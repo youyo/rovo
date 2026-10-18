@@ -16,7 +16,7 @@ import { type FakeGitHub, startFakeGitHub } from "../fake-github/server";
 import { generateAppKeyPair } from "../support/app-keys";
 import { gitRepoStore } from "../support/git-store";
 
-// Phase 3 のゴールの通し検証: MCP クライアント → Gateway（OAuth・TaskDO・UserDO・GitHub App）→ AgentDO → SandboxDO（実コンテナ）。
+// Phase 3 / Phase 4 のゴールの通し検証: MCP クライアント → Gateway（OAuth・TaskDO・UserDO・GitHub App）→ AgentDO → SandboxDO（実コンテナ）。
 // 偽なのは GitHub（OAuth・API）、git / npm の上流（acme/calc）、モデル（台本付き）だけ。
 //
 // 偽 GitHub（App API）と偽 git の整合: 偽 git（git http-backend）の bare リポジトリを「正」とする。
@@ -138,10 +138,10 @@ async function call(
 
 interface ScriptStep {
   text?: string;
-  toolCall?: { name: string; arguments: Record<string, string | number | boolean> };
+  toolCall?: { name: string; arguments: Record<string, unknown> };
   usage?: { input?: number; output?: number };
 }
-const tool = (name: string, args: Record<string, string | number | boolean>): ScriptStep => ({
+const tool = (name: string, args: Record<string, unknown>): ScriptStep => ({
   toolCall: { name, arguments: args },
 });
 const report = (summary: string, usage?: ScriptStep["usage"]): ScriptStep => ({
@@ -325,6 +325,42 @@ async function cancelAndSettle(client: Client, taskId: string) {
   expect(c.body).toEqual({ task_id: taskId, status: "CANCELLED" });
   await resultOf(client, taskId);
 }
+
+// ---- Phase 4 のヘルパー ----
+
+const UNTRUSTED_BEGIN = "<<<UNTRUSTED_CHILD_QUESTION";
+const UNTRUSTED_END = "<<<END_UNTRUSTED_CHILD_QUESTION>>>";
+
+async function testPost<T>(path: string, body: Body): Promise<T> {
+  const res = await fetch(`${wrangler.baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  expect(res.status, path).toBe(200);
+  return (await res.json()) as T;
+}
+
+/** モデル呼び出しごとの user メッセージ（AgentDO が ENVIRONMENT=test のときだけ記録する）。 */
+const modelCallsOf = async (taskId: string) =>
+  (await testPost<{ calls: string[][] }>("/__test/agent/model-calls", { task_id: taskId })).calls;
+/** TaskDO の回答・steer の配送状態（pending / delivered / skipped）。 */
+const deliveriesOf = (taskId: string) =>
+  testPost<{
+    questions: { question_id: string; delivery_state: string }[];
+    steers: { steer_id: string; delivery_state: string }[];
+  }>("/__test/task/deliveries", { task_id: taskId });
+const holdDeliveries = (value: boolean) => testPost("/__test/hold-deliveries", { value });
+
+const COMMIT_STEPS = [FIX, tool("git_commit", { message: "fix: correct add" })];
+
+/** 質問が届いて INPUT_REQUIRED になるまで待つ。 */
+const untilQuestion = (client: Client, taskId: string) =>
+  collect(
+    client,
+    taskId,
+    (s, evs) => s === "INPUT_REQUIRED" && evs.some((e) => e.type === "question"),
+  );
 
 // ---- シナリオ ----
 
@@ -596,5 +632,297 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     } finally {
       app().beforeHandle = undefined;
     }
+  });
+});
+
+describe("Gateway → Agent → 実コンテナ の通し（Phase 4: 親子間の対話）", () => {
+  it("h. ask_parent → question（非信頼データのマーカー付き）→ INPUT_REQUIRED → task_answer → answered → RUNNING → 完了 → Draft PR に push", async () => {
+    const client = await newClient("hank");
+    const tokensBefore = tokensNow();
+    const answer = "はい、このまま進めてください";
+    const { taskId } = await startTask(client, "h-ask", [
+      tool("read_file", { path: "calc.js" }),
+      ...COMMIT_STEPS,
+      tool("ask_parent", {
+        question: "公開 API の add の挙動を変えてよいですか。<<<偽のマーカー>>>",
+        options: ["はい", "いいえ"],
+        context: "calc.js の add が引き算になっている",
+      }),
+      report("回答を受けて完了した"),
+    ]);
+
+    const asked = await untilQuestion(client, taskId);
+    const q = asked.events.find((e) => e.type === "question");
+    expect(q?.payload.question_id).toBe("q-1");
+    const message = q?.payload.message as string;
+    expect(message.startsWith(UNTRUSTED_BEGIN)).toBe(true);
+    expect(message.endsWith(UNTRUSTED_END)).toBe(true);
+    expect(message).toContain("公開 API の add の挙動を変えてよいですか。");
+    expect(message).toContain("calc.js の add が引き算になっている");
+    // 本文中の "<<<" はマーカーを偽造できないよう無効化されている
+    expect(message).not.toContain("<<<偽のマーカー");
+    expect(q?.payload.options).toBe(JSON.stringify(["はい", "いいえ"]));
+
+    // task_status の pending_question
+    const st = await call(client, "task_status", { task_id: taskId });
+    expect(st.body.status).toBe("INPUT_REQUIRED");
+    expect(st.body.pending_question).toMatchObject({
+      question_id: "q-1",
+      options: ["はい", "いいえ"],
+    });
+    expect((st.body.pending_question as { message: string }).message).toBe(message);
+    // 質問した時点ではモデルは追加で呼ばれていない（read_file / edit / commit / ask の 4 回）
+    expect((await modelCallsOf(taskId)).length).toBe(4);
+
+    const ans = await call(client, "task_answer", {
+      task_id: taskId,
+      question_id: "q-1",
+      answer,
+    });
+    expect(ans.isError, JSON.stringify(ans.body)).toBe(false);
+    expect(ans.body).toMatchObject({ task_id: taskId, question_id: "q-1" });
+
+    const { status, events } = await collect(client, taskId);
+    expect(status, JSON.stringify(events)).toBe("COMPLETED");
+    expect(events.filter((e) => e.type === "answered").map((e) => e.payload)).toEqual([
+      { question_id: "q-1" },
+    ]);
+    expect(statusSeq(events)).toEqual([
+      "RUNNING",
+      "INPUT_REQUIRED",
+      "RUNNING",
+      "VERIFYING",
+      "COMPLETED",
+    ]);
+    // 回答の内容が、再開後のモデルへのメッセージに含まれる
+    const calls = await modelCallsOf(taskId);
+    expect(calls.length).toBe(5);
+    expect(calls.slice(0, 4).some((c) => c.some((t) => t.includes(answer)))).toBe(false);
+    expect(calls[4]?.some((t) => t.includes(answer) && t.includes("(q-1)"))).toBe(true);
+
+    // 完了して Draft PR に push されている
+    const r = await settledResult(client, taskId);
+    expect(r).toMatchObject({ status: "COMPLETED", summary: "回答を受けて完了した" });
+    const v = r.verification as { verified: boolean; commit_sha?: string };
+    expect(v.verified).toBe(true);
+    expect(events.some((e) => e.type === "pushed")).toBe(true);
+    expect(upstream.refSha("calc", refOf(taskId))).toBe(v.commit_sha);
+    expect(pullOf(taskId)).toMatchObject({ draft: true, state: "open" });
+    expect(r.pr).toMatchObject({ head_sha: v.commit_sha, head_matches_verified: true });
+    const after = await call(client, "task_status", { task_id: taskId });
+    expect(after.body.pending_question).toBeNull();
+    await waitFor("tokens revoked", () => allRevoked(tokensSince(tokensBefore)));
+  });
+
+  it("i. 実行中の task_steer: steer_received と steer_accepted が出て、追加の指示がモデルに届く。同じ idempotency_key の再送は二重にならない", async () => {
+    const client = await newClient("ivan");
+    const { taskId } = await startTask(client, "i-steer", [
+      tool("bash", { command: "sleep 10" }),
+      tool("read_file", { path: "calc.js" }),
+      ...COMMIT_STEPS,
+      report("steer を取り込んで完了した"),
+    ]);
+    await collect(client, taskId, (_s, evs) => evs.some((e) => e.type === "tool_start"));
+
+    const message = "あわせて README にも一言書いてください";
+    const first = await call(client, "task_steer", {
+      task_id: taskId,
+      message,
+      idempotency_key: "k-1",
+    });
+    expect(first.isError, JSON.stringify(first.body)).toBe(false);
+    expect(first.body).toMatchObject({ task_id: taskId, steer_id: "steer-k-1" });
+    // 再送（同じ key・同じ message）は同じ steer_id で成功。同じ key で違う message は conflict
+    const again = await call(client, "task_steer", {
+      task_id: taskId,
+      message,
+      idempotency_key: "k-1",
+    });
+    expect(again.isError).toBe(false);
+    expect(again.body.steer_id).toBe("steer-k-1");
+    const clash = await call(client, "task_steer", {
+      task_id: taskId,
+      message: "別の指示",
+      idempotency_key: "k-1",
+    });
+    expect(clash.isError).toBe(true);
+    expect(clash.body.code).toBe("conflict");
+
+    const { status, events } = await collect(client, taskId);
+    expect(status, JSON.stringify(events)).toBe("COMPLETED");
+    expect(events.filter((e) => e.type === "steer_received").map((e) => e.payload)).toEqual([
+      { steer_id: "steer-k-1" },
+    ]);
+    expect(events.filter((e) => e.type === "steer_accepted").map((e) => e.payload)).toEqual([
+      { steer_id: "steer-k-1" },
+    ]);
+    // 追加の指示がモデルへのメッセージに含まれる（二重にはならない）
+    const calls = await modelCallsOf(taskId);
+    const last = calls[calls.length - 1] ?? [];
+    expect(last.filter((t) => t.includes(message))).toHaveLength(1);
+    expect(last.find((t) => t.includes(message))).toContain("steer-k-1");
+    await settledResult(client, taskId);
+  });
+
+  it("j. 回答待ちの間の task_steer は回答とみなさず、task_answer と一緒に添えられて再開する", async () => {
+    const client = await newClient("judy");
+    const { taskId } = await startTask(client, "j-steer-waiting", [
+      ...COMMIT_STEPS,
+      tool("ask_parent", { question: "続けてよいですか" }),
+      report("回答と steer を受けて完了した"),
+    ]);
+    await untilQuestion(client, taskId);
+    const callsAtQuestion = (await modelCallsOf(taskId)).length;
+
+    const steerMessage = "テストも追加してください";
+    const steer = await call(client, "task_steer", { task_id: taskId, message: steerMessage });
+    expect(steer.isError, JSON.stringify(steer.body)).toBe(false);
+    expect(steer.body.status).toBe("INPUT_REQUIRED");
+    const steerId = steer.body.steer_id as string;
+    await waitFor("steer delivered", async () =>
+      (await deliveriesOf(taskId)).steers.find((s) => s.steer_id === steerId)?.delivery_state ===
+      "delivered"
+        ? true
+        : undefined,
+    );
+    // 回答ではないので、タスクは INPUT_REQUIRED のまま、モデルも呼ばれず、steer_accepted も出ない
+    await sleep(2_000);
+    const waiting = await collect(client, taskId, (s) => s === "INPUT_REQUIRED");
+    expect(waiting.events.some((e) => e.type === "steer_received")).toBe(true);
+    expect(waiting.events.some((e) => e.type === "steer_accepted")).toBe(false);
+    expect(waiting.events.some((e) => e.type === "answered")).toBe(false);
+    expect((await modelCallsOf(taskId)).length).toBe(callsAtQuestion);
+
+    const answer = "続けてください";
+    const ans = await call(client, "task_answer", { task_id: taskId, question_id: "q-1", answer });
+    expect(ans.isError, JSON.stringify(ans.body)).toBe(false);
+    const { status, events } = await collect(client, taskId);
+    expect(status, JSON.stringify(events)).toBe("COMPLETED");
+
+    // 再開のメッセージに、回答と steer が一緒に載る
+    const calls = await modelCallsOf(taskId);
+    expect(calls.length).toBe(callsAtQuestion + 1);
+    const resumed = (calls[callsAtQuestion] ?? []).find((t) => t.includes(answer));
+    expect(resumed).toContain(steerMessage);
+    expect(resumed).toContain(steerId);
+    // steer_accepted は回答の後
+    const seqOf = (type: string) => events.find((e) => e.type === type)?.seq ?? -1;
+    expect(seqOf("steer_accepted")).toBeGreaterThan(seqOf("answered"));
+    expect(events.filter((e) => e.type === "steer_accepted")).toHaveLength(1);
+    await settledResult(client, taskId);
+  });
+
+  it("k. 回答待ちの間の task_cancel: CANCELLED。未配送の回答と steer は skipped、トークンは失効し、PR は残る", async () => {
+    const client = await newClient("kate");
+    const tokensBefore = tokensNow();
+    const { taskId } = await startTask(client, "k-cancel-waiting", [
+      ...COMMIT_STEPS,
+      tool("ask_parent", { question: "続けてよいですか" }),
+      report("到達しない"),
+    ]);
+    await untilQuestion(client, taskId);
+    const callsAtQuestion = (await modelCallsOf(taskId)).length;
+
+    // AgentDO への配送を保留して、回答と steer を「未配送」のままにする
+    await holdDeliveries(true);
+    try {
+      const ans = await call(client, "task_answer", {
+        task_id: taskId,
+        question_id: "q-1",
+        answer: "届かない回答",
+      });
+      expect(ans.isError, JSON.stringify(ans.body)).toBe(false);
+      const steer = await call(client, "task_steer", { task_id: taskId, message: "届かない指示" });
+      expect(steer.isError, JSON.stringify(steer.body)).toBe(false);
+      const pending = await deliveriesOf(taskId);
+      expect(pending.questions).toEqual([{ question_id: "q-1", delivery_state: "pending" }]);
+      expect(pending.steers.map((s) => s.delivery_state)).toEqual(["pending"]);
+
+      const c = await call(client, "task_cancel", { task_id: taskId });
+      expect(c.body).toEqual({ task_id: taskId, status: "CANCELLED" });
+    } finally {
+      await holdDeliveries(false);
+    }
+    const { status, events } = await collect(client, taskId);
+    expect(status).toBe("CANCELLED");
+    expect(events.some((e) => e.type === "cancelled")).toBe(true);
+    // 未配送の意図は取りやめられ、AgentDO には届いていない
+    const done = await deliveriesOf(taskId);
+    expect(done.questions).toEqual([{ question_id: "q-1", delivery_state: "skipped" }]);
+    expect(done.steers.map((s) => s.delivery_state)).toEqual(["skipped"]);
+    expect(events.some((e) => e.type === "answered")).toBe(false);
+    expect(events.some((e) => e.type === "steer_accepted")).toBe(false);
+    expect((await modelCallsOf(taskId)).length).toBe(callsAtQuestion);
+
+    const r = await settledResult(client, taskId, { pushed: false });
+    expect(r).toMatchObject({ task_id: taskId, status: "CANCELLED" });
+    // PR は残る（閉じない）。トークンは失効する
+    expect(pullOf(taskId)).toMatchObject({ state: "open", draft: true });
+    expect(pullOf(taskId)?.body).toContain("Status: **CANCELLED**");
+    await waitFor("tokens revoked", () => allRevoked(tokensSince(tokensBefore)));
+    // 終端の後の回答は届かない
+    const late = await call(client, "task_answer", {
+      task_id: taskId,
+      question_id: "q-1",
+      answer: "遅い回答",
+    });
+    expect(late.isError).toBe(true);
+  });
+
+  it("l. task_answer の冪等性: 同じ回答の再送は成功、違う回答は conflict。RUNNING に戻った後の再送も同じ", async () => {
+    const client = await newClient("liam");
+    const { taskId } = await startTask(client, "l-idempotent", [
+      ...COMMIT_STEPS,
+      tool("ask_parent", { question: "どちらにしますか", options: ["A", "B"] }),
+      tool("bash", { command: "sleep 12" }),
+      report("完了"),
+    ]);
+    await untilQuestion(client, taskId);
+    const answerArgs = (answer: string, question_id = "q-1") => ({
+      task_id: taskId,
+      question_id,
+      answer,
+    });
+
+    const unknown = await call(client, "task_answer", answerArgs("A", "q-99"));
+    expect(unknown.isError).toBe(true);
+    expect(unknown.body.code).toBe("not_found");
+
+    const first = await call(client, "task_answer", answerArgs("A"));
+    expect(first.isError, JSON.stringify(first.body)).toBe(false);
+    const same = await call(client, "task_answer", answerArgs("A"));
+    expect(same.isError, JSON.stringify(same.body)).toBe(false);
+    const other = await call(client, "task_answer", answerArgs("B"));
+    expect(other.isError).toBe(true);
+    expect(other.body.code).toBe("conflict");
+
+    // RUNNING に戻った後（回答の後の sleep の間）の再送
+    await collect(
+      client,
+      taskId,
+      (_s, evs) =>
+        evs.some((e) => e.type === "answered") &&
+        evs.some((e) => e.type === "tool_start" && e.payload.name === "bash"),
+    );
+    expect((await call(client, "task_status", { task_id: taskId })).body.status).toBe("RUNNING");
+    const sameRunning = await call(client, "task_answer", answerArgs("A"));
+    expect(sameRunning.isError, JSON.stringify(sameRunning.body)).toBe(false);
+    expect(sameRunning.body.status).toBe("RUNNING");
+    const otherRunning = await call(client, "task_answer", answerArgs("B"));
+    expect(otherRunning.isError).toBe(true);
+    expect(otherRunning.body.code).toBe("conflict");
+
+    const { status, events } = await collect(client, taskId);
+    expect(status, JSON.stringify(events)).toBe("COMPLETED");
+    // 二重に再開していない
+    expect(events.filter((e) => e.type === "answered")).toHaveLength(1);
+    const calls = await modelCallsOf(taskId);
+    expect(calls.filter((c) => c.some((t) => t.includes("The parent answered"))).length).toBe(
+      calls.length - 3,
+    );
+    // 終端の後でも、同じ回答の再送は成功する
+    const sameDone = await call(client, "task_answer", answerArgs("A"));
+    expect(sameDone.isError, JSON.stringify(sameDone.body)).toBe(false);
+    await settledResult(client, taskId);
   });
 });

@@ -220,8 +220,8 @@ describe("answer", () => {
     await fx.answerGate.hold();
     const pending = fx.stub.answer("q-1", "Aにして");
     await fx.answerGate.waitEntered();
-    // submit の直前には、すでに SandboxDO の期限を延ばし終えている
-    expect(fx.sandbox.extended).toEqual([T0 + 2 * HOUR]);
+    // 質問のとき上限まで延ばし、回答では submit の直前までに正確な期限（SandboxDO 側は単調増加の制約で無視される）を渡し終えている
+    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR, T0 + 2 * HOUR]);
     fx.answerGate.release();
     expect(await pending).toEqual({ ok: true });
     expect(await waitForTerminal(fx)).toBe("completed");
@@ -250,7 +250,7 @@ describe("answer", () => {
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true });
     expect(await fx.stub.answer("q-1", "別の回答")).toEqual({ ok: true });
     expect((await typesOf(fx, "answered")).length).toBe(1);
-    expect(fx.sandbox.extended).toHaveLength(1);
+    expect(fx.sandbox.extended).toHaveLength(2); // 質問 + 回答（再送では増えない）
     fx.gate.release();
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.modelCalls.count).toBe(3);
@@ -332,7 +332,7 @@ describe("期限", () => {
     expect((await fx.stub.getEvents(0, 1)).phase).toBe("input_required");
     expect(fx.sandbox.terminateCount).toBe(0);
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true });
-    expect(fx.sandbox.extended).toEqual([T0 + 7 * HOUR]);
+    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR, T0 + 7 * HOUR]);
     expect(await runInDO(fx.stub, (inst) => inst.debugDeadlineAt())).toBe(T0 + 7 * HOUR);
     // 再起動しても期限は変わらない（再起動では延長しない）
     await abortAllDurableObjects();
@@ -383,7 +383,7 @@ describe("期限", () => {
     fx.clock.now += 20 * HOUR;
     expect(await fx.stub.answer("q-1", "A1")).toEqual({ ok: true });
     await waitUntil(() => fx.modelCalls.count >= 2);
-    await waitUntil(() => fx.sandbox.extended.length === 1);
+    await waitUntil(() => fx.sandbox.extended.length >= 2);
     // 2 回目の質問が記録されるまで待つ
     for (let i = 0; i < 100 && (await questionIds(fx)).length < 2; i++) await sleep(50);
     expect(await questionIds(fx)).toEqual(["q-1", "q-2"]);
@@ -392,6 +392,100 @@ describe("期限", () => {
     await runInDO(fx.stub, (inst) => inst.onJob({ job: { fn: "tick" }, attempt: 1 }));
     expect(await waitForTerminal(fx)).toBe("failed");
     expect(done(await fx.stub.getResult()).reason).toBe("input_timeout");
+  });
+});
+
+describe("SandboxDO の期限（回答待ちの間に元の期限をまたぐ）", () => {
+  it("質問のとき SandboxDO の期限を「待ちの上限（24 時間）」まで延ばす。元の期限を過ぎても認証トークンとコンテナは消えず、回答の後の書き込み・検証・push が通る", async () => {
+    const fx = newFixture("sb-span", [
+      ask("Q?"),
+      call("write_note", { text: "after answer" }),
+      report(),
+    ]);
+    fx.sandbox.clock = () => fx.clock.now;
+    await startAndAsk(fx, "sb-span");
+    // 質問の時点で、SandboxDO の期限は 元の期限(T0+2h) + 24h まで延びている
+    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR]);
+    expect(fx.sandbox.credentialAlive).toBe(true);
+
+    fx.clock.now += 5 * HOUR; // 元の期限（T0+2h）を過ぎる
+    fx.sandbox.expireIfDue(); // SandboxDO の alarm 相当
+    expect(fx.sandbox.destroyed).toBe(false);
+    expect(fx.sandbox.credentialAlive).toBe(true);
+
+    expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true });
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.sandbox.files.get("/workspace/note.txt")).toBe("after answer");
+    expect(fx.pushCalls.length).toBeGreaterThan(0);
+    expect(fx.sandbox.destroyed).toBe(false);
+    expect(fx.sandbox.credentialAlive).toBe(true);
+  });
+
+  it("延ばしていなければ（回帰確認）、同じ状況で SandboxDO は期限切れになる", async () => {
+    const fx = newFixture("sb-noext", [ask("Q?"), report()]);
+    fx.sandbox.clock = () => fx.clock.now;
+    await startAndAsk(fx, "sb-noext");
+    // 延長を取り消して SandboxDO の期限を元に戻す（fake の観測の妥当性を確かめる）
+    fx.sandbox.deadlineAt = T0 + 2 * HOUR;
+    fx.clock.now += 5 * HOUR;
+    fx.sandbox.expireIfDue();
+    expect(fx.sandbox.destroyed).toBe(true);
+    expect(fx.sandbox.credentialAlive).toBe(false);
+  });
+
+  it("期限の延長に失敗したら、質問は記録せずエラーを返す。再試行すると質問が記録される", async () => {
+    const fx = newFixture("sb-fail", [ask("Q?"), ask("Q?"), report()]);
+    fx.sandbox.extendError = new Error("sandbox unavailable");
+    await fx.stub.start(makeSpec("sb-fail"));
+    // 1 回目の ask_parent はエラー（質問なし）、モデルが 2 回目に呼び直して記録される
+    await waitForPhase(fx, "input_required");
+    expect(await questionIds(fx)).toEqual(["q-1"]);
+    expect(fx.modelCalls.count).toBe(2);
+    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR]);
+    const errors = (await typesOf(fx, "tool_end")).filter((e) => e.data.name === "ask_parent");
+    expect(errors[0]?.data.isError).toBe(true);
+  });
+
+  it("回答しないまま待機の累計が上限に達したら input_timeout で止まる。その時点で SandboxDO はまだ期限内（保険は AgentDO の期限より後）", async () => {
+    const fx = newFixture("sb-timeout", [ask("Q?"), report()]);
+    fx.sandbox.clock = () => fx.clock.now;
+    await startAndAsk(fx, "sb-timeout");
+    await sleep(200);
+    fx.clock.now += 24 * HOUR + 1000;
+    fx.sandbox.expireIfDue();
+    expect(fx.sandbox.destroyed).toBe(false); // 期限は T0 + 26h
+    await runInDO(fx.stub, (inst) => inst.onJob({ job: { fn: "input_timeout" }, attempt: 1 }));
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(done(await fx.stub.getResult()).reason).toBe("input_timeout");
+    expect(fx.sandbox.terminateCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("2 回目の質問でも、SandboxDO への期限は 開始から 2h + 24h を超えない", async () => {
+    const fx = newFixture("sb-second", [ask("Q1"), ask("Q2"), report()]);
+    await startAndAsk(fx, "sb-second");
+    fx.clock.now += 5 * HOUR;
+    expect(await fx.stub.answer("q-1", "A1")).toEqual({ ok: true });
+    for (let i = 0; i < 100 && (await questionIds(fx)).length < 2; i++) await sleep(50);
+    expect(await questionIds(fx)).toEqual(["q-1", "q-2"]);
+    for (const d of fx.sandbox.extended) expect(d).toBeLessThanOrEqual(T0 + 26 * HOUR);
+    // 質問のたびに「現在の期限 + 残りの待ち」。待った 5h を足した期限 T0+7h に、残り 19h を足す
+    expect(fx.sandbox.extended.at(-1)).toBe(T0 + 26 * HOUR);
+  });
+});
+
+describe("testModelCalls（通しの E2E が「モデルへのメッセージ」を観測する経路）", () => {
+  it("モデル呼び出しごとの user メッセージ（回答・steer を含む）を記録して返す", async () => {
+    const fx = newFixture("tmc", [ask("Q?"), report()]);
+    await startAndAsk(fx, "tmc");
+    await fx.stub.steer("s-1", "追加の指示です");
+    expect(await fx.stub.answer("q-1", "Aにして")).toEqual({ ok: true });
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const calls = await fx.stub.testModelCalls();
+    expect(calls).toEqual(fx.modelCalls.userTexts);
+    expect(calls.length).toBe(2);
+    const last = calls.at(-1) ?? [];
+    expect(last.some((t) => t.includes("Aにして"))).toBe(true);
+    expect(last.some((t) => t.includes("追加の指示です"))).toBe(true);
   });
 });
 
@@ -444,7 +538,7 @@ describe("cancel と回答", () => {
     await startAndAsk(fx, "c-first");
     await fx.stub.cancel();
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true, ignored: true });
-    expect(fx.sandbox.extended).toHaveLength(0);
+    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR]); // 質問のときの延長だけ。回答は SandboxDO に触れない
     expect(await piIdle(fx)).toBe(true);
   });
 });

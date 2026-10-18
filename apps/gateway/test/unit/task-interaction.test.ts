@@ -493,3 +493,26 @@ describe("イベントの並び", () => {
     expect(a).toBeGreaterThan(q);
   });
 });
+
+describe("testDeliveryStates（通しの E2E が配送の意図を観測する経路）", () => {
+  it("test 以外では使えない。test では質問・steer の delivery_state を返す", async () => {
+    const { stub } = await createAsked();
+    await stub.answer(OWNER, "q1", "pg");
+    const s = await stub.steer(OWNER, "追加");
+    if (!s.ok) throw new Error("steer failed");
+    // RPC 越しだと例外が未処理の拒否として報告されるので、インスタンスを直接呼ぶ
+    const states = await runInDurableObject(stub, (i) => {
+      const inst = i as unknown as {
+        env: Record<string, unknown>;
+        testDeliveryStates(): unknown;
+      };
+      expect(() => inst.testDeliveryStates()).toThrow(/test only/);
+      inst.env = { ...(env as unknown as Record<string, unknown>), ENVIRONMENT: "test" };
+      return inst.testDeliveryStates();
+    });
+    expect(states).toEqual({
+      questions: [{ question_id: "q1", delivery_state: "pending" }],
+      steers: [{ steer_id: s.steer_id, delivery_state: "pending" }],
+    });
+  });
+});

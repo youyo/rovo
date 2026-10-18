@@ -116,15 +116,11 @@ describe("ask_parent + 実コンテナ", () => {
     });
     expect((await sandbox.status()).terminated).toBe(false);
 
-    // 元の期限を過ぎるまで待つ。回答待ちの間は AgentDO は期限で止めない（SandboxDO は自分で期限切れになる）
+    // 元の期限を過ぎるまで待つ。質問のとき AgentDO が SandboxDO の期限を延ばしているので、
+    // SandboxDO は期限切れにならず、認証トークンもコンテナも消えない（トークンの入れ直しは要らない）
     while (Date.now() <= s.deadlineAt + 3_000) await sleep(1_000);
     expect((await agent.getEvents(0, 1)).phase).toBe("input_required");
-    await expect.poll(async () => (await sandbox.status()).expired, { timeout: 30_000 }).toBe(true);
-    // TaskDO が回答待ちの間も更新し続ける Installation Token（期限切れで SandboxDO が消している）
-    await agent.setGitCredential({
-      token: TEST_GIT_TOKEN,
-      expiresAt: Date.now() + 2 * 60 * 60 * 1000,
-    });
+    expect((await sandbox.status()).expired).toBe(false);
     // コンテナも落ちている状態から再開する（push 済みのチェックポイントから再 clone する）
     await sandbox.destroy();
 

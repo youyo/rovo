@@ -1157,6 +1157,27 @@ export class TaskDO extends DurableObject<Env> {
     }
   }
 
+  /** テスト専用: 回答と steer の配送状態（通しの E2E が、cancel で未配送が skipped になることを確かめる）。 */
+  testDeliveryStates(): {
+    questions: { question_id: string; delivery_state: string }[];
+    steers: { steer_id: string; delivery_state: string }[];
+  } {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    const sql = this.ctx.storage.sql;
+    return {
+      questions: sql
+        .exec<{ question_id: string; delivery_state: string }>(
+          "SELECT question_id, delivery_state FROM questions ORDER BY asked_at, rowid",
+        )
+        .toArray(),
+      steers: sql
+        .exec<{ steer_id: string; delivery_state: string }>(
+          "SELECT steer_id, delivery_state FROM steers ORDER BY n",
+        )
+        .toArray(),
+    };
+  }
+
   private hasPendingDelivery(): boolean {
     const sql = this.ctx.storage.sql;
     return (

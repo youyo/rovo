@@ -132,7 +132,10 @@ export class AgentDO extends DurableObject<Env> {
       if (env.ENVIRONMENT === "test") {
         provider = createScriptedProvider(
           (key) => this.readScript(key),
-          (ctx) => this.overrides().onModelCall?.(ctx),
+          (ctx) => {
+            this.recordModelCall(ctx?.userTexts ?? []);
+            this.overrides().onModelCall?.(ctx);
+          },
         );
       } else {
         if (!env.AI) throw new Error("AI binding is not configured");
@@ -440,6 +443,19 @@ export class AgentDO extends DurableObject<Env> {
   debugDeadlineAt(): number {
     if ((this.env as AgentEnv).ENVIRONMENT !== "test") throw new Error("test only");
     return this.deadlineAt();
+  }
+
+  /** テスト専用: モデル呼び出しごとの user メッセージ（通しの E2E が、回答や steer がモデルに届いたことを確かめる）。 */
+  testModelCalls(): string[][] {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    return this.ctx.storage.kv.get<string[][]>("test:model_calls") ?? [];
+  }
+
+  private recordModelCall(userTexts: string[]): void {
+    if (this.env.ENVIRONMENT !== "test") return;
+    const calls = this.ctx.storage.kv.get<string[][]>("test:model_calls") ?? [];
+    calls.push(userTexts);
+    this.ctx.storage.kv.put("test:model_calls", calls);
   }
 
   /** テスト専用: fake モデルの台本を保存する（key は最初の user メッセージ = spec.instructions）。 */
@@ -1271,6 +1287,27 @@ export class AgentDO extends DurableObject<Env> {
     if (this.refused()) return ended;
     const again = this.openQuestionId();
     if (again) return waiting(again);
+
+    // SandboxDO の期限を、回答待ちの上限まで先に延ばす（元の期限で認証トークンとコンテナが消え、回答の後の再 clone が 401 になるのを防ぐ）。
+    // 正確な期限は AgentDO が自分で守る。SandboxDO の期限は保険。延長に失敗したら質問を記録せず、モデルに再試行させる。
+    const sandboxDeadline = Math.min(
+      this.deadlineAt() + Math.max(0, MAX_INPUT_WAIT_MS - this.pausedTotal()),
+      this.baseDeadline() + MAX_INPUT_WAIT_MS,
+    );
+    try {
+      await this.sandbox().extendDeadline(sandboxDeadline);
+    } catch (e) {
+      if (this.refused()) return ended;
+      return reject(
+        wrapUntrusted(
+          "ask_parent",
+          `Could not prepare the sandbox to wait for the parent: ${tail(String(e), 300)}\nCall ask_parent again.`,
+        ),
+      );
+    }
+    if (this.refused()) return ended;
+    const again2 = this.openQuestionId();
+    if (again2) return waiting(again2);
 
     const seq = (this.store.meta<number>("question_seq") ?? 0) + 1;
     const questionId = `q-${seq}`;

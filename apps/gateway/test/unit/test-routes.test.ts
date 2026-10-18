@@ -114,6 +114,73 @@ describe("withTestScripts（TaskDO が子エージェントを呼ぶ前に台本
   });
 });
 
+describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへのメッセージ・配送状態）", () => {
+  it("test 以外では hold-deliveries / model-calls / deliveries は 404 で、何も保存しない", async () => {
+    const app = createDefaultApp();
+    for (const path of [
+      "/__test/hold-deliveries",
+      "/__test/agent/model-calls",
+      "/__test/task/deliveries",
+    ]) {
+      for (const environment of ["production", "", undefined]) {
+        const res = await app.request(
+          path,
+          post({ value: true, task_id: "x" }),
+          withEnv(environment),
+        );
+        expect(res.status, path).toBe(404);
+      }
+    }
+    expect(await env.OAUTH_KV.get("test-hold-deliveries")).toBeNull();
+  });
+
+  it("test の hold-deliveries は KV に保存し、value 省略で解除する", async () => {
+    const app = createDefaultApp();
+    expect(
+      (await app.request("/__test/hold-deliveries", post({ value: true }), withEnv("test"))).status,
+    ).toBe(200);
+    expect(await env.OAUTH_KV.get("test-hold-deliveries")).toBe("1");
+    await app.request("/__test/hold-deliveries", post({}), withEnv("test"));
+    expect(await env.OAUTH_KV.get("test-hold-deliveries")).toBeNull();
+  });
+
+  it("deliveries / model-calls は task_id が不正なら 400", async () => {
+    const app = createDefaultApp();
+    for (const path of ["/__test/agent/model-calls", "/__test/task/deliveries"]) {
+      expect((await app.request(path, post({}), withEnv("test"))).status, path).toBe(400);
+      expect((await app.request(path, post({ task_id: "../x" }), withEnv("test"))).status).toBe(
+        400,
+      );
+    }
+  });
+
+  it("withTestScripts は、hold-deliveries の間 answer / steer を AgentDO に届けず ok:false を返す。解除すれば届く", async () => {
+    const calls: string[] = [];
+    const agent = {
+      answer: async (q: string) => {
+        calls.push(`answer:${q}`);
+        return { ok: true };
+      },
+      steer: async (s: string) => {
+        calls.push(`steer:${s}`);
+        return { ok: true };
+      },
+    };
+    const wrapped = withTestScripts(withEnv("test"), agent as unknown as AgentRpc);
+    await env.OAUTH_KV.put("test-hold-deliveries", "1");
+    try {
+      expect(await wrapped.answer("q1", "a")).toEqual({ ok: false });
+      expect(await wrapped.steer("s1", "m")).toEqual({ ok: false });
+      expect(calls).toEqual([]);
+    } finally {
+      await env.OAUTH_KV.delete("test-hold-deliveries");
+    }
+    expect(await wrapped.answer("q1", "a")).toEqual({ ok: true });
+    expect(await wrapped.steer("s1", "m")).toEqual({ ok: true });
+    expect(calls).toEqual(["answer:q1", "steer:s1"]);
+  });
+});
+
 describe("E2E 用テストルート /__test/draft-fallback", () => {
   it("test 以外では 404 で何も保存せず、上書きも効かない", async () => {
     const app = createDefaultApp();

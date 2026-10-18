@@ -20,4 +20,23 @@ export type Checks = [
   Assert<Equal<Gateway.VerificationCommandResult, Agent.VerificationCommandResult>>,
   Assert<Equal<Gateway.AgentPhase, Agent.Phase>>,
   Assert<Equal<Gateway.ResultDto, Agent.ResultDto>>,
+  // Phase 4: 回答と steer の RPC。AgentDO 本体は import しない（apps/agent の Env 型が gateway の型検査に混ざるため）。
+  // 戻り値は apps/agent の DeliveryResult と一致し、引数は (id: string, text: string) であること。
+  Assert<Equal<Awaited<ReturnType<Gateway.AgentRpc["answer"]>>, Agent.DeliveryResult>>,
+  Assert<Equal<Awaited<ReturnType<Gateway.AgentRpc["steer"]>>, Agent.DeliveryResult>>,
+  Assert<Equal<Parameters<Gateway.AgentRpc["answer"]>, [questionId: string, answer: string]>>,
+  Assert<Equal<Parameters<Gateway.AgentRpc["steer"]>, [steerId: string, message: string]>>,
+  // 同一の関数型として扱える（Gateway のスタブに apps/agent の型で書いた実装を代入できる）
+  Assert<
+    Equal<
+      Gateway.AgentRpc["answer"],
+      (questionId: string, answer: string) => Promise<Agent.DeliveryResult>
+    >
+  >,
+  Assert<
+    Equal<
+      Gateway.AgentRpc["steer"],
+      (steerId: string, message: string) => Promise<Agent.DeliveryResult>
+    >
+  >,
 ];

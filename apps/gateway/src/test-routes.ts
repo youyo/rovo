@@ -15,6 +15,8 @@ const SCRIPT_KEY_PREFIX = "test-script:";
 const SCRIPT_TTL_SECONDS = 3600;
 
 const DRAFT_FALLBACK_KEY = "test-draft-fallback";
+const HOLD_DELIVERIES_KEY = "test-hold-deliveries";
+const TASK_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** 通しの E2E が預けた DRAFT_PR_FALLBACK の上書き値。test 環境以外・未設定なら undefined。 */
 export async function testDraftFallback(env: Env): Promise<string | undefined> {
@@ -30,6 +32,34 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     if (typeof body.value === "string") await c.env.OAUTH_KV.put(DRAFT_FALLBACK_KEY, body.value);
     else await c.env.OAUTH_KV.delete(DRAFT_FALLBACK_KEY);
     return c.json({ ok: true });
+  });
+
+  // 回答と steer の AgentDO への配送を保留する（TaskDO には「未配送の意図」が残る。cancel で skipped になることの確認用）
+  app.post("/__test/hold-deliveries", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const body = (await c.req.json().catch(() => ({}))) as { value?: unknown };
+    if (body.value === true) await c.env.OAUTH_KV.put(HOLD_DELIVERIES_KEY, "1");
+    else await c.env.OAUTH_KV.delete(HOLD_DELIVERIES_KEY);
+    return c.json({ ok: true });
+  });
+
+  // モデル呼び出しごとの user メッセージ（回答・steer がモデルに届いたことの確認用）
+  app.post("/__test/agent/model-calls", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const id = await taskIdOf(c.req);
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    const agent = c.env.AGENT_DO.getByName(id) as unknown as {
+      testModelCalls(): Promise<string[][]>;
+    };
+    return c.json({ calls: await agent.testModelCalls() });
+  });
+
+  // TaskDO の回答・steer の配送状態（pending / delivered / skipped）
+  app.post("/__test/task/deliveries", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const id = await taskIdOf(c.req);
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    return c.json(await c.env.TASK_DO.getByName(id).testDeliveryStates());
   });
 
   app.post("/__test/agent/set-script", async (c) => {
@@ -50,6 +80,13 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
   });
 }
 
+async function taskIdOf(req: { json(): Promise<unknown> }): Promise<string | undefined> {
+  const body = (await req.json().catch(() => ({}))) as { task_id?: unknown };
+  return typeof body.task_id === "string" && TASK_ID_RE.test(body.task_id)
+    ? body.task_id
+    : undefined;
+}
+
 /** AgentDO の台本設定 RPC（apps/agent の AgentDO.setScript。ENVIRONMENT=test のときだけ動く）。 */
 type ScriptableAgent = AgentRpc & { setScript(key: string, script: unknown[]): Promise<void> };
 
@@ -60,6 +97,8 @@ type ScriptableAgent = AgentRpc & { setScript(key: string, script: unknown[]): P
 export function withTestScripts(env: Env, agent: AgentRpc): AgentRpc {
   if (env.ENVIRONMENT !== "test") return agent;
   const scriptable = agent as ScriptableAgent;
+  // 回答と steer の配送を保留する間は、AgentDO に届けず ok:false を返す（TaskDO は pending のまま再送を続ける）
+  const held = async () => (await env.OAUTH_KV.get(HOLD_DELIVERIES_KEY)) !== null;
   return {
     start: async (spec: TaskSpec) => {
       const raw = await env.OAUTH_KV.get(SCRIPT_KEY_PREFIX + spec.instructions);
@@ -70,7 +109,9 @@ export function withTestScripts(env: Env, agent: AgentRpc): AgentRpc {
     getEvents: (afterSeq, limit) => agent.getEvents(afterSeq, limit),
     getResult: () => agent.getResult(),
     setGitCredential: (c) => agent.setGitCredential(c),
-    answer: (questionId, answer) => agent.answer(questionId, answer),
-    steer: (steerId, message) => agent.steer(steerId, message),
+    answer: async (questionId, answer) =>
+      (await held()) ? { ok: false } : agent.answer(questionId, answer),
+    steer: async (steerId, message) =>
+      (await held()) ? { ok: false } : agent.steer(steerId, message),
   };
 }

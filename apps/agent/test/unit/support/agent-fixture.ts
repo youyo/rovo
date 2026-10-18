@@ -185,3 +185,11 @@ export function done(r: ResultDto) {
   if (r.status === "not_ready") throw new Error("not ready");
   return r;
 }
+
+export async function waitUntil(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error("waitUntil timeout");
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}

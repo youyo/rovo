@@ -15,6 +15,8 @@ beforeAll(async () => {
   wrangler = await startWrangler({
     configs: ["apps/gateway/wrangler.jsonc", "apps/agent/wrangler.jsonc"],
     vars: { ENVIRONMENT: "test" },
+    // --var は primary（gateway）にしか効かないので、agent 側の ENVIRONMENT=test は .dev.vars で渡す
+    configVars: { "apps/agent/wrangler.jsonc": { ENVIRONMENT: "test" } },
     readyPath: "/",
     persistDir,
   });

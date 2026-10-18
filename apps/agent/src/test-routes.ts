@@ -1,3 +1,6 @@
+import type { TaskSpec } from "./agent/types";
+import type { ScriptStep } from "./pi/scripted-provider";
+
 /**
  * E2E 専用のルート（ENVIRONMENT=test のときだけ有効）。SandboxDO を HTTP から操作する。
  * 例外はメッセージを本文にして 500 で返す。
@@ -5,6 +8,8 @@
 export async function handleTestRoute(request: Request, env: Env): Promise<Response | undefined> {
   if (env.ENVIRONMENT !== "test" || request.method !== "POST") return undefined;
   const url = new URL(request.url);
+  const agentRoute = /^\/test\/agent\/([a-z-]+)$/.exec(url.pathname);
+  if (agentRoute) return handleAgentRoute(agentRoute[1] ?? "", request, env);
   const m = /^\/test\/sandbox\/([a-z-]+)$/.exec(url.pathname);
   if (!m) return undefined;
   const body = (await request.json()) as {
@@ -40,6 +45,47 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
         return Response.json({ ok: true });
       case "status":
         return Response.json(await sandbox.status());
+      default:
+        return undefined;
+    }
+  } catch (e) {
+    return new Response(e instanceof Error ? e.message : String(e), { status: 500 });
+  }
+}
+
+const AGENT_ACTIONS = ["set-script", "start", "cancel", "events", "result", "debug"];
+
+/** AgentDO を HTTP から操作する（台本の設定・start・cancel・イベントとresultの取得）。名前は SandboxDO と同じ task 名。 */
+async function handleAgentRoute(
+  action: string,
+  request: Request,
+  env: Env,
+): Promise<Response | undefined> {
+  if (!AGENT_ACTIONS.includes(action)) return undefined;
+  const body = (await request.json()) as {
+    name: string;
+    key?: string;
+    script?: ScriptStep[];
+    spec?: TaskSpec;
+    afterSeq?: number;
+    limit?: number;
+  };
+  const agent = env.AGENT_DO.getByName(body.name);
+  try {
+    switch (action) {
+      case "set-script":
+        await agent.setScript(body.key ?? "", body.script ?? []);
+        return Response.json({ ok: true });
+      case "start":
+        return Response.json(await agent.start(body.spec as TaskSpec));
+      case "cancel":
+        return Response.json(await agent.cancel());
+      case "events":
+        return Response.json(await agent.getEvents(body.afterSeq ?? 0, body.limit ?? 100));
+      case "result":
+        return Response.json(await agent.getResult());
+      case "debug":
+        return Response.json({ deadlineAt: await agent.debugDeadlineAt() });
       default:
         return undefined;
     }

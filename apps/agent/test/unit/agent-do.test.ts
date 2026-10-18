@@ -12,6 +12,7 @@ import {
   T0,
   waitForPhase,
   waitForTerminal,
+  waitUntil,
 } from "./support/agent-fixture";
 
 afterEach(() => clearAgentTestOverrides());
@@ -57,16 +58,90 @@ describe("cancel", () => {
 
   it("停止が確かめられなければ stopped:false を返し、再送で true になる", async () => {
     const fx = newFixture("cancel-retry", [call("gate")], { cancelWaitMs: 200 });
-    fx.sandbox.stopResults.push(false);
+    fx.sandbox.terminateResults.push(false);
     await fx.stub.start(makeSpec("cancel-retry"));
     await fx.gate.waitEntered();
     expect(await fx.stub.cancel()).toEqual({ stopped: false });
     fx.gate.release();
     expect(await fx.stub.cancel()).toEqual({ stopped: true });
-    expect(fx.sandbox.stopCount).toBeGreaterThanOrEqual(2);
+    expect(fx.sandbox.terminateCount).toBeGreaterThanOrEqual(2);
+    expect(fx.sandbox.stopCount).toBe(0);
     await waitForPhase(fx, "cancelled");
     const r = done(await fx.stub.getResult());
     expect(r.status).toBe("cancelled");
+  });
+});
+
+describe("終端停止は terminate を使う", () => {
+  it("cancel は terminate を呼び、stop は呼ばない", async () => {
+    const fx = newFixture("term-cancel", [call("gate")], { cancelWaitMs: 300 });
+    await fx.stub.start(makeSpec("term-cancel"));
+    await fx.gate.waitEntered();
+    // gate が走っている間は Pi の abort が idle を待つので stopped は false のまま。terminate は呼ばれる
+    await fx.stub.cancel();
+    expect(fx.sandbox.terminateCount).toBeGreaterThanOrEqual(1);
+    expect(fx.sandbox.stopCount).toBe(0);
+    fx.gate.release();
+    await waitUntil(() => fx.sandbox.terminateCount >= 2); // run が終わった後の片付けも terminate
+  });
+
+  it("start より先の cancel（何も始まっていない）でも terminate する", async () => {
+    const fx = newFixture("term-cancel-first", []);
+    expect(await fx.stub.cancel()).toEqual({ stopped: true });
+    expect(fx.sandbox.terminateCount).toBe(1);
+    expect(fx.sandbox.stopCount).toBe(0);
+  });
+
+  it("完了後の片付けも terminate（終端後に sandbox を再開させない）", async () => {
+    const fx = newFixture("term-done", [report()]);
+    await fx.stub.start(makeSpec("term-done"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    await waitUntil(() => fx.sandbox.terminateCount >= 1);
+    expect(fx.sandbox.stopCount).toBe(0);
+  });
+
+  it("失敗（検証の上限）と予算超過でも terminate する", async () => {
+    const failing = newFixture("term-failed", [report(), report(), report(), report()]);
+    failing.verifyResults.push(...Array.from({ length: 4 }, () => ({ exitCode: 1, stderr: "ng" })));
+    await failing.stub.start(makeSpec("term-failed"));
+    expect(await waitForTerminal(failing)).toBe("failed");
+    await waitUntil(() => failing.sandbox.terminateCount >= 1);
+    expect(failing.sandbox.stopCount).toBe(0);
+
+    const budget = newFixture("term-budget", [report()], { maxOutputTokens: 1_000_000 });
+    await budget.stub.start(makeSpec("term-budget", { budgetUsd: 0.5 }));
+    expect(await waitForTerminal(budget)).toBe("budget_exceeded");
+    await waitUntil(() => budget.sandbox.terminateCount >= 1);
+    expect(budget.sandbox.stopCount).toBe(0);
+  });
+
+  it("terminate を持たない SandboxPort には stop にフォールバックする", async () => {
+    const fx = newFixture("term-fallback", [call("gate")], { cancelWaitMs: 300 });
+    Object.defineProperty(fx.sandbox, "terminate", { value: undefined });
+    await fx.stub.start(makeSpec("term-fallback"));
+    await fx.gate.waitEntered();
+    await fx.stub.cancel();
+    expect(fx.sandbox.stopCount).toBeGreaterThanOrEqual(1);
+    expect(fx.sandbox.terminateCount).toBe(0);
+    fx.gate.release();
+    await waitUntil(() => fx.sandbox.stopCount >= 2);
+  });
+
+  it("terminate が例外なら stopped:false として扱い、再送で確かめ直せる", async () => {
+    const fx = newFixture("term-throw", [call("gate")], { cancelWaitMs: 500 });
+    let first = true;
+    fx.sandbox.terminate = async () => {
+      if (first) {
+        first = false;
+        throw new Error("boom");
+      }
+      return { stopped: true };
+    };
+    await fx.stub.start(makeSpec("term-throw"));
+    await fx.gate.waitEntered();
+    expect(await fx.stub.cancel()).toEqual({ stopped: false });
+    fx.gate.release();
+    expect(await fx.stub.cancel()).toEqual({ stopped: true });
   });
 });
 
@@ -300,7 +375,8 @@ describe("期限", () => {
     );
     expect(await waitForTerminal(fx)).toBe("failed");
     expect(done(await fx.stub.getResult()).reason).toBe("deadline");
-    expect(fx.sandbox.stopCount).toBeGreaterThanOrEqual(1);
+    await waitUntil(() => fx.sandbox.terminateCount >= 1);
+    expect(fx.sandbox.stopCount).toBe(0);
     fx.gate.release();
   });
 

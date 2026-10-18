@@ -13,6 +13,9 @@ export class FakeSandbox implements SandboxPort {
   stopCount = 0;
   /** stop() の戻り値を先頭から順に使う（空なら stopped:true）。後方互換の追加。 */
   stopResults: boolean[] = [];
+  terminateCount = 0;
+  /** terminate() の戻り値を先頭から順に使う（空なら stopped:true）。 */
+  terminateResults: boolean[] = [];
 
   constructor(private readonly handler: ExecHandler = () => ({})) {}
 
@@ -23,6 +26,12 @@ export class FakeSandbox implements SandboxPort {
   async stop(): Promise<{ stopped: boolean }> {
     this.stopCount += 1;
     return { stopped: this.stopResults.shift() ?? true };
+  }
+
+  /** 終端停止。terminate を持たない実装の再現は Object.defineProperty(sb, "terminate", {value: undefined}) で行う。 */
+  async terminate(): Promise<{ stopped: boolean }> {
+    this.terminateCount += 1;
+    return { stopped: this.terminateResults.shift() ?? true };
   }
 
   async exec(argv: string[], options: ExecOptions = {}): Promise<ExecResult> {

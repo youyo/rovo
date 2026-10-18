@@ -10,6 +10,8 @@ export interface FakeUpstream {
   url: string;
   /** 偽 GitHub の acme/hello（main）の先頭コミット SHA */
   helloSha: string;
+  /** 偽 GitHub の acme/calc（main）の先頭コミット SHA。add() にバグがある純 JS の小さなリポジトリ（npm test が失敗する） */
+  calcSha: string;
   /** 受け取った（= 許可されて上流まで届いた）リクエスト */
   requests: {
     host: string;
@@ -33,18 +35,31 @@ const git = (cwd: string, ...args: string[]) =>
     },
   });
 
-function buildRepo(root: string): string {
-  const work = join(root, "work");
+function buildRepo(root: string, name: string, files: Record<string, string>): string {
+  const work = join(root, "work", name);
   mkdirSync(work, { recursive: true });
   git(work, "init", "-q", "-b", "main");
-  writeFileSync(join(work, "README.md"), "hello from fake github\n");
+  for (const [file, content] of Object.entries(files)) writeFileSync(join(work, file), content);
   git(work, "add", "-A");
   git(work, "commit", "-q", "-m", "init");
-  const bare = join(root, "repos", "acme", "hello.git");
+  const bare = join(root, "repos", "acme", `${name}.git`);
   mkdirSync(join(root, "repos", "acme"), { recursive: true });
   git(root, "clone", "-q", "--bare", work, bare);
   return git(work, "rev-parse", "HEAD").toString().trim();
 }
+
+/** E2E 用の小さな純 JS リポジトリ。add() が a - b になっていて、`npm test`（node --test）が失敗する。 */
+const CALC_FILES: Record<string, string> = {
+  "package.json": `${JSON.stringify({ name: "calc", version: "1.0.0", scripts: { test: "node --test" } }, null, 2)}\n`,
+  "calc.js": "exports.add = (a, b) => a - b;\n",
+  "calc.test.js": [
+    'const test = require("node:test");',
+    'const assert = require("node:assert");',
+    'const { add } = require("./calc");',
+    'test("add", () => assert.strictEqual(add(2, 3), 5));',
+    "",
+  ].join("\n"),
+};
 
 function buildTarball(root: string): { file: Buffer; integrity: string; shasum: string } {
   const dir = join(root, "pkg", "package");
@@ -106,7 +121,8 @@ function gitBackend(root: string, req: IncomingMessage, res: ServerResponse, bod
 
 export async function startFakeUpstream(): Promise<FakeUpstream> {
   const root = mkdtempSync(join(tmpdir(), "rovo-upstream-"));
-  const helloSha = buildRepo(root);
+  const helloSha = buildRepo(root, "hello", { "README.md": "hello from fake github\n" });
+  const calcSha = buildRepo(root, "calc", CALC_FILES);
   const tar = buildTarball(root);
   const requests: FakeUpstream["requests"] = [];
 
@@ -159,6 +175,7 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
   return {
     url: `http://127.0.0.1:${port}`,
     helloSha,
+    calcSha,
     requests,
     stop: () =>
       new Promise((resolve) => {

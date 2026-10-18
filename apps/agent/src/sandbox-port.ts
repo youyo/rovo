@@ -39,4 +39,9 @@ export interface SandboxPort {
   writeFile(path: string, content: string): Promise<void>;
   /** 実行中のプロセスグループを止め、止まらなければコンテナを止める。停止を確かめてから戻る。 */
   stop(): Promise<{ stopped: boolean }>;
+  /**
+   * 永続的な終端停止。コンテナを止め、以後の ensureReady / exec / ファイル操作を拒否する（再開させない）。
+   * cancel と、タスクの終端（期限・予算・失敗・完了）の片付けで使う。無い実装には stop で代用する。
+   */
+  terminate?(): Promise<{ stopped: boolean }>;
 }

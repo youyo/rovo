@@ -1,11 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { createModels, Type } from "@earendil-works/pi-ai";
-import {
-  createRegistry,
-  defineTool,
-  Harness,
-  type ToolRegistration,
-} from "@earendil-works/pi-durable";
+import { createModels } from "@earendil-works/pi-ai";
+import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
@@ -34,6 +29,8 @@ import {
   type ScriptStep,
 } from "./pi/scripted-provider";
 import type { SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import { createSandboxTools } from "./tools";
+import { createToolContext } from "./tools/context";
 import type { SandboxToolsFactory } from "./tools/types";
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
@@ -48,8 +45,8 @@ const DEFAULT_CANCEL_WAIT_MS = 20_000;
 const TICK_MS = 30_000;
 const OUTPUT_TAIL = 4000;
 
-/** 本番で env に足す設定（wrangler.jsonc の ai バインディングと vars）。 */
-type AgentEnv = Env & { AI?: Ai; AI_GATEWAY_ID?: string; AGENT_MODEL?: string };
+/** wrangler.jsonc の ai バインディングと vars（AI_GATEWAY_ID / AGENT_MODEL）は生成型 Env に含まれる。 */
+type AgentEnv = Env;
 
 // biome-ignore lint/suspicious/noExplicitAny: Pi の BACKGROUND_CONTEXT と同じ形（取り消さない context）
 const BG: any = Object.freeze({
@@ -92,20 +89,16 @@ export class AgentDO extends DurableObject<Env> {
         );
       } else {
         if (!env.AI) throw new Error("AI binding is not configured");
-        provider = createAI({ binding: env.AI, id: env.AI_GATEWAY_ID }).provider;
+        provider = createAI({ binding: env.AI, id: env.AI_GATEWAY_ID || undefined }).provider;
       }
       models.setProvider(guardProvider(provider, (_model, context) => this.preModelCall(context)));
       const registry = createRegistry();
-      const sandboxTools = this.sandboxToolsFactory()(this.sandbox(), {
-        workspaceRoot: WORKSPACE_ROOT,
-        get deadlineAt() {
-          return Number.MAX_SAFE_INTEGER;
-        },
-        commitAuthor: { name: "rovo-agent", email: "rovo-agent@users.noreply.github.com" },
-      }) as ToolRegistration[];
-      const extra: ToolRegistration[] =
-        env.ENVIRONMENT === "test" ? [echoTool as ToolRegistration] : [];
-      registry.install(createAgentExtension([...sandboxTools, ...extra], this.piHooks()));
+      // ツールは start より前に作られる。期限は永続化した deadlineAt を呼び出し時に読む。
+      const sandboxTools = this.sandboxToolsFactory()(
+        this.sandbox(),
+        createToolContext(WORKSPACE_ROOT, () => this.deadlineAt()),
+      ) as ToolRegistration[];
+      registry.install(createAgentExtension(sandboxTools, this.piHooks()));
       return Harness.open(
         storage,
         { models, registry, settings: { toolExecution: "sequential" } },
@@ -133,18 +126,18 @@ export class AgentDO extends DurableObject<Env> {
 
   private modelId(): string {
     const env = this.env as AgentEnv;
-    return (
-      this.overrides().modelId ??
-      env.AGENT_MODEL ??
-      (env.ENVIRONMENT === "test" ? `scripted/${SCRIPTED_MODEL_ID}` : DEFAULT_MODEL)
-    );
+    // test では wrangler.jsonc の AGENT_MODEL（本番の既定）を無視して、台本付き fake モデルを使う
+    if (env.ENVIRONMENT === "test") {
+      return this.overrides().modelId ?? `scripted/${SCRIPTED_MODEL_ID}`;
+    }
+    return env.AGENT_MODEL || DEFAULT_MODEL;
   }
 
   private initialModel() {
     const env = this.env as AgentEnv;
     return env.ENVIRONMENT === "test"
       ? { provider: SCRIPTED_PROVIDER_ID, id: SCRIPTED_MODEL_ID }
-      : { provider: "cloudflare", id: env.AGENT_MODEL ?? DEFAULT_MODEL };
+      : { provider: "cloudflare", id: env.AGENT_MODEL || DEFAULT_MODEL };
   }
 
   private sandbox(): SandboxPort {
@@ -155,12 +148,7 @@ export class AgentDO extends DurableObject<Env> {
 
   private sandboxToolsFactory(): SandboxToolsFactory {
     const o = this.overrides().toolsFactory;
-    if (o) return o;
-    // TODO(M3): M2a の createSandboxTools を配線する。Unit は overrides で差し替える。
-    return (_port, _ctx) => {
-      if (this.env.ENVIRONMENT === "test") return [];
-      throw new Error("SandboxToolsFactory is not wired yet (M2a createSandboxTools)");
-    };
+    return o ?? createSandboxTools;
   }
 
   private taskName(): string {
@@ -306,24 +294,19 @@ export class AgentDO extends DurableObject<Env> {
     return this.deadlineAt();
   }
 
-  /** M1 スパイク（Gateway→Agent の疎通確認）。M3 で削除する。 */
+  /**
+   * 暫定: Gateway の /__spike/agent-ping と gateway-link E2E が使う疎通確認。ENVIRONMENT=test 限定。
+   * M3c（Gateway の task_start 統合）で Gateway の経路ごと削除する。
+   */
   ping(message: string): string {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
     return `agent:${message}`;
   }
 
-  /** M1 スパイク: 台本どおりに応答する fake モデルで 1 回実行する。ENVIRONMENT=test のときだけ使える。 */
-  async runScripted(script: ScriptStep[], prompt: string, operationId: string) {
-    if (this.env.ENVIRONMENT !== "test") throw new Error("runScripted is only available in test");
-    await this.lifecycle.start();
-    this.ctx.storage.kv.put(`script:${prompt}`, script);
-    const res = await this.harness.prompt(prompt, { operationId });
-    // RPC の型が深くなりすぎるため、transcript は JSON 文字列で返す
-    return {
-      status: res.status,
-      text: res.text,
-      reason: res.reason,
-      transcript: JSON.stringify(res.messages),
-    };
+  /** テスト専用: fake モデルの台本を保存する（key は最初の user メッセージ = spec.instructions）。 */
+  setScript(key: string, script: ScriptStep[]): void {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    this.ctx.storage.kv.put(`script:${key}`, script);
   }
 
   // ---- 起動・監視 ----
@@ -427,14 +410,16 @@ export class AgentDO extends DurableObject<Env> {
   // ---- 停止・確定 ----
 
   /**
-   * Sandbox を終端として止める唯一の呼び出し箇所。cancel / 期限 / 完了後の片付けはすべてここを通る。
+   * Sandbox を終端として止める唯一の呼び出し箇所（terminate、無ければ stop）。cancel / 期限 / 完了後の片付けはすべてここを通る。
    * 失敗は stopped:false として扱い、呼び出し側（cancel は再送で）が確かめ直す。
    */
   private async terminalStop(
     _why: "cancel" | "deadline" | "finished",
   ): Promise<{ stopped: boolean }> {
     try {
-      return await this.sandbox().stop();
+      // 終端では再開させない terminate を使う。無い実装（fake 等）には stop で代用する
+      const sb = this.sandbox();
+      return await (sb.terminate ? sb.terminate() : sb.stop());
     } catch {
       return { stopped: false };
     }
@@ -808,13 +793,3 @@ export class AgentDO extends DurableObject<Env> {
     return `${WORKSPACE_ROOT}/${cwd}`;
   }
 }
-
-const echoTool = defineTool({
-  name: "echo",
-  description: "Echo the given text back.",
-  parameters: Type.Object({ text: Type.String() }),
-  replay: "safe",
-  async execute(args) {
-    return { output: [{ type: "text", text: `echo: ${args.text}` }] };
-  },
-});

@@ -1,6 +1,7 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export const AGENT_DIR = join(import.meta.dirname, "..", "..");
 export const REPO_ROOT = join(AGENT_DIR, "..", "..");
@@ -61,7 +62,14 @@ async function groupGone(pid: number, withinMs: number): Promise<boolean> {
 export interface StartWranglerOptions {
   /** wrangler の設定ファイル（先頭が primary。複数なら `-c a -c b` の形で渡る）。repo ルート基準。 */
   configs: string[];
+  /** `--var` で渡す値。複数設定のときは先頭（primary）の Worker にしか効かない。 */
   vars: Record<string, string>;
+  /**
+   * 設定ファイルごとの追加 vars（キーは configs と同じ repo ルート基準のパス）。設定ファイルの隣の .dev.vars に
+   * 起動中だけ書く（複数設定の wrangler dev で primary 以外の Worker に ENVIRONMENT=test を渡すため。
+   * 既存の .dev.vars は退避して、停止時に戻す）。
+   */
+  configVars?: Record<string, Record<string, string>>;
   /** 起動完了とみなす URL（baseUrl からの相対）。応答が返れば ready。 */
   readyPath: string;
   persistDir: string;
@@ -94,6 +102,23 @@ export async function startWrangler(opts: StartWranglerOptions): Promise<Running
     "--log-level",
     "info",
   ];
+  const devVarsFiles = Object.entries(opts.configVars ?? {}).map(([config, vars]) => {
+    const file = join(REPO_ROOT, dirname(config), ".dev.vars");
+    const previous = existsSync(file) ? readFileSync(file) : undefined;
+    writeFileSync(
+      file,
+      `${Object.entries(vars)
+        .map(([k, v]) => `${k}=${v}`)
+        .join("\n")}\n`,
+    );
+    return { file, previous };
+  });
+  const restoreDevVars = () => {
+    for (const { file, previous } of devVarsFiles) {
+      if (previous === undefined) rmSync(file, { force: true });
+      else writeFileSync(file, previous);
+    }
+  };
   const containersBefore = listAgentContainers();
   const logs: string[] = [];
   const child: ChildProcess = spawn(process.execPath, args, {
@@ -120,6 +145,7 @@ export async function startWrangler(opts: StartWranglerOptions): Promise<Running
   };
   const stopAndClean = async () => {
     await stop();
+    restoreDevVars();
     // wrangler はプロキシのサイドカーを残すことがある。この起動中に増えた分だけ片付ける（既存の開発セッションは触らない）
     const leftovers = [...listAgentContainers()].filter((id) => !containersBefore.has(id));
     if (leftovers.length > 0) {
@@ -134,6 +160,7 @@ export async function startWrangler(opts: StartWranglerOptions): Promise<Running
   const deadline = Date.now() + (opts.readyDeadlineMs ?? 300_000);
   for (;;) {
     if (child.exitCode !== null) {
+      restoreDevVars();
       throw new Error(`wrangler dev が終了しました (code=${child.exitCode})\n${logs.join("")}`);
     }
     if (Date.now() > deadline) {

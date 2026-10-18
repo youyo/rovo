@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rovo-web",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "compatibility_flags": ["nodejs_compat"],
+  // gateway / agent からは service binding（WebResearch エントリポイントの RPC）で呼ぶ。公開のルートは持たない。
+  "workers_dev": false,
+  // Workers AI バインディング。Web Search API（env.AI.websearch）、HTML の Markdown 変換、Clef-flash の呼び出しに使う。
+  // Kitesurf 用の browser バインディングは M2 で足す。GitHub トークンや Anthropic のキーは持たせない（設計 8.4）。
+  "ai": { "binding": "AI" },
+  "vars": {
+    // "test" のときだけ TEST_FAKE_BASE が有効になる。本番は必ず "production"
+    "ENVIRONMENT": "production",
+    // AI Gateway の ID（必須。空なら websearch も AI.run も呼ばず、呼び出しをエラーにする）。デプロイ時に実際の ID へ変える。
+    "AI_GATEWAY_ID": "",
+    // 検索プロバイダ（ceramic / exa / linkup）
+    "WEB_SEARCH_PROVIDER": "ceramic",
+    // Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block / caution
+    "SAFETY_BLOCK_THRESHOLD": "0.8",
+    "SAFETY_CAUTION_THRESHOLD": "0.4",
+    // ENVIRONMENT=test のときだけ有効。AI（run / websearch / toMarkdown）と取得を向ける偽サーバーの URL。空なら本物を使う。
+    "TEST_FAKE_BASE": ""
+  }
+}

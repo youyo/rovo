@@ -21,9 +21,14 @@ description = "agent: wrangler types で Env 型を生成"
 dir = "apps/agent"
 run = "pnpm exec wrangler types --env-interface Env --strict-vars=false"
 
+[tasks."typegen:web"]
+description = "web: wrangler types で Env 型を生成"
+dir = "apps/web"
+run = "pnpm exec wrangler types --env-interface Env --strict-vars=false"
+
 [tasks.typegen]
-description = "両アプリの Env 型を生成（wrangler.jsonc を変えたら実行）"
-depends = ["typegen:gateway", "typegen:agent"]
+description = "全アプリの Env 型を生成（wrangler.jsonc を変えたら実行）"
+depends = ["typegen:gateway", "typegen:agent", "typegen:web"]
 
 [tasks."test:unit:gateway"]
 description = "gateway の Unit テスト（vitest + workerd）"
@@ -35,9 +40,14 @@ description = "agent の Unit テスト（vitest + workerd。コンテナは使�
 dir = "apps/agent"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
+[tasks."test:unit:web"]
+description = "web の Unit テスト（vitest + workerd。WebSearchSource / fetch / AI.run は fake。実アカウントは呼ばない）"
+dir = "apps/web"
+run = "pnpm exec vitest run --config vitest.config.ts"
+
 [tasks."test:unit"]
-description = "Unit テスト（gateway + agent）"
-depends = ["test:unit:gateway", "test:unit:agent"]
+description = "Unit テスト（gateway + agent + web）"
+depends = ["test:unit:gateway", "test:unit:agent", "test:unit:web"]
 
 [tasks."test:e2e:gateway"]
 description = "gateway の E2E（wrangler dev で実 Worker と偽 GitHub を起動し、MCP SDK Client から通しで検証）"
@@ -49,7 +59,7 @@ description = "agent の E2E（Docker 必須）。wrangler dev で実コンテ�
 dir = "apps/agent"
 run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 # 負荷によるタイムアウトを避けるため、Unit などの他のテストと同時には走らせない
-wait_for = ["test:unit:gateway", "test:unit:agent", "test:fake-github", "test:e2e:gateway"]
+wait_for = ["test:unit:gateway", "test:unit:agent", "test:unit:web", "test:fake-github", "test:e2e:gateway"]
 
 [tasks."test:e2e:full"]
 description = "Gateway(MCP) → AgentDO → SandboxDO（実コンテナ）の通しの E2E（Docker 必須）。Phase 3 のゴール（Draft PR・push・PR 本文の更新・トークンの失効）の検証。test:e2e:docker と Docker コンテナの片付けが干渉しないよう、同時には走らせない"
@@ -80,9 +90,14 @@ description = "agent の型検査"
 dir = "apps/agent"
 run = "pnpm exec tsc -p tsconfig.json && pnpm exec tsc -p test/e2e/tsconfig.json"
 
+[tasks."typecheck:web"]
+description = "web の型検査"
+dir = "apps/web"
+run = "pnpm exec tsc -p tsconfig.json"
+
 [tasks.typecheck]
-description = "TypeScript の型検査（両アプリ）"
-depends = ["typecheck:gateway", "typecheck:agent"]
+description = "TypeScript の型検査（全アプリ）"
+depends = ["typecheck:gateway", "typecheck:agent", "typecheck:web"]
 
 [tasks."lint:biome"]
 description = "Biome による lint / format チェック"

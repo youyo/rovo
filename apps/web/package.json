@@ -1,0 +1,16 @@
+{
+  "name": "@rovo/web",
+  "private": true,
+  "type": "module",
+  "scripts": {},
+  "dependencies": {
+    "agents": "0.28.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.4",
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.151.1"
+  }
+}

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
-import { mapAgentEvent } from "../agent/agent-events";
+import { count, mapAgentEvent } from "../agent/agent-events";
 import type {
   AgentRpc,
   EventsPage,
@@ -167,6 +167,8 @@ export type ResultView = {
     output_tokens: number;
     cache_read_tokens: number;
     cache_write_tokens: number;
+    /** 子が使った web の回数 */
+    web: { search: number; fetch: number; browse: number };
   };
 };
 
@@ -1001,6 +1003,7 @@ export class TaskDO extends DurableObject<Env> {
         outputTokens: 0,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
+        web: { search: 0, fetch: 0, browse: 0 },
       }),
     };
   }
@@ -2072,6 +2075,11 @@ function shapeUsage(u: UsageDto): ResultView["usage"] {
     output_tokens: u.outputTokens,
     cache_read_tokens: u.cacheReadTokens,
     cache_write_tokens: u.cacheWriteTokens,
+    web: {
+      search: count(u.web?.search),
+      fetch: count(u.web?.fetch),
+      browse: count(u.web?.browse),
+    },
   };
 }
 

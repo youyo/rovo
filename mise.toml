@@ -62,7 +62,7 @@ run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 wait_for = ["test:unit:gateway", "test:unit:agent", "test:unit:web", "test:fake-github", "test:e2e:gateway"]
 
 [tasks."test:e2e:full"]
-description = "Gateway(MCP) → AgentDO → SandboxDO（実コンテナ）の通しの E2E（Docker 必須）。Phase 3 のゴール（Draft PR・push・PR 本文の更新・トークンの失効）の検証。test:e2e:docker と Docker コンテナの片付けが干渉しないよう、同時には走らせない"
+description = "Gateway(MCP) → AgentDO → SandboxDO（実コンテナ）と、Web Research Service（apps/web。3つの Worker を同時に起動し、偽の Web / Clef / Web Search API を使う）の通しの E2E（Docker 必須）。Phase 3 のゴール（Draft PR・push・PR 本文の更新・トークンの失効）、Phase 4 の対話、Phase 5 の web_search / web_fetch の検証。test:e2e:docker と Docker コンテナの片付けが干渉しないよう、同時には走らせない"
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.e2e-full.config.ts"
 wait_for = ["test:e2e:docker"]
@@ -122,8 +122,8 @@ dir = "apps/gateway"
 run = "pnpm exec wrangler dev"
 
 [tasks."dev:all"]
-description = "gateway と agent を同時にローカル起動（Docker 必須）。script_name 付きバインディングは両方を同時に起動しないと本番の DO を参照する"
-run = "node apps/gateway/node_modules/wrangler/bin/wrangler.js dev -c apps/gateway/wrangler.jsonc -c apps/agent/wrangler.jsonc"
+description = "gateway・agent・web を同時にローカル起動（Docker 必須）。script_name 付きバインディングと service binding（WEB）は全部を同時に起動しないと解決できない"
+run = "node apps/gateway/node_modules/wrangler/bin/wrangler.js dev -c apps/gateway/wrangler.jsonc -c apps/agent/wrangler.jsonc -c apps/web/wrangler.jsonc"
 
 [tasks."test:fake-github"]
 description = "偽 GitHub サーバーと GitHub クライアントの結合テスト（Node）"

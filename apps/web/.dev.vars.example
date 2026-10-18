@@ -1,0 +1,14 @@
+# ローカル開発用。`cp .dev.vars.example .dev.vars` して値を埋める（.dev.vars は gitignore 済み）。
+# web に secret は無い（GitHub のトークンも Anthropic のキーも持たせない）。
+# gateway・agent と同時に起動する（`mise run dev:all`）。AI バインディングは実アカウントに繋がる（課金される）。
+
+# AI Gateway の ID（必須）。空だと websearch も AI.run（Clef）も呼ばず、呼び出しはエラーになる。
+# 本番はデプロイ時に wrangler.jsonc の vars を実際の ID に変える。
+# AI_GATEWAY_ID=
+
+# 検索プロバイダ（ceramic / exa / linkup）
+# WEB_SEARCH_PROVIDER=ceramic
+
+# Policy Engine の閾値（仮の値。受入試験で調整する）
+# SAFETY_BLOCK_THRESHOLD=0.8
+# SAFETY_CAUTION_THRESHOLD=0.4

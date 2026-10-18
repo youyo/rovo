@@ -120,6 +120,7 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
     for (const path of [
       "/__test/hold-deliveries",
       "/__test/agent/model-calls",
+      "/__test/agent/model-tool-results",
       "/__test/task/deliveries",
     ]) {
       for (const environment of ["production", "", undefined]) {
@@ -146,7 +147,11 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
 
   it("deliveries / model-calls は task_id が不正なら 400", async () => {
     const app = createDefaultApp();
-    for (const path of ["/__test/agent/model-calls", "/__test/task/deliveries"]) {
+    for (const path of [
+      "/__test/agent/model-calls",
+      "/__test/agent/model-tool-results",
+      "/__test/task/deliveries",
+    ]) {
       expect((await app.request(path, post({}), withEnv("test"))).status, path).toBe(400);
       expect((await app.request(path, post({ task_id: "../x" }), withEnv("test"))).status).toBe(
         400,

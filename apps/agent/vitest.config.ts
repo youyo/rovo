@@ -9,6 +9,11 @@ export default defineConfig({
       // 残り「Vite server が終了しない」警告の原因になる。Unit は台本付き fake モデルで実 AI を呼ばないので、リモート接続は不要。
       remoteBindings: false,
       miniflare: {
+        // wrangler.jsonc の WEB は別 Worker（rovo-web）への service binding。Unit では web を起動しないので、
+        // 呼ばれたらエラーにするだけの関数に差し替える。web を使うテストは fake を直接差し込む。
+        serviceBindings: {
+          WEB: () => new Response("web is not available in unit tests", { status: 500 }),
+        },
         bindings: {
           ENVIRONMENT: "test",
           // 32 バイト（0x07 の繰り返し）の base64。Unit 専用の値

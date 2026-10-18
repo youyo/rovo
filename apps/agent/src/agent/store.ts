@@ -1,4 +1,4 @@
-import type { AgentEventDto, Phase, UsageDto } from "./types";
+import type { AgentEventDto, Phase, UsageDto, WebUsage } from "./types";
 import { isTerminal } from "./types";
 
 /** received: 受け取った / submitted: Pi へ渡している最中 / buffered: 次の submit に添えるため保留 / accepted: Pi に渡し終えた */
@@ -9,13 +9,30 @@ export interface SteerRow {
   state: SteerState;
 }
 
+export const ZERO_WEB_USAGE: WebUsage = { search: 0, fetch: 0, browse: 0 };
+
 export const ZERO_USAGE: UsageDto = {
   costUsd: 0,
   inputTokens: 0,
   outputTokens: 0,
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
+  web: ZERO_WEB_USAGE,
 };
+
+/** 同じ値か（キーの並びに依存しない） */
+export function sameUsage(a: UsageDto, b: UsageDto): boolean {
+  return (
+    a.costUsd === b.costUsd &&
+    a.inputTokens === b.inputTokens &&
+    a.outputTokens === b.outputTokens &&
+    a.cacheReadTokens === b.cacheReadTokens &&
+    a.cacheWriteTokens === b.cacheWriteTokens &&
+    a.web.search === b.web.search &&
+    a.web.fetch === b.web.fetch &&
+    a.web.browse === b.web.browse
+  );
+}
 
 const PATCH_CHUNK = 128 * 1024;
 
@@ -113,7 +130,10 @@ export class AgentStore {
   }
 
   usage(): UsageDto {
-    return this.meta<UsageDto>("usage") ?? ZERO_USAGE;
+    const stored = this.meta<Partial<UsageDto>>("usage");
+    if (stored === undefined) return ZERO_USAGE;
+    // web を持たない旧い値（Phase 5 より前）も読めるようにする
+    return { ...ZERO_USAGE, ...stored, web: { ...ZERO_WEB_USAGE, ...stored.web } };
   }
 
   steer(steerId: string): SteerRow | undefined {

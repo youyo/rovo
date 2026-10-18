@@ -6,6 +6,7 @@ import type { Phase, ResultDto, TaskSpec } from "../../../src/agent/types";
 import type { ScriptStep } from "../../../src/pi/scripted-provider";
 import type { ExecResult } from "../../../src/sandbox-port";
 import type { SandboxToolsFactory } from "../../../src/tools/types";
+import type { WebPort } from "../../../src/tools/web";
 import { FakeSandbox } from "../../support/fake-sandbox";
 
 export const T0 = 1_800_000_000_000;
@@ -60,7 +61,8 @@ export interface Fixture {
   /** 検証コマンド（npm test）の結果を順に返す。尽きたら成功 */
   verifyResults: Partial<ExecResult>[];
   verifyCalls: string[][];
-  modelCalls: { count: number; userTexts: string[][] };
+  /** toolResults: モデル呼び出しごとに、そのとき transcript に載っていたツール結果の本文 */
+  modelCalls: { count: number; userTexts: string[][]; toolResults: string[][] };
   /** ask_parent の本体に入る直前（未回答の質問を記録する前）を止める */
   askGate: ExecGate;
   /** answer() が Pi へ回答を submit する直前を止める。throwOnce を立てると 1 回だけ例外にする */
@@ -107,12 +109,16 @@ export function newFixture(
     finalizeWaitMs?: number;
     usageReadWaitMs?: number;
     pushRetryDelayMs?: number;
+    /** web_search / web_fetch の RPC の fake */
+    web?: WebPort;
+    /** タスクごとの web の回数の上限（既定は 50 / 100） */
+    webLimits?: { search?: number; fetch?: number };
   } = {},
 ): Fixture {
   const clock = { now: T0 };
   const verifyResults: Partial<ExecResult>[] = [];
   const verifyCalls: string[][] = [];
-  const modelCalls = { count: 0, userTexts: [] as string[][] };
+  const modelCalls = { count: 0, userTexts: [] as string[][], toolResults: [] as string[][] };
   const patch = { value: "From abc\n--- a\n+++ b\n" };
   const nameStatus = { value: "" };
   // DO の中と外で Promise を共有すると I/O の所有者が混ざるので、フラグのポーリングにする
@@ -232,6 +238,8 @@ export function newFixture(
     finalizeWaitMs: opts.finalizeWaitMs,
     usageReadWaitMs: opts.usageReadWaitMs,
     pushRetryDelayMs: opts.pushRetryDelayMs ?? 0,
+    web: opts.web,
+    webLimits: opts.webLimits,
     beforeUsageRead: () => hold(usageState),
     beforeSubmit: () => hold(submitState),
     beforeAskParent: () => hold(askState),
@@ -248,6 +256,7 @@ export function newFixture(
     onModelCall: (ctx) => {
       modelCalls.count += 1;
       modelCalls.userTexts.push(ctx?.userTexts ?? []);
+      modelCalls.toolResults.push(ctx?.toolResults ?? []);
     },
   });
   return {

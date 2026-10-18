@@ -54,6 +54,17 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ calls: await agent.testModelCalls() });
   });
 
+  // モデル呼び出しごとの、そのとき transcript に載っていたツール結果（web ツールの結果がモデルに届いたことの確認用）
+  app.post("/__test/agent/model-tool-results", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const id = await taskIdOf(c.req);
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    const agent = c.env.AGENT_DO.getByName(id) as unknown as {
+      testModelToolResults(): Promise<string[][]>;
+    };
+    return c.json({ calls: await agent.testModelToolResults() });
+  });
+
   // TaskDO の回答・steer の配送状態（pending / delivered / skipped）
   app.post("/__test/task/deliveries", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();

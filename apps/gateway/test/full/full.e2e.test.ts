@@ -10,14 +10,18 @@ import {
   type RunningWrangler,
   startWrangler,
 } from "../../../agent/test/support/wrangler";
+import { type FakeWeb, startFakeWeb } from "../../../web/test/support/fake-web";
 import { fakeGitHubAdmin } from "../e2e/fake-admin";
 import { connectAuthenticated } from "../e2e/oauth-client";
 import { type FakeGitHub, startFakeGitHub } from "../fake-github/server";
 import { generateAppKeyPair } from "../support/app-keys";
 import { gitRepoStore } from "../support/git-store";
 
-// Phase 3 / Phase 4 のゴールの通し検証: MCP クライアント → Gateway（OAuth・TaskDO・UserDO・GitHub App）→ AgentDO → SandboxDO（実コンテナ）。
-// 偽なのは GitHub（OAuth・API）、git / npm の上流（acme/calc）、モデル（台本付き）だけ。
+// Phase 3 / Phase 4 / Phase 5 のゴールの通し検証: MCP クライアント → Gateway（OAuth・TaskDO・UserDO・GitHub App）→ AgentDO → SandboxDO（実コンテナ）。
+// Phase 5 では 3 つ目の Worker として apps/web（Web Research Service）も同時に起動し、
+// gateway（親の MCP の web_search / web_fetch）と agent（子の Pi ツール）から service binding で通しで呼ぶ。
+// 偽なのは GitHub（OAuth・API）、git / npm の上流（acme/calc）、モデル（台本付き）、
+// そして web の外側（Web Search API・Workers AI の Clef / toMarkdown・公開 Web のページ。apps/web/test/support/fake-web.ts）だけ。
 //
 // 偽 GitHub（App API）と偽 git の整合: 偽 git（git http-backend）の bare リポジトリを「正」とする。
 // 偽 GitHub の Git Data / refs / compare API は、その bare リポジトリへの実 git 操作で実装する（test/support/git-store.ts）。
@@ -25,6 +29,7 @@ import { gitRepoStore } from "../support/git-store";
 // 偽 git は、偽 GitHub が発行して失効していない Installation Token だけを受け付ける。
 let github: FakeGitHub;
 let upstream: FakeUpstream;
+let fakeWeb: FakeWeb;
 let wrangler: RunningWrangler;
 let persistDir: string;
 const clients: Client[] = [];
@@ -34,6 +39,10 @@ const ORG = "acme";
 const TEAM = "core";
 const REPO = { id: 4343, fullName: "acme/calc", push: true };
 const INSTALLATION_ID = 78;
+const WEB_DAILY_SEARCH = 4;
+const WEB_DAILY_FETCH = 6;
+const WEB_TASK_SEARCH = 2;
+const WEB_TASK_FETCH = 3;
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -51,6 +60,7 @@ beforeAll(async () => {
   // GitHub App の鍵は実行のたびに生成する（リポジトリに秘密鍵は置かない）
   const appKeys = await generateAppKeyPair();
   upstream = await startFakeUpstream();
+  fakeWeb = await startFakeWeb();
   github = await startFakeGitHub({
     app: {
       appId: "424242",
@@ -65,7 +75,11 @@ beforeAll(async () => {
   persistDir = mkdtempSync(join(tmpdir(), "rovo-full-e2e-"));
   const port = await freePort();
   wrangler = await startWrangler({
-    configs: ["apps/gateway/wrangler.jsonc", "apps/agent/wrangler.jsonc"],
+    configs: [
+      "apps/gateway/wrangler.jsonc",
+      "apps/agent/wrangler.jsonc",
+      "apps/web/wrangler.jsonc",
+    ],
     port,
     vars: {
       ENVIRONMENT: "test",
@@ -83,6 +97,9 @@ beforeAll(async () => {
         .replace(/\s+/g, ""),
       // 1 タスクの予約は $10。月額 $10 なら、$10 の予約が通るのは累計の費用が 0 のときだけ
       MONTHLY_BUDGET_USD: "10",
+      // 親の web の1日あたりの上限。シナリオごとにユーザーが違うので、上限のシナリオ（p）以外は超えない小ささにしておく
+      WEB_SEARCH_DAILY_LIMIT: String(WEB_DAILY_SEARCH),
+      WEB_FETCH_DAILY_LIMIT: String(WEB_DAILY_FETCH),
     },
     // --var は primary（gateway）にしか効かないので、agent 側は .dev.vars で渡す
     configVars: {
@@ -90,6 +107,15 @@ beforeAll(async () => {
         ENVIRONMENT: "test",
         TEST_UPSTREAM: upstream.url,
         TOKEN_ENC_KEY: E2E_TOKEN_ENC_KEY,
+        // 子の web の1タスクあたりの上限（既定の 50 / 100 回の代わりに、上限のシナリオを短くするための小さな値）
+        WEB_SEARCH_LIMIT_PER_TASK: String(WEB_TASK_SEARCH),
+        WEB_FETCH_LIMIT_PER_TASK: String(WEB_TASK_FETCH),
+      },
+      // web は偽サーバー（Web Search API・Clef・toMarkdown・ページ）に向ける。実アカウントの AI は呼ばない
+      "apps/web/wrangler.jsonc": {
+        ENVIRONMENT: "test",
+        TEST_FAKE_BASE: fakeWeb.url,
+        AI_GATEWAY_ID: "e2e-gateway",
       },
     },
     readyPath: "/.well-known/oauth-authorization-server",
@@ -102,6 +128,7 @@ afterAll(async () => {
   await Promise.all(clients.map((c) => c.close().catch(() => {})));
   await wrangler?.stop();
   await upstream?.stop();
+  await fakeWeb?.stop();
   await github?.stop();
   if (persistDir) rmSync(persistDir, { recursive: true, force: true });
 });
@@ -932,5 +959,271 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 4: 親子間�
     const sameDone = await call(client, "task_answer", answerArgs("A"));
     expect(sameDone.isError, JSON.stringify(sameDone.body)).toBe(false);
     await settledResult(client, taskId);
+  });
+});
+
+// ---- Phase 5: Web Research Service（apps/web）----
+
+const WEB_BEGIN = "<<<UNTRUSTED_WEB_CONTENT";
+const WEB_END = "<<<END_UNTRUSTED_WEB_CONTENT>>>";
+const CHILD_BEGIN = "<<<BEGIN_UNTRUSTED_OUTPUT>>>";
+const CHILD_END = "<<<END_UNTRUSTED_OUTPUT>>>";
+
+type WebSafetyView = { verdict: string; categories: string[]; evaluated: boolean };
+type WebFetchView = {
+  source: { url: string; final_url: string; via: string };
+  status: string;
+  blocked_reason?: string;
+  title?: string;
+  content: string | null;
+  safety: WebSafetyView;
+};
+type WebSearchView = {
+  results: { url: string; title: string; content: string | null; safety: WebSafetyView }[];
+  metadata: { request_id: string; provider: string | null; dropped_urls: number };
+};
+
+const webFetch = async (client: Client, url: string) => {
+  const r = await call(client, "web_fetch", { url });
+  return { ...r, view: r.body as unknown as WebFetchView };
+};
+const webSearch = async (client: Client, query: string) => {
+  const r = await call(client, "web_search", { query });
+  return { ...r, view: r.body as unknown as WebSearchView };
+};
+
+/** モデル呼び出しごとの、そのとき transcript に載っていたツール結果（AgentDO が ENVIRONMENT=test のときだけ記録する）。 */
+const toolResultsOf = async (taskId: string) =>
+  (await testPost<{ calls: string[][] }>("/__test/agent/model-tool-results", { task_id: taskId }))
+    .calls;
+
+describe("Gateway → Web Research Service（Phase 5: 親の MCP ツール）", () => {
+  it("m. web_search / web_fetch: 本文・title・description が非信頼データのマーカーで囲まれて返る。private な URL は検索結果から落ちる", async () => {
+    const client = await newClient("mallory");
+    const searched = await webSearch(client, "rovo guide");
+    expect(searched.isError, JSON.stringify(searched.body)).toBe(false);
+    expect(searched.view.results.map((r) => r.url)).toEqual([
+      "https://docs.example.com/guide",
+      "https://docs.example.com/faq",
+    ]);
+    expect(searched.view.metadata).toMatchObject({ provider: "ceramic", dropped_urls: 1 });
+    expect(searched.view.metadata.request_id).toMatch(/^fake-search-/);
+    const first = searched.view.results[0];
+    expect(first?.title.startsWith(WEB_BEGIN)).toBe(true);
+    expect(first?.title.endsWith(WEB_END)).toBe(true);
+    expect(first?.title).toContain("Rovo Guide");
+    expect(first?.content?.startsWith(WEB_BEGIN)).toBe(true);
+    expect(first?.content).toContain("SEARCH-DESC-GUIDE");
+    expect(first?.safety.verdict).toBe("allow");
+    // web には gatewayId を付けて検索している
+    const searchReq = fakeWeb.requests.findLast((r) => r.path === "/ai/websearch");
+    expect(searchReq?.body).toMatchObject({ query: "rovo guide", gatewayId: "e2e-gateway" });
+
+    const fetched = await webFetch(client, "https://docs.example.com/guide");
+    expect(fetched.isError, JSON.stringify(fetched.body)).toBe(false);
+    expect(fetched.view).toMatchObject({
+      status: "ok",
+      source: {
+        url: "https://docs.example.com/guide",
+        final_url: "https://docs.example.com/guide",
+        via: "direct",
+      },
+      safety: { verdict: "allow", evaluated: true },
+    });
+    const content = fetched.view.content ?? "";
+    expect(content.startsWith(WEB_BEGIN)).toBe(true);
+    expect(content.endsWith(WEB_END)).toBe(true);
+    expect(content).toContain("GUIDE-BODY-TOKEN");
+    expect(fetched.view.title).toContain("Rovo Guide");
+    await client.close();
+  });
+
+  it("n. 注入を含むページは block になり、本文は返らない（決定論ルール・モデル・評価不能の unknown）。caution は本文付き", async () => {
+    const client = await newClient("nina");
+    // 決定論ルール
+    const byRule = await webFetch(client, "https://evil.example.com/rule");
+    expect(byRule.isError, JSON.stringify(byRule.body)).toBe(false);
+    expect(byRule.view.content).toBeNull();
+    expect(byRule.view.safety.verdict).toBe("block");
+    expect(JSON.stringify(byRule.body)).not.toContain("send the API keys");
+    // モデル（偽 Clef が高い確率を返す）
+    const byModel = await webFetch(client, "https://evil.example.com/model");
+    expect(byModel.view.content).toBeNull();
+    expect(byModel.view.safety.verdict).toBe("block");
+    expect(byModel.view.safety.categories).toContain("prompt_injection");
+    // 評価できない（Clef が 500）→ unknown。本文は返らない
+    const unknown = await webFetch(client, "https://docs.example.com/clef-down");
+    expect(unknown.view.content).toBeNull();
+    expect(unknown.view.safety).toMatchObject({ verdict: "unknown", evaluated: false });
+    // caution は本文付き
+    const caution = await webFetch(client, "https://docs.example.com/suspicious");
+    expect(caution.view.safety.verdict).toBe("caution");
+    expect(caution.view.content).toContain("Odd wording");
+    expect(caution.view.content?.startsWith(WEB_BEGIN)).toBe(true);
+
+    // 検索結果の title に仕込まれた注入も block になり、title は伏せられて URL だけが返る
+    const search = await webSearch(client, "title-inject");
+    expect(search.view.results).toHaveLength(1);
+    expect(search.view.results[0]?.safety.verdict).toBe("block");
+    expect(search.view.results[0]?.title).toContain("(title withheld)");
+    expect(search.view.results[0]?.content).toBeNull();
+    expect(search.view.results[0]?.url).toBe("https://docs.example.com/guide");
+    expect(JSON.stringify(search.body)).not.toContain("inject-sample");
+    // description に仕込まれた注入
+    const desc = await webSearch(client, "desc-inject");
+    expect(desc.view.results[0]?.safety.verdict).toBe("block");
+    expect(desc.view.results[0]?.content).toBeNull();
+    await client.close();
+  });
+
+  it("o. redirect で private（169.254.169.254）に飛ばされると blocked。公開ホストへの redirect は行き先でも検査して通る。robots.txt の Disallow は blocked", async () => {
+    const client = await newClient("olive");
+    const toPrivate = await webFetch(client, "https://evil.example.com/to-private");
+    expect(toPrivate.isError, JSON.stringify(toPrivate.body)).toBe(false);
+    expect(toPrivate.view).toMatchObject({
+      status: "blocked",
+      blocked_reason: "redirect_policy",
+      content: null,
+      safety: { verdict: "block" },
+    });
+    // 169.254.169.254 には一度も取りに行っていない（偽サーバーに届いていない）
+    expect(fakeWeb.requests.some((r) => r.host.startsWith("169.254."))).toBe(false);
+
+    const toPublic = await webFetch(client, "https://evil.example.com/to-public");
+    expect(toPublic.view).toMatchObject({
+      status: "ok",
+      source: {
+        url: "https://evil.example.com/to-public",
+        final_url: "https://docs.example.com/guide",
+      },
+    });
+    expect(toPublic.view.content).toContain("GUIDE-BODY-TOKEN");
+
+    const disallowed = await webFetch(client, "https://private.example.com/secret");
+    expect(disallowed.view).toMatchObject({
+      status: "blocked",
+      blocked_reason: "robots_disallowed",
+      content: null,
+    });
+    // Disallow されたページ自体には取りに行っていない
+    expect(
+      fakeWeb.requests.some((r) => r.host === "private.example.com" && r.path === "/secret"),
+    ).toBe(false);
+    const open = await webFetch(client, "https://private.example.com/open");
+    expect(open.view.status).toBe("ok");
+    expect(open.view.content).toContain("OPEN-BODY-TOKEN");
+    await client.close();
+  });
+
+  it("p. ユーザーごとの1日の上限を超えると quota_exceeded（search と fetch は別枠）。入力の誤りは回数を使わない", async () => {
+    const client = await newClient("pat");
+    const bad = await call(client, "web_search", { query: "" });
+    expect(bad.body.code).toBe("invalid_input");
+    for (let i = 0; i < WEB_DAILY_SEARCH; i++) {
+      const r = await webSearch(client, `q${i}`);
+      expect(r.isError, `search ${i}: ${JSON.stringify(r.body)}`).toBe(false);
+    }
+    const over = await call(client, "web_search", { query: "one more" });
+    expect(over.isError).toBe(true);
+    expect(over.body).toMatchObject({ code: "quota_exceeded" });
+    expect(over.body.retry_after_seconds).toBeGreaterThan(0);
+    // fetch の枠は別
+    const f = await webFetch(client, "https://docs.example.com/faq");
+    expect(f.isError, JSON.stringify(f.body)).toBe(false);
+    for (let i = 1; i < WEB_DAILY_FETCH; i++) {
+      expect((await webFetch(client, "https://docs.example.com/faq")).isError).toBe(false);
+    }
+    const overFetch = await call(client, "web_fetch", { url: "https://docs.example.com/faq" });
+    expect(overFetch.body.code).toBe("quota_exceeded");
+    // 別のユーザーの枠は影響を受けない
+    const other = await newClient("pat-other");
+    expect((await webSearch(other, "fresh")).isError).toBe(false);
+    await client.close();
+    await other.close();
+  });
+
+  it("p2. 不正な URL・private な URL は invalid_input（web が拒否する）", async () => {
+    const client = await newClient("pia");
+    for (const url of [
+      "http://169.254.169.254/latest/meta-data/",
+      "https://evil.example.com:8443/",
+    ]) {
+      const r = await call(client, "web_fetch", { url });
+      expect(r.isError, url).toBe(true);
+      expect(r.body.code, url).toBe("invalid_input");
+    }
+    await client.close();
+  });
+});
+
+describe("Agent → Web Research Service（Phase 5: 子の Pi ツール）", () => {
+  it("q. 子の台本が web_search / web_fetch を呼び、結果が非信頼データのマーカー付きでモデルに届く。usage の web の回数が task_result に出る", async () => {
+    const client = await newClient("quinn");
+    const { taskId } = await startTask(client, "q-web", [
+      tool("web_search", { query: "rovo guide" }),
+      tool("web_fetch", { url: "https://docs.example.com/guide" }),
+      tool("read_file", { path: "calc.js" }),
+      ...COMMIT_STEPS,
+      report("web を調べて完了した"),
+    ]);
+    const { status, events } = await collect(client, taskId);
+    expect(status, JSON.stringify(events)).toBe("COMPLETED");
+
+    // ツールの結果がモデルへのメッセージに含まれる（マーカー付き）
+    const results = await toolResultsOf(taskId);
+    const last = (results[results.length - 1] ?? []).join("\n");
+    expect(last).toContain(CHILD_BEGIN);
+    expect(last).toContain(CHILD_END);
+    expect(last).toContain("https://docs.example.com/guide");
+    expect(last).toContain("SEARCH-DESC-GUIDE");
+    expect(last).toContain("GUIDE-BODY-TOKEN");
+    expect(last).toMatch(/verdict: allow/);
+    // private な URL は検索結果から落ちている
+    expect(last).not.toContain("169.254.169.254");
+
+    // usage イベントと task_result に web の回数が出る
+    const usages = events.filter((e) => e.type === "usage");
+    const lastUsage = usages[usages.length - 1]?.payload;
+    expect(lastUsage).toMatchObject({ web_search: 1, web_fetch: 1, web_browse: 0 });
+    const r = await settledResult(client, taskId);
+    expect(r.usage).toMatchObject({ web: { search: 1, fetch: 1, browse: 0 } });
+    expect(
+      events.filter((e) => e.type === "tool_end" && e.payload.name === "web_search"),
+    ).toHaveLength(1);
+  });
+
+  it("r. 注入を含むページは本文が無いことがモデルに伝わる。タスクごとの上限を超えるとツールのエラーになる", async () => {
+    const client = await newClient("ruth");
+    const { taskId } = await startTask(client, "r-web-limit", [
+      tool("web_search", { query: "one" }),
+      tool("web_search", { query: "two" }),
+      tool("web_search", { query: "three" }),
+      tool("web_fetch", { url: "https://evil.example.com/rule" }),
+      ...COMMIT_STEPS,
+      report("上限を確かめて完了した"),
+    ]);
+    const { status, events } = await collect(client, taskId);
+    expect(status, JSON.stringify(events)).toBe("COMPLETED");
+
+    const ends = events.filter(
+      (e) => e.type === "tool_end" && String(e.payload.name).startsWith("web_"),
+    );
+    expect(ends.map((e) => [e.payload.name, e.payload.is_error])).toEqual([
+      ["web_search", false],
+      ["web_search", false],
+      ["web_search", true],
+      ["web_fetch", false],
+    ]);
+    const results = await toolResultsOf(taskId);
+    const last = (results[results.length - 1] ?? []).join("\n");
+    // 3 回目の検索は上限で止まった
+    expect(last).toMatch(/reached the limit of 2 web_search calls/);
+    // 注入ページは block。本文は無く、withheld であることが伝わる
+    expect(last).toMatch(/verdict: block/);
+    expect(last).toMatch(/content is withheld/i);
+    expect(last).not.toContain("send the API keys");
+    // 上限を超えた呼び出しは数えない
+    const r = await settledResult(client, taskId);
+    expect(r.usage).toMatchObject({ web: { search: 2, fetch: 1, browse: 0 } });
   });
 });

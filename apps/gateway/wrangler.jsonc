@@ -14,6 +14,16 @@
     ]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] }],
+  "services": [
+    // apps/web（Web Research Service）の WebResearch エントリポイント。呼び出し元の種別は props で固定する
+    // （web は RPC の引数ではなく ctx.props から caller を取る）。デプロイは web → agent → gateway の順。
+    {
+      "binding": "WEB",
+      "service": "rovo-web",
+      "entrypoint": "WebResearch",
+      "props": { "caller": "parent" }
+    }
+  ],
   "vars": {
     // "test" のときだけ GitHub の接続先（GITHUB_OAUTH_BASE / GITHUB_API_BASE）の上書きを許す。本番は必ず "production"。
     "ENVIRONMENT": "production",
@@ -23,6 +33,9 @@
     "GITHUB_APP_CLIENT_ID": "",
     // ログインを許可する GitHub org と team の slug。どちらかが空ならログインは失敗する。
     "ALLOWED_ORG": "",
-    "ALLOWED_TEAM": ""
+    "ALLOWED_TEAM": "",
+    // 親（MCP の web_search / web_fetch）の回数の上限。ユーザーごとに UTC の1日あたり
+    "WEB_SEARCH_DAILY_LIMIT": "200",
+    "WEB_FETCH_DAILY_LIMIT": "500"
   }
 }

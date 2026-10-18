@@ -75,6 +75,7 @@ const ZERO_USAGE: UsageDto = {
   outputTokens: 0,
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
+  web: { search: 0, fetch: 0, browse: 0 },
 };
 
 /**

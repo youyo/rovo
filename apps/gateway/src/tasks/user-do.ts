@@ -19,6 +19,22 @@ export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const RESERVATION_RECLAIM_AFTER_MS = 10 * 60 * 1000;
 /** team 所属の再検証結果をキャッシュする時間。team から外れてから使えなくなるまでの遅れの上限。 */
 export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
+/** web の1日あたりの回数の既定値（ユーザーごと・UTC）。env の WEB_SEARCH_DAILY_LIMIT / WEB_FETCH_DAILY_LIMIT で変える。 */
+export const DEFAULT_WEB_SEARCH_DAILY_LIMIT = 200;
+export const DEFAULT_WEB_FETCH_DAILY_LIMIT = 500;
+/** web_usage の行を残す日数（古い日は消す）。 */
+const WEB_USAGE_RETAIN_DAYS = 3;
+
+export type WebQuotaKind = "search" | "fetch";
+export type WebQuotaResult = { ok: boolean; used: number; limit: number };
+
+/** 0 以上の整数だけを使う。未設定・不正な値は既定に戻す。 */
+export function parseDailyLimit(raw: string | undefined, fallback: number): number {
+  if (typeof raw !== "string" || !/^\d+$/.test(raw.trim())) return fallback;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) ? n : fallback;
+}
+
 /** 所属確認の途中で再ログインされ、結果を捨てたことを示す。 */
 const STALE = Symbol("stale");
 /** 再ログインと重なって確認をやり直す回数の上限。 */
@@ -122,6 +138,13 @@ export class UserDO extends DurableObject<Env> {
       closed INTEGER NOT NULL DEFAULT 0
     )`);
     sql.exec("CREATE INDEX IF NOT EXISTS task_budget_month ON task_budget (month)");
+    // 親（MCP の web_search / web_fetch）の回数。UTC の日付ごと・種別ごと。
+    sql.exec(`CREATE TABLE IF NOT EXISTS web_usage (
+      day TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY (day, kind)
+    )`);
     sql.exec(`CREATE TABLE IF NOT EXISTS membership_cache (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       checked_at INTEGER NOT NULL,
@@ -159,6 +182,44 @@ export class UserDO extends DurableObject<Env> {
     const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
     return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MONTHLY_BUDGET_USD;
   };
+
+  /** web の1日あたりの上限。env から読む。テストで差し替える。 */
+  webDailyLimit: (kind: WebQuotaKind) => number = (kind) =>
+    kind === "search"
+      ? parseDailyLimit(this.env.WEB_SEARCH_DAILY_LIMIT, DEFAULT_WEB_SEARCH_DAILY_LIMIT)
+      : parseDailyLimit(this.env.WEB_FETCH_DAILY_LIMIT, DEFAULT_WEB_FETCH_DAILY_LIMIT);
+
+  /**
+   * web の回数を1回分消費する（UTC の日付ごと）。上限に達していれば消費せず ok:false。
+   * 呼び出しの前に消費する（web の呼び出しが失敗しても戻さない。課金と取得の副作用が起きうるため）。
+   */
+  consumeWebQuota(kind: WebQuotaKind): WebQuotaResult {
+    const limit = this.webDailyLimit(kind);
+    const now = this.now();
+    const day = new Date(now).toISOString().slice(0, 10);
+    const oldest = new Date(now - WEB_USAGE_RETAIN_DAYS * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      sql.exec("DELETE FROM web_usage WHERE day < ?", oldest);
+      const row = sql
+        .exec<{ count: number }>(
+          "SELECT count FROM web_usage WHERE day = ? AND kind = ?",
+          day,
+          kind,
+        )
+        .toArray()[0];
+      const used = row?.count ?? 0;
+      if (used >= limit) return { ok: false, used, limit };
+      sql.exec(
+        "INSERT INTO web_usage (day, kind, count) VALUES (?, ?, 1) ON CONFLICT(day, kind) DO UPDATE SET count = count + 1",
+        day,
+        kind,
+      );
+      return { ok: true, used: used + 1, limit };
+    });
+  }
 
   /** 照合先の TaskDO。テストで差し替える。 */
   protected taskStub(taskId: string): TaskInspector {

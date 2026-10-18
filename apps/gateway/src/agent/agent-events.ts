@@ -61,6 +61,17 @@ function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
+/** 回数（0 以上の整数）。壊れた値は 0 */
+export function count(v: unknown): number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : 0;
+}
+
+/** usage イベントの web: {search, fetch, browse} を、公開用の web_search / web_fetch / web_browse に写す */
+function webCounts(web: unknown): { web_search: number; web_fetch: number; web_browse: number } {
+  const w = typeof web === "object" && web !== null ? (web as Record<string, unknown>) : {};
+  return { web_search: count(w.search), web_fetch: count(w.fetch), web_browse: count(w.browse) };
+}
+
 function parse(data: string): Record<string, unknown> {
   try {
     const v: unknown = JSON.parse(data);
@@ -96,6 +107,7 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
           output_tokens: num(d.outputTokens),
           cache_read_tokens: num(d.cacheReadTokens),
           cache_write_tokens: num(d.cacheWriteTokens),
+          ...webCounts(d.web),
         },
       };
     }

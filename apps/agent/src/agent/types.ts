@@ -94,6 +94,14 @@ export interface UsageDto {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** 子が使った web の回数（タスクごとの累計）。web 自体の費用は costUsd に含めない */
+  web: WebUsage;
+}
+
+export interface WebUsage {
+  search: number;
+  fetch: number;
+  browse: number;
 }
 
 export interface AgentEventDto {

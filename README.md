@@ -22,8 +22,26 @@ GitHub App のユーザー認可でログインし、`/mcp` から次の 5 つ�
 - 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
 - 1 タスクにつき $10 を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。
 
+### Phase 5: Web Research Service（`web_search` / `web_fetch`）
+
+親（MCP）に次の 2 つのツールが加わる。子（`apps/agent` の Pi）にも同名のツールがある。どちらも `apps/web` を service binding で呼ぶ。
+
+| ツール | 内容 |
+|---|---|
+| `web_search` | `{query, limit?}`。Web Search API の結果（url・title・description）を返す。private なアドレスなどを指す URL は結果から落とす |
+| `web_fetch` | `{url}`。公開ページを取得して Markdown で返す（JS は実行しない）。`status: "blocked"` は取得できなかった（bot チャレンジ・robots.txt の Disallow・redirect で private に飛ぶ） |
+
+- 本文（`content`）・`title`・検索の description は、Web 上の第三者が書いた**非信頼データ**。親には `<<<UNTRUSTED_WEB_CONTENT ...>>>` と `<<<END_UNTRUSTED_WEB_CONTENT>>>` で囲んで返し（本文中の `<<<` は全角に置き換える）、子には既存の `<<<BEGIN_UNTRUSTED_OUTPUT>>>` で囲んで渡す。
+- `safety.verdict`: `allow`（問題なし）/ `caution`（不審な表現があるので慎重に）/ `block`（注入などを検出。本文は `null`）/ `unknown`（評価できなかった。本文は `null`）。検索は結果全体で 1 つの判定で、`block` / `unknown` のときは description を落とし、title も `(title withheld)` にして URL だけを返す。
+- 回数の上限
+  - 親: ユーザーごとに UTC の 1 日あたり search 200 回・fetch 500 回（`UserDO` が数える）。超えると `quota_exceeded`（`retry_after_seconds` は翌日 0 時 UTC まで）。env `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` で変える。
+  - 子: タスクごとに search 50 回・fetch 100 回（`AgentDO` が数える）。超えるとツールのエラー。`apps/agent` の env `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` で変える。回数は `usage` イベント（`web_search` / `web_fetch` / `web_browse`）と `task_result` の `usage.web` に出る。
+  - 回数は呼び出しの前に数える（失敗しても戻さない）。web 自体には回数の上限を持たない（AI Gateway のレート制限とアカウントの上限に頼る）。
+- `web_browse`（JS を描画するページ）は未実装（M2）。
+
 ## 構成
 
+- `apps/web`（Phase 5）: Web Research Service の別 Worker。`WebResearch`（`WorkerEntrypoint`）の RPC `search` / `fetchUrl`（`fetch` は HTTP のハンドラ名なので使えない）。呼び出し元の種別は service binding の `props.caller`（gateway は `parent`、agent は `child`）から取り、props が無い・不正なら拒否する。状態を持たず、持つバインディングは `ai` だけ（GitHub のトークンや Anthropic のキーは持たない）。公開のルートは無い（`workers_dev: false`）
 - `apps/gateway`: Cloudflare Worker。Hono でルーティングし、`@cloudflare/workers-oauth-provider` で全体を包む。
   - `/mcp`（要 OAuth）: `agents/mcp/server` の `createMcpHandler` + `@modelcontextprotocol/server`。リクエストごとに McpServer を作り、ユーザー情報は共有しない
   - `/authorize`（同意画面）→ GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
@@ -58,15 +76,16 @@ mise run lint         # Biome + 型検査
 
 | タスク | 内容 |
 |---|---|
-| `mise run test:unit` | gateway と agent の Unit。vitest + `@cloudflare/vitest-plugin`（workerd 上で実行）。個別は `test:unit:gateway` / `test:unit:agent`。agent の Unit ではコンテナが使えないので、`SandboxPort` を fake にする |
+| `mise run test:unit` | gateway・agent・web の Unit。vitest + `@cloudflare/vitest-plugin`（workerd 上で実行）。個別は `test:unit:gateway` / `test:unit:agent` / `test:unit:web`。agent の Unit ではコンテナが使えないので、`SandboxPort` を fake にする。web の Unit は `WebSearchSource` / fetch / `AI.run` をすべて fake にする（実アカウントは呼ばない）。Unit では `WEB` の service binding を差し替えている（gateway は env に fake を渡し、agent は `AgentTestOverrides.web`） |
 | `mise run test:fake-github` | 偽 GitHub サーバーと GitHub クライアントの結合テスト（Node） |
 | `mise run test:e2e` | `test:e2e:gateway` + `test:e2e:docker` |
 | `mise run test:e2e:gateway` | `wrangler dev` で実 Worker と偽 GitHub を起動し、MCP SDK の Client から DCR → `/authorize` → 偽 GitHub → `/callback` → token(PKCE) → 4 つのツールまで通す |
 | `mise run test:e2e:docker` | **Docker 必須**。`wrangler dev` で実コンテナを起動し、ローカルの偽サーバー（偽 GitHub の git smart HTTP と偽 npm レジストリ）を許可先にして、外向き通信の許可・拒否（非許可ホスト、push、内部 IP、非 80/443 ポート、IPv6、CONNECT、WebSocket、リダイレクト、ヘッダ除去、再起動後の傍受）と `npm install` / `git clone`、Gateway → Agent の DO RPC（`-c gateway -c agent` の同時起動）を検証する |
+| `mise run test:e2e:full` | **Docker 必須**。gateway・agent・**web の 3 つの Worker を同時に** `wrangler dev` で起動し、MCP SDK の Client から Gateway → AgentDO → 実コンテナ、Phase 5 の `web_search` / `web_fetch`（親の MCP と子の台本）まで通しで検証する。偽なのは GitHub・git / npm の上流・モデル（台本）と、web の外側（Web Search API・Clef・toMarkdown・公開ページ。`apps/web/test/support/fake-web.ts`）だけ。web には `ENVIRONMENT=test` と `TEST_FAKE_BASE`（偽サーバーの URL）を `.dev.vars` で渡す |
 | `mise run test:e2e:net` | **Docker 必須・実ネットワーク**。上の E2E の実ネットワーク版。実 registry.npmjs.org への GET / `npm install` が通ること、許可外のホストに出られないこと、github.com への通信はトークンが無ければ 401 で落ちる（認証なしの clone が通らない）ことだけを確かめる。git の clone / push の検証は偽 git の E2E が担う。CI で不安定になりうるため `test` には含めない。認証付きアクセスや push はしない |
 | `mise run lint` / `mise run fmt` | Biome の lint / 整形、`tsc` の型検査 |
 | `mise run typegen` | `wrangler.jsonc` を変えたら実行して両アプリの `worker-configuration.d.ts` を更新する |
-| `mise run dev:all` | gateway と agent を同時にローカル起動する（Docker 必須）。`AGENT_DO` は `script_name` 付きなので、片方だけ起動すると本番の DO を参照してしまう（wrangler の known issue）。必ず両方を同時に起動する。`wrangler login` やデプロイは不要 |
+| `mise run dev:all` | gateway・agent・web を同時にローカル起動する（Docker 必須）。`AGENT_DO` は `script_name` 付きなので、片方だけ起動すると本番の DO を参照してしまう（wrangler の known issue）。`WEB` の service binding も web が起動していないと解決できない。必ず全部を同時に起動する。web の `AI` バインディングは実アカウントに繋がるため、`web_search` / `web_fetch` を実際に呼ぶと課金される（`wrangler login` が必要）。それ以外の用途ではデプロイは不要 |
 | `mise run build` | Worker のバンドル確認（`--dry-run`。デプロイはしない） |
 | `mise run dev` | ローカル起動（`http://localhost:8787`）。`apps/gateway/.dev.vars` を読む |
 
@@ -107,7 +126,30 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `AGENT_MODEL`（変数） | 子エージェントのモデル（既定 `anthropic/claude-sonnet-5-5`。単価表にあるものだけ） |
 | `ENVIRONMENT`（変数） | `production`（既定）。E2E だけ `test` |
 
+| `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK`（変数） | 子の `web_search` / `web_fetch` のタスクごとの回数の上限（既定 50 / 100）。0 以上の整数のみ。不正な値は既定に戻る |
+| `WEB`（service binding） | `apps/web` の `WebResearch`（`props: {caller: "child"}`）。デプロイは web → agent → gateway の順 |
+
 ローカルは `apps/agent/.dev.vars.example` を `apps/agent/.dev.vars` にコピーして埋める（`mise run dev:all`）。
+
+#### web（`apps/web`）の変数
+
+secret は無い（GitHub のトークンも Anthropic のキーも持たせない）。バインディングは `ai`（Workers AI）だけ。
+
+| 変数 | 内容 |
+|---|---|
+| `AI_GATEWAY_ID` | AI Gateway の ID。**必須**。空だと `websearch` も `AI.run`（Clef）も呼ばず、呼び出しは `misconfigured` のエラーになる（fail closed）。Clef の呼び出しには `userId` / `taskId` / `caller` を metadata に付ける |
+| `WEB_SEARCH_PROVIDER` | 検索プロバイダ（`ceramic` / `exa` / `linkup`。既定 `ceramic`） |
+| `SAFETY_BLOCK_THRESHOLD` / `SAFETY_CAUTION_THRESHOLD` | Policy Engine の閾値（既定 0.8 / 0.4）。モデルのスコアがこれ以上なら block / caution。**仮の値**で、受入試験で調整する |
+| `ENVIRONMENT` / `TEST_FAKE_BASE` | E2E 専用。`ENVIRONMENT=test` のときだけ、`TEST_FAKE_BASE`（偽サーバーの URL）に AI（`run` / `websearch` / `toMarkdown`）と取得を向ける。本番は必ず `production` |
+
+#### gateway の web 関連
+
+| 名前 | 内容 |
+|---|---|
+| `WEB`（service binding） | `apps/web` の `WebResearch`（`props: {caller: "parent"}`） |
+| `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT`（変数） | 親の `web_search` / `web_fetch` の、ユーザーごと・UTC の 1 日あたりの上限（既定 200 / 500） |
+
+**デプロイの順序**: web → agent → gateway。service binding は、参照される側の Worker（`rovo-web`）が先に存在している必要がある。agent は gateway から `script_name` で参照される。
 
 ### GitHub App の設定
 
@@ -136,5 +178,5 @@ mise run dev
 ## エラー
 
 ツールのエラーは `isError: true` で、本文は `{"code", "message", "retry_after_seconds"?}` の JSON。`code` は
-`not_found` / `conflict` / `expired` / `concurrency_limit` / `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。
+`not_found` / `conflict` / `expired` / `concurrency_limit` / `quota_exceeded`（web の1日の上限）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。
 `reauth_required` は GitHub 資格を回復できないとき（MCP のトークンが有効でも）で、再ログインが必要。`internal` は想定外の失敗で、詳細は応答に含めない。

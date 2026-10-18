@@ -703,6 +703,7 @@ describe("TaskDO.result", () => {
           outputTokens: 5,
           cacheReadTokens: 1,
           cacheWriteTokens: 2,
+          web: { search: 3, fetch: 4, browse: 0 },
         },
       },
     });
@@ -737,6 +738,7 @@ describe("TaskDO.result", () => {
           output_tokens: 5,
           cache_read_tokens: 1,
           cache_write_tokens: 2,
+          web: { search: 3, fetch: 4, browse: 0 },
         },
       },
     });
@@ -764,6 +766,7 @@ describe("TaskDO.result", () => {
           outputTokens: 0,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,
+          web: { search: 0, fetch: 0, browse: 0 },
         },
       },
     });
@@ -799,6 +802,7 @@ describe("TaskDO.result", () => {
           outputTokens: 0,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,
+          web: { search: 0, fetch: 0, browse: 0 },
         },
       },
     });

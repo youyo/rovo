@@ -25,6 +25,15 @@
     "SandboxDO": { "type": "durable-object", "storage": "sqlite" },
     "AgentDO": { "type": "durable-object", "storage": "sqlite" }
   },
+  "services": [
+    // apps/web（Web Research Service）。子の web_search / web_fetch が使う。caller は props で "child" に固定する。
+    {
+      "binding": "WEB",
+      "service": "rovo-web",
+      "entrypoint": "WebResearch",
+      "props": { "caller": "child" }
+    }
+  ],
   // Workers AI バインディング。createAI が AI Gateway（BYOK）経由で Claude を呼ぶ。
   "ai": { "binding": "AI" },
   "vars": {
@@ -34,6 +43,9 @@
     // 子エージェントのモデル。単価表（src/agent/pricing.ts）にあるものだけ使える。
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
     // ENVIRONMENT=test のときだけ有効。許可した外向き通信の転送先（偽サーバー）。空なら実ネットワークへ出る。
-    "TEST_UPSTREAM": ""
+    "TEST_UPSTREAM": "",
+    // 子の web_search / web_fetch の回数の上限（タスクごと）
+    "WEB_SEARCH_LIMIT_PER_TASK": "50",
+    "WEB_FETCH_LIMIT_PER_TASK": "100"
   }
 }

@@ -1,6 +1,7 @@
 import type { ScriptStep } from "../pi/scripted-provider";
 import type { SandboxPort } from "../sandbox-port";
 import type { SandboxToolsFactory } from "../tools/types";
+import type { WebPort } from "../tools/web";
 
 /**
  * AgentDO の差し替え点。本番では env から作る。Unit では ENVIRONMENT=test のときだけ、
@@ -10,6 +11,10 @@ export interface AgentTestOverrides {
   sandbox?: SandboxPort;
   toolsFactory?: SandboxToolsFactory;
   now?: () => number;
+  /** web_search / web_fetch の RPC（service binding の WEB の代わり） */
+  web?: WebPort;
+  /** タスクごとの web の回数の上限（env の WEB_SEARCH_LIMIT_PER_TASK / WEB_FETCH_LIMIT_PER_TASK の代わり） */
+  webLimits?: { search?: number; fetch?: number };
   /** 台本付き fake モデルの台本 */
   script?: ScriptStep[];
   modelId?: string;
@@ -37,7 +42,7 @@ export interface AgentTestOverrides {
   /** steer を Pi へ submit する直前（phase を確かめた後） */
   beforeSteerSubmit?: () => Promise<void>;
   /** モデル呼び出し（fake provider が実際に呼ばれた回数と、そのとき見えていた user メッセージの観測用） */
-  onModelCall?: (context?: { userTexts: string[] }) => void;
+  onModelCall?: (context?: { userTexts: string[]; toolResults: string[] }) => void;
 }
 
 const overrides = new Map<string, AgentTestOverrides>();

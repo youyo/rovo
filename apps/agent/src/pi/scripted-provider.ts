@@ -65,6 +65,13 @@ function userTexts(context: TranscriptContext): string[] {
   );
 }
 
+/** transcript のツール結果の本文（テストの観測用。ツールの結果がモデルに届いたことの確認） */
+function toolResultTexts(context: TranscriptContext): string[] {
+  return context.messages.flatMap((m) =>
+    m.role === "toolResult" ? [textOf(m.content as Parameters<typeof textOf>[0])] : [],
+  );
+}
+
 const ZERO_USAGE = {
   input: 0,
   output: 0,
@@ -83,7 +90,7 @@ const ZERO_USAGE = {
  */
 export function createScriptedProvider(
   getScript: (key: string) => readonly ScriptStep[],
-  onCall?: (context: { userTexts: string[] }) => void,
+  onCall?: (context: { userTexts: string[]; toolResults: string[] }) => void,
 ): Provider {
   const stream = (
     _model: Model<string>,
@@ -91,7 +98,7 @@ export function createScriptedProvider(
     options?: { signal?: AbortSignal },
   ) => {
     const out = createAssistantMessageEventStream();
-    onCall?.({ userTexts: userTexts(context) });
+    onCall?.({ userTexts: userTexts(context), toolResults: toolResultTexts(context) });
     const turn = context.messages.filter((m) => m.role === "assistant").length;
     const step = getScript(userText(context))[turn] ?? { text: "script exhausted" };
     const inTok = step.usage?.input ?? 0;

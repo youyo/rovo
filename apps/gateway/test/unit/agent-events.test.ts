@@ -87,3 +87,46 @@ describe("Phase 4 の対話イベント", () => {
     });
   });
 });
+
+describe("usage の web の回数（Phase 5）", () => {
+  it("usage は web の回数を公開する（task_wait の usage イベント）", () => {
+    const m = mapAgentEvent(
+      ev("usage", {
+        costUsd: 1.5,
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 1,
+        cacheWriteTokens: 2,
+        web: { search: 3, fetch: 4, browse: 1 },
+      }),
+    );
+    expect(m).toEqual({
+      kind: "usage",
+      costMicroUsd: 1_500_000,
+      payload: {
+        cost_usd: 1.5,
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_tokens: 1,
+        cache_write_tokens: 2,
+        web_search: 3,
+        web_fetch: 4,
+        web_browse: 1,
+      },
+    });
+  });
+
+  it("web が無い・壊れている usage は 0 回として扱う", () => {
+    for (const data of [
+      { costUsd: 1 },
+      { costUsd: 1, web: "x" },
+      { costUsd: 1, web: { search: -1, fetch: "a" } },
+    ]) {
+      expect(payloadOf(mapAgentEvent(ev("usage", data)))).toMatchObject({
+        web_search: 0,
+        web_fetch: 0,
+        web_browse: 0,
+      });
+    }
+  });
+});

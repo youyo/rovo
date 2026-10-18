@@ -339,6 +339,29 @@ describe("audit(): イベント別の allowlist（共通 + イベント固有）
     }
   });
 
+  it("web のイベント（M5）を閉じた一覧に含み、host と kind を通し、op / dest は通さない", () => {
+    expect(AUDIT_EVENTS).toContain("web_blocked");
+    const { record } = run("web_blocked", {
+      caller: "child",
+      userId: "42",
+      reason: "robots_disallowed",
+      kind: "fetch",
+      host: "Docs.Example.com",
+      op: "terminate",
+      dest: "github",
+      url: "https://docs.example.com/secret?x=1",
+    });
+    expect(record).toMatchObject({
+      event: "web_blocked",
+      reason: "robots_disallowed",
+      kind: "fetch",
+      host: "docs.example.com",
+    });
+    expect(record).not.toHaveProperty("op");
+    expect(record).not.toHaveProperty("dest");
+    expect(record).not.toHaveProperty("url");
+  });
+
   it("キーの順序は固定（audit, event, ts, 共通, 固有）", () => {
     const { lines } = run("outbound_denied", {
       dest: "other",

@@ -1,3 +1,4 @@
+import { audit } from "@rovo/audit";
 import type { WebSearchSource } from "agents/websearch";
 import { createAIWebSearch } from "agents/websearch";
 import { type BrowserLike, browsePage } from "./browse";
@@ -99,6 +100,11 @@ export function createWebResearchService(
         results: result.results.length,
         verdict: result.results[0]?.safety.verdict ?? null,
       });
+      const first = result.results[0];
+      // 判定は検索結果全体で1つ。host は出さない（結果の URL は複数あり、パスも含む）
+      if (first) {
+        auditSafety(ctx, "search", first.safety, { requestId: result.metadata.requestId });
+      }
       return result;
     },
 
@@ -119,6 +125,7 @@ export function createWebResearchService(
 
       if (outcome.kind === "blocked") {
         logWeb(ctx, "fetch", req.url, "blocked", { blocked_reason: outcome.reason });
+        auditWeb(ctx, "fetch", req.url, outcome.reason);
         return {
           source: { url: req.url, final_url: req.url, retrieved_at: retrievedAt, via: "direct" },
           content: null,
@@ -133,6 +140,7 @@ export function createWebResearchService(
         { evaluator, info, ctx, thresholds: config.thresholds },
       );
       logWeb(ctx, "fetch", req.url, page.safety.verdict);
+      auditSafety(ctx, "fetch", page.safety, { url: req.url });
       return {
         source: {
           url: req.url,
@@ -179,6 +187,7 @@ export function createWebResearchService(
       // 拒否・判定不能の経路: 本文も title も返さず、評価器は呼ばない
       if (outcome.kind === "blocked") {
         logWeb(ctx, "browse", req.url, "blocked", { blocked_reason: outcome.reason });
+        auditWeb(ctx, "browse", req.url, outcome.reason);
         return {
           source,
           content: null,
@@ -199,6 +208,7 @@ export function createWebResearchService(
       }
       if (outcome.kind === "unknown") {
         logWeb(ctx, "browse", req.url, "unknown", { unknown_reason: outcome.reason });
+        auditWeb(ctx, "browse", req.url, outcome.reason);
         return {
           source,
           content: null,
@@ -214,6 +224,7 @@ export function createWebResearchService(
         { evaluator, info, ctx, thresholds: config.thresholds },
       );
       logWeb(ctx, "browse", req.url, page.safety.verdict);
+      auditSafety(ctx, "browse", page.safety, { url: req.url });
       return {
         source: { ...source, final_url: outcome.finalUrl },
         content: page.content,
@@ -273,6 +284,45 @@ export function createWebResearchService(
     };
   }
 
+  /**
+   * 監査ログ（@rovo/audit）。web_research（観測用）とは別に、拒否・判定不能だけを出す。
+   * 本文・title・URL のパス / query は渡さない。host はホスト名だけ（audit() が長さとマスクを掛ける）。
+   */
+  function auditWeb(
+    ctx: CallContext,
+    kind: "search" | "fetch" | "browse",
+    url: string | undefined,
+    reason: string,
+    requestId?: string,
+  ) {
+    let host: string | undefined;
+    if (url !== undefined) {
+      try {
+        host = new URL(url).hostname;
+      } catch {}
+    }
+    audit("web_blocked", {
+      caller: ctx.caller,
+      userId: ctx.userId,
+      taskId: ctx.taskId,
+      kind,
+      reason,
+      host,
+      requestId,
+    });
+  }
+
+  /** 本文の安全性の判定が block / unknown のときだけ出す。reason は固定コードに丸める。 */
+  function auditSafety(
+    ctx: CallContext,
+    kind: "search" | "fetch" | "browse",
+    safety: Safety,
+    extra: { url?: string; requestId?: string },
+  ) {
+    if (safety.verdict !== "block" && safety.verdict !== "unknown") return;
+    auditWeb(ctx, kind, extra.url, safetyAuditReason(safety), extra.requestId);
+  }
+
   function logWeb(
     ctx: CallContext,
     op: "fetch" | "browse",
@@ -330,4 +380,18 @@ function unjudgedSafety(
     model: { verdict: "unknown", scores: null },
     policy: { verdict: "allow", rules: [] },
   };
+}
+
+/**
+ * safety.reason は "a; b" のような複数の理由の連結（`injection_rule:<rule>` など）なので、監査の固定コードに丸める。
+ * block: 決定論ルール（injection_rule）かモデル（model_score）。unknown: evaluator_failed / state_truncated / model_not_performed。
+ */
+function safetyAuditReason(safety: Safety): string {
+  if (safety.verdict === "block") {
+    return safety.policy.verdict === "block" ? "injection_rule" : "model_score";
+  }
+  if (safety.reason.includes("state_truncated")) return "state_truncated";
+  if (safety.reason.includes("evaluator_failed")) return "evaluator_failed";
+  if (safety.reason.includes("model_not_performed")) return "model_not_performed";
+  return "unknown";
 }

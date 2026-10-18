@@ -131,6 +131,23 @@ describe("監査イベント（/__test/audit。stdout は走査しない）", ()
             (r.event === "credential_revoke_given_up" && r.reason === "setup_failure")),
       );
       expect(dual.length).toBe(events.length);
+
+      // 終端の要約（task_summary）: 精算と GitHub の終了処理が済んだ後に 1 回、数値と固定コードだけで出る
+      const summary = (await waitForAudit((r) => r.event === "task_summary", { taskId })) as {
+        kind?: string;
+        userId?: number;
+        metrics?: Record<string, number>;
+      };
+      expect(summary).toMatchObject({
+        taskId,
+        userId: alice.id,
+        caller: "system",
+        kind: "cancelled",
+      });
+      expect(summary.metrics).toMatchObject({ duration_ms: expect.any(Number), transitions: 2 });
+      const summaries = (await auditRecords(taskId)).filter((r) => r.event === "task_summary");
+      expect(summaries).toHaveLength(1);
+      expect(JSON.stringify(summaries)).not.toContain("audited");
     } finally {
       await Promise.all([ca.close(), cb.close()]);
     }

@@ -130,3 +130,79 @@ describe("usage の web の回数（Phase 5）", () => {
     }
   });
 });
+
+describe("usage の sandbox（Phase 6 M3）", () => {
+  const base = { costUsd: 1 };
+
+  it("sandbox:{runtimeMs, restarts, bootRetries} を公開用の sandbox_* に写す", () => {
+    const p = payloadOf(
+      mapAgentEvent(
+        ev("usage", { ...base, sandbox: { runtimeMs: 90_500, restarts: 2, bootRetries: 1 } }),
+      ),
+    );
+    expect(p).toMatchObject({
+      sandbox_runtime_ms: 90_500,
+      sandbox_restarts: 2,
+      sandbox_boot_retries: 1,
+    });
+  });
+
+  it("sandbox の一部が欠けている・壊れている値は 0 にする", () => {
+    for (const sandbox of [
+      {},
+      { runtimeMs: -5, restarts: "x", bootRetries: null },
+      { runtimeMs: Number.NaN, restarts: 1.5 },
+    ]) {
+      expect(payloadOf(mapAgentEvent(ev("usage", { ...base, sandbox })))).toMatchObject({
+        sandbox_runtime_ms: 0,
+        sandbox_restarts: 0,
+        sandbox_boot_retries: 0,
+      });
+    }
+    expect(
+      payloadOf(mapAgentEvent(ev("usage", { ...base, sandbox: { runtimeMs: 10.9 } }))),
+    ).toMatchObject({ sandbox_runtime_ms: 10, sandbox_restarts: 0 });
+  });
+
+  it("sandbox 自体が無い（agent が読めなかった）usage には sandbox_* を付けない（0 回と区別する）", () => {
+    for (const data of [base, { ...base, sandbox: "x" }, { ...base, sandbox: null }]) {
+      const p = payloadOf(mapAgentEvent(ev("usage", data)));
+      expect(Object.keys(p).some((k) => k.startsWith("sandbox_"))).toBe(false);
+    }
+  });
+});
+
+describe("audit イベント（Phase 6 M3）", () => {
+  it("agent_cancelled は固定コードだけを audit として公開する", () => {
+    expect(mapAgentEvent(ev("audit", { code: "agent_cancelled" }))).toEqual({
+      kind: "event",
+      type: "audit",
+      payload: { code: "agent_cancelled" },
+    });
+  });
+
+  it("sandbox_privileged_op は code と、固定の op だけを公開する", () => {
+    for (const op of ["terminate", "set_deadline", "extend_deadline"]) {
+      expect(
+        mapAgentEvent(ev("audit", { code: "sandbox_privileged_op", op, message: "leak" })),
+      ).toEqual({ kind: "event", type: "audit", payload: { code: "sandbox_privileged_op", op } });
+    }
+  });
+
+  it("未知の code・op・形の合わない値は、中身を出さず agent_event に落とす", () => {
+    for (const data of [
+      { code: "something_else" },
+      { code: "sandbox_privileged_op", op: "rm -rf" },
+      { code: "sandbox_privileged_op" },
+      { code: 5 },
+      { code: "agent_cancelled\nsecret ghs_abc" },
+      {},
+    ]) {
+      expect(mapAgentEvent(ev("audit", data))).toEqual({
+        kind: "event",
+        type: "agent_event",
+        payload: { agent_type: "audit" },
+      });
+    }
+  });
+});

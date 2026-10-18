@@ -26,6 +26,14 @@ import {
 } from "../github";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
+import {
+  buildTaskSummary,
+  mergeUsagePublic,
+  parsePrices,
+  parseUsagePublic,
+  summaryMetrics,
+  type TaskSummary,
+} from "./summary";
 import { isTaskId, ulid } from "./ulid";
 import { TASK_BUDGET_USD, type UserDO } from "./user-do";
 import {
@@ -192,6 +200,10 @@ type LinkRow = {
   finished: number;
   /** AgentDO の cancel が stopped:true と共に返した最後のイベントの seq。無ければ NULL。 */
   final_seq: number | null;
+  /** usage イベントから覚えた累計の数値（summary.ts の UsagePublic の JSON） */
+  usage_public: string;
+  /** task_summary を出したか（1 回だけ出す） */
+  summary_logged: number;
 };
 
 export type GetStatusResult = { ok: true; task: TaskView } | { ok: false; code: "not_found" };
@@ -395,6 +407,9 @@ export class TaskDO extends DurableObject<Env> {
       finished INTEGER NOT NULL DEFAULT 0
     )`);
     this.addColumnIfMissing("agent_link", "final_seq", "INTEGER");
+    // Phase 6 M3: 要約（task_summary）のための累計と、出力済みの印
+    this.addColumnIfMissing("agent_link", "usage_public", "TEXT NOT NULL DEFAULT '{}'");
+    this.addColumnIfMissing("agent_link", "summary_logged", "INTEGER NOT NULL DEFAULT 0");
     // Phase 3: Draft PR・Installation Token・終端処理の進み具合（1 行）。Phase 2 で作られたタスクには無い。
     sql.exec(`CREATE TABLE IF NOT EXISTS github_link (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -1013,6 +1028,7 @@ export class TaskDO extends DurableObject<Env> {
     try {
       await this.pump();
     } finally {
+      this.logSummaryIfReady();
       await this.syncAlarm();
     }
     const row = this.getRow();
@@ -1404,6 +1420,7 @@ export class TaskDO extends DurableObject<Env> {
       let cursor = link.ingest_cursor;
       let usageSeq = link.usage_seq;
       let usageMicro = link.usage_micro;
+      let usagePublic = parseUsagePublic(link.usage_public);
       for (const e of page.events) {
         if (e.seq <= cursor) continue;
         const m = mapAgentEvent(e);
@@ -1412,6 +1429,7 @@ export class TaskDO extends DurableObject<Env> {
         if (m.kind === "phase") {
           if (open && m.status !== null) this.applyPhase(m.status, m.reason);
         } else if (m.kind === "usage") {
+          usagePublic = mergeUsagePublic(usagePublic, m.payload);
           if (e.seq > usageSeq) {
             usageSeq = e.seq;
             usageMicro = m.costMicroUsd;
@@ -1425,10 +1443,11 @@ export class TaskDO extends DurableObject<Env> {
         cursor = e.seq;
       }
       this.ctx.storage.sql.exec(
-        "UPDATE agent_link SET ingest_cursor = ?, usage_seq = ?, usage_micro = ? WHERE singleton = 1",
+        "UPDATE agent_link SET ingest_cursor = ?, usage_seq = ?, usage_micro = ?, usage_public = ? WHERE singleton = 1",
         cursor,
         usageSeq,
         usageMicro,
+        JSON.stringify(usagePublic),
       );
       return cursor > link.ingest_cursor;
     });
@@ -2104,6 +2123,108 @@ export class TaskDO extends DurableObject<Env> {
       JSON.stringify(own),
     );
     this.notifyWaiters();
+  }
+
+  // ---- 要約（task_summary。phase6.md「M3 で決めたこと」）----
+
+  /** 現在の状態から要約レコードを作る（読むだけ）。 */
+  private buildSummary(row: TaskRow, link: LinkRow): TaskSummary {
+    const sql = this.ctx.storage.sql;
+    const gl = this.getGithub();
+    const status = this.statusOf(row);
+    const changes = sql
+      .exec<{ payload: string; created_at: number }>(
+        "SELECT payload, created_at FROM events WHERE type = 'status_changed' ORDER BY seq",
+      )
+      .toArray()
+      .map((r) => ({
+        p: JSON.parse(r.payload) as { status?: unknown; reason?: unknown },
+        at: r.created_at,
+      }))
+      .filter((r) => typeof r.p.status === "string");
+    const last = changes.filter((c) => c.p.status === status).at(-1);
+    const verifications = sql
+      .exec<{ payload: string }>(
+        "SELECT payload FROM events WHERE type = 'verification' ORDER BY seq",
+      )
+      .toArray()
+      .map((r) => JSON.parse(r.payload) as { attempt?: unknown; passed?: unknown });
+    const countEvents = (type: string) =>
+      sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE type = ?", type).one().n;
+    const up = parseUsagePublic(link.usage_public);
+    const observed = up.sandbox_runtime_ms !== undefined;
+    return buildTaskSummary({
+      taskId: row.id,
+      userId: row.owner_id,
+      repository: row.repository,
+      prUrl: gl?.pr_url ?? row.draft_pr_url ?? null,
+      status,
+      reason: typeof last?.p.reason === "string" ? last.p.reason : null,
+      createdAt: row.created_at,
+      transitions: changes.map((c) => ({ status: String(c.p.status), at: c.at })),
+      usage: {
+        costMicroUsd: link.usage_micro,
+        inputTokens: up.input_tokens ?? 0,
+        outputTokens: up.output_tokens ?? 0,
+        cacheReadTokens: up.cache_read_tokens ?? 0,
+        cacheWriteTokens: up.cache_write_tokens ?? 0,
+        web: { search: up.web_search ?? 0, fetch: up.web_fetch ?? 0, browse: up.web_browse ?? 0 },
+        sandbox: observed
+          ? {
+              runtimeMs: up.sandbox_runtime_ms ?? 0,
+              restarts: up.sandbox_restarts ?? 0,
+              bootRetries: up.sandbox_boot_retries ?? 0,
+            }
+          : null,
+      },
+      questions: countEvents("question"),
+      verification: {
+        attempts: Math.max(
+          0,
+          ...verifications.map((v) => (typeof v.attempt === "number" ? v.attempt : 0)),
+        ),
+        passed: verifications.length === 0 ? null : verifications.at(-1)?.passed === true,
+      },
+      agentErrors: countEvents("agent_error"),
+      prices: parsePrices(this.env),
+    });
+  }
+
+  /**
+   * 終端で、費用の精算（finished）と GitHub の終了処理（finalize_done。GitHub と紐付かないタスクは満たしているものとして扱う）が
+   * 済んだら、task_summary を監査ログに 1 回だけ出す。R2 への保存は M4。出力の失敗でタスクの進行を止めない。
+   */
+  private logSummaryIfReady(): void {
+    try {
+      const row = this.getRow();
+      const link = this.getLink();
+      if (!row || !link || link.summary_logged === 1 || link.finished === 0) return;
+      const status = this.statusOf(row);
+      if (!isTerminal(status)) return;
+      const gl = this.getGithub();
+      if (gl !== undefined && gl.finalize_done === 0) return;
+      const summary = this.buildSummary(row, link);
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("UPDATE agent_link SET summary_logged = 1 WHERE singleton = 1");
+        this.emitAudit("task_summary", {
+          userId: row.owner_id,
+          reason: summary.reason ?? undefined,
+          kind: status.toLowerCase(),
+          metrics: summaryMetrics(summary),
+        });
+      });
+    } catch (e) {
+      console.error("task_summary_error", e instanceof Error ? e.name : typeof e);
+    }
+  }
+
+  /** テスト専用: 現在の状態から作った要約レコード。ENVIRONMENT=test のときだけ。 */
+  testSummary(): TaskSummary {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    const row = this.getRow();
+    const link = this.getLink();
+    if (!row || !link) throw new Error("task missing");
+    return this.buildSummary(row, link);
   }
 
   private needsAlarm(): boolean {

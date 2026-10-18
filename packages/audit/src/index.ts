@@ -10,4 +10,5 @@ export {
   MAX_HOST_LENGTH,
   OUTBOUND_DESTS,
   SANDBOX_OPS,
+  TASK_SUMMARY_METRICS,
 } from "./audit";

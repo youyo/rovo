@@ -29,6 +29,10 @@ export const AUDIT_EVENTS = [
   "boot_superseded",
   "start_cancelled_by_tombstone",
   "start_conflict",
+  // gateway（M3）: タスクの要約（数値と固定コードだけ）
+  "task_summary",
+  // web（M5）
+  "web_blocked",
 ] as const;
 
 export type AuditEventName = (typeof AUDIT_EVENTS)[number];
@@ -51,6 +55,8 @@ export type AuditFields = {
   op?: string;
   /** outbound_denied だけ: 宛先の分類（OUTBOUND_DESTS のどれか。ホスト名そのものではない） */
   dest?: string;
+  /** task_summary だけ: 数値の項目（キーは TASK_SUMMARY_METRICS のどれか。値は非負の有限数） */
+  metrics?: Record<string, number>;
 };
 
 /** 出力される 1 件。キーの順序は固定。 */
@@ -62,6 +68,28 @@ export type AuditRecord = {
 
 /** Sandbox の特権操作の種類（固定）。 */
 export const SANDBOX_OPS = ["terminate", "destroy", "set_deadline", "extend_deadline"] as const;
+/** task_summary の metrics に載せられるキー（固定。title や自由な文のキーは無い）。 */
+export const TASK_SUMMARY_METRICS = [
+  "duration_ms",
+  "transitions",
+  "claude_usd",
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_write_tokens",
+  "sandbox_runtime_ms",
+  "sandbox_restarts",
+  "sandbox_boot_retries",
+  "sandbox_usd_estimate",
+  "web_search",
+  "web_fetch",
+  "web_browse",
+  "web_usd_estimate",
+  "questions",
+  "verification_attempts",
+  "verification_passed",
+  "agent_errors",
+] as const;
 /** 外向き通信の宛先の分類（固定）。 */
 export const OUTBOUND_DESTS = ["github", "registry", "other"] as const;
 
@@ -76,10 +104,25 @@ const SANDBOX_OP_SET: ReadonlySet<unknown> = new Set(SANDBOX_OPS);
 const OUTBOUND_DEST_SET: ReadonlySet<unknown> = new Set(OUTBOUND_DESTS);
 
 /** イベント固有のフィールド。ここに無いイベントは共通のものだけ通す。 */
-const EVENT_FIELDS: Readonly<Partial<Record<AuditEventName, readonly ("op" | "dest")[]>>> = {
+const EVENT_FIELDS: Readonly<
+  Partial<Record<AuditEventName, readonly ("op" | "dest" | "metrics")[]>>
+> = {
   sandbox_privileged_op: ["op"],
   outbound_denied: ["dest"],
+  task_summary: ["metrics"],
 };
+
+/** metrics: 固定のキーの、非負の有限数だけを通す（自分のプロパティだけ読む）。1 つも無ければ出さない。 */
+function safeMetrics(v: unknown): Record<string, number> | undefined {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return undefined;
+  const out: Record<string, number> = {};
+  for (const key of TASK_SUMMARY_METRICS) {
+    if (!Object.hasOwn(v, key)) continue;
+    const n = (v as Record<string, unknown>)[key];
+    if (typeof n === "number" && Number.isFinite(n) && n >= 0) out[key] = n;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 /** host の最大長。ラベルにデータを載せる持ち出し（DNS 経由）の帯域を絞るため、実在のホスト名より短く切る。 */
 export const MAX_HOST_LENGTH = 100;
@@ -159,6 +202,7 @@ export function buildAudit(
     const dest = own("dest");
     put("dest", OUTBOUND_DEST_SET.has(dest) ? dest : undefined);
   }
+  if (extra.includes("metrics")) put("metrics", safeMetrics(own("metrics")));
   return record as AuditRecord;
 }
 

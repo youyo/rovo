@@ -139,7 +139,7 @@
 | `credential_revoke_given_up` | gateway（TaskDO） | 失効を諦めた。reason: `attempts_exhausted`（`REVOKE_MAX_ATTEMPTS`）/ `not_retryable`（403 など）/ `setup_failure`（App の設定が失われた・復号できない） | する（`attempts_exhausted` と `not_retryable` は既存の `warning`: `token_revoke_failed`。`setup_failure` は warning が無い経路なので `audit`） |
 | `sandbox_privileged_op` | agent（SandboxDO が監査ログを出し、AgentDO が events に積む） | `op`: terminate / destroy / set_deadline / extend_deadline（固定の値）。destroy は `reason`: `reap_failed` / `exec_timeout` | する（`audit`: `{code:"sandbox_privileged_op", op}`。`destroy` は AgentDO が呼ばないので監査ログだけ） |
 | `outbound_denied` | agent（OutboundGateway） | 既存の違反コード（`host_not_allowed` など）を `reason` に、宛先の分類を `dest`（github / registry / other）に。`taskId`、`caller`: `child` | しない |
-| `web_blocked` | web | verdict が block / unknown、`robots` / `redirect_policy` / `bot_challenge` による blocked | しない |
+| `web_blocked` | web | `kind`: search / fetch / browse。`reason`: 拒否は `bot_challenge` / `robots_disallowed` / `robots_unreachable` / `redirect_policy` / `private_address`、web_browse の判定不能は `invalid_status` / `invalid_final_url` / `invalid_redirect_chain` / `invalid_result` / `dns_check_failed`、本文（検索結果全体）の判定は block が `injection_rule`(決定論ルール) / `model_score`(モデル)、unknown が `evaluator_failed` / `state_truncated` / `model_not_performed` / `unknown`。`host` は fetch / browse のみ(ホスト名だけ。search は結果が複数なので出さない)。`requestId` は search のみ(AI Gateway の request id)。`caller` / `userId` / `taskId` は呼び出し元 | しない |
 | `task_cancelled` | gateway | `caller`: cancel の主体（今は `parent` だけ。reason は `parent_requested`）。変化があったときだけ（終端への再 cancel では出さない） | する（既存の `cancelled`） |
 | `agent_cancelled` | agent（AgentDO） | cancel を受理した最初の 1 回。`caller`: `parent`。reason: `stop_intent_recorded`（停止の意図を記録した）/ `not_started`（start より先の cancel。tombstone だけ）/ `already_terminal` | する（`audit`: `{code:"agent_cancelled"}`。`stop_intent_recorded` のときだけ。タスクが無い・終端済みのときは積まない） |
 | `task_ended_by_limit` | gateway / agent | `budget_exceeded` / `deadline` / `input_timeout` | する（既存の `status_changed` の reason） |
@@ -147,7 +147,7 @@
 | `boot_superseded` | agent（SandboxDO） | 古い起動世代の boot の破棄。reason: `generation_changed`、`caller`: `system` | しない |
 | `start_cancelled_by_tombstone` | agent（AgentDO） | tombstone の後に届いた start を cancelled にした（再送のたびに出る）。`caller`: `parent` | しない |
 | `start_conflict` | agent（AgentDO） | 同じタスクの start が衝突して拒否された。reason: `spec_mismatch`。`caller`: `parent`。同一 spec の再送（冪等）では出さない | しない |
-| `task_summary` | gateway（TaskDO） | 要約の生成（`finished` と `finalize_done` の後。数値と固定コードだけ） | しない |
+| `task_summary` | gateway（TaskDO） | 要約の生成（`finished` と `finalize_done` の後。数値と固定コードだけ。`kind` は終端の状態を小文字にしたもの、`reason` は終端の reason、数値は `metrics`） | しない |
 | `archive_skipped` / `archive_failed` / `archive_completed` | gateway（TaskDO） | `LOGS` が無い / 再試行の上限 / 成功 | しない（アーカイブの後） |
 
 ### フィールドと allowlist
@@ -219,9 +219,9 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 |---|---|---|---|
 | M1（実装済み） | gateway | `audit()`、allowlist、test 用のシンク。認証失敗・認可拒否・cancel・トークンの発行/失効・配送の打ち切りのイベント（二重化を含む） | Unit: `audit()` が、禁止したフィールド（トークン、URL のパス、本文）と未知のフィールドを出力しない |
 | M2（実装済み） | agent + `packages/audit` | `audit()` を `packages/audit`（`@rovo/audit`）へ移す（ステップ 0）。SandboxDO の実行時間と起動世代のカウンタの永続化、usage イベントの `sandbox: {...}`。違反ログの JSON 化、特権操作、リース相当の失効イベント | Unit: SandboxDO の起動→停止で `runtimeMs` が累計され、DO を作り直しても値が残る。Unit（パッケージ）: トークン形式が先頭でなくてもマスクされる |
-| M3 | gateway | `agent-events.ts` で sandbox の usage を写す。summary レコードの生成 | Unit: usage イベントの `sandbox` が公開用の payload に写る（欠けた値は 0）。summary に title が入らない |
+| M3（実装済み） | gateway + `packages/audit`（`task_summary` の追加のみ） | `agent-events.ts` で sandbox の usage を写す。summary レコードの生成 | Unit: usage イベントの `sandbox` が公開用の payload に写る（欠けた値は 0）。summary に title が入らない |
 | M4 | gateway | R2 アーカイブ（`needsAlarm` の拡張を含む） | Unit（fake の R2）: `finished && finalize_done` の前には書かず、成立後に1回呼んでも2回呼んでも同じ結果（冪等）。続けて、再試行と打ち切り。最後に wrangler のローカル R2 で通し |
-| M5 | web + ドキュメント | web の監査（block / unknown / robots / redirect）。design 15.7、推奨値の下書きをこの文書の該当の節に置く（docs/deploy.md 自体は Phase 7 で作る）、README、acceptance 14 以降 | Unit: web の block / unknown / robots / redirect_policy が `audit()` の許可したフィールドだけで出る |
+| M5（web の監査は実装済み、ドキュメントは未） | web + ドキュメント | web の監査（block / unknown / robots / redirect）。design 15.7、推奨値の下書きをこの文書の該当の節に置く（docs/deploy.md 自体は Phase 7 で作る）、README、acceptance 14 以降 | Unit: web の block / unknown / robots / redirect_policy が `audit()` の許可したフィールドだけで出る |
 
 ## テスト
 
@@ -243,7 +243,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - ~~`audit()` の置き場所~~ → M2 で決めた（`packages/audit`。「audit() の置き場所」）。
 - ~~DO の外で発行する監査イベント（認証の失敗など）の、E2E 用の記録先~~ → M1 で決めた（下の「M1 で決めたこと」）。
 - アーカイブの状態の置き場所（`agent_link` の列か、専用のテーブルか）。M4 で決める。
-- Sandbox と Web の単価の既定値（実装時に公式の料金表から取る）。
+- ~~Sandbox と Web の単価の既定値~~ → M3 で決めた（下の「M3 で決めたこと」）。
 - R2 を正にするかと、TaskDO の `events` / `questions` / `git_token` の削除（Phase 7）。
 
 ## 前提・注意
@@ -401,3 +401,61 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 - `delivery_given_up` に「再送の回数の上限」の意味はまだ無い。上限を入れるかは、M1 の範囲外（復旧の意味が変わる）。必要なら別途決める。
 - 月額予算の不足で `task_start` が `budget_exceeded` になる拒否（UserDO の reserve）は、タスクが作られないので `task_ended_by_limit` では扱わない。監査するなら新しいイベントが要る（未決）。
+
+## M3 で決めたこと（2026-10-19）
+
+### usage の `sandbox` の写し方（`agent-events.ts`）
+
+- agent の usage イベントの `sandbox:{runtimeMs, restarts, bootRetries}` を、公開用の usage payload の平らな項目 `sandbox_runtime_ms` / `sandbox_restarts` / `sandbox_boot_retries` に写す（`web_*` と同じ流儀。EventPayload はプリミティブしか持てない）。
+  - `sandbox` がある usage では、欠けた・壊れた値（負数・NaN・文字列）は 0。`runtimeMs` の小数は切り捨て、回数は整数以外を 0 にする。
+  - `sandbox` が**無い** usage（agent が読めなかった）には `sandbox_*` を付けない。「0 回」と「観測できなかった」を区別するため。
+- 単調性: agent は保存済みの値を下回らせない（M2）が、gateway も防ぐ。TaskDO は usage の累計の数値（tokens、`web_*`、`sandbox_*`）を `agent_link.usage_public`（JSON）に **項目ごとの最大値**で持つ。順序が入れ替わった・古い値が再送された usage でも要約の値は下がらない。Claude の金額は従来どおり `usage_seq` が最新のものを採る（精算と同じ値）。
+  - 終端の後に届く usage（cancel の最終 usage）も、`usage_public` には反映する（公開イベントには積まない既存の規則は変えない）。
+- `restarts` / `bootRetries` はそのまま「復旧の回数」になる（5.3 の対応表。`RECOVERING` に agent は入らない）。
+
+### agent の `audit` イベントの扱い
+
+- **公開する。ただし固定コードだけ**: `{code:"agent_cancelled"}` と `{code:"sandbox_privileged_op", op}`（`op` は terminate / set_deadline / extend_deadline のどれか）を、gateway 自身の `audit` と同じ形（type `audit`、payload は固定コード）で events に積む。それ以外の code、op の値が固定でないもの、形の合わないものは、中身を出さず従来どおり `agent_event {agent_type:"audit"}` に落とす（`data` の他の項目は一切通さない）。
+- 理由: 二重化の目的は、ログ基盤が欠落しても、タスクごとの記録が events（R2 の events.jsonl）に残ること。親に見せない選択にすると、agent 側の特権操作と cancel が events から消え、二重化が成り立たない。固定コードと固定の op だけなので、親（task_wait）に見えて害はない。
+- **gateway の監査ログには出し直さない**。agent の SandboxDO が実行した側として既に出している。gateway が出すと、同じ事象が 2 つの Worker から二重に出る（M2 で保留していた判断を確定）。
+- 制約: 終端に確定した後に取り込んだ agent のイベントは、既存の規則（終端の後は公開イベントを増やさない）により events に積まれない。cancel では TaskDO が先に終端になるので、`agent_cancelled` は events に載らないことが多い（親の cancel は TaskDO の `cancelled` + `audit` で記録済み）。agent の監査ログには出ている。この規則は変えない。
+
+### 要約レコード（`src/tasks/summary.ts`。純関数）
+
+- `buildTaskSummary(input)` が `TaskSummary` を作る。数値と固定コードだけ。**title・タスクの入力・answer / steer の本文・イベントの本文（agent_error の message など）は入れない**。`reason` は `^[a-z0-9_]{1,64}$` の形のときだけ入れ、それ以外は null。
+- 項目: `version`、`task_id`、`user_id`、`repository`、`pr_url`、`status`、`reason`、`created_at`、`ended_at`、`duration_ms`、`transitions`（`CREATING` を作成時刻で補い、以降は `status_changed` の時刻）、`usage`（Claude の金額と tokens）、`sandbox`（`observed`、`runtime_ms`、`restarts`、`boot_retries`）、`sandbox_usd_estimate`、`web`（子の分だけ）、`web_usd_estimate`、`unit_prices`（使った単価）、`questions`、`recoveries`（`container_restarts`、`boot_retries`）、`verification`（`attempts`、`passed`。events の `verification` から導く。無ければ 0 / null）、`errors.agent_errors`（件数だけ）。
+- 金額は `sandbox_usd_estimate` / `web_usd_estimate`。**推定**で、Claude の金額（`usage.cost_usd`）とは別。タスクの予算には含めない。
+- `summaryMetrics(summary)` が、監査ログ用の数値だけの平らな項目にする。
+
+### 単価（`wrangler.jsonc` の `vars`。下流が上書き）
+
+`SANDBOX_USD_PER_HOUR` / `WEB_USD_PER_1K_SEARCH` / `WEB_USD_PER_1K_FETCH` / `WEB_USD_PER_1K_BROWSE`。未設定・不正（空・負数・数でない）は `summary.ts` の `DEFAULT_PRICES`（vars と同じ値）。0 は許す。環境固有の値ではなく公開の料金なので、wrangler.jsonc に既定値を置いてよい（design 16）。
+
+| var | 既定値 | 根拠（Cloudflare の公式料金表。取得日 2026-10-19） |
+|---|---|---|
+| `SANDBOX_USD_PER_HOUR` | 0.0073 | Containers の料金（https://developers.cloudflare.com/containers/platform/pricing/ 、2026-10-05 更新）: CPU $0.000020 / vCPU 秒（稼働分）、メモリ $0.0000025 / GiB 秒、ディスク $0.00000007 / GB 秒。instance_type は agent が指定していない（`container.start` は `lite` 相当の既定）ので `lite`（1/16 vCPU、256 MiB、2 GB）で計算: 0.0625*3600*0.00002 + 0.25*3600*0.0000025 + 2*3600*0.00000007 = $0.00725 → 0.0073。CPU を 100% 稼働とみなした上限側。月の無料枠は差し引かない |
+| `WEB_USD_PER_1K_SEARCH` | 0.25 | Web Search API の ceramic（既定のプロバイダ）$0.25 / 1,000 リクエスト（https://developers.cloudflare.com/web-search/providers/ 。exa は $7.00、linkup は $5.00。`WEB_SEARCH_PROVIDER` を変えたら上書きする） |
+| `WEB_USD_PER_1K_FETCH` | 0 | web_fetch は取得先への通信で、Cloudflare の従量課金は無い（Workers のリクエストは Workers の料金に含まれる）。Workers AI の `toMarkdown` を使う分は無料枠とみなして 0 |
+| `WEB_USD_PER_1K_BROWSE` | 0.75 | Browser Run の REST API: $0.09 / ブラウザ時間（https://developers.cloudflare.com/browser-run/pricing/ ）。1 回あたり `gotoOptions.timeout` の 30 秒を上限として $0.09*30/3600 = $0.00075 / 回 |
+
+- 実際の instance_type を変えたら（例: standard-2）、`SANDBOX_USD_PER_HOUR` を上書きする。
+
+### `task_summary` 監査イベント
+
+- 発行元: TaskDO。`finished = 1` かつ（`finalize_done = 1` または GitHub と紐付かない）かつ終端になった最初の `advance()` の終わりに 1 回。`agent_link.summary_logged` で再発行を防ぐ（flag の更新と出力は同じトランザクション）。出力の失敗はタスクの進行を止めない。
+- `@rovo/audit` に `task_summary` を追加した（**packages/audit の変更はこれだけ**）。イベント固有のフィールド `metrics`: 固定のキー（`TASK_SUMMARY_METRICS`）の、非負の有限数だけを通す。それ以外のキー・値は落とす。`kind` に終端の状態（`completed` / `failed` / `budget_exceeded` / `cancelled`）、`reason` に終端の reason（固定コードの形のとき）、`userId`、`taskId`、`caller: "system"` を入れる。repository・PR URL・title は入れない（summary.json 側にある）。
+- M4 は `buildSummary` と同じ純関数で summary.json を作って R2 に書く（`summary_logged` と `archive_done` は別の印）。`task_summary` の発行は R2 の有無に依存しない。
+
+### M3 のテスト
+
+- Unit（パッケージ）: `packages/audit/test/task-summary.test.ts`（`metrics` の allowlist）。
+- Unit（gateway）: `agent-events.test.ts`（sandbox の写し・欠落・audit の固定コード）、`task-summary.test.ts`（純関数: 項目、title が無い、推定の名前、単価の上書き、丸め）、`task-summary-do.test.ts`（終端での 1 回の発行、finalize_done の前には出さない、単調性、観測できなかった sandbox、終端の後の usage、単価の上書き、start 前の cancel、question の回数、agent の audit の写し）。
+- E2E（gateway）: `audit.e2e.test.ts` の cancel のケースで `task_summary` が 1 回出ること（`kind: cancelled`、title が無い）。
+
+## M5（web）で決めたこと（2026-10-19）
+- イベントは `web_blocked` の 1 つ。`packages/audit` の `AUDIT_EVENTS` に追加した。共通フィールドだけを使い、イベント固有のフィールドは足していない。
+- 出す条件は、blocked(robots / redirect_policy / bot_challenge / private_address)、web_browse の unknown、本文の判定が block / unknown のとき。`http_error` と allow / caution は出さない。
+- `safety.reason` は複数の理由を連結した文字列で `audit()` の固定コード形式に合わないため、web で固定コード(`injection_rule` / `model_score` / `evaluator_failed` / `state_truncated` / `model_not_performed` / `unknown`)に丸めてから渡す。
+- 既存の `web_research`(観測用、全 verdict)は変更せず併存する。`web_blocked` は `audit()` 経由の別ログで、同じ事象は 2 行出る。
+- web は状態を持たないので、test シンクは作らない。unit で console.log を捕捉して検証した。E2E は M5 では書いていない。
+- web の `userId` は数字だけの値以外を `audit()` が落とす（gateway は GitHub の数値 ID を渡す前提）。

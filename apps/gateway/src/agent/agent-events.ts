@@ -1,3 +1,4 @@
+import { SANDBOX_OPS } from "@rovo/audit";
 import type { TaskStatus } from "../tasks/state";
 import type { AgentEventDto, AgentPhase } from "./contract";
 
@@ -72,6 +73,40 @@ function webCounts(web: unknown): { web_search: number; web_fetch: number; web_b
   return { web_search: count(w.search), web_fetch: count(w.fetch), web_browse: count(w.browse) };
 }
 
+/**
+ * usage の sandbox:{runtimeMs, restarts, bootRetries} を公開用の sandbox_* に写す（Phase 6 M3）。
+ * sandbox が無い（agent が読めなかった）ときは何も付けない（0 回と区別する）。あるなら、欠けた・壊れた値は 0。
+ * runtimeMs の小数は切り捨てる。回数（restarts / bootRetries）は整数以外を 0 にする。
+ */
+function sandboxCounts(sb: unknown): Record<string, number> {
+  if (typeof sb !== "object" || sb === null || Array.isArray(sb)) return {};
+  const s = sb as Record<string, unknown>;
+  const n = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  return {
+    sandbox_runtime_ms: n(s.runtimeMs),
+    sandbox_restarts: count(s.restarts),
+    sandbox_boot_retries: count(s.bootRetries),
+  };
+}
+
+/** agent の audit イベントのうち、親にも見せてよい固定コード（Phase 6 M3。phase6.md「M3 で決めたこと」） */
+const PUBLIC_AGENT_AUDIT_CODES: ReadonlySet<string> = new Set([
+  "agent_cancelled",
+  "sandbox_privileged_op",
+]);
+
+/** audit の payload を {code} / {code, op} の固定値に絞る。形が合わなければ undefined。 */
+function auditPayload(d: Record<string, unknown>): PublicPayload | undefined {
+  if (typeof d.code !== "string" || !PUBLIC_AGENT_AUDIT_CODES.has(d.code)) return undefined;
+  if (d.code === "sandbox_privileged_op") {
+    return typeof d.op === "string" && (SANDBOX_OPS as readonly string[]).includes(d.op)
+      ? { code: d.code, op: d.op }
+      : undefined;
+  }
+  return { code: d.code };
+}
+
 function parse(data: string): Record<string, unknown> {
   try {
     const v: unknown = JSON.parse(data);
@@ -108,6 +143,7 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
           cache_read_tokens: num(d.cacheReadTokens),
           cache_write_tokens: num(d.cacheWriteTokens),
           ...webCounts(d.web),
+          ...sandboxCounts(d.sandbox),
         },
       };
     }
@@ -191,6 +227,11 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
           final: d.final === true,
         },
       };
+    case "audit": {
+      const payload = auditPayload(d);
+      if (payload !== undefined) return { kind: "event", type: "audit", payload };
+      return { kind: "event", type: "agent_event", payload: { agent_type: "audit" } };
+    }
     default:
       return { kind: "event", type: "agent_event", payload: { agent_type: text(e.type, 100) } };
   }

@@ -278,7 +278,8 @@ describe("task service: status / wait / cancel", () => {
       repository: "acme/widgets",
       title: "Implement authentication",
       draft_pr_url: expect.stringMatching(/\/pull\/\d+$/),
-      latest_cursor: "3",
+      // created -> audit(credential_issued) -> draft_pr_created -> status_changed
+      latest_cursor: "4",
     });
     expect(r.ok && Date.parse(r.value.created_at)).not.toBeNaN();
     expect(r.ok && Date.parse(r.value.updated_at)).not.toBeNaN();
@@ -302,7 +303,7 @@ describe("task service: status / wait / cancel", () => {
   it("wait は task_id を付けて返し、invalid_cursor / invalid_input を写す", async () => {
     const { svc, p, taskId } = await started();
     const r = await svc.wait(p, { task_id: taskId, cursor: "0", timeout_seconds: 0 });
-    expect(r.ok && r.value).toMatchObject({ task_id: taskId, status: "RUNNING", cursor: "3" });
+    expect(r.ok && r.value).toMatchObject({ task_id: taskId, status: "RUNNING", cursor: "4" });
     expect(await svc.wait(p, { task_id: taskId, cursor: "99" })).toMatchObject({
       ok: false,
       error: { code: "invalid_cursor" },
@@ -316,7 +317,7 @@ describe("task service: status / wait / cancel", () => {
   it("wait の retry_after_seconds を error ではなく結果に含める", async () => {
     const { svc, p, taskId } = await started();
     const pendings = Array.from({ length: 16 }, () =>
-      svc.wait(p, { task_id: taskId, cursor: "3", timeout_seconds: 30 }),
+      svc.wait(p, { task_id: taskId, cursor: "4", timeout_seconds: 30 }),
     );
     const { runInDurableObject } = await import("cloudflare:test");
     for (let i = 0; i < 200; i++) {
@@ -326,7 +327,7 @@ describe("task service: status / wait / cancel", () => {
       if (n >= 16) break;
       await new Promise((r) => setTimeout(r, 10));
     }
-    const over = await svc.wait(p, { task_id: taskId, cursor: "3" });
+    const over = await svc.wait(p, { task_id: taskId, cursor: "4" });
     expect(over.ok && over.value.retry_after_seconds).toBeGreaterThan(0);
     await svc.cancel(p, taskId);
     await Promise.all(pendings);
@@ -336,8 +337,9 @@ describe("task service: status / wait / cancel", () => {
     const { svc, p, taskId } = await started();
     const c = await svc.cancel(p, taskId);
     expect(c).toMatchObject({ ok: true, value: { task_id: taskId, status: "CANCELLED" } });
-    const w = await svc.wait(p, { task_id: taskId, cursor: "3", timeout_seconds: 5 });
-    expect(w.ok && w.value.events.map((e) => e.type)).toEqual(["cancelled"]);
+    const w = await svc.wait(p, { task_id: taskId, cursor: "4", timeout_seconds: 5 });
+    // cancelled の後、停止確認で終端処理が進み、トークンの失効が audit(credential_revoked) として積まれる
+    expect(w.ok && w.value.events.map((e) => e.type)).toEqual(["cancelled", "audit"]);
     const next = await svc.start(p, { ...startInput, title: "next" });
     expect(next.ok).toBe(true);
   });
@@ -345,9 +347,11 @@ describe("task service: status / wait / cancel", () => {
   it("cancel は冪等（2回目も成功し、イベントは増えない）", async () => {
     const { svc, p, taskId } = await started();
     await svc.cancel(p, taskId);
+    const first = await svc.wait(p, { task_id: taskId, timeout_seconds: 0 });
+    expect(first.ok && first.value.events).toHaveLength(6);
     expect(await svc.cancel(p, taskId)).toMatchObject({ ok: true, value: { status: "CANCELLED" } });
     const w = await svc.wait(p, { task_id: taskId, timeout_seconds: 0 });
-    expect(w.ok && w.value.events).toHaveLength(4);
+    expect(w.ok && w.value.events).toHaveLength(6);
   });
 
   it("停止が確認できるまで枠は解放されない。確認できたら次の start が通る", async () => {

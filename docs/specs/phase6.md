@@ -132,17 +132,18 @@
 
 | event | 出す場所 | reason（固定コード）の例 | events にも積む |
 |---|---|---|---|
-| `auth_failed` | gateway | OAuth の state / code の不正、トークンの検証の失敗 | しない（タスクが無い） |
-| `authz_denied` | gateway | team 不所属、owner でない、push 権限が無い、App が Installation に入っていない | しない |
-| `credential_issued` / `credential_revoked` | gateway（TaskDO） | `kind`: start / refresh / final（トークンそのものは出さない） | する（`audit`） |
-| `credential_revoke_given_up` | gateway（TaskDO） | 失効を `REVOKE_MAX_ATTEMPTS` で諦めた | する（既存の `warning`: `token_revoke_failed`） |
+| `auth_failed` | gateway | OAuth の state / code の不正（`invalid_state` / `missing_code` / `github_denied` / `code_exchange_rejected` / `consent_rejected`）、提示されたトークンの拒否（`token_rejected`）、`/oauth/token` の拒否（`token_request_rejected`）、MCP の認証情報が無い（`auth_context_missing`）。トークンを提示していない `/mcp` の 401（MCP クライアントの最初の探索）は失敗ではないので出さない。GitHub の一時的な障害（upstream_unavailable）も出さない | しない（タスクが無い） |
+| `authz_denied` | gateway | team 不所属（ログイン時は `not_team_member`、ツール呼び出し時は `forbidden`）、資格が無い（`reauth_required`）、push 権限が無い・App が Installation に入っていない（`forbidden`）、owner でない（`not_owner`。TaskDO が行を持つのに owner が違うとき。応答は `not_found` のまま） | しない |
+| `credential_issued` / `credential_revoked` | gateway（TaskDO） | `kind`: start / refresh / final（トークンそのものは出さない）。revoked の reason: `revoked` / `already_expired`（期限切れで API を呼ばずに閉じた） | する（`audit`） |
+| `credential_issue_failed` | gateway（TaskDO） | 発行の失敗。`kind` と reason（`github_error_<status>`、`github_app_not_configured` など）。再試行のたびに出る | しない（再試行で増える。FAILED になれば `status_changed` の reason が残る） |
+| `credential_revoke_given_up` | gateway（TaskDO） | 失効を諦めた。reason: `attempts_exhausted`（`REVOKE_MAX_ATTEMPTS`）/ `not_retryable`（403 など）/ `setup_failure`（App の設定が失われた・復号できない） | する（`attempts_exhausted` と `not_retryable` は既存の `warning`: `token_revoke_failed`。`setup_failure` は warning が無い経路なので `audit`） |
 | `sandbox_privileged_op` | agent（SandboxDO） | `op`: terminate / destroy / set_deadline / extend_deadline | する（`audit`） |
 | `outbound_denied` | agent（OutboundGateway） | 既存の違反コード（`host_not_allowed` など）、宛先の分類 | しない |
 | `web_blocked` | web | verdict が block / unknown、`robots` / `redirect_policy` / `bot_challenge` による blocked | しない |
-| `task_cancelled` | gateway | cancel の主体（parent / system） | する（既存の `cancelled`） |
+| `task_cancelled` | gateway | `caller`: cancel の主体（今は `parent` だけ。reason は `parent_requested`）。変化があったときだけ（終端への再 cancel では出さない） | する（既存の `cancelled`） |
 | `agent_cancelled` | agent（AgentDO） | cancel（停止の意図）を受理した | する（`audit`） |
 | `task_ended_by_limit` | gateway / agent | `budget_exceeded` / `deadline` / `input_timeout` | する（既存の `status_changed` の reason） |
-| `delivery_given_up` | gateway（TaskDO） | 配送（start / cancel / answer / steer / credential）の打ち切り | する（`audit`） |
+| `delivery_given_up` | gateway（TaskDO） | 終端で、未配送の意図を取りやめた（`kind`: start / answer / steer。reason は `skipped_on_terminal`）。**再送の回数の上限による打ち切りは、今の実装には無い**（start / cancel / answer / steer / credential は成功まで alarm で再送する）ので、cancel と credential の kind は出ない | する（`audit`） |
 | `boot_superseded` | agent（SandboxDO） | 古い起動世代の boot の破棄 | しない |
 | `start_cancelled_by_tombstone` | agent（AgentDO） | tombstone の後に届いた start を cancelled にした | しない |
 | `start_conflict` | agent（AgentDO） | 同じタスクの start が衝突して拒否された | しない |
@@ -178,7 +179,7 @@
 - 既存の `testDeliveryStates` と `/__test/` ルート（`ENVIRONMENT=test` のときだけ有効）と同じ形で、**audit のシンクを読み出せる口**を作る。
   - `audit()` は、通常は `console.log` に出す。`ENVIRONMENT=test` のときだけ、発行元（DO またはWorker）にも記録を残し、`/__test/audit` が読み出す。
   - 本番（`ENVIRONMENT=production`）では記録も口も無効であることを、Unit で確かめる。
-  - 発行元が DO のものは、DO の test 用メソッドで読む。DO の外（認証の失敗など）のものの記録先は M1 で決める（既存の E2E のスクリプトのように KV に TTL つきで置く案がある）。
+  - 発行元が DO のものは、DO の test 用メソッドで読む。DO の外（認証の失敗など）のものの記録先は M1 で決めた（下の「M1 で決めたこと」）。
   - web は、`ServiceDeps.log` の差し込み口を既に持つ。
 
 ## 観測性（11.1）
@@ -210,7 +211,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 | M | 範囲 | 内容 | 最初の Red になるテスト |
 |---|---|---|---|
-| M1 | gateway | `audit()`、allowlist、test 用のシンク。認証失敗・認可拒否・cancel・トークンの発行/失効・配送の打ち切りのイベント（二重化を含む） | Unit: `audit()` が、禁止したフィールド（トークン、URL のパス、本文）と未知のフィールドを出力しない |
+| M1（実装済み） | gateway | `audit()`、allowlist、test 用のシンク。認証失敗・認可拒否・cancel・トークンの発行/失効・配送の打ち切りのイベント（二重化を含む） | Unit: `audit()` が、禁止したフィールド（トークン、URL のパス、本文）と未知のフィールドを出力しない |
 | M2 | agent | SandboxDO の実行時間と起動世代のカウンタの永続化、usage イベントの `sandbox: {...}`。違反ログの JSON 化、特権操作、リース相当の失効イベント | Unit: SandboxDO の起動→停止で `runtimeMs` が累計され、DO を作り直しても値が残る。**着手前に audit() の置き場所を決める** |
 | M3 | gateway | `agent-events.ts` で sandbox の usage を写す。summary レコードの生成 | Unit: usage イベントの `sandbox` が公開用の payload に写る（欠けた値は 0）。summary に title が入らない |
 | M4 | gateway | R2 アーカイブ（`needsAlarm` の拡張を含む） | Unit（fake の R2）: `finished && finalize_done` の前には書かず、成立後に1回呼んでも2回呼んでも同じ結果（冪等）。続けて、再試行と打ち切り。最後に wrangler のローカル R2 で通し |
@@ -233,8 +234,8 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 ## 未決事項
 
-- `audit()` の置き場所（`packages/audit` の新設か、3 Worker への複製か）。M2 に着手する前に決める。
-- DO の外で発行する監査イベント（認証の失敗など）の、E2E 用の記録先（M1 で決める）。
+- `audit()` の置き場所（`packages/audit` の新設か、3 Worker への複製か）。M2 に着手する前に決める。M1 は gateway の `src/audit.ts`（純粋関数）に置いた。
+- ~~DO の外で発行する監査イベント（認証の失敗など）の、E2E 用の記録先~~ → M1 で決めた（下の「M1 で決めたこと」）。
 - アーカイブの状態の置き場所（`agent_link` の列か、専用のテーブルか）。M4 で決める。
 - Sandbox と Web の単価の既定値（実装時に公式の料金表から取る）。
 - R2 を正にするかと、TaskDO の `events` / `questions` / `git_token` の削除（Phase 7）。
@@ -301,3 +302,53 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - マイルストーンを M1〜M5 に分け、各 M の最初の Red を決めた。
 - acceptance.md に Phase 6 の受入（14 以降）を追加した。design.md に 15.7 を追加し、5.3 にも対応表を追記した。
 - README 参照だった推奨値の置き場所を、docs/deploy.md に統一した（design 16 が要求する。Phase 7 の公開準備で作る）。
+
+## M1 で決めたこと（2026-10-19）
+
+### `audit()` と allowlist（`apps/gateway/src/audit.ts`）
+
+- 純粋関数 `audit(event, fields, {now, log})`（出力）と `buildAudit(event, fields, now)`（組み立て）。env にも DO にも触らない。後で `packages/audit` や agent / web へ移すときは、このファイルと `test/unit/audit.test.ts` を移す。
+- イベント名は閉じた一覧（`AUDIT_EVENTS`）。一覧に無い名前は何も出さない。
+- フィールドは `userId` / `taskId` / `caller` / `reason` / `requestId` / `host` / `kind` だけ。**未知のフィールドも、形の合わない値も黙って落とす**（変換して通さない）。
+  - `reason` / `kind` は固定コードの形（英小文字・数字・`_`。それぞれ 64 / 32 文字まで）。自由な文は出ない。
+  - `taskId` は `[A-Za-z0-9_-]{1,64}`、`userId` は非負の安全な整数（または数字だけの文字列）、`caller` は `parent` / `child` / `system`。
+  - `requestId` は `[A-Za-z0-9._-]{1,64}` で、トークンの接頭辞（`ghs_` など）で始まるものは出さない。Worker では `cf-ray` を使う。
+  - `host` は、ホスト名の形（`[a-z0-9._-]`）だけを通し、スキーム・パス・クエリ・userinfo・ポートを含む値は出さない。小文字にし、トークン形式（`gh?_`・`github_pat_`・`sk-`・`xox?-`・`eyJ`）か 32 文字以上のラベルを `masked` に置き換え、全体を 100 文字に切る。**host は allowlist に入っているが、M1 の発行元は host を渡さない**（M2 以降の agent / web が使う）。
+- 出力は `console.log` の 1 行 JSON（`{"audit":true,"event":...,"ts":...,...}`）。
+
+### test 用のシンクと、DO の外のイベントの記録先
+
+- `ENVIRONMENT=test` のときだけ、監査イベントを記録する。`POST /__test/audit` が読み出す（それ以外は 404）。`{task_id?}` を渡すと、Worker 側の記録と、その TaskDO の記録を時刻順に返す。
+- **DO（TaskDO）が発行したもの**: その DO の SQLite の `test_audit` テーブル（`ENVIRONMENT=test` のときだけ作る）に同期で書く。読み出しは `TaskDO.testAudit()`（test 以外は例外）。DO の同期の書き込みなので、`waitUntil` に頼らず、トランザクションの中でも書け、DO の退避をまたいで残る。
+- **DO の外（Worker の認証失敗・MCP の認可の拒否）が発行したもの**: 既存の `OAUTH_KV` に、`test-audit:` 接頭辞・TTL 1 時間で書く（`src/audit-sink.ts` の `auditFromWorker`）。
+  - 理由: 新しいバインディングを足さずに済む。`wrangler.jsonc` に何も足さない（本番に環境固有の値を置かない。design 16）。既存の `test-script:` と同じ置き場で、`ENVIRONMENT=test` のときだけ使う。KV のキーに時刻と発行順を入れ、辞書順が発行順になる。
+  - 記録の失敗は握りつぶす（監査の記録で本来の処理を壊さない）。
+- 本番（`ENVIRONMENT` が `test` 以外）では、記録も読み出し口も無い（Unit で確認）。
+- Unit では KV の中身がテストをまたいで残るため、`test/unit/helpers.ts` の `clearWorkerAudit()` を各テストの前に呼ぶ。
+
+### 二重化の線引き（M1 の実装）
+
+- events にも積む（type `audit`、payload は `{code, kind?}` の固定コードだけ）: `credential_issued`、`credential_revoked`、`credential_revoke_given_up`（`setup_failure` の経路だけ）、`delivery_given_up`。
+- 既存のイベントで足りるもの（監査ログにだけ出す）: `task_cancelled`（`cancelled`）、`task_ended_by_limit`（`status_changed` の reason。`budget_exceeded` / `deadline` / `input_timeout`）、`credential_revoke_given_up` の `attempts_exhausted` / `not_retryable`（`warning`: `token_revoke_failed`）。
+- 監査ログだけ: `auth_failed`、`authz_denied`、`credential_issue_failed`。
+- events の `audit` の件数と、監査ログの二重化したイベント（上の 4 種）の件数は、同じタスクで一致する（E2E で確認。acceptance 16）。
+- 既存の Unit / E2E の「イベント列」の期待は、トークン発行の `audit` が `created` の次に入るため更新した（例: `created, audit, draft_pr_created, status_changed`。cancel の後は `cancelled, audit`）。アサーションの意図は変えていない。
+
+### 発行元の一覧（M1）
+
+| 発行元 | イベント |
+|---|---|
+| `src/index.ts`（OAuthProvider の後） | `auth_failed`（`token_rejected` / `token_request_rejected`） |
+| `src/auth/login.ts` | `auth_failed`（`invalid_state` / `missing_code` / `github_denied` / `code_exchange_rejected` / `consent_rejected`）、`authz_denied`（`not_team_member`） |
+| `src/mcp/server.ts` | `auth_failed`（`auth_context_missing`）、`authz_denied`（`forbidden` / `reauth_required`） |
+| `src/tasks/task-do.ts` | `authz_denied`（`not_owner`）、`task_cancelled`、`task_ended_by_limit`、`credential_issued` / `credential_issue_failed` / `credential_revoked` / `credential_revoke_given_up`、`delivery_given_up` |
+
+### M1 のテスト
+
+- Unit: `audit.test.ts`（allowlist）、`audit-sink.test.ts`（シンクと `/__test/audit`、production で無効）、`task-audit.test.ts`（TaskDO の各イベントと二重化）、`login.test.ts` / `mcp.test.ts` / `worker-audit.test.ts`（Worker 側の auth_failed / authz_denied）。
+- E2E: `test/e2e/audit.e2e.test.ts`（gateway: 認証失敗・認可拒否・cancel とトークンの発行/失効・件数の一致）、`test/full/full.e2e.test.ts` の c（cancel の監査と二重化）と x（予算超過 `BUDGET_EXCEEDED` の `task_ended_by_limit`）。
+
+### 次の M へ送ること
+
+- `delivery_given_up` に「再送の回数の上限」の意味はまだ無い。上限を入れるかは、M1 の範囲外（復旧の意味が変わる）。必要なら別途決める。
+- 月額予算の不足で `task_start` が `budget_exceeded` になる拒否（UserDO の reserve）は、タスクが作られないので `task_ended_by_limit` では扱わない。監査するなら新しいイベントが要る（未決）。

@@ -62,7 +62,12 @@ describe("TaskDO: start の配送", () => {
     const { id, stub, agent } = await createTask();
     await stub.advance();
     expect(await statusOf(stub)).toBe("RUNNING");
-    expect(await eventTypes(stub)).toEqual(["created", "draft_pr_created", "status_changed"]);
+    expect(await eventTypes(stub)).toEqual([
+      "created",
+      "audit",
+      "draft_pr_created",
+      "status_changed",
+    ]);
     const calls = await agent.calls();
     expect(calls.start).toBe(1);
     expect(calls.specs[0]).toMatchObject({ taskId: id, userId: String(OWNER) });
@@ -103,6 +108,7 @@ describe("TaskDO: start の配送", () => {
     expect(await statusOf(stub)).toBe("VERIFYING");
     expect(await eventTypes(stub)).toEqual([
       "created",
+      "audit",
       "draft_pr_created",
       "status_changed",
       "status_changed",
@@ -222,7 +228,7 @@ describe("TaskDO: イベントの取り込み", () => {
     await stub.advance();
     const ev = await rows<{ type: string; payload: string }>(
       stub,
-      "SELECT type, payload FROM events WHERE seq > 3 ORDER BY seq",
+      "SELECT type, payload FROM events WHERE seq > 4 ORDER BY seq",
     );
     expect(ev.map((e) => e.type)).toEqual([
       "tool_start",
@@ -308,7 +314,10 @@ describe("TaskDO: イベントの取り込み", () => {
     await stub.advance();
     expect(await statusOf(stub)).toBe("COMPLETED");
     const types = await eventTypes(stub);
-    expect(types.at(-1)).toBe("status_changed");
+    // 終端の status_changed の後に続くのは、終端処理の audit（トークンの失効）だけ
+    expect(types.slice(types.lastIndexOf("status_changed") + 1).every((t) => t === "audit")).toBe(
+      true,
+    );
   });
 
   it("古いページが再配送されても重複しない（カーソルと一意制約）", async () => {
@@ -365,7 +374,7 @@ describe("TaskDO: イベントの取り込み", () => {
     await runInDurableObject(stub, (i) => {
       (i as unknown as { pollIntervalMs: number }).pollIntervalMs = 30;
     });
-    const cursor = (await stub.getStatus(OWNER)).ok ? "3" : "";
+    const cursor = (await stub.getStatus(OWNER)).ok ? "4" : "";
     const waiting = stub.wait(OWNER, cursor, 5);
     await new Promise((r) => setTimeout(r, 100));
     await agent.emit("tool_start", { callId: "c", name: "n", summary: "s" });
@@ -379,6 +388,8 @@ describe("TaskDO: イベントの取り込み", () => {
     const { stub, agent } = await createTask();
     await stub.advance();
     await stub.cancel(OWNER);
+    // 終端処理（トークンの失効の audit など）を済ませてから、子の遅れて届くイベントが公開されないことを確かめる
+    await stub.advance();
     const before = await eventTypes(stub);
     await agent.emit("tool_end", { callId: "c", name: "n", isError: false, summary: "late" });
     await stub.advance();

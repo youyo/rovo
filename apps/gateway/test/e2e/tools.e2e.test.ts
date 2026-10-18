@@ -30,18 +30,19 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
         repository: "acme/widgets",
         title: "t1",
         draft_pr_url: expect.stringMatching(/\/pull\/\d+$/),
-        latest_cursor: "3",
+        // created -> audit(credential_issued) -> draft_pr_created -> status_changed
+        latest_cursor: "4",
       });
 
       const t0 = Date.now();
       const timedOut = bodyOf(
         await client.callTool({
           name: "task_wait",
-          arguments: { task_id: taskId, cursor: "3", timeout_seconds: 1 },
+          arguments: { task_id: taskId, cursor: "4", timeout_seconds: 1 },
         }),
       );
       expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
-      expect(timedOut).toMatchObject({ status: "RUNNING", cursor: "3", events: [] });
+      expect(timedOut).toMatchObject({ status: "RUNNING", cursor: "4", events: [] });
 
       expect(
         bodyOf(await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } })),
@@ -54,12 +55,15 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const cancelled = bodyOf(
         await client.callTool({
           name: "task_wait",
-          arguments: { task_id: taskId, cursor: "3", timeout_seconds: 30 },
+          arguments: { task_id: taskId, cursor: "4", timeout_seconds: 30 },
         }),
       );
       expect(Date.now() - t1).toBeLessThan(5000);
-      expect(cancelled).toMatchObject({ status: "CANCELLED", cursor: "4" });
-      expect((cancelled.events as { type: string }[]).map((e) => e.type)).toEqual(["cancelled"]);
+      expect(cancelled).toMatchObject({ status: "CANCELLED" });
+      // cancelled の後に続くのは、終端処理のトークンの失効（audit）だけ
+      const types = (cancelled.events as { type: string }[]).map((e) => e.type);
+      expect(types[0]).toBe("cancelled");
+      expect(types.slice(1).every((t) => t === "audit")).toBe(true);
     } finally {
       await client.close();
     }
@@ -74,13 +78,14 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const t0 = Date.now();
       const waiting = client.callTool({
         name: "task_wait",
-        arguments: { task_id: taskId, cursor: "3", timeout_seconds: 30 },
+        arguments: { task_id: taskId, cursor: "4", timeout_seconds: 30 },
       });
       await new Promise((r) => setTimeout(r, 500));
       await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
       const w = bodyOf(await waiting);
       expect(Date.now() - t0).toBeLessThan(10_000);
-      expect(w).toMatchObject({ status: "CANCELLED", cursor: "4" });
+      expect(w).toMatchObject({ status: "CANCELLED" });
+      expect(Number(w.cursor)).toBeGreaterThanOrEqual(5); // cancelled（と、続く audit）
     } finally {
       await client.close();
     }

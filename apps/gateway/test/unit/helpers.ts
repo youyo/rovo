@@ -47,3 +47,13 @@ export function sampleInput(
 }
 
 export const FP = "f".repeat(64);
+
+/** test 用シンク（KV）に残った Worker 側の監査記録を消す（KV の中身はテストをまたいで残るため、各テストの前に呼ぶ）。 */
+export async function clearWorkerAudit(): Promise<void> {
+  for (;;) {
+    const page = await env.OAUTH_KV.list({ prefix: "test-audit:" });
+    if (page.keys.length === 0) return;
+    for (const k of page.keys) await env.OAUTH_KV.delete(k.name);
+    if (page.list_complete) return;
+  }
+}

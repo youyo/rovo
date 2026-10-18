@@ -2,8 +2,9 @@ import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { createApiApp } from "../../src/app";
+import { readWorkerAudit } from "../../src/audit-sink";
 import type {
   WebBrowseResponse,
   WebFetchResponse,
@@ -13,7 +14,7 @@ import type {
 } from "../../src/web/contract";
 import { UNTRUSTED_WEB_BEGIN, UNTRUSTED_WEB_END } from "../../src/web/untrusted";
 import { FakeGitHubFetch, installFakeGitHub } from "./fake-github-fetch";
-import { fakeAgent, newUserId, taskStub, userStub } from "./helpers";
+import { clearWorkerAudit, fakeAgent, newUserId, taskStub, userStub } from "./helpers";
 
 // OAuthProvider が apiHandler に渡す ExecutionContext を模す（props はリクエスト単位）
 function ctxWithProps(props: Record<string, unknown>): ExecutionContext {
@@ -251,19 +252,19 @@ describe("task_start / status / wait / cancel", () => {
       status: "RUNNING",
       repository: "acme/widgets",
       title: "t1",
-      // created -> draft_pr_created -> status_changed（task_start の応答の draft_pr_url は作成前なので null のまま）
+      // created -> audit(credential_issued) -> draft_pr_created -> status_changed（task_start の応答の draft_pr_url は作成前なので null のまま）
       draft_pr_url: expect.stringMatching(/\/pull\/\d+$/),
-      latest_cursor: "3",
+      latest_cursor: "4",
     });
     expect(Object.keys(status)).not.toContain("owner_id");
 
     const w1 = body(
       await client.callTool({
         name: "task_wait",
-        arguments: { task_id: s.task_id, cursor: "3", timeout_seconds: 0 },
+        arguments: { task_id: s.task_id, cursor: "4", timeout_seconds: 0 },
       }),
     );
-    expect(w1).toMatchObject({ status: "RUNNING", cursor: "3", events: [] });
+    expect(w1).toMatchObject({ status: "RUNNING", cursor: "4", events: [] });
 
     const c = body(
       await client.callTool({ name: "task_cancel", arguments: { task_id: s.task_id } }),
@@ -271,10 +272,11 @@ describe("task_start / status / wait / cancel", () => {
     expect(c).toEqual({ task_id: s.task_id, status: "CANCELLED" });
 
     const w2 = body(
-      await client.callTool({ name: "task_wait", arguments: { task_id: s.task_id, cursor: "3" } }),
+      await client.callTool({ name: "task_wait", arguments: { task_id: s.task_id, cursor: "4" } }),
     );
-    expect(w2).toMatchObject({ status: "CANCELLED", cursor: "4" });
-    expect((w2.events as { type: string }[]).map((e) => e.type)).toEqual(["cancelled"]);
+    // cancelled の後、停止確認で終端処理が進み、トークンの失効が audit(credential_revoked) として積まれる
+    expect(w2).toMatchObject({ status: "CANCELLED", cursor: "6" });
+    expect((w2.events as { type: string }[]).map((e) => e.type)).toEqual(["cancelled", "audit"]);
     await client.close();
   });
 
@@ -1215,5 +1217,121 @@ describe("web_browse（Phase 5 M2）", () => {
       if (code === "upstream_unavailable") expect(body(r).retry_after_seconds).toBeGreaterThan(0);
       await client.close();
     }
+  });
+});
+
+describe("監査（authz_denied / auth_failed）", () => {
+  beforeEach(clearWorkerAudit);
+  const testEnv = () => ({ ...env, ENVIRONMENT: "test" }) as unknown as Env;
+  const auditOf = async (e: Env, userId?: number) =>
+    (await readWorkerAudit(e)).filter((r) => userId === undefined || r.userId === userId);
+
+  it("team 非所属は authz_denied(forbidden) を userId つきで出す。応答は変わらない", async () => {
+    const u = await user("alice");
+    u.gh.team = "none";
+    const e = testEnv();
+    const client = await connect(createApiApp(), u.props, e);
+    const r = await client.callTool({
+      name: "task_status",
+      arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+    });
+    expect(body(r).code).toBe("forbidden");
+    const records = await auditOf(e, u.id);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      audit: true,
+      event: "authz_denied",
+      userId: u.id,
+      caller: "parent",
+      reason: "forbidden",
+    });
+    // ログに出すのは固定のフィールドだけ（login・task_id・入力は出ない）
+    expect(JSON.stringify(records)).not.toContain("alice");
+    expect(JSON.stringify(records)).not.toContain("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    await client.close();
+  });
+
+  it("task_start の認可（App 未導入・push 権限なし）の拒否も authz_denied", async () => {
+    const u = await user("alice");
+    const e = testEnv();
+    const client = await connect(createApiApp(), u.props, e);
+    const r = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { repository: "other/public" }),
+    });
+    expect(body(r).code).toBe("forbidden");
+    expect(await auditOf(e, u.id)).toEqual([
+      expect.objectContaining({ event: "authz_denied", reason: "forbidden", userId: u.id }),
+    ]);
+    await client.close();
+  });
+
+  it("web_search の team 非所属も authz_denied", async () => {
+    const u = await user("alice");
+    u.gh.team = "none";
+    const e = testEnv();
+    const client = await connect(createApiApp(), u.props, e);
+    const r = await client.callTool({ name: "web_search", arguments: { query: "x" } });
+    expect(body(r).code).toBe("forbidden");
+    expect((await auditOf(e, u.id)).map((r) => r.event)).toEqual(["authz_denied"]);
+    await client.close();
+  });
+
+  it("資格が無い（reauth_required）も authz_denied(reauth_required)", async () => {
+    const id = newUserId();
+    await installFakeGitHub(id, new FakeGitHubFetch(), { login: false });
+    const e = testEnv();
+    const client = await connect(createApiApp(), { githubUserId: id, login: "x" }, e);
+    const r = await client.callTool({
+      name: "task_status",
+      arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+    });
+    expect(body(r).code).toBe("reauth_required");
+    expect(await auditOf(e, id)).toEqual([
+      expect.objectContaining({ event: "authz_denied", reason: "reauth_required" }),
+    ]);
+    await client.close();
+  });
+
+  it("認証情報（props）が無いリクエストは auth_failed", async () => {
+    const e = testEnv();
+    const before = (await auditOf(e)).length;
+    const client = await connect(createApiApp(), {}, e);
+    const r = await client.callTool({
+      name: "task_status",
+      arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+    });
+    expect(body(r).code).toBe("reauth_required");
+    const added = (await auditOf(e)).slice(before);
+    expect(added).toEqual([
+      expect.objectContaining({ event: "auth_failed", reason: "auth_context_missing" }),
+    ]);
+    await client.close();
+  });
+
+  it("GitHub の一時的な障害（upstream_unavailable）は認可の拒否ではないので出さない", async () => {
+    const u = await user("alice");
+    u.gh.apiFault = 503;
+    const e = testEnv();
+    const client = await connect(createApiApp(), u.props, e);
+    const r = await client.callTool({
+      name: "task_status",
+      arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+    });
+    expect(body(r).code).toBe("upstream_unavailable");
+    expect(await auditOf(e, u.id)).toEqual([]);
+    await client.close();
+  });
+
+  it("production では記録しない（ログには出る）", async () => {
+    const u = await user("alice");
+    u.gh.team = "none";
+    const client = await connect(createApiApp(), u.props);
+    await client.callTool({
+      name: "task_status",
+      arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+    });
+    expect(await readWorkerAudit(env as unknown as Env)).toEqual([]);
+    await client.close();
   });
 });

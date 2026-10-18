@@ -42,5 +42,9 @@ export default defineConfig({
   test: {
     include: ["test/unit/**/*.test.ts"],
     setupFiles: ["test/unit/setup.ts"],
+    // 全テストファイルが 1 つの workerd を共有するので、並列が多い（既定は CPU 数に近い）と起動が詰まり、
+    // 最初の DO 呼び出しが 5 秒のタイムアウトに間に合わなくなる（fake-agent.test.ts で再現）。4 並列なら安定し、速くもなる
+    // （18 コアで 12 秒 → 7 秒）。
+    maxWorkers: 4,
   },
 });

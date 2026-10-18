@@ -111,7 +111,12 @@ describe("CREATING: 初期コミット・ブランチ・Draft PR", () => {
     expect(pr).toMatchObject({ draft: true, base: "main", title: "Implement authentication" });
     expect(pr?.body).toContain(MANAGED_BEGIN);
 
-    expect(await eventTypes(stub)).toEqual(["created", "draft_pr_created", "status_changed"]);
+    expect(await eventTypes(stub)).toEqual([
+      "created",
+      "audit",
+      "draft_pr_created",
+      "status_changed",
+    ]);
     const [ev] = await eventsOf(stub, "draft_pr_created");
     expect(ev).toMatchObject({ number: pr?.number, draft: true, branch });
     expect((await status(stub)).draft_pr_url).toBe(

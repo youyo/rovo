@@ -1,5 +1,7 @@
 import type { Hono } from "hono";
 import type { AgentRpc, TaskSpec } from "./agent/contract";
+import type { AuditRecord } from "./audit";
+import { readWorkerAudit } from "./audit-sink";
 
 /**
  * 通しの E2E 専用の仕組み（ENVIRONMENT=test のときだけ有効。それ以外は 404 / 何もしない）。
@@ -71,6 +73,25 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     const id = await taskIdOf(c.req);
     if (!id) return c.json({ error: "task_id is required" }, 400);
     return c.json(await c.env.TASK_DO.getByName(id).testDeliveryStates());
+  });
+
+  // 監査イベント（audit-sink.ts）。Worker 側（KV）と、task_id を渡したときはその TaskDO の記録を、時刻順に返す
+  app.post("/__test/audit", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const body = (await c.req.json().catch(() => ({}))) as { task_id?: unknown };
+    let taskId: string | undefined;
+    if (body.task_id !== undefined) {
+      taskId =
+        typeof body.task_id === "string" && TASK_ID_RE.test(body.task_id)
+          ? body.task_id
+          : undefined;
+      if (taskId === undefined) return c.json({ error: "task_id is invalid" }, 400);
+    }
+    const records: AuditRecord[] = await readWorkerAudit(c.env);
+    if (taskId !== undefined) records.push(...(await c.env.TASK_DO.getByName(taskId).testAudit()));
+    // Array.prototype.sort は安定。同じ時刻なら Worker 側 → DO 側の順のまま
+    records.sort((a, b) => a.ts - b.ts);
+    return c.json({ records });
   });
 
   app.post("/__test/agent/set-script", async (c) => {

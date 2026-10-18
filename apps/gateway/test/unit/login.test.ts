@@ -1,7 +1,10 @@
+import { env as workerEnv } from "cloudflare:workers";
 import { AuthorizationError } from "@cloudflare/workers-oauth-provider";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDefaultApp } from "../../src/app";
+import { readWorkerAudit } from "../../src/audit-sink";
 import { json, routerFetch, tokenResponse } from "./github/helpers";
+import { clearWorkerAudit } from "./helpers";
 
 const BASE = "https://rovo.example.com";
 const AUTHORIZE_URL = `${BASE}/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%2Fcb&code_challenge=x&code_challenge_method=S256&state=s`;
@@ -445,5 +448,97 @@ describe("GET /callback", () => {
     const text = await res.text();
     expect(text).not.toMatch(/ghu_|exploded/);
     expect(provider.completeAuthorization).not.toHaveBeenCalled();
+  });
+});
+
+describe("監査（auth_failed / authz_denied）", () => {
+  beforeEach(clearWorkerAudit);
+  // 記録先の KV だけ本物にして、ENVIRONMENT=test で出す
+  const auditEnv = (over: EnvOver = {}) =>
+    makeEnv({ ENVIRONMENT: "test", OAUTH_KV: workerEnv.OAUTH_KV, ...over });
+  const records = (env: Env) => readWorkerAudit(env);
+
+  it("state / Cookie が不正（finishUpstream が拒否）なら auth_failed(invalid_state)", async () => {
+    const { env, provider } = auditEnv();
+    provider.finishUpstream.mockRejectedValueOnce(
+      new AuthorizationError("invalid_request", { description: "state mismatch" }),
+    );
+    const res = await app(githubFetch().fetch).request(CALLBACK_URL, {}, env);
+    expect(res.status).toBe(400);
+    expect(await records(env)).toEqual([
+      expect.objectContaining({ audit: true, event: "auth_failed", reason: "invalid_state" }),
+    ]);
+  });
+
+  it("code が無ければ auth_failed(missing_code)、GitHub 側の拒否なら auth_failed(github_denied)", async () => {
+    const a = auditEnv();
+    await app(githubFetch().fetch).request(`${BASE}/callback?state=UP`, {}, a.env);
+    const b = auditEnv();
+    await app(githubFetch().fetch).request(
+      `${BASE}/callback?error=access_denied&state=UP`,
+      {},
+      b.env,
+    );
+    const all = await records(a.env);
+    expect(all.map((r) => r.reason)).toEqual(["missing_code", "github_denied"]);
+    expect(all.every((r) => r.event === "auth_failed")).toBe(true);
+  });
+
+  it("GitHub の code 交換が拒否されたら auth_failed(code_exchange_rejected)。5xx（一時的な障害）は出さない", async () => {
+    const bad = routerFetch({
+      "POST /login/oauth/access_token": () => json({ error: "bad_verification_code" }),
+    });
+    const a = auditEnv();
+    await app(bad.fetch).request(CALLBACK_URL, {}, a.env);
+    expect((await records(a.env)).map((r) => [r.event, r.reason])).toEqual([
+      ["auth_failed", "code_exchange_rejected"],
+    ]);
+    const before = (await records(a.env)).length;
+    const b = auditEnv();
+    await app(githubFetch({ tokenStatus: 503 }).fetch).request(CALLBACK_URL, {}, b.env);
+    expect((await records(b.env)).length).toBe(before);
+  });
+
+  it("team に所属していなければ authz_denied(not_team_member) を userId つきで出す。トークンは出さない", async () => {
+    const gh = githubFetch({ team: "none" });
+    const { env } = auditEnv();
+    const res = await app(gh.fetch).request(CALLBACK_URL, {}, env);
+    expect(new URL(res.headers.get("location") ?? "").searchParams.get("error")).toBe(
+      "access_denied",
+    );
+    const recs = await records(env);
+    expect(recs).toEqual([
+      expect.objectContaining({
+        event: "authz_denied",
+        reason: "not_team_member",
+        userId: 1001,
+        caller: "parent",
+      }),
+    ]);
+    expect(JSON.stringify(recs)).not.toMatch(/ghu_|ghr_|alice/);
+  });
+
+  it("同意の検証（CSRF・期限切れ）で拒否されたら auth_failed(consent_rejected)", async () => {
+    const { env, provider } = auditEnv();
+    provider.approveConsent.mockRejectedValueOnce(
+      new AuthorizationError("invalid_request", { description: "bad cookie" }),
+    );
+    const res = await post(env, approveForm());
+    expect(res.status).toBe(400);
+    expect((await records(env)).map((r) => [r.event, r.reason])).toEqual([
+      ["auth_failed", "consent_rejected"],
+    ]);
+  });
+
+  it("成功したログインでは何も出さない。production では記録しない", async () => {
+    const ok = auditEnv();
+    await app(githubFetch().fetch).request(CALLBACK_URL, {}, ok.env);
+    expect(await records(ok.env)).toEqual([]);
+    const prod = makeEnv({ OAUTH_KV: workerEnv.OAUTH_KV });
+    prod.provider.finishUpstream.mockRejectedValueOnce(
+      new AuthorizationError("invalid_request", { description: "state mismatch" }),
+    );
+    await app(githubFetch().fetch).request(CALLBACK_URL, {}, prod.env);
+    expect(await records({ ...prod.env, ENVIRONMENT: "test" } as Env)).toEqual([]);
   });
 });

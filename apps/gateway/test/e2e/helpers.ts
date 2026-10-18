@@ -48,3 +48,45 @@ export const startArgs = (title: string, extra: Record<string, unknown> = {}) =>
   instructions: "do it",
   ...extra,
 });
+
+export type AuditRecord = {
+  audit: true;
+  event: string;
+  ts: number;
+  userId?: number | string;
+  taskId?: string;
+  caller?: string;
+  reason?: string;
+  requestId?: string;
+  host?: string;
+  kind?: string;
+};
+
+/** ENVIRONMENT=test のときだけある /__test/audit から、監査イベント（Worker 側 + 指定したタスクの TaskDO 側）を読む。 */
+export async function auditRecords(taskId?: string): Promise<AuditRecord[]> {
+  const res = await fetch(`${baseUrl}/__test/audit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(taskId === undefined ? {} : { task_id: taskId }),
+  });
+  if (!res.ok) throw new Error(`/__test/audit failed: ${res.status}`);
+  return ((await res.json()) as { records: AuditRecord[] }).records;
+}
+
+/** 条件を満たす監査イベントが現れるまで読み直す（DO の外の記録は非同期のため、少し遅れうる）。 */
+export async function waitForAudit(
+  predicate: (r: AuditRecord) => boolean,
+  opts: { taskId?: string; timeoutMs?: number } = {},
+): Promise<AuditRecord> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 10_000);
+  for (;;) {
+    const hit = (await auditRecords(opts.taskId)).find(predicate);
+    if (hit) return hit;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `監査イベントが現れませんでした: ${JSON.stringify(await auditRecords(opts.taskId))}`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}

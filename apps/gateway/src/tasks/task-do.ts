@@ -9,6 +9,7 @@ import type {
   TaskSpec,
   UsageDto,
 } from "../agent/contract";
+import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "../audit";
 import {
   applyManagedBlock,
   decryptString,
@@ -281,6 +282,20 @@ class SetupFailure extends Error {
   }
 }
 
+/** 上限による終了の reason（監査の固定コード）。上限でなければ undefined。 */
+function limitReason(to: TaskStatus, reason: unknown): string | undefined {
+  if (to === "BUDGET_EXCEEDED") return "budget_exceeded";
+  if (to === "FAILED" && (reason === "deadline" || reason === "input_timeout")) return reason;
+  return undefined;
+}
+
+/** トークンの発行の失敗を、監査の固定コードにする（メッセージは使わない）。 */
+function issueFailureCode(e: unknown): string {
+  if (e instanceof GitHubApiError) return `github_error_${e.status}`;
+  if (e instanceof SetupFailure) return e.reason;
+  return "internal_error";
+}
+
 type EventRow = { seq: number; type: string; payload: string; created_at: number };
 
 type Waiter = { wake: () => void; timer?: ReturnType<typeof setTimeout> };
@@ -541,6 +556,61 @@ export class TaskDO extends DurableObject<Env> {
     return seq;
   }
 
+  // --- 監査（phase6.md「監査ログ」/ audit.ts） ---
+
+  /**
+   * 監査ログに 1 行出す（taskId と caller の既定値つき）。ENVIRONMENT=test のときだけ、DO の SQLite（test_audit）にも記録する。
+   * 記録の失敗で本来の処理を壊さない。
+   */
+  private emitAudit(event: AuditEventName, fields: AuditFields): void {
+    const record = audit(
+      event,
+      { taskId: this.getRow()?.id, caller: "system", ...fields },
+      { now: this.now() },
+    );
+    if (record === null || this.env.ENVIRONMENT !== "test") return;
+    try {
+      const sql = this.ctx.storage.sql;
+      sql.exec(
+        "CREATE TABLE IF NOT EXISTS test_audit (n INTEGER PRIMARY KEY AUTOINCREMENT, record TEXT NOT NULL)",
+      );
+      sql.exec("INSERT INTO test_audit (record) VALUES (?)", JSON.stringify(record));
+    } catch (e) {
+      console.error("audit_sink_error", e instanceof Error ? e.name : typeof e);
+    }
+  }
+
+  /**
+   * 欠落してはならない事象の二重化: 監査ログに出し、events にも type "audit" の固定コード（{code, kind?}）で積む。
+   * transactionSync の中から呼ぶ。呼び出し側が、tx の後に notifyWaiters() する。
+   */
+  private auditBoth(event: AuditEventName, fields: AuditFields): void {
+    const payload: EventPayload = { code: event };
+    if (fields.kind !== undefined) payload.kind = fields.kind;
+    this.appendEvent("audit", payload, this.now());
+    this.emitAudit(event, fields);
+  }
+
+  /** テスト専用: このタスクが発行した監査イベント（発行順）。ENVIRONMENT=test のときだけ。 */
+  testAudit(): AuditRecord[] {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS test_audit (n INTEGER PRIMARY KEY AUTOINCREMENT, record TEXT NOT NULL)",
+    );
+    return sql
+      .exec<{ record: string }>("SELECT record FROM test_audit ORDER BY n")
+      .toArray()
+      .map((r) => JSON.parse(r.record) as AuditRecord);
+  }
+
+  /** owner でない呼び出しか。行があるのに owner が違うときだけ authz_denied を出す（応答は not_found のまま）。 */
+  private notOwner(row: TaskRow, ownerId: number): boolean {
+    if (row.owner_id === ownerId) return false;
+    this.emitAudit("authz_denied", { userId: ownerId, caller: "parent", reason: "not_owner" });
+    return true;
+  }
+
   private getLink(): LinkRow | undefined {
     return this.ctx.storage.sql.exec<LinkRow>("SELECT * FROM agent_link").toArray()[0];
   }
@@ -584,6 +654,9 @@ export class TaskDO extends DurableObject<Env> {
         "UPDATE agent_link SET cancel_state = 'pending' WHERE cancel_state = 'none'",
       );
       this.skipPendingDeliveries();
+      // 上限による終了。events には既存の status_changed の reason があるので、監査ログだけに出す
+      const limit = limitReason(to, extra.reason);
+      if (limit !== undefined) this.emitAudit("task_ended_by_limit", { reason: limit });
     }
     return true;
   }
@@ -591,8 +664,21 @@ export class TaskDO extends DurableObject<Env> {
   /** 回答と steer の未配送の意図を取りやめる（終端に入ったトランザクションの中で呼ぶ）。 */
   private skipPendingDeliveries(): void {
     const sql = this.ctx.storage.sql;
+    const pending = (table: "questions" | "steers") =>
+      sql.exec(`SELECT 1 AS x FROM ${table} WHERE delivery_state = 'pending' LIMIT 1`).toArray()
+        .length > 0;
+    const answers = pending("questions");
+    const steers = pending("steers");
     sql.exec("UPDATE questions SET delivery_state = 'skipped' WHERE delivery_state = 'pending'");
     sql.exec("UPDATE steers SET delivery_state = 'skipped' WHERE delivery_state = 'pending'");
+    // 配送の打ち切り: 終端で未配送の意図を取りやめた（再送の回数の上限による打ち切りは無い）
+    if (answers) this.giveUpDelivery("answer");
+    if (steers) this.giveUpDelivery("steer");
+  }
+
+  /** 配送の打ち切りを events（audit）と監査ログに出す（transactionSync の中から呼ぶ。待機中の呼び出しは呼び出し側が起こす）。 */
+  private giveUpDelivery(kind: "start" | "answer" | "steer"): void {
+    this.auditBoth("delivery_given_up", { kind, reason: "skipped_on_terminal" });
   }
 
   private notifyWaiters(): void {
@@ -723,7 +809,7 @@ export class TaskDO extends DurableObject<Env> {
 
   async getStatus(ownerId: number): Promise<GetStatusResult> {
     const row = this.getRow();
-    if (!row || row.owner_id !== ownerId) return { ok: false, code: "not_found" };
+    if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
     return { ok: true, task: this.view(row) };
   }
 
@@ -731,7 +817,7 @@ export class TaskDO extends DurableObject<Env> {
   async cancel(ownerId: number): Promise<CancelResult> {
     const result = this.ctx.storage.transactionSync((): CancelResult => {
       const row = this.getRow();
-      if (!row || row.owner_id !== ownerId) return { ok: false, code: "not_found" };
+      if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
       const from = this.statusOf(row);
       if (isTerminal(from)) return { ok: true, status: from, changed: false };
       if (!canTransition(from, "CANCELLED")) {
@@ -753,6 +839,11 @@ export class TaskDO extends DurableObject<Env> {
       return { ok: true, status: "CANCELLED", changed: true };
     });
     if (result.ok && result.changed) {
+      this.emitAudit("task_cancelled", {
+        userId: ownerId,
+        caller: "parent",
+        reason: "parent_requested",
+      });
       this.notifyWaiters();
       await this.ensureAlarm();
     }
@@ -776,7 +867,7 @@ export class TaskDO extends DurableObject<Env> {
     }
     const result = this.ctx.storage.transactionSync((): AnswerResult & { changed?: boolean } => {
       const row = this.getRow();
-      if (!row || row.owner_id !== ownerId) return { ok: false, code: "not_found" };
+      if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
       const status = this.statusOf(row);
       const q = this.ctx.storage.sql
         .exec<{ answer: string | null }>(
@@ -816,7 +907,7 @@ export class TaskDO extends DurableObject<Env> {
     const steerId = idempotencyKey !== undefined ? `steer-${idempotencyKey}` : `steer-${ulid()}`;
     const result = this.ctx.storage.transactionSync((): SteerResult & { changed?: boolean } => {
       const row = this.getRow();
-      if (!row || row.owner_id !== ownerId) return { ok: false, code: "not_found" };
+      if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
       const status = this.statusOf(row);
       const existing = this.ctx.storage.sql
         .exec<{ message: string }>("SELECT message FROM steers WHERE steer_id = ?", steerId)
@@ -860,7 +951,7 @@ export class TaskDO extends DurableObject<Env> {
     timeoutSeconds: number | undefined,
   ): Promise<WaitResult> {
     const first = this.getRow();
-    if (!first || first.owner_id !== ownerId) return { ok: false, code: "not_found" };
+    if (!first || this.notOwner(first, ownerId)) return { ok: false, code: "not_found" };
 
     const c = parseCursor(cursor);
     if (!c.ok) return { ok: false, code: "invalid_cursor" };
@@ -946,7 +1037,7 @@ export class TaskDO extends DurableObject<Env> {
   /** 利用者に結果を返せる状態か（終端 + AgentDO の停止確認済み）を確かめて、結果を整形して返す。 */
   async result(ownerId: number): Promise<ResultOutcome> {
     const row = this.getRow();
-    if (!row || row.owner_id !== ownerId) return { ok: false, code: "not_found" };
+    if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
     const status = this.statusOf(row);
     if (!isTerminal(status) || !this.isStopped()) return { ok: false, code: "not_ready" };
     let dto: ResultDto;
@@ -1072,9 +1163,13 @@ export class TaskDO extends DurableObject<Env> {
     }
     if (isTerminal(this.currentStatus())) {
       // 終端のタスクの start は送らない（cancel の tombstone が遅れて届く start を拒否する）。
-      this.ctx.storage.sql.exec(
-        "UPDATE agent_link SET start_state = 'skipped' WHERE start_state = 'pending'",
-      );
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "UPDATE agent_link SET start_state = 'skipped' WHERE start_state = 'pending'",
+        );
+        this.giveUpDelivery("start");
+      });
+      this.notifyWaiters();
       return;
     }
     const base = JSON.parse(link.spec) as BaseSpec;
@@ -1453,6 +1548,19 @@ export class TaskDO extends DurableObject<Env> {
     row: TaskRow,
     kind: "start" | "refresh" | "final",
   ): Promise<{ id: number; token: string; expiresAt: number }> {
+    try {
+      return await this.issueTokenInner(row, kind);
+    } catch (e) {
+      // 失敗は監査ログだけに出す（再試行のたびに events を増やさない。FAILED になれば status_changed の reason が残る）
+      this.emitAudit("credential_issue_failed", { kind, reason: issueFailureCode(e) });
+      throw e;
+    }
+  }
+
+  private async issueTokenInner(
+    row: TaskRow,
+    kind: "start" | "refresh" | "final",
+  ): Promise<{ id: number; token: string; expiresAt: number }> {
     if (row.repository_id === null || row.installation_id === null) {
       throw new SetupFailure("github_app_not_configured");
     }
@@ -1466,14 +1574,20 @@ export class TaskDO extends DurableObject<Env> {
       throw new SetupFailure("github_app_not_configured");
     }
     const enc = await encryptString(await this.encKey(), issued.token, tokenAad(row.id));
-    const id = this.ctx.storage.sql
-      .exec<{ id: number }>(
-        "INSERT INTO git_token (enc, expires_at, kind) VALUES (?, ?, ?) RETURNING id",
-        enc,
-        issued.expiresAt,
-        kind,
-      )
-      .one().id;
+    // 保存と、発行の記録（events の audit と監査ログ。トークンの値は入れない）は同じトランザクション
+    const id = this.ctx.storage.transactionSync(() => {
+      const inserted = this.ctx.storage.sql
+        .exec<{ id: number }>(
+          "INSERT INTO git_token (enc, expires_at, kind) VALUES (?, ?, ?) RETURNING id",
+          enc,
+          issued.expiresAt,
+          kind,
+        )
+        .one().id;
+      this.auditBoth("credential_issued", { kind });
+      return inserted;
+    });
+    this.notifyWaiters();
     return { id, token: issued.token, expiresAt: issued.expiresAt };
   }
 
@@ -1809,10 +1923,18 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   private async revokeToken(r: TokenRow): Promise<void> {
-    if (r.expires_at > this.now()) {
+    const expired = r.expires_at <= this.now();
+    if (!expired) {
       await this.appClient().revokeInstallationToken(await this.decryptToken(r));
     }
-    this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", r.id);
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", r.id);
+      this.auditBoth("credential_revoked", {
+        kind: r.kind,
+        reason: expired ? "already_expired" : "revoked",
+      });
+    });
+    this.notifyWaiters();
   }
 
   // ---- 終端: PR の更新とトークンの失効 ----
@@ -1856,7 +1978,15 @@ export class TaskDO extends DurableObject<Env> {
       } catch (e) {
         if (e instanceof SetupFailure) {
           // App の設定が失われている・暗号文を復号できない。再試行しても直らないので、記録だけ閉じる（期限は 1 時間）。
-          this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", t.id);
+          this.ctx.storage.transactionSync(() => {
+            this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", t.id);
+            // 既存の warning が無い経路なので、events にも audit で残す
+            this.auditBoth("credential_revoke_given_up", {
+              kind: t.kind,
+              reason: "setup_failure",
+            });
+          });
+          this.notifyWaiters();
           continue;
         }
         this.onRevokeError(e);
@@ -1890,6 +2020,10 @@ export class TaskDO extends DurableObject<Env> {
           JSON.stringify([...(JSON.parse(gl.warnings) as string[]), warning]),
         );
         this.appendEvent("warning", { code: "token_revoke_failed" }, this.now());
+        // events には既存の warning(token_revoke_failed) があるので、監査ログだけに出す
+        this.emitAudit("credential_revoke_given_up", {
+          reason: retryable ? "attempts_exhausted" : "not_retryable",
+        });
       });
       this.notifyWaiters();
       return;

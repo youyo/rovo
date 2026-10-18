@@ -1,5 +1,6 @@
 import { AuthorizationError, authorizationErrorRedirect } from "@cloudflare/workers-oauth-provider";
 import type { Hono } from "hono";
+import { auditFromWorker } from "../audit-sink";
 import { GitHubClient, GitHubError, resolveGitHubBaseUrls } from "../github";
 import { CONSENT_CSP, renderConsentPage } from "./consent";
 import type { AuthProps } from "./props";
@@ -137,7 +138,13 @@ export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
       );
     } catch (error) {
       // 同意が期限切れ・使用済み・別のブラウザ・Cookie 無し。画面に返す（redirect しない）
-      if (error instanceof AuthorizationError) return badRequest();
+      if (error instanceof AuthorizationError) {
+        await auditFromWorker(c.env, "auth_failed", {
+          caller: "parent",
+          reason: "consent_rejected",
+        });
+        return badRequest();
+      }
       throw error;
     }
   });
@@ -152,6 +159,7 @@ export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
       resumed = await c.env.OAUTH_PROVIDER.finishUpstream(c.req.raw);
     } catch (error) {
       if (error instanceof AuthorizationError) {
+        await auditFromWorker(c.env, "auth_failed", { caller: "parent", reason: "invalid_state" });
         return new Response("The sign-in session is invalid or has expired. Please start again.", {
           status: 400,
           headers: NO_STORE,
@@ -162,11 +170,20 @@ export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
     const { request: original, headers } = resumed;
     const fail = (code: "access_denied" | "invalid_request" | "temporarily_unavailable") =>
       redirect(authorizationErrorRedirect(original, code), headers);
+    // 失敗の監査（固定コードだけ。GitHub の応答の内容・トークン・login は出さない）
+    const failed = (reason: string) =>
+      auditFromWorker(c.env, "auth_failed", { caller: "parent", reason });
 
     const params = new URL(c.req.url).searchParams;
-    if (params.get("error")) return fail("access_denied");
+    if (params.get("error")) {
+      await failed("github_denied");
+      return fail("access_denied");
+    }
     const code = params.get("code");
-    if (!code) return fail("invalid_request");
+    if (!code) {
+      await failed("missing_code");
+      return fail("invalid_request");
+    }
 
     try {
       const tokens = await config.client.exchangeCode({ code, redirectUri: config.redirectUri });
@@ -176,7 +193,14 @@ export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
         teamSlug: config.team,
         username: user.login,
       });
-      if (!member) return fail("access_denied");
+      if (!member) {
+        await auditFromWorker(c.env, "authz_denied", {
+          userId: user.id,
+          caller: "parent",
+          reason: "not_team_member",
+        });
+        return fail("access_denied");
+      }
 
       await c.env.USER_DO.getByName(String(user.id)).saveCredential(tokens);
 
@@ -192,6 +216,8 @@ export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
       return redirect(redirectTo, headers);
     } catch (error) {
       if (error instanceof GitHubError) {
+        // 一時的な障害（upstream_unavailable）は認証の失敗ではない
+        if (error.code !== "upstream_unavailable") await failed("code_exchange_rejected");
         return fail(
           error.code === "upstream_unavailable" ? "temporarily_unavailable" : "access_denied",
         );

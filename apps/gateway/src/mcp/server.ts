@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import { checkUrl, MAX_URL_LENGTH } from "../../../web/src/url-policy";
+import { auditFromWorker } from "../audit-sink";
 import { isAuthProps } from "../auth/props";
 import { checkStartInput, createTaskService, type Principal } from "../tasks/service";
 import type { WebPort } from "../web/contract";
@@ -178,6 +179,10 @@ async function runTool(
   try {
     const principal = principalFromContext();
     if (!principal) {
+      await auditFromWorker(env, "auth_failed", {
+        caller: "parent",
+        reason: "auth_context_missing",
+      });
       return toolErrorResult({ code: "reauth_required", message: "authentication required" });
     }
     const userDo = env.USER_DO.getByName(String(principal.githubUserId));
@@ -188,12 +193,28 @@ async function runTool(
   }
 }
 
+/**
+ * 認可の拒否（team 不所属・Installation に無い・push 権限が無い・資格が無い）を監査する。
+ * 一時的な障害（upstream_unavailable）と内部エラーは拒否ではないので出さない。入力・task_id・login は出さない。
+ */
+async function auditAuthzDenied(env: Env, principal: Principal, f: AuthzFailure): Promise<void> {
+  if (f.code !== "forbidden" && f.code !== "reauth_required") return;
+  await auditFromWorker(env, "authz_denied", {
+    userId: principal.githubUserId,
+    caller: "parent",
+    reason: f.code,
+  });
+}
+
 async function requireMember(
+  env: Env,
   principal: Principal,
   userDo: ReturnType<Env["USER_DO"]["getByName"]>,
 ): Promise<Outcome | null> {
   const m = await userDo.ensureMember(principal.githubUserId);
-  return m.ok ? null : failure(m);
+  if (m.ok) return null;
+  await auditAuthzDenied(env, principal, m);
+  return failure(m);
 }
 
 /** 翌日 0 時（UTC）までの秒数。quota_exceeded の retry_after_seconds に使う。 */
@@ -217,7 +238,7 @@ async function runWeb<R, V>(
   /** 回数を消費する前に行う入力の検査（失敗は invalid_input で、回数を消費しない）。 */
   precheck?: () => string | null,
 ): Promise<Outcome> {
-  const denied = await requireMember(principal, userDo);
+  const denied = await requireMember(env, principal, userDo);
   if (denied) return denied;
   const web = (env as unknown as { WEB?: WebPort }).WEB;
   if (!web) {
@@ -334,7 +355,10 @@ export function createRovoServer(env: Env): McpServer {
           principal.githubUserId,
           checked.value.input.repository,
         );
-        if (!authz.ok) return failure(authz);
+        if (!authz.ok) {
+          await auditAuthzDenied(env, principal, authz);
+          return failure(authz);
+        }
         const r = await service.start(principal, typed.value, {
           repositoryId: authz.repositoryId,
           installationId: authz.installationId,
@@ -354,7 +378,7 @@ export function createRovoServer(env: Env): McpServer {
         const typed = parseToolInput(taskIdSchema, args);
         if (!typed.ok) return typed;
         const { task_id } = typed.value;
-        const denied = await requireMember(principal, userDo);
+        const denied = await requireMember(env, principal, userDo);
         return denied ?? service.status(principal, task_id);
       }),
   );
@@ -369,7 +393,7 @@ export function createRovoServer(env: Env): McpServer {
       runTool(env, "task_wait", async (principal, userDo) => {
         const typed = parseToolInput(waitSchema, args);
         if (!typed.ok) return typed;
-        const denied = await requireMember(principal, userDo);
+        const denied = await requireMember(env, principal, userDo);
         return denied ?? service.wait(principal, typed.value);
       }),
   );
@@ -386,7 +410,7 @@ export function createRovoServer(env: Env): McpServer {
         const typed = parseToolInput(taskIdSchema, args);
         if (!typed.ok) return typed;
         const { task_id } = typed.value;
-        const denied = await requireMember(principal, userDo);
+        const denied = await requireMember(env, principal, userDo);
         return denied ?? service.result(principal, task_id);
       }),
   );
@@ -403,7 +427,7 @@ export function createRovoServer(env: Env): McpServer {
         const typed = parseToolInput(taskIdSchema, args);
         if (!typed.ok) return typed;
         const { task_id } = typed.value;
-        const denied = await requireMember(principal, userDo);
+        const denied = await requireMember(env, principal, userDo);
         return denied ?? service.cancel(principal, task_id);
       }),
   );
@@ -415,7 +439,7 @@ export function createRovoServer(env: Env): McpServer {
       runTool(env, "task_answer", async (principal, userDo) => {
         const typed = parseToolInput(answerSchema, args);
         if (!typed.ok) return typed;
-        const denied = await requireMember(principal, userDo);
+        const denied = await requireMember(env, principal, userDo);
         return denied ?? service.answer(principal, typed.value);
       }),
   );
@@ -427,7 +451,7 @@ export function createRovoServer(env: Env): McpServer {
       runTool(env, "task_steer", async (principal, userDo) => {
         const typed = parseToolInput(steerSchema, args);
         if (!typed.ok) return typed;
-        const denied = await requireMember(principal, userDo);
+        const denied = await requireMember(env, principal, userDo);
         return denied ?? service.steer(principal, typed.value);
       }),
   );

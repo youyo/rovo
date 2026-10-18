@@ -391,6 +391,28 @@ const deliveriesOf = (taskId: string) =>
     steers: { steer_id: string; delivery_state: string }[];
   }>("/__test/task/deliveries", { task_id: taskId });
 const holdDeliveries = (value: boolean) => testPost("/__test/hold-deliveries", { value });
+/** 監査イベント（Worker 側 + そのタスクの TaskDO 側。ENVIRONMENT=test のときだけある /__test/audit）。 */
+interface AuditRec {
+  audit: true;
+  event: string;
+  ts: number;
+  userId?: number | string;
+  taskId?: string;
+  caller?: string;
+  reason?: string;
+  kind?: string;
+}
+const auditOf = async (taskId: string) =>
+  (await testPost<{ records: AuditRec[] }>("/__test/audit", { task_id: taskId })).records;
+/**
+ * 二重化する監査イベント（TaskDO の events にも type "audit" の固定コードで積むもの）。
+ * credential_revoke_given_up は setup_failure のときだけ（他は既存の warning: token_revoke_failed が events 側）。
+ */
+const isDual = (a: { event: string; reason?: string }) =>
+  a.event === "credential_issued" ||
+  a.event === "credential_revoked" ||
+  a.event === "delivery_given_up" ||
+  (a.event === "credential_revoke_given_up" && a.reason === "setup_failure");
 
 const COMMIT_STEPS = [FIX, tool("git_commit", { message: "fix: correct add" })];
 
@@ -554,6 +576,33 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     expect(pr?.body).toContain("The task ended as CANCELLED.");
     await waitFor("tokens revoked", () => allRevoked(tokensSince(tokensBefore)));
 
+    // 監査（Phase 6 M1）: cancel と、トークンの発行・失効が、監査ログ（test 用シンク）と events の両方に残る
+    const audits = await waitFor("credential_revoked audit", async () => {
+      const recs = await auditOf(taskId);
+      return recs.some((a) => a.event === "credential_revoked") ? recs : undefined;
+    });
+    expect(audits.find((a) => a.event === "task_cancelled")).toMatchObject({
+      taskId,
+      caller: "parent",
+      reason: "parent_requested",
+    });
+    expect(audits.filter((a) => a.event === "credential_issued").map((a) => a.kind)).toContain(
+      "start",
+    );
+    const all = await collect(client, taskId);
+    const auditEvents = all.events.filter((e) => e.type === "audit");
+    expect(auditEvents.map((e) => e.payload.code)).toEqual(
+      expect.arrayContaining(["credential_issued", "credential_revoked"]),
+    );
+    for (const e of auditEvents) {
+      expect(Object.keys(e.payload).every((k) => k === "code" || k === "kind")).toBe(true);
+    }
+    // 二重化した監査ログの件数と、events の audit の件数が合う（acceptance 16）
+    expect(audits.filter(isDual).length).toBe(auditEvents.length);
+    // 発行したトークンの値は、監査ログにも events にも出ない
+    const dump = JSON.stringify([audits, all.events]);
+    for (const t of tokensSince(tokensBefore)) expect(dump).not.toContain(t.token);
+
     // 停止確認の後は同時実行の枠が解放され、同じユーザーが次の task_start できる
     const next = await startWhenFree(client, startArgs("c-next", "scenario:c-next"));
     expect(next.isError, JSON.stringify(next.body)).toBe(false);
@@ -572,6 +621,34 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     const next = await startWhenFree(client, startArgs("d-next", "scenario:d-next"));
     expect(next.isError).toBe(true);
     expect(next.body.code).toBe("budget_exceeded");
+  });
+
+  it("x. 予算超過で BUDGET_EXCEEDED になると task_ended_by_limit が監査に出る（events は status_changed の reason）", async () => {
+    const client = await newClient("xavier");
+    const tokensBefore = tokensNow();
+    // 1 回目の呼び出しで $10（タスクの予算）を使い切る。次のモデル呼び出しは、呼び出し前のハードキャップで止まる
+    const { taskId } = await startTask(client, "x-budget", [
+      { ...tool("read_file", { path: "calc.js" }), usage: { input: 10_000_000 } },
+      tool("read_file", { path: "calc.js" }),
+      report("到達しない"),
+    ]);
+    const { status, events } = await collect(client, taskId);
+    expect(status, JSON.stringify(events)).toBe("BUDGET_EXCEEDED");
+    expect(
+      events.find((e) => e.type === "status_changed" && e.payload.status === "BUDGET_EXCEEDED")
+        ?.payload,
+    ).toMatchObject({ reason: "budget_exceeded" });
+
+    const audits = await auditOf(taskId);
+    const limit = audits.filter((a) => a.event === "task_ended_by_limit");
+    expect(limit).toHaveLength(1);
+    expect(limit[0]).toMatchObject({ taskId, caller: "system", reason: "budget_exceeded" });
+    // events には既存の status_changed の reason があるので、audit イベントは二重に積まない
+    expect(events.some((e) => e.type === "audit" && e.payload.code === "task_ended_by_limit")).toBe(
+      false,
+    );
+    await resultOf(client, taskId);
+    await waitFor("tokens revoked", () => allRevoked(tokensSince(tokensBefore)));
   });
 
   it("e. 別ユーザーは他人のタスクの task_result / task_status / task_cancel が not_found", async () => {

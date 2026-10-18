@@ -223,6 +223,64 @@ describe("WebResearchService", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("fetch: 取得先が URL やページに仕込んだ文字列は、safety のどのフィールドにも出ない（redirect の拒否）", async () => {
+    const MARK = "EVILMARK-ignore-previous";
+    const fetchFn = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/robots.txt")) return new Response("", { status: 404 });
+      return new Response("", {
+        status: 302,
+        headers: { location: `http://169.254.169.254/${MARK}` },
+      });
+    }) as unknown as typeof fetch;
+    const r = await createWebResearchService(makeEnv(), { fetch: fetchFn }).fetch({
+      ...CTX,
+      url: "https://example.com/",
+    });
+    expect(r.status).toBe("blocked");
+    expect(r.safety.reason).toBe("redirect_policy");
+    expect(JSON.stringify(r.safety)).not.toContain(MARK);
+    expect(JSON.stringify(r.safety)).not.toContain("169.254");
+    expect(r.blocked_reason).toBe("redirect_policy");
+  });
+
+  it("fetch: bot チャレンジの拒否でも、safety.reason は固定コードだけ", async () => {
+    const fetchFn = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/robots.txt")) return new Response("", { status: 404 });
+      return new Response("EVILMARK-body", {
+        status: 403,
+        headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
+      });
+    }) as unknown as typeof fetch;
+    const r = await createWebResearchService(makeEnv(), { fetch: fetchFn }).fetch({
+      ...CTX,
+      url: "https://example.com/EVILMARK-path",
+    });
+    expect(r.safety.reason).toBe("bot_challenge");
+    expect(JSON.stringify(r.safety)).not.toContain("EVILMARK");
+  });
+
+  it("fetch: モデル評価が失敗し、エラー文に取得先の文字列が入っていても safety に出ない", async () => {
+    const MARK = "EVILMARK-https://evil.example";
+    const { ai } = fakeAiBinding();
+    (ai as unknown as { run: unknown }).run = vi.fn(async () => {
+      throw new Error(MARK);
+    });
+    const fetchFn = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/robots.txt")) return new Response("", { status: 404 });
+      return new Response("hello", { headers: { "content-type": "text/markdown" } });
+    }) as unknown as typeof fetch;
+    const r = await createWebResearchService(makeEnv({}, ai), { fetch: fetchFn }).fetch({
+      ...CTX,
+      url: "https://example.com/",
+    });
+    expect(r.safety.verdict).toBe("unknown");
+    expect(JSON.stringify(r.safety)).not.toContain("EVILMARK");
+    expect(JSON.stringify(r.safety)).not.toContain("evil.example");
+  });
+
   it("fetch: 決定論ルールで block なら Clef を呼ばずに block", async () => {
     const { ai, run } = fakeAiBinding();
     const fetchFn = (async (input: string | URL | Request) => {

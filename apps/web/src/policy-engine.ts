@@ -266,24 +266,22 @@ export function decide(
   }
   const categories = CATEGORIES.filter((c) => flagged.has(c));
 
+  // reason は固定の理由コードとルール名だけから作る（取得先由来の文字列は入れない）。
+  // 親と子のモデルまで届くので、failure などの自由文は載せない。
   const parts: string[] = [];
-  if (findings.length > 0)
-    parts.push(`rules: ${[...new Set(findings.map((f) => f.rule))].join(", ")}`);
-  if (scores && categories.length > 0) {
-    const detail = CATEGORIES.filter((c) => (scores[c] ?? 0) >= thresholds.caution)
-      .map((c) => `${c}=${(scores[c] ?? 0).toFixed(2)}`)
-      .join(", ");
-    if (detail) parts.push(`model: ${detail}`);
+  for (const rule of new Set(findings.map((f) => f.rule))) parts.push(`injection_rule:${rule}`);
+  if (scores) {
+    for (const c of CATEGORIES) {
+      if ((scores[c] ?? 0) >= thresholds.caution) parts.push(`model_score:${c}`);
+    }
   }
   if (model && !model.complete) {
-    parts.push(
-      `model evaluation incomplete (${model.evaluatedChars}/${model.totalChars} chars${model.failure ? `: ${model.failure}` : ""})`,
-    );
+    parts.push(model.failure === "state_truncated" ? "state_truncated" : "evaluator_failed");
   }
   if (model === null && modelVerdict === "unknown" && verdict !== "block") {
-    parts.push("model evaluation not performed");
+    parts.push("model_not_performed");
   }
-  const reason = parts.length > 0 ? parts.join("; ") : "no issues detected";
+  const reason = parts.length > 0 ? parts.join("; ") : "no_issues";
 
   return {
     verdict,

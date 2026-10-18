@@ -39,6 +39,20 @@ const REAPER_TIMEOUT_MS = 10_000;
 const STREAM_GRACE_MS = 2_000;
 const DESTROY_WAIT_MS = 15_000;
 const CLONE_TIMEOUT_MS = 5 * 60_000;
+/**
+ * コンテナが ready になる（exec が応答する）までの 1 回あたりの期限。
+ * 正常な起動は E2E の実測で ensureReady 全体が 0.9 秒前後（最大 0.92 秒、clone を含む）。その約 30 倍を見る。
+ * 止まった起動は何分待っても進まないので、これを超えたら破棄して起動し直す。
+ */
+const BOOT_ATTEMPT_MS = 30_000;
+const BOOT_MAX_ATTEMPTS = 3;
+/**
+ * ensureReady の起動待ち全体の上限。E2E の 1 操作の期限（120 秒）より短くして、
+ * 3 回目まで使い切る前に呼び出し側が諦めないようにする。破棄の待ち（最大 15 秒/回）は別に数える。
+ * AgentDO の setup は ensureReady の失敗を最大 3 回再試行する（tick 30 秒間隔）ので、1 回の失敗は 100 秒以内に確定する。
+ */
+const BOOT_BUDGET_MS = 75_000;
+const BOOT_POLL_MS = 500;
 /** 期限の延長の上限: 作成から 2 時間（タスクの最長）+ 回答待ちの累計の上限 24 時間 */
 const MAX_TASK_MS = 2 * 60 * 60_000;
 const MAX_INPUT_PAUSE_MS = 24 * 60 * 60_000;
@@ -90,6 +104,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private reapQueue: Promise<unknown> = Promise.resolve();
   /** destroy の監視期限（ms）。destroy() の Promise を待つ前から数える。 */
   private destroyWaitMs = DESTROY_WAIT_MS;
+  /** ready を待つ 1 回あたりの期限と、全試行の合計の上限（ms）。テストで短くする。 */
+  private bootAttemptMs = BOOT_ATTEMPT_MS;
+  private bootBudgetMs = BOOT_BUDGET_MS;
 
   // ---- 永続状態 ----
 
@@ -458,39 +475,94 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     // destroy を待っている間に terminate・期限・世代が変わりうる。start の直前に必ず確かめ直す
     this.assertBootCurrent(g);
     let started = false;
-    if (!container.running) {
-      this.ctx.storage.kv.delete("baseline");
-      container.start({
-        image: container.images.workspace,
-        enableInternet: false,
-        env: BASE_ENV,
-      });
-      started = true;
-    }
-    // DO だけが再起動してコンテナが生きている場合も、傍受は登録し直す（同じ宛先の再登録はハンドラを置き換える）。
-    // リポジトリは永続化した spec から導く（未設定のまま登録することはない）。
-    const props: OutboundGatewayProps = {
-      repo: parseRepository(spec.repository),
-      task: spec.branch,
-      // トークンの読み出しと push 先の ref はこの値で決める（DO の名前 = task id）
-      taskId: this.ctx.id.name ?? "",
-    };
-    const gateway = this.ctx.exports.OutboundGateway({ props });
-    await container.interceptOutboundHttps("*", gateway);
-    await container.interceptAllOutboundHttp(gateway);
-    this.assertBootCurrent(g);
-    // 起動直後は exec が失敗しうるので、応答するまで待つ
-    const deadline = Date.now() + 120_000;
-    for (;;) {
-      try {
-        const p = await container.exec(["true"]);
-        if ((await p.exitCode) === 0) break;
-      } catch {
-        // まだ起動中
+    const budgetEnd = Date.now() + this.bootBudgetMs;
+    const trace: string[] = [];
+    let ready = false;
+    for (let attempt = 1; attempt <= BOOT_MAX_ATTEMPTS && !ready; attempt++) {
+      const attemptStart = Date.now();
+      // この試行の期限。全体の上限が先に来るならそちらに合わせる
+      const until = Math.min(attemptStart + this.bootAttemptMs, budgetEnd);
+      if (!container.running) {
+        this.ctx.storage.kv.delete("baseline");
+        container.start({
+          image: container.images.workspace,
+          enableInternet: false,
+          env: BASE_ENV,
+        });
+        started = true;
       }
+      // DO だけが再起動してコンテナが生きている場合も、傍受は登録し直す（同じ宛先の再登録はハンドラを置き換える）。
+      // リポジトリは永続化した spec から導く（未設定のまま登録することはない）。
+      const props: OutboundGatewayProps = {
+        repo: parseRepository(spec.repository),
+        task: spec.branch,
+        // トークンの読み出しと push 先の ref はこの値で決める（DO の名前 = task id）
+        taskId: this.ctx.id.name ?? "",
+      };
+      const gateway = this.ctx.exports.OutboundGateway({ props });
+      let stage = "intercept";
+      let probes = 0;
+      let lastError = "";
+      const stageEnds: string[] = [];
+      const lap = (name: string, from: number) => stageEnds.push(`${name}=${Date.now() - from}ms`);
+      const t0 = Date.now();
+      // 傍受の登録も止まりうるので、ready の待ちと同じ期限の中で数える
+      const intercepted = await this.raceUntil(
+        g,
+        until,
+        Promise.all([
+          container.interceptOutboundHttps("*", gateway),
+          container.interceptAllOutboundHttp(gateway),
+        ]),
+      );
+      lap("intercept", t0);
       this.assertBootCurrent(g);
-      if (Date.now() > deadline) throw new Error("container did not become ready");
-      await sleep(500);
+      if (intercepted.timedOut) {
+        stage = "intercept";
+      } else {
+        stage = "probe";
+        // 起動直後は exec が失敗しうるので、応答するまで待つ。exec が返らないこと自体が「起動が止まった」の典型なので、
+        // 呼び出しを待ち続けず、期限と terminate・世代の確認を一定間隔で挟む。
+        const t1 = Date.now();
+        for (;;) {
+          probes += 1;
+          const probe = await this.raceUntil(
+            g,
+            until,
+            (async () => {
+              const p = await container.exec(["true"]);
+              return (await p.exitCode) === 0;
+            })().catch((e: unknown) => {
+              lastError = e instanceof Error ? e.message.slice(0, 120) : "error";
+              return false;
+            }),
+          );
+          this.assertBootCurrent(g);
+          if (!probe.timedOut && probe.value === true) {
+            ready = true;
+            break;
+          }
+          if (probe.timedOut || Date.now() >= until) break;
+          await sleep(BOOT_POLL_MS);
+          this.assertBootCurrent(g);
+          if (Date.now() >= until) break;
+        }
+        lap("probe", t1);
+      }
+      trace.push(
+        `#${attempt} ${ready ? "ready" : `stalled-at-${stage}`} ${stageEnds.join(" ")} probes=${probes}${lastError ? ` last="${lastError}"` : ""}`,
+      );
+      if (ready) break;
+      // 起動が止まった: 破棄して停止を確かめ、最初からやり直す（残り時間が足りなければ打ち切る）
+      await this.destroyContainer();
+      this.assertBootCurrent(g);
+      if (budgetEnd - Date.now() < BOOT_POLL_MS) break;
+    }
+    if (trace.length > 0) console.warn(`[sandbox-boot] ${trace.join(" | ")}`);
+    if (!ready) {
+      // 失敗は従来どおりのメッセージ。E2E のときだけ、段階ごとの所要時間を診断ログに残すために添える
+      const detail = this.env.ENVIRONMENT === "test" ? ` (${trace.join(" | ")})` : "";
+      throw new Error(`container did not become ready${detail}`);
     }
     this.assertBootCurrent(g);
     if (started) {
@@ -507,6 +579,37 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     this.assertBootCurrent(g);
     await this.armAlarm();
     return started;
+  }
+
+  /**
+   * promise を、期限（絶対時刻）まで待つ。待っている間も BOOT_POLL_MS ごとに terminate・世代を確かめ、
+   * 変わっていたら（boot を止めるため）すぐに投げる。期限が来たら timedOut を返す（promise は放置する）。
+   */
+  private async raceUntil<T>(
+    g: number,
+    until: number,
+    promise: Promise<T>,
+  ): Promise<{ timedOut: false; value: T } | { timedOut: true }> {
+    const settled = promise.then(
+      (value) => ({ done: true as const, value }),
+      (error: unknown) => ({ done: true as const, error }),
+    );
+    for (;;) {
+      const remaining = until - Date.now();
+      const r = await Promise.race([
+        settled,
+        sleep(Math.max(0, Math.min(BOOT_POLL_MS, remaining))),
+      ]);
+      if (r) {
+        if ("error" in r) throw r.error;
+        return { timedOut: false, value: r.value };
+      }
+      this.assertBootCurrent(g);
+      if (Date.now() >= until) {
+        // 放置した promise の失敗を Unhandled にしない（settled が拾っている）
+        return { timedOut: true };
+      }
+    }
   }
 
   /**

@@ -31,8 +31,23 @@ class FakeContainer {
   async setInactivityTimeout() {}
   async interceptOutboundHttps() {}
   async interceptAllOutboundHttp() {}
-  async exec(): Promise<never> {
-    throw new Error("not available in this fake");
+  /** true なら、exec が実際のコンテナのように振る舞う（readyOnStart 回目の start より前は応答しない） */
+  scripted = false;
+  readyOnStart = 1;
+  async exec(argv?: string[]): Promise<unknown> {
+    if (!this.scripted) throw new Error("not available in this fake");
+    // 起動が止まったコンテナ: exec が返らない
+    if (this.startCalls < this.readyOnStart) return new Promise<never>(() => {});
+    const text = (t: string) =>
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          if (t) c.enqueue(new TextEncoder().encode(t));
+          c.close();
+        },
+      });
+    // prepareWorkspace が「既に作業ブランチにいる」と判断するよう、ブランチ名を返す
+    const branch = argv?.includes("--abbrev-ref") ? "agent/task-x\n" : "";
+    return { stdout: text(branch), stderr: text(""), exitCode: Promise.resolve(0) };
   }
 }
 
@@ -46,6 +61,7 @@ const runInDO = runInDurableObject as unknown as (
 const spec = () => ({
   repository: "acme/hello",
   baseSha: SHA,
+  initialSha: SHA,
   branch: "agent/task-x",
   deadlineAt: Date.now() + 3_600_000,
 });
@@ -125,6 +141,83 @@ describe("終端後の操作", () => {
       const r = await inst.exec(["true"]);
       expect(r).toMatchObject({ exitCode: -1, terminated: true, timedOut: false });
       expect(r.stderr).toMatch(/terminated/i);
+    });
+  });
+});
+
+describe("起動が止まったコンテナの扱い", () => {
+  it("1回目の起動が ready にならなければ、破棄して2回目で成功する", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("boot-stall-retry");
+    await runInDO(stub, async (inst: Inst) => {
+      const fake = new FakeContainer(false, 0);
+      fake.scripted = true;
+      fake.readyOnStart = 2; // 1回目の start では応答しない
+      inst.maybeContainer = () => fake;
+      inst.bootAttemptMs = 300;
+      inst.bootBudgetMs = 5_000;
+      await inst.ensureReady(spec());
+      expect(fake.startCalls).toBe(2);
+      expect(fake.destroyCalls).toBe(1);
+      expect(fake.running).toBe(true);
+    });
+  });
+
+  it("3回とも ready にならなければ、container did not become ready で失敗し、コンテナは止めておく", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("boot-stall-fail");
+    await runInDO(stub, async (inst: Inst) => {
+      const fake = new FakeContainer(false, 0);
+      fake.scripted = true;
+      fake.readyOnStart = 99;
+      inst.maybeContainer = () => fake;
+      inst.bootAttemptMs = 200;
+      inst.bootBudgetMs = 5_000;
+      const started = Date.now();
+      await expect(inst.ensureReady(spec())).rejects.toThrow(/container did not become ready/);
+      expect(fake.startCalls).toBe(3);
+      expect(fake.destroyCalls).toBe(3);
+      expect(fake.running).toBe(false);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    });
+  });
+
+  it("全体の上限に達したら、試行が残っていても打ち切る", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("boot-stall-budget");
+    await runInDO(stub, async (inst: Inst) => {
+      const fake = new FakeContainer(false, 0);
+      fake.scripted = true;
+      fake.readyOnStart = 99;
+      inst.maybeContainer = () => fake;
+      inst.bootAttemptMs = 1_000;
+      inst.bootBudgetMs = 1_700; // 2回目の試行は約 700ms しかもらえず、3回目は始めない
+      await expect(inst.ensureReady(spec())).rejects.toThrow(/container did not become ready/);
+      expect(fake.startCalls).toBe(2);
+    });
+  });
+
+  it("ready を待っている間に terminate が来たら、すぐに止まり、再試行しない", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("boot-stall-terminate");
+    await runInDO(stub, async (inst: Inst) => {
+      const fake = new FakeContainer(false, 0);
+      fake.scripted = true;
+      fake.readyOnStart = 99;
+      inst.maybeContainer = () => fake;
+      inst.bootAttemptMs = 10_000;
+      inst.bootBudgetMs = 60_000;
+      const ensure = inst.ensureReady(spec()).then(
+        () => "ok",
+        (e: Error) => e.message,
+      );
+      while (fake.startCalls < 1) await sleep(10); // start 済み = ready を待っている
+      await sleep(50);
+      const started = Date.now();
+      const t = await inst.terminate();
+      const outcome = await ensure;
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(t).toEqual({ stopped: true });
+      expect(outcome).not.toBe("ok");
+      expect(outcome).not.toMatch(/did not become ready/);
+      expect(fake.startCalls).toBe(1);
+      expect(fake.running).toBe(false);
     });
   });
 });

@@ -106,7 +106,7 @@ export function createWebResearchService(
           model_version: info.modelVersion,
           verdict: "block",
           categories: [],
-          reason: `${outcome.reason}: ${outcome.detail}`,
+          reason: outcome.reason,
           evaluated: false,
           model: { verdict: "unknown", scores: null },
           policy: { verdict: "block", rules: [outcome.reason] },

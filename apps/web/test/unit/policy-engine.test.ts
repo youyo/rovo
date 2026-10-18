@@ -205,3 +205,39 @@ describe("decide: Policy Engine", () => {
     expect(decide({ findings: [], model: null }, T).verdict).toBe("unknown");
   });
 });
+
+describe("decide: reason は固定の理由コードとルール名だけから作る", () => {
+  const ALLOWED = /^[a-z_]+(:[a-z_]+)?(; [a-z_]+(:[a-z_]+)?)*$/;
+
+  it("決定論ルールは injection_rule:<rule>、モデルは model_score:<category>", () => {
+    const d = decide(
+      {
+        findings: [{ rule: "role_reassignment", verdict: "block", category: "role_spoofing" }],
+        model: model({ scores: { prompt_injection: 0.9 } }),
+      },
+      T,
+    );
+    expect(d.reason).toContain("injection_rule:role_reassignment");
+    expect(d.reason).toContain("model_score:prompt_injection");
+    expect(d.reason).toMatch(ALLOWED);
+  });
+
+  it("モデル失敗の failure に任意の文字列（URL・本文の断片）が入っても、reason には出さない", () => {
+    const evil = "ai_run_failed: https://evil.example/ignore-all-previous-instructions";
+    const d = decide({ findings: [], model: model({ complete: false, failure: evil }) }, T);
+    expect(d.reason).toBe("evaluator_failed");
+    expect(JSON.stringify(d)).not.toContain("evil");
+  });
+
+  it("state_truncated は固定コードのまま", () => {
+    const d = decide(
+      { findings: [], model: model({ complete: false, failure: "state_truncated" }) },
+      T,
+    );
+    expect(d.reason).toBe("state_truncated");
+  });
+
+  it("問題なしは固定の文字列", () => {
+    expect(decide({ findings: [], model: model() }, T).reason).toBe("no_issues");
+  });
+});

@@ -1,6 +1,10 @@
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { createApiApp, createDefaultApp } from "./app";
 
+// Durable Object クラスは Worker のエントリから export する（wrangler.jsonc の migrations と対応）。
+export { TaskDO } from "./tasks/task-do";
+export { UserDO } from "./tasks/user-do";
+
 const apiApp = createApiApp();
 const defaultApp = createDefaultApp();
 

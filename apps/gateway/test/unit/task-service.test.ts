@@ -1,0 +1,297 @@
+import { env } from "cloudflare:workers";
+import { describe, expect, it } from "vitest";
+import { createTaskService, type Principal } from "../../src/tasks/service";
+import { newTaskId, newUserId, taskStub, userStub } from "./helpers";
+
+const startInput = {
+  repository: "acme/widgets",
+  base_ref: "main",
+  base_sha: "0123456789abcdef",
+  title: "Implement authentication",
+  instructions: "Implement OAuth authentication.",
+  acceptance_criteria: ["tests pass"],
+  constraints: ["do not merge"],
+};
+
+function principal(): Principal {
+  return { githubUserId: newUserId(), login: "alice" };
+}
+
+describe("task service: start", () => {
+  it("task_id と CREATING を返し、draft_pr_url は null、note を含む", async () => {
+    const svc = createTaskService(env);
+    const r = await svc.start(principal(), { ...startInput });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toMatchObject({ status: "CREATING", draft_pr_url: null });
+    expect(r.value.task_id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(r.value.note).toEqual(expect.any(String));
+  });
+
+  it("同じ idempotency_key での再試行は同じ task_id", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    const a = await svc.start(p, { ...startInput, idempotency_key: "retry-1" });
+    const b = await svc.start(p, { ...startInput, idempotency_key: "retry-1" });
+    expect(a.ok && b.ok && a.value.task_id === b.value.task_id).toBe(true);
+  });
+
+  it("同じキーで入力が違えば conflict", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    await svc.start(p, { ...startInput, idempotency_key: "k" });
+    const r = await svc.start(p, { ...startInput, title: "other", idempotency_key: "k" });
+    expect(r).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+
+  it("実行中のタスクがあれば concurrency_limit", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    await svc.start(p, { ...startInput });
+    const r = await svc.start(p, { ...startInput, title: "second" });
+    expect(r).toMatchObject({ ok: false, error: { code: "concurrency_limit" } });
+  });
+
+  it("idempotency_key 省略の2回の start は別タスク扱い（2回目は concurrency_limit）", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    expect((await svc.start(p, { ...startInput })).ok).toBe(true);
+    expect(await svc.start(p, { ...startInput })).toMatchObject({
+      ok: false,
+      error: { code: "concurrency_limit" },
+    });
+  });
+
+  it.each([
+    ["空", ""],
+    ["129文字", "a".repeat(129)],
+    ["不正な文字", "a b"],
+    ["文字列でない", 123],
+  ])("idempotency_key が%sなら invalid_input（予約しない）", async (_n, key) => {
+    const svc = createTaskService(env);
+    const p = principal();
+    const r = await svc.start(p, { ...startInput, idempotency_key: key });
+    expect(r).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+    expect((await svc.start(p, { ...startInput })).ok).toBe(true);
+  });
+
+  it("入力が不正なら invalid_input", async () => {
+    const svc = createTaskService(env);
+    const r = await svc.start(principal(), { ...startInput, repository: "nope" });
+    expect(r).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+  });
+
+  it("repository_id / installation_id を TaskDO に渡す", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    const r = await svc.start(p, { ...startInput }, { repositoryId: 9, installationId: 3 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { runInDurableObject } = await import("cloudflare:test");
+    const [row] = await runInDurableObject(taskStub(r.value.task_id), (_i, s) =>
+      s.storage.sql.exec("SELECT repository_id, installation_id, owner_id FROM task").toArray(),
+    );
+    expect(row).toEqual({ repository_id: 9, installation_id: 3, owner_id: p.githubUserId });
+  });
+
+  it("ensureCreated が失敗しても予約は解放されず、同じキーの再試行で同じ task_id になる", async () => {
+    let fail = true;
+    const svc = createTaskService(env, {
+      tasks: (id) => {
+        const real = taskStub(id);
+        return new Proxy(real, {
+          get(target, prop) {
+            if (prop === "ensureCreated") {
+              return async (input: never) => {
+                if (fail) {
+                  fail = false;
+                  throw new Error("network lost");
+                }
+                return target.ensureCreated(input);
+              };
+            }
+            return Reflect.get(target, prop);
+          },
+        });
+      },
+    });
+    const p = principal();
+    await expect(svc.start(p, { ...startInput, idempotency_key: "k1" })).rejects.toThrow(
+      "network lost",
+    );
+    // 予約は残っている: 別キーは concurrency_limit
+    expect(await svc.start(p, { ...startInput, idempotency_key: "k2" })).toMatchObject({
+      ok: false,
+      error: { code: "concurrency_limit" },
+    });
+    const retry = await svc.start(p, { ...startInput, idempotency_key: "k1" });
+    expect(retry).toMatchObject({ ok: true, value: { status: "CREATING" } });
+  });
+
+  it("回収済み(tombstone)のキーで再試行すると expired", async () => {
+    let failFirst = true;
+    const svc = createTaskService(env, {
+      tasks: (id) => {
+        const real = taskStub(id);
+        return new Proxy(real, {
+          get(target, prop) {
+            if (prop === "ensureCreated") {
+              return async (input: never) => {
+                if (failFirst) {
+                  failFirst = false;
+                  throw new Error("lost");
+                }
+                return target.ensureCreated(input);
+              };
+            }
+            return Reflect.get(target, prop);
+          },
+        });
+      },
+    });
+    const p = principal();
+    await expect(svc.start(p, { ...startInput, idempotency_key: "stale" })).rejects.toThrow("lost");
+    // 10分経過させ、別キーの start で未作成の予約を回収(tombstone)させる
+    const { runInDurableObject } = await import("cloudflare:test");
+    const t = Date.now() + 11 * 60 * 1000;
+    await runInDurableObject(userStub(p.githubUserId), (i) => {
+      (i as unknown as { now: () => number }).now = () => t;
+    });
+    expect((await svc.start(p, { ...startInput, idempotency_key: "fresh", title: "x" })).ok).toBe(
+      true,
+    );
+    // 古いキーでの再試行は拒否される。新しく始めるには新しいキーが必要
+    expect(await svc.start(p, { ...startInput, idempotency_key: "stale" })).toMatchObject({
+      ok: false,
+      error: { code: "expired" },
+    });
+  });
+});
+
+describe("task service: status / wait / cancel", () => {
+  async function started() {
+    const svc = createTaskService(env);
+    const p = principal();
+    const r = await svc.start(p, { ...startInput });
+    if (!r.ok) throw new Error("start failed");
+    return { svc, p, taskId: r.value.task_id };
+  }
+
+  it("status は仕様の項目を返す", async () => {
+    const { svc, p, taskId } = await started();
+    const r = await svc.status(p, taskId);
+    expect(r.ok && r.value).toMatchObject({
+      task_id: taskId,
+      status: "CREATING",
+      repository: "acme/widgets",
+      title: "Implement authentication",
+      draft_pr_url: null,
+      latest_cursor: "1",
+    });
+    expect(r.ok && Date.parse(r.value.created_at)).not.toBeNaN();
+    expect(r.ok && Date.parse(r.value.updated_at)).not.toBeNaN();
+  });
+
+  it("別ユーザー・存在しない・形式不正の task_id はすべて not_found", async () => {
+    const { svc, taskId } = await started();
+    const other = principal();
+    for (const id of [taskId, newTaskId(), "task_123", ""]) {
+      for (const call of [
+        () => svc.status(other, id),
+        () => svc.wait(other, { task_id: id }),
+        () => svc.cancel(other, id),
+      ]) {
+        const r = await call();
+        expect(r).toMatchObject({ ok: false, error: { code: "not_found" } });
+      }
+    }
+  });
+
+  it("wait は task_id を付けて返し、invalid_cursor / invalid_input を写す", async () => {
+    const { svc, p, taskId } = await started();
+    const r = await svc.wait(p, { task_id: taskId, cursor: "0", timeout_seconds: 0 });
+    expect(r.ok && r.value).toMatchObject({ task_id: taskId, status: "CREATING", cursor: "1" });
+    expect(await svc.wait(p, { task_id: taskId, cursor: "99" })).toMatchObject({
+      ok: false,
+      error: { code: "invalid_cursor" },
+    });
+    expect(await svc.wait(p, { task_id: taskId, timeout_seconds: -1 })).toMatchObject({
+      ok: false,
+      error: { code: "invalid_input" },
+    });
+  });
+
+  it("wait の retry_after_seconds を error ではなく結果に含める", async () => {
+    const { svc, p, taskId } = await started();
+    const pendings = Array.from({ length: 16 }, () =>
+      svc.wait(p, { task_id: taskId, cursor: "1", timeout_seconds: 30 }),
+    );
+    const { runInDurableObject } = await import("cloudflare:test");
+    for (let i = 0; i < 200; i++) {
+      const n = await runInDurableObject(taskStub(taskId), (inst) => {
+        return (inst as unknown as { waiters: Set<unknown> }).waiters.size;
+      });
+      if (n >= 16) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const over = await svc.wait(p, { task_id: taskId, cursor: "1" });
+    expect(over.ok && over.value.retry_after_seconds).toBeGreaterThan(0);
+    await svc.cancel(p, taskId);
+    await Promise.all(pendings);
+  });
+
+  it("cancel: TaskDO を CANCELLED にし、予約を解放する（新しい start が通る）", async () => {
+    const { svc, p, taskId } = await started();
+    const c = await svc.cancel(p, taskId);
+    expect(c).toMatchObject({ ok: true, value: { task_id: taskId, status: "CANCELLED" } });
+    const w = await svc.wait(p, { task_id: taskId, cursor: "1", timeout_seconds: 5 });
+    expect(w.ok && w.value.events.map((e) => e.type)).toEqual(["cancelled"]);
+    const next = await svc.start(p, { ...startInput, title: "next" });
+    expect(next.ok).toBe(true);
+  });
+
+  it("cancel は冪等（2回目も成功し、イベントは増えない）", async () => {
+    const { svc, p, taskId } = await started();
+    await svc.cancel(p, taskId);
+    expect(await svc.cancel(p, taskId)).toMatchObject({ ok: true, value: { status: "CANCELLED" } });
+    const w = await svc.wait(p, { task_id: taskId, timeout_seconds: 0 });
+    expect(w.ok && w.value.events).toHaveLength(2);
+  });
+
+  it("release が失敗しても cancel の再試行で解放される", async () => {
+    let failRelease = true;
+    const svc = createTaskService(env, {
+      users: (id) => {
+        const real = userStub(id);
+        return new Proxy(real, {
+          get(target, prop) {
+            if (prop === "release") {
+              return async (taskId: string) => {
+                if (failRelease) {
+                  failRelease = false;
+                  throw new Error("release lost");
+                }
+                return target.release(taskId);
+              };
+            }
+            return Reflect.get(target, prop);
+          },
+        });
+      },
+    });
+    const p = principal();
+    const s = await svc.start(p, { ...startInput });
+    if (!s.ok) throw new Error("start failed");
+    await expect(svc.cancel(p, s.value.task_id)).rejects.toThrow("release lost");
+    // TaskDO は CANCELLED 確定済み
+    const st = await svc.status(p, s.value.task_id);
+    expect(st.ok && st.value.status).toBe("CANCELLED");
+    // 再試行で解放される: 予約が空いている
+    expect((await svc.cancel(p, s.value.task_id)).ok).toBe(true);
+    const { runInDurableObject } = await import("cloudflare:test");
+    const [res] = await runInDurableObject(userStub(p.githubUserId), (_i, state) =>
+      state.storage.sql.exec("SELECT active_task_id FROM reservation").toArray(),
+    );
+    expect(res).toEqual({ active_task_id: null });
+  });
+});

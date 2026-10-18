@@ -5,6 +5,13 @@
   "compatibility_date": "2026-10-12",
   "compatibility_flags": ["nodejs_compat"],
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TASK_DO", "class_name": "TaskDO" },
+      { "name": "USER_DO", "class_name": "UserDO" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] }],
   "vars": {
     // "test" のときだけ E2E 用のスタブ認可と上書き設定を許す。本番は必ず "production"。
     "ENVIRONMENT": "production",

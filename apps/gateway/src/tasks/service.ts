@@ -1,0 +1,194 @@
+import { z } from "zod";
+import type { TaskStatus } from "./state";
+import type { TaskDO, TaskEvent, TaskView } from "./task-do";
+import { isTaskId, ulid } from "./ulid";
+import type { UserDO } from "./user-do";
+import { computeFingerprint, isValidIdempotencyKey, taskInputSchema } from "./validation";
+
+/**
+ * ユースケース層。Gateway（MCP ツール）が UserDO / TaskDO を正しい順序で呼ぶための関数群。
+ * MCP ツールからは後でここを呼ぶ（M4）。認可（team 所属・Installation・push 権限）は
+ * GitHub 連携（M3）が担い、通った後の repository_id / installation_id を start に渡す。
+ */
+
+export type Principal = { githubUserId: number; login: string };
+
+export type ErrorCode =
+  | "not_found"
+  | "conflict"
+  | "expired"
+  | "concurrency_limit"
+  | "invalid_cursor"
+  | "invalid_input";
+
+export type ServiceError = { code: ErrorCode; message: string; retry_after_seconds?: number };
+export type ServiceResult<T> = { ok: true; value: T } | { ok: false; error: ServiceError };
+
+export type TaskServiceDeps = {
+  users: (githubUserId: number) => DurableObjectStub<UserDO>;
+  tasks: (taskId: string) => DurableObjectStub<TaskDO>;
+};
+
+export type StartOptions = { repositoryId?: number | null; installationId?: number | null };
+
+export type StartValue = {
+  task_id: string;
+  status: TaskStatus;
+  draft_pr_url: string | null;
+  note: string;
+};
+
+export const START_NOTE =
+  "Phase 1: 子エージェントはまだ無いため、タスクは CREATING のまま進みません。Draft PR も作られません（draft_pr_url は null）。";
+
+export type StatusValue = Omit<TaskView, "owner_id">;
+export type WaitValue = {
+  task_id: string;
+  status: TaskStatus;
+  cursor: string;
+  events: TaskEvent[];
+  retry_after_seconds?: number;
+};
+export type CancelValue = { task_id: string; status: TaskStatus };
+
+function fail(
+  code: ErrorCode,
+  message: string,
+  extra: Partial<ServiceError> = {},
+): ServiceResult<never> {
+  return { ok: false, error: { code, message, ...extra } };
+}
+
+const NOT_FOUND = "task not found";
+
+const startInputSchema = taskInputSchema.extend({
+  idempotency_key: z.unknown().optional(),
+});
+
+export function createTaskService(
+  env: Pick<Env, "USER_DO" | "TASK_DO">,
+  overrides: Partial<TaskServiceDeps> = {},
+) {
+  const deps: TaskServiceDeps = {
+    users: overrides.users ?? ((id) => env.USER_DO.getByName(String(id))),
+    tasks: overrides.tasks ?? ((id) => env.TASK_DO.getByName(id)),
+  };
+
+  return {
+    /**
+     * UserDO.reserve → TaskDO.ensureCreated の順に呼ぶ。
+     * ensureCreated が失敗（例外）しても予約は解放しない。成否が分からないため、
+     * クライアントは同じ idempotency_key で再試行する。
+     */
+    async start(
+      principal: Principal,
+      rawInput: unknown,
+      options: StartOptions = {},
+    ): Promise<ServiceResult<StartValue>> {
+      const parsed = startInputSchema.safeParse(rawInput);
+      if (!parsed.success) {
+        return fail(
+          "invalid_input",
+          parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+        );
+      }
+      const { idempotency_key: key, ...input } = parsed.data;
+      if (key !== undefined && !isValidIdempotencyKey(key)) {
+        return fail("invalid_input", "idempotency_key must match [A-Za-z0-9_-]{1,128}");
+      }
+      // 省略時はサーバーで生成する（再試行の重複排除は保証しない）。':' を含むので利用者のキーと衝突しない。
+      const requestKey = key ?? `auto:${ulid()}`;
+
+      const fingerprint = await computeFingerprint(input);
+      const reserved = await deps.users(principal.githubUserId).reserve(requestKey, fingerprint);
+      if (!reserved.ok) {
+        return reserved.code === "conflict"
+          ? fail("conflict", "idempotency_key was already used with different input")
+          : fail("concurrency_limit", "another task is already running for this user");
+      }
+
+      const created = await deps.tasks(reserved.task_id).ensureCreated({
+        ...input,
+        task_id: reserved.task_id,
+        owner_id: principal.githubUserId,
+        owner_login: principal.login,
+        repository_id: options.repositoryId ?? null,
+        installation_id: options.installationId ?? null,
+      });
+      if (!created.ok) {
+        switch (created.code) {
+          case "expired":
+            return fail("expired", "this idempotency_key has expired; use a new key");
+          case "conflict":
+            return fail("conflict", "idempotency_key was already used with different input");
+          default:
+            return fail("invalid_input", "invalid task input");
+        }
+      }
+      return {
+        ok: true,
+        value: {
+          task_id: created.task.task_id,
+          status: created.task.status,
+          draft_pr_url: created.task.draft_pr_url,
+          note: START_NOTE,
+        },
+      };
+    },
+
+    async status(principal: Principal, taskId: string): Promise<ServiceResult<StatusValue>> {
+      if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
+      const r = await deps.tasks(taskId).getStatus(principal.githubUserId);
+      if (!r.ok) return fail("not_found", NOT_FOUND);
+      const { owner_id: _owner, ...view } = r.task;
+      return { ok: true, value: view };
+    },
+
+    async wait(
+      principal: Principal,
+      args: { task_id: string; cursor?: string; timeout_seconds?: number },
+    ): Promise<ServiceResult<WaitValue>> {
+      if (!isTaskId(args.task_id)) return fail("not_found", NOT_FOUND);
+      const r = await deps
+        .tasks(args.task_id)
+        .wait(principal.githubUserId, args.cursor, args.timeout_seconds);
+      if (!r.ok) {
+        switch (r.code) {
+          case "invalid_cursor":
+            return fail("invalid_cursor", "cursor is invalid");
+          case "invalid_input":
+            return fail("invalid_input", "timeout_seconds must be an integer >= 0");
+          default:
+            return fail("not_found", NOT_FOUND);
+        }
+      }
+      return {
+        ok: true,
+        value: {
+          task_id: args.task_id,
+          status: r.status,
+          cursor: r.cursor,
+          events: r.events,
+          ...(r.retry_after_seconds !== undefined
+            ? { retry_after_seconds: r.retry_after_seconds }
+            : {}),
+        },
+      };
+    },
+
+    /**
+     * TaskDO を先に CANCELLED に確定させ、その後 UserDO.release(task_id) を呼ぶ。
+     * release が失敗（例外）したら例外のまま返す。同じ cancel を再試行すれば、
+     * TaskDO 側は冪等に成功し、release も再試行される。
+     */
+    async cancel(principal: Principal, taskId: string): Promise<ServiceResult<CancelValue>> {
+      if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
+      const r = await deps.tasks(taskId).cancel(principal.githubUserId);
+      if (!r.ok) return fail("not_found", NOT_FOUND);
+      await deps.users(principal.githubUserId).release(taskId);
+      return { ok: true, value: { task_id: taskId, status: r.status } };
+    },
+  };
+}
+
+export type TaskService = ReturnType<typeof createTaskService>;

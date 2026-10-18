@@ -50,6 +50,11 @@ export interface SandboxPort {
   exec(argv: string[], options?: ExecOptions): Promise<ExecResult>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<void>;
+  /**
+   * 期限を延ばす（回答待ちの間に止めていた分を戻す）。単調増加だけ受け付け（小さい値は無視）、
+   * 上限は作成時刻 + 2 時間 + 24 時間。超える値・準備前・終端後は例外。alarm も張り直す。
+   */
+  extendDeadline(deadlineAt: number): Promise<void>;
   /** 実行中のプロセスグループを止め、止まらなければコンテナを止める。停止を確かめてから戻る。 */
   stop(): Promise<{ stopped: boolean }>;
   /**

@@ -1,5 +1,6 @@
 import type {
   CancelResult,
+  DeliveryResult,
   EventsPage,
   ResultDto,
   StartResult,
@@ -32,6 +33,10 @@ export function agentClient(baseUrl: string, name: string) {
     cancel: () => op("cancel") as Promise<CancelResult>,
     setGitCredential: (credential: { token: string; expiresAt: number }) =>
       op("set-git-credential", { credential }) as Promise<{ ok: boolean }>,
+    answer: (questionId: string, answer: string) =>
+      op("answer", { questionId, answer }) as Promise<DeliveryResult>,
+    steer: (steerId: string, message: string) =>
+      op("steer", { steerId, message }) as Promise<DeliveryResult>,
     getEvents: (afterSeq = 0, limit = 100) =>
       op("events", { afterSeq, limit }) as Promise<EventsPage>,
     getResult: () => op("result") as Promise<ResultDto>,

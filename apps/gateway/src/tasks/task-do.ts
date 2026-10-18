@@ -25,12 +25,15 @@ import {
 } from "../github";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
-import { isTaskId } from "./ulid";
+import { isTaskId, ulid } from "./ulid";
 import { TASK_BUDGET_USD, type UserDO } from "./user-do";
 import {
   computeFingerprint,
+  isValidIdempotencyKey,
+  MAX_ANSWER_LENGTH,
   MAX_CONCURRENT_WAITERS,
   MAX_EVENTS_PER_WAIT,
+  MAX_STEER_LENGTH,
   parseCursor,
   parseTimeoutSeconds,
   taskInputSchema,
@@ -41,6 +44,12 @@ import {
 export const AGENT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 /** alarm の間隔。start / cancel の再送、取り込み、精算の再試行に使う。 */
 export const ALARM_INTERVAL_MS = 10_000;
+/** INPUT_REQUIRED の間で、配送すべきものが無いときの alarm の間隔（AgentDO の期限の監視と、トークンの更新の確認だけ）。 */
+export const INPUT_REQUIRED_ALARM_INTERVAL_MS = 60_000;
+/** 回答待ちの上限（AgentDO が数える。7.3）と、TaskDO がバックストップとして待つ猶予。 */
+export const INPUT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const INPUT_TIMEOUT_GRACE_MS = 10 * 60 * 1000;
+const INPUT_REQUIRED_SINCE_KEY = "input_required_at";
 /** task_wait が待機中に AgentDO から取り込み直す間隔。 */
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const EVENT_PAGE_LIMIT = 100;
@@ -94,6 +103,8 @@ export type TaskView = {
   updated_at: string;
   /** 最後のイベントの seq（不透明な cursor 文字列）。 */
   latest_cursor: string;
+  /** 子の未回答の質問（終端でないとき）。message は子が作った非信頼データ */
+  pending_question: { question_id: string; message: string; options: string[] } | null;
 };
 
 /** イベントの中身。RPC で返せるよう、値はプリミティブに限る。 */
@@ -185,6 +196,17 @@ export type GetStatusResult = { ok: true; task: TaskView } | { ok: false; code: 
 export type CancelResult =
   | { ok: true; status: TaskStatus; changed: boolean }
   | { ok: false; code: "not_found" };
+
+export type AnswerResult =
+  | { ok: true; status: TaskStatus }
+  | { ok: false; code: "not_found" | "conflict" | "invalid_input" };
+
+export type SteerResult =
+  | { ok: true; status: TaskStatus; steer_id: string }
+  | { ok: false; code: "not_found" | "conflict" | "invalid_input" };
+
+/** steer を受け付ける状態（4.6）。 */
+const STEERABLE: ReadonlySet<TaskStatus> = new Set(["RUNNING", "VERIFYING", "INPUT_REQUIRED"]);
 
 export type WaitResult =
   | {
@@ -379,6 +401,22 @@ export class TaskDO extends DurableObject<Env> {
       finalize_done INTEGER NOT NULL DEFAULT 0
     )`);
     this.addColumnIfMissing("github_link", "revoke_attempts", "INTEGER NOT NULL DEFAULT 0");
+    // Phase 4: 子の質問と回答、親からの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
+    sql.exec(`CREATE TABLE IF NOT EXISTS questions (
+      question_id TEXT PRIMARY KEY,
+      message TEXT NOT NULL,
+      options TEXT NOT NULL,
+      answer TEXT,
+      delivery_state TEXT NOT NULL DEFAULT 'none',
+      asked_at INTEGER NOT NULL
+    )`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS steers (
+      n INTEGER PRIMARY KEY AUTOINCREMENT,
+      steer_id TEXT NOT NULL UNIQUE,
+      message TEXT NOT NULL,
+      delivery_state TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL
+    )`);
     // Installation Token は AES-GCM で暗号化して保存する（TOKEN_ENC_KEY）。kind は start（taskSpec に入れたもの）/ refresh / final。
     sql.exec(`CREATE TABLE IF NOT EXISTS git_token (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -456,7 +494,27 @@ export class TaskDO extends DurableObject<Env> {
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString(),
       latest_cursor: String(this.latestSeq()),
+      pending_question: this.pendingQuestion(this.statusOf(row)),
     };
+  }
+
+  /** 未回答の質問。終端のタスクには無い。 */
+  private pendingQuestion(status: TaskStatus): TaskView["pending_question"] {
+    if (isTerminal(status)) return null;
+    const q = this.ctx.storage.sql
+      .exec<{ question_id: string; message: string; options: string }>(
+        "SELECT question_id, message, options FROM questions WHERE answer IS NULL ORDER BY asked_at DESC, rowid DESC LIMIT 1",
+      )
+      .toArray()[0];
+    if (!q) return null;
+    let options: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(q.options);
+      if (Array.isArray(parsed)) options = parsed.filter((x): x is string => typeof x === "string");
+    } catch {
+      // 壊れていれば空（保存時に正規化済みなので通常は起きない）
+    }
+    return { question_id: q.question_id, message: q.message, options };
   }
 
   // --- 書き込み（必ず transactionSync の中から呼ぶ） ---
@@ -509,12 +567,30 @@ export class TaskDO extends DurableObject<Env> {
       at,
     );
     this.appendEvent("status_changed", { status: to, from, ...extra }, at);
+    // 回答待ちの起点（24 時間のバックストップの基準）。INPUT_REQUIRED に入ったときに記録し、出たら消す。
+    if (to === "INPUT_REQUIRED") {
+      this.ctx.storage.sql.exec(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+        INPUT_REQUIRED_SINCE_KEY,
+        String(at),
+      );
+    } else {
+      this.ctx.storage.sql.exec("DELETE FROM meta WHERE key = ?", INPUT_REQUIRED_SINCE_KEY);
+    }
     if (isTerminal(to)) {
       this.ctx.storage.sql.exec(
         "UPDATE agent_link SET cancel_state = 'pending' WHERE cancel_state = 'none'",
       );
+      this.skipPendingDeliveries();
     }
     return true;
+  }
+
+  /** 回答と steer の未配送の意図を取りやめる（終端に入ったトランザクションの中で呼ぶ）。 */
+  private skipPendingDeliveries(): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec("UPDATE questions SET delivery_state = 'skipped' WHERE delivery_state = 'pending'");
+    sql.exec("UPDATE steers SET delivery_state = 'skipped' WHERE delivery_state = 'pending'");
   }
 
   private notifyWaiters(): void {
@@ -669,6 +745,9 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         "UPDATE agent_link SET cancel_state = 'pending' WHERE cancel_state = 'none'",
       );
+      this.ctx.storage.sql.exec("DELETE FROM meta WHERE key = ?", INPUT_REQUIRED_SINCE_KEY);
+      // 未配送の回答と steer は送らない（cancel と同じトランザクションで取りやめる）
+      this.skipPendingDeliveries();
       return { ok: true, status: "CANCELLED", changed: true };
     });
     if (result.ok && result.changed) {
@@ -676,6 +755,91 @@ export class TaskDO extends DurableObject<Env> {
       await this.ensureAlarm();
     }
     return result;
+  }
+
+  /**
+   * 子の質問への回答を受け付ける（task_answer）。
+   * 保存済みの回答と一致すれば、状態に関係なく成功（再送。RUNNING に戻った後でも conflict にしない）。この判定を最初に行う。
+   * それ以外は INPUT_REQUIRED の未回答の質問にだけ答えられる。配送は alarm で成功するまで再送する。
+   */
+  async answer(ownerId: number, questionId: string, answer: string): Promise<AnswerResult> {
+    if (
+      typeof questionId !== "string" ||
+      questionId === "" ||
+      typeof answer !== "string" ||
+      answer === "" ||
+      answer.length > MAX_ANSWER_LENGTH
+    ) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const result = this.ctx.storage.transactionSync((): AnswerResult & { changed?: boolean } => {
+      const row = this.getRow();
+      if (!row || row.owner_id !== ownerId) return { ok: false, code: "not_found" };
+      const status = this.statusOf(row);
+      const q = this.ctx.storage.sql
+        .exec<{ answer: string | null }>(
+          "SELECT answer FROM questions WHERE question_id = ?",
+          questionId,
+        )
+        .toArray()[0];
+      if (!q) return { ok: false, code: "not_found" };
+      if (q.answer !== null) {
+        return q.answer === answer ? { ok: true, status } : { ok: false, code: "conflict" };
+      }
+      if (status !== "INPUT_REQUIRED") return { ok: false, code: "conflict" };
+      this.ctx.storage.sql.exec(
+        "UPDATE questions SET answer = ?, delivery_state = 'pending' WHERE question_id = ? AND answer IS NULL",
+        answer,
+        questionId,
+      );
+      return { ok: true, status, changed: true };
+    });
+    if (result.ok && result.changed) await this.pullAlarmIn(ALARM_INTERVAL_MS);
+    return result.ok ? { ok: true, status: result.status } : result;
+  }
+
+  /**
+   * 実行中のタスクへ追加の指示を渡す（task_steer）。RUNNING / VERIFYING / INPUT_REQUIRED だけ受け付ける。
+   * steer_id は idempotency_key から導く（無ければ発行）。同じ steer_id・同じ message の再送は、状態に関係なく成功。
+   */
+  async steer(ownerId: number, message: string, idempotencyKey?: string): Promise<SteerResult> {
+    if (
+      typeof message !== "string" ||
+      message === "" ||
+      message.length > MAX_STEER_LENGTH ||
+      (idempotencyKey !== undefined && !isValidIdempotencyKey(idempotencyKey))
+    ) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const steerId = idempotencyKey !== undefined ? `steer-${idempotencyKey}` : `steer-${ulid()}`;
+    const result = this.ctx.storage.transactionSync((): SteerResult & { changed?: boolean } => {
+      const row = this.getRow();
+      if (!row || row.owner_id !== ownerId) return { ok: false, code: "not_found" };
+      const status = this.statusOf(row);
+      const existing = this.ctx.storage.sql
+        .exec<{ message: string }>("SELECT message FROM steers WHERE steer_id = ?", steerId)
+        .toArray()[0];
+      if (existing) {
+        return existing.message === message
+          ? { ok: true, status, steer_id: steerId }
+          : { ok: false, code: "conflict" };
+      }
+      if (!STEERABLE.has(status)) return { ok: false, code: "conflict" };
+      const at = this.now();
+      this.ctx.storage.sql.exec(
+        "INSERT INTO steers (steer_id, message, delivery_state, created_at) VALUES (?, ?, 'pending', ?)",
+        steerId,
+        message,
+        at,
+      );
+      this.appendEvent("steer_received", { steer_id: steerId }, at);
+      return { ok: true, status, steer_id: steerId, changed: true };
+    });
+    if (result.ok && result.changed) {
+      this.notifyWaiters();
+      await this.pullAlarmIn(ALARM_INTERVAL_MS);
+    }
+    return result.ok ? { ok: true, status: result.status, steer_id: result.steer_id } : result;
   }
 
   /**
@@ -850,7 +1014,12 @@ export class TaskDO extends DurableObject<Env> {
   private running = new Set<string>();
 
   private async guard(step: string, fn: () => Promise<void>): Promise<void> {
-    const single = step === "setup" || step === "credentials" || step === "finalize";
+    const single =
+      step === "setup" ||
+      step === "credentials" ||
+      step === "finalize" ||
+      step === "answer" ||
+      step === "steer";
     if (single) {
       if (this.running.has(step)) return;
       this.running.add(step);
@@ -872,7 +1041,11 @@ export class TaskDO extends DurableObject<Env> {
     await this.guard("setup", () => this.deliverSetup());
     await this.guard("start", () => this.deliverStart());
     await this.guard("cancel", () => this.deliverCancel());
+    await this.guard("answer", () => this.deliverAnswers());
+    await this.guard("steer", () => this.deliverSteers());
     await this.guard("sync", () => this.syncFromAgent());
+    // AgentDO が自分で input_timeout にしなかったときのバックストップ（取り込みの後に判定する）
+    this.failIfInputTimedOut();
     // エージェント側の終端をこの回で取り込んだときは、その場で停止確認（cancel）まで進める。
     // （cancel を送ったのに未停止だったものは、次の alarm で再送する。1 回の advance で繰り返さない）
     if (first.cancel_state === "none" && this.getLink()?.cancel_state === "pending") {
@@ -943,6 +1116,71 @@ export class TaskDO extends DurableObject<Env> {
       return true;
     });
     if (changed) this.notifyWaiters();
+  }
+
+  /** 回答を AgentDO に届ける。ok:true（ignored を含む）で完了。ok:false・例外は次の alarm で再送する。 */
+  private async deliverAnswers(): Promise<void> {
+    const link = this.getLink();
+    if (link?.start_state !== "accepted" || isTerminal(this.currentStatus())) return;
+    const pending = this.ctx.storage.sql
+      .exec<{ question_id: string; answer: string }>(
+        "SELECT question_id, answer FROM questions WHERE delivery_state = 'pending' AND answer IS NOT NULL ORDER BY asked_at, rowid",
+      )
+      .toArray();
+    for (const q of pending) {
+      const r = await this.agentStub().answer(q.question_id, q.answer);
+      if (!r.ok) return;
+      // await の間に cancel が skipped にしていれば、上書きしない
+      this.ctx.storage.sql.exec(
+        "UPDATE questions SET delivery_state = 'delivered' WHERE question_id = ? AND delivery_state = 'pending'",
+        q.question_id,
+      );
+    }
+  }
+
+  /** steer を受け付けた順に AgentDO に届ける。失敗したらそこで止めて、次の alarm で同じ順に再送する。 */
+  private async deliverSteers(): Promise<void> {
+    const link = this.getLink();
+    if (link?.start_state !== "accepted" || isTerminal(this.currentStatus())) return;
+    const pending = this.ctx.storage.sql
+      .exec<{ steer_id: string; message: string }>(
+        "SELECT steer_id, message FROM steers WHERE delivery_state = 'pending' ORDER BY n",
+      )
+      .toArray();
+    for (const s of pending) {
+      const r = await this.agentStub().steer(s.steer_id, s.message);
+      if (!r.ok) return;
+      this.ctx.storage.sql.exec(
+        "UPDATE steers SET delivery_state = 'delivered' WHERE steer_id = ? AND delivery_state = 'pending'",
+        s.steer_id,
+      );
+    }
+  }
+
+  private hasPendingDelivery(): boolean {
+    const sql = this.ctx.storage.sql;
+    return (
+      sql.exec("SELECT 1 AS x FROM questions WHERE delivery_state = 'pending' LIMIT 1").toArray()
+        .length > 0 ||
+      sql.exec("SELECT 1 AS x FROM steers WHERE delivery_state = 'pending' LIMIT 1").toArray()
+        .length > 0
+    );
+  }
+
+  /**
+   * 回答待ちが上限（24 時間）+ 猶予を過ぎたら FAILED(input_timeout) にする。
+   * 24 時間を数えるのは AgentDO（主）。これは AgentDO が応答しない場合のバックストップで、
+   * FAILED になれば cancel の配送（停止確認）に進む。
+   */
+  private failIfInputTimedOut(): void {
+    const row = this.getRow();
+    if (!row || this.statusOf(row) !== "INPUT_REQUIRED") return;
+    const since = this.ctx.storage.sql
+      .exec<{ value: string }>("SELECT value FROM meta WHERE key = ?", INPUT_REQUIRED_SINCE_KEY)
+      .toArray()[0];
+    const at = since ? Number(since.value) : Number.NaN;
+    if (!Number.isFinite(at)) return;
+    if (this.now() - at > INPUT_TIMEOUT_MS + INPUT_TIMEOUT_GRACE_MS) this.failTask("input_timeout");
   }
 
   private async deliverCancel(): Promise<void> {
@@ -1060,6 +1298,8 @@ export class TaskDO extends DurableObject<Env> {
             usageMicro = m.costMicroUsd;
           }
           if (open) this.appendAgentEvent("usage", m.payload, e.ts, link.operation_id, e.seq);
+        } else if (m.kind === "question") {
+          if (open) this.applyQuestion(m.payload, e.ts, link.operation_id, e.seq);
         } else if (open) {
           this.appendAgentEvent(m.type, m.payload, e.ts, link.operation_id, e.seq);
         }
@@ -1075,6 +1315,31 @@ export class TaskDO extends DurableObject<Env> {
     });
     if (this.latestSeq() !== before) this.notifyWaiters();
     return progressed;
+  }
+
+  /** question の取り込み。questions への保存とイベントの追加は、取り込みと同じトランザクションの中で行う。 */
+  private applyQuestion(
+    payload: EventPayload,
+    ts: number,
+    operationId: string,
+    agentSeq: number,
+  ): void {
+    const questionId = String(payload.question_id ?? "");
+    if (questionId === "") return;
+    const sql = this.ctx.storage.sql;
+    const known = sql
+      .exec("SELECT 1 AS x FROM questions WHERE question_id = ?", questionId)
+      .toArray();
+    if (known.length > 0) return;
+    const at = Number.isFinite(ts) ? ts : this.now();
+    sql.exec(
+      "INSERT INTO questions (question_id, message, options, delivery_state, asked_at) VALUES (?, ?, ?, 'none', ?)",
+      questionId,
+      String(payload.message ?? ""),
+      String(payload.options ?? "[]"),
+      at,
+    );
+    this.appendAgentEvent("question", payload, ts, operationId, agentSeq);
   }
 
   private appendAgentEvent(
@@ -1697,10 +1962,44 @@ export class TaskDO extends DurableObject<Env> {
     );
   }
 
+  /**
+   * 次の alarm までの間隔。INPUT_REQUIRED の間は 60 秒に延ばす（親の回答を待っているだけなので）。
+   * 回答や steer の配送が pending、cancel / start の再送、トークンの更新・配送が必要なときは 10 秒。
+   */
+  private alarmDelay(): number {
+    const row = this.getRow();
+    const link = this.getLink();
+    if (!row || !link) return ALARM_INTERVAL_MS;
+    const idle =
+      this.statusOf(row) === "INPUT_REQUIRED" &&
+      link.start_state === "accepted" &&
+      link.cancel_state === "none" &&
+      !this.hasPendingDelivery() &&
+      !this.credentialWorkPending();
+    return idle ? INPUT_REQUIRED_ALARM_INTERVAL_MS : ALARM_INTERVAL_MS;
+  }
+
+  /** 新しいトークンを渡せていない、または期限が近く更新が要る。 */
+  private credentialWorkPending(): boolean {
+    const gl = this.getGithub();
+    const latest = this.tokenRows("revoked = 0").at(-1);
+    if (!gl || !latest) return false;
+    return (
+      latest.id > gl.cred_delivered_id || latest.expires_at - this.now() <= TOKEN_REFRESH_BEFORE_MS
+    );
+  }
+
   /** 次の alarm を明示的に設定し直す。仕事が無ければ消す。 */
   private async syncAlarm(): Promise<void> {
-    if (this.needsAlarm()) await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+    if (this.needsAlarm()) await this.ctx.storage.setAlarm(Date.now() + this.alarmDelay());
     else await this.ctx.storage.deleteAlarm();
+  }
+
+  /** alarm が ms より先なら、前倒しする（回答や steer を受け付けたとき。60 秒の待機を待たせない）。 */
+  private async pullAlarmIn(ms: number): Promise<void> {
+    const target = Date.now() + ms;
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > target) await this.ctx.storage.setAlarm(target);
   }
 
   /** 仕事があるのに alarm が無いときだけ設定する（作成直後・再起動後）。 */

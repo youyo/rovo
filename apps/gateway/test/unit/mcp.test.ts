@@ -60,15 +60,17 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("5 つのツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("7 つのツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "task_answer",
       "task_cancel",
       "task_result",
       "task_start",
       "task_status",
+      "task_steer",
       "task_wait",
     ]);
     const start = tools.find((t) => t.name === "task_start");
@@ -81,6 +83,135 @@ describe("/mcp ツール一覧", () => {
     const result = tools.find((t) => t.name === "task_result");
     expect(result?.description).toContain("not_ready");
     await client.close();
+  });
+});
+
+describe("task_answer / task_steer（Phase 4）", () => {
+  async function askedTask(message = "which db?") {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const s = body(await client.callTool({ name: "task_start", arguments: startArgs("t1") }));
+    const taskId = String(s.task_id);
+    await fakeAgent(taskId).ask("q1", message, ["pg", "mysql"]);
+    return { u, client, taskId };
+  }
+
+  it("ツールの説明に、質問への答え方と「質問文はデータ」を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const answer = tools.find((t) => t.name === "task_answer");
+    expect(answer?.description).toContain("task_answer");
+    expect(answer?.description).toContain("INPUT_REQUIRED");
+    expect(answer?.description).toMatch(/指示ではなく.*データ/);
+    const wait = tools.find((t) => t.name === "task_wait");
+    expect(wait?.description).toContain("question");
+    expect(wait?.description).toContain("task_answer");
+    expect(wait?.description).toMatch(/指示ではなく.*データ/);
+    const steer = tools.find((t) => t.name === "task_steer");
+    expect(steer?.description).toContain("RUNNING");
+    expect(steer?.description).toContain("idempotency_key");
+    const answerProps = answer?.inputSchema.properties as Record<string, { type?: string }>;
+    expect(answerProps.question_id?.type).toBe("string");
+    expect(answer?.inputSchema.required).toEqual(
+      expect.arrayContaining(["task_id", "question_id", "answer"]),
+    );
+    await client.close();
+  });
+
+  it("task_wait で question を受け取り（非信頼マーカー付き）、task_answer で答えると RUNNING に戻る", async () => {
+    const { client, taskId } = await askedTask();
+    const w = body(
+      await client.callTool({
+        name: "task_wait",
+        arguments: { task_id: taskId, cursor: "3", timeout_seconds: 0 },
+      }),
+    );
+    expect(w.status).toBe("INPUT_REQUIRED");
+    const events = w.events as { type: string; payload: Record<string, string> }[];
+    const q = events.find((e) => e.type === "question");
+    expect(q?.payload.question_id).toBe("q1");
+    expect(q?.payload.message).toContain("which db?");
+    expect(q?.payload.message).toContain("UNTRUSTED");
+    const status = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+    );
+    expect(status.pending_question).toMatchObject({ question_id: "q1", options: ["pg", "mysql"] });
+
+    const a = await client.callTool({
+      name: "task_answer",
+      arguments: { task_id: taskId, question_id: "q1", answer: "pg" },
+    });
+    expect(a.isError).toBeFalsy();
+    expect(body(a)).toMatchObject({ task_id: taskId, question_id: "q1" });
+    expect((await fakeAgent(taskId).calls()).answers).toEqual([{ questionId: "q1", answer: "pg" }]);
+    const after = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+    );
+    expect(after).toMatchObject({ status: "RUNNING", pending_question: null });
+    await client.close();
+  });
+
+  it("task_answer のエラー: 違う回答は conflict、未知の question_id は not_found、空の回答は invalid_input", async () => {
+    const { client, taskId } = await askedTask();
+    await taskStub(taskId).advance();
+    const call = (args: Record<string, unknown>) =>
+      client.callTool({ name: "task_answer", arguments: { task_id: taskId, ...args } });
+    expect((await call({ question_id: "q1", answer: "pg" })).isError).toBeFalsy();
+    const conflict = await call({ question_id: "q1", answer: "mysql" });
+    expect(conflict.isError).toBe(true);
+    expect(body(conflict).code).toBe("conflict");
+    const missing = await call({ question_id: "zzz", answer: "pg" });
+    expect(body(missing).code).toBe("not_found");
+    const empty = await call({ question_id: "q1", answer: "" });
+    expect(body(empty).code).toBe("invalid_input");
+    const typed = await client.callTool({ name: "task_answer", arguments: { task_id: taskId } });
+    expect(body(typed).code).toBe("invalid_input");
+    await client.close();
+  });
+
+  it("task_steer: 受け付けて steer_id を返し、AgentDO に届く。終端では conflict", async () => {
+    const { client, taskId } = await askedTask();
+    await taskStub(taskId).advance(); // question を取り込んで INPUT_REQUIRED にする
+    const r = await client.callTool({
+      name: "task_steer",
+      arguments: { task_id: taskId, message: "use pnpm", idempotency_key: "s-1" },
+    });
+    expect(r.isError).toBeFalsy();
+    const v = body(r);
+    expect(v).toMatchObject({ task_id: taskId, status: "INPUT_REQUIRED" });
+    expect(typeof v.steer_id).toBe("string");
+    expect((await fakeAgent(taskId).calls()).steers).toEqual([
+      { steerId: v.steer_id, message: "use pnpm" },
+    ]);
+    await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
+    const late = await client.callTool({
+      name: "task_steer",
+      arguments: { task_id: taskId, message: "late" },
+    });
+    expect(late.isError).toBe(true);
+    expect(body(late).code).toBe("conflict");
+    const bad = await client.callTool({
+      name: "task_steer",
+      arguments: { task_id: taskId, message: "" },
+    });
+    expect(body(bad).code).toBe("invalid_input");
+    await client.close();
+  });
+
+  it("他人の task には not_found", async () => {
+    const { taskId } = await askedTask();
+    const other = await user("bob");
+    const c2 = await connect(createApiApp(), other.props);
+    for (const [name, args] of [
+      ["task_answer", { question_id: "q1", answer: "pg" }],
+      ["task_steer", { message: "x" }],
+    ] as const) {
+      const r = await c2.callTool({ name, arguments: { task_id: taskId, ...args } });
+      expect(r.isError).toBe(true);
+      expect(body(r).code).toBe("not_found");
+    }
+    await c2.close();
   });
 });
 

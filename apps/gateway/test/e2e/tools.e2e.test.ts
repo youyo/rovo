@@ -86,6 +86,35 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
     }
   });
 
+  it("task_steer は RUNNING で受け付け、同じ idempotency_key なら同じ steer_id。cancel 後は conflict。質問が無ければ task_answer は not_found", async () => {
+    const { client } = await memberClient();
+    try {
+      const { task_id: taskId } = bodyOf(
+        await client.callTool({ name: "task_start", arguments: startArgs("t") }),
+      ) as { task_id: string };
+      const steerArgs = { task_id: taskId, message: "use pnpm", idempotency_key: "s-1" };
+      const a = bodyOf(await client.callTool({ name: "task_steer", arguments: steerArgs }));
+      const b = bodyOf(await client.callTool({ name: "task_steer", arguments: steerArgs }));
+      expect(a).toMatchObject({ task_id: taskId, status: "RUNNING" });
+      expect(b.steer_id).toBe(a.steer_id);
+      const noQuestion = await client.callTool({
+        name: "task_answer",
+        arguments: { task_id: taskId, question_id: "q1", answer: "x" },
+      });
+      expect(noQuestion.isError).toBe(true);
+      expect(bodyOf(noQuestion).code).toBe("not_found");
+      await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
+      const late = await client.callTool({
+        name: "task_steer",
+        arguments: { task_id: taskId, message: "late" },
+      });
+      expect(late.isError).toBe(true);
+      expect(bodyOf(late).code).toBe("conflict");
+    } finally {
+      await client.close();
+    }
+  });
+
   it("同じ idempotency_key の再試行で同じ task_id が返る", async () => {
     const { client } = await memberClient();
     try {
@@ -167,10 +196,22 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const { task_id: taskId } = bodyOf(
         await ca.callTool({ name: "task_start", arguments: startArgs("secret") }),
       ) as { task_id: string };
-      for (const name of ["task_status", "task_wait", "task_cancel", "task_result"]) {
+      const extra: Record<string, Record<string, unknown>> = {
+        task_wait: { timeout_seconds: 0 },
+        task_answer: { question_id: "q1", answer: "x" },
+        task_steer: { message: "x" },
+      };
+      for (const name of [
+        "task_status",
+        "task_wait",
+        "task_cancel",
+        "task_result",
+        "task_answer",
+        "task_steer",
+      ]) {
         const r = await cb.callTool({
           name,
-          arguments: { task_id: taskId, ...(name === "task_wait" ? { timeout_seconds: 0 } : {}) },
+          arguments: { task_id: taskId, ...(extra[name] ?? {}) },
         });
         expect(r.isError).toBe(true);
         expect(bodyOf(r).code).toBe("not_found");

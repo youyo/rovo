@@ -39,6 +39,9 @@ const REAPER_TIMEOUT_MS = 10_000;
 const STREAM_GRACE_MS = 2_000;
 const DESTROY_WAIT_MS = 15_000;
 const CLONE_TIMEOUT_MS = 5 * 60_000;
+/** 期限の延長の上限: 作成から 2 時間（タスクの最長）+ 回答待ちの累計の上限 24 時間 */
+const MAX_TASK_MS = 2 * 60 * 60_000;
+const MAX_INPUT_PAUSE_MS = 24 * 60 * 60_000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -143,6 +146,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     } else {
       if (spec.deadlineAt <= Date.now()) throw new Error("sandbox deadline exceeded");
       this.ctx.storage.kv.put("spec", spec);
+      this.ctx.storage.kv.put("created_at", Date.now());
     }
     this.requireSpec();
     await this.armAlarm();
@@ -150,6 +154,26 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       this.requireSpec();
       await this.ensureRunning();
     });
+    await this.armAlarm();
+  }
+
+  /**
+   * 期限を延ばす（AgentDO が、回答待ちで止めていた分を戻すために answer の submit より前に呼ぶ）。
+   * 単調増加だけ受け付け（小さい・同じ値は無視）、上限は作成時刻 + 2h + 24h。alarm も新しい期限で張り直す。
+   */
+  async extendDeadline(deadlineAt: number): Promise<void> {
+    if (typeof deadlineAt !== "number" || !Number.isFinite(deadlineAt)) {
+      throw new Error("invalid deadline");
+    }
+    if (this.terminated()) throw new Error("sandbox was terminated");
+    const spec = this.spec();
+    if (!spec) throw new Error("sandbox is not ready: call ensureReady first");
+    const created = this.ctx.storage.kv.get<number>("created_at") ?? spec.deadlineAt - MAX_TASK_MS;
+    if (deadlineAt > created + MAX_TASK_MS + MAX_INPUT_PAUSE_MS) {
+      throw new Error("deadline exceeds the limit");
+    }
+    if (deadlineAt <= spec.deadlineAt) return;
+    this.ctx.storage.kv.put("spec", { ...spec, deadlineAt });
     await this.armAlarm();
   }
 

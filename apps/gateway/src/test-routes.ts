@@ -70,5 +70,7 @@ export function withTestScripts(env: Env, agent: AgentRpc): AgentRpc {
     getEvents: (afterSeq, limit) => agent.getEvents(afterSeq, limit),
     getResult: () => agent.getResult(),
     setGitCredential: (c) => agent.setGitCredential(c),
+    answer: (questionId, answer) => agent.answer(questionId, answer),
+    steer: (steerId, message) => agent.steer(steerId, message),
   };
 }

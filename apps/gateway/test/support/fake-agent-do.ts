@@ -17,6 +17,8 @@ export type StartStep = "accept" | "reject" | "conflict" | "throw" | "lose";
 export type CancelStep = "stopped" | "not_stopped" | "throw" | "lose";
 /** setGitCredential の台本 1 手。lose は「効果は起きたが応答が失われる」。 */
 export type CredentialStep = "ok" | "not_ok" | "throw" | "lose";
+/** answer / steer の台本 1 手。lose は「効果は起きたが応答が失われる」、ignored は ignored:true を返す。 */
+export type DeliveryStep = "ok" | "not_ok" | "throw" | "lose" | "ignored";
 
 export type FakeProgram = {
   /** 呼び出しごとに 1 手ずつ消費する。尽きたら accept。 */
@@ -25,6 +27,10 @@ export type FakeProgram = {
   cancel?: CancelStep[];
   /** 呼び出しごとに 1 手ずつ消費する。尽きたら ok。 */
   setGitCredential?: CredentialStep[];
+  /** answer の呼び出しごとに 1 手ずつ消費する。尽きたら ok。 */
+  answer?: DeliveryStep[];
+  /** steer の呼び出しごとに 1 手ずつ消費する。尽きたら ok。 */
+  steer?: DeliveryStep[];
   /** accept したら starting -> running の phase イベントを積む（既定 true）。 */
   autoRun?: boolean;
   /** getEvents を先頭 n 回だけ失敗させる。 */
@@ -53,6 +59,12 @@ export type FakeCalls = {
   setGitCredential: number;
   /** setGitCredential で受け取った資格（効果が起きたもの。not_ok / throw は含まない） */
   credentials: GitCredential[];
+  /** answer の呼び出し回数（失敗も含む） */
+  answer: number;
+  /** answer で受け取った (questionId, answer)（効果が起きたもの。not_ok / throw は含まない） */
+  answers: { questionId: string; answer: string }[];
+  steer: number;
+  steers: { steerId: string; message: string }[];
 };
 
 const TERMINAL: readonly AgentPhase[] = ["completed", "failed", "budget_exceeded", "cancelled"];
@@ -87,7 +99,14 @@ export class FakeAgentDO extends DurableObject {
     specs: [],
     setGitCredential: 0,
     credentials: [],
+    answer: 0,
+    answers: [],
+    steer: 0,
+    steers: [],
   };
+  /** 未回答の質問（question_id）。 */
+  private pendingQuestion: string | undefined;
+  private seenSteers = new Set<string>();
 
   // ---- 制御用 RPC（テストから呼ぶ）----
 
@@ -97,6 +116,8 @@ export class FakeAgentDO extends DurableObject {
       start: [...(p.start ?? [])],
       cancel: [...(p.cancel ?? [])],
       setGitCredential: [...(p.setGitCredential ?? [])],
+      answer: [...(p.answer ?? [])],
+      steer: [...(p.steer ?? [])],
     };
     this.stale = p.staleOnce === true;
     this.getEventsFails = p.getEventsFailures ?? 0;
@@ -107,7 +128,16 @@ export class FakeAgentDO extends DurableObject {
       ...this.callCounts,
       specs: [...this.callCounts.specs],
       credentials: [...this.callCounts.credentials],
+      answers: [...this.callCounts.answers],
+      steers: [...this.callCounts.steers],
     };
+  }
+
+  /** 子の質問を再現する: question イベントを積み、phase を input_required にする。 */
+  ask(questionId: string, message: string, options: string[] = []): void {
+    this.append("question", { question_id: questionId, message, options: JSON.stringify(options) });
+    this.pendingQuestion = questionId;
+    this.setPhase("input_required");
   }
 
   /** イベントを積む（phase 以外）。 */
@@ -228,6 +258,40 @@ export class FakeAgentDO extends DurableObject {
     if (step === "not_ok") return { ok: false };
     this.callCounts.credentials.push(c);
     if (step === "lose") throw new Error("fake agent: setGitCredential response lost");
+    return { ok: true };
+  }
+
+  async answer(questionId: string, answer: string): Promise<{ ok: boolean; ignored?: boolean }> {
+    this.callCounts.answer++;
+    const step = this.program.answer?.shift() ?? "ok";
+    if (step === "throw") throw new Error("fake agent: answer failed");
+    if (step === "not_ok") return { ok: false };
+    this.callCounts.answers.push({ questionId, answer });
+    if (step === "ignored") return { ok: true, ignored: true };
+    // 本物と同じ規則: 未回答の質問と一致すれば回答して running に戻る。それ以外（回答済み・終端・不明）は ignored
+    if (this.tombstone || this.isTerminal() || this.pendingQuestion !== questionId) {
+      if (step === "lose") throw new Error("fake agent: answer response lost");
+      return { ok: true, ignored: true };
+    }
+    this.pendingQuestion = undefined;
+    this.append("answered", { question_id: questionId });
+    this.setPhase("running");
+    if (step === "lose") throw new Error("fake agent: answer response lost");
+    return { ok: true };
+  }
+
+  async steer(steerId: string, message: string): Promise<{ ok: boolean; ignored?: boolean }> {
+    this.callCounts.steer++;
+    const step = this.program.steer?.shift() ?? "ok";
+    if (step === "throw") throw new Error("fake agent: steer failed");
+    if (step === "not_ok") return { ok: false };
+    this.callCounts.steers.push({ steerId, message });
+    if (step === "ignored") return { ok: true, ignored: true };
+    if (!this.seenSteers.has(steerId) && !this.tombstone && !this.isTerminal()) {
+      this.seenSteers.add(steerId);
+      this.append("steer_accepted", { steer_id: steerId });
+    }
+    if (step === "lose") throw new Error("fake agent: steer response lost");
     return { ok: true };
   }
 

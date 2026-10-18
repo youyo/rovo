@@ -7,6 +7,7 @@
 export type AgentPhase =
   | "starting"
   | "running"
+  | "input_required"
   | "verifying"
   | "completed"
   | "failed"
@@ -127,4 +128,11 @@ export interface AgentRpc {
   getResult(): Promise<ResultDto>;
   /** Installation Token の更新。冪等で、成功（ok:true）するまで TaskDO が再送する */
   setGitCredential(c: GitCredential): Promise<{ ok: boolean }>;
+  /**
+   * 子の質問への回答。question_id で冪等。ok:false なら TaskDO が再送する。
+   * ignored:true は「もう効果が無い」（回答済み・終端・cancel 済み）ことを示し、TaskDO は再送をやめる。
+   */
+  answer(questionId: string, answer: string): Promise<{ ok: boolean; ignored?: boolean }>;
+  /** 追加の指示。steer_id（Gateway が発行）で冪等。ok:false なら TaskDO が再送する */
+  steer(steerId: string, message: string): Promise<{ ok: boolean; ignored?: boolean }>;
 }

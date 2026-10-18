@@ -4,6 +4,8 @@ export type Phase =
   | "starting"
   | "running"
   | "verifying"
+  /** ask_parent で質問し、親の回答を待っている */
+  | "input_required"
   | "completed"
   | "failed"
   | "budget_exceeded"
@@ -69,6 +71,12 @@ export type StartResult =
   | { status: "conflict" }
   | { status: "cancelled" }
   | { status: "rejected"; reason: string };
+
+/** answer / steer の結果。ignored は「停止・終端のため何もしなかった」（Gateway は成功として扱う）。 */
+export interface DeliveryResult {
+  ok: boolean;
+  ignored?: boolean;
+}
 
 export interface CancelResult {
   /**

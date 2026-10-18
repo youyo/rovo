@@ -1,6 +1,14 @@
 import type { AgentEventDto, Phase, UsageDto } from "./types";
 import { isTerminal } from "./types";
 
+/** received: 受け取った / submitted: Pi へ渡している最中 / buffered: 次の submit に添えるため保留 / accepted: Pi に渡し終えた */
+export type SteerState = "received" | "submitted" | "buffered" | "accepted";
+export interface SteerRow {
+  steerId: string;
+  message: string;
+  state: SteerState;
+}
+
 export const ZERO_USAGE: UsageDto = {
   costUsd: 0,
   inputTokens: 0,
@@ -24,6 +32,9 @@ export class AgentStore {
     sql.exec("CREATE TABLE IF NOT EXISTS agent_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     sql.exec(
       "CREATE TABLE IF NOT EXISTS agent_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL)",
+    );
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS agent_steers (seq INTEGER PRIMARY KEY AUTOINCREMENT, steer_id TEXT NOT NULL UNIQUE, message TEXT NOT NULL, state TEXT NOT NULL, announced INTEGER NOT NULL DEFAULT 0)",
     );
     sql.exec(
       "CREATE TABLE IF NOT EXISTS agent_patch (idx INTEGER PRIMARY KEY, chunk TEXT NOT NULL)",
@@ -103,6 +114,53 @@ export class AgentStore {
 
   usage(): UsageDto {
     return this.meta<UsageDto>("usage") ?? ZERO_USAGE;
+  }
+
+  steer(steerId: string): SteerRow | undefined {
+    const row = this.ctx.storage.sql
+      .exec<{ steer_id: string; message: string; state: SteerState }>(
+        "SELECT steer_id, message, state FROM agent_steers WHERE steer_id = ?",
+        steerId,
+      )
+      .toArray()[0];
+    return row && { steerId: row.steer_id, message: row.message, state: row.state };
+  }
+
+  insertSteer(steerId: string, message: string, state: SteerState): void {
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO agent_steers (steer_id, message, state) VALUES (?, ?, ?)",
+      steerId,
+      message,
+      state,
+    );
+  }
+
+  setSteerState(steerId: string, state: SteerState): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE agent_steers SET state = ? WHERE steer_id = ?",
+      state,
+      steerId,
+    );
+  }
+
+  /** steer_accepted を出したことを記録する。初めて記録したときだけ true（二重に出さないため） */
+  markAnnounced(steerId: string): boolean {
+    const cursor = this.ctx.storage.sql.exec(
+      "UPDATE agent_steers SET announced = 1 WHERE steer_id = ? AND announced = 0",
+      steerId,
+    );
+    return cursor.rowsWritten > 0;
+  }
+
+  /** 受け取った順の保留中の steer */
+  steersIn(state: SteerState): SteerRow[] {
+    return this.ctx.storage.sql
+      .exec<{ steer_id: string; message: string; state: SteerState }>(
+        "SELECT steer_id, message, state FROM agent_steers WHERE state = ? ORDER BY seq",
+        state,
+      )
+      .toArray()
+      .map((r) => ({ steerId: r.steer_id, message: r.message, state: r.state }));
   }
 
   savePatch(patch: string): void {

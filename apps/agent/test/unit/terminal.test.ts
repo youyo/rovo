@@ -31,4 +31,26 @@ describe("decideTerminal: cancel > deadline > budget_exceeded > failed > complet
   it("要求が無く意図だけでも決まる", () => {
     expect(decideTerminal(["deadline"], [])).toEqual({ phase: "failed", reason: "deadline" });
   });
+
+  it("input_timeout は deadline の下、budget_exceeded / failed / completed の上", () => {
+    expect(decideTerminal(["input_timeout"], [completed])).toEqual({
+      phase: "failed",
+      reason: "input_timeout",
+    });
+    expect(decideTerminal(["input_timeout"], [failed])).toEqual({
+      phase: "failed",
+      reason: "input_timeout",
+    });
+    expect(decideTerminal(["budget_exceeded", "input_timeout"], [completed])).toEqual({
+      phase: "failed",
+      reason: "input_timeout",
+    });
+    expect(decideTerminal(["input_timeout", "deadline"], [completed])).toEqual({
+      phase: "failed",
+      reason: "deadline",
+    });
+    expect(decideTerminal(["input_timeout", "cancel"], [completed])).toMatchObject({
+      phase: "cancelled",
+    });
+  });
 });

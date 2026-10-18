@@ -26,8 +26,16 @@ export interface AgentTestOverrides {
   beforeUsageRead?: () => Promise<void>;
   /** doLaunch が Pi へ run を投入する直前に待つ（投入中に cancel が確定するケースの再現用） */
   beforeSubmit?: () => Promise<void>;
-  /** モデル呼び出し（fake provider が実際に呼ばれた回数の観測用） */
-  onModelCall?: () => void;
+  /** ask_parent が未 commit の確認と質問の記録に入る直前 */
+  beforeAskParent?: () => Promise<void>;
+  /** ask_parent が質問を記録した直後（ツールの結果を返す前） */
+  afterQuestion?: () => Promise<void>;
+  /** answer() が Pi へ回答を submit する直前（期限の延長は済んでいる）。例外を投げると submit の失敗になる */
+  beforeAnswerSubmit?: () => Promise<void>;
+  /** steer を Pi へ submit する直前（phase を確かめた後） */
+  beforeSteerSubmit?: () => Promise<void>;
+  /** モデル呼び出し（fake provider が実際に呼ばれた回数と、そのとき見えていた user メッセージの観測用） */
+  onModelCall?: (context?: { userTexts: string[] }) => void;
 }
 
 const overrides = new Map<string, AgentTestOverrides>();

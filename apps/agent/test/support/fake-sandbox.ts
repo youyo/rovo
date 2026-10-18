@@ -24,6 +24,11 @@ export class FakeSandbox implements SandboxPort {
   /** terminate() の戻り値を先頭から順に使う（空なら stopped:true）。 */
   terminateResults: boolean[] = [];
 
+  /** extendDeadline で受け取った期限（古い順） */
+  readonly extended: number[] = [];
+  /** 設定すると extendDeadline がこの例外を投げる（1 回で消える） */
+  extendError: Error | undefined;
+
   constructor(private readonly handler: ExecHandler = () => ({})) {}
 
   async ensureReady(spec: WorkspaceSpec): Promise<void> {
@@ -35,6 +40,16 @@ export class FakeSandbox implements SandboxPort {
     if (this.credentialError) throw this.credentialError;
     this.order.push("credential");
     this.credentials.push(credential);
+  }
+
+  async extendDeadline(deadlineAt: number): Promise<void> {
+    if (this.extendError) {
+      const e = this.extendError;
+      this.extendError = undefined;
+      throw e;
+    }
+    this.order.push("extend");
+    this.extended.push(deadlineAt);
   }
 
   async stop(): Promise<{ stopped: boolean }> {

@@ -7,15 +7,22 @@ export type PublicPayload = Record<string, string | number | boolean | null>;
 /** 公開する文字列の上限。AgentDO の data をそのままは流さず、既知の項目だけをここで切って渡す。 */
 export const MAX_PUBLIC_TEXT = 500;
 export const MAX_PUBLIC_SUMMARY = 2_000;
+/** 子の質問の本文の上限（文字数）。options は 10 個まで・各 500 文字（ask_parent の上限と同じ）。 */
+export const MAX_QUESTION_LENGTH = 4_000;
+export const MAX_QUESTION_OPTIONS = 10;
+export const MAX_QUESTION_OPTION_LENGTH = 500;
 
 export type MappedAgentEvent =
   | { kind: "phase"; status: TaskStatus | null; reason?: string }
   | { kind: "usage"; costMicroUsd: number; payload: PublicPayload }
+  /** 子の質問。TaskDO は questions テーブルにも保存する。options は JSON 配列の文字列 */
+  | { kind: "question"; payload: PublicPayload }
   | { kind: "event"; type: string; payload: PublicPayload };
 
 const PHASE_STATUS: Readonly<Record<AgentPhase, TaskStatus | null>> = {
   starting: null,
   running: "RUNNING",
+  input_required: "INPUT_REQUIRED",
   verifying: "VERIFYING",
   completed: "COMPLETED",
   failed: "FAILED",
@@ -30,6 +37,24 @@ export function usdToMicro(usd: number): number {
 function text(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
   return v.length > max ? `${v.slice(0, max)}…` : v;
+}
+
+/** options を JSON 配列の文字列に正規化する（EventPayload はプリミティブしか持てない）。壊れていれば "[]"。 */
+function questionOptions(v: unknown): string {
+  let list: unknown = v;
+  if (typeof v === "string") {
+    try {
+      list = JSON.parse(v);
+    } catch {
+      return "[]";
+    }
+  }
+  if (!Array.isArray(list)) return "[]";
+  const items = list
+    .filter((x): x is string => typeof x === "string")
+    .slice(0, MAX_QUESTION_OPTIONS)
+    .map((x) => x.slice(0, MAX_QUESTION_OPTION_LENGTH));
+  return JSON.stringify(items);
 }
 
 function num(v: unknown): number {
@@ -74,6 +99,27 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
         },
       };
     }
+    case "question":
+      return {
+        kind: "question",
+        payload: {
+          question_id: typeof d.question_id === "string" ? d.question_id.slice(0, 128) : "",
+          message: typeof d.message === "string" ? d.message.slice(0, MAX_QUESTION_LENGTH) : "",
+          options: questionOptions(d.options),
+        },
+      };
+    case "answered":
+      return {
+        kind: "event",
+        type: "answered",
+        payload: { question_id: text(d.question_id, 128) },
+      };
+    case "steer_accepted":
+      return {
+        kind: "event",
+        type: "steer_accepted",
+        payload: { steer_id: text(d.steer_id, 160) },
+      };
     case "tool_start":
       return {
         kind: "event",

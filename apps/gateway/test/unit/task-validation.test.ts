@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { isTaskId, ulid } from "../../src/tasks/ulid";
 import {
+  answerInputSchema,
   computeFingerprint,
   exceedsInputLimit,
   isValidIdempotencyKey,
   parseCursor,
   parseTimeoutSeconds,
+  steerInputSchema,
   taskInputSchema,
 } from "../../src/tasks/validation";
 
@@ -257,5 +259,28 @@ describe("verification_commands の検証", () => {
     );
     expect(empty).toBe(none);
     expect(new Set([none, a, b, c]).size).toBe(4);
+  });
+});
+
+describe("task_answer / task_steer の入力", () => {
+  it("answer は 1〜20,000 文字。question_id は必須", () => {
+    const ok = { task_id: "t", question_id: "q", answer: "a" };
+    expect(answerInputSchema.safeParse(ok).success).toBe(true);
+    expect(answerInputSchema.safeParse({ ...ok, answer: "a".repeat(20_000) }).success).toBe(true);
+    expect(answerInputSchema.safeParse({ ...ok, answer: "" }).success).toBe(false);
+    expect(answerInputSchema.safeParse({ ...ok, answer: "a".repeat(20_001) }).success).toBe(false);
+    expect(answerInputSchema.safeParse({ ...ok, question_id: "" }).success).toBe(false);
+    expect(answerInputSchema.safeParse({ task_id: "t", answer: "a" }).success).toBe(false);
+  });
+
+  it("steer の message は 1〜20,000 文字。idempotency_key は任意で形式を検証する", () => {
+    const ok = { task_id: "t", message: "m" };
+    expect(steerInputSchema.safeParse(ok).success).toBe(true);
+    expect(steerInputSchema.safeParse({ ...ok, message: "m".repeat(20_000) }).success).toBe(true);
+    expect(steerInputSchema.safeParse({ ...ok, message: "" }).success).toBe(false);
+    expect(steerInputSchema.safeParse({ ...ok, message: "m".repeat(20_001) }).success).toBe(false);
+    expect(steerInputSchema.safeParse({ ...ok, idempotency_key: "key-1" }).success).toBe(true);
+    expect(steerInputSchema.safeParse({ ...ok, idempotency_key: "bad key!" }).success).toBe(false);
+    expect(steerInputSchema.safeParse({ ...ok, idempotency_key: "" }).success).toBe(false);
   });
 });

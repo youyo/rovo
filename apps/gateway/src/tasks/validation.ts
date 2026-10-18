@@ -122,3 +122,29 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+/** task_answer の answer / task_steer の message の長さの上限（文字数）。 */
+export const MAX_ANSWER_LENGTH = 20_000;
+export const MAX_STEER_LENGTH = 20_000;
+const MAX_ID_LENGTH = 128;
+
+/** task_answer の入力。回答は認証された親からの指示なので内容は縛らず、長さだけ制限する。 */
+export const answerInputSchema = z.object({
+  task_id: z.string(),
+  question_id: z.string().min(1).max(MAX_ID_LENGTH),
+  answer: z.string().min(1).max(MAX_ANSWER_LENGTH),
+});
+
+export type AnswerInput = z.infer<typeof answerInputSchema>;
+
+/** task_steer の入力。idempotency_key があれば steer_id をそこから導く。 */
+export const steerInputSchema = z.object({
+  task_id: z.string(),
+  message: z.string().min(1).max(MAX_STEER_LENGTH),
+  idempotency_key: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,128}$/, "idempotency_key must match [A-Za-z0-9_-]{1,128}")
+    .optional(),
+});
+
+export type SteerInput = z.infer<typeof steerInputSchema>;

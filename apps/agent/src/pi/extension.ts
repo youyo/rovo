@@ -25,6 +25,12 @@ export interface AgentPiHooks {
   reportCompletion(
     summary: string,
   ): Promise<{ text: string; isError: boolean; terminate: boolean }>;
+  /** 親への質問。terminate が true なら、このラウンドで run を終える（回答まで再開しない） */
+  askParent(args: {
+    question: string;
+    options?: string[];
+    context?: string;
+  }): Promise<{ text: string; isError: boolean; terminate: boolean }>;
   /** システムプロンプトの section（key → 本文。本文が undefined なら出さない） */
   sections(): { key: string; text: string | undefined }[];
 }
@@ -36,6 +42,7 @@ const SECTION_KEYS = [
   "verification",
   "procedure",
   "untrusted_data",
+  "ask_parent",
   "no_push",
 ] as const;
 
@@ -71,9 +78,37 @@ export function createAgentExtension(
     },
   });
 
+  const askParent = defineTool({
+    name: "ask_parent",
+    description:
+      "Ask the parent a question and stop until it answers. Use it only for a decision you cannot make yourself " +
+      "(see the system prompt). Commit your work with git_commit first (WIP is fine). " +
+      "Limits: question and context together up to 4000 characters, up to 10 options of up to 500 characters each.",
+    parameters: Type.Object({
+      question: Type.String({ description: "The question for the parent" }),
+      options: Type.Optional(
+        Type.Array(Type.String(), { description: "Answer choices, if the answer is a choice" }),
+      ),
+      context: Type.Optional(Type.String({ description: "Background the parent needs" })),
+    }),
+    replay: "unsafe",
+    async execute(args) {
+      const r = await hooks.askParent({
+        question: args.question,
+        ...(args.options !== undefined ? { options: args.options } : {}),
+        ...(args.context !== undefined ? { context: args.context } : {}),
+      });
+      return {
+        output: [{ type: "text" as const, text: r.text }],
+        isError: r.isError,
+        ...(r.terminate ? { control: { terminate: true as const } } : {}),
+      };
+    },
+  });
+
   return defineExtension({
     name: "rovo",
-    tools: [...sandboxTools, reportCompletion],
+    tools: [...sandboxTools, reportCompletion, askParent],
     sections: SECTION_KEYS.map((key) =>
       section(key, () => hooks.sections().find((s) => s.key === key)?.text),
     ),

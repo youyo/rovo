@@ -32,11 +32,18 @@ export function makeSpec(taskId: string, over: Partial<TaskSpec> = {}): TaskSpec
 export const report = (summary = "done"): ScriptStep => ({
   toolCall: { name: "report_completion", arguments: { summary } },
 });
-export const call = (
-  name: string,
-  args: Record<string, string | number | boolean> = {},
-): ScriptStep => ({
+export const call = (name: string, args: Record<string, unknown> = {}): ScriptStep => ({
   toolCall: { name, arguments: args },
+});
+
+/** ask_parent を呼ぶ台本の 1 ターン */
+export const ask = (question: string, options?: string[]): ScriptStep => ({
+  toolCall: { name: "ask_parent", arguments: options ? { question, options } : { question } },
+});
+
+/** 1 つの応答で複数のツールを呼ぶ台本の 1 ターン（各ステップの toolCall を並べる） */
+export const round = (...steps: ScriptStep[]): ScriptStep => ({
+  toolCalls: steps.flatMap((s) => (s.toolCall ? [s.toolCall] : [])),
 });
 
 export interface ExecGate {
@@ -53,7 +60,15 @@ export interface Fixture {
   /** 検証コマンド（npm test）の結果を順に返す。尽きたら成功 */
   verifyResults: Partial<ExecResult>[];
   verifyCalls: string[][];
-  modelCalls: { count: number };
+  modelCalls: { count: number; userTexts: string[][] };
+  /** ask_parent の本体に入る直前（未回答の質問を記録する前）を止める */
+  askGate: ExecGate;
+  /** answer() が Pi へ回答を submit する直前を止める。throwOnce を立てると 1 回だけ例外にする */
+  answerGate: ExecGate & { throwOnce: () => void };
+  /** steer を Pi へ submit する直前（phase を確かめた後）を止める（その間に phase が変わるケースの再現用） */
+  steerGate: ExecGate;
+  /** ask_parent が質問を記録した直後（ツールの結果を返す前）を止める */
+  questionGate: ExecGate;
   gate: { waitEntered: () => Promise<void>; release: () => void };
   patch: { value: string };
   nameStatus: { value: string };
@@ -95,7 +110,7 @@ export function newFixture(
   const clock = { now: T0 };
   const verifyResults: Partial<ExecResult>[] = [];
   const verifyCalls: string[][] = [];
-  const modelCalls = { count: 0 };
+  const modelCalls = { count: 0, userTexts: [] as string[][] };
   const patch = { value: "From abc\n--- a\n+++ b\n" };
   const nameStatus = { value: "" };
   // DO の中と外で Promise を共有すると I/O の所有者が混ざるので、フラグのポーリングにする
@@ -107,6 +122,11 @@ export function newFixture(
   };
   const usageState = { held: false, entered: false };
   const submitState = { held: false, entered: false };
+  const askState = { held: false, entered: false };
+  const answerState = { held: false, entered: false };
+  const steerState = { held: false, entered: false };
+  const questionState = { held: false, entered: false };
+  const answerThrow = { once: false };
   const hold = async (g: { held: boolean; entered: boolean }) => {
     if (!g.held) return;
     g.entered = true;
@@ -211,8 +231,19 @@ export function newFixture(
     pushRetryDelayMs: opts.pushRetryDelayMs ?? 0,
     beforeUsageRead: () => hold(usageState),
     beforeSubmit: () => hold(submitState),
-    onModelCall: () => {
+    beforeAskParent: () => hold(askState),
+    beforeAnswerSubmit: async () => {
+      await hold(answerState);
+      if (answerThrow.once) {
+        answerThrow.once = false;
+        throw new Error("answer submit failed");
+      }
+    },
+    beforeSteerSubmit: () => hold(steerState),
+    afterQuestion: () => hold(questionState),
+    onModelCall: (ctx) => {
       modelCalls.count += 1;
+      modelCalls.userTexts.push(ctx?.userTexts ?? []);
     },
   });
   return {
@@ -241,6 +272,15 @@ export function newFixture(
     pushCalls,
     usageGate: gateOf(usageState),
     submitGate: gateOf(submitState),
+    askGate: gateOf(askState),
+    answerGate: {
+      ...gateOf(answerState),
+      throwOnce: () => {
+        answerThrow.once = true;
+      },
+    },
+    steerGate: gateOf(steerState),
+    questionGate: gateOf(questionState),
     execGate: {
       status: gateOf(execState.status),
       switch: gateOf(execState.switch),

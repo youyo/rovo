@@ -68,6 +68,8 @@ const AGENT_ACTIONS = [
   "result",
   "debug",
   "set-git-credential",
+  "answer",
+  "steer",
 ];
 
 /** AgentDO を HTTP から操作する（台本の設定・start・cancel・イベントとresultの取得）。名前は SandboxDO と同じ task 名。 */
@@ -85,6 +87,10 @@ async function handleAgentRoute(
     credential?: { token: string; expiresAt: number };
     afterSeq?: number;
     limit?: number;
+    questionId?: string;
+    answer?: string;
+    steerId?: string;
+    message?: string;
   };
   const agent = env.AGENT_DO.getByName(body.name);
   try {
@@ -96,6 +102,10 @@ async function handleAgentRoute(
         return Response.json(await agent.start(body.spec as TaskSpec));
       case "set-git-credential":
         return Response.json(await agent.setGitCredential(body.credential as never));
+      case "answer":
+        return Response.json(await agent.answer(body.questionId ?? "", body.answer ?? ""));
+      case "steer":
+        return Response.json(await agent.steer(body.steerId ?? "", body.message ?? ""));
       case "cancel":
         return Response.json(await agent.cancel());
       case "events":

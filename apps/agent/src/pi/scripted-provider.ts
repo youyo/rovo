@@ -8,10 +8,17 @@ import {
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 
+export interface ScriptToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
 /** 台本の 1 ターン。モデルが 1 回返す応答（テキストと、任意でツール呼び出し 1 件）。 */
 export interface ScriptStep {
   text?: string;
-  toolCall?: { name: string; arguments: Record<string, string | number | boolean> };
+  toolCall?: ScriptToolCall;
+  /** 1 つの応答で複数のツールを呼ぶ（toolCall より優先） */
+  toolCalls?: ScriptToolCall[];
   /** このターンで消費したトークン数。費用は scripted モデルの単価（$1/100万トークン）で計算する。 */
   usage?: { input?: number; output?: number };
   /** 応答を返すまでの待ち（ms）。呼び出しの途中で cancel されるケースの再現用。abort しても応答は返る（usage が後から増える）。 */
@@ -34,11 +41,28 @@ const MODEL: Model<string> = {
   maxTokens: 4096,
 };
 
+function textOf(content: string | readonly { type: string; text?: string }[]): string {
+  if (typeof content === "string") return content;
+  return content.map((c) => (c.type === "text" ? (c.text ?? "") : "")).join("");
+}
+
+/**
+ * 台本のキー。最初の user メッセージの先頭の text だけを使う
+ * （親からの追加の指示 = steer は、後ろの text として添えられるので、キーを変えない）。
+ */
 function userText(context: TranscriptContext): string {
   const first = context.messages.find((m) => m.role === "user");
   if (!first) return "";
   if (typeof first.content === "string") return first.content;
-  return first.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+  const head = first.content.find((c) => c.type === "text");
+  return head && head.type === "text" ? head.text : "";
+}
+
+/** transcript の user メッセージの本文（テストの観測用） */
+function userTexts(context: TranscriptContext): string[] {
+  return context.messages.flatMap((m) =>
+    m.role === "user" ? [textOf(m.content as Parameters<typeof textOf>[0])] : [],
+  );
 }
 
 const ZERO_USAGE = {
@@ -59,7 +83,7 @@ const ZERO_USAGE = {
  */
 export function createScriptedProvider(
   getScript: (key: string) => readonly ScriptStep[],
-  onCall?: () => void,
+  onCall?: (context: { userTexts: string[] }) => void,
 ): Provider {
   const stream = (
     _model: Model<string>,
@@ -67,7 +91,7 @@ export function createScriptedProvider(
     options?: { signal?: AbortSignal },
   ) => {
     const out = createAssistantMessageEventStream();
-    onCall?.();
+    onCall?.({ userTexts: userTexts(context) });
     const turn = context.messages.filter((m) => m.role === "assistant").length;
     const step = getScript(userText(context))[turn] ?? { text: "script exhausted" };
     const inTok = step.usage?.input ?? 0;
@@ -86,16 +110,16 @@ export function createScriptedProvider(
     };
     const content: AssistantMessage["content"] = [];
     if (step.text) content.push({ type: "text", text: step.text });
-    let toolCall: ToolCall | undefined;
-    if (step.toolCall) {
-      toolCall = {
+    const calls = step.toolCalls ?? (step.toolCall ? [step.toolCall] : []);
+    const toolCall = calls.length > 0 ? true : undefined;
+    calls.forEach((c, i) => {
+      content.push({
         type: "toolCall",
-        id: `call_${turn}`,
-        name: step.toolCall.name,
-        arguments: step.toolCall.arguments,
-      };
-      content.push(toolCall);
-    }
+        id: calls.length > 1 ? `call_${turn}_${i}` : `call_${turn}`,
+        name: c.name,
+        arguments: c.arguments as ToolCall["arguments"],
+      });
+    });
     const message: AssistantMessage = {
       role: "assistant",
       content,

@@ -24,8 +24,9 @@ export function isTerminal(status: TaskStatus): boolean {
   return TERMINAL.has(status);
 }
 
-// 許可する遷移の一覧。Phase 1 の公開 API が使うのは「→ CANCELLED」だけで、
-// それ以外（CREATING → RUNNING など）は Phase 2 以降のために定義しておく。
+// 許可する遷移の一覧。Phase 1 の公開 API が使うのは「→ CANCELLED」だけだった。
+// Phase 2 で CREATING → RUNNING などが、Phase 4 で RUNNING ⇄ INPUT_REQUIRED と
+// INPUT_REQUIRED → FAILED（input_timeout）が使われる（TaskDO が AgentDO の phase を写すときに canTransition で確かめる）。
 const TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   CREATING: ["RUNNING", "FAILED", "BUDGET_EXCEEDED", "CANCELLED"],
   RUNNING: [

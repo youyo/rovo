@@ -78,7 +78,10 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - ヘッダ: `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'`、`X-Frame-Options: DENY`、`Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`。
     - CSP に `form-action 'self'` は付けない。Chrome は `form-action` を POST 後の redirect 先にも適用するため、承認後の GitHub への redirect と、拒否時の client の `redirect_uri` への redirect が壊れる。フォームの送信先は相対パス固定で、`base-uri 'none'` により `<base>` での差し替えも封じている。
   - 承認の記憶（`approveConsent` の `remember`）は Phase 1 では使わない。毎回、同意画面を出す。
-- state は1回限り有効で、期限付き（10分）にする。開始したブラウザとの紐付けは、署名付き Cookie で行う。
+- state は期限付き（10分）にし、開始したブラウザとの紐付けは `__Host-` Cookie で行う。
+  - 実装には workers-oauth-provider の `beginUpstream` / `finishUpstream` を使う。
+  - 逐次の再使用は拒否される。ただし KV の get と delete は原子的でないため、同じブラウザから同じ state で並行して callback すると、両方が通る可能性がある。
+  - その場合でも GitHub の認可コードは1回しか交換できないので、二重の grant にはならないと判断し、許容する。
 - 設定値（env）: `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET`（secret）、`ALLOWED_ORG`、`ALLOWED_TEAM`。
 - GitHub の URL（`GITHUB_OAUTH_BASE` / `GITHUB_API_BASE`）は E2E でだけ差し替えられるようにする。
   - 本番では既定値（`https://github.com` / `https://api.github.com`）以外を拒否する。たとえば `ENVIRONMENT=test` のときだけ上書きを許す。
@@ -141,7 +144,9 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - 無ければ最大 `timeout_seconds` 待つ。既定は 30 秒、上限は 60 秒にクランプする。
   - 待機者は DO 内で Promise として保持する。複数の待機者がそれぞれのカーソルで独立に起きるようにし、通知を一人が消費して終わる形にしない。
   - 取りこぼしを防ぐため、「待機者を登録してから再読する」順にする。
-  - タイムアウトしたときやクライアントが切断したときは、待機者を片付ける。
+  - タイムアウトしたときは、待機者を片付ける。
+    - DO の RPC では、呼び出し側の切断を検知できない。そのため切断しても待機者はすぐには消えず、タイマー（最大60秒）で必ず解放される。
+    - つまり切断した待機者は、同時待機の枠を最大60秒占有する。
   - DO ごとの同時待機数に上限を設ける（例: 16）。超えたら即座に空の結果を返す。
     - その応答には `retry_after_seconds` を含め、クライアントが連打しないようにする。
   - 待機全体を `blockConcurrencyWhile` で包まない（cancel などを妨げるため）。
@@ -195,7 +200,9 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
 
 - 入力は zod で検証する。repository は `owner/name` 形式、base_sha は 7〜40桁の16進。
 - エラーは MCP のツールエラー（`isError: true`）として、`code` を含む JSON で返す。
-  - `code` は `not_found` / `conflict` / `expired` / `concurrency_limit` / `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` のいずれか。
+  - `code` は `not_found` / `conflict` / `expired` / `concurrency_limit` / `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal` のいずれか。
+  - `internal` は想定外の例外に使い、メッセージは固定にする。スタックやトークンは含めない。
+  - SDK の入力スキーマに合わない入力（必須項目の欠落・型の不正）も `invalid_input` として返す。
 - `task_answer` / `task_steer` / `task_result` は Phase 4 以降で追加する。
 
 ## テスト

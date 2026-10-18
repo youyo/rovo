@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rovo-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "vars": {
+    // "test" のときだけ E2E 用のスタブ認可と上書き設定を許す。本番は必ず "production"。
+    "ENVIRONMENT": "production",
+    // 公開 URL（OAuth の issuer / resource の元になる）。デプロイ時に実 URL へ置き換える。
+    "PUBLIC_BASE_URL": "https://rovo-gateway.example.workers.dev"
+  }
+}

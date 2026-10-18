@@ -1,0 +1,58 @@
+[tools]
+node = "24.21.0"
+pnpm = "12.14.0"
+
+[env]
+# wrangler の対話・テレメトリを止める（CI=1 は pnpm install を frozen-lockfile 扱いにもする）
+WRANGLER_SEND_METRICS = "false"
+CI = "1"
+
+[tasks.install]
+description = "依存パッケージをインストール"
+run = "pnpm install --frozen-lockfile"
+
+[tasks.typegen]
+description = "wrangler types で Env 型を生成"
+dir = "apps/gateway"
+run = "pnpm exec wrangler types --env-interface Env --strict-vars=false"
+
+[tasks."test:unit"]
+description = "Unit テスト（vitest + workerd）"
+dir = "apps/gateway"
+run = "pnpm exec vitest run --config vitest.config.ts"
+
+[tasks."test:e2e"]
+description = "E2E テスト（wrangler dev で実 Worker を起動し MCP SDK Client から接続）"
+dir = "apps/gateway"
+run = "pnpm exec vitest run --config vitest.e2e.config.ts"
+
+[tasks.test]
+description = "Unit + E2E"
+depends = ["test:unit", "test:e2e"]
+
+[tasks.typecheck]
+description = "TypeScript の型検査"
+dir = "apps/gateway"
+run = "pnpm exec tsc -p tsconfig.json && pnpm exec tsc -p test/e2e/tsconfig.json"
+
+[tasks."lint:biome"]
+description = "Biome による lint / format チェック"
+run = "pnpm exec biome check ."
+
+[tasks.lint]
+description = "lint + 型検査"
+depends = ["lint:biome", "typecheck"]
+
+[tasks.fmt]
+description = "Biome で整形"
+run = "pnpm exec biome check --write ."
+
+[tasks.build]
+description = "Worker をバンドル（デプロイはしない）"
+dir = "apps/gateway"
+run = "pnpm exec wrangler deploy --dry-run --outdir dist"
+
+[tasks.dev]
+description = "wrangler dev でローカル起動（ENVIRONMENT=test のスタブ認可を有効にする）"
+dir = "apps/gateway"
+run = "pnpm exec wrangler dev --var ENVIRONMENT:test --var PUBLIC_BASE_URL:http://localhost:8787"

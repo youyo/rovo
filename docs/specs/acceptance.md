@@ -11,6 +11,8 @@ Phase 1 のコードが揃った後に、利用者と一緒に実施して結果
 - [ ] Secret を設定した: `GITHUB_APP_CLIENT_SECRET`、`TOKEN_ENC_KEY`
 - [ ] 変数を設定した: `GITHUB_APP_CLIENT_ID`、`ALLOWED_ORG`、`ALLOWED_TEAM`
 - [ ] MCP Server Portal に本 Worker の `/mcp` を登録した
+  - Portal と Access の設定は、このリポジトリではなく `cloudflare-infra`（Terraform）で管理する。登録もそちらから行う。
+  - 登録に必要な情報: MCP の URL `https://<PUBLIC_BASE_URL>/mcp`、ユーザーごとの OAuth（Portal の「Require user auth」を有効にする）。DCR は `/oauth/register`、認可は `/authorize`、トークンは `/oauth/token`。protected resource metadata は Worker が公開する。
 
 ## 1. ログイン
 

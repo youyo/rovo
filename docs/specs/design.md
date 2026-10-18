@@ -1022,6 +1022,11 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - MCP サーバー側でも利用者を制限する。指定した GitHub org の指定 team のメンバーだけを許可する。
   - Portal の Access ポリシーは直接の URL で迂回できるため、MCP 側の制限を実際の防御線とみなす。
 - タスク作成時には、上記に加えて対象リポジトリへの push 権限をタスクごとに検証する（10.1）。
+- GitHub のログインには、OAuth App ではなく GitHub App のユーザー認可（user-to-server トークン）を使う。これで次の3つを確かめる。
+  - push 権限
+  - 対象リポジトリに App がインストールされていること（`/user/installations/{id}/repositories`）
+  - team への所属
+- 詳細は `phase1.md` に記す。
 
 ### 15.4 予算
 

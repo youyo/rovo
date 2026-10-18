@@ -2,6 +2,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { Hono } from "hono";
 import { type LoginDeps, registerLoginRoutes } from "./auth/login";
 import { createRovoServer } from "./mcp/server";
+import { registerTestRoutes } from "./test-routes";
 
 type AppEnv = { Bindings: Env };
 
@@ -25,6 +26,8 @@ export function createDefaultApp(deps: LoginDeps = {}) {
 
   app.get("/", (c) => c.text("rovo gateway"));
   registerLoginRoutes(app, deps);
+  // ENVIRONMENT=test のときだけ有効な E2E 用ルート（それ以外は 404）
+  registerTestRoutes(app);
 
   // 想定外の例外は内容を出さない（トークンやスタックを漏らさない）
   app.onError((error, c) => {

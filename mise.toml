@@ -49,9 +49,15 @@ description = "agent の E2E（Docker 必須）。wrangler dev で実コンテ�
 dir = "apps/agent"
 run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 
+[tasks."test:e2e:full"]
+description = "Gateway(MCP) → AgentDO → SandboxDO（実コンテナ）の通しの E2E（Docker 必須）。Phase 2 のゴールの検証。test:e2e:docker と Docker コンテナの片付けが干渉しないよう、同時には走らせない"
+dir = "apps/gateway"
+run = "pnpm exec vitest run --config vitest.e2e-full.config.ts"
+wait_for = ["test:e2e:docker"]
+
 [tasks."test:e2e"]
-description = "E2E（gateway + agent。agent は Docker 必須）"
-depends = ["test:e2e:gateway", "test:e2e:docker"]
+description = "E2E（gateway + agent + 通し。agent と通しは Docker 必須）"
+depends = ["test:e2e:gateway", "test:e2e:docker", "test:e2e:full"]
 
 [tasks."test:e2e:net"]
 description = "agent の E2E の実ネットワーク版（Docker 必須。実 npm / 公開 GitHub リポジトリの匿名 clone。CI の test には含めない）"
@@ -65,7 +71,7 @@ depends = ["test:unit", "test:fake-github", "test:e2e"]
 [tasks."typecheck:gateway"]
 description = "gateway の型検査"
 dir = "apps/gateway"
-run = "pnpm exec tsc -p tsconfig.json && pnpm exec tsc -p test/e2e/tsconfig.json && pnpm exec tsc -p test/fake-github/tsconfig.json"
+run = "pnpm exec tsc -p tsconfig.json && pnpm exec tsc -p test/e2e/tsconfig.json && pnpm exec tsc -p test/full/tsconfig.json && pnpm exec tsc -p test/fake-github/tsconfig.json"
 
 [tasks."typecheck:agent"]
 description = "agent の型検査"

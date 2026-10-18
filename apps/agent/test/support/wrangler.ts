@@ -1,6 +1,7 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const AGENT_DIR = join(import.meta.dirname, "..", "..");
@@ -34,6 +35,59 @@ function listAgentContainers(): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+const LOCK_DIR = join(tmpdir(), "rovo-e2e-docker.lock");
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * wrangler dev + Docker の E2E は同時に 1 つだけ走らせる（プロセス間の排他ロック）。
+ * 後始末が「この起動中に増えた rovo-agent のコンテナ」を消すため、別の起動と並走すると互いのコンテナを消し合い、
+ * コンテナが SIGKILL（exit 137）されて不安定になる。ロックの持ち主のプロセスが死んでいたら奪う。
+ * 戻り値は解放関数（何度呼んでもよい）。
+ */
+async function acquireDockerLock(timeoutMs: number): Promise<() => void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      mkdirSync(LOCK_DIR);
+      writeFileSync(join(LOCK_DIR, "pid"), String(process.pid));
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      let owner = Number.NaN;
+      try {
+        owner = Number.parseInt(readFileSync(join(LOCK_DIR, "pid"), "utf8"), 10);
+      } catch {
+        // 作成直後で pid が未記入。少し待って見直す
+      }
+      if (Number.isFinite(owner) && !pidAlive(owner)) {
+        rmSync(LOCK_DIR, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`Docker E2E のロックを取得できません（持ち主 pid=${owner}）: ${LOCK_DIR}`);
+      }
+      await sleep(1_000);
+    }
+  }
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    process.off("exit", release);
+    rmSync(LOCK_DIR, { recursive: true, force: true });
+  };
+  process.on("exit", release);
+  return release;
 }
 
 export interface RunningWrangler {
@@ -75,6 +129,8 @@ export interface StartWranglerOptions {
   persistDir: string;
   /** ready 待ちの上限。Docker イメージのビルドを含むので長め。 */
   readyDeadlineMs?: number;
+  /** 待ち受けポート。事前に決める必要があるとき（PUBLIC_BASE_URL を vars に入れる等）だけ指定する。省略時は空きポート。 */
+  port?: number;
 }
 
 /**
@@ -82,7 +138,20 @@ export interface StartWranglerOptions {
  * SIGTERM で wrangler が起動したコンテナも片付く。
  */
 export async function startWrangler(opts: StartWranglerOptions): Promise<RunningWrangler> {
-  const port = await freePort();
+  const releaseLock = await acquireDockerLock(30 * 60_000);
+  try {
+    return await startLocked(opts, releaseLock);
+  } catch (e) {
+    releaseLock();
+    throw e;
+  }
+}
+
+async function startLocked(
+  opts: StartWranglerOptions,
+  releaseLock: () => void,
+): Promise<RunningWrangler> {
+  const port = opts.port ?? (await freePort());
   const inspectorPort = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const bin = join(AGENT_DIR, "node_modules", "wrangler", "bin", "wrangler.js");
@@ -155,6 +224,7 @@ export async function startWrangler(opts: StartWranglerOptions): Promise<Running
         // 片付けの失敗でテスト結果を変えない
       }
     }
+    releaseLock();
   };
 
   const deadline = Date.now() + (opts.readyDeadlineMs ?? 300_000);

@@ -9,6 +9,7 @@ import type {
   TaskSpec,
   UsageDto,
 } from "../agent/contract";
+import { withTestScripts } from "../test-routes";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import { isTaskId } from "./ulid";
 import { TASK_BUDGET_USD, type UserDO } from "./user-do";
@@ -202,7 +203,8 @@ export class TaskDO extends DurableObject<Env> {
   protected agentStub(): AgentRpc {
     const taskId = this.getRow()?.id;
     if (!taskId) throw new Error("task row missing");
-    return this.env.AGENT_DO.getByName(taskId) as unknown as AgentRpc;
+    // ENVIRONMENT=test のときだけ、E2E の台本を start の前に渡す（それ以外は素通し）
+    return withTestScripts(this.env, this.env.AGENT_DO.getByName(taskId) as unknown as AgentRpc);
   }
 
   /** 所有者の UserDO。テストで差し替える。 */

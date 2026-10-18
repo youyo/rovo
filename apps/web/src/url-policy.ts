@@ -74,9 +74,32 @@ function isExtraForbiddenIPv4(p: number[]): boolean {
   return a === 198 && (b === 18 || b === 19); // 198.18.0.0/15
 }
 
-/** IPv6 の拒否範囲（webfetch が持たないもの）。 */
+/** IPv4 の拒否判定の全体（webfetch の判定 + 追加範囲）。 */
+function isForbiddenIPv4Parts(p: number[]): boolean {
+  return isPrivateOrLocalHost(p.join(".")) || isExtraForbiddenIPv4(p);
+}
+
+const v4From = (hi: number, lo: number): number[] => [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff];
+
+/** IPv6 の拒否範囲（webfetch が持たないもの）。IPv4 を埋め込む形は、取り出して IPv4 の判定にかける。 */
 function isExtraForbiddenIPv6(g: number[]): boolean {
-  const [g0, g1, g2, g3, g4, g5] = g as [number, number, number, number, number, number];
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = g as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  if (g0 === 0x3fff && g1 < 0x1000) return true; // ドキュメント用 3fff::/20（RFC 9637）
+  if (g0 === 0x2002) return isForbiddenIPv4Parts(v4From(g1, g2)); // 6to4 2002::/16
+  // 周知 NAT64 64:ff9b::/96
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return isForbiddenIPv4Parts(v4From(g6, g7));
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0xffff && g5 === 0) return true; // SIIT ::ffff:0:0:0/96（丸ごと拒否）
   if (g0 === 0x2001 && g1 === 0) return true; // Teredo 2001:0::/32
   if (g0 === 0x2001 && g1 === 0x0db8) return true; // ドキュメント用 2001:db8::/32
   if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) return true; // IPv4-mapped ::ffff:0:0/96

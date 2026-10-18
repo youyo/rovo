@@ -241,5 +241,5 @@ apps/agent    ──service binding──▶     search / fetch / browse
   - 防御は、Workers の `fetch` が private / loopback / link-local のアドレスへ接続できないこと（プラットフォーム側の制約）に頼っている。この前提は受入（acceptance.md 11）で実機を使って確かめる。
   - `web_browse` は DoH で解決して補助的に検査するが、解決後に別のアドレスへ変わる DNS rebinding は防げない（上の「web_browse の安全策」3）。
   - redirect の行き先も、名前の検査と上記の制約だけで守る。
-- 拒否するアドレスの範囲は url-policy で `agents/webfetch` の判定に足している: Teredo（2001:0::/32）、IPv4-mapped（::ffff:0:0/96。公開の IPv4 を包んだ形も拒否）、ローカル NAT64（64:ff9b:1::/48）、discard（100::/64）、ドキュメント用（2001:db8::/32、192.0.2.0/24、198.51.100.0/24、203.0.113.0/24）、ベンチマーク（198.18.0.0/15）。
+- 拒否するアドレスの範囲は url-policy で `agents/webfetch` の判定に足している: Teredo（2001:0::/32）、IPv4-mapped（::ffff:0:0/96。公開の IPv4 を包んだ形も拒否）、ローカル NAT64（64:ff9b:1::/48）、discard（100::/64）、ドキュメント用（2001:db8::/32、3fff::/20、192.0.2.0/24、198.51.100.0/24、203.0.113.0/24）、ベンチマーク（198.18.0.0/15）。IPv4 を埋め込む形は、埋め込み IPv4 を取り出して IPv4 の判定（agents/webfetch + 上記の追加範囲）にかける: 周知 NAT64（64:ff9b::/96）と 6to4（2002::/16）。SIIT（::ffff:0:0:0/96）は通常のインターネット宛てではないので丸ごと拒否する。公開の IPv4 を埋めた NAT64 / 6to4 は通す。
 - gateway は、回数を消費する前に同じ URL の検査（url-policy を共有）を行い、違反の URL では回数を消費しない。返す URL は 2000 文字までに制限し、ツールの説明に「URL も非信頼のデータ」と書く。

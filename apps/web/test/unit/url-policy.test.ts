@@ -197,6 +197,51 @@ describe("checkUrl: 追加で拒否する範囲（境界）", () => {
   });
 });
 
+describe("checkUrl: IPv6 に IPv4 を埋めた形・3fff::/20", () => {
+  it.each([
+    // 周知 NAT64 64:ff9b::/96 に private / 文書用 / loopback の IPv4
+    "http://[64:ff9b::c000:201]/", // 192.0.2.1
+    "http://[64:ff9b::7f00:1]/", // 127.0.0.1
+    "http://[64:ff9b::a00:1]/", // 10.0.0.1
+    "http://[64:ff9b::a9fe:a9fe]/", // 169.254.169.254
+    "http://[64:ff9b::192.0.2.1]/",
+    // 6to4 2002::/16
+    "http://[2002:c000:204::]/", // 192.0.2.4
+    "http://[2002:7f00:1::]/", // 127.0.0.1
+    "http://[2002:a00:1::1]/", // 10.0.0.1
+    "http://[2002:a9fe:a9fe::]/", // 169.254.169.254
+    // SIIT ::ffff:0:0:0/96（丸ごと拒否）
+    "http://[::ffff:0:7f00:1]/",
+    "http://[::ffff:0:808:808]/",
+    "http://[::ffff:0:0:0]/",
+    // IPv4 互換 ::a.b.c.d
+    "http://[::7f00:1]/",
+    "http://[::a00:1]/",
+    "http://[::c000:201]/",
+    "http://[::808:808]/", // 互換は agents/webfetch が丸ごと拒否
+    // 3fff::/20（RFC 9637 文書用）
+    "http://[3fff::1]/",
+    "http://[3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff]/",
+  ])("拒否する: %s", (u) => {
+    const r = checkUrl(u);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("private_host");
+  });
+
+  it.each([
+    "https://[64:ff9b::808:808]/", // NAT64 + 8.8.8.8
+    "https://[64:ff9b::8.8.8.8]/",
+    "https://[2002:808:808::]/", // 6to4 + 8.8.8.8
+    "https://[2003::1]/", // 6to4 の次
+    "https://[2001:ffff::1]/", // 6to4 の手前
+    "https://[3fff:1000::]/", // 3fff::/20 の次
+    "https://[3ffe::1]/", // 3fff::/20 の手前
+    "https://[4000::1]/",
+  ])("境界の外・公開 IPv4 を埋めた形は通す: %s", (u) => {
+    expect(checkUrl(u).ok).toBe(true);
+  });
+});
+
 describe("isForbiddenHost", () => {
   it("hostname 単体でも判定できる（DoH で解決したアドレスの検査に使う）", () => {
     expect(isForbiddenHost("10.0.0.1")).toBe(true);

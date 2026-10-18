@@ -1040,3 +1040,20 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - Clef / Jev はプロンプトインジェクションの専用検出器ではない。8.5 の各リスク分類は `questions` として自前で定義する。
 - 取得した本文は `state`（データ）にだけ入れ、評価の指示は `questions` 側に分離する。
 - 判定は誘導され得るため、Policy Engine では決定論的チェックと組み合わせる。
+
+---
+
+## 16. 公開とデプロイの運用モデル（2026-10-18 決定）
+
+- このリポジトリ（`rovo`）は、最終的にパブリックにする。汎用のコードとドキュメントだけを置く。
+- デプロイは、private リポジトリ `rovo-mcp` から行う。
+  - `rovo-mcp` は upstream にこのリポジトリを登録し、更新を取り込む。
+  - 環境固有の値は `rovo-mcp` 側に置く。対象は、Cloudflare の account id、KV / AI Gateway の id、許可する org / team、公開 URL、secret の投入手順など。
+- MCP Server Portal / Access への登録は、`cloudflare-infra`（Terraform）で行う。
+
+### このリポジトリが守ること
+
+- 環境固有の値、秘密情報、個人情報をコミットしない。必要な値は env・secret・下流の設定ファイルで差し込む。
+- `wrangler.jsonc` はローカル開発とテスト用の設定とし、本番用の値（KV の id など）を持たない。
+- 下流が upstream の変更をコンフリクトなく取り込めるようにする。下流は「新しいファイルを足すだけ」でデプロイできる構成にする（例: 下流の本番用 wrangler 設定を `-c` で指定してデプロイする mise タスク）。下流に upstream のファイルを書き換えさせない。
+- 公開の前に、LICENSE、公開向けの README、下流でのデプロイ手順（`docs/deploy.md`）を用意する。

@@ -154,7 +154,6 @@ describe("起動が止まったコンテナの扱い", () => {
       fake.readyOnStart = 2; // 1回目の start では応答しない
       inst.maybeContainer = () => fake;
       inst.bootAttemptMs = 300;
-      inst.bootBudgetMs = 5_000;
       await inst.ensureReady(spec());
       expect(fake.startCalls).toBe(2);
       expect(fake.destroyCalls).toBe(1);
@@ -170,7 +169,6 @@ describe("起動が止まったコンテナの扱い", () => {
       fake.readyOnStart = 99;
       inst.maybeContainer = () => fake;
       inst.bootAttemptMs = 200;
-      inst.bootBudgetMs = 5_000;
       const started = Date.now();
       await expect(inst.ensureReady(spec())).rejects.toThrow(/container did not become ready/);
       expect(fake.startCalls).toBe(3);
@@ -180,17 +178,53 @@ describe("起動が止まったコンテナの扱い", () => {
     });
   });
 
-  it("全体の上限に達したら、試行が残っていても打ち切る", async () => {
-    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("boot-stall-budget");
+  it("破棄が遅くても、破棄の時間は起動の待ちから引かれず、3回目まで試される", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("boot-slow-destroy");
     await runInDO(stub, async (inst: Inst) => {
-      const fake = new FakeContainer(false, 0);
+      const fake = new FakeContainer(false, 400); // 破棄に 400ms（1 回の待ち 300ms より長い）
       fake.scripted = true;
       fake.readyOnStart = 99;
       inst.maybeContainer = () => fake;
-      inst.bootAttemptMs = 1_000;
-      inst.bootBudgetMs = 1_700; // 2回目の試行は約 700ms しかもらえず、3回目は始めない
+      inst.bootAttemptMs = 300;
+      inst.bootDestroyMs = 1_000;
       await expect(inst.ensureReady(spec())).rejects.toThrow(/container did not become ready/);
-      expect(fake.startCalls).toBe(2);
+      expect(fake.startCalls).toBe(3);
+      expect(fake.destroyCalls).toBe(3);
+      expect(fake.running).toBe(false);
+    });
+  });
+
+  it("破棄が返らなくても、破棄の上限で打ち切られ、全体は (待ち + 破棄の上限) の範囲に収まる", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("boot-hung-destroy");
+    await runInDO(stub, async (inst: Inst) => {
+      const fake = new FakeContainer(false, "never");
+      fake.scripted = true;
+      fake.readyOnStart = 99;
+      inst.maybeContainer = () => fake;
+      inst.bootAttemptMs = 200;
+      inst.bootDestroyMs = 300;
+      const started = Date.now();
+      await expect(inst.ensureReady(spec())).rejects.toThrow(/did not stop/);
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeLessThan(200 + 300 + 1_000);
+      expect(fake.startCalls).toBe(1);
+    });
+  });
+
+  it("最悪でも 試行数 x (待ち + 破棄の上限) 以内で失敗する（破棄が上限ぎりぎりに遅い場合）", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("boot-worst-case");
+    await runInDO(stub, async (inst: Inst) => {
+      const fake = new FakeContainer(false, 250);
+      fake.scripted = true;
+      fake.readyOnStart = 99;
+      inst.maybeContainer = () => fake;
+      inst.bootAttemptMs = 200;
+      inst.bootDestroyMs = 300;
+      const started = Date.now();
+      await expect(inst.ensureReady(spec())).rejects.toThrow(/container did not become ready/);
+      const elapsed = Date.now() - started;
+      expect(fake.startCalls).toBe(3);
+      expect(elapsed).toBeLessThan(3 * (200 + 300) + 500);
     });
   });
 
@@ -202,7 +236,6 @@ describe("起動が止まったコンテナの扱い", () => {
       fake.readyOnStart = 99;
       inst.maybeContainer = () => fake;
       inst.bootAttemptMs = 10_000;
-      inst.bootBudgetMs = 60_000;
       const ensure = inst.ensureReady(spec()).then(
         () => "ok",
         (e: Error) => e.message,

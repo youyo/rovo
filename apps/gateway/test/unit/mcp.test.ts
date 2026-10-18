@@ -713,6 +713,8 @@ describe("web_search / web_fetch（Phase 5）", () => {
         expect(t?.description, `${name} ${v}`).toContain(v);
       }
       expect(t?.description, name).toContain("quota_exceeded");
+      // URL も非信頼のデータ（検索結果の url・redirect 後の final_url は第三者が決める）
+      expect(t?.description, name).toMatch(/URL.*(非信頼|信頼できない).*データ/);
     }
     const search = tools.find((x) => x.name === "web_search");
     expect(search?.inputSchema.required).toEqual(["query"]);
@@ -814,6 +816,52 @@ describe("web_search / web_fetch（Phase 5）", () => {
       client.callTool({ name: "web_fetch", arguments: { url: "https://a.example.com/" } });
     expect((await f()).isError).toBeFalsy();
     expect(body(await f())).toMatchObject({ code: "quota_exceeded" });
+    await client.close();
+  });
+
+  it("web_fetch: URL ポリシー違反は invalid_input で、回数を消費せず web も呼ばない", async () => {
+    const u = await user("alice");
+    await setLimits(u.id, { fetch: 1 });
+    const web = fakeWeb();
+    const client = await connect(createApiApp(), u.props, withWeb(web.port));
+    for (const url of [
+      "http://127.0.0.1/",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://[::1]/",
+      "http://[2001:db8::1]/",
+      "ftp://a.example.com/",
+      "https://user:pw@a.example.com/",
+      "https://a.example.com:8443/",
+      "not a url",
+      "http://localhost/",
+    ]) {
+      const r = await client.callTool({ name: "web_fetch", arguments: { url } });
+      expect(r.isError, url).toBe(true);
+      expect(body(r).code, url).toBe("invalid_input");
+    }
+    expect(web.calls).toEqual([]);
+    // 上限 1 回の枠が残っている
+    const ok = await client.callTool({
+      name: "web_fetch",
+      arguments: { url: "https://a.example.com/" },
+    });
+    expect(ok.isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("web_fetch: URL は 2000 文字まで（web 側の上限と同じ）。2001 文字は invalid_input", async () => {
+    const u = await user("alice");
+    const web = fakeWeb();
+    const client = await connect(createApiApp(), u.props, withWeb(web.port));
+    const base = "https://a.example.com/";
+    const at2000 = base + "a".repeat(2000 - base.length);
+    expect(
+      (await client.callTool({ name: "web_fetch", arguments: { url: at2000 } })).isError,
+    ).toBeFalsy();
+    const over = await client.callTool({ name: "web_fetch", arguments: { url: `${at2000}a` } });
+    expect(over.isError).toBe(true);
+    expect(body(over).code).toBe("invalid_input");
+    expect(web.calls).toHaveLength(1);
     await client.close();
   });
 

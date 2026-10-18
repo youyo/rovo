@@ -41,17 +41,18 @@ const DESTROY_WAIT_MS = 15_000;
 const CLONE_TIMEOUT_MS = 5 * 60_000;
 /**
  * コンテナが ready になる（exec が応答する）までの 1 回あたりの期限。
- * 正常な起動は E2E の実測で ensureReady 全体が 0.9 秒前後（最大 0.92 秒、clone を含む）。その約 30 倍を見る。
+ * 正常な起動は E2E の実測で ensureReady 全体が 0.9 秒前後（最大 0.92 秒、clone を含む）。その約 25 倍を見る。
  * 止まった起動は何分待っても進まないので、これを超えたら破棄して起動し直す。
+ * 待ちは試行ごとに数える（前の試行の破棄にかかった時間で、次の試行の待ちを削らない）。
  */
-const BOOT_ATTEMPT_MS = 30_000;
+const BOOT_ATTEMPT_MS = 25_000;
 const BOOT_MAX_ATTEMPTS = 3;
 /**
- * ensureReady の起動待ち全体の上限。E2E の 1 操作の期限（120 秒）より短くして、
- * 3 回目まで使い切る前に呼び出し側が諦めないようにする。破棄の待ち（最大 15 秒/回）は別に数える。
- * AgentDO の setup は ensureReady の失敗を最大 3 回再試行する（tick 30 秒間隔）ので、1 回の失敗は 100 秒以内に確定する。
+ * 起動の途中で行う破棄の待ちの上限（1 回あたり）。通常の DESTROY_WAIT_MS（15 秒）より短くする。
+ * 起動全体の最悪時間 = 最初の破棄 10 + 3 x (待ち 25 + 破棄 10) = 115 秒 < E2E の 1 操作の期限 120 秒。
+ * 破棄が上限内に止まらなければ、そこで "container did not stop" として失敗する（残りの試行は行わない）。
  */
-const BOOT_BUDGET_MS = 75_000;
+const BOOT_DESTROY_MS = 10_000;
 const BOOT_POLL_MS = 500;
 /** 期限の延長の上限: 作成から 2 時間（タスクの最長）+ 回答待ちの累計の上限 24 時間 */
 const MAX_TASK_MS = 2 * 60 * 60_000;
@@ -104,9 +105,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private reapQueue: Promise<unknown> = Promise.resolve();
   /** destroy の監視期限（ms）。destroy() の Promise を待つ前から数える。 */
   private destroyWaitMs = DESTROY_WAIT_MS;
-  /** ready を待つ 1 回あたりの期限と、全試行の合計の上限（ms）。テストで短くする。 */
+  /** ready を待つ 1 回あたりの期限と、起動中の破棄の待ちの上限（ms）。テストで短くする。 */
   private bootAttemptMs = BOOT_ATTEMPT_MS;
-  private bootBudgetMs = BOOT_BUDGET_MS;
+  private bootDestroyMs = BOOT_DESTROY_MS;
 
   // ---- 永続状態 ----
 
@@ -471,17 +472,16 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const container = this.container();
     const spec = this.assertBootCurrent(g);
     // 基準プロセスの記録が無いコンテナは信用できないので、作り直す
-    if (container.running && !this.baseline()) await this.destroyContainer();
+    if (container.running && !this.baseline()) await this.destroyContainer(this.bootDestroyMs);
     // destroy を待っている間に terminate・期限・世代が変わりうる。start の直前に必ず確かめ直す
     this.assertBootCurrent(g);
     let started = false;
-    const budgetEnd = Date.now() + this.bootBudgetMs;
     const trace: string[] = [];
     let ready = false;
     for (let attempt = 1; attempt <= BOOT_MAX_ATTEMPTS && !ready; attempt++) {
       const attemptStart = Date.now();
-      // この試行の期限。全体の上限が先に来るならそちらに合わせる
-      const until = Math.min(attemptStart + this.bootAttemptMs, budgetEnd);
+      // この試行の期限（破棄の時間は含めない）
+      const until = attemptStart + this.bootAttemptMs;
       if (!container.running) {
         this.ctx.storage.kv.delete("baseline");
         container.start({
@@ -553,10 +553,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         `#${attempt} ${ready ? "ready" : `stalled-at-${stage}`} ${stageEnds.join(" ")} probes=${probes}${lastError ? ` last="${lastError}"` : ""}`,
       );
       if (ready) break;
-      // 起動が止まった: 破棄して停止を確かめ、最初からやり直す（残り時間が足りなければ打ち切る）
-      await this.destroyContainer();
+      // 起動が止まった: 破棄して停止を確かめ、最初からやり直す。破棄の時間は待ちの期限に数えない
+      await this.destroyContainer(this.bootDestroyMs);
       this.assertBootCurrent(g);
-      if (budgetEnd - Date.now() < BOOT_POLL_MS) break;
     }
     if (trace.length > 0) console.warn(`[sandbox-boot] ${trace.join(" | ")}`);
     if (!ready) {
@@ -769,16 +768,16 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
    * コンテナを破棄し、止まったことを確かめる。これが停止の唯一の保証（コンテナ内のプロセスの走査は偽装できる）。
    * 監視の期限は destroy() の Promise を待つ前から数える（Promise が返らなくても期限が効く）。
    */
-  private async destroyContainer(): Promise<void> {
+  private async destroyContainer(waitMs = this.destroyWaitMs): Promise<void> {
     const container = this.container();
-    const until = Date.now() + this.destroyWaitMs;
+    const until = Date.now() + waitMs;
     this.readyGen = -1;
     this.ctx.storage.kv.delete("baseline");
     if (!container.running) return;
     const destroyed = Promise.resolve()
       .then(() => container.destroy())
       .catch(() => {});
-    await Promise.race([destroyed, sleep(this.destroyWaitMs)]);
+    await Promise.race([destroyed, sleep(waitMs)]);
     while (container.running && Date.now() < until) await sleep(100);
     if (container.running) throw new Error("container did not stop");
   }

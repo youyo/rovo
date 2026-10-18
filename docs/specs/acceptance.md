@@ -164,6 +164,7 @@ Phase 5（Web Research Service: `web_search` / `web_fetch`）のコードが揃�
 - [ ] 子（AgentDO）が `web_search` / `web_fetch` を呼べる。結果がマーカー付きでモデルに届き、`task_wait` の `usage` イベントと `task_result` の `usage.web` に回数が出る
 - [ ] `robots.txt` で Disallow のページ、redirect で private なアドレスに向かうページが `blocked` になる。bot チャレンジのページ（Cloudflare の challenge）が `bot_challenge` で `blocked` になる
 - [ ] 回数の上限: 親は 1 日あたり search 200 回・fetch 500 回で `quota_exceeded`（実運用の値で確かめるのは大変なので、env で小さくして確かめてもよい）。子はタスクごとに search 50 回・fetch 100 回でツールのエラー
+- [ ] private に解決される名前（例: `127.0.0.1.nip.io`、`169.254.169.254.nip.io`）を `web_fetch` に渡しても、内部のサービスには到達せず、本文が返らない（`blocked` かエラー）。URL の検査は名前だけを見るため通ってしまうが、Workers の `fetch` が private / loopback / link-local へ接続できないことに頼っている。実機で確かめ、結果を記録する。到達できてしまった場合は Phase 5 の完了としない
 
 ## 12. Clef の応答の形・usage.input_tokens・sentinel の効き方
 

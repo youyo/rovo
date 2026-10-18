@@ -42,6 +42,8 @@ export type WebResearchService = {
   browse(req: BrowseRequest & { caller: unknown }): Promise<BrowseResult>;
 };
 
+const MAX_TITLE_CHARS = 200;
+
 const defaultLog = (entry: Record<string, unknown>) => console.log(JSON.stringify(entry));
 
 export function createWebResearchService(
@@ -122,12 +124,18 @@ export function createWebResearchService(
       }
 
       const normalized = normalizeContent(outcome.content, { maxChars: MAX_CONTENT_CHARS });
-      // 決定論ルールは生の本文（隠し文字を含む）にかける
-      const findings = runDeterministicRules(outcome.content);
+      // title も外部のコンテンツ。隠し文字を除いて 200 文字に切り詰め、本文と同じ評価にかける
+      const title = outcome.title
+        ? normalizeContent(outcome.title, { maxChars: MAX_TITLE_CHARS }).text.trim()
+        : "";
+      const evalPrefix = title ? `title: ${title}\n\n` : "";
+      // 決定論ルールは生の本文・生の title（隠し文字を含む）にかける。生の title は長さだけ制限する
+      const rawTitle = outcome.title ? `title: ${outcome.title.slice(0, 2000)}\n\n` : "";
+      const findings = runDeterministicRules(rawTitle + outcome.content);
       // 決定論ルールで block なら、モデルには渡さない
       const model = findings.some((f) => f.verdict === "block")
         ? null
-        : await evaluateSafely(evaluator, normalized.text, ctx);
+        : await evaluateSafely(evaluator, evalPrefix + normalized.text, ctx);
       const decision = decide({ findings, model }, config.thresholds);
       const releasable = decision.verdict === "allow" || decision.verdict === "caution";
       logFetch(ctx, req.url, decision.verdict);
@@ -142,7 +150,8 @@ export function createWebResearchService(
         content: releasable ? normalized.text : null,
         safety: toSafety(decision, info),
         status: "ok",
-        ...(outcome.title ? { title: outcome.title } : {}),
+        // block / unknown のときは title も返さない（本文と同じ扱い）
+        ...(releasable && title ? { title } : {}),
         truncated: normalized.truncated,
       };
     },

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WebFetchResponse, WebSafety, WebSearchResponse } from "../../src/web/contract";
 import {
+  MAX_RETURNED_URL_LENGTH,
   mapWebError,
   shapeFetchResult,
   shapeSearchResult,
@@ -108,6 +109,41 @@ describe("shapeSearchResult", () => {
     const r = shapeSearchResult(search([{ content: null, safety: safety("block") }]));
     expect(r.results[0]?.content).toBeNull();
     expect(r.results[0]?.safety.verdict).toBe("block");
+  });
+});
+
+describe("返す URL の長さの制限", () => {
+  const long = `https://a.example.com/${"x".repeat(MAX_RETURNED_URL_LENGTH)}`;
+
+  it("MAX_RETURNED_URL_LENGTH は 2000（web 側の入力の上限と同じ）", () => {
+    expect(MAX_RETURNED_URL_LENGTH).toBe(2000);
+  });
+
+  it("fetch: 長すぎる final_url は固定の文言に置き換える。上限ちょうどはそのまま", () => {
+    const exact = `https://a.example.com/${"x".repeat(MAX_RETURNED_URL_LENGTH - 22)}`;
+    expect(exact).toHaveLength(MAX_RETURNED_URL_LENGTH);
+    const ok = shapeFetchResult(fetched({ source: { ...fetched().source, final_url: exact } }));
+    expect(ok.source.final_url).toBe(exact);
+    const r = shapeFetchResult(
+      fetched({ source: { ...fetched().source, url: long, final_url: long } }),
+    );
+    expect(r.source.final_url).toBe("[url omitted: too long]");
+    expect(r.source.url).toBe("[url omitted: too long]");
+    expect(JSON.stringify(r)).not.toContain("xxxxxxxxxx");
+  });
+
+  it("search: 長すぎる URL の項目は落とし、dropped_urls に数える", () => {
+    const r = shapeSearchResult({
+      results: [long, "https://b.example.com/"].map((url) => ({
+        source: { url, retrieved_at: "t", via: "search" as const },
+        title: "T",
+        content: "D",
+        safety: safety(),
+      })),
+      metadata: { requestId: "r", latencyMs: 1, provider: "ceramic", dropped_urls: 1 },
+    });
+    expect(r.results.map((i) => i.url)).toEqual(["https://b.example.com/"]);
+    expect(r.metadata.dropped_urls).toBe(2);
   });
 });
 

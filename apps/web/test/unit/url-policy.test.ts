@@ -140,6 +140,63 @@ describe("checkUrl: 内部アドレス", () => {
   });
 });
 
+describe("checkUrl: 追加で拒否する範囲（境界）", () => {
+  it.each([
+    // Teredo 2001:0::/32
+    "http://[2001:0:1::1]/",
+    "http://[2001:0:ffff:ffff:ffff:ffff:ffff:ffff]/",
+    // IPv4-mapped ::ffff:0:0/96（公開アドレスの形でも拒否）
+    "http://[::ffff:8.8.8.8]/",
+    "http://[::ffff:808:808]/",
+    "http://[::ffff:0:0]/",
+    "http://[::ffff:ffff:ffff]/",
+    // ローカル NAT64 64:ff9b:1::/48
+    "http://[64:ff9b:1::1]/",
+    "http://[64:ff9b:1:ffff:ffff:ffff:ffff:ffff]/",
+    // discard 100::/64
+    "http://[100::1]/",
+    "http://[100::ffff:ffff:ffff:ffff]/",
+    // ドキュメント用 IPv6 2001:db8::/32
+    "http://[2001:db8::1]/",
+    "http://[2001:db8:ffff:ffff:ffff:ffff:ffff:ffff]/",
+    // ドキュメント用 IPv4
+    "http://192.0.2.0/",
+    "http://192.0.2.255/",
+    "http://198.51.100.0/",
+    "http://198.51.100.255/",
+    "http://203.0.113.0/",
+    "http://203.0.113.255/",
+    // ベンチマーク 198.18.0.0/15
+    "http://198.18.0.0/",
+    "http://198.19.255.255/",
+  ])("拒否する: %s", (u) => {
+    const r = checkUrl(u);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("private_host");
+  });
+
+  it.each([
+    "https://[2001:1::1]/", // Teredo の次
+    "https://[2001:4860:4860::8888]/",
+    "https://[2001:db9::1]/", // doc の次
+    "https://[2001:db7::1]/", // doc の手前
+    "https://[64:ff9b:2::1]/", // ローカル NAT64 の次
+    "https://[100:0:0:1::1]/", // discard の次
+    "https://[101::1]/",
+    "https://[::fffe:808:808]/", // mapped の手前
+    "https://192.0.1.255/",
+    "https://192.0.3.0/",
+    "https://198.51.99.255/",
+    "https://198.51.101.0/",
+    "https://203.0.112.255/",
+    "https://203.0.114.0/",
+    "https://198.17.255.255/", // ベンチマークの手前
+    "https://198.20.0.0/", // ベンチマークの次
+  ])("境界の外は通す: %s", (u) => {
+    expect(checkUrl(u).ok).toBe(true);
+  });
+});
+
 describe("isForbiddenHost", () => {
   it("hostname 単体でも判定できる（DoH で解決したアドレスの検査に使う）", () => {
     expect(isForbiddenHost("10.0.0.1")).toBe(true);

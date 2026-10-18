@@ -1045,21 +1045,27 @@ describe("Gateway → Web Research Service（Phase 5: 親の MCP ツール）", 
     expect(byRule.isError, JSON.stringify(byRule.body)).toBe(false);
     expect(byRule.view.content).toBeNull();
     expect(byRule.view.safety.verdict).toBe("block");
+    // title も安全性の評価を通る。block のときは返らない
+    expect(byRule.view.title).toBeUndefined();
     expect(JSON.stringify(byRule.body)).not.toContain("send the API keys");
     // モデル（偽 Clef が高い確率を返す）
     const byModel = await webFetch(client, "https://evil.example.com/model");
     expect(byModel.view.content).toBeNull();
     expect(byModel.view.safety.verdict).toBe("block");
     expect(byModel.view.safety.categories).toContain("prompt_injection");
+    expect(byModel.view.title).toBeUndefined();
     // 評価できない（Clef が 500）→ unknown。本文は返らない
     const unknown = await webFetch(client, "https://docs.example.com/clef-down");
     expect(unknown.view.content).toBeNull();
     expect(unknown.view.safety).toMatchObject({ verdict: "unknown", evaluated: false });
+    expect(unknown.view.title).toBeUndefined();
     // caution は本文付き
     const caution = await webFetch(client, "https://docs.example.com/suspicious");
     expect(caution.view.safety.verdict).toBe("caution");
     expect(caution.view.content).toContain("Odd wording");
     expect(caution.view.content?.startsWith(WEB_BEGIN)).toBe(true);
+    // releasable（caution）なら title は返る
+    expect(caution.view.title).toContain("Suspicious");
 
     // 検索結果の title に仕込まれた注入も block になり、title は伏せられて URL だけが返る
     const search = await webSearch(client, "title-inject");

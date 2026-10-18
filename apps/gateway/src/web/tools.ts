@@ -4,6 +4,12 @@ import { wrapUntrustedWeb } from "./untrusted";
 /** web が一時的に使えないときにクライアントへ示す待ち時間。 */
 export const WEB_UPSTREAM_RETRY_AFTER_SECONDS = 30;
 
+/** 返す URL の長さの上限。web 側の入力の上限（MAX_URL_LENGTH）と同じ。超える URL は親のモデルに渡さない。 */
+export const MAX_RETURNED_URL_LENGTH = 2000;
+const URL_OMITTED = "[url omitted: too long]";
+
+const clampUrl = (u: string): string => (u.length > MAX_RETURNED_URL_LENGTH ? URL_OMITTED : u);
+
 /** 検索結果 1 件。url は検査済み。title / content（description）は非信頼データなのでマーカーで囲む。 */
 export type ShapedSearchResult = {
   results: {
@@ -16,8 +22,10 @@ export type ShapedSearchResult = {
 };
 
 export function shapeSearchResult(r: WebSearchResponse): ShapedSearchResult {
+  // 長すぎる URL の項目は落とす（切り詰めた URL は別のものを指すので返さない）
+  const kept = r.results.filter((i) => i.source.url.length <= MAX_RETURNED_URL_LENGTH);
   return {
-    results: r.results.map((i) => ({
+    results: kept.map((i) => ({
       url: i.source.url,
       title: wrapUntrustedWeb(i.title),
       content: i.content === null ? null : wrapUntrustedWeb(i.content),
@@ -26,7 +34,7 @@ export function shapeSearchResult(r: WebSearchResponse): ShapedSearchResult {
     metadata: {
       request_id: r.metadata.requestId,
       provider: r.metadata.provider,
-      dropped_urls: r.metadata.dropped_urls,
+      dropped_urls: r.metadata.dropped_urls + (r.results.length - kept.length),
     },
   };
 }
@@ -38,9 +46,10 @@ export type ShapedFetchResult = Omit<WebFetchResponse, "content" | "title"> & {
 };
 
 export function shapeFetchResult(r: WebFetchResponse): ShapedFetchResult {
-  const { content, title, ...rest } = r;
+  const { content, title, source, ...rest } = r;
   return {
     ...rest,
+    source: { ...source, url: clampUrl(source.url), final_url: clampUrl(source.final_url) },
     content: content === null ? null : wrapUntrustedWeb(content),
     ...(title !== undefined && title !== "" ? { title: wrapUntrustedWeb(title) } : {}),
   };

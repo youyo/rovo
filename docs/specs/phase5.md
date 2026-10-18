@@ -233,3 +233,13 @@ apps/agent    ──service binding──▶     search / fetch / browse
 
 - Unit では、次の3つのインターフェースを境界にする: `WebSearchSource`、`WebFetchSource`（createDirectWebFetch の fetch の差し替え）、`SafetyEvaluator`。
 - E2E では、ENVIRONMENT=test のときだけ、AI（toMarkdown / run / websearch）と BROWSER の fake を差し込む（agent の TEST_UPSTREAM と同じ形）。production では無効であることを、Unit で確かめる。
+
+### 残存リスク: private に解決される名前（web_fetch）
+
+- **URL の検査（url-policy）はホスト名の文字列だけを見る。** `127.0.0.1.nip.io` のように、公開の名前が private / loopback / link-local のアドレスに解決される場合、DNS の解決後の IP はこちらでは検査できず、検査を通ってしまう。
+  - `web_fetch`（`createDirectWebFetch`）は Workers の `fetch` で取得する。解決後の IP を検査するフックは無い。
+  - 防御は、Workers の `fetch` が private / loopback / link-local のアドレスへ接続できないこと（プラットフォーム側の制約）に頼っている。この前提は受入（acceptance.md 11）で実機を使って確かめる。
+  - `web_browse` は DoH で解決して補助的に検査するが、解決後に別のアドレスへ変わる DNS rebinding は防げない（上の「web_browse の安全策」3）。
+  - redirect の行き先も、名前の検査と上記の制約だけで守る。
+- 拒否するアドレスの範囲は url-policy で `agents/webfetch` の判定に足している: Teredo（2001:0::/32）、IPv4-mapped（::ffff:0:0/96。公開の IPv4 を包んだ形も拒否）、ローカル NAT64（64:ff9b:1::/48）、discard（100::/64）、ドキュメント用（2001:db8::/32、192.0.2.0/24、198.51.100.0/24、203.0.113.0/24）、ベンチマーク（198.18.0.0/15）。
+- gateway は、回数を消費する前に同じ URL の検査（url-policy を共有）を行い、違反の URL では回数を消費しない。返す URL は 2000 文字までに制限し、ツールの説明に「URL も非信頼のデータ」と書く。

@@ -65,6 +65,8 @@ export interface Fixture {
   askGate: ExecGate;
   /** answer() が Pi へ回答を submit する直前を止める。throwOnce を立てると 1 回だけ例外にする */
   answerGate: ExecGate & { throwOnce: () => void };
+  /** answer() の Pi への submit が戻った直後（再開済みの記録をする前）を止める */
+  afterAnswerGate: ExecGate;
   /** steer を Pi へ submit する直前（phase を確かめた後）を止める（その間に phase が変わるケースの再現用） */
   steerGate: ExecGate;
   /** ask_parent が質問を記録した直後（ツールの結果を返す前）を止める */
@@ -124,6 +126,7 @@ export function newFixture(
   const submitState = { held: false, entered: false };
   const askState = { held: false, entered: false };
   const answerState = { held: false, entered: false };
+  const afterAnswerState = { held: false, entered: false };
   const steerState = { held: false, entered: false };
   const questionState = { held: false, entered: false };
   const answerThrow = { once: false };
@@ -239,6 +242,7 @@ export function newFixture(
         throw new Error("answer submit failed");
       }
     },
+    afterAnswerSubmit: () => hold(afterAnswerState),
     beforeSteerSubmit: () => hold(steerState),
     afterQuestion: () => hold(questionState),
     onModelCall: (ctx) => {
@@ -279,6 +283,7 @@ export function newFixture(
         answerThrow.once = true;
       },
     },
+    afterAnswerGate: gateOf(afterAnswerState),
     steerGate: gateOf(steerState),
     questionGate: gateOf(questionState),
     execGate: {

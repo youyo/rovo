@@ -28,11 +28,15 @@ export class FakeSandbox implements SandboxPort {
   readonly extended: number[] = [];
   /** 設定すると extendDeadline がこの例外を投げる（1 回で消える） */
   extendError: Error | undefined;
+  /** setDeadline で受け取った期限（古い順） */
+  readonly deadlines: number[] = [];
+  /** 設定すると setDeadline がこの例外を投げる（1 回で消える） */
+  setDeadlineError: Error | undefined;
 
   /**
    * SandboxDO の期限切れの再現（opt-in）。clock を渡すと、期限を過ぎた exec / readFile / writeFile は
    * "sandbox deadline exceeded" で失敗し、expireIfDue()（SandboxDO の alarm 相当）が認証トークンを消して破棄済みにする。
-   * extendDeadline は単調増加だけ受け付ける（SandboxDO と同じ）。
+   * extendDeadline は単調増加だけ受け付ける。setDeadline は短くもできる（SandboxDO と同じ）。
    */
   clock: (() => number) | undefined;
   deadlineAt: number | undefined;
@@ -65,6 +69,25 @@ export class FakeSandbox implements SandboxPort {
     this.order.push("extend");
     this.extended.push(deadlineAt);
     if (this.deadlineAt === undefined || deadlineAt > this.deadlineAt) this.deadlineAt = deadlineAt;
+  }
+
+  /** setDeadline の入口を止める（止めている間に別の出来事を起こすため）。 */
+  readonly deadlineGate = { held: false, entered: false };
+
+  /** 期限を短くもできる（SandboxDO と同じ）。 */
+  async setDeadline(deadlineAt: number): Promise<void> {
+    if (this.deadlineGate.held) {
+      this.deadlineGate.entered = true;
+      while (this.deadlineGate.held) await new Promise((r) => setTimeout(r, 10));
+    }
+    if (this.setDeadlineError) {
+      const e = this.setDeadlineError;
+      this.setDeadlineError = undefined;
+      throw e;
+    }
+    this.order.push("set_deadline");
+    this.deadlines.push(deadlineAt);
+    this.deadlineAt = deadlineAt;
   }
 
   /** SandboxDO の alarm 相当。期限を過ぎていれば認証トークンを消し、コンテナを破棄する。 */

@@ -36,13 +36,33 @@ describe("テストルートは ENVIRONMENT=test 限定", () => {
     expect(res?.status).toBe(200);
   });
 
-  it("test では作業ツリーの仕込みルートが応答する（仕様が未設定のサンドボックスは 500 で理由を返す）", async () => {
-    const res = await handleTestRoute(
-      post("/test/sandbox/seed-workspace", { name: "route-seed-none" }),
-      env,
-    );
+  it("test では作業ツリーの仕込みルートが応答し、失敗はメッセージを本文にして 500 で返す", async () => {
+    // 実 DO の RPC が reject すると、vitest-pool-workers が DO 側の Uncaught (in promise) を出して
+    // Unhandled Error になる。ルートの 500 への変換は、reject する SandboxDO の代役で確かめる。
+    const failing = {
+      ...env,
+      SANDBOX_DO: {
+        getByName: () => ({
+          seedWorkspaceForTest: async () => {
+            throw new Error("sandbox is not ready: call ensureReady first");
+          },
+        }),
+      },
+    } as unknown as Env;
+    const res = await handleTestRoute(post("/test/sandbox/seed-workspace", { name: "x" }), failing);
     expect(res?.status).toBe(500);
     expect(await res?.text()).toMatch(/not ready/);
+  });
+
+  it("仕様が未設定の SandboxDO は、作業ツリーの仕込みを not ready で拒否する", async () => {
+    const stub = env.SANDBOX_DO.getByName("route-seed-none");
+    type Seedable = { seedWorkspaceForTest(): Promise<void> };
+    // DO の中で直接呼ぶ（RPC 越しの reject は上記の Uncaught を出すため）
+    await runInDurableObject(stub, async (inst) => {
+      await expect((inst as unknown as Seedable).seedWorkspaceForTest()).rejects.toThrow(
+        /not ready/,
+      );
+    });
   });
 
   it("SandboxDO の仕込みは ENVIRONMENT=test 以外では拒否する", async () => {

@@ -571,6 +571,8 @@ export class AgentDO extends DurableObject<Env> {
 
   /** Pi に渡し終えた steer を accepted にして、初めてのときだけ steer_accepted を出す（トランザクションの中で呼ぶ）。 */
   private acceptSteers(rows: readonly SteerRow[]): void {
+    // 終端の後にイベントを積まない（finalSeq を最後にするため）。steer の状態も変えない
+    if (isTerminal(this.store.phase())) return;
     for (const r of rows) {
       this.store.setSteerState(r.steerId, "accepted");
       if (this.store.markAnnounced(r.steerId)) {
@@ -585,6 +587,8 @@ export class AgentDO extends DurableObject<Env> {
     return (
       this.store.meta("launched") === true &&
       !this.store.meta("pending_resume") &&
+      // 終端を確定している最中は、idle の session への submit で新しい run が始まってしまう
+      !this.finalizing &&
       !this.refused() &&
       (phase === "running" || phase === "verifying")
     );
@@ -619,7 +623,7 @@ export class AgentDO extends DurableObject<Env> {
   private async submitSteer(row: SteerRow): Promise<void> {
     this.store.setSteerState(row.steerId, "submitted");
     await this.overrides().beforeSteerSubmit?.();
-    const operationId = `steer:${row.steerId}`;
+    const operationId = this.steerOperationId(row.steerId);
     await this.harness.submit(this.steerText(row), { operationId, whenBusy: "steer" });
     if (this.canSubmitSteer()) {
       this.store.tx(() => this.acceptSteers([row]));
@@ -628,13 +632,27 @@ export class AgentDO extends DurableObject<Env> {
     await this.reclaimSteer(row);
   }
 
+  /**
+   * steer を Pi に渡すときの operationId。Pi は同じ operationId の再 submit を重複とみなして配送しないので、
+   * 引き戻すたびに世代（steer:<id>:<n>）を進め、再び渡すときは新しい operationId にする。
+   */
+  private steerOperationId(steerId: string): string {
+    return `steer:${steerId}:${this.store.meta<number>(`steer_gen:${steerId}`) ?? 0}`;
+  }
+
+  private bumpSteerGeneration(steerId: string): void {
+    const key = `steer_gen:${steerId}`;
+    this.store.setMeta(key, (this.store.meta<number>(key) ?? 0) + 1);
+  }
+
   /** Pi に渡した steer を、モデルが回答なしに動き出さないよう引き戻す（質問の確定、cancel などの後に呼ぶ）。 */
   private async reclaimSteer(row: SteerRow): Promise<void> {
-    const operationId = `steer:${row.steerId}`;
+    const operationId = this.steerOperationId(row.steerId);
     const mine = (await this.harness.pending()).find((p) => p.operationId === operationId);
     if (mine?.status === "queued") await this.harness.abort({ operationId });
     // 既に run に加わった steer は取り出せない。回答待ちの間に run が動いていれば止める
     else if (mine && this.store.phase() === "input_required") await this.abortRun();
+    this.bumpSteerGeneration(row.steerId);
     this.store.setSteerState(row.steerId, "buffered");
   }
 
@@ -642,9 +660,12 @@ export class AgentDO extends DurableObject<Env> {
   private async reclaimQueuedSteers(): Promise<void> {
     for (const p of await this.harness.pending()) {
       if (!p.operationId.startsWith("steer:") || p.status !== "queued") continue;
-      const row = this.store.steer(p.operationId.slice("steer:".length));
+      // steer:<id>:<世代>。id に ":" が入っていても、世代は最後の ":" の後ろ
+      const body = p.operationId.slice("steer:".length);
+      const row = this.store.steer(body.slice(0, Math.max(0, body.lastIndexOf(":"))));
       if (!row) continue;
       if (await this.harness.abort({ operationId: p.operationId })) {
+        this.bumpSteerGeneration(row.steerId);
         this.store.setSteerState(row.steerId, "buffered");
       }
     }
@@ -664,22 +685,28 @@ export class AgentDO extends DurableObject<Env> {
       return { ok: true, ignored: true };
     }
     if (this.refused()) return { ok: true, ignored: true };
+    // 回答待ちの上限（累計 24 時間）を過ぎた後の回答では再開しない
+    if (this.inputTimedOut()) {
+      this.requestStop("input_timeout");
+      return { ok: true, ignored: true };
+    }
     const q = this.questions()[questionId];
     if (!q) return { ok: true, ignored: true };
     const resuming = this.store.meta<string | null>("pending_resume") === questionId;
     if (q.answered) return resuming ? this.resumeFromAnswer(questionId) : { ok: true };
     if (this.store.phase() !== "input_required") return { ok: true, ignored: true };
 
-    // 待った分を足した期限を計算し、submit より前に SandboxDO の期限を延ばす（回答の後の exec / clone が期限で拒否されないように）
+    // 待った分を足した期限を計算し、submit より前に SandboxDO の期限をその正確な値にする（質問で上限まで延ばした分を戻す）
     const pausedAt = this.pausedAt() ?? this.now();
     const pausedTotal = this.pausedTotal() + Math.max(0, this.now() - pausedAt);
     const deadlineAt = this.baseDeadline() + pausedTotal;
     try {
-      await this.sandbox().extendDeadline(deadlineAt);
+      await this.sandbox().setDeadline(deadlineAt);
     } catch {
-      return { ok: false };
+      // 失敗の間に cancel などが確定していたら、再送を促さない
+      return this.refused() ? { ok: true, ignored: true } : { ok: false };
     }
-    // 延長を待つ間に cancel などが届いたかもしれない
+    // 設定を待つ間に cancel などが届いたかもしれない
     if (this.refused()) return { ok: true, ignored: true };
     if (!this.questions()[questionId]?.answered) {
       this.store.tx(() => {
@@ -716,10 +743,12 @@ export class AgentDO extends DurableObject<Env> {
         this.userInput(`The parent answered your question (${questionId}):\n${answer}`, carried),
         { operationId },
       );
+      await this.overrides().afterAnswerSubmit?.();
       if (this.store.meta<string | null>("pending_resume") === questionId) {
         this.store.tx(() => {
           this.store.setMeta("pending_resume", null);
-          this.acceptSteers(carried);
+          // submit の間に cancel などが確定に向かっていたら、steer_accepted は積まない
+          if (!this.refused()) this.acceptSteers(carried);
         });
       }
     } catch {
@@ -1308,6 +1337,12 @@ export class AgentDO extends DurableObject<Env> {
     if (this.refused()) return ended;
     const again2 = this.openQuestionId();
     if (again2) return waiting(again2);
+
+    // 期限の延長を待つ間に期限を過ぎていたら、質問は記録せず deadline で止める
+    if (this.deadlineExceeded()) {
+      this.requestStop("deadline");
+      return ended;
+    }
 
     const seq = (this.store.meta<number>("question_seq") ?? 0) + 1;
     const questionId = `q-${seq}`;

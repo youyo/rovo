@@ -81,9 +81,28 @@ export function wrapUntrustedQuestion(message: string): string {
   return `${UNTRUSTED_QUESTION_BEGIN}\n${body}\n${UNTRUSTED_QUESTION_END}`;
 }
 
+/** イベントの options は JSON 文字列。各要素を囲んで文字列に戻す（読めない値は空の選択肢にする）。 */
+function wrapOptionsJson(raw: unknown): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(typeof raw === "string" ? raw : "[]");
+  } catch {
+    parsed = [];
+  }
+  const list = Array.isArray(parsed)
+    ? parsed.filter((x): x is string => typeof x === "string")
+    : [];
+  return JSON.stringify(list.map(wrapUntrustedQuestion));
+}
+
 function wrapEvent(e: TaskEvent): TaskEvent {
   if (e.type !== "question" || typeof e.payload.message !== "string") return e;
-  return { ...e, payload: { ...e.payload, message: wrapUntrustedQuestion(e.payload.message) } };
+  const payload: Record<string, string | number | boolean | null> = {
+    ...e.payload,
+    message: wrapUntrustedQuestion(e.payload.message),
+  };
+  if ("options" in e.payload) payload.options = wrapOptionsJson(e.payload.options);
+  return { ...e, payload };
 }
 
 function fail(
@@ -218,6 +237,7 @@ export function createTaskService(
             ? {
                 ...view.pending_question,
                 message: wrapUntrustedQuestion(view.pending_question.message),
+                options: view.pending_question.options.map(wrapUntrustedQuestion),
               }
             : null,
         },

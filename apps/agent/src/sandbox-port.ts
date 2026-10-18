@@ -55,6 +55,11 @@ export interface SandboxPort {
    * 上限は作成時刻 + 2 時間 + 24 時間。超える値・準備前・終端後は例外。alarm も張り直す。
    */
   extendDeadline(deadlineAt: number): Promise<void>;
+  /**
+   * 期限を正確な値に設定する（短くもできる。回答のときに、質問で延ばした上限から戻す）。
+   * 上限は作成時刻 + 2 時間 + 24 時間で、超える値・準備前・終端後は例外。現在時刻より前の値は即座に期限切れとして扱う。
+   */
+  setDeadline(deadlineAt: number): Promise<void>;
   /** 実行中のプロセスグループを止め、止まらなければコンテナを止める。停止を確かめてから戻る。 */
   stop(): Promise<{ stopped: boolean }>;
   /**

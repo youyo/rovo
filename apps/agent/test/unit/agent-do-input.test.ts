@@ -220,8 +220,9 @@ describe("answer", () => {
     await fx.answerGate.hold();
     const pending = fx.stub.answer("q-1", "Aにして");
     await fx.answerGate.waitEntered();
-    // 質問のとき上限まで延ばし、回答では submit の直前までに正確な期限（SandboxDO 側は単調増加の制約で無視される）を渡し終えている
-    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR, T0 + 2 * HOUR]);
+    // 質問のとき上限まで延ばし、回答では submit の直前までに正確な期限（setDeadline。短くもできる）を渡し終えている
+    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR]);
+    expect(fx.sandbox.deadlines).toEqual([T0 + 2 * HOUR]);
     fx.answerGate.release();
     expect(await pending).toEqual({ ok: true });
     expect(await waitForTerminal(fx)).toBe("completed");
@@ -250,7 +251,8 @@ describe("answer", () => {
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true });
     expect(await fx.stub.answer("q-1", "別の回答")).toEqual({ ok: true });
     expect((await typesOf(fx, "answered")).length).toBe(1);
-    expect(fx.sandbox.extended).toHaveLength(2); // 質問 + 回答（再送では増えない）
+    expect(fx.sandbox.extended).toHaveLength(1); // 質問
+    expect(fx.sandbox.deadlines).toHaveLength(1); // 回答（再送では増えない）
     fx.gate.release();
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.modelCalls.count).toBe(3);
@@ -267,7 +269,7 @@ describe("answer", () => {
   it("期限の延長に失敗したら ok:false で何も変えず、再送で成功する", async () => {
     const fx = newFixture("ans-extend-fail", [ask("Q?"), report()]);
     await startAndAsk(fx, "ans-extend-fail");
-    fx.sandbox.extendError = new Error("sandbox unavailable");
+    fx.sandbox.setDeadlineError = new Error("sandbox unavailable");
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: false });
     expect((await fx.stub.getEvents(0, 1)).phase).toBe("input_required");
     expect(await typesOf(fx, "answered")).toHaveLength(0);
@@ -332,7 +334,8 @@ describe("期限", () => {
     expect((await fx.stub.getEvents(0, 1)).phase).toBe("input_required");
     expect(fx.sandbox.terminateCount).toBe(0);
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true });
-    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR, T0 + 7 * HOUR]);
+    expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR]);
+    expect(fx.sandbox.deadlines).toEqual([T0 + 7 * HOUR]);
     expect(await runInDO(fx.stub, (inst) => inst.debugDeadlineAt())).toBe(T0 + 7 * HOUR);
     // 再起動しても期限は変わらない（再起動では延長しない）
     await abortAllDurableObjects();
@@ -383,7 +386,7 @@ describe("期限", () => {
     fx.clock.now += 20 * HOUR;
     expect(await fx.stub.answer("q-1", "A1")).toEqual({ ok: true });
     await waitUntil(() => fx.modelCalls.count >= 2);
-    await waitUntil(() => fx.sandbox.extended.length >= 2);
+    await waitUntil(() => fx.sandbox.deadlines.length >= 1);
     // 2 回目の質問が記録されるまで待つ
     for (let i = 0; i < 100 && (await questionIds(fx)).length < 2; i++) await sleep(50);
     expect(await questionIds(fx)).toEqual(["q-1", "q-2"]);
@@ -507,9 +510,9 @@ describe("cancel と回答", () => {
     expect(await fx.stub.cancel()).toMatchObject({ stopped: true, finalSeq: res.finalSeq });
   });
 
-  it("回答の submit 中に cancel が届いても、どちらの順序でも cancelled に収束し Pi の run が残らない", async () => {
-    const fx = newFixture("c-race", [ask("Q?"), report()]);
-    await startAndAsk(fx, "c-race");
+  it("回答の submit の前に cancel が届いても、cancelled に収束し Pi の run が残らない", async () => {
+    const fx = newFixture("c-race-before", [ask("Q?"), report()]);
+    await startAndAsk(fx, "c-race-before");
     await sleep(200);
     fx.answerGate.hold();
     const answering = fx.stub.answer("q-1", "A");
@@ -524,13 +527,66 @@ describe("cancel と回答", () => {
     expect((await fx.stub.getEvents(0, 1)).phase).toBe("cancelled");
     const events = await allEvents(fx);
     expect(res.finalSeq).toBe(events[events.length - 1]?.seq);
-    await waitUntil(() => true);
     for (let i = 0; i < 100; i++) {
       if (await piIdle(fx)) break;
       await sleep(50);
     }
     expect(await piIdle(fx)).toBe(true);
     expect(fx.modelCalls.count).toBe(1);
+  });
+
+  it("回答の submit が戻った後に cancel が確定しても、cancelled に収束し Pi の run が残らない", async () => {
+    const fx = newFixture("c-race-after", [ask("Q?"), call("gate"), report()], {
+      cancelWaitMs: 300,
+    });
+    await startAndAsk(fx, "c-race-after");
+    await sleep(200);
+    fx.afterAnswerGate.hold();
+    const answering = fx.stub.answer("q-1", "A");
+    await fx.afterAnswerGate.waitEntered();
+    await fx.gate.waitEntered();
+    const cancelling = fx.stub.cancel();
+    await sleep(50);
+    fx.gate.release();
+    const res = await cancelling;
+    expect(res).toMatchObject({ stopped: true });
+    fx.afterAnswerGate.release();
+    expect(await answering).toEqual({ ok: true, ignored: true });
+    expect((await fx.stub.getEvents(0, 1)).phase).toBe("cancelled");
+    const events = await allEvents(fx);
+    expect(res.finalSeq).toBe(events[events.length - 1]?.seq);
+    for (let i = 0; i < 100; i++) {
+      if (await piIdle(fx)) break;
+      await sleep(50);
+    }
+    expect(await piIdle(fx)).toBe(true);
+  });
+
+  it("buffered の steer がある状態で、回答の submit の後に cancel が確定しても、finalSeq の後に steer_accepted が積まれない", async () => {
+    const fx = newFixture("c-race-steer", [ask("Q?"), call("gate"), report()], {
+      cancelWaitMs: 300,
+    });
+    await startAndAsk(fx, "c-race-steer");
+    await sleep(200);
+    expect(await fx.stub.steer("s1", "補足")).toEqual({ ok: true });
+    fx.afterAnswerGate.hold();
+    const answering = fx.stub.answer("q-1", "A");
+    await fx.afterAnswerGate.waitEntered();
+    await fx.gate.waitEntered();
+    const cancelling = fx.stub.cancel();
+    await sleep(50);
+    fx.gate.release();
+    const res = await cancelling;
+    expect(res).toMatchObject({ stopped: true });
+    const before = await allEvents(fx);
+    expect(res.finalSeq).toBe(before[before.length - 1]?.seq);
+    fx.afterAnswerGate.release();
+    await answering;
+    await sleep(300);
+    const after = await allEvents(fx);
+    expect(after.map((e) => e.seq)).toEqual(before.map((e) => e.seq));
+    expect(after.filter((e) => e.type === "steer_accepted")).toHaveLength(0);
+    expect(after[after.length - 1]?.seq).toBe(res.finalSeq);
   });
 
   it("cancel が先に確定した後の回答は ignored で、Pi に何も渡さない", async () => {
@@ -639,5 +695,100 @@ describe("steer", () => {
     expect(await fx.stub.answer("q-1", "回答")).toEqual({ ok: true });
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.modelCalls.userTexts.at(-1)?.some((t) => t.includes("飛び込みの指示"))).toBe(true);
+  });
+});
+
+describe("回答の入口の守り", () => {
+  it("回答待ちの上限（累計 24 時間）を過ぎた後に届いた回答では再開せず、input_timeout で止まる", async () => {
+    const fx = newFixture("ans-late", [ask("Q?"), report()]);
+    await startAndAsk(fx, "ans-late");
+    await sleep(200);
+    fx.clock.now += 24 * HOUR + 1000;
+    expect(await fx.stub.answer("q-1", "遅い回答")).toEqual({ ok: true, ignored: true });
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(done(await fx.stub.getResult()).reason).toBe("input_timeout");
+    expect(fx.modelCalls.count).toBe(1);
+    expect(await typesOf(fx, "answered")).toHaveLength(0);
+    expect(fx.sandbox.deadlines).toEqual([]);
+  });
+
+  it("回答のとき SandboxDO の期限は正確な値に戻る（質問で延ばした上限より短くなる）", async () => {
+    const fx = newFixture("ans-exact", [ask("Q?"), call("gate"), report()]);
+    fx.sandbox.clock = () => fx.clock.now;
+    await startAndAsk(fx, "ans-exact");
+    expect(fx.sandbox.deadlineAt).toBe(T0 + 26 * HOUR);
+    fx.clock.now += 5 * HOUR;
+    expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true });
+    expect(fx.sandbox.deadlineAt).toBe(T0 + 7 * HOUR);
+    await fx.gate.waitEntered();
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("completed");
+  });
+
+  it("期限の設定に失敗した間に cancel が確定していたら、ok:false ではなく ignored を返す", async () => {
+    const fx = newFixture("ans-refused-after-fail", [ask("Q?"), report()]);
+    await startAndAsk(fx, "ans-refused-after-fail");
+    await sleep(200);
+    fx.sandbox.deadlineGate.held = true;
+    fx.sandbox.setDeadlineError = new Error("sandbox unavailable");
+    const answering = fx.stub.answer("q-1", "A");
+    while (!fx.sandbox.deadlineGate.entered) await sleep(10);
+    const res = await fx.stub.cancel();
+    expect(res).toMatchObject({ stopped: true });
+    fx.sandbox.deadlineGate.held = false;
+    expect(await answering).toEqual({ ok: true, ignored: true });
+    expect(fx.modelCalls.count).toBe(1);
+  });
+});
+
+describe("ask_parent の期限", () => {
+  it("記録の直前に期限を過ぎていたら、質問を記録せず deadline で止まる", async () => {
+    const fx = newFixture("ask-deadline", [ask("Q?"), report()]);
+    fx.askGate.hold();
+    await fx.stub.start(makeSpec("ask-deadline"));
+    await fx.askGate.waitEntered();
+    fx.clock.now += 3 * HOUR; // 期限 T0+2h を過ぎる
+    fx.askGate.release();
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(done(await fx.stub.getResult()).reason).toBe("deadline");
+    expect(await questionIds(fx)).toEqual([]);
+  });
+});
+
+describe("steer の引き戻しと確定中", () => {
+  it("引き戻した steer を再び渡しても、モデルへのメッセージに必ず含まれる（Pi の重複排除で落とされない）", async () => {
+    const fx = newFixture("st-reclaim", [call("gate"), report()]);
+    await fx.stub.start(makeSpec("st-reclaim"));
+    await fx.gate.waitEntered();
+    expect(await fx.stub.steer("s1", "引き戻した指示")).toEqual({ ok: true });
+    await runInDO(fx.stub, async (inst) => {
+      await inst.reclaimSteer(inst.store.steer("s1"));
+      expect(inst.store.steer("s1").state).toBe("buffered");
+      await inst.flushSteers();
+    });
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const last = fx.modelCalls.userTexts.at(-1) ?? [];
+    expect(last.filter((t) => t.includes("引き戻した指示"))).toHaveLength(1);
+  });
+
+  it("確定の最中（finalizing）に届いた steer は Pi に渡さず buffered のまま", async () => {
+    const fx = newFixture("st-finalizing", [call("gate"), report()]);
+    await fx.stub.start(makeSpec("st-finalizing"));
+    await fx.gate.waitEntered();
+    await runInDO(fx.stub, (inst) => {
+      inst.finalizing = new Promise(() => {});
+    });
+    expect(await fx.stub.steer("s1", "確定中の指示")).toEqual({ ok: true });
+    const state = await runInDO(fx.stub, async (inst) => {
+      const pending = await inst.harness.pending();
+      const s = inst.store.steer("s1").state;
+      inst.finalizing = undefined;
+      return { s, ops: pending.map((p: { operationId: string }) => p.operationId) };
+    });
+    expect(state.s).toBe("buffered");
+    expect(state.ops.some((o: string) => o.startsWith("steer:"))).toBe(false);
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("completed");
   });
 });

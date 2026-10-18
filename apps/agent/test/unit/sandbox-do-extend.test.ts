@@ -108,3 +108,50 @@ describe("SandboxDO.extendDeadline", () => {
     });
   });
 });
+
+describe("SandboxDO.setDeadline", () => {
+  it("期限を短くもできる。alarm も新しい期限の範囲で張り直される", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("set-shrink");
+    await runInDO(stub, async (inst) => {
+      const now = Date.now();
+      seed(inst, now + 26 * HOUR, now);
+      await inst.setDeadline(now + 7 * HOUR);
+      expect(inst.spec().deadlineAt).toBe(now + 7 * HOUR);
+      await inst.setDeadline(now + 9 * HOUR);
+      expect(inst.spec().deadlineAt).toBe(now + 9 * HOUR);
+      const alarm = await inst.ctx.storage.getAlarm();
+      expect(alarm).not.toBeNull();
+      expect(alarm).toBeLessThanOrEqual(now + 9 * HOUR);
+    });
+  });
+
+  it("上限は created_at + 2h + 24h。超える値・不正な値・準備前・終端後は拒否する", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("set-bad");
+    await runInDO(stub, async (inst) => {
+      await expect(inst.setDeadline(Date.now() + HOUR)).rejects.toThrow(/not ready/);
+      const now = Date.now();
+      seed(inst, now + HOUR, now);
+      await expect(inst.setDeadline(now + 26 * HOUR + 1)).rejects.toThrow(/exceeds/);
+      expect(inst.spec().deadlineAt).toBe(now + HOUR);
+      await inst.setDeadline(now + 26 * HOUR);
+      expect(inst.spec().deadlineAt).toBe(now + 26 * HOUR);
+      await expect(inst.setDeadline(Number.NaN)).rejects.toThrow(/invalid/);
+      inst.ctx.storage.kv.put("terminated", true);
+      await expect(inst.setDeadline(now + 2 * HOUR)).rejects.toThrow(/terminated/);
+    });
+  });
+
+  it("現在時刻より前の値は、即座に期限切れとして扱う", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("set-past");
+    await runInDO(stub, async (inst) => {
+      const now = Date.now();
+      seed(inst, now + 5 * HOUR, now - HOUR);
+      expect(inst.status().expired).toBe(false);
+      await inst.setDeadline(now - 1000);
+      expect(inst.status().expired).toBe(true);
+      const alarm = await inst.ctx.storage.getAlarm();
+      expect(alarm).not.toBeNull();
+      expect(alarm).toBeLessThanOrEqual(Date.now() + 1000);
+    });
+  });
+});

@@ -13,5 +13,5 @@
     "verbatimModuleSyntax": true,
     "types": ["@cloudflare/vitest-plugin/types"]
   },
-  "include": ["src", "test/unit", "worker-configuration.d.ts", "vitest.config.ts"]
+  "include": ["src", "test/unit", "test/contract", "worker-configuration.d.ts", "vitest.config.ts"]
 }

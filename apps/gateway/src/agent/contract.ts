@@ -1,7 +1,8 @@
 /**
  * Gateway から見た AgentDO（apps/agent）の RPC 契約。
  * apps/agent から import しない（Worker 間でビルド依存を作らない）ので、同等の型をここに持つ。
- * 乖離は test/contract/agent-contract.ts（型だけを比べるファイル。typecheck で検査）が検出する。
+ * 乖離は gateway の test/contract/agent-contract.ts（DTO の型）と、apps/agent の test/contract/gateway-contract.ts
+ * （AgentDO の実際のメソッドの型との比較）が検出する（どちらも typecheck で検査）。
  */
 
 export type AgentPhase =

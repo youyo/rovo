@@ -158,10 +158,27 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /**
-   * 期限を延ばす（AgentDO が、回答待ちで止めていた分を戻すために answer の submit より前に呼ぶ）。
+   * 期限を延ばす（AgentDO が、ask_parent で回答待ちの上限まで先に延ばすために呼ぶ。回答のときに正確な値へ戻すのは setDeadline）。
    * 単調増加だけ受け付け（小さい・同じ値は無視）、上限は作成時刻 + 2h + 24h。alarm も新しい期限で張り直す。
    */
   async extendDeadline(deadlineAt: number): Promise<void> {
+    const spec = this.checkedDeadline(deadlineAt);
+    if (deadlineAt <= spec.deadlineAt) return;
+    this.ctx.storage.kv.put("spec", { ...spec, deadlineAt });
+    await this.armAlarm();
+  }
+
+  /**
+   * 期限を正確な値に設定する（AgentDO が、回答のときに質問で延ばした上限から戻すために submit より前に呼ぶ）。
+   * 短くもできる。上限は extendDeadline と同じ。現在時刻より前の値は、alarm がすぐ発火して期限切れとして扱われる。
+   */
+  async setDeadline(deadlineAt: number): Promise<void> {
+    const spec = this.checkedDeadline(deadlineAt);
+    this.ctx.storage.kv.put("spec", { ...spec, deadlineAt });
+    await this.armAlarm();
+  }
+
+  private checkedDeadline(deadlineAt: number) {
     if (typeof deadlineAt !== "number" || !Number.isFinite(deadlineAt)) {
       throw new Error("invalid deadline");
     }
@@ -172,9 +189,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (deadlineAt > created + MAX_TASK_MS + MAX_INPUT_PAUSE_MS) {
       throw new Error("deadline exceeds the limit");
     }
-    if (deadlineAt <= spec.deadlineAt) return;
-    this.ctx.storage.kv.put("spec", { ...spec, deadlineAt });
-    await this.armAlarm();
+    return spec;
   }
 
   // ---- Git の認証トークン（コンテナには入れない。OutboundGateway が判定を通ったリクエストにだけ注入する）----

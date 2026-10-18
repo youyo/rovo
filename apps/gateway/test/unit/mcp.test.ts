@@ -136,7 +136,14 @@ describe("task_answer / task_steer（Phase 4）", () => {
     const status = body(
       await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
     );
-    expect(status.pending_question).toMatchObject({ question_id: "q1", options: ["pg", "mysql"] });
+    const pending = status.pending_question as { question_id: string; options: string[] };
+    expect(pending.question_id).toBe("q1");
+    // options の各要素も非信頼データのマーカーで囲まれる
+    expect(pending.options).toHaveLength(2);
+    expect(pending.options[0]).toContain("UNTRUSTED");
+    expect(pending.options[0]).toContain("pg");
+    expect(pending.options[1]).toContain("UNTRUSTED");
+    expect(pending.options[1]).toContain("mysql");
 
     const a = await client.callTool({
       name: "task_answer",

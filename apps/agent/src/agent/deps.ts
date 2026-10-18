@@ -32,6 +32,8 @@ export interface AgentTestOverrides {
   afterQuestion?: () => Promise<void>;
   /** answer() が Pi へ回答を submit する直前（期限の延長は済んでいる）。例外を投げると submit の失敗になる */
   beforeAnswerSubmit?: () => Promise<void>;
+  /** answer() の Pi への submit が戻った直後（再開済みの記録をする前）。その間に cancel が確定するケースの再現用 */
+  afterAnswerSubmit?: () => Promise<void>;
   /** steer を Pi へ submit する直前（phase を確かめた後） */
   beforeSteerSubmit?: () => Promise<void>;
   /** モデル呼び出し（fake provider が実際に呼ばれた回数と、そのとき見えていた user メッセージの観測用） */

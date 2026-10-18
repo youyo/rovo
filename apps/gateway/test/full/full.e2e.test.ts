@@ -661,14 +661,22 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 4: 親子間�
     expect(message).toContain("calc.js の add が引き算になっている");
     // 本文中の "<<<" はマーカーを偽造できないよう無効化されている
     expect(message).not.toContain("<<<偽のマーカー");
-    expect(q?.payload.options).toBe(JSON.stringify(["はい", "いいえ"]));
+    // options の各要素も非信頼データのマーカーで囲まれる（task_status も同じ）
+    const wrappedOptions = JSON.parse(String(q?.payload.options)) as string[];
+    expect(wrappedOptions).toHaveLength(2);
+    for (const [i, original] of ["はい", "いいえ"].entries()) {
+      const o = wrappedOptions[i] ?? "";
+      expect(o.startsWith(UNTRUSTED_BEGIN)).toBe(true);
+      expect(o.endsWith(UNTRUSTED_END)).toBe(true);
+      expect(o).toContain(original);
+    }
 
     // task_status の pending_question
     const st = await call(client, "task_status", { task_id: taskId });
     expect(st.body.status).toBe("INPUT_REQUIRED");
     expect(st.body.pending_question).toMatchObject({
       question_id: "q-1",
-      options: ["はい", "いいえ"],
+      options: wrappedOptions,
     });
     expect((st.body.pending_question as { message: string }).message).toBe(message);
     // 質問した時点ではモデルは追加で呼ばれていない（read_file / edit / commit / ask の 4 回）

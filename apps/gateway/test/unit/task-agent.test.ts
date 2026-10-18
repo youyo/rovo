@@ -817,4 +817,18 @@ describe("TaskDO.result", () => {
     });
     expect(await stub.result(OWNER)).toEqual({ ok: false, code: "upstream_unavailable" });
   });
+
+  it("AgentDO の getResult が返らなくても、期限が来たら upstream_unavailable", async () => {
+    const { stub } = await createTask();
+    await stub.cancel(OWNER);
+    await stub.advance();
+    await runInDurableObject(stub, (i) => {
+      const t = i as unknown as { agentStub: () => unknown; resultTimeoutMs: number };
+      t.resultTimeoutMs = 200;
+      t.agentStub = () => ({ getResult: () => new Promise<never>(() => {}) });
+    });
+    const started = Date.now();
+    expect(await stub.result(OWNER)).toEqual({ ok: false, code: "upstream_unavailable" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
 });

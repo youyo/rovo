@@ -629,3 +629,143 @@ describe("start の事前検証", () => {
     expect(aiGatewayRejection({ ENVIRONMENT: "test", AI_GATEWAY_ID: "" })).toBeUndefined();
   });
 });
+
+describe("report_completion の sandbox RPC 中に停止が割り込んでも循環待ちにならない", () => {
+  /** cancel を再送して、有限時間で stopped:true に収束することを確かめる */
+  async function cancelUntilStopped(fx: ReturnType<typeof newFixture>, timeoutMs = 3000) {
+    const end = Date.now() + timeoutMs;
+    for (;;) {
+      const res = await fx.stub.cancel();
+      if (res.stopped) return res;
+      if (Date.now() > end) throw new Error("cancel が stopped:true に収束しない");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  it("検証コマンドなし: git status の await 中に cancel → RPC 成功後も cancelled に収束する", async () => {
+    const fx = newFixture("cycle-nocmd", [report()], { cancelWaitMs: 300 });
+    fx.execGate.status.hold();
+    await fx.stub.start(makeSpec("cycle-nocmd", { verificationCommands: [] }));
+    await fx.execGate.status.waitEntered();
+    expect(await fx.stub.cancel()).toEqual({ stopped: false });
+    fx.execGate.status.release();
+    const res = await cancelUntilStopped(fx);
+    expect(res.finalSeq).toBeGreaterThan(0);
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+  });
+
+  it("検証コマンドあり: git switch（検証後のブランチ復元）の await 中に cancel → cancelled に収束する", async () => {
+    const fx = newFixture("cycle-cmd", [report()], { cancelWaitMs: 300 });
+    fx.execGate.switch.hold();
+    await fx.stub.start(makeSpec("cycle-cmd"));
+    await fx.execGate.switch.waitEntered();
+    expect(await fx.stub.cancel()).toEqual({ stopped: false });
+    fx.execGate.switch.release();
+    await cancelUntilStopped(fx);
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+  });
+
+  it("検証コマンドあり: git status の await 中に cancel → cancelled に収束する", async () => {
+    const fx = newFixture("cycle-cmd-status", [report()], { cancelWaitMs: 300 });
+    fx.execGate.status.hold();
+    await fx.stub.start(makeSpec("cycle-cmd-status"));
+    await fx.execGate.status.waitEntered();
+    expect(await fx.stub.cancel()).toEqual({ stopped: false });
+    fx.execGate.status.release();
+    await cancelUntilStopped(fx);
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+  });
+});
+
+describe("検証中に sandbox が例外を投げたとき", () => {
+  it("phase は verifying のまま残らず running に戻り、例外の内容が非信頼データとしてモデルへ返る", async () => {
+    const fx = newFixture("verify-throw", [report(), report()]);
+    const orig = fx.sandbox.exec.bind(fx.sandbox);
+    let thrown = false;
+    fx.sandbox.exec = async (argv, options) => {
+      if (argv[1] === "status" && !thrown) {
+        thrown = true;
+        throw new Error("container exploded");
+      }
+      return orig(argv, options);
+    };
+    await fx.stub.start(makeSpec("verify-throw"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const phases = (await allEvents(fx)).filter((e) => e.type === "phase").map((e) => e.data.phase);
+    // 例外の後に running へ戻り、その後で 2 回目の report_completion が verifying になる
+    const first = phases.indexOf("verifying");
+    expect(phases.slice(first, first + 3)).toEqual(["verifying", "running", "verifying"]);
+    const toolEnds = (await allEvents(fx)).filter((e) => e.type === "tool_end");
+    const err = toolEnds.find((e) => e.data.isError === true);
+    expect(JSON.stringify(err?.data)).toContain("container exploded");
+  });
+});
+
+describe("start は Sandbox の準備を待たない", () => {
+  it("ensureReady が終わらなくても accepted を返し、その間の cancel でも start は例外にならない", async () => {
+    const fx = newFixture("start-async", [report()], { cancelWaitMs: 300 });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    fx.sandbox.ensureReady = async (spec) => {
+      fx.sandbox.readySpecs.push(spec);
+      await gate;
+    };
+    const started = await Promise.race([
+      fx.stub.start(makeSpec("start-async")),
+      new Promise<string>((r) => setTimeout(() => r("blocked"), 1500)),
+    ]);
+    expect(started).toMatchObject({ status: "accepted" });
+    await waitUntil(() => fx.sandbox.readySpecs.length === 1);
+    await fx.stub.cancel();
+    release();
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+    expect(fx.modelCalls.count).toBe(0);
+  });
+});
+
+describe("停止の確定は Pi の abort を無期限には待たない", () => {
+  it("上限を超えたら、呼び出し前の見積額を usage に含めて確定する", async () => {
+    const fx = newFixture(
+      "finalize-cap",
+      [{ text: "遅い応答", usage: { input: 500_000 }, delayMs: 4000 }],
+      { cancelWaitMs: 300, finalizeWaitMs: 100 },
+    );
+    await fx.stub.start(makeSpec("finalize-cap"));
+    await waitUntil(() => fx.modelCalls.count === 1);
+    await fx.stub.cancel();
+    // モデルの応答（4 秒）を待たずに確定する
+    expect(await waitForTerminal(fx, 2000)).toBe("cancelled");
+    const r = done(await fx.stub.getResult());
+    expect(r.usage.costUsd).toBeGreaterThan(0); // 見積額（上限側）が計上されている
+    const events = await allEvents(fx);
+    const last = events[events.length - 1];
+    expect(last).toMatchObject({ type: "phase", data: { phase: "cancelled" } });
+    // 確定の後に遅れて届く実費でイベントは増えない
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await allEvents(fx)).length).toBe(events.length);
+  });
+});
+
+describe("終端の後に検証イベントを積まない", () => {
+  it("確定が先に走った後で git switch が戻っても verification イベントは終端の phase より後に出ない", async () => {
+    const fx = newFixture("verify-after-terminal", [report()], {
+      cancelWaitMs: 200,
+      finalizeWaitMs: 100,
+    });
+    fx.execGate.switch.hold();
+    await fx.stub.start(makeSpec("verify-after-terminal"));
+    await fx.execGate.switch.waitEntered();
+    await fx.stub.cancel();
+    expect(await waitForTerminal(fx, 3000)).toBe("cancelled");
+    fx.execGate.switch.release();
+    await new Promise((r) => setTimeout(r, 300));
+    const events = await allEvents(fx);
+    const terminalSeq = events.find((e) => e.type === "phase" && e.data.phase === "cancelled")?.seq;
+    expect(events.filter((e) => e.type === "verification" && e.seq > (terminalSeq ?? 0))).toEqual(
+      [],
+    );
+    expect(events[events.length - 1]?.type).toBe("phase");
+  });
+});

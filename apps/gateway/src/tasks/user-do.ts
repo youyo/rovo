@@ -315,16 +315,6 @@ export class UserDO extends DurableObject<Env> {
     }
   }
 
-  /** 予約先が同じ task_id のときだけ解放する（compare-and-clear）。冪等。 */
-  async release(taskId: string): Promise<{ released: boolean }> {
-    const released = this.ctx.storage.transactionSync(() => {
-      const cur = this.reservationRow();
-      if (cur.active_task_id !== taskId) return false;
-      return this.clearIfUnchanged(taskId, cur.version);
-    });
-    return { released };
-  }
-
   /**
    * usage（累計）の精算。TaskDO が取り込んだ usage イベントの seq ごとに冪等に呼ばれる。
    * seq が記録済み以下なら何もしない。AgentDO は直接ここへ計上しない（一方向 RPC）。

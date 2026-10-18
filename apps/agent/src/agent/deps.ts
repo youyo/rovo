@@ -16,6 +16,8 @@ export interface AgentTestOverrides {
   maxOutputTokens?: number;
   /** cancel が abort / stop の完了を待つ上限（ms） */
   cancelWaitMs?: number;
+  /** 停止の意図による確定が Pi の abort を待つ上限（ms） */
+  finalizeWaitMs?: number;
   /** モデル呼び出し（fake provider が実際に呼ばれた回数の観測用） */
   onModelCall?: () => void;
 }

@@ -47,6 +47,8 @@ DCR（動的クライアント登録）が有効なため、`/authorize` は Git
 
 **Docker が必要**: `apps/agent` の E2E（`mise run test:e2e:docker`、したがって `mise run test`）は `wrangler dev` が Docker でコンテナ（`apps/agent/Dockerfile`）をビルド・起動する。Docker Desktop など、ローカルで Docker が動いていること。初回はイメージのビルド（`cloudflare/sandbox:1.0.1` の取得を含む）に数分かかる。
 
+**E2E の実行中は `mise run dev:all` を起動しない**: E2E の後始末は「その起動中に増えた `workerd-rovo-agent-*` コンテナ」を `docker rm -f` で消す。E2E 同士はロック（`$TMPDIR/rovo-e2e-docker.lock`）で直列化されるが、`dev:all` はロックを取らないため、並走すると開発セッションのコンテナが消えることがある。また E2E は `apps/*/.dev.vars` を起動中だけ書き換える（元のファイルは `.dev.vars.rovo-e2e-backup` に退避し、異常終了した場合も次の起動の冒頭で元に戻す）。
+
 ```sh
 mise install          # node / pnpm を入れる
 mise run install      # 依存パッケージ（pnpm install --frozen-lockfile）

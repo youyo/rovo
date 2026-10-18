@@ -14,6 +14,8 @@ export interface ExecResult {
   timedOut: boolean;
   /** 出力が上限を超えて切り詰められたか */
   truncated: boolean;
+  /** 終端（terminate 済み）のため実行しなかった。exitCode は -1。 */
+  terminated?: boolean;
 }
 
 /** Sandbox の作業環境を用意するための指定。認証済みの taskSpec から作る。 */
@@ -34,6 +36,7 @@ export interface SandboxPort {
    * 傍受の登録と CA 設定が終わるまで clone / exec はしない。
    */
   ensureReady(spec: WorkspaceSpec): Promise<void>;
+  /** terminate 後は例外ではなく `terminated: true` の結果を返す。 */
   exec(argv: string[], options?: ExecOptions): Promise<ExecResult>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<void>;

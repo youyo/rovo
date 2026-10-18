@@ -4,6 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-12",
   "compatibility_flags": ["nodejs_compat"],
+  // Gateway からは DO バインディングで呼ぶので workers.dev では公開しない（ルートも持たない）
+  "workers_dev": false,
   "containers": [
     {
       "class_name": "SandboxDO",

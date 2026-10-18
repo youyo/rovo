@@ -36,6 +36,12 @@ export const call = (
   toolCall: { name, arguments: args },
 });
 
+export interface ExecGate {
+  hold: () => void;
+  waitEntered: () => Promise<void>;
+  release: () => void;
+}
+
 export interface Fixture {
   name: string;
   stub: DurableObjectStub<import("../../../src/agent-do").AgentDO>;
@@ -50,6 +56,8 @@ export interface Fixture {
   nameStatus: { value: string };
   /** git format-patch を止めておく（finalize の patch 取得中に別の出来事を起こすため） */
   patchGate: { hold: () => void; waitEntered: () => Promise<void>; release: () => void };
+  /** git status / git switch の exec を止めておく（report_completion が sandbox RPC を await 中に別の出来事を起こすため） */
+  execGate: Record<"status" | "switch", ExecGate>;
   /** git rev-parse HEAD の応答を先頭から順に使う。尽きたら c0ffee */
   revParse: string[];
   /** git status --porcelain の結果を先頭から順に使う。尽きたら clean */
@@ -60,7 +68,12 @@ export interface Fixture {
 export function newFixture(
   name: string,
   script: ScriptStep[],
-  opts: { maxOutputTokens?: number; modelId?: string; cancelWaitMs?: number } = {},
+  opts: {
+    maxOutputTokens?: number;
+    modelId?: string;
+    cancelWaitMs?: number;
+    finalizeWaitMs?: number;
+  } = {},
 ): Fixture {
   const clock = { now: T0 };
   const verifyResults: Partial<ExecResult>[] = [];
@@ -71,14 +84,26 @@ export function newFixture(
   // DO の中と外で Promise を共有すると I/O の所有者が混ざるので、フラグのポーリングにする
   const gateState = { entered: false, released: false };
   const patchState = { held: false, entered: false };
+  const execState = {
+    status: { held: false, entered: false },
+    switch: { held: false, entered: false },
+  };
   const revParse: string[] = [];
   const statusResults: Partial<ExecResult>[] = [];
 
   const sandbox = new FakeSandbox(async (argv) => {
     const [a0, a1] = argv;
     if (a0 === "git" && a1 === "rev-parse") return { stdout: `${revParse.shift() ?? "c0ffee"}\n` };
-    if (a0 === "git" && a1 === "status") return statusResults.shift() ?? { stdout: "" };
-    if (a0 === "git" && (a1 === "checkout" || a1 === "switch")) return {};
+    if (a0 === "git" && (a1 === "status" || a1 === "switch")) {
+      const g = execState[a1];
+      if (g.held) {
+        g.entered = true;
+        while (g.held) await new Promise((r) => setTimeout(r, 10));
+      }
+      if (a1 === "status") return statusResults.shift() ?? { stdout: "" };
+      return {};
+    }
+    if (a0 === "git" && a1 === "checkout") return {};
     if (a0 === "git" && a1 === "format-patch") {
       if (patchState.held) {
         patchState.entered = true;
@@ -137,6 +162,7 @@ export function newFixture(
     maxOutputTokens: opts.maxOutputTokens,
     modelId: opts.modelId,
     cancelWaitMs: opts.cancelWaitMs,
+    finalizeWaitMs: opts.finalizeWaitMs,
     onModelCall: () => {
       modelCalls.count += 1;
     },
@@ -161,6 +187,10 @@ export function newFixture(
     nameStatus,
     revParse,
     statusResults,
+    execGate: {
+      status: gateOf(execState.status),
+      switch: gateOf(execState.switch),
+    },
     patchGate: {
       hold: () => {
         patchState.held = true;
@@ -171,6 +201,20 @@ export function newFixture(
       release: () => {
         patchState.held = false;
       },
+    },
+  };
+}
+
+function gateOf(state: { held: boolean; entered: boolean }): ExecGate {
+  return {
+    hold: () => {
+      state.held = true;
+    },
+    waitEntered: async () => {
+      while (!state.entered) await new Promise((r) => setTimeout(r, 10));
+    },
+    release: () => {
+      state.held = false;
     },
   };
 }

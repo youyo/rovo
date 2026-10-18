@@ -322,3 +322,15 @@ apps/gateway (既存 Worker)
 - 停止の意図（cancel / deadline / budget_exceeded）は `stop_intents` に記録し、記録した時点で Sandbox の破棄と Pi の abort を始める。公開する終端は、モデルの停止を待って最終 usage を保存してから、1 つのトランザクションの中で cancel > deadline > budget_exceeded > failed > completed の順に判定して確定する。停止の意図があるタスクでは Sandbox が既に破棄されているため、patch は保存しない。
 - 検証: 固定した SHA を `git checkout --detach` した状態で実行し、前後で HEAD と追跡ファイルの変更の有無を確かめる（実行で生まれる未追跡の生成物は許す）。検証の後に作業ブランチを検証した SHA に戻し、patch は `base..検証済み SHA` で作る。
 - 本番（`ENVIRONMENT` が test 以外）で `AI_GATEWAY_ID` が空なら、`start` は `rejected`（`ai_gateway_not_configured`）を返す。
+
+## 最終レビュー（verifier、2026-10-18）を受けた修正
+
+- **finalize の循環待ちの解消**: report_completion（ツール）の中から、Pi の abort を待つ確定を await しない。各 `finalize` の直前に `stopIntents()` を同期で確かめ、意図があれば await せず `terminate: true` で戻る（意図は decideTerminal で必ず勝つ）。回帰テストは「git status / git switch の await 中に cancel → RPC 成功後も cancel の再送が有限時間で stopped:true・cancelled に収束」（検証コマンドあり / なし）。
+- **abort 待ちの上限**: 停止の意図による確定は Pi の abort を最大 60 秒（期限までまだ時間があるなら期限まで）だけ待つ。期限を過ぎた後の停止（deadline による停止）は 60 秒まで待つ（期限までの残りを上限にすると、期限による停止が常に待たなくなり、最終 usage を取る契約を壊すため）。超えたら、`preModelCall` が呼び出し前に永続化した見積額（`inflight`: 呼び出し前の累計 + 見積額）を usage に含めて確定する（実費は後で分からないので上限側で計上）。確定の後に遅れて届く usage は記録しない。`stopped:true` の契約（最終 usage 永続化済み・以後イベントなし）は変えない。上限で確定した直後は abort が終わっていないので cancel は `stopped:false` を返し、abort 完了後の再送で true になる。
+- **検証中の sandbox の例外**: report_completion の検証本体を catch で包み、停止の意図が無ければ `running` に戻して、例外の内容を非信頼データのマーカー付きでモデルに返す。その試行は試行回数に数える（回数は実行前に永続化済み）。
+- **start は Sandbox の準備を待たない**: `AgentDO.start` は永続化と job の登録の後、launch（ensureReady → submit）を待たずに accepted を返す。失敗の再試行は tick job と `launched` メタが受け持つ。cancel / 終端の後に ensureReady が失敗しても、準備の失敗として数えない。Gateway が受け取る応答（accepted → RUNNING）は変わらない。
+- **terminate 後の exec は結果型**: `SandboxPort.exec` は terminate 済みの Sandbox では例外ではなく `{exitCode: -1, terminated: true, stderr: "sandbox was terminated"}` を返す（workerd が呼び出され側の例外を Uncaught として記録するため）。`readFile` / `writeFile` / `ensureReady` の終端後の拒否は例外のまま（AgentDO は catch する）。期限切れの拒否も例外のまま。
+- **検証イベント**: 終端の後には `verification` イベントを積まない。
+- **Gateway**: `UserDO.release`（finishTask を迂回する公開 RPC）を削除。`TaskDO.result` の `getResult` に 10 秒の期限を付け、超えたら `upstream_unavailable`。
+- **agent の公開面**: `apps/agent/wrangler.jsonc` に `workers_dev: false`（ルートも持たない。Gateway は DO バインディングで呼ぶ）。
+- **E2E 基盤**: `.dev.vars` はファイル（`.dev.vars.rovo-e2e-backup`）へ rename で退避し、自分が書いたものには印の行を付ける。起動時に前回の残骸（退避ファイルの残り、印つきの `.dev.vars`）を元に戻してから始め、プロセスの exit でも復元する。ロックの奪取は rename（原子的）で脇へ動かし、持ち主を見直す。E2E の後始末は `workerd-rovo-agent-*` コンテナを消すため、E2E 中に別途 `dev:all` を起動しない（README に注意を書いた）。

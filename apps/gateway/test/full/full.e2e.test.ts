@@ -97,7 +97,9 @@ async function call(
   name: string,
   args: Body,
 ): Promise<{ isError: boolean; body: Body }> {
-  process.stderr.write(`CALL ${name} ${JSON.stringify(args).slice(0, 80)} ${Date.now()}\n`);
+  if (process.env.E2E_DEBUG === "1") {
+    process.stderr.write(`CALL ${name} ${JSON.stringify(args).slice(0, 80)} ${Date.now()}\n`);
+  }
   const r = await client.callTool({ name, arguments: args });
   const text = (r.content as { text: string }[])[0]?.text ?? "{}";
   return { isError: r.isError === true, body: JSON.parse(text) as Body };
@@ -315,7 +317,10 @@ describe("Gateway → Agent → 実コンテナ の通し", () => {
 
     const r = await resultOf(client, taskId);
     expect(r).toMatchObject({ task_id: taskId, status: "CANCELLED" });
+    // 停止後でも usage が取れる（最終 usage を含めて確定済み）
+    expect((r.usage as { cost_usd: number }).cost_usd).toBeGreaterThanOrEqual(0);
 
+    // 停止確認の後は同時実行の枠が解放され、同じユーザーが次の task_start できる
     const next = await startWhenFree(client, startArgs("c-next", "scenario:c-next"));
     expect(next.isError, JSON.stringify(next.body)).toBe(false);
     await cancelAndSettle(client, next.body.task_id as string);

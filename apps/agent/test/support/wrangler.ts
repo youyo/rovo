@@ -1,8 +1,9 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { writeDevVars } from "./dev-vars";
+import { acquireLock } from "./docker-lock";
 
 export const AGENT_DIR = join(import.meta.dirname, "..", "..");
 export const REPO_ROOT = join(AGENT_DIR, "..", "..");
@@ -39,56 +40,14 @@ function listAgentContainers(): Set<string> {
 
 const LOCK_DIR = join(tmpdir(), "rovo-e2e-docker.lock");
 
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 /**
- * wrangler dev + Docker の E2E は同時に 1 つだけ走らせる（プロセス間の排他ロック）。
+ * wrangler dev + Docker の E2E は同時に 1 つだけ走らせる（プロセス間の排他ロック。docker-lock.ts）。
  * 後始末が「この起動中に増えた rovo-agent のコンテナ」を消すため、別の起動と並走すると互いのコンテナを消し合い、
- * コンテナが SIGKILL（exit 137）されて不安定になる。ロックの持ち主のプロセスが死んでいたら奪う。
- * 戻り値は解放関数（何度呼んでもよい）。
+ * コンテナが SIGKILL（exit 137）されて不安定になる。
+ * 注意: このロックを取るのは E2E の起動同士だけ。E2E の実行中に別に起動した `mise run dev:all` はロックを取らないので、
+ * その開発セッションのコンテナ（名前が workerd-rovo-agent-）が後始末で消えることがある。
  */
-async function acquireDockerLock(timeoutMs: number): Promise<() => void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      mkdirSync(LOCK_DIR);
-      writeFileSync(join(LOCK_DIR, "pid"), String(process.pid));
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      let owner = Number.NaN;
-      try {
-        owner = Number.parseInt(readFileSync(join(LOCK_DIR, "pid"), "utf8"), 10);
-      } catch {
-        // 作成直後で pid が未記入。少し待って見直す
-      }
-      if (Number.isFinite(owner) && !pidAlive(owner)) {
-        rmSync(LOCK_DIR, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`Docker E2E のロックを取得できません（持ち主 pid=${owner}）: ${LOCK_DIR}`);
-      }
-      await sleep(1_000);
-    }
-  }
-  let released = false;
-  const release = () => {
-    if (released) return;
-    released = true;
-    process.off("exit", release);
-    rmSync(LOCK_DIR, { recursive: true, force: true });
-  };
-  process.on("exit", release);
-  return release;
-}
+const acquireDockerLock = (timeoutMs: number) => acquireLock(LOCK_DIR, timeoutMs);
 
 export interface RunningWrangler {
   baseUrl: string;
@@ -171,23 +130,15 @@ async function startLocked(
     "--log-level",
     "info",
   ];
-  const devVarsFiles = Object.entries(opts.configVars ?? {}).map(([config, vars]) => {
-    const file = join(REPO_ROOT, dirname(config), ".dev.vars");
-    const previous = existsSync(file) ? readFileSync(file) : undefined;
-    writeFileSync(
-      file,
-      `${Object.entries(vars)
-        .map(([k, v]) => `${k}=${v}`)
-        .join("\n")}\n`,
-    );
-    return { file, previous };
-  });
+  // 設定ファイルの隣の .dev.vars に起動中だけ書く。前回の異常終了の残骸は、書く前に戻す（dev-vars.ts）
+  const restores = Object.entries(opts.configVars ?? {}).map(([config, vars]) =>
+    writeDevVars(join(REPO_ROOT, dirname(config), ".dev.vars"), vars),
+  );
   const restoreDevVars = () => {
-    for (const { file, previous } of devVarsFiles) {
-      if (previous === undefined) rmSync(file, { force: true });
-      else writeFileSync(file, previous);
-    }
+    process.off("exit", restoreDevVars);
+    for (const r of restores) r();
   };
+  process.on("exit", restoreDevVars);
   const containersBefore = listAgentContainers();
   const logs: string[] = [];
   const child: ChildProcess = spawn(process.execPath, args, {

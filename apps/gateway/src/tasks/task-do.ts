@@ -32,6 +32,8 @@ const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const EVENT_PAGE_LIMIT = 100;
 /** task_wait が入口の取り込みを最低限待つ時間。timeout 0 や終端のタスクでも、速い応答は拾う。 */
 const SYNC_GRACE_MS = 500;
+/** task_result が AgentDO の getResult を待つ上限。超えたら upstream_unavailable（MCP の呼び出しを固めない）。 */
+const RESULT_TIMEOUT_MS = 10_000;
 /** 1 回の取り込みで読むページ数の上限（残りは次の alarm / wait で取り込む）。 */
 const MAX_PAGES_PER_SYNC = 20;
 
@@ -198,6 +200,9 @@ export class TaskDO extends DurableObject<Env> {
     // 配送の意図が残っているのに alarm が無い（作成と setAlarm の間で止まった等）なら設定し直す。
     ctx.blockConcurrencyWhile(() => this.ensureAlarm());
   }
+
+  /** テストで短くする。 */
+  protected resultTimeoutMs = RESULT_TIMEOUT_MS;
 
   /** 子エージェントの RPC。テストで差し替える。 */
   protected agentStub(): AgentRpc {
@@ -630,6 +635,16 @@ export class TaskDO extends DurableObject<Env> {
     await this.advance();
   }
 
+  private withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timeout")), ms);
+    });
+    return Promise.race([p, limit]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+  }
+
   /** 利用者に結果を返せる状態か（終端 + AgentDO の停止確認済み）を確かめて、結果を整形して返す。 */
   async result(ownerId: number): Promise<ResultOutcome> {
     const row = this.getRow();
@@ -638,7 +653,7 @@ export class TaskDO extends DurableObject<Env> {
     if (!isTerminal(status) || !this.isStopped()) return { ok: false, code: "not_ready" };
     let dto: ResultDto;
     try {
-      dto = await this.agentStub().getResult();
+      dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
     } catch (e) {
       console.error("task_do_result_error", e instanceof Error ? e.name : typeof e);
       return { ok: false, code: "upstream_unavailable" };

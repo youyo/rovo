@@ -38,6 +38,7 @@ import type { ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
 import { createSandboxTools } from "./tools";
 import { createToolContext } from "./tools/context";
 import type { SandboxToolsFactory } from "./tools/types";
+import { wrapUntrusted } from "./tools/untrusted";
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
 const WORKSPACE_ROOT = "/workspace";
@@ -48,6 +49,9 @@ const MAX_SETUP_ATTEMPTS = 3;
 const PATCH_LIMIT = 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_000;
 const DEFAULT_CANCEL_WAIT_MS = 20_000;
+/** 停止の意図による確定が、Pi の abort（idle）を待つ上限。deadline を超えては待たない。 */
+const DEFAULT_FINALIZE_WAIT_MS = 60_000;
+const USAGE_READ_WAIT_MS = 2_000;
 const TICK_MS = 30_000;
 const OUTPUT_TAIL = 4000;
 
@@ -216,7 +220,8 @@ export class AgentDO extends DurableObject<Env> {
       });
       await this.scheduleJobs(deadlineAt);
     }
-    if (!isTerminal(this.store.phase())) await this.launch();
+    // Sandbox の準備（ensureReady）は待たない。MCP の呼び出し時間に近づくため。失敗の再試行は tick job が受け持つ
+    if (!isTerminal(this.store.phase())) void this.launch().catch(() => undefined);
     return {
       status: "accepted",
       phase: this.store.phase() ?? "starting",
@@ -341,6 +346,8 @@ export class AgentDO extends DurableObject<Env> {
       try {
         await this.sandbox().ensureReady(this.workspaceSpec(spec));
       } catch (e) {
+        // cancel などで終端停止された後の失敗は、準備の失敗として数えない
+        if (this.store.meta("tombstone") || isTerminal(this.store.phase())) return;
         const attempts = (this.store.meta<number>("setup_attempts") ?? 0) + 1;
         this.store.setMeta("setup_attempts", attempts);
         if (attempts >= MAX_SETUP_ATTEMPTS) {
@@ -476,6 +483,8 @@ export class AgentDO extends DurableObject<Env> {
    * ツールの中から呼ぶ確定（完了）は待たない: abort は idle を待つので、自分自身を待つことになる。
    */
   private finalize(request?: TerminalRequest, waitFor?: Promise<unknown>): Promise<void> {
+    // ツール（report_completion）の中から、abort を待つ確定を await してはいけない（循環待ち）。
+    // 呼び出し側は事前に stopIntents() を確かめ、意図があれば await せずに戻る。
     if (isTerminal(this.store.phase())) return Promise.resolve();
     if (request) this.requests.push(request);
     this.finalizing ??= this.doFinalize(waitFor).finally(() => {
@@ -503,9 +512,21 @@ export class AgentDO extends DurableObject<Env> {
         warnings.push(`patch を取得できませんでした: ${String(e)}`);
       }
     }
-    // モデルの停止を待ってから最終の usage を保存する
-    if (waitFor) await waitFor.catch(() => undefined);
-    await this.refreshUsage().catch(() => undefined);
+    // モデルの停止を待ってから最終の usage を保存する（上限つき。上限を超えたら見積もりを含めて確定する）
+    let timedOut = false;
+    if (waitFor) {
+      const cap = this.overrides().finalizeWaitMs ?? DEFAULT_FINALIZE_WAIT_MS;
+      // 期限までまだ時間があるなら、期限を超えては待たない。期限を過ぎた後の停止（期限による停止など）は cap まで待つ
+      const untilDeadline = this.deadlineAt() - this.now();
+      const limit = untilDeadline > 0 ? Math.min(cap, untilDeadline) : cap;
+      timedOut = await this.raceTimeout(waitFor, limit);
+    }
+    if (timedOut) {
+      await this.raceTimeout(this.refreshUsage(), USAGE_READ_WAIT_MS);
+      this.includeInflightEstimate();
+    } else {
+      await this.refreshUsage().catch(() => undefined);
+    }
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
       // 古い指示をそのまま採用せず、確定の時点の意図と要求から決める
@@ -526,6 +547,42 @@ export class AgentDO extends DurableObject<Env> {
       });
       this.store.setPhase(decision.phase, decision.reason);
       this.requests = [];
+    });
+  }
+
+  /** p の完了を ms まで待つ。待ち切れなければ true（p の失敗は完了として扱う）。 */
+  private async raceTimeout(p: Promise<unknown>, ms: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        p.then(
+          () => false,
+          () => false,
+        ),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), ms);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Pi がまだモデル呼び出し中のまま確定するとき、実費は後でしか分からない。
+   * 呼び出し前に永続化した見積額（上限側）を「進行中」として usage に計上する。
+   */
+  private includeInflightEstimate(): void {
+    const inflight = this.store.meta<{ baseCostUsd: number; estimateUsd: number }>("inflight");
+    if (!inflight) return;
+    const prev = this.store.usage();
+    const upper = inflight.baseCostUsd + inflight.estimateUsd;
+    if (upper <= prev.costUsd) return;
+    const total: UsageDto = { ...prev, costUsd: upper };
+    this.store.tx(() => {
+      if (isTerminal(this.store.phase())) return;
+      this.store.setMeta("usage", total);
+      this.store.appendEvent("usage", total);
     });
   }
 
@@ -638,6 +695,8 @@ export class AgentDO extends DurableObject<Env> {
       this.requestStop("budget_exceeded");
       return { block: "budget_exceeded" };
     }
+    // 呼び出し前の見積額を「進行中」として永続化する（abort を待ち切れずに確定するとき、これを計上する）
+    this.store.setMeta("inflight", { baseCostUsd: spent.costUsd, estimateUsd: estimate });
     return { maxTokens, metadata: { userId: spec.userId, taskId: spec.taskId } };
   }
 
@@ -669,7 +728,10 @@ export class AgentDO extends DurableObject<Env> {
         });
       },
       afterTools: async () => {
-        if (this.spec()) await this.refreshUsage();
+        if (this.spec()) {
+          await this.refreshUsage();
+          this.store.setMeta("inflight", null);
+        }
       },
       onYield: async () => {
         if (!this.spec() || isTerminal(this.store.phase())) return undefined;
@@ -733,6 +795,17 @@ export class AgentDO extends DurableObject<Env> {
       if (this.stopIntents().length === 0) this.store.setPhase("running");
       return { text, isError: true, terminate: false };
     };
+    const ended = { text: "The task has already ended.", isError: true, terminate: true };
+    /**
+     * 終端を確定してツールの結果を返す。停止の意図があるときは確定を await しない:
+     * 意図による確定は Pi の abort（= このツールの終了）を待つので、await すると循環する。
+     * 意図は decideTerminal で必ず勝つので、ここでは何もせずに戻ってよい。
+     */
+    const settle = async <T>(request: TerminalRequest, result: T) => {
+      if (this.stopIntents().length > 0) return ended;
+      await this.finalize(request);
+      return result;
+    };
     const git = (args: string[], timeoutMs = 60_000) =>
       sb.exec(["git", ...args], { cwd: WORKSPACE_ROOT, timeoutMs });
     // 終了コード 0・タイムアウトなし・切り詰めなしのときだけ、結果を信用する
@@ -748,145 +821,159 @@ export class AgentDO extends DurableObject<Env> {
     const prev = this.store.meta<VerificationSummary>("verification");
     // 保存済みの試行回数が上限なら、何も実行せずに failed（再起動などで試行が消費された後の再実行を防ぐ）
     if (commands.length > 0 && (prev?.attempts ?? 0) >= MAX_VERIFY_ATTEMPTS) {
-      await this.finalize({
-        phase: "failed",
-        reason: "verification_failed",
-        ...(prev?.commitSha ? { sha: prev.commitSha } : {}),
-      });
-      return {
-        text: "Verification failed and no attempts remain.",
-        isError: true,
-        terminate: true,
-      };
-    }
-
-    const head = await git(["rev-parse", "HEAD"]);
-    const sha = head.stdout.trim();
-    if (!trusted(head) || !sha) {
-      return back(`Could not read HEAD (${why(head)}). Make sure the repository is intact.`);
-    }
-    const status = await git(["status", "--porcelain"]);
-    if (!trusted(status)) {
-      return back(
-        `Could not check the working tree (git status: ${why(status)}). Fix the repository and call report_completion again.`,
-      );
-    }
-    if (status.stdout.trim() !== "") {
-      return back(
-        `There are uncommitted changes:\n${tail(status.stdout, 1000)}\nCommit them with git_commit, then call report_completion again.`,
+      return settle(
+        {
+          phase: "failed",
+          reason: "verification_failed",
+          ...(prev?.commitSha ? { sha: prev.commitSha } : {}),
+        },
+        { text: "Verification failed and no attempts remain.", isError: true, terminate: true },
       );
     }
 
-    if (commands.length === 0) {
-      this.store.setMeta("verification", {
-        commands,
-        results: [],
-        verified: false,
-        attempts: 0,
-        commitSha: sha,
-      } satisfies VerificationSummary);
-      await this.finalize({ phase: "completed", sha });
-      return {
-        text: "Completion recorded (no verification commands were given).",
-        isError: false,
-        terminate: true,
-      };
-    }
-    const attempts = (prev?.attempts ?? 0) + 1;
-    // 試行回数は実行前に永続化する（途中で落ちても消費したものとして数える）
-    this.store.setMeta("verification", {
-      ...(prev ?? { commands, results: [], verified: false }),
-      commands,
-      attempts,
-      commitSha: sha,
-    });
-
-    // 固定した SHA を checkout した状態で検証する（前後で HEAD と作業ツリーを確かめる）
-    const branch = `agent/task-${spec.taskId}`;
-    const results: VerificationCommandResult[] = [];
-    let passed = true;
-    let destroyed = false;
-    const fail = (argv: string[], output: string) => {
-      results.push({ argv, exitCode: -1, timedOut: false, output });
-      passed = false;
-    };
-    const pin = await git(["checkout", "-q", "--detach", sha]);
-    const pinned = trusted(pin) ? await git(["rev-parse", "HEAD"]) : undefined;
-    if (!pinned || !trusted(pinned) || pinned.stdout.trim() !== sha) {
-      fail(["git", "checkout", "--detach", sha], `could not pin ${sha}: ${why(pin)}`);
-    }
-    for (const cmd of passed ? commands : []) {
-      const cwd = this.resolveCwd(cmd.cwd);
-      if (cwd === undefined) {
-        fail(cmd.argv, "invalid cwd");
-        break;
+    try {
+      const head = await git(["rev-parse", "HEAD"]);
+      const sha = head.stdout.trim();
+      if (!trusted(head) || !sha) {
+        return back(`Could not read HEAD (${why(head)}). Make sure the repository is intact.`);
       }
-      const r = await sb.exec(cmd.argv, { cwd, timeoutMs: (cmd.timeoutSeconds ?? 600) * 1000 });
-      results.push({
-        argv: cmd.argv,
-        exitCode: r.exitCode,
-        timedOut: r.timedOut,
-        output: tail(`${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`),
-      });
-      if (r.timedOut) destroyed = true; // タイムアウトでコンテナは破棄され、作業ツリーは作り直される
-      if (r.exitCode !== 0 || r.timedOut) {
-        passed = false;
-        break;
-      }
-    }
-    if (!destroyed) {
-      // 実行後: HEAD が動いておらず、追跡ファイルが変わっていないこと（未追跡の生成物は許す）
-      const after = await git(["rev-parse", "HEAD"]);
-      const dirty = await git(["status", "--porcelain", "--untracked-files=no"]);
-      if (!trusted(after) || after.stdout.trim() !== sha) {
-        fail(["git", "rev-parse", "HEAD"], `HEAD moved during verification (${why(after)})`);
-      } else if (!trusted(dirty) || dirty.stdout.trim() !== "") {
-        fail(
-          ["git", "status"],
-          `verification modified tracked files (${trusted(dirty) ? tail(dirty.stdout, 500) : why(dirty)})`,
+      const status = await git(["status", "--porcelain"]);
+      if (!trusted(status)) {
+        return back(
+          `Could not check the working tree (git status: ${why(status)}). Fix the repository and call report_completion again.`,
         );
       }
-      // 作業ブランチを検証した SHA に戻す（検証中にブランチが動かされていても）
-      const restore = await git(["switch", "-q", "-C", branch, sha]);
-      if (!trusted(restore)) {
-        fail(["git", "switch", branch], `could not restore the branch: ${why(restore)}`);
+      if (status.stdout.trim() !== "") {
+        return back(
+          `There are uncommitted changes:\n${tail(status.stdout, 1000)}\nCommit them with git_commit, then call report_completion again.`,
+        );
       }
-    }
-    const verification: VerificationSummary = {
-      commands,
-      results,
-      verified: passed,
-      attempts,
-      commitSha: sha,
-    };
-    this.store.tx(() => {
-      this.store.setMeta("verification", verification);
-      this.store.appendEvent("verification", { attempt: attempts, passed, commitSha: sha });
-    });
-    if (passed) {
-      await this.finalize({ phase: "completed", sha });
-      return {
-        text: "Verification passed. The task is complete.",
-        isError: false,
-        terminate: true,
+
+      if (commands.length === 0) {
+        this.store.setMeta("verification", {
+          commands,
+          results: [],
+          verified: false,
+          attempts: 0,
+          commitSha: sha,
+        } satisfies VerificationSummary);
+        return await settle(
+          { phase: "completed", sha },
+          {
+            text: "Completion recorded (no verification commands were given).",
+            isError: false,
+            terminate: true,
+          },
+        );
+      }
+      const attempts = (prev?.attempts ?? 0) + 1;
+      // 試行回数は実行前に永続化する（途中で落ちても消費したものとして数える。sandbox が例外を投げた試行も消費済み）
+      this.store.setMeta("verification", {
+        ...(prev ?? { commands, results: [], verified: false }),
+        commands,
+        attempts,
+        commitSha: sha,
+      });
+
+      // 固定した SHA を checkout した状態で検証する（前後で HEAD と作業ツリーを確かめる）
+      const branch = `agent/task-${spec.taskId}`;
+      const results: VerificationCommandResult[] = [];
+      let passed = true;
+      let destroyed = false;
+      const fail = (argv: string[], output: string) => {
+        results.push({ argv, exitCode: -1, timedOut: false, output });
+        passed = false;
       };
-    }
-    if (attempts >= MAX_VERIFY_ATTEMPTS) {
-      await this.finalize({ phase: "failed", reason: "verification_failed", sha });
-      return {
-        text: "Verification failed and no attempts remain.",
-        isError: true,
-        terminate: true,
+      const pin = await git(["checkout", "-q", "--detach", sha]);
+      const pinned = trusted(pin) ? await git(["rev-parse", "HEAD"]) : undefined;
+      if (!pinned || !trusted(pinned) || pinned.stdout.trim() !== sha) {
+        fail(["git", "checkout", "--detach", sha], `could not pin ${sha}: ${why(pin)}`);
+      }
+      for (const cmd of passed ? commands : []) {
+        const cwd = this.resolveCwd(cmd.cwd);
+        if (cwd === undefined) {
+          fail(cmd.argv, "invalid cwd");
+          break;
+        }
+        const r = await sb.exec(cmd.argv, { cwd, timeoutMs: (cmd.timeoutSeconds ?? 600) * 1000 });
+        results.push({
+          argv: cmd.argv,
+          exitCode: r.exitCode,
+          timedOut: r.timedOut,
+          output: tail(`${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`),
+        });
+        if (r.timedOut) destroyed = true; // タイムアウトでコンテナは破棄され、作業ツリーは作り直される
+        if (r.exitCode !== 0 || r.timedOut) {
+          passed = false;
+          break;
+        }
+      }
+      if (!destroyed) {
+        // 実行後: HEAD が動いておらず、追跡ファイルが変わっていないこと（未追跡の生成物は許す）
+        const after = await git(["rev-parse", "HEAD"]);
+        const dirty = await git(["status", "--porcelain", "--untracked-files=no"]);
+        if (!trusted(after) || after.stdout.trim() !== sha) {
+          fail(["git", "rev-parse", "HEAD"], `HEAD moved during verification (${why(after)})`);
+        } else if (!trusted(dirty) || dirty.stdout.trim() !== "") {
+          fail(
+            ["git", "status"],
+            `verification modified tracked files (${trusted(dirty) ? tail(dirty.stdout, 500) : why(dirty)})`,
+          );
+        }
+        // 作業ブランチを検証した SHA に戻す（検証中にブランチが動かされていても）
+        const restore = await git(["switch", "-q", "-C", branch, sha]);
+        if (!trusted(restore)) {
+          fail(["git", "switch", branch], `could not restore the branch: ${why(restore)}`);
+        }
+      }
+      const verification: VerificationSummary = {
+        commands,
+        results,
+        verified: passed,
+        attempts,
+        commitSha: sha,
       };
+      this.store.tx(() => {
+        this.store.setMeta("verification", verification);
+        // 終端の後（期限切れの確定など）にはイベントを積まない
+        if (!isTerminal(this.store.phase())) {
+          this.store.appendEvent("verification", { attempt: attempts, passed, commitSha: sha });
+        }
+      });
+      if (passed) {
+        return await settle(
+          { phase: "completed", sha },
+          {
+            text: "Verification passed. The task is complete.",
+            isError: false,
+            terminate: true,
+          },
+        );
+      }
+      if (attempts >= MAX_VERIFY_ATTEMPTS) {
+        return await settle(
+          { phase: "failed", reason: "verification_failed", sha },
+          { text: "Verification failed and no attempts remain.", isError: true, terminate: true },
+        );
+      }
+      const failedResult = results[results.length - 1];
+      return back(
+        `Verification failed (attempt ${attempts} of ${MAX_VERIFY_ATTEMPTS}). Command: ${failedResult?.argv.join(" ")} exit=${failedResult?.exitCode}${failedResult?.timedOut ? " (timed out)" : ""}\n${failedResult?.output ?? ""}\n${
+          destroyed
+            ? "The sandbox container was destroyed because the command timed out: ALL uncommitted changes and local commits in the workspace were lost; your next tool call re-clones the base commit. Redo your work.\n"
+            : ""
+        }Fix the problem, commit, and call report_completion again.`,
+      );
+    } catch (e) {
+      // sandbox の RPC が例外を投げた。停止の意図が無ければ running に戻し、内容を（非信頼データとして）モデルに返す
+      if (this.stopIntents().length > 0) return ended;
+      return back(
+        wrapUntrusted(
+          "report_completion",
+          `The sandbox failed while checking or verifying the work: ${tail(String(e), 500)}\nThis attempt counted toward the verification limit. Check the repository and call report_completion again.`,
+        ),
+      );
     }
-    const failedResult = results[results.length - 1];
-    return back(
-      `Verification failed (attempt ${attempts} of ${MAX_VERIFY_ATTEMPTS}). Command: ${failedResult?.argv.join(" ")} exit=${failedResult?.exitCode}${failedResult?.timedOut ? " (timed out)" : ""}\n${failedResult?.output ?? ""}\n${
-        destroyed
-          ? "The sandbox container was destroyed because the command timed out: ALL uncommitted changes and local commits in the workspace were lost; your next tool call re-clones the base commit. Redo your work.\n"
-          : ""
-      }Fix the problem, commit, and call report_completion again.`,
-    );
   }
 
   private resolveCwd(cwd: string | undefined): string | undefined {

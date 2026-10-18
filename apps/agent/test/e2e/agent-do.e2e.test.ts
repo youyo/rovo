@@ -106,7 +106,7 @@ describe("AgentDO + 実コンテナ", () => {
 
     // 完了後の片付けは terminate。終端の後に sandbox は再開しない
     await expect.poll(async () => (await sandbox.status()).terminated).toBe(true);
-    await expect(sandbox.exec(["true"])).rejects.toThrow(/terminated/i);
+    expect(await sandbox.exec(["true"])).toMatchObject({ exitCode: -1, terminated: true });
   });
 
   it("getEvents のページングは seq が単調で、終端の phase イベントが最後", async () => {
@@ -169,7 +169,7 @@ describe("AgentDO + 実コンテナ", () => {
     const st = await sandbox.status();
     expect(st.terminated).toBe(true);
     expect(st.running).toBe(false);
-    await expect(sandbox.exec(["true"])).rejects.toThrow(/terminated/i);
+    expect(await sandbox.exec(["true"])).toMatchObject({ exitCode: -1, terminated: true });
     expect(await agent.waitForTerminal(60_000)).toBe("cancelled");
     const events = await agent.allEvents();
     expect(events[events.length - 1]).toMatchObject({
@@ -199,7 +199,7 @@ describe("AgentDO + 実コンテナ", () => {
     await expect
       .poll(async () => (await sandbox.status()).terminated, { timeout: 60_000 })
       .toBe(true);
-    await expect(sandbox.exec(["true"])).rejects.toThrow(/terminated|deadline/i);
+    expect(await sandbox.exec(["true"])).toMatchObject({ exitCode: -1, terminated: true });
     const events = await agent.allEvents();
     expect(events[events.length - 1]).toMatchObject({ type: "phase", data: { phase: "failed" } });
   });

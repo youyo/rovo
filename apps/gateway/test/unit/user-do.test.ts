@@ -43,6 +43,12 @@ async function reserveOk(stub: UserStub, key: string, fp = FP) {
   return r;
 }
 
+/** 同時実行の枠の解放（finishTask 経由。usage の精算は無し）。 */
+async function release(stub: UserStub, taskId: string): Promise<{ released: boolean }> {
+  const r = await stub.finishTask(taskId, 0, 0);
+  return { released: r.released };
+}
+
 async function create(userId: number, taskId: string) {
   const r = await taskStub(taskId).ensureCreated(sampleInput(taskId, userId));
   if (!r.ok) throw new Error(`ensureCreated failed: ${r.code}`);
@@ -76,7 +82,7 @@ describe("UserDO.reserve", () => {
   it("再試行: 予約が解放された後でも同じ task_id を返す", async () => {
     const stub = userStub(newUserId());
     const a = await reserveOk(stub, "key-1");
-    await stub.release(a.task_id);
+    await release(stub, a.task_id);
     const b = await reserveOk(stub, "key-1");
     expect(b).toMatchObject({ task_id: a.task_id, reused: true });
     expect((await reservation(stub)).active_task_id).toBeNull();
@@ -127,11 +133,11 @@ describe("UserDO.reserve", () => {
     const stub = userStub(newUserId());
     const clock = await useClock(stub);
     const a = await reserveOk(stub, "old");
-    await stub.release(a.task_id);
+    await release(stub, a.task_id);
     clock.advance(7 * DAY - MIN);
     expect(await sql(stub, "SELECT * FROM requests")).toHaveLength(1);
     expect(((await reserveOk(stub, "old")) as { reused: boolean }).reused).toBe(true);
-    await stub.release(a.task_id);
+    await release(stub, a.task_id);
     clock.advance(2 * MIN); // 7 日を超える
     const b = await reserveOk(stub, "old");
     expect(b.reused).toBe(false);
@@ -139,14 +145,14 @@ describe("UserDO.reserve", () => {
   });
 });
 
-describe("UserDO.release", () => {
+describe("finishTask による枠の解放", () => {
   it("予約先が同じ task_id のときだけ解放する（compare-and-clear）", async () => {
     const stub = userStub(newUserId());
     const a = await reserveOk(stub, "key-1");
     const v = (await reservation(stub)).version;
-    expect(await stub.release("01ARZ3NDEKTSV4RRFFQ69G5FAV")).toEqual({ released: false });
+    expect(await release(stub, "01ARZ3NDEKTSV4RRFFQ69G5FAV")).toEqual({ released: false });
     expect(await reservation(stub)).toMatchObject({ active_task_id: a.task_id, version: v });
-    expect(await stub.release(a.task_id)).toEqual({ released: true });
+    expect(await release(stub, a.task_id)).toEqual({ released: true });
     const after = await reservation(stub);
     expect(after.active_task_id).toBeNull();
     expect(after.version).toBeGreaterThan(v);
@@ -155,16 +161,16 @@ describe("UserDO.release", () => {
   it("冪等: 2回目は released=false で状態を変えない", async () => {
     const stub = userStub(newUserId());
     const a = await reserveOk(stub, "key-1");
-    await stub.release(a.task_id);
+    await release(stub, a.task_id);
     const before = await reservation(stub);
-    expect(await stub.release(a.task_id)).toEqual({ released: false });
+    expect(await release(stub, a.task_id)).toEqual({ released: false });
     expect(await reservation(stub)).toEqual(before);
   });
 
   it("解放後は新しいキーで reserve できる", async () => {
     const stub = userStub(newUserId());
     const a = await reserveOk(stub, "key-1");
-    await stub.release(a.task_id);
+    await release(stub, a.task_id);
     const b = await reserveOk(stub, "key-2", FP2);
     expect(b.task_id).not.toBe(a.task_id);
   });
@@ -250,7 +256,7 @@ describe("UserDO.reserve の照合による回収", () => {
     await hookTaskInspect(stub, async (instance) => {
       if (hooked) return;
       hooked = true;
-      await instance.release(a.task_id);
+      await instance.finishTask(a.task_id, 0, 0);
       await instance.reserve("key-other", FP2);
     });
     const r = await stub.reserve("key-new", "9".repeat(64));
@@ -276,7 +282,7 @@ describe("UserDO.reserve の照合による回収", () => {
     await hookTaskInspect(stub, async (instance) => {
       if (hooked) return;
       hooked = true;
-      await instance.release(a.task_id);
+      await instance.finishTask(a.task_id, 0, 0);
       const r = await instance.reserve("key-new", "9".repeat(64));
       inner = r.ok ? r.task_id : undefined;
     });
@@ -358,6 +364,6 @@ async function hookTaskInspect(
   });
 }
 type UserStubInstance = {
-  release: (id: string) => Promise<unknown>;
+  finishTask: (id: string, seq: number, micro: number) => Promise<unknown>;
   reserve: (key: string, fp: string) => Promise<{ ok: boolean; task_id?: string; code?: string }>;
 };

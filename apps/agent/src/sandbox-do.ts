@@ -64,6 +64,16 @@ function drain(stream: ReadableStream<Uint8Array> | null | undefined, buf: TailB
   return { done, cancel: () => void reader?.cancel().catch(() => {}) };
 }
 
+/** terminate 後の exec の結果。exitCode は 0 以外なので、呼び出し側は失敗として扱う。 */
+const TERMINATED_RESULT: ExecResult = {
+  exitCode: -1,
+  stdout: "",
+  stderr: "sandbox was terminated",
+  timedOut: false,
+  truncated: false,
+  terminated: true,
+};
+
 export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   /** 起動の世代。boot ごとに増える。古い boot の結果が新しい状態を上書きしないようにする。 */
   private gen = 0;
@@ -145,8 +155,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       throw new Error("argv must be a non-empty array of strings");
     }
     const cwd = options.cwd ? resolveWorkspacePath(WORKSPACE, options.cwd) : WORKSPACE;
+    // 終端後の exec は例外にしない（workerd は呼び出され側の例外を Uncaught として記録するため、結果型で返す）
+    if (this.terminated()) return TERMINATED_RESULT;
     this.requireSpec();
     return this.serial(async () => {
+      if (this.terminated()) return TERMINATED_RESULT;
       this.requireSpec();
       await this.runningOrThrowRestarted();
       return this.runExec(argv, { ...options, cwd });

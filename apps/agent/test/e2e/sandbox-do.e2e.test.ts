@@ -335,7 +335,7 @@ describe("stop / terminate", () => {
     const st = await c.status();
     expect(st.running).toBe(false);
     expect(st.terminated).toBe(true);
-    await expect(c.exec(["true"])).rejects.toThrow(/terminated/i);
+    expect(await c.exec(["true"])).toMatchObject({ exitCode: -1, terminated: true });
     await expect(c.ensureReady(spec)).rejects.toThrow(/terminated/i);
     expect((await c.status()).running).toBe(false);
   });

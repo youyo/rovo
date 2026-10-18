@@ -115,3 +115,16 @@ describe("destroy の監視期限", () => {
     });
   });
 });
+
+describe("終端後の操作", () => {
+  it("terminate の後の exec は例外ではなく terminated の結果で返る（呼び出され側の例外を Uncaught にしない）", async () => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName("exec-after-terminate");
+    await runInDO(stub, async (inst: Inst) => {
+      inst.maybeContainer = () => new FakeContainer(false, 0);
+      await inst.terminate();
+      const r = await inst.exec(["true"]);
+      expect(r).toMatchObject({ exitCode: -1, terminated: true, timedOut: false });
+      expect(r.stderr).toMatch(/terminated/i);
+    });
+  });
+});

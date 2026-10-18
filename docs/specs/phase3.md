@@ -58,7 +58,11 @@ TaskDO の CREATING で、AgentDO.start の前に行う。各ステップは冪�
 3. Draft PR を作る（`POST /pulls`、`draft: true`、head は作業ブランチ、base は base_ref）。
    - 先に `GET /pulls?head=<owner>:agent/task-<id>&state=open` で既存の PR を探す。あれば、base が base_ref と一致するかを確かめてから使う。
    - `POST` が 422（already exists）なら、もう一度 GET する。
-   - Draft PR を作れない場合（Free プランの private リポジトリなどで 422）は、FAILED（`draft_pr_unsupported`）にする。通常の PR へのフォールバックはしない。通常の PR はレビュー依頼や CI を起動しうるため。
+   - Draft PR を作れない場合（Free プランの private リポジトリなどで 422）の扱いは、env `DRAFT_PR_FALLBACK` で切り替える。OSS として Free プランの利用者も対象にするため。
+     - `fail`（既定）: FAILED（`draft_pr_unsupported`）にする。通常の PR はレビュー依頼や CI を起動しうるため。
+     - `ready`: 通常の PR を作る。タイトルの先頭に `[WIP] ` を付け、本文の冒頭に「rovo が作業中。完了するまでマージしない」と明記する。イベントと `task_result` に警告 `draft_pr_unavailable` を付ける。
+     - 不正な値は `fail` として扱う（fail-closed）。
+     - 判定は、422 の応答本文が Draft に関するものである場合に限る。それ以外の 422 で通常の PR に切り替えない。
 4. PR の番号・URL・初期コミットの SHA を保存し、イベント `draft_pr_created` を出す。
 5. Installation Token を発行し、AgentDO.start を呼ぶ（taskSpec に branch・初期コミットの SHA・トークンを入れる）。
 
@@ -124,7 +128,7 @@ TaskDO の CREATING で、AgentDO.start の前に行う。各ステップは冪�
     - 決定的な初期コミット（同じ created_at なら同じリクエスト本文になる）
     - ブランチと PR が既にある場合
     - compare の各 status
-    - 422（already exists / draft 不可）
+    - 422（already exists / draft 不可）、`DRAFT_PR_FALLBACK` の `fail` / `ready` / 不正な値
     - 401 / 403 / 404 / 429 / 5xx の扱いと backoff
     - CREATING の上限
   - receive-pack の判定: 許可する更新、削除、タグ、別ブランチ、2本のコマンド、shallow、push-options、sha256、壊れた pkt-line、content-encoding。コマンド部を検証する前に、upstream へ転送しないこと。

@@ -29,6 +29,10 @@ export function fakeGitHubAdmin(url: string) {
     revokeRefreshTokens: () => post("revoke-refresh-tokens"),
     setFault: (target: FaultTarget, status: number | null, count?: number) =>
       post("fault", { target, status, count }),
+    /** 偽 GitHub の App API（FakeGitHubApp）のメソッドを呼ぶ */
+    async app<T = unknown>(method: string, ...args: unknown[]): Promise<T> {
+      return (await post("app", { method, args })).result as T;
+    },
     async requests(): Promise<RecordedRequest[]> {
       return ((await post("requests")).requests ?? []) as RecordedRequest[];
     },

@@ -48,7 +48,7 @@ export type StartValue = {
 };
 
 export const START_NOTE =
-  "Phase 2: 子エージェントが Sandbox で編集・テスト・ローカル commit までを行います。push と Draft PR は作られません（draft_pr_url は null）。成果は終端になってから task_result で取得できます。";
+  "Phase 3: 作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントが Sandbox で編集・テスト・commit・push します。draft_pr_url は作成前なので null です。PR の URL は task_status・task_result・イベント draft_pr_created で返ります。成果は終端になってから task_result で取得できます（PR はマージされず Draft のままです）。";
 
 export type StatusValue = Omit<TaskView, "owner_id">;
 export type WaitValue = {

@@ -62,7 +62,7 @@ describe("TaskDO: start の配送", () => {
     const { id, stub, agent } = await createTask();
     await stub.advance();
     expect(await statusOf(stub)).toBe("RUNNING");
-    expect(await eventTypes(stub)).toEqual(["created", "status_changed"]);
+    expect(await eventTypes(stub)).toEqual(["created", "draft_pr_created", "status_changed"]);
     const calls = await agent.calls();
     expect(calls.start).toBe(1);
     expect(calls.specs[0]).toMatchObject({ taskId: id, userId: String(OWNER) });
@@ -101,7 +101,12 @@ describe("TaskDO: start の配送", () => {
     await agent.setPhase("verifying");
     await runDurableObjectAlarm(stub);
     expect(await statusOf(stub)).toBe("VERIFYING");
-    expect(await eventTypes(stub)).toEqual(["created", "status_changed", "status_changed"]);
+    expect(await eventTypes(stub)).toEqual([
+      "created",
+      "draft_pr_created",
+      "status_changed",
+      "status_changed",
+    ]);
   });
 
   it("rejected は FAILED（理由つき）。再送せず、alarm は止まる", async () => {
@@ -217,7 +222,7 @@ describe("TaskDO: イベントの取り込み", () => {
     await stub.advance();
     const ev = await rows<{ type: string; payload: string }>(
       stub,
-      "SELECT type, payload FROM events WHERE seq > 2 ORDER BY seq",
+      "SELECT type, payload FROM events WHERE seq > 3 ORDER BY seq",
     );
     expect(ev.map((e) => e.type)).toEqual([
       "tool_start",
@@ -360,7 +365,7 @@ describe("TaskDO: イベントの取り込み", () => {
     await runInDurableObject(stub, (i) => {
       (i as unknown as { pollIntervalMs: number }).pollIntervalMs = 30;
     });
-    const cursor = (await stub.getStatus(OWNER)).ok ? "2" : "";
+    const cursor = (await stub.getStatus(OWNER)).ok ? "3" : "";
     const waiting = stub.wait(OWNER, cursor, 5);
     await new Promise((r) => setTimeout(r, 100));
     await agent.emit("tool_start", { callId: "c", name: "n", summary: "s" });
@@ -715,7 +720,14 @@ describe("TaskDO.result", () => {
           attempts: 1,
           commit_sha: "abc",
         },
-        warnings: ["w"],
+        warnings: ["w", expect.stringMatching(/^head_moved_after_verification/)],
+        pr: {
+          number: expect.any(Number),
+          url: expect.stringMatching(/\/pull\/\d+$/),
+          // 終端の PR 更新（head の読み取り）が済んでいる。commit_sha "abc" は PR の head と一致しない。
+          head_sha: expect.stringMatching(/^[0-9a-f]{40}$/),
+          head_matches_verified: false,
+        },
         patch: "diff --git",
         patch_too_large: false,
         usage: {

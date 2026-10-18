@@ -1,5 +1,13 @@
+import { generateKeyPairSync } from "node:crypto";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
+
+// テスト用の GitHub App の鍵は、実行のたびに生成する（リポジトリに秘密鍵は置かない）
+const appKeys = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+});
 
 export default defineConfig({
   plugins: [
@@ -18,11 +26,16 @@ export default defineConfig({
           ALLOWED_ORG: "acme",
           ALLOWED_TEAM: "core",
           TOKEN_ENC_KEY: "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+          GITHUB_APP_ID: "424242",
+          GITHUB_APP_PRIVATE_KEY: appKeys.privateKey,
+          // 偽 GitHub が JWT の署名を検証する公開鍵（Unit だけが使う）
+          TEST_APP_PUBLIC_KEY: appKeys.publicKey,
         },
       },
     }),
   ],
   test: {
     include: ["test/unit/**/*.test.ts"],
+    setupFiles: ["test/unit/setup.ts"],
   },
 });

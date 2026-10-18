@@ -32,7 +32,7 @@ const UPSTREAM_RETRY_AFTER_SECONDS = 30;
 const START_DESCRIPTION = [
   "リポジトリに対するコーディングタスクを作成し、子エージェントを起動する。応答は {task_id, status, draft_pr_url, note}。",
   "子エージェントが start を受理すると status は RUNNING になる（受理を確認できなかった場合は CREATING のままで、Gateway が自動で再送する）。進捗は task_wait、成果（要約・検証結果・patch）は終端になってから task_result で取得する。",
-  "Phase 2 では push も Draft PR も作られない（draft_pr_url は常に null）。成果は patch として返る。",
+  "作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントの commit は自動で push される（応答の draft_pr_url は作成前なので null。PR の URL は task_status・task_result・イベント draft_pr_created で返る）。PR は Draft のままで、マージはされない。成果は patch としても返る。",
   "verification_commands（任意）は {argv: string[], cwd?: リポジトリ内の相対パス, timeout_seconds?} の配列（最大 10 件）。完了の申告後に Sandbox で実行され、全部が終了コード 0 なら COMPLETED になる。指定しない場合はモデルの申告だけで完了し、結果は「未検証」と記される。",
   "1 タスクにつき $10 を月額の枠から予約する。枠が足りなければ budget_exceeded で拒否される。",
   "idempotency_key（1〜128 文字の [A-Za-z0-9_-]）を渡すと、同じキー・同じ入力の再試行で同じ task_id が返る。",
@@ -208,7 +208,7 @@ export function createRovoServer(env: Env): McpServer {
     "task_status",
     {
       description:
-        "タスクの現在の状態を返す。{task_id, status, repository, title, draft_pr_url, created_at, updated_at, latest_cursor}。自分のタスクだけ参照できる。",
+        "タスクの現在の状態を返す。{task_id, status, repository, title, draft_pr_url, created_at, updated_at, latest_cursor}。draft_pr_url は Draft PR の作成後に入る。自分のタスクだけ参照できる。",
       inputSchema: publishedSchema(taskIdSchema),
     },
     async (args) =>
@@ -241,7 +241,7 @@ export function createRovoServer(env: Env): McpServer {
     "task_result",
     {
       description:
-        "終端になったタスクの成果を返す。{task_id, status, summary, verification: {commands, results, verified, attempts, commit_sha?}, warnings, patch | diffstat, patch_too_large, usage}。verified が false のときは検証コマンドを通っていない（未指定、またはモデルの申告のみ）。warnings にテスト設定の変更などが記される。タスクが終端でない、またはエージェントの停止を確認できていない間は not_ready エラーを返すので、task_wait で終端を待ってから呼ぶ。自分のタスクだけ参照できる。",
+        "終端になったタスクの成果を返す。{task_id, status, summary, verification: {commands, results, verified, attempts, commit_sha?}, warnings, pr: {number, url, head_sha, head_matches_verified} | null, patch | diffstat, patch_too_large, usage}。pr は Draft PR の情報で、head_sha は終端で GitHub から読んだ PR の head（読めるまでは null）、head_matches_verified は検証済みの commit と一致するか（head が動いていれば false で、warnings にも出る）。verified が false のときは検証コマンドを通っていない（未指定、またはモデルの申告のみ）。warnings にテスト設定の変更などが記される。タスクが終端でない、またはエージェントの停止を確認できていない間は not_ready エラーを返すので、task_wait で終端を待ってから呼ぶ。自分のタスクだけ参照できる。",
       inputSchema: publishedSchema(taskIdSchema),
     },
     async (args) =>

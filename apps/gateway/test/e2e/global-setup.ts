@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestProject } from "vitest/node";
 import { type FakeGitHub, startFakeGitHub } from "../fake-github/server";
+import { generateAppKeyPair } from "../support/app-keys";
 
 declare module "vitest" {
   export interface ProvidedContext {
@@ -21,6 +22,7 @@ const FAKE_AGENT_CONFIG = join("test", "support", "fake-agent-worker", "wrangler
 const ALLOWED_ORG = "acme";
 const ALLOWED_TEAM = "core";
 const TOKEN_ENC_KEY = Buffer.alloc(32, 7).toString("base64");
+const APP_ID = "424242";
 
 const READY_DEADLINE_MS = 90_000;
 const READY_FETCH_TIMEOUT_MS = 2_000;
@@ -118,7 +120,9 @@ export default async function setup(project: TestProject) {
   }
 
   try {
-    const github = await startFakeGitHub();
+    // GitHub App の鍵は実行のたびに生成する（リポジトリに秘密鍵は置かない）
+    const keys = await generateAppKeyPair();
+    const github = await startFakeGitHub({ app: { appId: APP_ID, publicKeyPem: keys.publicPem } });
     resources.github = github;
 
     const port = await freePort();
@@ -138,6 +142,9 @@ export default async function setup(project: TestProject) {
       ALLOWED_ORG,
       ALLOWED_TEAM,
       TOKEN_ENC_KEY,
+      GITHUB_APP_ID: APP_ID,
+      // 改行を避けるため、ヘッダーなしの base64（1 行）で渡す。PEM 本体と同じ内容
+      GITHUB_APP_PRIVATE_KEY: keys.privatePem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, ""),
     };
     const varArgs = Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`]);
 

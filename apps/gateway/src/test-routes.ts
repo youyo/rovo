@@ -52,5 +52,6 @@ export function withTestScripts(env: Env, agent: AgentRpc): AgentRpc {
     cancel: () => agent.cancel(),
     getEvents: (afterSeq, limit) => agent.getEvents(afterSeq, limit),
     getResult: () => agent.getResult(),
+    setGitCredential: (c) => agent.setGitCredential(c),
   };
 }

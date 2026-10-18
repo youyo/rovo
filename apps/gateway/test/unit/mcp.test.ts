@@ -103,18 +103,19 @@ describe("task_start / status / wait / cancel", () => {
       status: "RUNNING",
       repository: "acme/widgets",
       title: "t1",
-      draft_pr_url: null,
-      latest_cursor: "2",
+      // created -> draft_pr_created -> status_changed（task_start の応答の draft_pr_url は作成前なので null のまま）
+      draft_pr_url: expect.stringMatching(/\/pull\/\d+$/),
+      latest_cursor: "3",
     });
     expect(Object.keys(status)).not.toContain("owner_id");
 
     const w1 = body(
       await client.callTool({
         name: "task_wait",
-        arguments: { task_id: s.task_id, cursor: "2", timeout_seconds: 0 },
+        arguments: { task_id: s.task_id, cursor: "3", timeout_seconds: 0 },
       }),
     );
-    expect(w1).toMatchObject({ status: "RUNNING", cursor: "2", events: [] });
+    expect(w1).toMatchObject({ status: "RUNNING", cursor: "3", events: [] });
 
     const c = body(
       await client.callTool({ name: "task_cancel", arguments: { task_id: s.task_id } }),
@@ -122,9 +123,9 @@ describe("task_start / status / wait / cancel", () => {
     expect(c).toEqual({ task_id: s.task_id, status: "CANCELLED" });
 
     const w2 = body(
-      await client.callTool({ name: "task_wait", arguments: { task_id: s.task_id, cursor: "2" } }),
+      await client.callTool({ name: "task_wait", arguments: { task_id: s.task_id, cursor: "3" } }),
     );
-    expect(w2).toMatchObject({ status: "CANCELLED", cursor: "3" });
+    expect(w2).toMatchObject({ status: "CANCELLED", cursor: "4" });
     expect((w2.events as { type: string }[]).map((e) => e.type)).toEqual(["cancelled"]);
     await client.close();
   });
@@ -222,6 +223,13 @@ describe("task_start の追加入力と task_result", () => {
       summary: "fake summary",
       verification: { verified: false },
       patch_too_large: false,
+      // Draft PR の情報。検証済みの commit が無いので head_matches_verified は比較できない（null）
+      pr: {
+        number: expect.any(Number),
+        url: expect.stringMatching(/\/pull\/\d+$/),
+        head_sha: expect.stringMatching(/^[0-9a-f]{40}$/),
+        head_matches_verified: null,
+      },
     });
     await ca.close();
     await cb.close();

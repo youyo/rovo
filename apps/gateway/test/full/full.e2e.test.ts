@@ -9,6 +9,7 @@ import { type RunningWrangler, startWrangler } from "../../../agent/test/support
 import { fakeGitHubAdmin } from "../e2e/fake-admin";
 import { connectAuthenticated } from "../e2e/oauth-client";
 import { type FakeGitHub, startFakeGitHub } from "../fake-github/server";
+import { generateAppKeyPair } from "../support/app-keys";
 
 // Phase 2 のゴールの通し検証: MCP クライアント → Gateway（OAuth・TaskDO・UserDO）→ AgentDO → SandboxDO（実コンテナ）。
 // 偽なのは GitHub（OAuth・API）、git / npm の上流（acme/calc）、モデル（台本付き）だけ。
@@ -37,7 +38,9 @@ function freePort(): Promise<number> {
 }
 
 beforeAll(async () => {
-  github = await startFakeGitHub();
+  // GitHub App の鍵は実行のたびに生成する（リポジトリに秘密鍵は置かない）
+  const appKeys = await generateAppKeyPair();
+  github = await startFakeGitHub({ app: { appId: "424242", publicKeyPem: appKeys.publicPem } });
   upstream = await startFakeUpstream();
   persistDir = mkdtempSync(join(tmpdir(), "rovo-full-e2e-"));
   const port = await freePort();
@@ -54,6 +57,10 @@ beforeAll(async () => {
       ALLOWED_ORG: ORG,
       ALLOWED_TEAM: TEAM,
       TOKEN_ENC_KEY: Buffer.alloc(32, 7).toString("base64"),
+      GITHUB_APP_ID: "424242",
+      GITHUB_APP_PRIVATE_KEY: appKeys.privatePem
+        .replace(/-----[^-]+-----/g, "")
+        .replace(/\s+/g, ""),
       // 1 タスクの予約は $10。月額 $10 なら、$10 の予約が通るのは累計の費用が 0 のときだけ
       MONTHLY_BUDGET_USD: "10",
     },

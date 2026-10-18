@@ -4,6 +4,7 @@ import type {
   AgentPhase,
   CancelResult,
   EventsPage,
+  GitCredential,
   ResultDto,
   StartResult,
   TaskSpec,
@@ -14,12 +15,16 @@ import type {
 export type StartStep = "accept" | "reject" | "conflict" | "throw" | "lose";
 /** cancel の台本 1 手。 */
 export type CancelStep = "stopped" | "not_stopped" | "throw" | "lose";
+/** setGitCredential の台本 1 手。lose は「効果は起きたが応答が失われる」。 */
+export type CredentialStep = "ok" | "not_ok" | "throw" | "lose";
 
 export type FakeProgram = {
   /** 呼び出しごとに 1 手ずつ消費する。尽きたら accept。 */
   start?: StartStep[];
   /** 呼び出しごとに 1 手ずつ消費する。尽きたら stopped。 */
   cancel?: CancelStep[];
+  /** 呼び出しごとに 1 手ずつ消費する。尽きたら ok。 */
+  setGitCredential?: CredentialStep[];
   /** accept したら starting -> running の phase イベントを積む（既定 true）。 */
   autoRun?: boolean;
   /** getEvents を先頭 n 回だけ失敗させる。 */
@@ -45,6 +50,9 @@ export type FakeCalls = {
   getEvents: number;
   getResult: number;
   specs: TaskSpec[];
+  setGitCredential: number;
+  /** setGitCredential で受け取った資格（効果が起きたもの。not_ok / throw は含まない） */
+  credentials: GitCredential[];
 };
 
 const TERMINAL: readonly AgentPhase[] = ["completed", "failed", "budget_exceeded", "cancelled"];
@@ -71,18 +79,35 @@ export class FakeAgentDO extends DurableObject {
   private usage: UsageDto = ZERO_USAGE;
   private stale = false;
   private getEventsFails = 0;
-  private callCounts: FakeCalls = { start: 0, cancel: 0, getEvents: 0, getResult: 0, specs: [] };
+  private callCounts: FakeCalls = {
+    start: 0,
+    cancel: 0,
+    getEvents: 0,
+    getResult: 0,
+    specs: [],
+    setGitCredential: 0,
+    credentials: [],
+  };
 
   // ---- 制御用 RPC（テストから呼ぶ）----
 
   setProgram(p: FakeProgram): void {
-    this.program = { ...p, start: [...(p.start ?? [])], cancel: [...(p.cancel ?? [])] };
+    this.program = {
+      ...p,
+      start: [...(p.start ?? [])],
+      cancel: [...(p.cancel ?? [])],
+      setGitCredential: [...(p.setGitCredential ?? [])],
+    };
     this.stale = p.staleOnce === true;
     this.getEventsFails = p.getEventsFailures ?? 0;
   }
 
   calls(): FakeCalls {
-    return { ...this.callCounts, specs: [...this.callCounts.specs] };
+    return {
+      ...this.callCounts,
+      specs: [...this.callCounts.specs],
+      credentials: [...this.callCounts.credentials],
+    };
   }
 
   /** イベントを積む（phase 以外）。 */
@@ -194,6 +219,16 @@ export class FakeAgentDO extends DurableObject {
       phaseAsOfSeq: phaseSeq,
       usage,
     };
+  }
+
+  async setGitCredential(c: GitCredential): Promise<{ ok: boolean }> {
+    this.callCounts.setGitCredential++;
+    const step = this.program.setGitCredential?.shift() ?? "ok";
+    if (step === "throw") throw new Error("fake agent: setGitCredential failed");
+    if (step === "not_ok") return { ok: false };
+    this.callCounts.credentials.push(c);
+    if (step === "lose") throw new Error("fake agent: setGitCredential response lost");
+    return { ok: true };
   }
 
   async getResult(): Promise<ResultDto> {

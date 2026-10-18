@@ -31,6 +31,18 @@ export interface TaskSpec {
   constraints?: string[];
   budgetUsd: number;
   deadlineAt: number;
+  /** 作業ブランチ名（agent/task-<id>）。TaskDO が AgentDO.start より前に作っている */
+  branch: string;
+  /** 決定的な初期コミットの SHA（作業ブランチの出発点。空コミット） */
+  initialSha: string;
+  /** Installation Access Token と期限（epoch ms）。ログに出さない */
+  gitCredential: GitCredential;
+}
+
+export interface GitCredential {
+  token: string;
+  /** epoch ms */
+  expiresAt: number;
 }
 
 export type StartResult =
@@ -103,6 +115,8 @@ export type ResultDto =
       diffstat?: string;
       patchTooLarge: boolean;
       usage: UsageDto;
+      /** 完了時に push して ls-remote で確かめた SHA（補助情報。真偽は GitHub から読んだ PR の head を正とする） */
+      pushedSha?: string;
     };
 
 /** AgentDO の公開 RPC。 */
@@ -111,4 +125,6 @@ export interface AgentRpc {
   cancel(): Promise<CancelResult>;
   getEvents(afterSeq: number, limit: number): Promise<EventsPage>;
   getResult(): Promise<ResultDto>;
+  /** Installation Token の更新。冪等で、成功（ok:true）するまで TaskDO が再送する */
+  setGitCredential(c: GitCredential): Promise<{ ok: boolean }>;
 }

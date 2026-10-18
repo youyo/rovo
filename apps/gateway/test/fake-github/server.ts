@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { FakeGitHubApp } from "../support/fake-github-app";
 
 /**
  * E2E 用の偽 GitHub（GitHub App のユーザー認可 + 必要な REST API だけ）。
@@ -28,6 +29,8 @@ export interface FakeGitHubOptions {
   port?: number;
   clientId?: string;
   clientSecret?: string;
+  /** GitHub App 自身の API（JWT / Installation Token / Git Data / Pulls）を有効にする */
+  app?: { appId: string | number; publicKeyPem: string };
 }
 
 interface Config {
@@ -75,7 +78,11 @@ class State {
   log: RecordedRequest[] = [];
 }
 
-export function createAdmin(getState: () => State, reset: () => void) {
+export function createAdmin(
+  getState: () => State,
+  reset: () => void,
+  getApp: () => FakeGitHubApp | undefined = () => undefined,
+) {
   return {
     reset,
     addUser(user: { id: number; login: string }) {
@@ -93,6 +100,10 @@ export function createAdmin(getState: () => State, reset: () => void) {
     },
     setInstallation(inst: { id: number; repositories: FakeRepository[] }) {
       getState().installations.set(inst.id, inst.repositories);
+      // App の API（Installation Token / Git Data）でも同じリポジトリが見えるようにする
+      for (const r of inst.repositories) {
+        getApp()?.seedRepo({ id: r.id, fullName: r.fullName, installationId: inst.id });
+      }
     },
     removeInstallation(id: number) {
       getState().installations.delete(id);
@@ -126,6 +137,8 @@ export interface FakeGitHub {
   clientId: string;
   clientSecret: string;
   admin: FakeGitHubAdmin;
+  /** options.app を渡したときだけ有効。偽 GitHub の App API の状態を直接操作・確認できる */
+  app: FakeGitHubApp | undefined;
   stop(): Promise<void>;
 }
 
@@ -157,11 +170,14 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
   const clientId = options.clientId ?? "fake-client-id";
   const clientSecret = options.clientSecret ?? "fake-client-secret";
   let state = new State();
+  const app = options.app ? new FakeGitHubApp(options.app) : undefined;
   const admin = createAdmin(
     () => state,
     () => {
       state = new State();
+      app?.reset();
     },
+    () => app,
   );
 
   const takeFault = (target: FaultTarget): Fault | null => {
@@ -221,6 +237,20 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
       case "requests":
         sendJson(res, 200, { requests: admin.requests() });
         return;
+      case "app": {
+        // App API の管理: {method, args} で FakeGitHubApp のメソッドを呼ぶ（HTTP 越しの E2E 用）
+        const target = app as unknown as Record<string, (...a: unknown[]) => unknown> | undefined;
+        const fn = target?.[String(body.method)];
+        if (!target || typeof fn !== "function" || String(body.method).startsWith("handle")) {
+          sendJson(res, 400, { message: "unknown app admin method" });
+          return;
+        }
+        Promise.resolve(fn.apply(target, (body.args ?? []) as unknown[])).then(
+          (result) => sendJson(res, 200, { ok: true, result: result ?? null }),
+          (e) => sendJson(res, 500, { message: String(e) }),
+        );
+        return;
+      }
       default:
         sendJson(res, 404, { message: `unknown admin command: ${command}` });
         return;
@@ -404,6 +434,32 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    if (app && /^\/(app\/|repos\/|installation\/)/.test(url.pathname)) {
+      // GitHub App の API は FakeGitHubApp（Request -> Response）に任せる
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const headers = new Headers();
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === "string") headers.set(k, v);
+      }
+      const method = req.method ?? "GET";
+      const hasBody = method !== "GET" && method !== "HEAD";
+      try {
+        const r = await app.handle(
+          new Request(url, {
+            method,
+            headers,
+            ...(hasBody ? { body: Buffer.concat(chunks) } : {}),
+          }),
+        );
+        const out = r ?? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+        res.writeHead(out.status, Object.fromEntries(out.headers));
+        res.end(Buffer.from(await out.arrayBuffer()));
+      } catch (e) {
+        sendJson(res, 500, { message: String(e) });
+      }
+      return;
+    }
     const body = req.method === "POST" ? await readBody(req) : null;
     const isAdmin = url.pathname.startsWith("/__admin/");
     if (!isAdmin) {
@@ -443,6 +499,7 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
     clientId,
     clientSecret,
     admin,
+    app,
     stop: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

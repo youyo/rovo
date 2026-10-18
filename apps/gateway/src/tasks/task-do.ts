@@ -9,6 +9,20 @@ import type {
   TaskSpec,
   UsageDto,
 } from "../agent/contract";
+import {
+  applyManagedBlock,
+  decryptString,
+  encryptString,
+  GitHubApiError,
+  GitHubAppClient,
+  GitHubRepoApi,
+  importEncryptionKey,
+  type PullInfo,
+  READY_FALLBACK_NOTE,
+  renderInitialBlock,
+  renderReportBlock,
+  resolveGitHubBaseUrls,
+} from "../github";
 import { withTestScripts } from "../test-routes";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import { isTaskId } from "./ulid";
@@ -34,6 +48,18 @@ const EVENT_PAGE_LIMIT = 100;
 const SYNC_GRACE_MS = 500;
 /** task_result が AgentDO の getResult を待つ上限。超えたら upstream_unavailable（MCP の呼び出しを固めない）。 */
 const RESULT_TIMEOUT_MS = 10_000;
+/** CREATING（初期コミット・ブランチ・Draft PR・start の受理）に許す時間。超えたら FAILED（setup_timeout）。 */
+export const SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+/** Installation Token の期限のこれだけ前になったら、新しいトークンを発行して渡す。 */
+export const TOKEN_REFRESH_BEFORE_MS = 15 * 60 * 1000;
+/** GitHub 呼び出しの再試行間隔: 5s, 10s, 20s, 40s, 60s（上限）。Retry-After があればそれを尊重する。 */
+const BACKOFF_BASE_MS = 5_000;
+const BACKOFF_MAX_MS = 60_000;
+const RETRY_AFTER_MAX_MS = 10 * 60 * 1000;
+/** 終端の PR 更新を諦めるまでの試行回数（諦めてもトークンの失効は行う）。 */
+const FINALIZE_MAX_ATTEMPTS = 6;
+const TOKEN_AAD = "installation_token";
+const BOT_IDENTITY = { name: "rovo", email: "rovo@users.noreply.github.com" };
 /** 1 回の取り込みで読むページ数の上限（残りは次の alarm / wait で取り込む）。 */
 const MAX_PAGES_PER_SYNC = 20;
 
@@ -102,6 +128,15 @@ export type ResultView = {
     commit_sha?: string;
   };
   warnings: string[];
+  /** Draft PR の情報。PR が無い（作成前に失敗した、Phase 2 のタスク）なら null */
+  pr: {
+    number: number;
+    url: string;
+    /** GitHub から読んだ PR の head。まだ読めていなければ null */
+    head_sha: string | null;
+    /** head が検証済みの SHA と一致するか。比較できない（未読・検証済みの SHA なし）なら null */
+    head_matches_verified: boolean | null;
+  } | null;
   patch?: string;
   diffstat?: string;
   patch_too_large: boolean;
@@ -173,6 +208,44 @@ type TaskRow = {
   updated_at: number;
 };
 
+/** ensureCreated が保存する、トークンを含まない taskSpec（branch・initialSha・gitCredential は start の直前に足す）。 */
+type BaseSpec = Omit<TaskSpec, "branch" | "initialSha" | "gitCredential">;
+
+type GithubRow = {
+  branch: string;
+  initial_sha: string | null;
+  branch_ready: number;
+  pr_number: number | null;
+  pr_url: string | null;
+  pr_draft: number | null;
+  setup_done: number;
+  setup_attempts: number;
+  setup_retry_at: number;
+  auth_warned: number;
+  /** JSON の文字列配列（draft_pr_unavailable など。task_result と PR 本文に出す） */
+  warnings: string;
+  /** AgentDO が受け取りを確認した最新のトークン（git_token.id） */
+  cred_delivered_id: number;
+  head_sha: string | null;
+  head_matches: number | null;
+  body_done: number;
+  finalize_attempts: number;
+  finalize_retry_at: number;
+  finalize_done: number;
+};
+
+type TokenRow = { id: number; enc: string; expires_at: number; revoked: number; kind: string };
+
+/** 再試行しても直らない失敗。TaskDO を FAILED にする。reason は公開される（秘密を入れない）。 */
+class SetupFailure extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(reason);
+    this.name = "SetupFailure";
+    this.reason = reason;
+  }
+}
+
 type EventRow = { seq: number; type: string; payload: string; created_at: number };
 
 type Waiter = { wake: () => void; timer?: ReturnType<typeof setTimeout> };
@@ -203,6 +276,9 @@ export class TaskDO extends DurableObject<Env> {
 
   /** テストで短くする。 */
   protected resultTimeoutMs = RESULT_TIMEOUT_MS;
+
+  /** GitHub API への fetch。テストで偽の GitHub に差し替える。 */
+  protected githubFetch: typeof fetch | undefined = undefined;
 
   /** 子エージェントの RPC。テストで差し替える。 */
   protected agentStub(): AgentRpc {
@@ -269,6 +345,36 @@ export class TaskDO extends DurableObject<Env> {
       finished INTEGER NOT NULL DEFAULT 0
     )`);
     this.addColumnIfMissing("agent_link", "final_seq", "INTEGER");
+    // Phase 3: Draft PR・Installation Token・終端処理の進み具合（1 行）。Phase 2 で作られたタスクには無い。
+    sql.exec(`CREATE TABLE IF NOT EXISTS github_link (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      branch TEXT NOT NULL,
+      initial_sha TEXT,
+      branch_ready INTEGER NOT NULL DEFAULT 0,
+      pr_number INTEGER,
+      pr_url TEXT,
+      pr_draft INTEGER,
+      setup_done INTEGER NOT NULL DEFAULT 0,
+      setup_attempts INTEGER NOT NULL DEFAULT 0,
+      setup_retry_at INTEGER NOT NULL DEFAULT 0,
+      auth_warned INTEGER NOT NULL DEFAULT 0,
+      warnings TEXT NOT NULL DEFAULT '[]',
+      cred_delivered_id INTEGER NOT NULL DEFAULT 0,
+      head_sha TEXT,
+      head_matches INTEGER,
+      body_done INTEGER NOT NULL DEFAULT 0,
+      finalize_attempts INTEGER NOT NULL DEFAULT 0,
+      finalize_retry_at INTEGER NOT NULL DEFAULT 0,
+      finalize_done INTEGER NOT NULL DEFAULT 0
+    )`);
+    // Installation Token は AES-GCM で暗号化して保存する（TOKEN_ENC_KEY）。kind は start（taskSpec に入れたもの）/ refresh / final。
+    sql.exec(`CREATE TABLE IF NOT EXISTS git_token (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      enc TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      revoked INTEGER NOT NULL DEFAULT 0,
+      kind TEXT NOT NULL
+    )`);
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -367,6 +473,16 @@ export class TaskDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<LinkRow>("SELECT * FROM agent_link").toArray()[0];
   }
 
+  private getGithub(): GithubRow | undefined {
+    return this.ctx.storage.sql.exec<GithubRow>("SELECT * FROM github_link").toArray()[0];
+  }
+
+  private tokenRows(where = "1 = 1"): TokenRow[] {
+    return this.ctx.storage.sql
+      .exec<TokenRow>(`SELECT * FROM git_token WHERE ${where} ORDER BY id`)
+      .toArray();
+  }
+
   /**
    * 状態を遷移させてイベントを積む（transactionSync の中で呼ぶ）。許されない遷移は何もしない。
    * 終端に入ったら、AgentDO の停止確認（cancel）の意図を記録する。
@@ -449,7 +565,7 @@ export class TaskDO extends DurableObject<Env> {
         at,
       );
       // start を配送する意図と taskSpec を、作成と同じトランザクションで記録する。
-      const spec: TaskSpec = {
+      const spec: BaseSpec = {
         taskId: input.task_id,
         userId: String(input.owner_id),
         repository: data.repository,
@@ -474,6 +590,10 @@ export class TaskDO extends DurableObject<Env> {
          VALUES (1, ?, ?, 'pending', 'none')`,
         JSON.stringify(spec),
         `run:${input.task_id}`,
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO github_link (singleton, branch) VALUES (1, ?)",
+        `agent/task-${input.task_id}`,
       );
       this.appendEvent("created", { status: "CREATING" }, at);
       const row = this.getRow();
@@ -658,17 +778,35 @@ export class TaskDO extends DurableObject<Env> {
       console.error("task_do_result_error", e instanceof Error ? e.name : typeof e);
       return { ok: false, code: "upstream_unavailable" };
     }
+    const view =
+      dto.status === "not_ready" ? this.synthesizeResult(row, status) : shapeResult(status, dto);
+    return { ok: true, result: this.withGithub(view) };
+  }
+
+  /** GitHub 側の情報（Draft PR・終端で読んだ head・警告）を結果に足す。 */
+  private withGithub(view: ResultView): ResultView {
+    const gl = this.getGithub();
+    if (!gl) return { ...view, pr: null };
+    const extra = (JSON.parse(gl.warnings) as string[]).filter((w) => !view.warnings.includes(w));
     return {
-      ok: true,
-      result:
-        dto.status === "not_ready" ? this.synthesizeResult(row, status) : shapeResult(status, dto),
+      ...view,
+      warnings: [...view.warnings, ...extra],
+      pr:
+        gl.pr_number !== null && gl.pr_url !== null
+          ? {
+              number: gl.pr_number,
+              url: gl.pr_url,
+              head_sha: gl.head_sha,
+              head_matches_verified: gl.head_matches === null ? null : gl.head_matches === 1,
+            }
+          : null,
     };
   }
 
   /** AgentDO に結果が無い（start より先に cancel した、start が rejected など）終端タスクの結果。 */
   private synthesizeResult(row: TaskRow, status: TaskStatus): ResultView {
     const link = this.getLink();
-    const spec = link ? (JSON.parse(link.spec) as TaskSpec) : undefined;
+    const spec = link ? (JSON.parse(link.spec) as BaseSpec) : undefined;
     return {
       status,
       summary: "",
@@ -679,6 +817,7 @@ export class TaskDO extends DurableObject<Env> {
         attempts: 0,
       },
       warnings: [`${row.id}: the agent produced no result`],
+      pr: null,
       patch_too_large: false,
       usage: shapeUsage({
         costUsd: (link?.usage_micro ?? 0) / 1_000_000,
@@ -695,18 +834,30 @@ export class TaskDO extends DurableObject<Env> {
     return link ? link.cancel_state === "stopped" : true;
   }
 
+  /** 実行中の GitHub 手順（setup / credentials / finalize）。同じ手順を並行して走らせない（冪等だが無駄な呼び出しを避ける）。 */
+  private running = new Set<string>();
+
   private async guard(step: string, fn: () => Promise<void>): Promise<void> {
+    const single = step === "setup" || step === "credentials" || step === "finalize";
+    if (single) {
+      if (this.running.has(step)) return;
+      this.running.add(step);
+    }
     try {
       await fn();
     } catch (e) {
       // メッセージにタスクの内容が入りうるので、エラー名だけを記録する。次の alarm で再試行される。
       console.error("task_do_step_error", step, e instanceof Error ? e.name : typeof e);
+    } finally {
+      this.running.delete(step);
     }
   }
 
   private async pump(): Promise<void> {
     const first = this.getLink();
     if (!first) return;
+    this.failIfSetupTimedOut();
+    await this.guard("setup", () => this.deliverSetup());
     await this.guard("start", () => this.deliverStart());
     await this.guard("cancel", () => this.deliverCancel());
     await this.guard("sync", () => this.syncFromAgent());
@@ -716,11 +867,16 @@ export class TaskDO extends DurableObject<Env> {
       await this.guard("cancel", () => this.deliverCancel());
       await this.guard("sync", () => this.syncFromAgent());
     }
+    await this.guard("credentials", () => this.deliverCredentials());
+    await this.guard("finalize", () => this.finalizeGithub());
   }
 
   private async deliverStart(): Promise<void> {
     const link = this.getLink();
     if (link?.start_state !== "pending") return;
+    const gl = this.getGithub();
+    // Draft PR とブランチ（と最初のトークン）が整うまで start は送らない
+    if (gl && gl.setup_done === 0 && !isTerminal(this.currentStatus())) return;
     if (isTerminal(this.currentStatus())) {
       // 終端のタスクの start は送らない（cancel の tombstone が遅れて届く start を拒否する）。
       this.ctx.storage.sql.exec(
@@ -728,7 +884,12 @@ export class TaskDO extends DurableObject<Env> {
       );
       return;
     }
-    const result = await this.agentStub().start(JSON.parse(link.spec) as TaskSpec);
+    const base = JSON.parse(link.spec) as BaseSpec;
+    // 再送のたびに同じ spec（同じトークン）を送る。AgentDO は spec の同一性で冪等を判定する。
+    const spec: TaskSpec = gl
+      ? { ...base, ...(await this.githubSpecPart(gl)) }
+      : (base as TaskSpec);
+    const result = await this.agentStub().start(spec);
     this.applyStartResult(result);
   }
 
@@ -740,6 +901,10 @@ export class TaskDO extends DurableObject<Env> {
       switch (result.status) {
         case "accepted":
           sql.exec("UPDATE agent_link SET start_state = 'accepted' WHERE singleton = 1");
+          // start に載せたトークンは AgentDO に渡った
+          sql.exec(
+            "UPDATE github_link SET cred_delivered_id = COALESCE((SELECT MIN(id) FROM git_token WHERE kind = 'start'), 0)",
+          );
           if (this.currentStatus() === "CREATING") this.changeStatus("RUNNING");
           break;
         case "rejected":
@@ -945,13 +1110,495 @@ export class TaskDO extends DurableObject<Env> {
     }
   }
 
+  // ---- GitHub: 初期コミット・ブランチ・Draft PR・Installation Token ----
+
+  private apiBase(): string {
+    return resolveGitHubBaseUrls(this.env).apiBase;
+  }
+
+  private async encKey(): Promise<CryptoKey> {
+    return importEncryptionKey(this.env.TOKEN_ENC_KEY);
+  }
+
+  private appClient(): GitHubAppClient {
+    const appId = this.env.GITHUB_APP_ID;
+    const privateKey = this.env.GITHUB_APP_PRIVATE_KEY;
+    if (!appId || !privateKey) throw new SetupFailure("github_app_not_configured");
+    return new GitHubAppClient({
+      appId,
+      privateKey,
+      apiBase: this.apiBase(),
+      now: () => this.now(),
+      ...(this.githubFetch ? { fetch: this.githubFetch } : {}),
+    });
+  }
+
+  private repoApi(row: TaskRow, token: string): GitHubRepoApi {
+    return new GitHubRepoApi({
+      token,
+      repository: row.repository,
+      apiBase: this.apiBase(),
+      ...(this.githubFetch ? { fetch: this.githubFetch } : {}),
+    });
+  }
+
+  /** Installation Token を発行して暗号化保存する。トークンの値はログにもイベントにも出さない。 */
+  private async issueToken(
+    row: TaskRow,
+    kind: "start" | "refresh" | "final",
+  ): Promise<{ id: number; token: string; expiresAt: number }> {
+    if (row.repository_id === null || row.installation_id === null) {
+      throw new SetupFailure("github_app_not_configured");
+    }
+    const client = this.appClient();
+    let issued: { token: string; expiresAt: number };
+    try {
+      issued = await client.createInstallationToken(row.installation_id, row.repository_id);
+    } catch (e) {
+      if (e instanceof GitHubApiError) throw e;
+      // 鍵の形式不正など（メッセージに鍵の内容は含まれない）
+      throw new SetupFailure("github_app_not_configured");
+    }
+    const enc = await encryptString(await this.encKey(), issued.token, TOKEN_AAD);
+    const id = this.ctx.storage.sql
+      .exec<{ id: number }>(
+        "INSERT INTO git_token (enc, expires_at, kind) VALUES (?, ?, ?) RETURNING id",
+        enc,
+        issued.expiresAt,
+        kind,
+      )
+      .one().id;
+    return { id, token: issued.token, expiresAt: issued.expiresAt };
+  }
+
+  private async decryptToken(r: TokenRow): Promise<string> {
+    return decryptString(await this.encKey(), r.enc, TOKEN_AAD);
+  }
+
+  /** start の taskSpec に入れる部分（branch・initialSha・最初のトークン）。再送でも同じ値になる。 */
+  private async githubSpecPart(
+    gl: GithubRow,
+  ): Promise<Pick<TaskSpec, "branch" | "initialSha" | "gitCredential">> {
+    const start = this.tokenRows("kind = 'start'")[0];
+    if (!start || gl.initial_sha === null) throw new Error("github setup is incomplete");
+    return {
+      branch: gl.branch,
+      initialSha: gl.initial_sha,
+      gitCredential: { token: await this.decryptToken(start), expiresAt: start.expires_at },
+    };
+  }
+
+  /** 10 分を超えて CREATING のままなら FAILED（setup_timeout）。GitHub の障害で枠と予算を握り続けない。 */
+  private failIfSetupTimedOut(): void {
+    const row = this.getRow();
+    if (!row || this.statusOf(row) !== "CREATING") return;
+    if (this.now() - row.created_at > SETUP_TIMEOUT_MS) this.failTask("setup_timeout");
+  }
+
+  private failTask(reason: string): void {
+    this.ctx.storage.transactionSync(() => {
+      this.changeStatus("FAILED", { reason });
+    });
+    this.notifyWaiters();
+  }
+
+  private async deliverSetup(): Promise<void> {
+    const row = this.getRow();
+    const gl = this.getGithub();
+    if (!row || !gl || gl.setup_done === 1 || isTerminal(this.statusOf(row))) return;
+    if (this.now() < gl.setup_retry_at) return;
+    try {
+      await this.runSetup(row, gl);
+    } catch (e) {
+      this.onGithubError(e, "setup");
+    }
+  }
+
+  /** 各ステップは冪等で、進んだところは永続化する。途中で落ちても次の alarm で続きから再開する。 */
+  private async runSetup(row: TaskRow, start: GithubRow): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    let gl = start;
+    const existing = this.tokenRows("kind = 'start'")[0];
+    const plain = existing
+      ? await this.decryptToken(existing)
+      : (await this.issueToken(row, "start")).token;
+    const api = this.repoApi(row, plain);
+
+    // 1. 決定的な初期コミット（author / committer の日時を created_at に固定）。SHA は ref を作る前に永続化する。
+    if (gl.initial_sha === null) {
+      let base: { sha: string; treeSha: string };
+      try {
+        base = await api.getCommit(row.base_sha);
+      } catch (e) {
+        if (e instanceof GitHubApiError && e.status === 404) {
+          throw new SetupFailure("base_sha_not_found");
+        }
+        throw e;
+      }
+      const date = new Date(row.created_at).toISOString().replace(/\.\d{3}Z$/, "Z");
+      const sha = await api.createCommit({
+        message: `rovo: start task ${row.id}`,
+        treeSha: base.treeSha,
+        parents: [base.sha],
+        identity: { ...BOT_IDENTITY, date },
+      });
+      sql.exec("UPDATE github_link SET initial_sha = ?", sha);
+      gl = this.getGithub() as GithubRow;
+    }
+    const initial = gl.initial_sha as string;
+
+    // 2. 作業ブランチ。既にあれば compare で確かめる（削除も force もしない）。
+    if (gl.branch_ready === 0) {
+      if ((await api.createBranch(gl.branch, initial)) === "exists") {
+        const head = await api.getBranchSha(gl.branch);
+        if (head === null) throw new GitHubApiError({ status: 0, what: "branch vanished" });
+        const cmp = await api.compare(initial, head);
+        if (cmp.status !== "identical" && cmp.status !== "ahead") {
+          throw new SetupFailure("branch_conflict");
+        }
+      }
+      sql.exec("UPDATE github_link SET branch_ready = 1");
+    }
+
+    // 3. Draft PR と、4. 保存・イベント
+    if (gl.pr_number === null) {
+      const pr = await this.ensurePull(api, row, gl.branch);
+      this.ctx.storage.transactionSync(() => {
+        sql.exec(
+          "UPDATE github_link SET pr_number = ?, pr_url = ?, pr_draft = ?",
+          pr.number,
+          pr.url,
+          pr.draft ? 1 : 0,
+        );
+        sql.exec("UPDATE task SET draft_pr_url = ? WHERE singleton = 1", pr.url);
+        const at = this.now();
+        this.appendEvent(
+          "draft_pr_created",
+          {
+            number: pr.number,
+            url: pr.url,
+            draft: pr.draft,
+            branch: gl.branch,
+            initial_sha: initial,
+          },
+          at,
+        );
+        if (!pr.draft) {
+          const warning =
+            "draft_pr_unavailable: this repository cannot create draft pull requests; a regular [WIP] pull request was created instead";
+          sql.exec(
+            "UPDATE github_link SET warnings = ?",
+            JSON.stringify([...(JSON.parse(gl.warnings) as string[]), warning]),
+          );
+          this.appendEvent("warning", { code: "draft_pr_unavailable" }, at);
+        }
+      });
+      this.notifyWaiters();
+    }
+
+    // 5. 最初のトークンは発行済み（上）。start を送ってよい。
+    sql.exec("UPDATE github_link SET setup_done = 1, setup_attempts = 0, setup_retry_at = 0");
+  }
+
+  private checkBase(pr: PullInfo, row: TaskRow): PullInfo {
+    if (pr.baseRef !== row.base_ref) throw new SetupFailure("pr_base_mismatch");
+    return pr;
+  }
+
+  private draftFallbackIsReady(): boolean {
+    // fail-closed: "ready" 以外（未設定・不正な値）はすべて fail
+    return (this.env.DRAFT_PR_FALLBACK ?? "").trim().toLowerCase() === "ready";
+  }
+
+  private async ensurePull(api: GitHubRepoApi, row: TaskRow, branch: string): Promise<PullInfo> {
+    const found = await api.findOpenPull(branch);
+    if (found) return this.checkBase(found, row);
+    const create = (draft: boolean) =>
+      api.createPull({
+        title: draft ? row.title : `[WIP] ${row.title}`,
+        head: branch,
+        base: row.base_ref,
+        body: draft
+          ? renderInitialBlock(row.id)
+          : `${READY_FALLBACK_NOTE}\n\n${renderInitialBlock(row.id)}`,
+        draft,
+      });
+    // already exists の 422: もう一度探して使う
+    const refind = async (): Promise<PullInfo> => {
+      const again = await api.findOpenPull(branch);
+      if (again) return this.checkBase(again, row);
+      throw new GitHubApiError({ status: 0, what: "pull request exists but is not listed" });
+    };
+    try {
+      return await create(true);
+    } catch (e) {
+      if (!(e instanceof GitHubApiError) || e.status !== 422) throw e;
+      if (/already exists/i.test(e.detail)) return refind();
+      // Draft に関する 422 のときだけ、DRAFT_PR_FALLBACK に従う。それ以外の 422 で通常の PR に切り替えない。
+      if (!/draft/i.test(e.detail)) throw new SetupFailure("github_unprocessable");
+      if (!this.draftFallbackIsReady()) throw new SetupFailure("draft_pr_unsupported");
+      try {
+        return await create(false);
+      } catch (e2) {
+        if (e2 instanceof GitHubApiError && e2.status === 422) {
+          if (/already exists/i.test(e2.detail)) return refind();
+          throw new SetupFailure("github_unprocessable");
+        }
+        throw e2;
+      }
+    }
+  }
+
+  /**
+   * GitHub 呼び出しの失敗を分類する。
+   * 401: 警告して再試行 / 403・404: FAILED / 422: FAILED / 429・secondary rate limit・5xx・ネットワーク: 再試行。
+   */
+  private onGithubError(e: unknown, phase: "setup" | "finalize"): void {
+    if (e instanceof SetupFailure) {
+      if (phase === "setup") this.failTask(e.reason);
+      else this.giveUpFinalize();
+      return;
+    }
+    if (!(e instanceof GitHubApiError)) {
+      console.error("task_do_github_error", phase, e instanceof Error ? e.name : typeof e);
+      this.scheduleRetry(phase);
+      return;
+    }
+    console.error("task_do_github_error", phase, e.status);
+    if (e.rateLimited) {
+      this.scheduleRetry(phase, e.retryAfterMs);
+    } else if (e.status === 401) {
+      const gl = this.getGithub();
+      if (gl && gl.auth_warned === 0) {
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec("UPDATE github_link SET auth_warned = 1");
+          this.appendEvent("warning", { code: "github_auth_failed" }, this.now());
+        });
+        this.notifyWaiters();
+      }
+      this.scheduleRetry(phase);
+    } else if (e.status === 0 || e.status >= 500) {
+      this.scheduleRetry(phase, e.retryAfterMs);
+    } else if (phase === "finalize") {
+      // 403（権限不足）・404（見えない）・422・その他の 4xx: 再試行しても直らない
+      this.giveUpFinalize();
+    } else {
+      const reason =
+        e.status === 403
+          ? "github_forbidden"
+          : e.status === 404
+            ? "github_not_found"
+            : e.status === 422
+              ? "github_unprocessable"
+              : `github_error_${e.status}`;
+      this.failTask(reason);
+    }
+  }
+
+  private scheduleRetry(phase: "setup" | "finalize", retryAfterMs?: number): void {
+    const gl = this.getGithub();
+    if (!gl) return;
+    const attempts = (phase === "setup" ? gl.setup_attempts : gl.finalize_attempts) + 1;
+    const backoff = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (attempts - 1));
+    const delay =
+      retryAfterMs !== undefined
+        ? Math.min(Math.max(retryAfterMs, 0), RETRY_AFTER_MAX_MS)
+        : backoff;
+    const at = this.now() + delay;
+    if (phase === "setup") {
+      this.ctx.storage.sql.exec(
+        "UPDATE github_link SET setup_attempts = ?, setup_retry_at = ?",
+        attempts,
+        at,
+      );
+    } else {
+      this.ctx.storage.sql.exec(
+        "UPDATE github_link SET finalize_attempts = ?, finalize_retry_at = ?",
+        attempts,
+        at,
+      );
+      // 有限回で PR 本文の更新を諦める（トークンの失効は続ける）
+      if (attempts >= FINALIZE_MAX_ATTEMPTS) this.giveUpFinalize();
+    }
+  }
+
+  /** PR 本文の更新を諦める。トークンの失効には進む。 */
+  private giveUpFinalize(): void {
+    const gl = this.getGithub();
+    if (!gl || gl.body_done === 1) return;
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        "UPDATE github_link SET body_done = 1, finalize_attempts = 0, finalize_retry_at = 0",
+      );
+      this.appendEvent("warning", { code: "pr_update_failed" }, this.now());
+    });
+    this.notifyWaiters();
+  }
+
+  // ---- RUNNING 中のトークンの更新と配送 ----
+
+  private async deliverCredentials(): Promise<void> {
+    const row = this.getRow();
+    const link = this.getLink();
+    const gl = this.getGithub();
+    if (!row || !link || !gl) return;
+    if (link.start_state !== "accepted" || isTerminal(this.statusOf(row))) return;
+    let latest = this.tokenRows("revoked = 0").at(-1);
+    if (!latest) return;
+    // 期限の 15 分前になったら新しいトークンを発行する（まだ渡せていない新しいトークンがあれば、それを再送する）
+    if (
+      latest.id <= gl.cred_delivered_id &&
+      latest.expires_at - this.now() <= TOKEN_REFRESH_BEFORE_MS
+    ) {
+      const issued = await this.issueToken(row, "refresh");
+      latest = this.tokenRows(`id = ${issued.id}`)[0] as TokenRow;
+    }
+    if (latest.id <= gl.cred_delivered_id) return;
+    const r = await this.agentStub().setGitCredential({
+      token: await this.decryptToken(latest),
+      expiresAt: latest.expires_at,
+    });
+    if (!r.ok) return;
+    this.ctx.storage.sql.exec(
+      "UPDATE github_link SET cred_delivered_id = MAX(cred_delivered_id, ?)",
+      latest.id,
+    );
+    // 渡せたので、古いトークンは失効させる（失敗しても終端で失効する）
+    for (const old of this.tokenRows(`revoked = 0 AND id < ${latest.id}`)) {
+      await this.revokeToken(old).catch(() => {});
+    }
+  }
+
+  private async revokeToken(r: TokenRow): Promise<void> {
+    if (r.expires_at > this.now()) {
+      await this.appClient().revokeInstallationToken(await this.decryptToken(r));
+    }
+    this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", r.id);
+  }
+
+  // ---- 終端: PR の更新とトークンの失効 ----
+
+  private terminalReason(): string | undefined {
+    const rows = this.ctx.storage.sql
+      .exec<{ payload: string }>(
+        "SELECT payload FROM events WHERE type IN ('status_changed', 'cancelled') ORDER BY seq DESC LIMIT 5",
+      )
+      .toArray();
+    for (const r of rows) {
+      const p = JSON.parse(r.payload) as { reason?: unknown };
+      if (typeof p.reason === "string") return p.reason;
+    }
+    return undefined;
+  }
+
+  /** 終端を確定し、AgentDO の停止を確かめた後に 1 回だけ（冪等に）行う。予約の返却とは独立。 */
+  private async finalizeGithub(): Promise<void> {
+    const row = this.getRow();
+    const link = this.getLink();
+    const gl = this.getGithub();
+    if (!row || !link || !gl || gl.finalize_done === 1) return;
+    const status = this.statusOf(row);
+    if (!isTerminal(status) || link.cancel_state !== "stopped") return;
+    if (this.now() < gl.finalize_retry_at) return;
+
+    if (gl.pr_number !== null && gl.body_done === 0) {
+      try {
+        await this.updatePullBody(row, gl, status);
+      } catch (e) {
+        this.onGithubError(e, "finalize");
+        // 本文の更新が済んでいない（再試行待ち）あいだは、失効しない
+        if ((this.getGithub() as GithubRow).body_done === 0) return;
+      }
+    }
+
+    for (const t of this.tokenRows("revoked = 0")) {
+      try {
+        await this.revokeToken(t);
+      } catch (e) {
+        if (e instanceof SetupFailure) {
+          // App の設定が失われていて失効できない。再試行しても直らないので、記録だけ閉じる（期限は 1 時間）。
+          this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", t.id);
+          continue;
+        }
+        this.onGithubError(e, "finalize");
+        return;
+      }
+    }
+    this.ctx.storage.sql.exec("UPDATE github_link SET finalize_done = 1");
+  }
+
+  /** 失効していない、期限に余裕のあるトークン。無ければ発行する。 */
+  private async workingToken(row: TaskRow): Promise<string> {
+    for (const t of this.tokenRows("revoked = 0").reverse()) {
+      if (t.expires_at - this.now() > 60_000) return this.decryptToken(t);
+    }
+    return (await this.issueToken(row, "final")).token;
+  }
+
+  private async updatePullBody(row: TaskRow, gl: GithubRow, status: TaskStatus): Promise<void> {
+    const number = gl.pr_number as number;
+    const dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
+    const view =
+      dto.status === "not_ready" ? this.synthesizeResult(row, status) : shapeResult(status, dto);
+    const pushed = dto.status === "not_ready" ? undefined : dto.pushedSha;
+
+    const api = this.repoApi(row, await this.workingToken(row));
+    const pull = await api.getPull(number);
+    // 真偽は GitHub から読んだ head を正とする。検証済みの SHA（なければ AgentDO が push した SHA）と比べる。
+    const verifiedSha = view.verification.commit_sha ?? pushed;
+    const matches = verifiedSha === undefined ? null : pull.headSha === verifiedSha;
+    const own = JSON.parse(gl.warnings) as string[];
+    if (matches === false) {
+      const w = `head_moved_after_verification: the PR head ${pull.headSha} differs from the verified commit ${verifiedSha}`;
+      if (!own.includes(w)) own.push(w);
+    }
+    const reason = view.reason ?? this.terminalReason();
+    const block = renderReportBlock(
+      {
+        taskId: row.id,
+        status,
+        ...(reason !== undefined ? { reason } : {}),
+        summary: view.summary,
+        verified: view.verification.verified,
+        ...(view.verification.commit_sha !== undefined
+          ? { commitSha: view.verification.commit_sha }
+          : {}),
+        results: view.verification.results.map((r) => ({
+          argv: r.argv,
+          exitCode: r.exit_code,
+          timedOut: r.timed_out,
+          output: r.output,
+        })),
+        warnings: [...view.warnings, ...own],
+        headSha: pull.headSha,
+        headMatches: matches,
+        costUsd: view.usage.cost_usd,
+      },
+      { showCost: this.env.PR_SHOW_COST === "true" },
+    );
+    const body = applyManagedBlock(pull.body, block);
+    if (body !== pull.body) await api.updatePullBody(number, body);
+    this.ctx.storage.sql.exec(
+      "UPDATE github_link SET head_sha = ?, head_matches = ?, warnings = ?, body_done = 1, finalize_attempts = 0, finalize_retry_at = 0",
+      pull.headSha,
+      matches === null ? null : matches ? 1 : 0,
+      JSON.stringify(own),
+    );
+    this.notifyWaiters();
+  }
+
   private needsAlarm(): boolean {
     const link = this.getLink();
     const row = this.getRow();
     if (!link || !row) return false;
     if (link.start_state === "pending" || link.cancel_state === "pending") return true;
     if (!isTerminal(this.statusOf(row))) return link.start_state === "accepted";
-    return link.usage_seq > link.settled_seq || link.finished === 0;
+    const gl = this.getGithub();
+    return (
+      link.usage_seq > link.settled_seq ||
+      link.finished === 0 ||
+      (gl !== undefined && gl.finalize_done === 0)
+    );
   }
 
   /** 次の alarm を明示的に設定し直す。仕事が無ければ消す。 */
@@ -1047,6 +1694,7 @@ function shapeResult(
       ...(v.commitSha !== undefined ? { commit_sha: v.commitSha } : {}),
     },
     warnings: dto.warnings,
+    pr: null,
     ...(dto.patch !== undefined ? { patch: dto.patch } : {}),
     ...(dto.diffstat !== undefined ? { diffstat: dto.diffstat } : {}),
     patch_too_large: dto.patchTooLarge,

@@ -5,6 +5,16 @@
 GITHUB_APP_CLIENT_ID=
 GITHUB_APP_CLIENT_SECRET=
 
+# GitHub App の App ID と秘密鍵（PKCS#8 の PEM。1 行にするなら改行を \n にする）。
+# GitHub がくれる PKCS#1 は変換する: openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem -out app.pkcs8.pem
+GITHUB_APP_ID=
+GITHUB_APP_PRIVATE_KEY=
+
+# Draft PR を作れないリポジトリでの扱い: fail（既定。不正な値も fail）/ ready
+# DRAFT_PR_FALLBACK=fail
+# true のときだけ費用を PR 本文に載せる
+# PR_SHOW_COST=false
+
 # ログインを許可する org と team（slug）
 ALLOWED_ORG=
 ALLOWED_TEAM=

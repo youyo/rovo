@@ -17,7 +17,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次の 5 つ�
 
 **制約（ツールの応答にも明記している）**
 
-- push と Draft PR は作られない（`draft_pr_url` は常に `null`）。成果は patch として `task_result` で返る。
+- Phase 3（M1: Gateway 側）: `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。子エージェント側の push は M2。成果は patch としても `task_result` で返る。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
 - 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
 - 1 タスクにつき $10 を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。
@@ -86,13 +86,17 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `PUBLIC_BASE_URL` | 公開 URL。OAuth の issuer と `/mcp` の resource、GitHub のコールバック URL（`<PUBLIC_BASE_URL>/callback`）になる。本番は `https`、ローカルのみ loopback の `http` が許される |
 | `GITHUB_APP_CLIENT_ID` | GitHub App の Client ID（秘密ではない） |
 | `ALLOWED_ORG` / `ALLOWED_TEAM` | ログインと全ツール呼び出しを許す org と team の slug。子 team のメンバーも許可される。空だとログインできない（fail closed） |
+| `GITHUB_APP_ID` | GitHub App の App ID（秘密ではない）。Installation Access Token の発行（JWT の `iss`）に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる（fail closed） |
+| `DRAFT_PR_FALLBACK` | Draft PR を作れないリポジトリ（Free プランの private リポジトリなど）での扱い。`fail`（既定。タスクを `draft_pr_unsupported` で FAILED にする）/ `ready`（`[WIP]` を付けた通常の PR を作り、本文冒頭に注記し、警告 `draft_pr_unavailable` を付ける）。**不正な値は `fail` として扱う**。判定は Draft に関する 422 のときだけ |
+| `PR_SHOW_COST` | `true` のときだけ、費用を PR 本文に載せる（既定は載せない。公開リポジトリでは誰でも見られるため） |
 
 ### Secret（`wrangler secret put <NAME>`、ローカルは `.dev.vars`）
 
 | Secret | 内容 |
 |---|---|
 | `GITHUB_APP_CLIENT_SECRET` | GitHub App の Client secret |
-| `TOKEN_ENC_KEY` | GitHub のトークンを UserDO に暗号化して保存する鍵。base64 の 32 バイト（`openssl rand -base64 32`）。変えると保存済みの資格は復号できなくなり、全員が再ログインになる |
+| `GITHUB_APP_PRIVATE_KEY` | GitHub App の秘密鍵（**PKCS#8** の PEM）。GitHub がダウンロードさせるのは PKCS#1（`BEGIN RSA PRIVATE KEY`）なので、`openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem -out app.pkcs8.pem` で変換して投入する（`wrangler secret put GITHUB_APP_PRIVATE_KEY < app.pkcs8.pem`）。リポジトリには置かない |
+| `TOKEN_ENC_KEY` | GitHub のトークンを UserDO に暗号化して保存する鍵。base64 の 32 バイト（`openssl rand -base64 32`）。TaskDO が保存する Installation Token の暗号化にも使う。変えると保存済みの資格は復号できなくなり、全員が再ログインになる |
 
 ### GitHub App の設定
 

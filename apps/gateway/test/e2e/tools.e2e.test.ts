@@ -29,18 +29,19 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
         status: "RUNNING",
         repository: "acme/widgets",
         title: "t1",
-        latest_cursor: "2",
+        draft_pr_url: expect.stringMatching(/\/pull\/\d+$/),
+        latest_cursor: "3",
       });
 
       const t0 = Date.now();
       const timedOut = bodyOf(
         await client.callTool({
           name: "task_wait",
-          arguments: { task_id: taskId, cursor: "2", timeout_seconds: 1 },
+          arguments: { task_id: taskId, cursor: "3", timeout_seconds: 1 },
         }),
       );
       expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
-      expect(timedOut).toMatchObject({ status: "RUNNING", cursor: "2", events: [] });
+      expect(timedOut).toMatchObject({ status: "RUNNING", cursor: "3", events: [] });
 
       expect(
         bodyOf(await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } })),
@@ -53,11 +54,11 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const cancelled = bodyOf(
         await client.callTool({
           name: "task_wait",
-          arguments: { task_id: taskId, cursor: "2", timeout_seconds: 30 },
+          arguments: { task_id: taskId, cursor: "3", timeout_seconds: 30 },
         }),
       );
       expect(Date.now() - t1).toBeLessThan(5000);
-      expect(cancelled).toMatchObject({ status: "CANCELLED", cursor: "3" });
+      expect(cancelled).toMatchObject({ status: "CANCELLED", cursor: "4" });
       expect((cancelled.events as { type: string }[]).map((e) => e.type)).toEqual(["cancelled"]);
     } finally {
       await client.close();
@@ -73,13 +74,13 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const t0 = Date.now();
       const waiting = client.callTool({
         name: "task_wait",
-        arguments: { task_id: taskId, cursor: "2", timeout_seconds: 30 },
+        arguments: { task_id: taskId, cursor: "3", timeout_seconds: 30 },
       });
       await new Promise((r) => setTimeout(r, 500));
       await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
       const w = bodyOf(await waiting);
       expect(Date.now() - t0).toBeLessThan(10_000);
-      expect(w).toMatchObject({ status: "CANCELLED", cursor: "3" });
+      expect(w).toMatchObject({ status: "CANCELLED", cursor: "4" });
     } finally {
       await client.close();
     }
@@ -254,6 +255,106 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       expect(bodyOf(r)).toMatchObject({ code: "upstream_unavailable" });
     } finally {
       await admin.setFault("api", null);
+      await client.close();
+    }
+  });
+});
+
+describe("Draft PR（偽 GitHub の App API 経由）", () => {
+  type Pull = {
+    number: number;
+    draft: boolean;
+    state: string;
+    head: string;
+    base: string;
+    body: string;
+  };
+  const pullsOf = () => admin.app<Pull[]>("pulls", "acme/widgets");
+  const tokens = () => admin.app<{ token: string; revoked: boolean }[]>("tokenList");
+
+  it("task_start で作業ブランチと Draft PR が作られ、cancel で本文が更新されてトークンが失効する", async () => {
+    const { client } = await memberClient();
+    try {
+      const started = bodyOf(
+        await client.callTool({ name: "task_start", arguments: startArgs("draft pr") }),
+      );
+      const taskId = started.task_id as string;
+      const branch = `agent/task-${taskId}`;
+      expect(started.draft_pr_url).toBeNull(); // 作成前の応答
+
+      const pr = (await pullsOf()).find((p) => p.head === branch);
+      expect(pr).toMatchObject({ draft: true, state: "open", base: "main" });
+      expect(await admin.app<string | null>("branch", "acme/widgets", branch)).toMatch(
+        /^[0-9a-f]{40}$/,
+      );
+
+      const status = bodyOf(
+        await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+      );
+      expect(status.draft_pr_url).toBe(`https://github.test/acme/widgets/pull/${pr?.number}`);
+
+      // JWT で認証して、repository_ids と permissions を絞ってトークンを発行している
+      const reqs =
+        await admin.app<
+          { path: string; method: string; auth: string; body: Record<string, unknown> }[]
+        >("requests");
+      const issued = reqs.filter((r) => r.path.endsWith("/access_tokens"));
+      expect(issued.at(-1)).toMatchObject({
+        method: "POST",
+        auth: "jwt",
+        body: {
+          repository_ids: [4242],
+          permissions: { contents: "write", pull_requests: "write", metadata: "read" },
+        },
+      });
+
+      await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
+      // 終端処理（停止確認の後の PR 更新と失効）は alarm 経由なので、少し待つ
+      for (let i = 0; i < 50; i++) {
+        const t = await tokens();
+        if (t.length > 0 && t.every((x) => x.revoked)) break;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      expect((await tokens()).every((x) => x.revoked)).toBe(true);
+      const after = (await pullsOf()).find((p) => p.head === branch);
+      expect(after).toMatchObject({ draft: true, state: "open" });
+      expect(after?.body).toContain("CANCELLED");
+
+      const result = bodyOf(
+        await client.callTool({ name: "task_result", arguments: { task_id: taskId } }),
+      );
+      expect(result.pr).toMatchObject({
+        number: pr?.number,
+        url: status.draft_pr_url,
+        head_sha: expect.stringMatching(/^[0-9a-f]{40}$/),
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("Draft PR を作れないリポジトリでは、既定（fail）で FAILED（draft_pr_unsupported）。通常の PR は作られない", async () => {
+    await admin.app("setDraftUnsupported", true);
+    const { client } = await memberClient();
+    try {
+      const started = bodyOf(
+        await client.callTool({ name: "task_start", arguments: startArgs("no draft") }),
+      );
+      const taskId = started.task_id as string;
+      expect(started.status).toBe("FAILED");
+      const w = bodyOf(
+        await client.callTool({
+          name: "task_wait",
+          arguments: { task_id: taskId, cursor: "0", timeout_seconds: 0 },
+        }),
+      );
+      const failed = (w.events as { type: string; payload: Record<string, unknown> }[]).find(
+        (e) => e.type === "status_changed" && e.payload.status === "FAILED",
+      );
+      expect(failed?.payload.reason).toBe("draft_pr_unsupported");
+      expect((await pullsOf()).some((p) => p.head === `agent/task-${taskId}`)).toBe(false);
+    } finally {
+      await admin.app("setDraftUnsupported", false);
       await client.close();
     }
   });

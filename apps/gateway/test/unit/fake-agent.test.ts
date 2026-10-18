@@ -14,6 +14,9 @@ describe("偽の AgentDO（Unit の AGENT_DO）", () => {
       instructions: "x",
       budgetUsd: 10,
       deadlineAt: Date.now() + 1000,
+      branch: `agent/task-${id}`,
+      initialSha: "1".repeat(40),
+      gitCredential: { token: "ghs_test", expiresAt: Date.now() + 3600_000 },
     };
     const first = await agent.start(spec);
     expect(first).toMatchObject({ status: "accepted", alreadyAccepted: false });

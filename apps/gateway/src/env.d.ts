@@ -5,11 +5,19 @@ interface Env {
   // ---- Worker Secret（wrangler secret put。ローカルは .dev.vars）----
   /** GitHub App のクライアントシークレット */
   GITHUB_APP_CLIENT_SECRET: string;
+  /** GitHub App の App ID */
+  GITHUB_APP_ID: string;
+  /** GitHub App の秘密鍵（PKCS#8 の PEM）。Installation Token の発行に使う */
+  GITHUB_APP_PRIVATE_KEY: string;
   /** GitHub トークンを UserDO に暗号化保存する鍵。base64 の 32 バイト */
   TOKEN_ENC_KEY: string;
   // ---- ENVIRONMENT=test のときだけ上書きできる GitHub の接続先 ----
   GITHUB_OAUTH_BASE?: string;
   GITHUB_API_BASE?: string;
+  /** Draft PR を作れないリポジトリでの扱い。fail（既定。不正な値も fail）/ ready */
+  DRAFT_PR_FALLBACK?: string;
+  /** "true" のときだけ、費用を PR 本文に載せる */
+  PR_SHOW_COST?: string;
   /** 月額の費用上限（USD）。未設定は 100 */
   MONTHLY_BUDGET_USD?: string;
 }

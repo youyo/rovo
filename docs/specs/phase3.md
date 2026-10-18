@@ -73,6 +73,8 @@ TaskDO の CREATING で、AgentDO.start の前に行う。各ステップは冪�
   - 429、secondary rate limit、5xx: `Retry-After` を尊重して再試行する。alarm の間隔は指数で延ばす（上限60秒）。
 - CREATING の上限: 10分を超えたら FAILED（`setup_timeout`）にし、予約を返す。GitHub の障害で、同時実行の枠と予算を握り続けないようにするため。
 
+- 互換性: Phase 2 で作られた TaskDO（`github_link` なし）は移行しない。AgentDO は `gitCredential` を必須にして `rejected` にするので、TaskDO は start を送らず、start の前に FAILED（`legacy_task`）で閉じる（本番データはまだ無い）。
+
 ## Sandbox の作業ツリー
 
 - `prepareWorkspace` は、初回も含めて常に、リモートの `refs/heads/agent/task-<id>` を checkout する（TaskDO が AgentDO.start より前にブランチを作っているので、必ずある）。

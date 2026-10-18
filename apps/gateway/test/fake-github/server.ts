@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { FakeGitHubApp } from "../support/fake-github-app";
+import { type FakeAppOptions, FakeGitHubApp } from "../support/fake-github-app";
 
 /**
  * E2E 用の偽 GitHub（GitHub App のユーザー認可 + 必要な REST API だけ）。
@@ -30,7 +30,7 @@ export interface FakeGitHubOptions {
   clientId?: string;
   clientSecret?: string;
   /** GitHub App 自身の API（JWT / Installation Token / Git Data / Pulls）を有効にする */
-  app?: { appId: string | number; publicKeyPem: string };
+  app?: Pick<FakeAppOptions, "appId" | "publicKeyPem" | "storeFor">;
 }
 
 interface Config {

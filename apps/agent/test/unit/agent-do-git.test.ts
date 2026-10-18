@@ -98,7 +98,13 @@ describe("start: 契約の検証", () => {
   it("預けるのに失敗したら start は失敗し（TaskDO が再送する）、再送で受理される", async () => {
     const fx = newFixture("cred-fail", [report()]);
     fx.sandbox.credentialError = new Error("sandbox down");
-    await expect(fx.stub.start(makeSpec("cred-fail"))).rejects.toThrow(/sandbox down/);
+    // DO の中で呼ぶ（RPC 越しに例外を投げると、workerd が呼び出され側の例外を Uncaught として報告し、
+    // vitest が unhandled rejection でテスト実行全体を失敗にする）
+    await expect(
+      runInDurableObject(fx.stub, (inst: { start(spec: unknown): Promise<unknown> }) =>
+        inst.start(makeSpec("cred-fail")),
+      ),
+    ).rejects.toThrow(/sandbox down/);
     expect(fx.sandbox.readySpecs).toHaveLength(0);
     fx.sandbox.credentialError = undefined;
     expect(await fx.stub.start(makeSpec("cred-fail"))).toMatchObject({ status: "accepted" });

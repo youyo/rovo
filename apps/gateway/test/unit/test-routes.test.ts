@@ -2,7 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { AgentRpc, TaskSpec } from "../../src/agent/contract";
 import { createDefaultApp } from "../../src/app";
-import { withTestScripts } from "../../src/test-routes";
+import { testDraftFallback, withTestScripts } from "../../src/test-routes";
 
 const SCRIPT = [{ toolCall: { name: "report_completion", arguments: { summary: "x" } } }];
 
@@ -111,5 +111,39 @@ describe("withTestScripts（TaskDO が子エージェントを呼ぶ前に台本
     const wrapped = withTestScripts(withEnv("test"), agent as unknown as AgentRpc);
     await wrapped.start({ ...spec, instructions: "scenario:none" });
     expect(calls).toEqual(["start"]);
+  });
+});
+
+describe("E2E 用テストルート /__test/draft-fallback", () => {
+  it("test 以外では 404 で何も保存せず、上書きも効かない", async () => {
+    const app = createDefaultApp();
+    const res = await app.request(
+      "/__test/draft-fallback",
+      post({ value: "ready" }),
+      withEnv("production"),
+    );
+    expect(res.status).toBe(404);
+    expect(await env.OAUTH_KV.get("test-draft-fallback")).toBeNull();
+    await env.OAUTH_KV.put("test-draft-fallback", "ready");
+    try {
+      expect(await testDraftFallback(withEnv("production"))).toBeUndefined();
+      expect(await testDraftFallback(withEnv("test"))).toBe("ready");
+    } finally {
+      await env.OAUTH_KV.delete("test-draft-fallback");
+    }
+  });
+
+  it("test では値を保存し、value 省略で解除する", async () => {
+    const app = createDefaultApp();
+    const set = await app.request(
+      "/__test/draft-fallback",
+      post({ value: "ready" }),
+      withEnv("test"),
+    );
+    expect(set.status).toBe(200);
+    expect(await testDraftFallback(withEnv("test"))).toBe("ready");
+    const clear = await app.request("/__test/draft-fallback", post({}), withEnv("test"));
+    expect(clear.status).toBe(200);
+    expect(await testDraftFallback(withEnv("test"))).toBeUndefined();
   });
 });

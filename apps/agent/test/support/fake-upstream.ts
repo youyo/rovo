@@ -28,6 +28,13 @@ export interface FakeUpstream {
    */
   expectedToken: string | undefined;
   /**
+   * 指定すると、github.com 宛の認証をこの関数で判定する（expectedToken より優先）。引数は Basic の x-access-token の値。
+   * Gateway が発行した Installation Token を受け付ける通しの E2E 用。
+   */
+  acceptToken: ((token: string) => boolean) | undefined;
+  /** bare リポジトリのディレクトリ（偽 GitHub の Git Data API が同じリポジトリを読み書きするため） */
+  repoDir(repo: FakeRepoName): string;
+  /**
    * 作業ブランチ `agent/task-<taskId>` を bare リポジトリに用意する（TaskDO が Phase 3 で作るものの代用）。
    * initialCommit を true にすると、main の先頭の上に空コミット（TaskDO の初期コミット相当）を作って指す。
    * false（既定）なら main の先頭をそのまま指す（initialSha = base）。
@@ -163,7 +170,10 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
   const calcSha = buildRepo(root, "calc", CALC_FILES);
   const tar = buildTarball(root);
   const requests: FakeUpstream["requests"] = [];
-  const state: { expectedToken: string | undefined } = { expectedToken: TEST_GIT_TOKEN };
+  const state: {
+    expectedToken: string | undefined;
+    acceptToken: ((token: string) => boolean) | undefined;
+  } = { expectedToken: TEST_GIT_TOKEN, acceptToken: undefined };
 
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -174,6 +184,18 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
       const path = req.url ?? "/";
       requests.push({ host, method: req.method ?? "", path, headers: { ...req.headers } });
       if (host === "github.com") {
+        if (state.acceptToken) {
+          const m = /^Basic (.+)$/.exec(String(req.headers.authorization ?? ""));
+          const decoded = m?.[1] ? Buffer.from(m[1], "base64").toString() : "";
+          const token = decoded.startsWith("x-access-token:")
+            ? decoded.slice("x-access-token:".length)
+            : "";
+          if (token === "" || !state.acceptToken(token)) {
+            res.writeHead(401, { "www-authenticate": 'Basic realm="GitHub"' });
+            return void res.end("fake github: bad credentials");
+          }
+          return gitBackend(root, req, res, body, "x-access-token");
+        }
         const want =
           state.expectedToken === undefined
             ? undefined
@@ -232,6 +254,13 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
     set expectedToken(v: string | undefined) {
       state.expectedToken = v;
     },
+    get acceptToken() {
+      return state.acceptToken;
+    },
+    set acceptToken(v: ((token: string) => boolean) | undefined) {
+      state.acceptToken = v;
+    },
+    repoDir: (repo) => bareOf(root, repo),
     createTaskBranch(repo, taskId, opts = {}) {
       const bare = bareOf(root, repo);
       const base = repo === "hello" ? helloSha : calcSha;

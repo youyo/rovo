@@ -498,6 +498,26 @@ describe("トークンの配送と更新", () => {
     expect((await agent.calls()).setGitCredential).toBe(4);
   });
 
+  it("未配送のトークン自身が期限切れに近づいたら、再発行して差し替える（期限切れを送り続けない）", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    const first = (await agent.calls()).specs[0]?.gitCredential;
+    // 1 回目の更新は配送に失敗し続ける
+    await agent.setProgram({ setGitCredential: ["lose", "lose"] });
+    await warp(stub, (first?.expiresAt ?? 0) - Date.now() - 14 * 60_000);
+    await runDurableObjectAlarm(stub);
+    const second = (await agent.calls()).credentials[0];
+    expect(second?.token).not.toBe(first?.token);
+    // 未配送の second も期限の 10 分前になった: 同じものを送らず、再発行して差し替える
+    await warp(stub, (second?.expiresAt ?? 0) - Date.now() - 10 * 60_000);
+    await runDurableObjectAlarm(stub);
+    const calls = await agent.calls();
+    const last = calls.credentials.at(-1);
+    expect(last?.token).not.toBe(second?.token);
+    expect(last?.token).not.toBe(first?.token);
+    expect(last?.expiresAt).toBeGreaterThan(second?.expiresAt ?? 0);
+  });
+
   it("新しいトークンを渡せたら、古いトークンは失効させる", async () => {
     const { stub, agent } = await createTask();
     await stub.advance();
@@ -508,6 +528,19 @@ describe("トークンの配送と更新", () => {
     expect(old?.token).toBe(first?.token);
     expect(old?.revoked).toBe(true);
     expect(fresh?.revoked).toBe(false);
+  });
+});
+
+describe("Phase 2 で作られた TaskDO（github_link なし）", () => {
+  it("start を送らず FAILED（legacy_task）で閉じる", async () => {
+    const { stub, agent } = await createTask();
+    await runInDurableObject(stub, (_i, state) => {
+      state.storage.sql.exec("DELETE FROM github_link");
+    });
+    await stub.advance();
+    expect((await status(stub)).status).toBe("FAILED");
+    expect(await failReason(stub)).toBe("legacy_task");
+    expect((await agent.calls()).specs.length).toBe(0);
   });
 });
 

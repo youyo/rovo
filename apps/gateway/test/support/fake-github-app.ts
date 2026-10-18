@@ -4,7 +4,30 @@
  * 両方で同じ実装を使う。依存は WebCrypto のみ。
  */
 
+/** コミットの保存先。既定は Map（メモリ）。E2E では実 git のリポジトリを差し込む（test/support/git-store.ts） */
+export interface CommitStore {
+  get(sha: string): FakeCommit | undefined;
+  set(sha: string, commit: FakeCommit): unknown;
+  has(sha: string): boolean;
+}
+/** ref（refs/heads/...）の保存先。既定は Map。 */
+export interface RefStore {
+  get(ref: string): string | undefined;
+  set(ref: string, sha: string): unknown;
+  has(ref: string): boolean;
+  delete(ref: string): unknown;
+}
+export interface RepoStore {
+  commits: CommitStore;
+  refs: RefStore;
+}
+
 export interface FakeAppOptions {
+  /**
+   * リポジトリ（owner/name）ごとの保存先。undefined を返すとメモリ上の既定を使う。
+   * 偽 git の bare リポジトリを正として、Git Data API をそこへの実 git 操作で実装するために使う。
+   */
+  storeFor?: (fullName: string) => RepoStore | undefined;
   appId: string | number;
   /** SPKI の PEM。JWT の RS256 署名を検証する */
   publicKeyPem: string;
@@ -35,8 +58,8 @@ interface FakeRepoRec {
   id: number;
   fullName: string;
   installationId: number;
-  commits: Map<string, FakeCommit>;
-  refs: Map<string, string>;
+  commits: CommitStore;
+  refs: RefStore;
   pulls: FakePull[];
   missing: Set<string>;
 }
@@ -118,7 +141,13 @@ export class FakeGitHubApp {
   tokenTtlSeconds: number;
   /** true なら draft:true の PR 作成を 422 で拒否する（Free プランの private リポジトリ相当） */
   draftUnsupported = false;
+  /**
+   * リクエストを処理する直前に呼ぶ（"METHOD /path"）。「終端の後に head が動いた」のように、
+   * 特定の API 呼び出しの直前に状態を変えたいときに使う。
+   */
+  beforeHandle: ((key: string) => void | Promise<void>) | undefined;
   private publicKeyPem: string;
+  private storeFor: ((fullName: string) => RepoStore | undefined) | undefined;
   private publicKey: Promise<CryptoKey> | undefined;
   private repos = new Map<string, FakeRepoRec>();
   private tokens = new Map<string, TokenRec>();
@@ -129,6 +158,7 @@ export class FakeGitHubApp {
   constructor(opts: FakeAppOptions) {
     this.appId = String(opts.appId);
     this.publicKeyPem = opts.publicKeyPem;
+    this.storeFor = opts.storeFor;
     this.now = opts.now ?? Date.now;
     this.tokenTtlSeconds = opts.tokenTtlSeconds ?? 3600;
   }
@@ -141,18 +171,31 @@ export class FakeGitHubApp {
     this.faults = [];
     this.log = [];
     this.draftUnsupported = false;
+    this.beforeHandle = undefined;
+  }
+
+  /**
+   * この Installation Token が、いま fullName への書き込み（contents: write）に使えるか。
+   * 偽 git が Basic 認証の x-access-token を検証するために使う。失効・期限切れ・対象外のリポジトリは false。
+   */
+  isTokenValid(token: string, fullName: string): boolean {
+    const rec = this.tokens.get(token);
+    const repo = this.repos.get(fullName.toLowerCase());
+    if (!rec || !repo || rec.revoked || rec.expiresAt <= this.now()) return false;
+    return rec.repoIds.includes(repo.id) && rec.permissions.contents === "write";
   }
 
   /** リポジトリを用意する。base_sha を渡した未知の SHA は、既定でベースのコミットとして扱う。 */
   seedRepo(args: { id: number; fullName: string; installationId: number }): void {
     const key = args.fullName.toLowerCase();
     if (this.repos.has(key)) return;
+    const store = this.storeFor?.(args.fullName);
     this.repos.set(key, {
       id: args.id,
       fullName: args.fullName,
       installationId: args.installationId,
-      commits: new Map(),
-      refs: new Map(),
+      commits: store?.commits ?? new Map(),
+      refs: store?.refs ?? new Map(),
       pulls: [],
       missing: new Set(),
     });
@@ -380,6 +423,7 @@ export class FakeGitHubApp {
     });
 
     const key = `${req.method} ${path}`;
+    await this.beforeHandle?.(key);
     for (const f of this.faults) {
       if (f.pattern.test(key) && f.remaining > 0) {
         f.remaining -= 1;

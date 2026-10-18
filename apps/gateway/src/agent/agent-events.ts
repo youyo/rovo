@@ -117,6 +117,22 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
           commit_sha: text(d.commitSha, 64),
         },
       };
+    case "pushed":
+      return {
+        kind: "event",
+        type: "pushed",
+        payload: { sha: text(d.sha, 64), final: d.final === true },
+      };
+    case "push_failed":
+      return {
+        kind: "event",
+        type: "push_failed",
+        payload: {
+          sha: text(d.sha, 64),
+          message: text(d.message, MAX_PUBLIC_TEXT),
+          final: d.final === true,
+        },
+      };
     default:
       return { kind: "event", type: "agent_event", payload: { agent_type: text(e.type, 100) } };
   }

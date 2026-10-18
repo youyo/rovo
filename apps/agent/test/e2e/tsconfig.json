@@ -17,6 +17,7 @@
     "../support/**/*.ts",
     "../../src/sandbox-port.ts",
     "../../vitest.e2e.config.ts",
-    "../../vitest.e2e-net.config.ts"
+    "../../vitest.e2e-net.config.ts",
+    "../e2e-net/**/*.ts"
   ]
 }

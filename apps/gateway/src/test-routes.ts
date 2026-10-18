@@ -14,7 +14,24 @@ import type { AgentRpc, TaskSpec } from "./agent/contract";
 const SCRIPT_KEY_PREFIX = "test-script:";
 const SCRIPT_TTL_SECONDS = 3600;
 
+const DRAFT_FALLBACK_KEY = "test-draft-fallback";
+
+/** 通しの E2E が預けた DRAFT_PR_FALLBACK の上書き値。test 環境以外・未設定なら undefined。 */
+export async function testDraftFallback(env: Env): Promise<string | undefined> {
+  if (env.ENVIRONMENT !== "test") return undefined;
+  return (await env.OAUTH_KV.get(DRAFT_FALLBACK_KEY)) ?? undefined;
+}
+
 export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
+  // DRAFT_PR_FALLBACK を実行中に切り替える（value 省略で上書きを解除）
+  app.post("/__test/draft-fallback", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const body = (await c.req.json().catch(() => ({}))) as { value?: unknown };
+    if (typeof body.value === "string") await c.env.OAUTH_KV.put(DRAFT_FALLBACK_KEY, body.value);
+    else await c.env.OAUTH_KV.delete(DRAFT_FALLBACK_KEY);
+    return c.json({ ok: true });
+  });
+
   app.post("/__test/agent/set-script", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();
     let body: { key?: unknown; script?: unknown };

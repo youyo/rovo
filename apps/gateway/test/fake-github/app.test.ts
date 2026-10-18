@@ -228,3 +228,32 @@ describe("偽 GitHub: Git Data / Pulls", () => {
     expect(gh.app?.draftUnsupported).toBe(true);
   });
 });
+
+describe("偽 GitHub: 偽 git 向けのトークン検証と beforeHandle", () => {
+  it("isTokenValid: 発行済みで有効なトークンだけが対象リポジトリで true。失効・別リポジトリ・未知は false", async () => {
+    const app = gh.app;
+    if (!app) throw new Error("app disabled");
+    const t = await appClient().createInstallationToken(77, 4242);
+    expect(app.isTokenValid(t.token, "acme/widgets")).toBe(true);
+    expect(app.isTokenValid(t.token, "acme/other")).toBe(false);
+    expect(app.isTokenValid("ghs_unknown", "acme/widgets")).toBe(false);
+    await appClient().revokeInstallationToken(t.token);
+    expect(app.isTokenValid(t.token, "acme/widgets")).toBe(false);
+    const t2 = await appClient().createInstallationToken(77, 4242);
+    app.expireTokens(t2.token);
+    expect(app.isTokenValid(t2.token, "acme/widgets")).toBe(false);
+  });
+
+  it('beforeHandle は各リクエストの処理の直前に "METHOD /path" で呼ばれる', async () => {
+    const app = gh.app;
+    if (!app) throw new Error("app disabled");
+    const seen: string[] = [];
+    app.beforeHandle = (key) => {
+      seen.push(key);
+    };
+    const t = await appClient().createInstallationToken(77, 4242);
+    await repoApi(t.token).findOpenPull("agent/task-x");
+    expect(seen).toContain("POST /app/installations/77/access_tokens");
+    expect(seen.some((k) => k.startsWith("GET /repos/acme/widgets/pulls"))).toBe(true);
+  });
+});

@@ -857,7 +857,7 @@ export class AgentDO extends DurableObject<Env> {
     return [
       {
         key: "role",
-        text: `You are an autonomous coding agent. Your workspace is ${WORKSPACE_ROOT}, a git checkout of ${spec.repository} at ${spec.baseSha}, on branch agent/task-${spec.taskId}. Complete the task given in the user message.`,
+        text: `You are an autonomous coding agent. Your workspace is ${WORKSPACE_ROOT}, a git checkout of ${spec.repository}, on branch agent/task-${spec.taskId}. The branch tip is the starting point (an empty commit on top of ${spec.baseSha}). Complete the task given in the user message.`,
       },
       { key: "acceptance_criteria", text: list(spec.acceptanceCriteria) },
       { key: "constraints", text: list(spec.constraints) },

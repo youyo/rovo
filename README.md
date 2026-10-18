@@ -63,7 +63,7 @@ mise run lint         # Biome + 型検査
 | `mise run test:e2e` | `test:e2e:gateway` + `test:e2e:docker` |
 | `mise run test:e2e:gateway` | `wrangler dev` で実 Worker と偽 GitHub を起動し、MCP SDK の Client から DCR → `/authorize` → 偽 GitHub → `/callback` → token(PKCE) → 4 つのツールまで通す |
 | `mise run test:e2e:docker` | **Docker 必須**。`wrangler dev` で実コンテナを起動し、ローカルの偽サーバー（偽 GitHub の git smart HTTP と偽 npm レジストリ）を許可先にして、外向き通信の許可・拒否（非許可ホスト、push、内部 IP、非 80/443 ポート、IPv6、CONNECT、WebSocket、リダイレクト、ヘッダ除去、再起動後の傍受）と `npm install` / `git clone`、Gateway → Agent の DO RPC（`-c gateway -c agent` の同時起動）を検証する |
-| `mise run test:e2e:net` | **Docker 必須・実ネットワーク**。上の E2E の実ネットワーク版（実 registry.npmjs.org、`octocat/Hello-World` の匿名 clone）。CI で不安定になりうるため `test` には含めない。認証付きアクセスや push はしない |
+| `mise run test:e2e:net` | **Docker 必須・実ネットワーク**。上の E2E の実ネットワーク版。実 registry.npmjs.org への GET / `npm install` が通ること、許可外のホストに出られないこと、github.com への通信はトークンが無ければ 401 で落ちる（認証なしの clone が通らない）ことだけを確かめる。git の clone / push の検証は偽 git の E2E が担う。CI で不安定になりうるため `test` には含めない。認証付きアクセスや push はしない |
 | `mise run lint` / `mise run fmt` | Biome の lint / 整形、`tsc` の型検査 |
 | `mise run typegen` | `wrangler.jsonc` を変えたら実行して両アプリの `worker-configuration.d.ts` を更新する |
 | `mise run dev:all` | gateway と agent を同時にローカル起動する（Docker 必須）。`AGENT_DO` は `script_name` 付きなので、片方だけ起動すると本番の DO を参照してしまう（wrangler の known issue）。必ず両方を同時に起動する。`wrangler login` やデプロイは不要 |
@@ -96,7 +96,18 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 |---|---|
 | `GITHUB_APP_CLIENT_SECRET` | GitHub App の Client secret |
 | `GITHUB_APP_PRIVATE_KEY` | GitHub App の秘密鍵（**PKCS#8** の PEM）。GitHub がダウンロードさせるのは PKCS#1（`BEGIN RSA PRIVATE KEY`）なので、`openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem -out app.pkcs8.pem` で変換して投入する（`wrangler secret put GITHUB_APP_PRIVATE_KEY < app.pkcs8.pem`）。リポジトリには置かない |
-| `TOKEN_ENC_KEY` | GitHub のトークンを UserDO に暗号化して保存する鍵。base64 の 32 バイト（`openssl rand -base64 32`）。TaskDO が保存する Installation Token の暗号化にも使う。変えると保存済みの資格は復号できなくなり、全員が再ログインになる |
+| `TOKEN_ENC_KEY` | （gateway）GitHub のトークンを UserDO に暗号化して保存する鍵。base64 の 32 バイト（`openssl rand -base64 32`）。TaskDO が保存する Installation Token の暗号化にも使う。変えると保存済みの資格は復号できなくなり、全員が再ログインになる |
+
+#### agent（`apps/agent`）の secret / 変数
+
+| 名前 | 内容 |
+|---|---|
+| `TOKEN_ENC_KEY`（secret） | Installation Token を SandboxDO の storage に暗号化して保存する鍵。base64 の 32 バイト（`openssl rand -base64 32`）。`cd apps/agent && wrangler secret put TOKEN_ENC_KEY`。gateway の同名の secret とは別の Worker の値で、同じでも違ってもよい。未設定だと Installation Token を預けられず、`start` は拒否される（fail closed）。トークンはコンテナには入らない |
+| `AI_GATEWAY_ID`（変数） | AI Gateway の ID。空だと `start` が `ai_gateway_not_configured` で拒否される |
+| `AGENT_MODEL`（変数） | 子エージェントのモデル（既定 `anthropic/claude-sonnet-5-5`。単価表にあるものだけ） |
+| `ENVIRONMENT`（変数） | `production`（既定）。E2E だけ `test` |
+
+ローカルは `apps/agent/.dev.vars.example` を `apps/agent/.dev.vars` にコピーして埋める（`mise run dev:all`）。
 
 ### GitHub App の設定
 

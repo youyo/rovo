@@ -23,7 +23,7 @@ import {
   renderReportBlock,
   resolveGitHubBaseUrls,
 } from "../github";
-import { withTestScripts } from "../test-routes";
+import { testDraftFallback, withTestScripts } from "../test-routes";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import { isTaskId } from "./ulid";
 import { TASK_BUDGET_USD, type UserDO } from "./user-do";
@@ -877,6 +877,11 @@ export class TaskDO extends DurableObject<Env> {
     const gl = this.getGithub();
     // Draft PR とブランチ（と最初のトークン）が整うまで start は送らない
     if (gl && gl.setup_done === 0 && !isTerminal(this.currentStatus())) return;
+    // Phase 2 で作られた TaskDO（github_link なし）は移行しない。AgentDO は gitCredential を必須にして
+    // rejected にするので、start を送らずに FAILED（legacy_task）で閉じる（本番データはまだ無い）。
+    if (!gl && !isTerminal(this.currentStatus())) {
+      this.failTask("legacy_task");
+    }
     if (isTerminal(this.currentStatus())) {
       // 終端のタスクの start は送らない（cancel の tombstone が遅れて届く start を拒否する）。
       this.ctx.storage.sql.exec(
@@ -1305,9 +1310,12 @@ export class TaskDO extends DurableObject<Env> {
     return pr;
   }
 
-  private draftFallbackIsReady(): boolean {
+  private async draftFallbackIsReady(): Promise<boolean> {
+    // 通しの E2E だけ、wrangler の再起動なしで切り替えられる（ENVIRONMENT=test のときだけ有効。test-routes.ts）
+    const override = await testDraftFallback(this.env);
+    const value = override ?? this.env.DRAFT_PR_FALLBACK ?? "";
     // fail-closed: "ready" 以外（未設定・不正な値）はすべて fail
-    return (this.env.DRAFT_PR_FALLBACK ?? "").trim().toLowerCase() === "ready";
+    return value.trim().toLowerCase() === "ready";
   }
 
   private async ensurePull(api: GitHubRepoApi, row: TaskRow, branch: string): Promise<PullInfo> {
@@ -1336,7 +1344,7 @@ export class TaskDO extends DurableObject<Env> {
       if (/already exists/i.test(e.detail)) return refind();
       // Draft に関する 422 のときだけ、DRAFT_PR_FALLBACK に従う。それ以外の 422 で通常の PR に切り替えない。
       if (!/draft/i.test(e.detail)) throw new SetupFailure("github_unprocessable");
-      if (!this.draftFallbackIsReady()) throw new SetupFailure("draft_pr_unsupported");
+      if (!(await this.draftFallbackIsReady())) throw new SetupFailure("draft_pr_unsupported");
       try {
         return await create(false);
       } catch (e2) {
@@ -1446,10 +1454,8 @@ export class TaskDO extends DurableObject<Env> {
     let latest = this.tokenRows("revoked = 0").at(-1);
     if (!latest) return;
     // 期限の 15 分前になったら新しいトークンを発行する（まだ渡せていない新しいトークンがあれば、それを再送する）
-    if (
-      latest.id <= gl.cred_delivered_id &&
-      latest.expires_at - this.now() <= TOKEN_REFRESH_BEFORE_MS
-    ) {
+    // 未配送のトークン自身が期限に近づいた場合も再発行して差し替える（配送失敗が続いても期限切れを送り続けない）
+    if (latest.expires_at - this.now() <= TOKEN_REFRESH_BEFORE_MS) {
       const issued = await this.issueToken(row, "refresh");
       latest = this.tokenRows(`id = ${issued.id}`)[0] as TokenRow;
     }

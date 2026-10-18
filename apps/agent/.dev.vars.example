@@ -1,0 +1,20 @@
+# ローカル開発用。`cp .dev.vars.example .dev.vars` して値を埋める（.dev.vars は gitignore 済み）。
+# 本番の secret は `wrangler secret put <NAME>` で設定する（このファイルには書かない）。
+# gateway と同時に起動する（`mise run dev:all`）。
+
+# Installation Token を SandboxDO に暗号化して保存する鍵（base64 の 32 バイト）: openssl rand -base64 32
+# Gateway の TOKEN_ENC_KEY とは独立でよい（Gateway はこの鍵を使わない）。変えると保存済みのトークンは復号できず、
+# 実行中のタスクは次のトークン更新（TaskDO からの setGitCredential）まで push / clone が 401 になる。
+TOKEN_ENC_KEY=
+
+# 以下は wrangler.jsonc の vars の上書き（ローカルだけ変えたいとき）。
+
+# AI Gateway の ID。空だとタスクの start が ai_gateway_not_configured で拒否される（子エージェントのモデル呼び出しは
+# AI Gateway 経由のみ）。本番はデプロイ時に wrangler.jsonc の vars を実際の ID に変える。
+# AI_GATEWAY_ID=
+
+# 子エージェントのモデル。単価表（src/agent/pricing.ts）にあるものだけ使える。
+# AGENT_MODEL=anthropic/claude-sonnet-5-5
+
+# production（既定）/ test。test は E2E 専用（台本付き fake モデルや /test/* ルートが有効になる）。本番で test にしない。
+# ENVIRONMENT=production

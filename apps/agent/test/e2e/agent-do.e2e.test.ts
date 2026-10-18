@@ -5,9 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { TaskSpec } from "../../src/agent/types";
 import type { ScriptStep } from "../../src/pi/scripted-provider";
 import { agentClient } from "../support/agent-client";
-import { type FakeUpstream, startFakeUpstream } from "../support/fake-upstream";
+import { type FakeUpstream, startFakeUpstream, TEST_GIT_TOKEN } from "../support/fake-upstream";
 import { sandboxClient } from "../support/sandbox-client";
-import { type RunningWrangler, startWrangler } from "../support/wrangler";
+import { E2E_TOKEN_ENC_KEY, type RunningWrangler, startWrangler } from "../support/wrangler";
 
 // 実コンテナ上で AgentDO → 本番のツール群 → SandboxDO を通す。モデルだけが台本付きの fake。
 // AgentDO と SandboxDO は同じ名前（= task id）で引く。
@@ -21,7 +21,7 @@ beforeAll(async () => {
   persistDir = mkdtempSync(join(tmpdir(), "rovo-agent-do-"));
   wrangler = await startWrangler({
     configs: ["apps/agent/wrangler.jsonc"],
-    vars: { ENVIRONMENT: "test", TEST_UPSTREAM: upstream.url },
+    vars: { ENVIRONMENT: "test", TEST_UPSTREAM: upstream.url, TOKEN_ENC_KEY: E2E_TOKEN_ENC_KEY },
     readyPath: "/",
     persistDir,
   });
@@ -42,11 +42,16 @@ const FIX = tool("edit_file", { path: "calc.js", old_string: "a - b", new_string
 const WRONG_FIX = tool("edit_file", { path: "calc.js", old_string: "a - b", new_string: "a * b" });
 
 function spec(task: string, over: Partial<TaskSpec> = {}): TaskSpec {
+  // 作業ブランチは TaskDO が AgentDO.start より前に作る。偽 GitHub に初期コミット付きで作る
+  const { branch, initialSha } = upstream.createTaskBranch("calc", task, { initialCommit: true });
   return {
     taskId: task,
     userId: "user-e2e",
     repository: "acme/calc",
     baseSha: upstream.calcSha,
+    branch,
+    initialSha,
+    gitCredential: { token: TEST_GIT_TOKEN, expiresAt: Date.now() + 60 * 60 * 1000 },
     instructions: `scenario:${task}`,
     acceptanceCriteria: ["npm test が通る"],
     verificationCommands: [{ argv: ["npm", "test"], timeoutSeconds: 120 }],

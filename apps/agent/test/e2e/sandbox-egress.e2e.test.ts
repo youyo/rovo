@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { WorkspaceSpec } from "../../src/sandbox-port";
 import { type FakeUpstream, startFakeUpstream } from "../support/fake-upstream";
 import { sandboxClient } from "../support/sandbox-client";
-import { type RunningWrangler, startWrangler } from "../support/wrangler";
+import { E2E_TOKEN_ENC_KEY, type RunningWrangler, startWrangler } from "../support/wrangler";
 
 let upstream: FakeUpstream;
 let wrangler: RunningWrangler;
@@ -18,7 +18,7 @@ beforeAll(async () => {
   persistDir = mkdtempSync(join(tmpdir(), "rovo-agent-e2e-"));
   wrangler = await startWrangler({
     configs: ["apps/agent/wrangler.jsonc"],
-    vars: { ENVIRONMENT: "test", TEST_UPSTREAM: upstream.url },
+    vars: { ENVIRONMENT: "test", TEST_UPSTREAM: upstream.url, TOKEN_ENC_KEY: E2E_TOKEN_ENC_KEY },
     readyPath: "/",
     persistDir,
   });
@@ -27,6 +27,7 @@ beforeAll(async () => {
     repository: "acme/hello",
     baseSha: upstream.helloSha,
     branch: "agent/task-egress",
+    initialSha: upstream.createTaskBranch("hello", "egress").initialSha,
     deadlineAt: Date.now() + 3_600_000,
   };
   // ensureReady でコンテナを起動し、傍受の設定完了と clone まで待つ
@@ -83,17 +84,32 @@ describe("拒否される通信（上流に届かない）", () => {
     expect(upstream.requests.length).toBe(before);
   });
 
-  it("github.com の git-receive-pack（push）は 403。git push も失敗する", async () => {
+  it("対象リポジトリ以外の git-receive-pack（info/refs・POST）は 403 で、上流に届かない", async () => {
+    const before = upstream.requests.length;
     expect(
-      (await sb.curl("https://github.com/acme/hello.git/info/refs?service=git-receive-pack")).code,
+      (await sb.curl("https://github.com/acme/other.git/info/refs?service=git-receive-pack")).code,
     ).toBe("403");
+    expect(
+      (await sb.curl("https://github.com/acme/other.git/git-receive-pack", "-X", "POST", "-d", "x"))
+        .code,
+    ).toBe("403");
+    expect(upstream.requests.length).toBe(before);
+  });
+
+  it("作業ブランチ以外への git push は失敗し、上流の ref は動かない（本文のコマンドを検証して止める）", async () => {
     const push = await sb.exec([
       "bash",
       "-c",
       "cd /workspace/hello && git -c user.name=t -c user.email=t@e commit -q --allow-empty -m x && git push origin HEAD:refs/heads/x",
     ]);
     expect(push.exitCode).not.toBe(0);
-    expect(reachedUpstream("github.com").some((r) => r.path.includes("receive-pack"))).toBe(false);
+    expect(upstream.refSha("hello", "refs/heads/x")).toBeUndefined();
+    // receive-pack の POST は上流まで届いていない（コマンド部を検証した時点で 403）
+    expect(
+      reachedUpstream("github.com").some(
+        (r) => r.method === "POST" && r.path.includes("receive-pack"),
+      ),
+    ).toBe(false);
   });
 
   it("メタデータ・内部 IP（HTTP）は 403、HTTPS の裸 IP は接続できない", async () => {

@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { posix } from "node:path";
 import { Files } from "@cloudflare/sandbox";
+import type { GitCredential } from "./agent/types";
 import { PROCESS_SCRIPT } from "./container-scripts";
+import { decryptString, encryptString, importEncryptionKey } from "./crypto";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
 import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
@@ -132,7 +134,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       if (
         stored.repository !== spec.repository ||
         stored.baseSha !== spec.baseSha ||
-        stored.branch !== spec.branch
+        stored.branch !== spec.branch ||
+        stored.initialSha !== spec.initialSha
       ) {
         throw new Error("conflict: this sandbox is already bound to a different workspace");
       }
@@ -148,6 +151,51 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       await this.ensureRunning();
     });
     await this.armAlarm();
+  }
+
+  // ---- Git の認証トークン（コンテナには入れない。OutboundGateway が判定を通ったリクエストにだけ注入する）----
+  // ensureReady より前に届き、push（exec の最中）の間にも読まれるので、直列キューにも requireSpec にも依存させない。
+
+  private credentialAad(): string {
+    return `git-credential:${this.ctx.id.name ?? ""}`;
+  }
+
+  /** 暗号化して保存する。保存済みより新しい expiresAt のものだけ採用する（冪等）。 */
+  async setGitCredential(input: GitCredential): Promise<void> {
+    const c = input as Partial<GitCredential> | null;
+    if (
+      !c ||
+      typeof c.token !== "string" ||
+      !/^[\x21-\x7e]{1,2048}$/.test(c.token) ||
+      typeof c.expiresAt !== "number" ||
+      !Number.isFinite(c.expiresAt)
+    ) {
+      throw new Error("invalid git credential");
+    }
+    if (this.terminated()) throw new Error("sandbox was terminated");
+    const stored = this.ctx.storage.kv.get<{ ct: string; expiresAt: number }>("git_credential");
+    if (stored && stored.expiresAt >= c.expiresAt) return;
+    const key = await importEncryptionKey(this.env.TOKEN_ENC_KEY ?? "");
+    const ct = await encryptString(key, c.token, this.credentialAad());
+    // 暗号化の間に terminate されていたら保存しない
+    if (this.terminated()) throw new Error("sandbox was terminated");
+    const again = this.ctx.storage.kv.get<{ expiresAt: number }>("git_credential");
+    if (again && again.expiresAt >= c.expiresAt) return;
+    this.ctx.storage.kv.put("git_credential", { ct, expiresAt: c.expiresAt });
+  }
+
+  /** OutboundGateway 用。無い・終端・復号できないときは undefined（= 401）。 */
+  async readGitCredential(): Promise<GitCredential | undefined> {
+    if (this.terminated()) return undefined;
+    const stored = this.ctx.storage.kv.get<{ ct: string; expiresAt: number }>("git_credential");
+    if (!stored) return undefined;
+    try {
+      const key = await importEncryptionKey(this.env.TOKEN_ENC_KEY ?? "");
+      const token = await decryptString(key, stored.ct, this.credentialAad());
+      return { token, expiresAt: stored.expiresAt };
+    } catch {
+      return undefined;
+    }
   }
 
   async exec(argv: string[], options: ExecOptions = {}): Promise<ExecResult> {
@@ -227,6 +275,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
    */
   async terminate(): Promise<{ stopped: boolean }> {
     this.ctx.storage.kv.put("terminated", true);
+    this.ctx.storage.kv.delete("git_credential");
     this.invalidateBoot();
     await this.ctx.storage.deleteAlarm();
     let error: unknown;
@@ -288,6 +337,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const spec = this.spec();
     if (!spec) return;
     if (this.terminated() || Date.now() >= spec.deadlineAt) {
+      this.ctx.storage.kv.delete("git_credential");
       try {
         await this.destroyContainer();
       } catch {
@@ -300,13 +350,13 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   // ---- 起動 ----
 
-  /** 起動直後の操作が「再起動した」ことを伝える。以降の操作は新しい作業ツリーで動く。 */
+  /** 起動直後の操作が「再起動した」ことを伝える。以降の操作は、最後に push した状態から再 clone した作業ツリーで動く。 */
   private async runningOrThrowRestarted(): Promise<void> {
     const started = await this.ensureRunning();
     if (started) {
       throw new Error(
-        "the sandbox container was restarted and the workspace was re-cloned from the base commit; " +
-          "uncommitted and unpushed changes were lost. Redo your work.",
+        "the sandbox container was restarted and the workspace was re-cloned from the last pushed checkpoint " +
+          "(the task branch on the remote); uncommitted changes and commits that were not pushed were lost. Redo your work.",
       );
     }
   }
@@ -362,6 +412,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const props: OutboundGatewayProps = {
       repo: parseRepository(spec.repository),
       task: spec.branch,
+      // トークンの読み出しと push 先の ref はこの値で決める（DO の名前 = task id）
+      taskId: this.ctx.id.name ?? "",
     };
     const gateway = this.ctx.exports.OutboundGateway({ props });
     await container.interceptOutboundHttps("*", gateway);
@@ -397,7 +449,10 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     return started;
   }
 
-  /** /workspace を spec の状態にする。冪等（既にあれば何もしない）。 */
+  /**
+   * /workspace を spec の状態にする。冪等（既に作業ブランチにいれば何もしない）。
+   * 初回も含め、常にリモートの作業ブランチ（TaskDO が作成済み）を checkout する。base_sha がその祖先でなければ失敗する。
+   */
   private async prepareWorkspace(spec: WorkspaceSpec): Promise<void> {
     const git = (args: string[], timeoutMs = 60_000) =>
       this.rawExec(["git", "-C", WORKSPACE, ...args], { timeoutMs });
@@ -408,9 +463,19 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         );
       }
     };
+    // checkout したブランチに base_sha が含まれること（fail-closed）。0: 祖先、1: 祖先ではない、他: 判定できない
+    const verifyBase = async () => {
+      const r = await git(["merge-base", "--is-ancestor", spec.baseSha, "HEAD"]);
+      if (r.exitCode === 1) {
+        throw new Error(
+          `the task branch ${spec.branch} does not contain the base commit ${spec.baseSha}`,
+        );
+      }
+      must(r, "git merge-base");
+    };
     const healthy = await git(["rev-parse", "--verify", "-q", "HEAD"]);
     if (healthy.exitCode !== 0) {
-      // 作業ツリーが無い（または clone の途中で壊れた）: 空にしてから clone する
+      // 作業ツリーが無い（または clone の途中で壊れた）: 空にしてから、作業ブランチを直接 clone する
       await this.rawExec(["find", WORKSPACE, "-mindepth", "1", "-delete"], { timeoutMs: 60_000 });
       must(
         await this.rawExec(
@@ -418,7 +483,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
             "git",
             "clone",
             "-q",
-            "--no-checkout",
+            "--branch",
+            spec.branch,
             `https://github.com/${spec.repository}.git`,
             WORKSPACE,
           ],
@@ -426,6 +492,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         ),
         "git clone",
       );
+      await verifyBase();
+      return;
     }
     const current = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
     if (current.stdout.trim() === spec.branch) return;
@@ -434,8 +502,19 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       must(await git(["switch", "-q", spec.branch]), "git switch");
       return;
     }
-    must(await git(["checkout", "-q", "--detach", spec.baseSha], CLONE_TIMEOUT_MS), "git checkout");
-    must(await git(["switch", "-q", "-c", spec.branch]), "git switch -c");
+    // 作業ツリーはあるが作業ブランチを持っていない: リモートから取り直して切り替える
+    must(
+      await git(
+        ["fetch", "-q", "origin", `+refs/heads/${spec.branch}:refs/remotes/origin/${spec.branch}`],
+        CLONE_TIMEOUT_MS,
+      ),
+      "git fetch",
+    );
+    must(
+      await git(["switch", "-q", "-c", spec.branch, "--no-track", `origin/${spec.branch}`]),
+      "git switch -c",
+    );
+    await verifyBase();
   }
 
   // ---- 内部の実行 ----

@@ -1,3 +1,5 @@
+import type { GitCredential } from "./agent/types";
+
 export interface ExecOptions {
   cwd?: string;
   env?: Record<string, string>;
@@ -23,8 +25,10 @@ export interface WorkspaceSpec {
   /** owner/name */
   repository: string;
   baseSha: string;
-  /** 作業ブランチ名（例: agent/task-<id>） */
+  /** 作業ブランチ名（例: agent/task-<id>）。リモートに既にある（TaskDO が作成済み）ことが前提。 */
   branch: string;
+  /** 作業ブランチの初期コミット（base_sha の上の空コミット）。 */
+  initialSha: string;
   /** epoch ms。超えたら SandboxDO は自分でコンテナを止める。 */
   deadlineAt: number;
 }
@@ -36,6 +40,12 @@ export interface SandboxPort {
    * 傍受の登録と CA 設定が終わるまで clone / exec はしない。
    */
   ensureReady(spec: WorkspaceSpec): Promise<void>;
+  /**
+   * GitHub の Installation Token を預ける（暗号化して SandboxDO の storage に保存。コンテナには入れない）。
+   * ensureReady より前に呼ぶ（clone にも使うため）。冪等で、保存済みより新しい expiresAt のものだけ採用する。
+   * 終端後は例外。terminate で削除される。
+   */
+  setGitCredential(credential: GitCredential): Promise<void>;
   /** terminate 後は例外ではなく `terminated: true` の結果を返す。 */
   exec(argv: string[], options?: ExecOptions): Promise<ExecResult>;
   readFile(path: string): Promise<string>;

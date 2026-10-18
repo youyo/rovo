@@ -1,5 +1,6 @@
 import type { ExecResult, WorkspaceSpec } from "../../src/sandbox-port";
 import { e2eLog } from "./e2e-log";
+import { TEST_GIT_TOKEN } from "./fake-upstream";
 
 /** wrangler dev 上の E2E 用ルート（ENVIRONMENT=test のときだけ有効）経由で Sandbox を操作する。 */
 export function sandboxClient(baseUrl: string, name: string) {
@@ -20,9 +21,26 @@ export function sandboxClient(baseUrl: string, name: string) {
       post(`/test/sandbox/${path}`, { name, ...body }),
     );
   };
+  const setGitCredential = (credential: { token: string; expiresAt: number }) =>
+    op("set-git-credential", { credential }) as Promise<{ ok: true }>;
   return {
     name,
-    ensureReady: (spec: WorkspaceSpec) => op("ensure-ready", { spec }) as Promise<{ ok: true }>,
+    setGitCredential,
+    /**
+     * 既定では、偽 GitHub が要求するトークンを先に預けてから ensureReady する（clone にもトークンが要るため）。
+     * `credential: null` ならトークンを預けない（トークン無しの挙動の検証用）。
+     */
+    async ensureReady(
+      spec: WorkspaceSpec,
+      opts: { credential?: { token: string; expiresAt: number } | null } = {},
+    ) {
+      const credential =
+        opts.credential === undefined
+          ? { token: TEST_GIT_TOKEN, expiresAt: Date.now() + 3_600_000 }
+          : opts.credential;
+      if (credential) await setGitCredential(credential);
+      return op("ensure-ready", { spec }) as Promise<{ ok: true }>;
+    },
     exec: (argv: string[], options: Record<string, unknown> = {}) =>
       op("exec", { argv, options: { timeoutMs: 60_000, ...options } }) as Promise<ExecResult>,
     readFile: (path: string) => op("read-file", { path }) as Promise<{ content: string }>,

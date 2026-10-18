@@ -8,7 +8,13 @@ export interface ToolContext {
   deadlineAt: number;
   /** git commit の作者 */
   commitAuthor: { name: string; email: string };
+  /** 作業ブランチ名（`agent/task-<id>`）。git_commit の成功のたびに、ここへ push する。未設定なら push しない。 */
+  branch?: string;
+  /** git_commit の push の結果（best-effort。失敗しても git_commit は失敗にならない）。 */
+  onPush?: (result: PushResult) => Promise<void>;
 }
+
+export type PushResult = { ok: true; sha: string } | { ok: false; sha: string; error: string };
 
 /**
  * Sandbox を操作するツール群（read_file / list_files / search / write_file / edit_file / bash / git_commit）を作る。

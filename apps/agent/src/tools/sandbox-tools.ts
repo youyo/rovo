@@ -1,9 +1,9 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { maskSecrets } from "../redact";
-import type { SandboxPort } from "../sandbox-port";
+import type { ExecResult, SandboxPort } from "../sandbox-port";
 import { resolveWorkspacePath } from "../workspace-path";
-import type { ToolContext } from "./types";
+import type { PushResult, ToolContext } from "./types";
 import { wrapUntrusted } from "./untrusted";
 
 export const READ_MAX_LINES = 2000;
@@ -53,6 +53,8 @@ export function searchCommand(root: string, target: string, rgArgs: string[]): s
 }
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const isExecResult = (r: unknown): r is ExecResult =>
+  typeof r === "object" && r !== null && "exitCode" in r;
 
 export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) {
   const root = context.workspaceRoot;
@@ -325,8 +327,8 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         if (r.timedOut) {
           parts.push(
             "the command timed out. The sandbox container was destroyed to guarantee it stopped: " +
-              "ALL uncommitted changes (and any local commits not in the base) in the workspace were lost. " +
-              "Your next tool call re-clones the workspace from the base commit; redo your work, " +
+              "ALL uncommitted changes (and any local commits that were not pushed) in the workspace were lost. " +
+              "Your next tool call re-clones the workspace from the last pushed checkpoint (the task branch on the remote); redo your work, " +
               "and avoid long-running commands.",
           );
         }
@@ -340,10 +342,42 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
     ),
   });
 
+  /**
+   * commit のたびの push（チェックポイント）。best-effort: 失敗しても git_commit は失敗にしない。
+   * 結果の文面（モデルに返す）を返す。
+   */
+  const pushCheckpoint = async (sha: string): Promise<string> => {
+    if (!context.branch || !context.onPush) return "";
+    const r = await port
+      .exec(["git", "push", "origin", `HEAD:refs/heads/${context.branch}`], {
+        ...cwdOpts,
+        timeoutMs: 120_000,
+        maxOutputBytes: 32 * 1024,
+      })
+      .catch((e: unknown) => e);
+    let result: PushResult;
+    if (r instanceof Error || !isExecResult(r)) {
+      result = { ok: false, sha, error: errMsg(r) };
+    } else if (r.exitCode === 0 && !r.timedOut) {
+      result = { ok: true, sha };
+    } else {
+      const why = r.timedOut ? "timed out" : (r.stderr || r.stdout || `exit ${r.exitCode}`).trim();
+      result = { ok: false, sha, error: maskSecrets(why).slice(-500) };
+    }
+    try {
+      await context.onPush(result);
+    } catch {
+      // 記録の失敗で commit を失敗にしない
+    }
+    return result.ok
+      ? "\npushed to the task branch"
+      : "\npush failed (the commit is kept locally; the next git_commit tries again)";
+  };
+
   const git_commit = defineTool({
     name: "git_commit",
     description:
-      "Stage all changes (git add -A) and create a local commit with the given message. Reports when there is nothing to commit. Never pushes.",
+      "Stage all changes (git add -A) and create a local commit with the given message. Reports when there is nothing to commit. The commit is pushed to the task branch automatically; never run git push yourself.",
     parameters: Type.Object({ message: Type.String({ minLength: 1, maxLength: 5000 }) }),
     replay: "unsafe",
     execute: guarded("git_commit", async (args: { message: string }) => {
@@ -373,7 +407,9 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
       if (commit.exitCode !== 0)
         return fail("git_commit", commit.stderr || commit.stdout || "git commit failed");
       const head = await git(["rev-parse", "HEAD"]);
-      return ok("git_commit", `committed ${head.stdout.trim()}`);
+      const sha = head.stdout.trim();
+      const pushed = await pushCheckpoint(sha);
+      return ok("git_commit", `committed ${sha}${pushed}`);
     }),
   });
 

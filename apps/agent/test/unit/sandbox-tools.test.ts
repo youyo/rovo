@@ -464,3 +464,105 @@ describe("git_commit", () => {
     expect(r.text).toContain("hook failed");
   });
 });
+
+describe("git_commit の push（チェックポイント）", () => {
+  const SHA = "c".repeat(40);
+  const handler =
+    (push: { exitCode?: number; stderr?: string; timedOut?: boolean } = {}): ExecHandler =>
+    (argv) => {
+      if (argv.includes("diff")) return { exitCode: 1 };
+      if (argv.includes("rev-parse")) return { stdout: `${SHA}\n` };
+      if (argv.includes("push")) return push;
+      return {};
+    };
+  const pushes = (sandbox: FakeSandbox) => sandbox.calls.filter((c) => c.argv.includes("push"));
+
+  it("commit が成功したら、作業ブランチへ push する（HEAD:refs/heads/<branch>）。結果は onPush に渡す", async () => {
+    const results: unknown[] = [];
+    const { sandbox, run } = setup(handler(), {
+      branch: "agent/task-t1",
+      onPush: async (r) => void results.push(r),
+    });
+    const r = await run("git_commit", { message: "m" });
+    expect(r.isError).toBe(false);
+    expect(r.text).toContain(SHA);
+    expect(pushes(sandbox).map((c) => c.argv)).toEqual([
+      ["git", "push", "origin", "HEAD:refs/heads/agent/task-t1"],
+    ]);
+    expect(pushes(sandbox)[0]?.options.cwd).toBe("/workspace");
+    // push は commit の後
+    const order = sandbox.calls.map((c) =>
+      c.argv.includes("push") ? "push" : c.argv.includes("commit") ? "commit" : "",
+    );
+    expect(order.indexOf("commit")).toBeLessThan(order.indexOf("push"));
+    expect(results).toEqual([{ ok: true, sha: SHA }]);
+  });
+
+  it("push が失敗しても git_commit は成功のまま。失敗は onPush に渡し、結果の文面にも出す", async () => {
+    const results: { ok: boolean; sha: string; error?: string }[] = [];
+    const { run } = setup(handler({ exitCode: 1, stderr: "remote: rejected (non-fast-forward)" }), {
+      branch: "agent/task-t1",
+      onPush: async (r) => void results.push(r),
+    });
+    const r = await run("git_commit", { message: "m" });
+    expect(r.isError).toBe(false);
+    expect(r.text).toMatch(/push failed/i);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ ok: false, sha: SHA });
+    expect(results[0]?.error).toContain("non-fast-forward");
+  });
+
+  it("push がタイムアウトしても git_commit は成功のまま（失敗として onPush に渡す）", async () => {
+    const results: { ok: boolean }[] = [];
+    const { run } = setup(handler({ exitCode: 137, timedOut: true }), {
+      branch: "agent/task-t1",
+      onPush: async (r) => void results.push(r),
+    });
+    const r = await run("git_commit", { message: "m" });
+    expect(r.isError).toBe(false);
+    expect(results[0]?.ok).toBe(false);
+  });
+
+  it("onPush が例外を投げても git_commit は成功のまま", async () => {
+    const { run } = setup(handler(), {
+      branch: "agent/task-t1",
+      onPush: async () => {
+        throw new Error("boom");
+      },
+    });
+    expect((await run("git_commit", { message: "m" })).isError).toBe(false);
+  });
+
+  it("変更が無ければ push しない。ブランチが未設定でも push しない", async () => {
+    const a = setup((argv) => (argv.includes("diff") ? { exitCode: 0 } : {}), {
+      branch: "agent/task-t1",
+      onPush: async () => {},
+    });
+    await a.run("git_commit", { message: "m" });
+    expect(pushes(a.sandbox)).toHaveLength(0);
+    const b = setup(handler());
+    await b.run("git_commit", { message: "m" });
+    expect(pushes(b.sandbox)).toHaveLength(0);
+  });
+
+  it("commit が失敗したら push しない", async () => {
+    const { sandbox, run } = setup(
+      (argv) =>
+        argv.includes("commit")
+          ? { exitCode: 1, stderr: "hook failed" }
+          : argv.includes("diff")
+            ? { exitCode: 1 }
+            : {},
+      { branch: "agent/task-t1", onPush: async () => {} },
+    );
+    expect((await run("git_commit", { message: "m" })).isError).toBe(true);
+    expect(pushes(sandbox)).toHaveLength(0);
+  });
+
+  it("説明は「push は自動」と書き、「Never pushes」とは書かない", () => {
+    const { tools } = setup();
+    const d = tools.find((t) => t.name === "git_commit")?.description ?? "";
+    expect(d).not.toMatch(/never push/i);
+    expect(d).toMatch(/push/i);
+  });
+});

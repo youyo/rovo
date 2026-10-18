@@ -9,6 +9,9 @@ import { e2eLog } from "./e2e-log";
 export const AGENT_DIR = join(import.meta.dirname, "..", "..");
 export const REPO_ROOT = join(AGENT_DIR, "..", "..");
 
+/** E2E の Worker に渡す TOKEN_ENC_KEY（base64 の 32 バイト。テスト専用の値）。 */
+export const E2E_TOKEN_ENC_KEY = Buffer.alloc(32, 9).toString("base64");
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function freePort(): Promise<number> {

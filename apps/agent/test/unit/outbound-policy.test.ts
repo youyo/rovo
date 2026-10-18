@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideOutbound } from "../../src/outbound-policy";
+import { decideOutbound, gitRoute } from "../../src/outbound-policy";
 
 const repo = { owner: "octocat", name: "Hello-World" };
 const get = (url: string, opts = {}) => decideOutbound({ method: "GET", url }, opts);
@@ -188,5 +188,88 @@ describe("decideOutbound: リポジトリ未設定は fail-closed", () => {
   });
   it("レジストリは repo が無くても許可する", () => {
     expect(get("https://registry.npmjs.org/x").allow).toBe(true);
+  });
+});
+
+describe("decideOutbound: GitHub の push（git-receive-pack）", () => {
+  const branch = "agent/task-t1";
+  const withBranch = { repo, branch };
+  const post = (url: string, opts: { repo: typeof repo; branch?: string } = withBranch) =>
+    decideOutbound({ method: "POST", url }, opts);
+  const base = "https://github.com/octocat/Hello-World.git";
+
+  it("作業ブランチがあるとき、info/refs?service=git-receive-pack の GET と git-receive-pack の POST を許可する", () => {
+    expect(get(`${base}/info/refs?service=git-receive-pack`, withBranch)).toEqual({ allow: true });
+    expect(post(`${base}/git-receive-pack`)).toEqual({ allow: true });
+    expect(post("https://github.com/octocat/Hello-World/git-receive-pack").allow).toBe(true);
+  });
+
+  it("作業ブランチが無い・形が違うなら、push は何も許可しない（fail-closed）", () => {
+    for (const opts of [
+      { repo },
+      { repo, branch: "main" },
+      { repo, branch: "agent/task-" },
+      { repo, branch: "x/agent/task-1" },
+    ]) {
+      expect(get(`${base}/info/refs?service=git-receive-pack`, opts)).toMatchObject({
+        allow: false,
+        code: "github_push_not_allowed",
+      });
+      expect(post(`${base}/git-receive-pack`, opts)).toMatchObject({ allow: false });
+    }
+    // upload-pack は作業ブランチの有無に関係なく通る
+    expect(get(`${base}/info/refs?service=git-upload-pack`, { repo }).allow).toBe(true);
+  });
+
+  it("別のリポジトリへの push は拒否する", () => {
+    expect(
+      get("https://github.com/octocat/Other/info/refs?service=git-receive-pack", withBranch),
+    ).toMatchObject({
+      allow: false,
+      code: "github_other_repo",
+    });
+    expect(post("https://github.com/evil/Hello-World/git-receive-pack")).toMatchObject({
+      allow: false,
+      code: "github_other_repo",
+    });
+  });
+
+  it("query は service だけ。余計な query・別の service・GET の receive-pack・POST の info/refs は拒否する", () => {
+    expect(get(`${base}/info/refs?service=git-receive-pack&x=1`, withBranch).allow).toBe(false);
+    expect(get(`${base}/info/refs?x=1&service=git-receive-pack`, withBranch).allow).toBe(false);
+    expect(
+      get(`${base}/info/refs?service=git-receive-pack&service=git-upload-pack`, withBranch).allow,
+    ).toBe(false);
+    expect(get(`${base}/info/refs?service=git-foo`, withBranch).allow).toBe(false);
+    expect(get(`${base}/git-receive-pack`, withBranch).allow).toBe(false);
+    expect(post(`${base}/git-receive-pack?x=1`).allow).toBe(false);
+    expect(post(`${base}/info/refs?service=git-receive-pack`).allow).toBe(false);
+  });
+
+  it("dumb HTTP・LFS・余計なセグメントは拒否する", () => {
+    expect(get(`${base}/HEAD`, withBranch).allow).toBe(false);
+    expect(post(`${base}/info/lfs/objects/batch`).allow).toBe(false);
+    expect(post(`${base}/x/git-receive-pack`).allow).toBe(false);
+  });
+});
+
+describe("gitRoute", () => {
+  const u = (s: string) => new URL(s);
+  const base = "https://github.com/octocat/Hello-World.git";
+  it("許可の判定ではなく、git の段階を分類する", () => {
+    expect(gitRoute("GET", u(`${base}/info/refs?service=git-upload-pack`))).toBe(
+      "upload-pack-advert",
+    );
+    expect(gitRoute("GET", u(`${base}/info/refs?service=git-receive-pack`))).toBe(
+      "receive-pack-advert",
+    );
+    expect(gitRoute("POST", u(`${base}/git-upload-pack`))).toBe("upload-pack");
+    expect(gitRoute("POST", u(`${base}/git-receive-pack`))).toBe("receive-pack");
+  });
+  it("github.com 以外・形が違うものは undefined", () => {
+    expect(gitRoute("POST", u("https://registry.npmjs.org/git-receive-pack"))).toBeUndefined();
+    expect(gitRoute("GET", u(`${base}/git-receive-pack`))).toBeUndefined();
+    expect(gitRoute("GET", u(`${base}/info/refs`))).toBeUndefined();
+    expect(gitRoute("POST", u(`${base}/info/refs?service=git-receive-pack`))).toBeUndefined();
   });
 });

@@ -32,6 +32,12 @@ export interface VerificationCommand {
   timeoutSeconds?: number;
 }
 
+/** GitHub の Installation Token と期限（epoch ms）。SandboxDO が暗号化して持ち、コンテナには入れない。 */
+export interface GitCredential {
+  token: string;
+  expiresAt: number;
+}
+
 /** Gateway が認証済みの値から作って渡すタスク仕様。 */
 export interface TaskSpec {
   taskId: string;
@@ -39,6 +45,15 @@ export interface TaskSpec {
   /** owner/name */
   repository: string;
   baseSha: string;
+  /** 作業ブランチ名。`agent/task-<taskId>` と一致しなければ start を拒否する。 */
+  branch: string;
+  /** TaskDO が作った初期コミットの SHA（base_sha の上の空コミット。作業ブランチの先頭は最初これを指す）。 */
+  initialSha: string;
+  /**
+   * push / clone 用の Installation Token。AgentDO は永続化せず、SandboxDO に暗号化して預ける。
+   * start の同一性判定（fingerprint）には含めない（更新されうるため）。更新は setGitCredential で届く。
+   */
+  gitCredential: GitCredential;
   instructions: string;
   acceptanceCriteria?: string[];
   verificationCommands?: VerificationCommand[];
@@ -119,5 +134,10 @@ export type ResultDto =
       patch?: string;
       diffstat?: string;
       patchTooLarge: boolean;
+      /**
+       * 完了時に作業ブランチを検証済みの SHA に揃え、ls-remote で一致を確かめられたときだけ入る（その SHA）。
+       * 入らない（push に失敗した、または completed 以外）ときは、Gateway は PR の head と比べない。
+       */
+      pushedSha?: string;
       usage: UsageDto;
     };

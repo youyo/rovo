@@ -30,6 +30,8 @@ export function agentClient(baseUrl: string, name: string) {
     setScript: (key: string, script: ScriptStep[]) => op("set-script", { key, script }),
     start: (spec: TaskSpec) => op("start", { spec }) as Promise<StartResult>,
     cancel: () => op("cancel") as Promise<CancelResult>,
+    setGitCredential: (credential: { token: string; expiresAt: number }) =>
+      op("set-git-credential", { credential }) as Promise<{ ok: boolean }>,
     getEvents: (afterSeq = 0, limit = 100) =>
       op("events", { afterSeq, limit }) as Promise<EventsPage>,
     getResult: () => op("result") as Promise<ResultDto>,

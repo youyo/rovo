@@ -21,6 +21,8 @@ describe("AgentDO の本番ツール配線", () => {
   it("createSandboxTools のツール（read_file / bash / git_commit）が SandboxPort 経由で動く", async () => {
     const sandbox = new FakeSandbox((argv) => {
       if (argv[0] === "git" && argv[1] === "rev-parse") return { stdout: "c0ffee\n" };
+      // 完了時の作業ブランチの同期（ls-remote で先頭を確かめる）。リモートは常に c0ffee
+      if (argv[0] === "git" && argv[1] === "ls-remote") return { stdout: `c0ffee\t${argv[3]}\n` };
       if (argv[0] === "git" && argv[1] === "format-patch") return { stdout: "PATCH" };
       if (argv[0] === "bash") return { stdout: "built\n" };
       return {};

@@ -4,8 +4,17 @@ import type { ToolContext } from "./types";
  * ツールに渡す ToolContext を作る。Pi のハーネスは start より前にツールを作るので、期限は固定値ではなく
  * 呼び出し時に評価する getter にする（AgentDO が永続化した deadlineAt を参照させる）。
  */
-export function createToolContext(workspaceRoot: string, deadlineAt: () => number): ToolContext {
+export function createToolContext(
+  workspaceRoot: string,
+  deadlineAt: () => number,
+  extra: { branch?: string | (() => string | undefined); onPush?: ToolContext["onPush"] } = {},
+): ToolContext {
+  const branch = extra.branch;
   return {
+    onPush: extra.onPush,
+    get branch() {
+      return typeof branch === "function" ? branch() : branch;
+    },
     workspaceRoot,
     get deadlineAt() {
       return deadlineAt();

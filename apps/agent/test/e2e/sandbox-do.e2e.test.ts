@@ -5,20 +5,25 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { WorkspaceSpec } from "../../src/sandbox-port";
 import { type FakeUpstream, startFakeUpstream } from "../support/fake-upstream";
 import { sandboxClient } from "../support/sandbox-client";
-import { type RunningWrangler, startWrangler } from "../support/wrangler";
+import { E2E_TOKEN_ENC_KEY, type RunningWrangler, startWrangler } from "../support/wrangler";
 
 let upstream: FakeUpstream;
 let wrangler: RunningWrangler;
 let persistDir: string;
 const clients: ReturnType<typeof sandboxClient>[] = [];
 
-const specFor = (task: string, over: Partial<WorkspaceSpec> = {}): WorkspaceSpec => ({
-  repository: "acme/hello",
-  baseSha: upstream.helloSha,
-  branch: `agent/task-${task}`,
-  deadlineAt: Date.now() + 3_600_000,
-  ...over,
-});
+/** 作業ブランチはリモートにあらかじめ用意されている（Phase 3 では TaskDO が作る）。偽 GitHub に作ってから spec を返す。 */
+const specFor = (task: string, over: Partial<WorkspaceSpec> = {}): WorkspaceSpec => {
+  const hasBranch = over.branch === undefined && (over.repository ?? "acme/hello") === "acme/hello";
+  return {
+    repository: "acme/hello",
+    baseSha: upstream.helloSha,
+    branch: `agent/task-${task}`,
+    initialSha: hasBranch ? upstream.createTaskBranch("hello", task).initialSha : upstream.helloSha,
+    deadlineAt: Date.now() + 3_600_000,
+    ...over,
+  };
+};
 
 function client(name: string) {
   const c = sandboxClient(wrangler.baseUrl, name);
@@ -41,7 +46,7 @@ beforeAll(async () => {
   persistDir = mkdtempSync(join(tmpdir(), "rovo-agent-sbx-"));
   wrangler = await startWrangler({
     configs: ["apps/agent/wrangler.jsonc"],
-    vars: { ENVIRONMENT: "test", TEST_UPSTREAM: upstream.url },
+    vars: { ENVIRONMENT: "test", TEST_UPSTREAM: upstream.url, TOKEN_ENC_KEY: E2E_TOKEN_ENC_KEY },
     readyPath: "/",
     persistDir,
   });

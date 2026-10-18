@@ -16,6 +16,9 @@ export function makeSpec(taskId: string, over: Partial<TaskSpec> = {}): TaskSpec
     userId: "user-1",
     repository: "octo/repo",
     baseSha: "base000",
+    branch: `agent/task-${taskId}`,
+    initialSha: "1".repeat(40),
+    gitCredential: { token: "ghs_unit_token", expiresAt: T0 + 60 * 60 * 1000 },
     instructions: `taskId=${taskId} を実装して`,
     acceptanceCriteria: ["テストが通る"],
     verificationCommands: [{ argv: ["npm", "test"] }],
@@ -66,6 +69,14 @@ export interface Fixture {
   revParse: string[];
   /** git status --porcelain の結果を先頭から順に使う。尽きたら clean */
   statusResults: Partial<ExecResult>[];
+  /** リモートの作業ブランチの先頭（ls-remote の応答。push が成功すると push した SHA になる）。初期値は c0ffee */
+  remote: { sha: string | undefined };
+  /** git push の結果を先頭から順に使う。尽きたら成功。成功した push はリモートの先頭を更新する */
+  pushResults: Partial<ExecResult>[];
+  /** git ls-remote の結果を先頭から順に使う。尽きたらリモートの先頭を返す */
+  lsRemoteResults: Partial<ExecResult>[];
+  /** push の呼び出し（argv） */
+  pushCalls: string[][];
 }
 
 /** AgentDO を 1 つ用意する。sandbox は fake、モデルは台本、ツールはテスト用の小さな factory。 */
@@ -78,6 +89,7 @@ export function newFixture(
     cancelWaitMs?: number;
     finalizeWaitMs?: number;
     usageReadWaitMs?: number;
+    pushRetryDelayMs?: number;
   } = {},
 ): Fixture {
   const clock = { now: T0 };
@@ -102,6 +114,10 @@ export function newFixture(
   };
   const revParse: string[] = [];
   const statusResults: Partial<ExecResult>[] = [];
+  const remote: { sha: string | undefined } = { sha: "c0ffee" };
+  const pushResults: Partial<ExecResult>[] = [];
+  const lsRemoteResults: Partial<ExecResult>[] = [];
+  const pushCalls: string[][] = [];
 
   const sandbox = new FakeSandbox(async (argv) => {
     const [a0, a1] = argv;
@@ -114,6 +130,22 @@ export function newFixture(
       }
       if (a1 === "status") return statusResults.shift() ?? { stdout: "" };
       return {};
+    }
+    if (a0 === "git" && a1 === "ls-remote") {
+      const injected = lsRemoteResults.shift();
+      if (injected) return injected;
+      const ref = argv[3] ?? "";
+      return { stdout: remote.sha === undefined ? "" : `${remote.sha}\t${ref}\n` };
+    }
+    if (a0 === "git" && a1 === "push") {
+      pushCalls.push(argv);
+      const r = pushResults.shift() ?? {};
+      if ((r.exitCode ?? 0) === 0 && !r.timedOut) {
+        // 最後の引数が `<src>:<ref>`。src が HEAD なら、検証前の HEAD（c0ffee）
+        const src = (argv[argv.length - 1] ?? "").split(":")[0] ?? "";
+        remote.sha = src === "HEAD" ? "c0ffee" : src;
+      }
+      return r;
     }
     if (a0 === "git" && a1 === "checkout") return {};
     if (a0 === "git" && a1 === "format-patch") {
@@ -176,6 +208,7 @@ export function newFixture(
     cancelWaitMs: opts.cancelWaitMs,
     finalizeWaitMs: opts.finalizeWaitMs,
     usageReadWaitMs: opts.usageReadWaitMs,
+    pushRetryDelayMs: opts.pushRetryDelayMs ?? 0,
     beforeUsageRead: () => hold(usageState),
     beforeSubmit: () => hold(submitState),
     onModelCall: () => {
@@ -202,6 +235,10 @@ export function newFixture(
     nameStatus,
     revParse,
     statusResults,
+    remote,
+    pushResults,
+    lsRemoteResults,
+    pushCalls,
     usageGate: gateOf(usageState),
     submitGate: gateOf(submitState),
     execGate: {

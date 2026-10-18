@@ -19,6 +19,7 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
     options?: Record<string, unknown>;
     path?: string;
     content?: string;
+    credential?: { token: string; expiresAt: number };
   };
   const sandbox = env.SANDBOX_DO.getByName(body.name);
   try {
@@ -32,6 +33,9 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
         return Response.json({ content: await sandbox.readFile(body.path ?? "") });
       case "write-file":
         await sandbox.writeFile(body.path ?? "", body.content ?? "");
+        return Response.json({ ok: true });
+      case "set-git-credential":
+        await sandbox.setGitCredential(body.credential as never);
         return Response.json({ ok: true });
       case "stop":
         return Response.json(await sandbox.stop());
@@ -53,7 +57,15 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
   }
 }
 
-const AGENT_ACTIONS = ["set-script", "start", "cancel", "events", "result", "debug"];
+const AGENT_ACTIONS = [
+  "set-script",
+  "start",
+  "cancel",
+  "events",
+  "result",
+  "debug",
+  "set-git-credential",
+];
 
 /** AgentDO を HTTP から操作する（台本の設定・start・cancel・イベントとresultの取得）。名前は SandboxDO と同じ task 名。 */
 async function handleAgentRoute(
@@ -67,6 +79,7 @@ async function handleAgentRoute(
     key?: string;
     script?: ScriptStep[];
     spec?: TaskSpec;
+    credential?: { token: string; expiresAt: number };
     afterSeq?: number;
     limit?: number;
   };
@@ -78,6 +91,8 @@ async function handleAgentRoute(
         return Response.json({ ok: true });
       case "start":
         return Response.json(await agent.start(body.spec as TaskSpec));
+      case "set-git-credential":
+        return Response.json(await agent.setGitCredential(body.credential as never));
       case "cancel":
         return Response.json(await agent.cancel());
       case "events":

@@ -1,3 +1,4 @@
+import type { GitCredential } from "../../src/agent/types";
 import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "../../src/sandbox-port";
 
 export type ExecHandler = (
@@ -10,6 +11,12 @@ export class FakeSandbox implements SandboxPort {
   readonly files = new Map<string, string>();
   readonly calls: { argv: string[]; options: ExecOptions }[] = [];
   readonly readySpecs: WorkspaceSpec[] = [];
+  /** setGitCredential で預けられた値（古い順） */
+  readonly credentials: GitCredential[] = [];
+  /** ensureReady と setGitCredential が呼ばれた順（"credential" / "ready"） */
+  readonly order: string[] = [];
+  /** 設定すると setGitCredential がこの例外を投げる */
+  credentialError: Error | undefined;
   stopCount = 0;
   /** stop() の戻り値を先頭から順に使う（空なら stopped:true）。後方互換の追加。 */
   stopResults: boolean[] = [];
@@ -20,7 +27,14 @@ export class FakeSandbox implements SandboxPort {
   constructor(private readonly handler: ExecHandler = () => ({})) {}
 
   async ensureReady(spec: WorkspaceSpec): Promise<void> {
+    this.order.push("ready");
     this.readySpecs.push(spec);
+  }
+
+  async setGitCredential(credential: GitCredential): Promise<void> {
+    if (this.credentialError) throw this.credentialError;
+    this.order.push("credential");
+    this.credentials.push(credential);
   }
 
   async stop(): Promise<{ stopped: boolean }> {

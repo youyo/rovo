@@ -11,4 +11,11 @@ describe("createToolContext", () => {
     expect(ctx.workspaceRoot).toBe("/workspace");
     expect(ctx.commitAuthor.name).toBe("rovo-agent");
   });
+
+  it("branch と onPush を渡せる", () => {
+    const onPush = async () => {};
+    const ctx = createToolContext("/workspace", () => 1, { branch: "agent/task-t", onPush });
+    expect(ctx.branch).toBe("agent/task-t");
+    expect(ctx.onPush).toBe(onPush);
+  });
 });

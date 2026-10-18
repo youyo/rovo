@@ -18,6 +18,7 @@ import { detectTestTampering } from "./agent/test-patterns";
 import {
   type CancelResult,
   type EventsPage,
+  type GitCredential,
   isTerminal,
   type ResultDto,
   type StartResult,
@@ -37,7 +38,7 @@ import {
 import type { ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
 import { createSandboxTools } from "./tools";
 import { createToolContext } from "./tools/context";
-import type { SandboxToolsFactory } from "./tools/types";
+import type { PushResult, SandboxToolsFactory } from "./tools/types";
 import { wrapUntrusted } from "./tools/untrusted";
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
@@ -54,6 +55,29 @@ const DEFAULT_FINALIZE_WAIT_MS = 60_000;
 const USAGE_READ_WAIT_MS = 2_000;
 const TICK_MS = 30_000;
 const OUTPUT_TAIL = 4000;
+
+/** 永続化する spec。Installation Token は含めない（SandboxDO に暗号化して預ける）。 */
+type StoredSpec = Omit<TaskSpec, "gitCredential">;
+interface BranchSync {
+  pushedSha?: string;
+  error?: string;
+}
+const MAX_SYNC_ATTEMPTS = 3;
+const SYNC_RETRY_BASE_MS = 2_000;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** コンテナから返った SHA（ls-remote の出力など）。argv に入れるので形を厳しく見る。 */
+const SHA_RE = /^[0-9a-f]{4,64}$/;
+
+function isValidCredential(c: unknown): c is GitCredential {
+  if (typeof c !== "object" || c === null) return false;
+  const { token, expiresAt } = c as Partial<GitCredential>;
+  return (
+    typeof token === "string" &&
+    /^[\x21-\x7e]{1,2048}$/.test(token) &&
+    typeof expiresAt === "number" &&
+    Number.isFinite(expiresAt)
+  );
+}
 
 /** wrangler.jsonc の ai バインディングと vars（AI_GATEWAY_ID / AGENT_MODEL）は生成型 Env に含まれる。 */
 type AgentEnv = Env;
@@ -83,6 +107,8 @@ export class AgentDO extends DurableObject<Env> {
   private sandboxStopping: Promise<{ stopped: boolean }> | undefined;
   /** 確定を求められた終端（完了・失敗）。確定のトランザクションで停止の意図と合わせて判定する。 */
   private requests: TerminalRequest[] = [];
+  /** トークンの受け渡しを 1 つずつ行うための鎖（新しい期限のものだけを採用する判定を直列にする） */
+  private credentialChain: Promise<unknown> = Promise.resolve();
 
   private readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
@@ -103,7 +129,10 @@ export class AgentDO extends DurableObject<Env> {
       // ツールは start より前に作られる。期限は永続化した deadlineAt を呼び出し時に読む。
       const sandboxTools = this.sandboxToolsFactory()(
         this.sandbox(),
-        createToolContext(WORKSPACE_ROOT, () => this.deadlineAt()),
+        createToolContext(WORKSPACE_ROOT, () => this.deadlineAt(), {
+          branch: () => this.spec()?.branch,
+          onPush: (r) => this.onCheckpointPush(r),
+        }),
       ) as ToolRegistration[];
       registry.install(createAgentExtension(sandboxTools, this.piHooks()));
       return Harness.open(
@@ -168,8 +197,8 @@ export class AgentDO extends DurableObject<Env> {
 
   // ---- 保存済みの値 ----
 
-  private spec(): TaskSpec | undefined {
-    return this.store.meta<TaskSpec>("spec");
+  private spec(): StoredSpec | undefined {
+    return this.store.meta<StoredSpec>("spec");
   }
 
   private deadlineAt(): number {
@@ -180,11 +209,12 @@ export class AgentDO extends DurableObject<Env> {
     return this.store.meta<string>("operation_id") ?? "";
   }
 
-  private workspaceSpec(spec: TaskSpec): WorkspaceSpec {
+  private workspaceSpec(spec: StoredSpec): WorkspaceSpec {
     return {
       repository: spec.repository,
       baseSha: spec.baseSha,
-      branch: `agent/task-${spec.taskId}`,
+      branch: spec.branch,
+      initialSha: spec.initialSha,
       deadlineAt: this.deadlineAt(),
     };
   }
@@ -199,15 +229,19 @@ export class AgentDO extends DurableObject<Env> {
 
   // ---- RPC ----
 
-  async start(spec: TaskSpec): Promise<StartResult> {
+  async start(input: TaskSpec): Promise<StartResult> {
     await this.lifecycle.start();
     if (this.store.meta("tombstone")) return { status: "cancelled" };
+    // Installation Token は spec の同一性（fingerprint）にも永続化にも含めない。更新されるたびに conflict になってしまうため
+    const { gitCredential, ...spec } = input;
     const canonical = JSON.stringify(spec);
     const existing = this.store.meta<string>("fingerprint");
     if (existing !== undefined && existing !== canonical) return { status: "conflict" };
     if (existing === undefined) {
-      const rejected = this.validate(spec);
+      const rejected = this.validate(input);
       if (rejected) return { status: "rejected", reason: rejected };
+      // clone（upload-pack）にもトークンが要るので、Sandbox の準備より前に預ける。失敗したら start ごと失敗にして再送を待つ
+      await this.deliverCredential(gitCredential);
       const startedAt = this.now();
       const deadlineAt = Math.min(spec.deadlineAt, startedAt + MAX_DEADLINE_MS);
       this.store.tx(() => {
@@ -219,6 +253,9 @@ export class AgentDO extends DurableObject<Env> {
         this.store.setPhase("starting");
       });
       await this.scheduleJobs(deadlineAt);
+    } else if (!isTerminal(this.store.phase()) && isValidCredential(gitCredential)) {
+      // 再送された start のトークンが新しければ預け直す（古い・同じものは何もしない）
+      await this.deliverCredential(gitCredential);
     }
     // Sandbox の準備（ensureReady）は待たない。MCP の呼び出し時間に近づくため。失敗の再試行は tick job が受け持つ
     if (!isTerminal(this.store.phase())) void this.launch().catch(() => undefined);
@@ -227,6 +264,41 @@ export class AgentDO extends DurableObject<Env> {
       phase: this.store.phase() ?? "starting",
       alreadyAccepted: existing !== undefined,
     };
+  }
+
+  /**
+   * Installation Token の更新（TaskDO が期限の前に発行して push する）。冪等で、新しい expiresAt のものだけ採用する。
+   * 預け先が無い（未開始）・終端・失敗のときは ok:false（TaskDO が成功するまで再送する）。
+   */
+  async setGitCredential(c: GitCredential): Promise<{ ok: boolean }> {
+    await this.lifecycle.start();
+    if (!isValidCredential(c)) return { ok: false };
+    if (
+      this.store.meta("tombstone") ||
+      this.store.meta("fingerprint") === undefined ||
+      isTerminal(this.store.phase())
+    ) {
+      return { ok: false };
+    }
+    try {
+      await this.deliverCredential(c);
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  /** SandboxDO にトークンを預ける（直列化。保存済みより新しい期限のものだけ。失敗は投げ直し、期限は進めない）。 */
+  private deliverCredential(c: GitCredential): Promise<void> {
+    const run = async () => {
+      const current = this.store.meta<number>("credential_expires_at");
+      if (current !== undefined && c.expiresAt <= current) return;
+      await this.sandbox().setGitCredential(c);
+      this.store.setMeta("credential_expires_at", c.expiresAt);
+    };
+    const p = this.credentialChain.then(run);
+    this.credentialChain = p.catch(() => {});
+    return p;
   }
 
   async cancel(): Promise<CancelResult> {
@@ -280,6 +352,7 @@ export class AgentDO extends DurableObject<Env> {
       patchTooLarge?: boolean;
       diffstat?: string;
       hasPatch?: boolean;
+      pushedSha?: string;
     }>("result");
     const verification = this.store.meta<VerificationSummary>("verification") ?? {
       commands: this.spec()?.verificationCommands ?? [],
@@ -296,6 +369,7 @@ export class AgentDO extends DurableObject<Env> {
       ...(r?.hasPatch ? { patch: this.store.loadPatch() } : {}),
       ...(r?.diffstat !== undefined ? { diffstat: r.diffstat } : {}),
       patchTooLarge: r?.patchTooLarge ?? false,
+      ...(r?.pushedSha !== undefined ? { pushedSha: r.pushedSha } : {}),
       usage: this.store.usage(),
     };
   }
@@ -318,6 +392,15 @@ export class AgentDO extends DurableObject<Env> {
     if (!spec.taskId || !spec.repository || !spec.baseSha || !spec.instructions) {
       return "invalid_spec";
     }
+    // push は agent/task-<taskId> だけが許される（OutboundGateway が同じ名前で判定する）。ずれていれば始めない
+    if (spec.branch !== `agent/task-${spec.taskId}`) return "invalid_spec: branch";
+    if (
+      typeof spec.initialSha !== "string" ||
+      !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(spec.initialSha)
+    ) {
+      return "invalid_spec: initialSha";
+    }
+    if (!isValidCredential(spec.gitCredential)) return "invalid_spec: gitCredential";
     if (!(spec.budgetUsd > 0) || !Number.isFinite(spec.deadlineAt)) return "invalid_spec";
     const gw = aiGatewayRejection(this.env as AgentEnv);
     if (gw) return gw;
@@ -546,7 +629,16 @@ export class AgentDO extends DurableObject<Env> {
         warnings.push("検証コマンドが指定されていないため未検証です（モデルの申告のみ）");
       }
       if (keepPatch && patch !== undefined) this.store.savePatch(patch);
+      // 完了のときだけ、作業ブランチの同期の結果を結果に反映する
+      const sync =
+        decision.phase === "completed" ? this.store.meta<BranchSync>("branch_sync") : undefined;
+      if (sync && !sync.pushedSha) {
+        warnings.push(
+          `push_failed: 作業ブランチを検証済みの SHA に揃えられませんでした（${sync.error ?? "unknown"}）。patch は結果に残っています`,
+        );
+      }
       this.store.setMeta("result", {
+        ...(sync?.pushedSha ? { pushedSha: sync.pushedSha } : {}),
         reason: decision.reason,
         summary: this.store.meta<string>("last_summary") ?? "",
         warnings,
@@ -598,7 +690,7 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   private async capturePatch(
-    spec: TaskSpec,
+    spec: StoredSpec,
     sha?: string,
   ): Promise<{
     patch?: string;
@@ -785,7 +877,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "no_push",
-        text: "Do not push to any remote and do not create pull requests. Credentials are not available. Delivery happens through the committed patch only.",
+        text: "Every git_commit is pushed to the task branch automatically; do not run git push yourself, do not change git remotes or credentials, and do not create pull requests. Credentials are not available inside the sandbox.",
       },
     ];
   }
@@ -869,6 +961,8 @@ export class AgentDO extends DurableObject<Env> {
           attempts: 0,
           commitSha: sha,
         } satisfies VerificationSummary);
+        await this.syncBranch(sha);
+        if (this.stopIntents().length > 0) return ended;
         return await settle(
           { phase: "completed", sha },
           {
@@ -953,6 +1047,8 @@ export class AgentDO extends DurableObject<Env> {
         }
       });
       if (passed) {
+        await this.syncBranch(sha);
+        if (this.stopIntents().length > 0) return ended;
         return await settle(
           { phase: "completed", sha },
           {
@@ -972,7 +1068,7 @@ export class AgentDO extends DurableObject<Env> {
       return back(
         `Verification failed (attempt ${attempts} of ${MAX_VERIFY_ATTEMPTS}). Command: ${failedResult?.argv.join(" ")} exit=${failedResult?.exitCode}${failedResult?.timedOut ? " (timed out)" : ""}\n${failedResult?.output ?? ""}\n${
           destroyed
-            ? "The sandbox container was destroyed because the command timed out: ALL uncommitted changes and local commits in the workspace were lost; your next tool call re-clones the base commit. Redo your work.\n"
+            ? "The sandbox container was destroyed because the command timed out: ALL uncommitted changes and local commits that were not pushed were lost; your next tool call re-clones the workspace from the last pushed checkpoint (the task branch on the remote). Redo your work.\n"
             : ""
         }Fix the problem, commit, and call report_completion again.`,
       );
@@ -986,6 +1082,85 @@ export class AgentDO extends DurableObject<Env> {
         ),
       );
     }
+  }
+
+  // ---- push ----
+
+  /** git_commit のたびの push の結果（best-effort）をイベントにする。 */
+  private async onCheckpointPush(r: PushResult): Promise<void> {
+    if (r.ok) this.emit("pushed", { sha: r.sha });
+    else this.emit("push_failed", { sha: r.sha, message: tail(r.error, 500) });
+  }
+
+  /**
+   * 完了時に、作業ブランチを検証済みの SHA に揃える（モデルが bash で履歴を書き換えていても、信頼できる側で正す）。
+   * ls-remote で現在の先頭を読み → --force-with-lease で push → ls-remote で一致を確かめる。失敗は有限回（3 回）再試行する。
+   * 結果は branch_sync に残し、確定のときに warnings / pushedSha に反映する。失敗しても完了は妨げない。
+   */
+  private async syncBranch(sha: string): Promise<void> {
+    const spec = this.spec();
+    if (!spec) return;
+    const ref = `refs/heads/${spec.branch}`;
+    const sb = this.sandbox();
+    const exec = (argv: string[], timeoutMs: number) =>
+      sb.exec(argv, { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes: 32 * 1024 });
+    const ok = (r: ExecResult) => r.exitCode === 0 && !r.timedOut;
+    const why = (r: ExecResult) =>
+      r.timedOut ? "timed out" : `exit ${r.exitCode}: ${tail((r.stderr || r.stdout).trim(), 300)}`;
+    /** ls-remote の出力から ref の先頭を読む。無ければ ""。SHA の形でなければ例外 */
+    const readRemote = async (): Promise<string> => {
+      const ls = await exec(["git", "ls-remote", "origin", ref], 60_000);
+      if (!ok(ls)) throw new Error(`git ls-remote ${why(ls)}`);
+      const line = ls.stdout
+        .split("\n")
+        .map((l) => l.split("\t"))
+        .find((p) => p[1] === ref);
+      if (!line) return "";
+      const head = line[0] ?? "";
+      if (!SHA_RE.test(head)) throw new Error("git ls-remote returned an unexpected value");
+      return head;
+    };
+
+    let lastError = "unknown";
+    if (!SHA_RE.test(sha)) {
+      this.finishSync({ error: "the verified commit is not a valid sha" }, sha);
+      return;
+    }
+    for (let attempt = 1; attempt <= MAX_SYNC_ATTEMPTS; attempt++) {
+      if (this.stopIntents().length > 0 || isTerminal(this.store.phase())) return;
+      try {
+        const remote = await readRemote();
+        const push = await exec(
+          ["git", "push", `--force-with-lease=${ref}:${remote}`, "origin", `${sha}:${ref}`],
+          120_000,
+        );
+        if (!ok(push)) throw new Error(`git push ${why(push)}`);
+        const after = await readRemote();
+        if (after !== sha)
+          throw new Error(`the branch head is ${after || "(missing)"} after push, expected ${sha}`);
+        this.finishSync({ pushedSha: sha }, sha);
+        return;
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+      }
+      if (attempt < MAX_SYNC_ATTEMPTS) {
+        await sleep(this.overrides().pushRetryDelayMs ?? SYNC_RETRY_BASE_MS * attempt);
+      }
+    }
+    this.finishSync({ error: lastError }, sha);
+  }
+
+  private finishSync(result: BranchSync, sha: string): void {
+    this.store.tx(() => {
+      this.store.setMeta("branch_sync", result);
+      if (result.pushedSha) this.emit("pushed", { sha, final: true });
+      else
+        this.emit("push_failed", {
+          sha,
+          message: tail(result.error ?? "unknown", 500),
+          final: true,
+        });
+    });
   }
 
   private resolveCwd(cwd: string | undefined): string | undefined {

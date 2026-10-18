@@ -50,6 +50,12 @@ export function validateWorkspaceSpec(spec: WorkspaceSpec): WorkspaceSpec {
     throw new Error("invalid baseSha: expected a full commit sha");
   }
   if (
+    typeof spec.initialSha !== "string" ||
+    !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(spec.initialSha)
+  ) {
+    throw new Error("invalid initialSha: expected a full commit sha");
+  }
+  if (
     typeof spec.branch !== "string" ||
     spec.branch.length > 200 ||
     !/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(spec.branch) ||

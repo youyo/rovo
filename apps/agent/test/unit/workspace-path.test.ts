@@ -72,6 +72,7 @@ describe("validateWorkspaceSpec", () => {
     repository: "acme/hello",
     baseSha: "a".repeat(40),
     branch: "agent/task-abc123",
+    initialSha: "b".repeat(40),
     deadlineAt: Date.now() + 1000,
   };
   it("正しい spec を通す", () => {
@@ -81,6 +82,9 @@ describe("validateWorkspaceSpec", () => {
     ["baseSha", "main"],
     ["baseSha", "--upload-pack=x"],
     ["baseSha", "abc"],
+    ["initialSha", "main"],
+    ["initialSha", "--upload-pack=x"],
+    ["initialSha", ""],
     ["branch", "-evil"],
     ["branch", "a b"],
     ["branch", "a..b"],

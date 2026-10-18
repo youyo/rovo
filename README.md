@@ -25,9 +25,19 @@ GitHub App のユーザー認可でログインし、`/mcp` から次の 4 つ�
 
 - `apps/gateway`: Cloudflare Worker。Hono でルーティングし、`@cloudflare/workers-oauth-provider` で全体を包む。
   - `/mcp`（要 OAuth）: `agents/mcp/server` の `createMcpHandler` + `@modelcontextprotocol/server`。リクエストごとに McpServer を作り、ユーザー情報は共有しない
-  - `/authorize` → GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
+  - `/authorize`（同意画面）→ GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
   - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の予約。GitHub のトークンは DO の外へ返さない
   - `TaskDO`（タスクごと）: 状態とイベント
+
+## 同意画面（confused deputy 対策）
+
+DCR（動的クライアント登録）が有効なため、`/authorize` は GitHub へ行く前に必ず同意画面を表示する。悪意あるクライアントが利用者に認可を開始させても、利用者が承認しない限り MCP のアクセストークンは渡らない。
+
+- 表示: クライアント名（`client_name`。自己申告で未検証）、**`redirect_uri` のホスト**（目立たせて表示）とフル URI、要求 scope、「このアプリにあなたの rovo タスクの作成・操作を許可しますか」。送り先のホストに見覚えがなければ拒否する。
+- 承認すると GitHub のログインへ進む。拒否すると client の `redirect_uri` へ `error=access_denied` で戻る。
+- CSRF 対策: フォームの値は 1 回限りの handle で、`__Host-` の Cookie（Secure・HttpOnly・SameSite=Lax）と突き合わせる。別のサイトや別のブラウザからの送信、再送は 400 になる。
+- クリックジャッキング対策として `X-Frame-Options: DENY` と CSP（`default-src 'none'`・`frame-ancestors 'none'` など）を付ける。`form-action` は付けない（Chrome が POST 後の redirect 先にも適用し、承認・拒否後の redirect を壊すため）。
+- 承認の記憶はしない。ログインのたびに同意画面が出る。
 
 ## 開発手順
 

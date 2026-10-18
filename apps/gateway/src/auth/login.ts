@@ -1,6 +1,7 @@
 import { AuthorizationError, authorizationErrorRedirect } from "@cloudflare/workers-oauth-provider";
 import type { Hono } from "hono";
 import { GitHubClient, GitHubError, resolveGitHubBaseUrls } from "../github";
+import { CONSENT_CSP, renderConsentPage } from "./consent";
 import type { AuthProps } from "./props";
 
 type AppEnv = { Bindings: Env };
@@ -50,6 +51,13 @@ function misconfigured(): Response {
   return new Response("login is not available", { status: 500, headers: NO_STORE });
 }
 
+function badRequest(): Response {
+  return new Response(
+    "This authorization request is invalid, has expired, or was already used. Please start again from the app.",
+    { status: 400, headers: { ...NO_STORE, "content-type": "text/plain; charset=utf-8" } },
+  );
+}
+
 function redirect(location: string, headers: Headers = new Headers()): Response {
   headers.set("location", location);
   headers.set("cache-control", "no-store");
@@ -72,18 +80,64 @@ function authorizationFailure(error: AuthorizationError): Response {
  * OAuthProvider の beginUpstream / finishUpstream に任せる。
  */
 export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
+  // 同意画面（confused deputy 対策）。DCR が有効なので、悪意あるクライアントが /authorize を
+  // 開始できる。承認されるまで beginUpstream（= GitHub へ行く state の発行）はしない。
   app.get("/authorize", async (c) => {
     const config = loadConfig(c.env, deps);
     if (!config) return misconfigured();
     try {
       const authRequest = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
-      const { state, headers } = await c.env.OAUTH_PROVIDER.beginUpstream(authRequest);
+      const details = await c.env.OAUTH_PROVIDER.describeConsent(authRequest);
+      const { handle, headers } = await c.env.OAUTH_PROVIDER.beginConsent(authRequest);
+      // beginConsent の headers: 紐付け Cookie（__Host-・HttpOnly・SameSite=Lax）と no-store
+      headers.set("content-type", "text/html; charset=utf-8");
+      headers.set("content-security-policy", CONSENT_CSP);
+      headers.set("x-frame-options", "DENY");
+      headers.set("cache-control", "no-store");
+      headers.set("referrer-policy", "no-referrer");
+      headers.set("x-content-type-options", "nosniff");
+      return new Response(renderConsentPage(details, handle), { status: 200, headers });
+    } catch (error) {
+      if (error instanceof AuthorizationError) return authorizationFailure(error);
+      throw error;
+    }
+  });
+
+  app.post("/authorize", async (c) => {
+    const config = loadConfig(c.env, deps);
+    if (!config) return misconfigured();
+
+    let form: FormData;
+    try {
+      form = await c.req.raw.formData();
+    } catch {
+      return badRequest();
+    }
+    const handles = form.getAll("handle");
+    const handle = handles[0];
+    if (handles.length !== 1 || typeof handle !== "string" || handle === "") return badRequest();
+    // "approve" 以外はすべて拒否として扱う（曖昧な値で承認しない）
+    const approved = form.get("decision") === "approve";
+
+    try {
+      if (!approved) {
+        // redirect 先は保存済み（parseAuthRequest が検証済み）の request から作られる。フォームの値は使わない
+        const denied = await c.env.OAUTH_PROVIDER.denyConsent(c.req.raw, handle);
+        denied.headers.set("cache-control", "no-store");
+        return new Response(null, { status: 302, headers: denied.headers });
+      }
+      // handle の一致・Cookie 紐付け・1 回限りはここで検証され、消費される。scope はフォームから受け取らない
+      const consent = await c.env.OAUTH_PROVIDER.approveConsent(c.req.raw, handle);
+      const { state, headers } = await c.env.OAUTH_PROVIDER.beginUpstream(consent.request, {
+        headers: consent.headers,
+      });
       return redirect(
         config.client.authorizeUrl({ redirectUri: config.redirectUri, state }),
         headers,
       );
     } catch (error) {
-      if (error instanceof AuthorizationError) return authorizationFailure(error);
+      // 同意が期限切れ・使用済み・別のブラウザ・Cookie 無し。画面に返す（redirect しない）
+      if (error instanceof AuthorizationError) return badRequest();
       throw error;
     }
   });

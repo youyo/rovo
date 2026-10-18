@@ -17,7 +17,7 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
 - ルーティングは **Hono**（ユーザー指定）。
 - 認証は `@cloudflare/workers-oauth-provider`。
   - Worker 全体を `OAuthProvider` で包み、保護された `apiHandler` に Hono アプリを置く。
-  - `defaultHandler` も Hono で書き、`/authorize` と `/callback` を扱う。
+  - `defaultHandler` も Hono で書き、`/authorize`（同意画面）と `/callback` を扱う。
 - MCP は Hono のルート上で動かす。
   - 第一候補は Cloudflare 公式 v2 の `createMcpHandler`（`agents/mcp/server`）+ `@modelcontextprotocol/server` を Hono に組み込む形。
     - スパイクでは、OAuthProvider → Hono → handler の経路で ExecutionContext とリクエスト単位の props を渡せることも確かめる。
@@ -65,6 +65,19 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - GitHub API の障害時は拒否する（fail-closed）。
   - 401 は `reauth_required`、403 / 404 は `forbidden`、429 / 5xx は `upstream_unavailable` に分けて返す。
   - team API は子 team への所属も含めて判定するので、子 team のメンバーも許可される（仕様として明記する）。
+- **同意画面（confused deputy 対策）**
+  - DCR が有効なため、悪意あるクライアントが `/authorize` を開始し、GitHub 側が自動承認すると、利用者の MCP アクセストークンが攻撃者の `redirect_uri` に渡りうる。これを防ぐため、`/authorize` は GitHub へ行く前に必ず同意画面を表示する。
+  - 流れ（`@cloudflare/workers-oauth-provider` 1.2.3 の `parseAuthRequest` → `describeConsent` → `beginConsent` → `approveConsent` / `denyConsent` → `beginUpstream`）
+    1. `GET /authorize`: request を検証し、同意画面（HTML）を返す。この時点では state を発行せず、GitHub にも行かない。
+    2. `POST /authorize`（フォーム: `handle`, `decision`）
+       - `decision=approve` だけを承認として扱う。それ以外の値はすべて拒否。
+       - 承認: `approveConsent` で同意を消費し、その request で `beginUpstream` を呼んで GitHub へ redirect する。
+       - 拒否: `denyConsent` が返す、client の `redirect_uri` への `error=access_denied`（state・iss 付き）へ redirect する。redirect 先は保存済みの request から作られ、フォームの値は使わない。
+  - 表示内容: クライアント名（DCR の `client_name`。無ければ `client_id`。自己申告で未検証である旨も表示）、`redirect_uri` のホスト（目立たせる）とフル URI、要求 scope、「このアプリにあなたの rovo タスクの作成・操作を許可しますか」。loopback 宛ては警告を出す。client 由来の文字列は全てエスケープする。
+  - CSRF 対策: フォームの `handle` はワンタイムの値（10 分・1 回限り）で、`__Host-oauth-consent-*` Cookie（Secure・HttpOnly・SameSite=Lax）と突き合わせる。Cookie が無い・別のブラウザ・別の画面の Cookie・でたらめな handle・使用済み・期限切れの POST は 400 で拒否し、GitHub へは行かない。承認時の scope はフォームから受け取らない（client が要求した範囲のまま）。
+  - ヘッダ: `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'`、`X-Frame-Options: DENY`、`Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`。
+    - CSP に `form-action 'self'` は付けない。Chrome は `form-action` を POST 後の redirect 先にも適用するため、承認後の GitHub への redirect と、拒否時の client の `redirect_uri` への redirect が壊れる。フォームの送信先は相対パス固定で、`base-uri 'none'` により `<base>` での差し替えも封じている。
+  - 承認の記憶（`approveConsent` の `remember`）は Phase 1 では使わない。毎回、同意画面を出す。
 - state は1回限り有効で、期限付き（10分）にする。開始したブラウザとの紐付けは、署名付き Cookie で行う。
 - 設定値（env）: `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET`（secret）、`ALLOWED_ORG`、`ALLOWED_TEAM`。
 - GitHub の URL（`GITHUB_OAUTH_BASE` / `GITHUB_API_BASE`）は E2E でだけ差し替えられるようにする。
@@ -223,15 +236,25 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - timeout が負数・小数
   - idempotency_key の長さと文字種
 
+#### 同意画面（Unit）
+
+- `GET /authorize` が同意画面を返し、承認前に `beginUpstream` を呼ばない・GitHub へ redirect しない
+- client 名・redirect_uri のホストとフル URI・scope が表示され、client 由来の文字列がエスケープされる
+- CSP / `X-Frame-Options: DENY` / `no-store` が付く
+- 承認で GitHub へ redirect、拒否で `access_denied`、`approve` 以外の `decision` は拒否扱い
+- handle の欠落・重複、form 以外の Content-Type は 400
+- 実際の OAuthProvider で、Cookie 無し・別画面の Cookie・でたらめな handle・使用済み handle の POST が 400
+
 ### E2E
 
 - `wrangler dev` で実際の Worker を起動する。偽の GitHub サーバー（Node の小さな HTTP サーバー）も起動し、`ENVIRONMENT=test` で `GITHUB_*_BASE` をそこへ向ける。
-- OAuth のフローは本物を通す。OAuthProvider の DCR → `/authorize` → 偽 GitHub → `/callback` → トークン交換（PKCE）。
+- OAuth のフローは本物を通す。OAuthProvider の DCR → `/authorize`（同意画面の承認 POST）→ 偽 GitHub → `/callback` → トークン交換（PKCE）。
 - MCP SDK の Client（Streamable HTTP）で4つのツールを呼ぶ。
   - start → status → wait（タイムアウト）→ cancel → wait（cancelled イベントが即座に返る）
   - 同じ idempotency_key での再試行で、同じ task_id が返る
   - 同時実行の制限
   - 別ユーザーからの操作が not_found になる
+  - 同意画面が出て、承認するまで偽 GitHub に何も届かない。拒否で `access_denied`。Cookie 無し・handle 不一致・再使用の承認 POST は拒否される
   - team に所属していないユーザーはログインできない
   - state の不一致・再使用は拒否される
   - 公開リポジトリだが App が未導入なら、task_start は forbidden

@@ -1,9 +1,92 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { addMember, admin, baseUrl, bodyOf, login, newUser, ORG, TEAM } from "./helpers";
-import { approveAtGitHub, beginLogin, callCallback } from "./oauth-client";
+import {
+  approveAtGitHub,
+  beginLogin,
+  callCallback,
+  openConsent,
+  submitConsent,
+} from "./oauth-client";
 
 beforeEach(async () => {
   await admin.reset();
+});
+
+describe("同意画面（confused deputy 対策）", () => {
+  it("/authorize は同意画面を出し、承認するまで GitHub へ行かない（偽 GitHub に何も届かない）", async () => {
+    const before = (await admin.requests()).length;
+    const consent = await openConsent(baseUrl);
+    expect(consent.response.headers.get("location")).toBeNull();
+    expect(consent.response.headers.get("x-frame-options")).toBe("DENY");
+    expect(consent.response.headers.get("content-security-policy")).toContain(
+      "frame-ancestors 'none'",
+    );
+    expect(consent.html).toContain("rovo-e2e"); // DCR の client_name
+    expect(consent.html).toContain("<strong>127.0.0.1</strong>"); // redirect_uri のホスト
+    expect(consent.html).toContain("http://127.0.0.1:9/callback");
+    expect((await admin.requests()).length).toBe(before);
+  });
+
+  it("拒否すると client の redirect_uri へ access_denied。ログインも GitHub への接続も起きない", async () => {
+    const before = (await admin.requests()).length;
+    const consent = await openConsent(baseUrl);
+    const res = await submitConsent(
+      baseUrl,
+      { handle: consent.handle, decision: "deny" },
+      consent.cookie,
+    );
+    expect(res.status).toBe(302);
+    const back = new URL(res.headers.get("location") ?? "");
+    expect(back.origin + back.pathname).toBe("http://127.0.0.1:9/callback");
+    expect(back.searchParams.get("error")).toBe("access_denied");
+    expect(back.searchParams.get("code")).toBeNull();
+    expect((await admin.requests()).length).toBe(before);
+    // 拒否で消費された handle では承認できない
+    const again = await submitConsent(
+      baseUrl,
+      { handle: consent.handle, decision: "approve" },
+      consent.cookie,
+    );
+    expect(again.status).toBe(400);
+    expect(again.headers.get("location")).toBeNull();
+  });
+
+  it("CSRF: 開始したブラウザの Cookie が無い承認 POST は拒否される", async () => {
+    const consent = await openConsent(baseUrl);
+    const res = await submitConsent(baseUrl, { handle: consent.handle, decision: "approve" }, "");
+    expect(res.status).toBe(400);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("CSRF: handle が一致しない・別の同意画面の Cookie の承認 POST は拒否される", async () => {
+    const a = await openConsent(baseUrl);
+    const b = await openConsent(baseUrl);
+    for (const [handle, cookie] of [
+      ["forged-handle", a.cookie],
+      [a.handle, b.cookie],
+    ] as const) {
+      const res = await submitConsent(baseUrl, { handle, decision: "approve" }, cookie);
+      expect(res.status).toBe(400);
+      expect(res.headers.get("location")).toBeNull();
+    }
+  });
+
+  it("CSRF: 承認済みの handle は再使用できない", async () => {
+    const consent = await openConsent(baseUrl);
+    const first = await submitConsent(
+      baseUrl,
+      { handle: consent.handle, decision: "approve" },
+      consent.cookie,
+    );
+    expect(first.status).toBe(302);
+    const replay = await submitConsent(
+      baseUrl,
+      { handle: consent.handle, decision: "approve" },
+      consent.cookie,
+    );
+    expect(replay.status).toBe(400);
+    expect(replay.headers.get("location")).toBeNull();
+  });
 });
 
 describe("ログイン（本物のフロー: DCR -> /authorize -> 偽 GitHub -> /callback -> token(PKCE)）", () => {

@@ -73,14 +73,28 @@ function location(res: Response, what: string): string {
 export interface LoginFlow {
   provider: MemoryOAuthProvider;
   transport: StreamableHTTPClientTransport;
-  /** /authorize が返した GitHub の authorize URL（state を含む） */
+  /** 承認後に /authorize が返した GitHub の authorize URL（state を含む） */
   githubAuthorizeUrl: string;
-  /** /authorize が発行した、開始ブラウザに紐付く Cookie */
+  /** 承認後に発行された、開始ブラウザに紐付く Cookie（/callback に必要） */
   cookie: string;
 }
 
-/** 未認証で /mcp に接続して 401 を受け、DCR して /authorize を叩くところまで進める。 */
-export async function beginLogin(baseUrl: string): Promise<LoginFlow> {
+/** 同意画面まで進んだ状態（まだ承認していない）。 */
+export interface ConsentStep {
+  provider: MemoryOAuthProvider;
+  transport: StreamableHTTPClientTransport;
+  /** 同意画面の HTML */
+  html: string;
+  /** 同意フォームの handle（ワンタイムの CSRF トークン） */
+  handle: string;
+  /** 同意画面と一緒に発行された、開始ブラウザに紐付く Cookie */
+  cookie: string;
+  /** 同意画面のレスポンス */
+  response: Response;
+}
+
+/** 未認証で /mcp に接続して 401 を受け、DCR して /authorize の同意画面を開くところまで進める。 */
+export async function openConsent(baseUrl: string): Promise<ConsentStep> {
   const provider = new MemoryOAuthProvider();
   const url = new URL(`${baseUrl}/mcp`);
   const transport = new StreamableHTTPClientTransport(url, { authProvider: provider });
@@ -95,12 +109,44 @@ export async function beginLogin(baseUrl: string): Promise<LoginFlow> {
   );
   if (!provider.authorizationUrl) throw new Error("認可 URL が得られなかった");
 
-  // ブラウザの代わりに /authorize を叩く。GitHub への redirect と Cookie が返る
-  const res = await fetch(provider.authorizationUrl, { redirect: "manual" });
+  // ブラウザの代わりに /authorize を開く。同意画面（HTML）と Cookie が返る。GitHub へはまだ行かない
+  const response = await fetch(provider.authorizationUrl, { redirect: "manual" });
+  if (response.status !== 200) throw new Error(`同意画面が出なかった: ${response.status}`);
+  const html = await response.text();
+  const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1];
+  if (!handle) throw new Error("同意画面に handle が無い");
+  return { provider, transport, html, handle, cookie: cookieHeader(response), response };
+}
+
+/** 同意フォームを POST する（ブラウザのフォーム送信の代わり）。 */
+export async function submitConsent(
+  baseUrl: string,
+  fields: { handle: string; decision: string },
+  cookie: string,
+): Promise<Response> {
+  return fetch(`${baseUrl}/authorize`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      ...(cookie ? { cookie } : {}),
+    },
+    body: new URLSearchParams(fields).toString(),
+  });
+}
+
+/** 同意画面を承認して GitHub の authorize URL に進む。 */
+export async function beginLogin(baseUrl: string): Promise<LoginFlow> {
+  const consent = await openConsent(baseUrl);
+  const res = await submitConsent(
+    baseUrl,
+    { handle: consent.handle, decision: "approve" },
+    consent.cookie,
+  );
   return {
-    provider,
-    transport,
-    githubAuthorizeUrl: location(res, "/authorize"),
+    provider: consent.provider,
+    transport: consent.transport,
+    githubAuthorizeUrl: location(res, "承認 POST"),
     cookie: cookieHeader(res),
   };
 }

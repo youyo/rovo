@@ -111,8 +111,10 @@ export function newFixture(
     pushRetryDelayMs?: number;
     /** web_search / web_fetch の RPC の fake */
     web?: WebPort;
-    /** タスクごとの web の回数の上限（既定は 50 / 100） */
-    webLimits?: { search?: number; fetch?: number };
+    /** タスクごとの web の回数の上限（既定は 50 / 100 / 20） */
+    webLimits?: { search?: number; fetch?: number; browse?: number };
+    /** web_browse を有効にするか（既定は無効。WEB_BROWSE_ENABLED の代わり） */
+    webBrowse?: boolean;
   } = {},
 ): Fixture {
   const clock = { now: T0 };
@@ -240,6 +242,7 @@ export function newFixture(
     pushRetryDelayMs: opts.pushRetryDelayMs ?? 0,
     web: opts.web,
     webLimits: opts.webLimits,
+    webBrowseEnabled: opts.webBrowse,
     beforeUsageRead: () => hold(usageState),
     beforeSubmit: () => hold(submitState),
     beforeAskParent: () => hold(askState),

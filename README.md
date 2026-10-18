@@ -35,9 +35,10 @@ GitHub App のユーザー認可でログインし、`/mcp` から次の 5 つ�
 - `safety.verdict`: `allow`（問題なし）/ `caution`（不審な表現があるので慎重に）/ `block`（注入などを検出。本文は `null`）/ `unknown`（評価できなかった。本文は `null`）。検索は結果全体で 1 つの判定で、`block` / `unknown` のときは description を落とし、title も `(title withheld)` にして URL だけを返す。
 - 回数の上限
   - 親: ユーザーごとに UTC の 1 日あたり search 200 回・fetch 500 回（`UserDO` が数える）。超えると `quota_exceeded`（`retry_after_seconds` は翌日 0 時 UTC まで）。env `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` で変える。
+  - web_browse は別枠: 親は 1 日 50 回（`WEB_BROWSE_DAILY_LIMIT`）、子はタスクごとに 20 回（`WEB_BROWSE_LIMIT_PER_TASK`）。
   - 子: タスクごとに search 50 回・fetch 100 回（`AgentDO` が数える）。超えるとツールのエラー。`apps/agent` の env `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` で変える。回数は `usage` イベント（`web_search` / `web_fetch` / `web_browse`）と `task_result` の `usage.web` に出る。
   - 回数は呼び出しの前に数える（失敗しても戻さない）。web 自体には回数の上限を持たない（AI Gateway のレート制限とアカウントの上限に頼る）。
-- `web_browse`（JS を描画するページ）は未実装（M2）。
+- `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効なら親の tools/list にも子の Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、実機での確認（`docs/specs/phase5.md` の「有効化前のゲート」）が必要。**
 
 ## 構成
 
@@ -126,7 +127,8 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `AGENT_MODEL`（変数） | 子エージェントのモデル（既定 `anthropic/claude-sonnet-5-5`。単価表にあるものだけ） |
 | `ENVIRONMENT`（変数） | `production`（既定）。E2E だけ `test` |
 
-| `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK`（変数） | 子の `web_search` / `web_fetch` のタスクごとの回数の上限（既定 50 / 100）。0 以上の整数のみ。不正な値は既定に戻る |
+| `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` / `WEB_BROWSE_LIMIT_PER_TASK`（変数） | 子の `web_search` / `web_fetch` / `web_browse` のタスクごとの回数の上限（既定 50 / 100 / 20）。0 以上の整数のみ。不正な値は既定に戻る |
+| `WEB_BROWSE_ENABLED`（変数） | 子に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
 | `WEB`（service binding） | `apps/web` の `WebResearch`（`props: {caller: "child"}`）。デプロイは web → agent → gateway の順 |
 
 ローカルは `apps/agent/.dev.vars.example` を `apps/agent/.dev.vars` にコピーして埋める（`mise run dev:all`）。
@@ -147,7 +149,8 @@ secret は無い（GitHub のトークンも Anthropic のキーも持たせな�
 | 名前 | 内容 |
 |---|---|
 | `WEB`（service binding） | `apps/web` の `WebResearch`（`props: {caller: "parent"}`） |
-| `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT`（変数） | 親の `web_search` / `web_fetch` の、ユーザーごと・UTC の 1 日あたりの上限（既定 200 / 500） |
+| `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` / `WEB_BROWSE_DAILY_LIMIT`（変数） | 親の `web_search` / `web_fetch` / `web_browse` の、ユーザーごと・UTC の 1 日あたりの上限（既定 200 / 500 / 50） |
+| `WEB_BROWSE_ENABLED`（変数） | 親の MCP に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
 
 **デプロイの順序**: web → agent → gateway。service binding は、参照される側の Worker（`rovo-web`）が先に存在している必要がある。agent は gateway から `script_name` で参照される。
 

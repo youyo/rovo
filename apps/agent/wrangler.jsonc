@@ -44,8 +44,12 @@
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
     // ENVIRONMENT=test のときだけ有効。許可した外向き通信の転送先（偽サーバー）。空なら実ネットワークへ出る。
     "TEST_UPSTREAM": "",
-    // 子の web_search / web_fetch の回数の上限（タスクごと）
+    // 子の web_search / web_fetch / web_browse の回数の上限（タスクごと）
     "WEB_SEARCH_LIMIT_PER_TASK": "50",
-    "WEB_FETCH_LIMIT_PER_TASK": "100"
+    "WEB_FETCH_LIMIT_PER_TASK": "100",
+    "WEB_BROWSE_LIMIT_PER_TASK": "20",
+    // web_browse を子のツールとして出すか（"true" のときだけ。既定は無効で、ツールもシステムプロンプトの記述も出さない）。
+    // 有効にする前に、phase5.md の「有効化前のゲート」を満たすこと。apps/web と apps/gateway の同名の var も合わせる。
+    "WEB_BROWSE_ENABLED": "false"
   }
 }

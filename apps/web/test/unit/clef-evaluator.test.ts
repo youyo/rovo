@@ -4,6 +4,7 @@ import {
   CLEF_QUESTIONS,
   createClefEvaluator,
   estimateTokens,
+  MAX_EVAL_CHUNKS,
   SENTINEL_QUESTION_ID,
   splitIntoChunks,
 } from "../../src/safety/clef";
@@ -212,5 +213,25 @@ describe("createClefEvaluator", () => {
     const r = await createClefEvaluator({ ai, gatewayId: "" }).evaluate("hello", CTX);
     expect(run).not.toHaveBeenCalled();
     expect(r.complete).toBe(false);
+  });
+});
+
+describe("チャンク数の上限", () => {
+  it("上限を超える本文は AI.run を呼ばずに未完了（too_many_chunks）にする", async () => {
+    const { ai, run } = fakeAi(() => answers(0.02));
+    const ev = createClefEvaluator({ ai, gatewayId: "gw-1" });
+    // 3 バイト文字で 10,000 バイト / チャンクなので、上限を超えるチャンク数になる長さ
+    const text = "あ".repeat(Math.ceil(((MAX_EVAL_CHUNKS + 2) * CHUNK_MAX_TOKENS) / 3));
+    expect(splitIntoChunks(text).length).toBeGreaterThan(MAX_EVAL_CHUNKS);
+    const r = await ev.evaluate(text, CTX);
+    expect(r.complete).toBe(false);
+    expect(r.failure).toBe("too_many_chunks");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("上限は、返す本文の最大（50,000 文字）を日本語（3 バイト / 文字）で評価しても足りる", () => {
+    const worst = "あ".repeat(50_000 + 20);
+    expect(splitIntoChunks(worst).length).toBeLessThanOrEqual(MAX_EVAL_CHUNKS);
+    expect(MAX_EVAL_CHUNKS).toBe(20);
   });
 });

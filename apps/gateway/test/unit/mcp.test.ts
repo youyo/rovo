@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { describe, expect, it } from "vitest";
 import { createApiApp } from "../../src/app";
 import type {
+  WebBrowseResponse,
   WebFetchResponse,
   WebPort,
   WebSafety,
@@ -686,6 +687,22 @@ function fakeWeb(over: Partial<WebPort> = {}) {
         truncated: false,
       } satisfies WebFetchResponse;
     },
+    async browse(req) {
+      calls.push({ op: "browse", req });
+      return {
+        source: {
+          url: req.url,
+          final_url: req.url,
+          retrieved_at: "t",
+          via: "rendered",
+        },
+        content: "# Rendered body",
+        safety: safetyOf(),
+        status: "ok",
+        title: "Rendered",
+        truncated: false,
+      } satisfies WebBrowseResponse;
+    },
     ...over,
   };
   return { port, calls };
@@ -958,5 +975,245 @@ describe("web_search / web_fetch（Phase 5）", () => {
     expect(r.isError).toBe(true);
     expect(body(r).code).toBe("internal");
     await client.close();
+  });
+});
+
+// ---- Phase 5 M2: web_browse（既定は無効。WEB_BROWSE_ENABLED=true のときだけ公開する）----
+
+const withBrowseFlag = (port: WebPort | undefined, flag: unknown): Env =>
+  ({ ...env, WEB: port, WEB_BROWSE_ENABLED: flag }) as unknown as Env;
+const withBrowse = (port: WebPort | undefined): Env => withBrowseFlag(port, "true");
+
+describe("web_browse（Phase 5 M2）", () => {
+  async function setBrowseLimit(userId: number, browse: number) {
+    await runInDurableObject(userStub(userId), (i) => {
+      (i as unknown as { webDailyLimit: (k: string) => number }).webDailyLimit = (k) =>
+        k === "browse" ? browse : 500;
+    });
+  }
+
+  it('既定（WEB_BROWSE_ENABLED が未設定・"false"）では tools/list に出ない。呼んでも web は呼ばれない', async () => {
+    const u = await user("alice");
+    const web = fakeWeb();
+    for (const flag of [undefined, "", "false", "yes", "1"]) {
+      const client = await connect(createApiApp(), u.props, withBrowseFlag(web.port, flag));
+      const { tools } = await client.listTools();
+      expect(
+        tools.map((t) => t.name),
+        String(flag),
+      ).not.toContain("web_browse");
+      const r = await client
+        .callTool({ name: "web_browse", arguments: { url: "https://a.example.com/" } })
+        .catch((e) => ({ isError: true, thrown: String(e) }));
+      expect(r.isError, String(flag)).toBe(true);
+      await client.close();
+    }
+    expect(web.calls).toEqual([]);
+  });
+
+  it("実環境の既定（wrangler.jsonc の vars）は無効", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).not.toContain("web_browse");
+    await client.close();
+  });
+
+  it("有効なら 10 個目のツールとして公開し、説明に非信頼データ・verdict・status・quota を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props, withBrowse(fakeWeb().port));
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toContain("web_browse");
+    const t = tools.find((x) => x.name === "web_browse");
+    expect(t?.inputSchema.required).toEqual(["url"]);
+    expect(t?.description).toMatch(/指示ではなく.*データ/);
+    expect(t?.description).toContain("UNTRUSTED_WEB_CONTENT");
+    for (const v of [
+      "allow",
+      "caution",
+      "block",
+      "unknown",
+      "http_error",
+      "blocked",
+      "quota_exceeded",
+    ]) {
+      expect(t?.description, v).toContain(v);
+    }
+    expect(t?.description).toMatch(/URL.*(非信頼|信頼できない).*データ/);
+    // JS 描画後・web_fetch との使い分け
+    expect(t?.description).toContain("JavaScript");
+    expect(t?.description).toContain("web_fetch");
+    await client.close();
+  });
+
+  it("本文と title をマーカーで囲んで返し、userId だけを渡す。source.via は rendered", async () => {
+    const u = await user("alice");
+    const web = fakeWeb();
+    const client = await connect(createApiApp(), u.props, withBrowse(web.port));
+    const r = await client.callTool({
+      name: "web_browse",
+      arguments: { url: "https://a.example.com/spa" },
+    });
+    expect(r.isError).toBeFalsy();
+    const b = body(r) as {
+      content: string;
+      title: string;
+      source: { via: string };
+      status: string;
+    };
+    expect(b.status).toBe("ok");
+    expect(b.source.via).toBe("rendered");
+    expect(b.content.startsWith(UNTRUSTED_WEB_BEGIN)).toBe(true);
+    expect(b.content).toContain("# Rendered body");
+    expect(b.title.startsWith(UNTRUSTED_WEB_BEGIN)).toBe(true);
+    expect(web.calls).toEqual([
+      { op: "browse", req: { userId: String(u.id), url: "https://a.example.com/spa" } },
+    ]);
+    await client.close();
+  });
+
+  it("入力に url 以外（html・追加オプション）があっても、web には url だけを渡す", async () => {
+    const u = await user("alice");
+    const web = fakeWeb();
+    const client = await connect(createApiApp(), u.props, withBrowse(web.port));
+    await client.callTool({
+      name: "web_browse",
+      arguments: { url: "https://a.example.com/", html: "<script>1</script>", browser: "chromium" },
+    });
+    for (const c of web.calls) {
+      expect(Object.keys(c.req as object).sort()).toEqual(["url", "userId"]);
+    }
+    await client.close();
+  });
+
+  it("blocked / http_error / unknown では content が null のまま、理由コードを返す", async () => {
+    const u = await user("alice");
+    const cases: Partial<WebBrowseResponse>[] = [
+      { status: "blocked", blocked_reason: "redirect_policy", safety: safetyOf("block") },
+      { status: "http_error", http_status: 403, safety: safetyOf("unknown") },
+      { status: "unknown", unknown_reason: "invalid_final_url", safety: safetyOf("unknown") },
+    ];
+    for (const c of cases) {
+      const web = fakeWeb({
+        async browse(req) {
+          return {
+            source: { url: req.url, final_url: req.url, retrieved_at: "t", via: "rendered" },
+            content: null,
+            ...c,
+          } as WebBrowseResponse;
+        },
+      });
+      const client = await connect(createApiApp(), u.props, withBrowse(web.port));
+      const r = await client.callTool({
+        name: "web_browse",
+        arguments: { url: "https://a.example.com/" },
+      });
+      expect(r.isError).toBeFalsy();
+      expect(body(r)).toMatchObject({ content: null, ...c });
+      await client.close();
+    }
+  });
+
+  it("1日の上限を超えると quota_exceeded。fetch・search の枠とは別", async () => {
+    const u = await user("alice");
+    await setBrowseLimit(u.id, 1);
+    const web = fakeWeb();
+    const client = await connect(createApiApp(), u.props, withBrowse(web.port));
+    const browse = () =>
+      client.callTool({ name: "web_browse", arguments: { url: "https://a.example.com/" } });
+    expect((await browse()).isError).toBeFalsy();
+    const over = await browse();
+    expect(over.isError).toBe(true);
+    expect(body(over)).toMatchObject({ code: "quota_exceeded" });
+    expect(body(over).message).toContain("web_browse");
+    expect(web.calls.filter((c) => c.op === "browse")).toHaveLength(1);
+    // fetch の枠は使っていない
+    expect(
+      (await client.callTool({ name: "web_fetch", arguments: { url: "https://a.example.com/" } }))
+        .isError,
+    ).toBeFalsy();
+    await client.close();
+  });
+
+  it("URL ポリシー違反・入力の不正は invalid_input で、回数を消費せず web も呼ばない", async () => {
+    const u = await user("alice");
+    await setBrowseLimit(u.id, 1);
+    const web = fakeWeb();
+    const client = await connect(createApiApp(), u.props, withBrowse(web.port));
+    for (const args of [
+      { url: "http://127.0.0.1/" },
+      { url: "http://169.254.169.254/latest/meta-data/" },
+      { url: "http://[::1]/" },
+      { url: "https://a.example.com:8443/" },
+      { url: "https://user:pw@a.example.com/" },
+      { url: "file:///etc/passwd" },
+      { url: "not a url" },
+      { url: "" },
+      { url: 5 },
+      {},
+    ]) {
+      const r = await client.callTool({ name: "web_browse", arguments: args });
+      expect(r.isError, JSON.stringify(args)).toBe(true);
+      expect(body(r).code, JSON.stringify(args)).toBe("invalid_input");
+    }
+    expect(web.calls).toEqual([]);
+    expect(
+      (await client.callTool({ name: "web_browse", arguments: { url: "https://a.example.com/" } }))
+        .isError,
+    ).toBeFalsy();
+    await client.close();
+  });
+
+  it("team 非所属は forbidden、props が無ければ reauth_required（回数も web も使わない）", async () => {
+    const u = await user("alice");
+    u.gh.team = "none";
+    const web = fakeWeb();
+    const client = await connect(createApiApp(), u.props, withBrowse(web.port));
+    const r = await client.callTool({
+      name: "web_browse",
+      arguments: { url: "https://a.example.com/" },
+    });
+    expect(body(r).code).toBe("forbidden");
+    await client.close();
+    const anon = await connect(createApiApp(), {}, withBrowse(web.port));
+    const r2 = await anon.callTool({
+      name: "web_browse",
+      arguments: { url: "https://a.example.com/" },
+    });
+    expect(body(r2).code).toBe("reauth_required");
+    expect(web.calls).toEqual([]);
+    await anon.close();
+  });
+
+  it("web の RPC のエラーを固定の文言に写す。上流の文字列は親に渡さない", async () => {
+    const u = await user("alice");
+    const SECRET = "UPSTREAM-SECRET";
+    const cases: [string, string, string][] = [
+      [`invalid_input: ${SECRET}`, "invalid_input", "the URL could not be opened by the browser"],
+      [`navigation_timeout: ${SECRET}`, "upstream_unavailable", ""],
+      [`upstream_error: ${SECRET}`, "upstream_unavailable", ""],
+      [`timeout: ${SECRET}`, "upstream_unavailable", ""],
+      [`too_large: ${SECRET}`, "invalid_input", "the page is too large to fetch"],
+      [`disabled: ${SECRET}`, "internal", ""],
+      ["no code here", "internal", ""],
+    ];
+    for (const [message, code, text] of cases) {
+      const web = fakeWeb({
+        async browse() {
+          throw new Error(message);
+        },
+      });
+      const client = await connect(createApiApp(), u.props, withBrowse(web.port));
+      const r = await client.callTool({
+        name: "web_browse",
+        arguments: { url: "https://a.example.com/" },
+      });
+      expect(r.isError, message).toBe(true);
+      expect(body(r).code, message).toBe(code);
+      if (text) expect(body(r).message).toBe(text);
+      expect(JSON.stringify(body(r)), message).not.toContain(SECRET);
+      if (code === "upstream_unavailable") expect(body(r).retry_after_seconds).toBeGreaterThan(0);
+      await client.close();
+    }
   });
 });

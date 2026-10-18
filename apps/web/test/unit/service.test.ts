@@ -418,10 +418,10 @@ describe("WebResearchService", () => {
     ).rejects.toMatchObject({ code: "invalid_request" });
   });
 
-  it("browse は M2 で実装する。型は用意し、not_implemented を返す", async () => {
+  it("browse は既定で無効（WEB_BROWSE_ENABLED が未設定）。disabled を返す", async () => {
     const svc = createWebResearchService(makeEnv());
     await expect(svc.browse({ ...CTX, url: "https://example.com/" })).rejects.toMatchObject({
-      code: "not_implemented",
+      code: "disabled",
     });
   });
 });
@@ -471,10 +471,10 @@ describe("WebResearch エントリポイント（RPC）", () => {
     },
   );
 
-  it("browse は not_implemented、設定の誤りは misconfigured。code は message の先頭に入る", async () => {
+  it("browse は既定で disabled、設定の誤りは misconfigured。code は message の先頭に入る", async () => {
     const entry = new WebResearch(ctxWith({ caller: "child" }), makeEnv({ AI_GATEWAY_ID: "" }));
     await expect(entry.browse({ ...args, url: "https://example.com/" })).rejects.toThrowError(
-      /^not_implemented:/,
+      /^disabled:/,
     );
     await expect(entry.search({ ...args, query: "q" })).rejects.toThrowError(/^misconfigured:/);
   });

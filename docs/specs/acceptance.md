@@ -166,6 +166,27 @@ Phase 5（Web Research Service: `web_search` / `web_fetch`）のコードが揃�
 - [ ] 回数の上限: 親は 1 日あたり search 200 回・fetch 500 回で `quota_exceeded`（実運用の値で確かめるのは大変なので、env で小さくして確かめてもよい）。子はタスクごとに search 50 回・fetch 100 回でツールのエラー
 - [ ] private に解決される名前（例: `127.0.0.1.nip.io`、`169.254.169.254.nip.io`）を `web_fetch` に渡しても、内部のサービスには到達せず、本文が返らない（`blocked` かエラー）。URL の検査は名前だけを見るため通ってしまうが、Workers の `fetch` が private / loopback / link-local へ接続できないことに頼っている。実機で確かめ、結果を記録する。到達できてしまった場合は Phase 5 の完了としない
 
+### web_browse（有効化前のゲート）
+
+web_browse は既定で無効（`WEB_BROWSE_ENABLED="false"`）。以下の「有効化前のゲート」をすべて確かめ、残存リスクの受け入れを記録するまで、本番で有効にしない。保証は「禁止先・判定不能の取得結果を返さない」までで、禁止先への通信の発生は防げない（`docs/specs/phase5.md` の Kitesurf スパイク節）。
+
+有効化前のゲート:
+
+- [ ] Kitesurf 実機で、iframe・popup・meta refresh・JS 遷移（location の書き換え）・service worker・data: / blob:・A→禁止 B→A の各経路について、redirectChain / finalUrl に現れるか、現れないとき本文のホストと finalUrl がずれるか、内部 IP への通信が発生するかを確かめ、結果を記録する
+- [ ] 許可外へのトップレベル遷移・リダイレクトで blocked（redirect_policy）になり、本文が返らない
+- [ ] 169.254.169.254 / localhost / 10.0.0.1 へのリダイレクトで、エッジの 1003 の本文が返らず http_error になる
+- [ ] DNS rebinding（短 TTL で内部 IP に切り替わる名前）での挙動を確かめ、記録する
+- [ ] 以上を踏まえ、残存リスクを受け入れるかの判断を記録する（受け入れられなければ有効にしない）
+
+そのほかの確認:
+
+- [ ] bot チャレンジのページが blocked（bot_challenge）、WAF のブロックページが http_error になる
+- [ ] script タグ・フロントマター経由の注入サンプルで、評価器が block を返し本文・title が返らない
+- [ ] 数百 KB のページの所要時間、2 MiB の上限での too_large、並列呼び出し、レート制限の挙動
+- [ ] Kitesurf が名乗る UA と、robots 照合のトークン rovo-web の食い違いを確認し、方針を決める
+- [ ] 下流で remote: true を設定した BROWSER が、実際に使う wrangler の版と compatibility_date で動く
+- [ ] 有効化は web → agent → gateway の順に WEB_BROWSE_ENABLED を "true" にし、tools/list に web_browse が現れる
+
 ## 12. Clef の応答の形・usage.input_tokens・sentinel の効き方
 
 Clef-flash はドキュメントに複数の形があり、実機で確かめていない前提がある（`apps/web/src/safety/clef.ts`）。

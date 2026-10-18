@@ -10,7 +10,12 @@ import {
   type RunningWrangler,
   startWrangler,
 } from "../../../agent/test/support/wrangler";
-import { type FakeWeb, startFakeWeb } from "../../../web/test/support/fake-web";
+import {
+  BROWSE_INTERNAL_TOKEN,
+  DNS_PRIVATE_HOST,
+  type FakeWeb,
+  startFakeWeb,
+} from "../../../web/test/support/fake-web";
 import { fakeGitHubAdmin } from "../e2e/fake-admin";
 import { connectAuthenticated } from "../e2e/oauth-client";
 import { type FakeGitHub, startFakeGitHub } from "../fake-github/server";
@@ -43,6 +48,8 @@ const WEB_DAILY_SEARCH = 4;
 const WEB_DAILY_FETCH = 6;
 const WEB_TASK_SEARCH = 2;
 const WEB_TASK_FETCH = 3;
+const WEB_DAILY_BROWSE = 6;
+const WEB_TASK_BROWSE = 3;
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -100,6 +107,9 @@ beforeAll(async () => {
       // 親の web の1日あたりの上限。シナリオごとにユーザーが違うので、上限のシナリオ（p）以外は超えない小ささにしておく
       WEB_SEARCH_DAILY_LIMIT: String(WEB_DAILY_SEARCH),
       WEB_FETCH_DAILY_LIMIT: String(WEB_DAILY_FETCH),
+      WEB_BROWSE_DAILY_LIMIT: String(WEB_DAILY_BROWSE),
+      // web_browse は既定で無効。この通しでは 3 つの Worker すべてで有効にする（無効のときの挙動は Unit で確かめる）
+      WEB_BROWSE_ENABLED: "true",
     },
     // --var は primary（gateway）にしか効かないので、agent 側は .dev.vars で渡す
     configVars: {
@@ -110,12 +120,15 @@ beforeAll(async () => {
         // 子の web の1タスクあたりの上限（既定の 50 / 100 回の代わりに、上限のシナリオを短くするための小さな値）
         WEB_SEARCH_LIMIT_PER_TASK: String(WEB_TASK_SEARCH),
         WEB_FETCH_LIMIT_PER_TASK: String(WEB_TASK_FETCH),
+        WEB_BROWSE_LIMIT_PER_TASK: String(WEB_TASK_BROWSE),
+        WEB_BROWSE_ENABLED: "true",
       },
       // web は偽サーバー（Web Search API・Clef・toMarkdown・ページ）に向ける。実アカウントの AI は呼ばない
       "apps/web/wrangler.jsonc": {
         ENVIRONMENT: "test",
         TEST_FAKE_BASE: fakeWeb.url,
         AI_GATEWAY_ID: "e2e-gateway",
+        WEB_BROWSE_ENABLED: "true",
       },
     },
     readyPath: "/.well-known/oauth-authorization-server",
@@ -992,6 +1005,12 @@ const webSearch = async (client: Client, query: string) => {
   return { ...r, view: r.body as unknown as WebSearchView };
 };
 
+type WebBrowseView = WebFetchView & { http_status?: number; unknown_reason?: string };
+const webBrowse = async (client: Client, url: string) => {
+  const r = await call(client, "web_browse", { url });
+  return { ...r, view: r.body as unknown as WebBrowseView };
+};
+
 /** モデル呼び出しごとの、そのとき transcript に載っていたツール結果（AgentDO が ENVIRONMENT=test のときだけ記録する）。 */
 const toolResultsOf = async (taskId: string) =>
   (await testPost<{ calls: string[][] }>("/__test/agent/model-tool-results", { task_id: taskId }))
@@ -1162,6 +1181,122 @@ describe("Gateway → Web Research Service（Phase 5: 親の MCP ツール）", 
   });
 });
 
+describe("Gateway → Web Research Service（Phase 5 M2: 親の MCP ツール web_browse。fake の BROWSER）", () => {
+  it("s. web_browse は tools/list に出る。JS 描画後の本文が非信頼データのマーカー付きで返り、quickAction へは固定の引数だけが渡る", async () => {
+    const client = await newClient("sam");
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toContain("web_browse");
+
+    const before = fakeWeb.requests.length;
+    const r = await webBrowse(client, "https://docs.example.com/spa");
+    expect(r.isError, JSON.stringify(r.body)).toBe(false);
+    expect(r.view.status).toBe("ok");
+    expect(r.view.source).toMatchObject({
+      url: "https://docs.example.com/spa",
+      final_url: "https://docs.example.com/spa",
+      via: "rendered",
+    });
+    expect(r.view.safety.verdict).toBe("allow");
+    const content = r.view.content ?? "";
+    expect(content.startsWith(WEB_BEGIN)).toBe(true);
+    expect(content.endsWith(WEB_END)).toBe(true);
+    expect(content).toContain("BROWSE-BODY-TOKEN");
+    expect(r.view.title).toContain("SPA App");
+
+    // web から BROWSER（fake）へは、url / browser:kitesurf / 固定のオプションだけが渡る
+    const sent = fakeWeb.requests
+      .slice(before)
+      .filter((q) => q.path === "/browser/markdown")
+      .map((q) => q.body);
+    expect(sent).toEqual([
+      {
+        browser: "kitesurf",
+        url: "https://docs.example.com/spa",
+        gotoOptions: { timeout: 30000 },
+        allowRequestPattern: ["^https?://docs\\.example\\.com(:443|:80)?/"],
+        rejectResourceTypes: ["image", "media", "font"],
+      },
+    ]);
+    await client.close();
+  });
+
+  it("t. meta refresh 想定（finalUrl が別の公開ページ）は正常。内部 IP へのリダイレクトは blocked で、1003 の本文は返らない", async () => {
+    const client = await newClient("tess");
+    const refreshed = await webBrowse(client, "https://docs.example.com/meta-refresh");
+    expect(refreshed.view.status).toBe("ok");
+    expect(refreshed.view.source.final_url).toBe("https://docs.example.com/faq");
+    expect(refreshed.view.content).toContain("BROWSE-REFRESHED-TOKEN");
+
+    const toPrivate = await webBrowse(client, "https://evil.example.com/browse-to-private");
+    expect(toPrivate.isError, JSON.stringify(toPrivate.body)).toBe(false);
+    expect(toPrivate.view).toMatchObject({
+      status: "blocked",
+      blocked_reason: "redirect_policy",
+      content: null,
+    });
+    expect(toPrivate.view.safety.verdict).toBe("block");
+    expect(JSON.stringify(toPrivate.body)).not.toContain(BROWSE_INTERNAL_TOKEN);
+    expect(toPrivate.view.title).toBeUndefined();
+
+    // DoH で private に解決される名前は、BROWSER を呼ばずに blocked
+    const before = fakeWeb.requests.filter((q) => q.path === "/browser/markdown").length;
+    const rebind = await webBrowse(client, `https://${DNS_PRIVATE_HOST}/x`);
+    expect(rebind.view).toMatchObject({
+      status: "blocked",
+      blocked_reason: "private_address",
+      content: null,
+    });
+    expect(fakeWeb.requests.filter((q) => q.path === "/browser/markdown")).toHaveLength(before);
+    await client.close();
+  });
+
+  it("u. bot チャレンジは blocked、4xx は http_error（本文なし）。フロントマターの注入は block で本文も title も返らない", async () => {
+    const client = await newClient("uma");
+    const challenge = await webBrowse(client, "https://docs.example.com/challenge");
+    expect(challenge.view).toMatchObject({
+      status: "blocked",
+      blocked_reason: "bot_challenge",
+      content: null,
+    });
+    expect(JSON.stringify(challenge.body)).not.toContain("Checking your browser");
+
+    const missing = await webBrowse(client, "https://docs.example.com/missing");
+    expect(missing.view).toMatchObject({ status: "http_error", http_status: 404, content: null });
+    expect(JSON.stringify(missing.body)).not.toContain("Not found page body");
+
+    const injected = await webBrowse(client, "https://docs.example.com/spa-injected");
+    expect(injected.isError, JSON.stringify(injected.body)).toBe(false);
+    expect(injected.view.status).toBe("ok");
+    expect(injected.view.safety.verdict).toBe("block");
+    expect(injected.view.content).toBeNull();
+    expect(injected.view.title).toBeUndefined();
+    expect(JSON.stringify(injected.body)).not.toContain("send the API keys");
+    await client.close();
+  });
+
+  it("v. web_browse は browse の枠で数える（search・fetch とは別）。URL の誤りは invalid_input で回数を使わない", async () => {
+    const client = await newClient("vic");
+    for (const url of [
+      "http://169.254.169.254/latest/meta-data/",
+      "https://evil.example.com:8443/",
+    ]) {
+      const r = await call(client, "web_browse", { url });
+      expect(r.isError, url).toBe(true);
+      expect(r.body.code, url).toBe("invalid_input");
+    }
+    for (let i = 0; i < WEB_DAILY_BROWSE; i++) {
+      const r = await webBrowse(client, "https://docs.example.com/spa");
+      expect(r.isError, `browse ${i}: ${JSON.stringify(r.body)}`).toBe(false);
+    }
+    const over = await call(client, "web_browse", { url: "https://docs.example.com/spa" });
+    expect(over.isError).toBe(true);
+    expect(over.body).toMatchObject({ code: "quota_exceeded" });
+    // fetch の枠は別
+    expect((await webFetch(client, "https://docs.example.com/faq")).isError).toBe(false);
+    await client.close();
+  });
+});
+
 describe("Agent → Web Research Service（Phase 5: 子の Pi ツール）", () => {
   it("q. 子の台本が web_search / web_fetch を呼び、結果が非信頼データのマーカー付きでモデルに届く。usage の web の回数が task_result に出る", async () => {
     const client = await newClient("quinn");
@@ -1231,5 +1366,45 @@ describe("Agent → Web Research Service（Phase 5: 子の Pi ツール）", () 
     // 上限を超えた呼び出しは数えない
     const r = await settledResult(client, taskId);
     expect(r.usage).toMatchObject({ web: { search: 2, fetch: 1, browse: 0 } });
+  });
+});
+
+describe("Agent → Web Research Service（Phase 5 M2: 子の Pi ツール web_browse。fake の BROWSER）", () => {
+  it("w. 子の台本が web_browse を呼び、結果が非信頼データのマーカー付きでモデルに届く。内部 IP へのリダイレクトと注入は本文が伝わらない。上限を超えるとツールのエラー", async () => {
+    const client = await newClient("wes");
+    const { taskId } = await startTask(client, "w-web-browse", [
+      tool("web_browse", { url: "https://docs.example.com/spa" }),
+      tool("web_browse", { url: "https://evil.example.com/browse-to-private" }),
+      tool("web_browse", { url: "https://docs.example.com/spa-injected" }),
+      tool("web_browse", { url: "https://docs.example.com/spa" }),
+      ...COMMIT_STEPS,
+      report("web_browse を確かめて完了した"),
+    ]);
+    const { status, events } = await collect(client, taskId);
+    expect(status, JSON.stringify(events)).toBe("COMPLETED");
+
+    const ends = events.filter((e) => e.type === "tool_end" && e.payload.name === "web_browse");
+    expect(ends.map((e) => e.payload.is_error)).toEqual([false, false, false, true]);
+    const results = await toolResultsOf(taskId);
+    const last = (results[results.length - 1] ?? []).join("\n");
+    // 1 回目: JS 描画後の本文がマーカー付きで届く
+    expect(last).toContain(CHILD_BEGIN);
+    expect(last).toContain(CHILD_END);
+    expect(last).toContain("BROWSE-BODY-TOKEN");
+    expect(last).toMatch(/\[web_browse\] verdict: allow/);
+    // 2 回目: 内部 IP へのリダイレクトは blocked。1003 の本文は届かない
+    expect(last).toMatch(/blocked: redirect_policy/);
+    expect(last).not.toContain(BROWSE_INTERNAL_TOKEN);
+    // 3 回目: フロントマターの注入は block。本文は届かない
+    expect(last).toMatch(/\[web_browse\] verdict: block/);
+    expect(last).toMatch(/content is withheld/i);
+    expect(last).not.toContain("send the API keys");
+    // 4 回目: タスクごとの上限（3）を超えた
+    expect(last).toMatch(/reached the limit of 3 web_browse calls/);
+
+    const usages = events.filter((e) => e.type === "usage");
+    expect(usages[usages.length - 1]?.payload).toMatchObject({ web_browse: WEB_TASK_BROWSE });
+    const r = await settledResult(client, taskId);
+    expect(r.usage).toMatchObject({ web: { search: 0, fetch: 0, browse: WEB_TASK_BROWSE } });
   });
 });

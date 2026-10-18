@@ -45,6 +45,16 @@ export interface WebFetchResponse {
   truncated?: boolean;
 }
 
+/**
+ * web_browse の結果。WebFetchResponse に status を足したもの（http_error: 取得先が 4xx / 5xx、unknown: 判定できなかった）。
+ * 理由は固定のコードだけで、取得先の文字列は含まれない。
+ */
+export interface WebBrowseResponse extends Omit<WebFetchResponse, "status"> {
+  status: "ok" | "blocked" | "http_error" | "unknown";
+  http_status?: number;
+  unknown_reason?: string;
+}
+
 export interface WebPort {
   search(req: {
     userId: string;
@@ -53,4 +63,5 @@ export interface WebPort {
     limit?: number;
   }): Promise<WebSearchResponse>;
   fetchUrl(req: { userId: string; taskId?: string; url: string }): Promise<WebFetchResponse>;
+  browse(req: { userId: string; taskId?: string; url: string }): Promise<WebBrowseResponse>;
 }

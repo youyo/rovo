@@ -34,8 +34,12 @@
     // ログインを許可する GitHub org と team の slug。どちらかが空ならログインは失敗する。
     "ALLOWED_ORG": "",
     "ALLOWED_TEAM": "",
-    // 親（MCP の web_search / web_fetch）の回数の上限。ユーザーごとに UTC の1日あたり
+    // 親（MCP の web_search / web_fetch / web_browse）の回数の上限。ユーザーごとに UTC の1日あたり
     "WEB_SEARCH_DAILY_LIMIT": "200",
-    "WEB_FETCH_DAILY_LIMIT": "500"
+    "WEB_FETCH_DAILY_LIMIT": "500",
+    "WEB_BROWSE_DAILY_LIMIT": "50",
+    // web_browse を MCP のツールとして公開するか（"true" のときだけ。既定は無効で、tools/list にも出ない）。
+    // 有効にする前に、phase5.md の「有効化前のゲート」を満たすこと。apps/web と apps/agent の同名の var も合わせる。
+    "WEB_BROWSE_ENABLED": "false"
   }
 }

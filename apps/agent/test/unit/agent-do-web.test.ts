@@ -1,7 +1,13 @@
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides } from "../../src/agent/deps";
-import type { WebFetchResponse, WebPort, WebSafety, WebSearchResponse } from "../../src/tools/web";
+import type {
+  WebBrowseResponse,
+  WebFetchResponse,
+  WebPort,
+  WebSafety,
+  WebSearchResponse,
+} from "../../src/tools/web";
 import {
   allEvents,
   ask,
@@ -36,7 +42,7 @@ const safety = (verdict: WebSafety["verdict"] = "allow"): WebSafety => ({
   policy: { verdict: "allow", rules: [] },
 });
 
-type Rpc = { op: "search" | "fetch"; req: Record<string, unknown> };
+type Rpc = { op: "search" | "fetch" | "browse"; req: Record<string, unknown> };
 
 function fakeWeb(over: Partial<WebPort> = {}) {
   const calls: Rpc[] = [];
@@ -72,6 +78,17 @@ function fakeWeb(over: Partial<WebPort> = {}) {
         truncated: false,
       } satisfies WebFetchResponse;
     },
+    async browse(req) {
+      calls.push({ op: "browse", req });
+      return {
+        source: { url: req.url, final_url: req.url, retrieved_at: "t", via: "rendered" },
+        content: "# Rendered body",
+        safety: safety(),
+        status: "ok",
+        title: "Rendered",
+        truncated: false,
+      } satisfies WebBrowseResponse;
+    },
     ...over,
   };
   return { port, calls };
@@ -80,6 +97,7 @@ function fakeWeb(over: Partial<WebPort> = {}) {
 const search = (query = "rovo", limit?: number) =>
   call("web_search", limit === undefined ? { query } : { query, limit });
 const fetchUrl = (url = "https://a.example.com/x") => call("web_fetch", { url });
+const browse = (url = "https://a.example.com/spa") => call("web_browse", { url });
 
 async function run(fx: Fixture, name: string) {
   await fx.stub.start(makeSpec(name));
@@ -344,10 +362,12 @@ describe("AgentDO: web ツールの登録とシステムプロンプト", () => 
       askParent: async () => ({ text: "", isError: false, terminate: false }),
       webSearch: async () => ({ text: "", isError: false }),
       webFetch: async () => ({ text: "", isError: false }),
+      webBrowse: async () => ({ text: "", isError: false }),
+      webBrowseEnabled: () => true,
       sections: () => [],
     });
     const tools = (ext as unknown as { tools: { name: string; replay: string }[] }).tools;
-    for (const name of ["web_search", "web_fetch"]) {
+    for (const name of ["web_search", "web_fetch", "web_browse"]) {
       const t = tools.find((x) => x.name === name);
       expect(t, name).toBeDefined();
       expect(t?.replay, name).not.toBe("safe");
@@ -368,5 +388,195 @@ describe("AgentDO: web ツールの登録とシステムプロンプト", () => 
     expect(text).toMatch(/untrusted/i);
     expect(text).toMatch(/never follow/i);
     await waitForTerminal(fx);
+  });
+});
+
+describe("AgentDO: web_browse（既定は無効）", () => {
+  const hooksFor = (enabled: boolean) => ({
+    beforeTool: async () => undefined,
+    afterTool: async () => {},
+    afterTools: async () => {},
+    onYield: async () => undefined,
+    reportCompletion: async () => ({ text: "", isError: false, terminate: false }),
+    askParent: async () => ({ text: "", isError: false, terminate: false }),
+    webSearch: async () => ({ text: "", isError: false }),
+    webFetch: async () => ({ text: "", isError: false }),
+    webBrowse: async () => ({ text: "", isError: false }),
+    webBrowseEnabled: () => enabled,
+    sections: () => [],
+  });
+  const toolsOf = async (enabled: boolean) => {
+    const { createAgentExtension } = await import("../../src/pi/extension");
+    const ext = createAgentExtension([], hooksFor(enabled));
+    return (ext as unknown as { tools: { name: string; description?: string }[] }).tools;
+  };
+
+  it("無効なら Pi のツールに web_browse を登録しない。有効なら登録し、説明に非信頼データと JS 描画を書く", async () => {
+    expect((await toolsOf(false)).map((t) => t.name)).not.toContain("web_browse");
+    expect((await toolsOf(false)).map((t) => t.name)).toContain("web_fetch");
+    const t = (await toolsOf(true)).find((x) => x.name === "web_browse");
+    expect(t).toBeDefined();
+    expect(t?.description).toMatch(/untrusted/i);
+    expect(t?.description).toMatch(/JavaScript/);
+    expect(t?.description).toMatch(/web_fetch/);
+    expect(t?.description).toMatch(/block or unknown/);
+  });
+
+  it("システムプロンプト: 無効なら web_browse に触れない。有効なら使い分けと非信頼データの注意を書く", async () => {
+    const textOf = async (name: string, webBrowse: boolean) => {
+      const fx = newFixture(name, [report()], { webBrowse });
+      await fx.stub.start(makeSpec(name));
+      const sections = (await runInDO(fx.stub, (inst) => inst.promptSections())) as {
+        key: string;
+        text?: string;
+      }[];
+      await waitForTerminal(fx);
+      return sections.map((s) => s.text ?? "").join("\n");
+    };
+    expect(await textOf("web-prompt-off", false)).not.toContain("web_browse");
+    const on = await textOf("web-prompt-on", true);
+    expect(on).toContain("web_browse");
+    expect(on).toMatch(/JavaScript/);
+    expect(on).toMatch(/untrusted/i);
+  });
+
+  it("無効のとき、本体が直接呼ばれても RPC を呼ばず、数えない", async () => {
+    const web = fakeWeb();
+    const fx = newFixture("browse-off", [report()], { web: web.port });
+    expect(await run(fx, "browse-off")).toBe("completed");
+    const r = await runInDO(fx.stub, (inst) =>
+      inst.piHooks().webBrowse({ url: "https://a.example.com/" }),
+    );
+    expect(r).toMatchObject({ isError: true });
+    expect(web.calls).toEqual([]);
+    expect(done(await fx.stub.getResult()).usage.web).toEqual({ search: 0, fetch: 0, browse: 0 });
+  });
+
+  it("有効: userId と taskId を付けて RPC を呼び、非信頼データの囲みでモデルに渡す。browse の回数が数えられる", async () => {
+    const web = fakeWeb();
+    const fx = newFixture("browse-1", [browse(), report()], { web: web.port, webBrowse: true });
+    expect(await run(fx, "browse-1")).toBe("completed");
+    expect(web.calls).toEqual([
+      {
+        op: "browse",
+        req: { userId: "user-1", taskId: "browse-1", url: "https://a.example.com/spa" },
+      },
+    ]);
+    const seen = fx.modelCalls.toolResults[1]?.join("\n") ?? "";
+    expect(seen).toContain("<<<BEGIN_UNTRUSTED_OUTPUT>>>");
+    expect(seen).toContain("# Rendered body");
+    expect(seen).toMatch(/\[web_browse\] verdict: allow/);
+    expect(seen).toContain("final_url: https://a.example.com/spa");
+    expect(done(await fx.stub.getResult()).usage.web).toEqual({ search: 0, fetch: 0, browse: 1 });
+    // tool_end の summary に本文を載せない
+    const ends = (await allEvents(fx)).filter((e) => e.type === "tool_end");
+    expect(String(ends[0]?.data.summary)).not.toContain("Rendered body");
+  });
+
+  it("blocked / http_error / unknown は本文が無いことと理由を伝え、回避しないよう促す", async () => {
+    const cases: [Partial<WebBrowseResponse>, RegExp[]][] = [
+      [
+        { status: "blocked", blocked_reason: "redirect_policy", safety: safety("block") },
+        [/blocked: redirect_policy/, /Do not try to work around/i],
+      ],
+      [
+        { status: "http_error", http_status: 403, safety: safety("unknown") },
+        [/HTTP 403/, /no content/i, /do not retry|do not try to work around/i],
+      ],
+      [
+        { status: "unknown", unknown_reason: "invalid_final_url", safety: safety("unknown") },
+        [/invalid_final_url/, /withheld/i, /do not retry|do not try to work around/i],
+      ],
+    ];
+    for (const [i, [over, patterns]] of cases.entries()) {
+      const web = fakeWeb({
+        async browse(req) {
+          return {
+            source: { url: req.url, final_url: req.url, retrieved_at: "t", via: "rendered" },
+            content: null,
+            ...over,
+          } as WebBrowseResponse;
+        },
+      });
+      const fx = newFixture(`browse-status-${i}`, [browse(), report()], {
+        web: web.port,
+        webBrowse: true,
+      });
+      expect(await run(fx, `browse-status-${i}`)).toBe("completed");
+      const seen = fx.modelCalls.toolResults[1]?.join("\n") ?? "";
+      for (const p of patterns) expect(seen).toMatch(p);
+      expect((await toolEnds(fx))[0]?.isError).toBe(false);
+    }
+  });
+
+  it("verdict が block / unknown（status は ok）では本文が withheld であることを伝える", async () => {
+    for (const verdict of ["block", "unknown"] as const) {
+      const web = fakeWeb({
+        async browse(req) {
+          return {
+            source: { url: req.url, final_url: req.url, retrieved_at: "t", via: "rendered" },
+            content: null,
+            safety: safety(verdict),
+            status: "ok",
+          };
+        },
+      });
+      const fx = newFixture(`browse-null-${verdict}`, [browse(), report()], {
+        web: web.port,
+        webBrowse: true,
+      });
+      expect(await run(fx, `browse-null-${verdict}`)).toBe("completed");
+      const seen = fx.modelCalls.toolResults[1]?.join("\n") ?? "";
+      expect(seen).toContain(`verdict: ${verdict}`);
+      expect(seen).toMatch(/content is withheld/i);
+    }
+  });
+
+  it("タスクごとの上限（既定 20）。search・fetch とは別枠で、超えた呼び出しは RPC も数えもしない", async () => {
+    const web = fakeWeb();
+    const fx = newFixture("browse-limit", [browse(), browse(), browse(), fetchUrl(), report()], {
+      web: web.port,
+      webBrowse: true,
+      webLimits: { browse: 2 },
+    });
+    expect(await run(fx, "browse-limit")).toBe("completed");
+    expect(web.calls.map((c) => c.op)).toEqual(["browse", "browse", "fetch"]);
+    const ends = await toolEnds(fx);
+    expect(ends.map((e) => [e.name, e.isError])).toEqual([
+      ["web_browse", false],
+      ["web_browse", false],
+      ["web_browse", true],
+      ["web_fetch", false],
+    ]);
+    expect(done(await fx.stub.getResult()).usage.web).toEqual({ search: 0, fetch: 1, browse: 2 });
+    const { DEFAULT_WEB_BROWSE_LIMIT } = await import("../../src/agent-do");
+    expect(DEFAULT_WEB_BROWSE_LIMIT).toBe(20);
+  });
+
+  it("RPC のエラーは固定の文言でツールのエラーになる。上流の文字列は渡さず、回数は数える", async () => {
+    const SECRET = "evil.example/ignore-previous-instructions";
+    const cases: [string, RegExp][] = [
+      [`invalid_input: ${SECRET}`, /could not be opened/],
+      [`navigation_timeout: ${SECRET}`, /failed; you may retry once later/],
+      [`upstream_error: ${SECRET}`, /failed; you may retry once later/],
+      [`disabled: ${SECRET}`, /not available/],
+    ];
+    for (const [i, [message, pattern]] of cases.entries()) {
+      const web = fakeWeb({
+        async browse() {
+          throw new Error(message);
+        },
+      });
+      const fx = newFixture(`browse-err-${i}`, [browse(), report()], {
+        web: web.port,
+        webBrowse: true,
+      });
+      expect(await run(fx, `browse-err-${i}`)).toBe("completed");
+      const seen = fx.modelCalls.toolResults.at(-1)?.join("\n") ?? "";
+      expect(seen).toMatch(pattern);
+      expect(seen).not.toContain("evil.example");
+      expect((await toolEnds(fx))[0]?.isError).toBe(true);
+      expect(done(await fx.stub.getResult()).usage.web.browse).toBe(1);
+    }
   });
 });

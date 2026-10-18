@@ -80,7 +80,17 @@ export type BlockedReason =
   | "bot_challenge"
   | "robots_disallowed"
   | "robots_unreachable"
-  | "redirect_policy";
+  | "redirect_policy"
+  /** web_browse: 事前の DoH で、private / link-local などのアドレスに解決された */
+  | "private_address";
+
+/** web_browse が判定できなかった理由（固定のコード。上流の文字列は含めない） */
+export type UnknownReason =
+  | "invalid_status"
+  | "invalid_final_url"
+  | "invalid_redirect_chain"
+  | "invalid_result"
+  | "dns_check_failed";
 
 export type FetchResult = {
   source: FetchSource;
@@ -115,4 +125,15 @@ export type SearchResult = {
   };
 };
 
-export type BrowseResult = FetchResult;
+/**
+ * web_browse の結果。FetchResult と同じ形に、status を足したもの。
+ * - "ok": 取得でき、評価まで進んだ（safety.verdict が block / unknown のときは content が null）
+ * - "blocked": 取得結果を返さない（bot チャレンジ・robots・redirect / ダウングレード・private への解決）
+ * - "http_error": 取得先が 4xx / 5xx を返した（1003 などのエラーページを含む）。本文は返さず、評価もしない
+ * - "unknown": 取得結果を判定できなかった（fail-closed）。本文は返さず、評価もしない
+ */
+export type BrowseResult = Omit<FetchResult, "status"> & {
+  status: "ok" | "blocked" | "http_error" | "unknown";
+  http_status?: number;
+  unknown_reason?: UnknownReason;
+};

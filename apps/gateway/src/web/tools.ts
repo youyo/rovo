@@ -1,4 +1,4 @@
-import type { WebFetchResponse, WebSafety, WebSearchResponse } from "./contract";
+import type { WebBrowseResponse, WebFetchResponse, WebSafety, WebSearchResponse } from "./contract";
 import { wrapUntrustedWeb } from "./untrusted";
 
 /** web が一時的に使えないときにクライアントへ示す待ち時間。 */
@@ -46,13 +46,42 @@ export type ShapedFetchResult = Omit<WebFetchResponse, "content" | "title"> & {
 };
 
 export function shapeFetchResult(r: WebFetchResponse): ShapedFetchResult {
+  return shapePage(r);
+}
+
+/** web_browse の応答。web_fetch と同じ整形（content / title を囲み、長い URL を固定の文言にする）。 */
+export type ShapedBrowseResult = Omit<WebBrowseResponse, "content" | "title"> & {
+  content: string | null;
+  title?: string;
+};
+
+export function shapeBrowseResult(r: WebBrowseResponse): ShapedBrowseResult {
+  return shapePage(r);
+}
+
+function shapePage<
+  R extends {
+    content: string | null;
+    title?: string;
+    source: { url: string; final_url: string };
+  },
+>(r: R): Omit<R, "content" | "title"> & { content: string | null; title?: string } {
   const { content, title, source, ...rest } = r;
   return {
     ...rest,
     source: { ...source, url: clampUrl(source.url), final_url: clampUrl(source.final_url) },
     content: content === null ? null : wrapUntrustedWeb(content),
     ...(title !== undefined && title !== "" ? { title: wrapUntrustedWeb(title) } : {}),
-  };
+  } as Omit<R, "content" | "title"> & { content: string | null; title?: string };
+}
+
+/**
+ * web_browse を公開するか。WEB_BROWSE_ENABLED が "true"（前後の空白・大文字小文字は無視）のときだけ。
+ * 未設定・空・誤記はすべて無効（ツールを tools/list に出さない）。
+ */
+export function isWebBrowseEnabled(env: { WEB_BROWSE_ENABLED?: unknown }): boolean {
+  const v = env.WEB_BROWSE_ENABLED;
+  return typeof v === "string" && v.trim().toLowerCase() === "true";
 }
 
 export type WebToolError = {
@@ -82,6 +111,9 @@ export function mapWebError(e: unknown): WebToolError {
     case "invalid_request":
     case "invalid_url":
       return { code: "invalid_input", message: detail };
+    case "invalid_input":
+      // web_browse: ブラウザが開けない URL。上流の文字列は使わず、固定の文にする
+      return { code: "invalid_input", message: "the URL could not be opened by the browser" };
     case "too_large":
       return { code: "invalid_input", message: "the page is too large to fetch" };
     case "too_many_redirects":
@@ -90,9 +122,12 @@ export function mapWebError(e: unknown): WebToolError {
     case "timeout":
     case "unavailable":
     case "fetch_failed":
+    case "navigation_timeout":
+    case "upstream_error":
       return unavailable;
     case "misconfigured":
     case "not_implemented":
+    case "disabled":
       return { code: "internal", message: "web research service is not available" };
     default:
       break;

@@ -19,6 +19,10 @@ TOKEN_ENC_KEY=
 # production（既定）/ test。test は E2E 専用（台本付き fake モデルや /test/* ルートが有効になる）。本番で test にしない。
 # ENVIRONMENT=production
 
-# 子の web_search / web_fetch のタスクごとの回数の上限（既定 50 / 100）。
+# 子の web_search / web_fetch / web_browse のタスクごとの回数の上限（既定 50 / 100 / 20）。
 # WEB_SEARCH_LIMIT_PER_TASK=50
 # WEB_FETCH_LIMIT_PER_TASK=100
+# WEB_BROWSE_LIMIT_PER_TASK=20
+
+# web_browse を子のツールとして出すか（"true" のときだけ。既定は無効）。apps/web・apps/gateway の同名の var も合わせる。
+# WEB_BROWSE_ENABLED=false

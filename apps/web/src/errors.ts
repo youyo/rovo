@@ -8,7 +8,12 @@ export type WebResearchErrorCode =
   | "too_large"
   | "too_many_redirects"
   | "unavailable"
-  | "fetch_failed";
+  | "fetch_failed"
+  // web_browse（Browser Run）。上流のメッセージは載せず、固定の文だけにする
+  | "disabled"
+  | "invalid_input"
+  | "navigation_timeout"
+  | "upstream_error";
 
 /**
  * RPC 越しには message と name しか確実に届かないので、code を message の先頭に入れる（"code: 説明"）。

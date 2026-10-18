@@ -22,10 +22,11 @@ export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
 /** web の1日あたりの回数の既定値（ユーザーごと・UTC）。env の WEB_SEARCH_DAILY_LIMIT / WEB_FETCH_DAILY_LIMIT で変える。 */
 export const DEFAULT_WEB_SEARCH_DAILY_LIMIT = 200;
 export const DEFAULT_WEB_FETCH_DAILY_LIMIT = 500;
+export const DEFAULT_WEB_BROWSE_DAILY_LIMIT = 50;
 /** web_usage の行を残す日数（古い日は消す）。 */
 const WEB_USAGE_RETAIN_DAYS = 3;
 
-export type WebQuotaKind = "search" | "fetch";
+export type WebQuotaKind = "search" | "fetch" | "browse";
 export type WebQuotaResult = { ok: boolean; used: number; limit: number };
 
 /** 0 以上の整数だけを使う。未設定・不正な値は既定に戻す。 */
@@ -138,7 +139,7 @@ export class UserDO extends DurableObject<Env> {
       closed INTEGER NOT NULL DEFAULT 0
     )`);
     sql.exec("CREATE INDEX IF NOT EXISTS task_budget_month ON task_budget (month)");
-    // 親（MCP の web_search / web_fetch）の回数。UTC の日付ごと・種別ごと。
+    // 親（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
     sql.exec(`CREATE TABLE IF NOT EXISTS web_usage (
       day TEXT NOT NULL,
       kind TEXT NOT NULL,
@@ -187,7 +188,9 @@ export class UserDO extends DurableObject<Env> {
   webDailyLimit: (kind: WebQuotaKind) => number = (kind) =>
     kind === "search"
       ? parseDailyLimit(this.env.WEB_SEARCH_DAILY_LIMIT, DEFAULT_WEB_SEARCH_DAILY_LIMIT)
-      : parseDailyLimit(this.env.WEB_FETCH_DAILY_LIMIT, DEFAULT_WEB_FETCH_DAILY_LIMIT);
+      : kind === "browse"
+        ? parseDailyLimit(this.env.WEB_BROWSE_DAILY_LIMIT, DEFAULT_WEB_BROWSE_DAILY_LIMIT)
+        : parseDailyLimit(this.env.WEB_FETCH_DAILY_LIMIT, DEFAULT_WEB_FETCH_DAILY_LIMIT);
 
   /**
    * web の回数を1回分消費する（UTC の日付ごと）。上限に達していれば消費せず ok:false。

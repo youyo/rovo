@@ -47,6 +47,16 @@ export interface WebFetchResponse {
   truncated?: boolean;
 }
 
+/**
+ * web_browse の結果。WebFetchResponse に status を足したもの（http_error: 取得先が 4xx / 5xx、unknown: 判定できなかった）。
+ * 理由は固定のコードだけで、取得先の文字列は含まれない。
+ */
+export interface WebBrowseResponse extends Omit<WebFetchResponse, "status"> {
+  status: "ok" | "blocked" | "http_error" | "unknown";
+  http_status?: number;
+  unknown_reason?: string;
+}
+
 export interface WebPort {
   search(req: {
     userId: string;
@@ -55,6 +65,7 @@ export interface WebPort {
     limit?: number;
   }): Promise<WebSearchResponse>;
   fetchUrl(req: { userId: string; taskId?: string; url: string }): Promise<WebFetchResponse>;
+  browse(req: { userId: string; taskId?: string; url: string }): Promise<WebBrowseResponse>;
 }
 
 export type WebToolResult = { text: string; isError: boolean };
@@ -110,6 +121,38 @@ export function formatWebFetch(r: WebFetchResponse): WebToolResult {
   };
 }
 
+/** web_browse の結果。status が ok 以外のときは本文が無いので、理由の固定コードだけを伝える。 */
+export function formatWebBrowse(r: WebBrowseResponse): WebToolResult {
+  if (r.status === "blocked") {
+    return {
+      text: `[web_browse] The page could not be fetched (blocked: ${token(r.blocked_reason)}). Do not try to work around this.\n${wrapUntrusted("web_browse", `url: ${r.source.url}`)}`,
+      isError: false,
+    };
+  }
+  if (r.status === "http_error") {
+    const code =
+      typeof r.http_status === "number" && Number.isInteger(r.http_status) ? r.http_status : 0;
+    return {
+      text: `[web_browse] The page answered with an error (HTTP ${code}). No content is available. Do not retry the same request and do not try to work around this.\n${wrapUntrusted("web_browse", `url: ${r.source.url}`)}`,
+      isError: false,
+    };
+  }
+  if (r.status === "unknown") {
+    return {
+      text: `[web_browse] The page could not be judged (reason: ${token(r.unknown_reason)}). The content is withheld. Do not retry the same request and do not try to work around this.\n${wrapUntrusted("web_browse", `url: ${r.source.url}`)}`,
+      isError: false,
+    };
+  }
+  const head = [`url: ${r.source.url}`, `final_url: ${r.source.final_url}`];
+  if (r.title) head.push(`title: ${r.title}`);
+  if (r.truncated) head.push("(the content was truncated)");
+  const body = r.content === null ? head.join("\n") : `${head.join("\n")}\n\n${r.content}`;
+  return {
+    text: `${verdictLine("web_browse", r.safety.verdict)}\n${wrapUntrusted("web_browse", body)}`,
+    isError: false,
+  };
+}
+
 const MAX_PASSTHROUGH = 200;
 
 /**
@@ -128,6 +171,9 @@ export function formatWebError(tool: string, e: unknown): WebToolResult {
     case "invalid_url":
       text = detail;
       break;
+    case "invalid_input":
+      text = "the URL could not be opened by the browser";
+      break;
     case "too_large":
       text = "the page is too large to fetch";
       break;
@@ -138,6 +184,8 @@ export function formatWebError(tool: string, e: unknown): WebToolResult {
     case "timeout":
     case "unavailable":
     case "fetch_failed":
+    case "navigation_timeout":
+    case "upstream_error":
       text = "the web research service failed; you may retry once later";
       break;
     default:

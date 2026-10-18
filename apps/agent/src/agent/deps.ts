@@ -11,10 +11,12 @@ export interface AgentTestOverrides {
   sandbox?: SandboxPort;
   toolsFactory?: SandboxToolsFactory;
   now?: () => number;
-  /** web_search / web_fetch の RPC（service binding の WEB の代わり） */
+  /** web_search / web_fetch / web_browse の RPC（service binding の WEB の代わり） */
   web?: WebPort;
-  /** タスクごとの web の回数の上限（env の WEB_SEARCH_LIMIT_PER_TASK / WEB_FETCH_LIMIT_PER_TASK の代わり） */
-  webLimits?: { search?: number; fetch?: number };
+  /** タスクごとの web の回数の上限（env の WEB_SEARCH_LIMIT_PER_TASK / WEB_FETCH_LIMIT_PER_TASK / WEB_BROWSE_LIMIT_PER_TASK の代わり） */
+  webLimits?: { search?: number; fetch?: number; browse?: number };
+  /** web_browse を有効にするか（env の WEB_BROWSE_ENABLED の代わり） */
+  webBrowseEnabled?: boolean;
   /** 台本付き fake モデルの台本 */
   script?: ScriptStep[];
   modelId?: string;

@@ -7,8 +7,11 @@
   // gateway / agent からは service binding（WebResearch エントリポイントの RPC）で呼ぶ。公開のルートは持たない。
   "workers_dev": false,
   // Workers AI バインディング。Web Search API（env.AI.websearch）、HTML の Markdown 変換、Clef-flash の呼び出しに使う。
-  // Kitesurf 用の browser バインディングは M2 で足す。GitHub トークンや Anthropic のキーは持たせない（設計 8.4）。
+  // GitHub トークンや Anthropic のキーは持たせない（設計 8.4）。
   "ai": { "binding": "AI" },
+  // Browser Run（web_browse が quickAction("markdown", {browser: "kitesurf"}) で使う）。
+  // remote は下流（デプロイ側）で設定する。rovo には環境固有の値を置かない。
+  "browser": { "binding": "BROWSER" },
   "vars": {
     // "test" のときだけ TEST_FAKE_BASE が有効になる。本番は必ず "production"
     "ENVIRONMENT": "production",
@@ -19,6 +22,9 @@
     // Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block / caution
     "SAFETY_BLOCK_THRESHOLD": "0.8",
     "SAFETY_CAUTION_THRESHOLD": "0.4",
+    // web_browse の有効化（"true" のときだけ有効。既定は無効）。有効にする前に、phase5.md の「有効化前のゲート」を満たすこと。
+    // gateway / agent の同名の var も合わせる（それぞれ web_browse ツールを出すかを決める）。
+    "WEB_BROWSE_ENABLED": "false",
     // ENVIRONMENT=test のときだけ有効。AI（run / websearch / toMarkdown）と取得を向ける偽サーバーの URL。空なら本物を使う。
     "TEST_FAKE_BASE": ""
   }

@@ -26,6 +26,13 @@ export const SENTINEL_QUESTION_ID = "state_ends_with_marker";
 const SENTINEL_MIN_PROBABILITY = 0.5;
 /** 境界をまたぐ注入を拾うための重なり */
 const CHUNK_OVERLAP = 500;
+/**
+ * 1回の評価で呼ぶチャンク数の上限（AI.run の呼び出し回数の上限）。これを超える本文は評価せず未完了にする。
+ * 返す本文は最大 50,000 文字で、UTF-8 では最大 3 バイト / 文字（150,000 バイト）。1 チャンクは 10,000 バイトで
+ * 500 文字の重なりがあるので、title を含めた最悪ケースで 18 チャンク前後。20 はそれに余裕を持たせた値で、本文の上限や分割の設定が
+ * 変わったときの保険になる。
+ */
+export const MAX_EVAL_CHUNKS = 20;
 
 type NoulQuestion = {
   type: "noul";
@@ -246,6 +253,15 @@ export function createClefEvaluator(options: ClefEvaluatorOptions): SafetyEvalua
         return { ...base, complete: true, scores: {}, evaluatedChars: 0 };
       }
       const chunks = splitIntoChunks(text);
+      if (chunks.length > MAX_EVAL_CHUNKS) {
+        return {
+          ...base,
+          complete: false,
+          scores: {},
+          evaluatedChars: 0,
+          failure: "too_many_chunks",
+        };
+      }
       const outcomes = await Promise.all(chunks.map((c) => evaluateChunk(c, ctx)));
 
       const scores: Partial<Record<Category, number>> = {};

@@ -4,19 +4,23 @@ import { parseDailyLimit } from "../../src/tasks/user-do";
 import { newUserId, userStub } from "./helpers";
 
 type UserStub = ReturnType<typeof userStub>;
-type Limits = { search?: number; fetch?: number };
+type Limits = { search?: number; fetch?: number; browse?: number };
 
 async function setup(stub: UserStub, start = Date.UTC(2026, 9, 18, 12), limits: Limits = {}) {
   let t = start;
   await runInDurableObject(stub, (i) => {
     const u = i as unknown as {
       now: () => number;
-      webDailyLimit: (kind: "search" | "fetch") => number;
+      webDailyLimit: (kind: "search" | "fetch" | "browse") => number;
     };
     u.now = () => t;
-    if (limits.search !== undefined || limits.fetch !== undefined) {
+    if (limits.search !== undefined || limits.fetch !== undefined || limits.browse !== undefined) {
       u.webDailyLimit = (kind) =>
-        kind === "search" ? (limits.search ?? 200) : (limits.fetch ?? 500);
+        kind === "search"
+          ? (limits.search ?? 200)
+          : kind === "browse"
+            ? (limits.browse ?? 50)
+            : (limits.fetch ?? 500);
     }
   });
   return {
@@ -87,5 +91,26 @@ describe("parseDailyLimit", () => {
     expect(parseDailyLimit("1.5", 500)).toBe(500);
     expect(parseDailyLimit("", 500)).toBe(500);
     expect(parseDailyLimit(undefined, 500)).toBe(500);
+  });
+});
+
+describe("UserDO: web_browse の1日あたりの回数", () => {
+  it("browse は search・fetch とは別の枠で数える", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub, undefined, { search: 1, fetch: 1, browse: 2 });
+    expect(await stub.consumeWebQuota("browse")).toEqual({ ok: true, used: 1, limit: 2 });
+    expect(await stub.consumeWebQuota("browse")).toEqual({ ok: true, used: 2, limit: 2 });
+    expect(await stub.consumeWebQuota("browse")).toEqual({ ok: false, used: 2, limit: 2 });
+    expect((await stub.consumeWebQuota("search")).ok).toBe(true);
+    expect((await stub.consumeWebQuota("fetch")).ok).toBe(true);
+  });
+
+  it("既定の上限は 50 回 / 日（WEB_BROWSE_DAILY_LIMIT で変える）", async () => {
+    const { DEFAULT_WEB_BROWSE_DAILY_LIMIT } = await import("../../src/tasks/user-do");
+    expect(DEFAULT_WEB_BROWSE_DAILY_LIMIT).toBe(50);
+    const stub = userStub(newUserId());
+    const r = await stub.consumeWebQuota("browse");
+    expect(r).toMatchObject({ ok: true, used: 1 });
+    expect(r.limit).toBeGreaterThan(0);
   });
 });

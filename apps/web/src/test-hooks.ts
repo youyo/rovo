@@ -3,13 +3,18 @@
  * production では TEST_FAKE_BASE が設定されていても何もしない（前例: apps/agent の TEST_UPSTREAM）。
  *
  * - ai: AI バインディング（run / websearch / toMarkdown）を偽サーバーへの HTTP に置き換える
+ * - browser: env.BROWSER（quickAction）を偽サーバーへの HTTP に置き換える。実アカウントのブラウザは使わない
  * - fetch: 取得（robots.txt を含む）を偽サーバーへ向ける。URL ポリシーの検査は元の URL に対して先に済んでいる。
  *   元のホストは x-original-host、スキームは x-original-scheme で渡す。
  */
 
+import type { BrowserLike } from "./browse";
+
 export type TestHooks = {
   ai: Ai;
   fetch: typeof fetch;
+  /** Browser Run（quickAction）を偽サーバーの POST /browser/<action> に置き換える */
+  browser: BrowserLike;
 };
 
 type HookEnv = { ENVIRONMENT?: string; TEST_FAKE_BASE?: string };
@@ -61,5 +66,10 @@ export function testHooks(
     });
   }) as typeof fetch;
 
-  return { ai, fetch: fakeFetch };
+  const browser: BrowserLike = {
+    // 偽サーバーが返した Response（JSON のエンベロープ・HTTP ステータス）をそのまま quickAction の結果として返す
+    quickAction: (action, options) => postJson(`/browser/${action}`, options),
+  };
+
+  return { ai, fetch: fakeFetch, browser };
 }

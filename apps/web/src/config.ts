@@ -8,6 +8,8 @@ export type WebConfig = {
   gatewayId: string;
   provider: WebSearchProvider;
   thresholds: PolicyThresholds;
+  /** web_browse を有効にするか（WEB_BROWSE_ENABLED が "true" のときだけ。既定は無効） */
+  browseEnabled: boolean;
 };
 
 const PROVIDERS: readonly WebSearchProvider[] = ["ceramic", "exa", "linkup"];
@@ -18,6 +20,7 @@ type ConfigEnv = {
   WEB_SEARCH_PROVIDER?: string;
   SAFETY_BLOCK_THRESHOLD?: string;
   SAFETY_CAUTION_THRESHOLD?: string;
+  WEB_BROWSE_ENABLED?: string;
 };
 
 function parseThreshold(name: string, raw: string | undefined, fallback: number): number {
@@ -30,6 +33,16 @@ function parseThreshold(name: string, raw: string | undefined, fallback: number)
     );
   }
   return n;
+}
+
+/** "true"（前後の空白・大文字小文字は無視）だけが有効。未設定・空・誤記はすべて無効（有効にならない側へ倒す）。 */
+function parseEnabledFlag(raw: unknown): boolean {
+  return typeof raw === "string" && raw.trim().toLowerCase() === "true";
+}
+
+/** web_browse が有効か。他の設定（AI_GATEWAY_ID など）の検査より先に判定する（無効なら何も読まない）。 */
+export function isBrowseEnabled(env: { WEB_BROWSE_ENABLED?: unknown }): boolean {
+  return parseEnabledFlag(env.WEB_BROWSE_ENABLED);
 }
 
 /**
@@ -71,5 +84,6 @@ export function loadConfig(env: ConfigEnv): WebConfig {
     gatewayId,
     provider: providerRaw as WebSearchProvider,
     thresholds: { block, caution },
+    browseEnabled: parseEnabledFlag(env.WEB_BROWSE_ENABLED),
   };
 }

@@ -14,6 +14,8 @@ type SearchOut = Awaited<ReturnType<WebResearch["search"]>>;
 type FetchOut = Awaited<ReturnType<WebResearch["fetchUrl"]>>;
 type SearchIn = Parameters<WebResearch["search"]>[0];
 type FetchIn = Parameters<WebResearch["fetchUrl"]>[0];
+type BrowseOut = Awaited<ReturnType<WebResearch["browse"]>>;
+type BrowseIn = Parameters<WebResearch["browse"]>[0];
 
 export type Checks = [
   // gateway
@@ -21,9 +23,13 @@ export type Checks = [
   Assert<Extends<FetchOut, Awaited<ReturnType<GatewayWebPort["fetchUrl"]>>>>,
   Assert<Extends<Parameters<GatewayWebPort["search"]>[0], SearchIn>>,
   Assert<Extends<Parameters<GatewayWebPort["fetchUrl"]>[0], FetchIn>>,
+  Assert<Extends<BrowseOut, Awaited<ReturnType<GatewayWebPort["browse"]>>>>,
+  Assert<Extends<Parameters<GatewayWebPort["browse"]>[0], BrowseIn>>,
   // agent
   Assert<Extends<SearchOut, Awaited<ReturnType<AgentWebPort["search"]>>>>,
   Assert<Extends<FetchOut, Awaited<ReturnType<AgentWebPort["fetchUrl"]>>>>,
   Assert<Extends<Parameters<AgentWebPort["search"]>[0], SearchIn>>,
   Assert<Extends<Parameters<AgentWebPort["fetchUrl"]>[0], FetchIn>>,
+  Assert<Extends<BrowseOut, Awaited<ReturnType<AgentWebPort["browse"]>>>>,
+  Assert<Extends<Parameters<AgentWebPort["browse"]>[0], BrowseIn>>,
 ];

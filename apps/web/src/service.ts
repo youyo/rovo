@@ -1,10 +1,17 @@
 import type { WebSearchSource } from "agents/websearch";
 import { createAIWebSearch } from "agents/websearch";
-import { loadConfig } from "./config";
+import { type BrowserLike, browsePage } from "./browse";
+import { isBrowseEnabled, loadConfig } from "./config";
 import { WebResearchError } from "./errors";
 import { fetchPage } from "./fetch-proxy";
 import { MAX_CONTENT_CHARS, normalizeContent } from "./normalizer";
-import { decide, runDeterministicRules, toSafety } from "./policy-engine";
+import {
+  decide,
+  type PolicyDecision,
+  type PolicyThresholds,
+  runDeterministicRules,
+  toSafety,
+} from "./policy-engine";
 import { readCallContext } from "./request";
 import type { RobotsCache } from "./robots";
 import { createClefEvaluator } from "./safety/clef";
@@ -13,6 +20,7 @@ import type { SafetyEvaluator } from "./safety/types";
 import { searchWeb } from "./search-broker";
 import { testHooks } from "./test-hooks";
 import type {
+  BlockedReason,
   BrowseRequest,
   BrowseResult,
   CallContext,
@@ -21,6 +29,7 @@ import type {
   Safety,
   SearchRequest,
   SearchResult,
+  UnknownReason,
 } from "./types";
 
 /** fake を差し込める境界（Unit / E2E）。省略すると本番の実装（env.AI を使う）になる。 */
@@ -31,6 +40,12 @@ export type ServiceDeps = {
   evaluator?: SafetyEvaluator;
   now?: () => Date;
   robotsCache?: RobotsCache;
+  /** web_browse の Browser Run（env.BROWSER の代わり） */
+  browser?: BrowserLike;
+  /** 評価器 1 回の期限（ms）。省略すると 60 秒 */
+  evaluatorTimeoutMs?: number;
+  /** web_browse の全体の期限（ms）。省略すると 45 秒 */
+  browseDeadlineMs?: number;
   log?: (entry: Record<string, unknown>) => void;
 };
 
@@ -95,7 +110,7 @@ export function createWebResearchService(
       const outcome = await fetchPage(
         { url: req.url },
         {
-          fetch: deps.fetch ?? hooks?.fetch ?? ((i, init) => fetch(i, init)),
+          fetch: fetchImpl(),
           ai,
           robotsCache: deps.robotsCache,
         },
@@ -103,42 +118,21 @@ export function createWebResearchService(
       const retrievedAt = now().toISOString();
 
       if (outcome.kind === "blocked") {
-        const safety: Safety = {
-          evaluator: info.evaluator,
-          model_version: info.modelVersion,
-          verdict: "block",
-          categories: [],
-          reason: outcome.reason,
-          evaluated: false,
-          model: { verdict: "unknown", scores: null },
-          policy: { verdict: "block", rules: [outcome.reason] },
-        };
-        logFetch(ctx, req.url, "blocked", outcome.reason);
+        logWeb(ctx, "fetch", req.url, "blocked", { blocked_reason: outcome.reason });
         return {
           source: { url: req.url, final_url: req.url, retrieved_at: retrievedAt, via: "direct" },
           content: null,
-          safety,
+          safety: blockedSafety(info, outcome.reason),
           status: "blocked",
           blocked_reason: outcome.reason,
         };
       }
 
-      const normalized = normalizeContent(outcome.content, { maxChars: MAX_CONTENT_CHARS });
-      // title も外部のコンテンツ。隠し文字を除いて 200 文字に切り詰め、本文と同じ評価にかける
-      const title = outcome.title
-        ? normalizeContent(outcome.title, { maxChars: MAX_TITLE_CHARS }).text.trim()
-        : "";
-      const evalPrefix = title ? `title: ${title}\n\n` : "";
-      // 決定論ルールは生の本文・生の title（隠し文字を含む）にかける。生の title は長さだけ制限する
-      const rawTitle = outcome.title ? `title: ${outcome.title.slice(0, 2000)}\n\n` : "";
-      const findings = runDeterministicRules(rawTitle + outcome.content);
-      // 決定論ルールで block なら、モデルには渡さない
-      const model = findings.some((f) => f.verdict === "block")
-        ? null
-        : await evaluateSafely(evaluator, evalPrefix + normalized.text, ctx);
-      const decision = decide({ findings, model }, config.thresholds);
-      const releasable = decision.verdict === "allow" || decision.verdict === "caution";
-      logFetch(ctx, req.url, decision.verdict);
+      const page = await assessContent(
+        { content: outcome.content, title: outcome.title },
+        { evaluator, info, ctx, thresholds: config.thresholds },
+      );
+      logWeb(ctx, "fetch", req.url, page.safety.verdict);
       return {
         source: {
           url: req.url,
@@ -147,35 +141,193 @@ export function createWebResearchService(
           via: "direct",
           converted_by: outcome.via,
         },
-        content: releasable ? normalized.text : null,
-        safety: toSafety(decision, info),
+        content: page.content,
+        safety: page.safety,
         status: "ok",
-        // block / unknown のときは title も返さない（本文と同じ扱い）
-        ...(releasable && title ? { title } : {}),
-        truncated: normalized.truncated,
+        ...(page.title !== undefined ? { title: page.title } : {}),
+        truncated: page.truncated,
       };
     },
 
     async browse(req) {
-      readCallContext(req);
-      throw new WebResearchError("not_implemented", "web_browse is not implemented yet.");
+      const ctx = readCallContext(req);
+      // 無効なら、他の設定も読まず、BROWSER・DoH・評価器のどれも使わない（ツールを出さない側が主で、これは設定のずれに対する backstop）
+      if (!isBrowseEnabled(env)) {
+        throw new WebResearchError("disabled", "web_browse is not enabled.");
+      }
+      const config = loadConfig(env);
+      const evaluator = evaluatorFor(config.gatewayId);
+      const info = { evaluator: evaluator.name, modelVersion: evaluator.modelVersion };
+      const browser = deps.browser ?? hooks?.browser ?? (env.BROWSER as unknown as BrowserLike);
+      const outcome = await browsePage(
+        { url: req.url },
+        {
+          browser,
+          fetch: fetchImpl(),
+          robotsCache: deps.robotsCache,
+          ...(deps.browseDeadlineMs !== undefined ? { deadlineMs: deps.browseDeadlineMs } : {}),
+        },
+      );
+      const retrievedAt = now().toISOString();
+      const source = {
+        url: req.url,
+        final_url: req.url,
+        retrieved_at: retrievedAt,
+        via: "rendered",
+      } as const;
+
+      // 拒否・判定不能の経路: 本文も title も返さず、評価器は呼ばない
+      if (outcome.kind === "blocked") {
+        logWeb(ctx, "browse", req.url, "blocked", { blocked_reason: outcome.reason });
+        return {
+          source,
+          content: null,
+          safety: blockedSafety(info, outcome.reason),
+          status: "blocked",
+          blocked_reason: outcome.reason,
+        };
+      }
+      if (outcome.kind === "http_error") {
+        logWeb(ctx, "browse", req.url, "http_error", { http_status: outcome.httpStatus });
+        return {
+          source,
+          content: null,
+          safety: unjudgedSafety(info, "http_error"),
+          status: "http_error",
+          http_status: outcome.httpStatus,
+        };
+      }
+      if (outcome.kind === "unknown") {
+        logWeb(ctx, "browse", req.url, "unknown", { unknown_reason: outcome.reason });
+        return {
+          source,
+          content: null,
+          safety: unjudgedSafety(info, outcome.reason),
+          status: "unknown",
+          unknown_reason: outcome.reason,
+        };
+      }
+
+      // フロントマターを含む markdown 全体と meta.title を、web_fetch と同じ評価にかける
+      const page = await assessContent(
+        { content: outcome.markdown, title: outcome.title },
+        { evaluator, info, ctx, thresholds: config.thresholds },
+      );
+      logWeb(ctx, "browse", req.url, page.safety.verdict);
+      return {
+        source: { ...source, final_url: outcome.finalUrl },
+        content: page.content,
+        safety: page.safety,
+        status: "ok",
+        ...(page.title !== undefined ? { title: page.title } : {}),
+        truncated: page.truncated,
+      };
     },
   };
 
-  function logFetch(ctx: CallContext, url: string, verdict: string, blockedReason?: string) {
+  /** DoH と robots.txt と web_fetch の取得に使う fetch（テストでは偽サーバーへ向ける） */
+  function fetchImpl(): typeof fetch {
+    return deps.fetch ?? hooks?.fetch ?? ((i, init) => fetch(i, init));
+  }
+
+  /**
+   * 取得した本文と title を評価して、返してよいものだけを返す（web_fetch と web_browse で共用）。
+   * - 評価の対象と返却の対象は同じ: 切り詰めた（50,000 文字）後の本文と、200 文字に切った後の title。
+   * - 決定論ルールは生の本文・生の title（隠し文字を含む）にかける。block ならモデルには渡さない。
+   * - block / unknown のときは、本文も title も返さない。
+   */
+  async function assessContent(
+    input: { content: string; title?: string },
+    ctx: {
+      evaluator: SafetyEvaluator;
+      info: { evaluator: string; modelVersion: string };
+      ctx: CallContext;
+      thresholds: PolicyThresholds;
+    },
+  ): Promise<{
+    content: string | null;
+    title: string | undefined;
+    truncated: boolean;
+    safety: Safety;
+  }> {
+    const normalized = normalizeContent(input.content, { maxChars: MAX_CONTENT_CHARS });
+    // title も外部のコンテンツ。隠し文字を除いて 200 文字に切り詰め、本文と同じ評価にかける
+    const title = input.title
+      ? normalizeContent(input.title, { maxChars: MAX_TITLE_CHARS }).text.trim()
+      : "";
+    const evalPrefix = title ? `title: ${title}\n\n` : "";
+    const rawTitle = input.title ? `title: ${input.title.slice(0, 2000)}\n\n` : "";
+    const findings = runDeterministicRules(rawTitle + input.content);
+    const model = findings.some((f) => f.verdict === "block")
+      ? null
+      : await evaluateSafely(ctx.evaluator, evalPrefix + normalized.text, ctx.ctx, {
+          timeoutMs: deps.evaluatorTimeoutMs,
+        });
+    const decision: PolicyDecision = decide({ findings, model }, ctx.thresholds);
+    const releasable = decision.verdict === "allow" || decision.verdict === "caution";
+    return {
+      content: releasable ? normalized.text : null,
+      title: releasable && title ? title : undefined,
+      truncated: normalized.truncated,
+      safety: toSafety(decision, ctx.info),
+    };
+  }
+
+  function logWeb(
+    ctx: CallContext,
+    op: "fetch" | "browse",
+    url: string,
+    verdict: string,
+    extra: Record<string, string | number> = {},
+  ) {
     let host = "";
     try {
       host = new URL(url).host;
     } catch {}
+    // 本文・title・URL のパス / query は載せない。理由は固定のコードだけ
     log({
       event: "web_research",
-      op: "fetch",
+      op,
       caller: ctx.caller,
       userId: ctx.userId,
       taskId: ctx.taskId,
       host,
       verdict,
-      blocked_reason: blockedReason,
+      ...extra,
     });
   }
+}
+
+/** 取得結果を返さない（block）ときの safety。理由は固定のコード。 */
+function blockedSafety(
+  info: { evaluator: string; modelVersion: string },
+  reason: BlockedReason,
+): Safety {
+  return {
+    evaluator: info.evaluator,
+    model_version: info.modelVersion,
+    verdict: "block",
+    categories: [],
+    reason,
+    evaluated: false,
+    model: { verdict: "unknown", scores: null },
+    policy: { verdict: "block", rules: [reason] },
+  };
+}
+
+/** 判定できなかった・評価に回さなかった（http_error など）ときの safety。評価はしていない。 */
+function unjudgedSafety(
+  info: { evaluator: string; modelVersion: string },
+  reason: UnknownReason | "http_error",
+): Safety {
+  return {
+    evaluator: info.evaluator,
+    model_version: info.modelVersion,
+    verdict: "unknown",
+    categories: [],
+    reason,
+    evaluated: false,
+    model: { verdict: "unknown", scores: null },
+    policy: { verdict: "allow", rules: [] },
+  };
 }

@@ -16,10 +16,18 @@
 
 ## ゴール
 
-`task_start` → `RUNNING` → Sandbox で編集・テスト・ローカル commit → `VERIFYING` → `COMPLETED` / `FAILED`、の流れが動く。
+`task_start` → `RUNNING` → Sandbox で編集・テスト・ローカル commit → `VERIFYING` → `COMPLETED` / `FAILED`、の流れが動く。完了したタスクの成果（要約、検証結果、patch）は `task_result` で取得できる。
 
 - push と Draft PR は作らない（Phase 3）。
 - 親への質問（`INPUT_REQUIRED`）は作らない（Phase 4）。
+
+## codex レビュー（2026-10-18）で追加した原則
+
+1. **停止の保証**: 止めるときは、プロセスグループ全体を止めて終了を確かめる。キャンセルや期限切れのときは、最終手段としてコンテナ全体を止める。Pi の `abort()` は idle を待つので、Sandbox の停止は abort より先か、並行して行う。
+2. **配送の収束**: Gateway → Agent の指示（start / cancel）は、意図を永続化してから送る。成功を確かめるまで alarm で再送する。受け手は冪等にし、tombstone で遅れて届いた指示を拒否する。
+3. **期限は各層が持つ**: 下位の層から上位の層へ通知はしない（一方向 RPC）。Gateway は deadline を渡し、各層は自分で期限を確かめて止まる。上位は poll で状態を知る。
+4. **費用は呼び出し前に止める**: 次のモデル呼び出しの最大費用を見積もり、残りの予算で払えなければ呼ばない（事後の usage で止めるだけでは上限を保証できない）。
+5. **検証の入力はモデルの手の外に置く**: 検証コマンドは親が渡し、AgentDO の storage に保存する。対象の commit SHA を固定する。
 
 ## 構成
 
@@ -54,27 +62,56 @@ apps/gateway (既存 Worker)
   - 既定は `anthropic/claude-sonnet-5-5`。env で変更できる。
   - `createAI` の `metadata` に userId と taskId を入れ、AI Gateway のログで突き合わせられるようにする。
 - 起動
-  - Gateway から `start(taskSpec)` を呼ぶ。`operationId` は taskId から導いて、Gateway が再試行しても二重に submit しないようにする。
-  - taskSpec には、repository / base_sha / instructions / acceptance_criteria / constraints / 予算 / userId を入れる。
+  - Gateway から `start(taskSpec)` を呼ぶ。
+  - taskSpec には、repository / base_sha / instructions / acceptance_criteria / verification_commands / constraints / 予算 / userId / deadlineAt を入れる。
+  - AgentDO は、taskSpec の fingerprint と operationId（taskId から導く）を永続化する。
+    - 同じ operationId と同じ fingerprint の再送には、受理済みの結果を返す。
+    - fingerprint が違えば `conflict` を返す。
+    - cancel の tombstone があれば `cancelled` を返して、何も始めない（start より先に cancel が届いた場合）。
 - システムプロンプト（sections）
   - 受け入れ条件、制約、作業手順（調査 → 実装 → テスト → commit → 完了報告）
   - 外部コンテンツを信用しないこと、push や PR はしないこと
 - イベント
-  - Pi の `events()` を購読し、要約したイベント（状態変化、ツール呼び出しの要約、エラー、完了報告）を AgentDO 自身の SQLite に seq 付きで永続化する。
-  - Gateway の TaskDO は `getEvents(afterSeq)` で引き、自分の seq に写して `task_wait` に流す。Phase 1 の `task_wait` の約束は変えない。
+  - AgentDO のイベントは、AgentDO 自身の状態遷移（phase の変化、ツール呼び出しの開始と終了の要約、エラー、完了報告、費用の更新）として、同じトランザクションで SQLite に seq 付きで書く。
+  - Pi の `events()` は表示用の補助にとどめ、正本にしない。Pi のイベントは再起動後に途中から再開できず、永続化する前にクラッシュすると抜けが生じるため。
+  - `getEvents(afterSeq, limit)` は `{events, throughSeq, hasMore, phase, phaseAsOfSeq, usage}` を返す。
 - 状態の報告
-  - AgentDO は `phase`（`running` / `verifying` / `completed` / `failed` / `budget_exceeded` / `cancelled`）を持ち、`getEvents` の応答に含める。
-  - Gateway の TaskDO は、それを状態遷移表に従って反映する。
-- 予算
-  - Pi に予算の機能はない。ターン後と `beforeTool` フックで `pi().usage()` を読み、モデル別の単価で費用を計算する。$10/Task を超えたら `abort` して `budget_exceeded` にする。
-  - 費用は Gateway の UserDO の月額上限（phase1.md で「Phase 2 で入れる」としたもの）にも計上する。UserDO の月額上限を超えていたら `task_start` を拒否する。
-- キャンセル
-  - Gateway の `task_cancel` が AgentDO の `cancel()` を呼ぶ。AgentDO は `abort` し、SandboxDO の実行中プロセスを止める。
-  - Gateway 側は、TaskDO を `CANCELLED` に確定させてから AgentDO を呼ぶ（Phase 1 の順序を守る）。
+  - AgentDO は `phase`（`starting` / `running` / `verifying` / `completed` / `failed` / `budget_exceeded` / `cancelled`）を持つ。
+  - phase の変化も、イベントとして seq に載せる。Gateway は、終端の phase のイベントを取り込み終えてから、TaskDO を終端に確定する。
+- 予算（呼び出し前に止める）
+  - モデルの単価表はコードに固定する。単価表にないモデルは使えない（起動時に拒否する）。
+  - 次のモデル呼び出しの前に、最大費用を見積もる。見積もりは「現在のコンテキストのトークン数 × 入力単価」と「出力の上限トークン数（max_tokens）× 出力単価」の合計。
+    - 残りの予算で払えなければ、呼ばずに `budget_exceeded` で終える。
+    - Pi に「モデル呼び出しの前」のフックがあるかは M2 で確かめる。無い場合は、ツールの結果を返した直後（＝次のモデル呼び出しの直前）に判定する。
+  - 実際の費用は `pi().usage()` から計算し、キャッシュの読み書きと再試行の分も含める。
+  - 月額の上限
+    - UserDO が `task_start` の時点で、タスクの予算（$10）を月額の枠から予約する。足りなければ `task_start` を拒否する。
+    - TaskDO は、AgentDO のイベントに含まれる usage を取り込み、UserDO に冪等に精算する（usage の seq で重複を防ぐ）。
+    - タスクが終わったら（成功・失敗・キャンセルのいずれでも）、予約と実費の差額を枠に戻す。月をまたいだタスクは、開始した月に計上する。
+    - AgentDO から UserDO へは直接計上しない（一方向 RPC）。
+- 期限
+  - AgentDO は `startedAt` と `deadlineAt`（開始から2時間）を永続化する。alarm、モデル呼び出しの前、ツールの開始前に確かめ、超えていたら `failed`（理由: deadline）にする。
+  - 再起動しても期限は延長しない。
+- キャンセル（停止を確かめるまで収束させる）
+  - Gateway は、TaskDO を `CANCELLED` に確定させ、同じトランザクションで「cancel を配送する意図」を記録する。
+  - TaskDO の alarm は、AgentDO から停止の確認（`stopped: true`）が返るまで cancel を再送する。TaskDO が終端になった後も続ける。
+  - AgentDO の `cancel()`
+    1. cancel の tombstone を記録する（遅れて届いた start を拒否するため）。
+    2. SandboxDO の停止（プロセスグループ全体を止め、終わらなければコンテナを止める）を先に始め、並行して Pi の `abort()` を呼ぶ。
+    3. 両方が終わったら `stopped: true` を返す。終わっていなければ `stopped: false` を返し、次の再送で確かめ直す。
+  - UserDO の同時実行枠は、停止を確かめてから解放する。Phase 1 の照合（`reserve` 時に予約先を確かめる）も、TaskDO の「停止確認済み」を見るように変える。古いタスクが動いたまま次のタスクが始まらないようにするため。
 - 完了判定
-  - モデルが `report_completion({summary, tests})` ツールを呼んだら `verifying` にする。
-  - AgentDO は、受け入れ条件に書かれたテストコマンドを Sandbox で再実行して確かめる（モデルの自己申告だけで完了にしない）。
-  - 合格なら `completed`、不合格なら差し戻して修正させる（自動修正は最大3回、7.3）。3回目も不合格なら `failed`。
+  - `task_start` の入力に `verification_commands: {argv: string[], cwd?: string, timeout_seconds?: number}[]` を追加する（任意）。自然文の acceptance_criteria とは分ける。
+  - モデルが `report_completion({summary})` を呼んだら `verifying` にする。
+  - AgentDO は、その時点の commit SHA を固定し、AgentDO の storage に保存した verification_commands を Sandbox で実行する。
+  - 全部が成功（終了コード 0）なら `completed`。失敗なら、結果をモデルに返して修正させる。
+    - 試行は「最初の1回 + 修正3回」の計4回まで。4回目も失敗なら `failed`。
+  - verification_commands が無い場合は、モデルの申告だけで `completed` にし、結果に「未検証」と記す。
+  - 限界: モデルはテストの設定（例: package.json の test スクリプト）を書き換えられるので、この検証は門番であって保証ではない。テスト関連のファイル（package.json の scripts、テストの設定ファイル、テストファイルの削除）が変わっていれば、結果に警告として記し、親のレビューに委ねる。
+- 成果の保存
+  - `completed` / `failed` になったら、base_sha からの patch（`git format-patch`）と、検証結果・要約を AgentDO の storage に保存する。
+  - patch は 1MiB までとし、DO の行サイズの制限を避けるため分割して保存する。超える場合は「大きすぎる」と記し、diffstat だけを保存する。
+  - Sandbox を作り直すと未 push の commit も失われるので、成果はこの保存分を正とする（push は Phase 3）。
 
 ## ツール（`defineTool` で自作）
 
@@ -89,7 +126,10 @@ apps/gateway (既存 Worker)
 | `git_commit` | unsafe | `git add -A && git commit`（argv）。作者は bot 名 |
 | `report_completion` | unsafe | 完了の申告 |
 
-- パスはすべて `/workspace` 配下に正規化し、外に出るもの（`..` やシンボリックリンク経由）は拒否する。
+- 構造化されたファイルツール（read / list / search / write / edit）のパスは、`/workspace` 配下に正規化し、外に出るもの（`..` やシンボリックリンク経由）は拒否する。
+- `bash` はコンテナ全体（`/etc` や `/tmp` を含む）にアクセスできる。これを前提として、コンテナには他のタスクのデータ、秘密情報、信頼が必要な制御状態（検証コマンドなど）を置かない。
+- `bash` は `setsid` で新しいプロセスグループとして起動する。タイムアウトやキャンセルのときは、グループ全体に SIGTERM を送り、猶予の後に SIGKILL を送って、終了を確かめる。
+- 出力は上限付きのリングバッファで読み続ける（末尾 64KiB を残す）。読むのを止めると、プロセスが書き込みで詰まるため。
 - ツールの結果に含まれる外部由来の文字列は、信用しないデータとして扱う（プロンプトの section で明示）。
 
 ## SandboxDO
@@ -105,15 +145,26 @@ apps/gateway (既存 Worker)
   - 終了済みプロセスへの kill は例外になるので、それを握りつぶさずに扱う。
 - 生存期間
   - `setInactivityTimeout` は2時間。処理中は1分ごとの alarm で DO を active に保つ。
-  - 設計 7.3 の最大実行時間（2時間）を超えたら、AgentDO に通知して `failed` にする。
+  - SandboxDO も AgentDO から渡された `deadlineAt` を持ち、超えたら自分でコンテナを止める（AgentDO へは通知しない。AgentDO は自分の期限で止まる）。
+  - `stop()` RPC: プロセスグループ全体を止め、終わらなければコンテナを止める。停止を確かめてから戻る。
 - 外向き通信（7.2 の強制）
-  - `interceptOutboundHttps("*", OutboundGateway)` と `interceptOutboundHttp("*", OutboundGateway)` ですべてを受け、エントリポイント内でホストごとに判定する。
+  - 傍受の登録と CA の設定が終わるまで、clone や exec を行わない。コンテナを起動するたびに、傍受を登録し直す。
+  - HTTPS は `interceptOutboundHttps("*", OutboundGateway)`、HTTP は全宛先を受ける API（`interceptAllOutboundHttp` があればそれ）で受け、エントリポイント内で判定する。両者の仕様の違いは M1 で確かめる。
   - 許可するもの
-    - `github.com`: `git-upload-pack`（GET `info/refs?service=git-upload-pack`、POST `git-upload-pack`）だけ。対象は taskSpec のリポジトリに限る。認証ヘッダは Worker 側で注入する。
-      - Phase 2 の注入トークンは仮置き。公開リポジトリなら認証なしで通し、非公開リポジトリは Phase 3 の Token Broker で対応する。
+    - `github.com`（HTTPS、443、ホスト名の完全一致）:
+      - GET `/<owner>/<repo>(.git)?/info/refs?service=git-upload-pack`（query は `service` だけ）
+      - POST `/<owner>/<repo>(.git)?/git-upload-pack`
+      - owner/repo は正規化したうえで、taskSpec のリポジトリと一致するものだけ。
+      - 認証ヘッダは Worker 側で注入する。Phase 2 は公開リポジトリだけを対象にし、認証なしで通す。非公開リポジトリは Phase 3 の Token Broker で対応する。
+      - git-receive-pack、dumb HTTP、LFS、別リポジトリ（submodule を含む）は拒否する。
+      - リクエスト本文のサイズと時間に上限を設ける。
     - `registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`: GET と HEAD だけ。
-  - それ以外はすべて 403 を返し、ポリシー違反としてイベントに記録する。
+  - それ以外（CONNECT、WebSocket、別ポート、裸の IP、IPv6 の直接指定、Host と SNI の不一致を含む）はすべて拒否し、ポリシー違反としてイベントに記録する。記録には query や本文を残さない。
+  - 上流への転送
+    - `redirect: "manual"` にし、redirect の行き先ごとに scheme / host / port / path / method を判定し直す。
+    - 上流は HTTPS に固定し、必要なヘッダだけで組み立て直す。コンテナから来た Authorization / Cookie / Host は転送しない。
   - コンテナ内では、Cloudflare のエフェメラル CA を `NODE_EXTRA_CA_CERTS` / `GIT_SSL_CAINFO` / `REQUESTS_CA_BUNDLE` に設定する。
+  - 残るリスク: 許可したホストへの GET / HEAD の path / query / header や、git の POST 本文を使った情報流出は、原理的には防ぎきれない（7.2）。「GET だから流出しない」とは言えない。lockfile にあるパッケージだけに絞るのは、将来の強化策とする。npm の tarball が外部ホストにある依存は失敗する（fail-closed）。
 - 既知の制限
   - postinstall で外部からバイナリを取る依存（playwright など）は失敗する。
   - 許可したホスト経由の情報流出は、原理的には防ぎきれない（7.2）。Phase 2 は GET 系だけに絞る。
@@ -121,13 +172,24 @@ apps/gateway (既存 Worker)
 ## Gateway 側の変更
 
 - `task_start`
-  - 予約と TaskDO の作成の後、AgentDO の `start` を呼ぶ。
-  - 成功したら `RUNNING` に遷移する。`start` の失敗は `CREATING` のまま残し、再試行（同じ idempotency_key）で再び `start` を呼べるようにする。
+  - 入力に `verification_commands`（任意）を追加する。
+  - 予約（同時実行枠と、月額枠からのタスク予算）と TaskDO の作成の後、AgentDO の `start` を呼ぶ。
+  - TaskDO は、作成時に「start を配送する意図」と taskSpec の fingerprint を同じトランザクションで記録する。
+  - `start` が成功したら `RUNNING` に遷移する。失敗したり応答が失われたりしても、TaskDO の alarm が `start` を再送する（`CREATING` も alarm の対象にする）。利用者の再試行に頼らない。
 - TaskDO
-  - AgentDO のイベントを取り込む仕組みを持つ。`task_wait` の中で取り込んでから返すことと、alarm（10秒ごと、実行中だけ）で取り込むことの両方を行う。
-  - AgentDO の `phase` を状態遷移表に従って反映する。
-- `task_cancel` は AgentDO の `cancel()` も呼ぶ（失敗しても TaskDO は `CANCELLED` のまま。AgentDO の照合で後から止まる）。
-- UserDO: 月額の費用上限（初期値は env で設定。既定 $100）。
+  - AgentDO のイベントを取り込む。`task_wait` の中で取り込んでから返すことと、alarm（10秒ごと、終端で停止が確認されるまで）で取り込むことの両方を行う。
+  - 取り込みは冪等にする。`(operationId, agentSeq)` を一意にし、TaskDO の状態・自分の seq・イベント・取り込みカーソルを同じトランザクションで更新する。`task_wait` と alarm が同時に同じ範囲を取りに行っても重複しない。
+  - `hasMore` が false になるまで取り込み、終端の phase のイベントを取り込んだときだけ終端に確定する。
+  - alarm は at-least-once で発火するので、処理は冪等にし、次の alarm は明示的に設定し直す。
+- `task_cancel` の流れは、上の「キャンセル（停止を確かめるまで収束させる）」のとおり。
+- `task_result`（新設）
+  - `{task_id}` を受け取り、`{status, summary, verification: {commands, results, verified}, warnings, patch | diffstat, usage}` を返す。
+  - 終端でないタスクには `not_ready` を返す。
+  - owner の確認は、ほかのツールと同じ。
+- UserDO
+  - 月額の費用上限を持つ（初期値は env で設定。既定 $100）。
+  - タスク予算の予約、usage の冪等な精算、終了時の差額の返却を行う。
+  - 同時実行枠の解放と照合は、TaskDO の「停止確認済み」を条件にする。
 
 ## テスト
 
@@ -141,7 +203,15 @@ apps/gateway (既存 Worker)
   - fake のモデルの台本で「ファイルを編集してテストを通し、commit して完了を申告する」流れを通す。
   - 対象リポジトリは、テスト用に用意した純 JS の小さなもの（ローカルの偽 git サーバーか、偽 GitHub に git の smart HTTP を足したもの）。
   - 外向き通信: 許可されたホストに届くこと、許可されないホストや内部 IP に届かないこと。
-  - Gateway の MCP 経由で、`task_start` → `task_wait` で `RUNNING` → `COMPLETED` のイベントが流れること。
+  - Gateway の MCP 経由で、`task_start` → `task_wait` で `RUNNING` → `COMPLETED` のイベントが流れ、`task_result` で patch と検証結果が取れること。
+  - 外向き通信の遮断: IPv4 / IPv6、private / link-local / メタデータのアドレス、別ポート、DNS、redirect、CONNECT、WebSocket、Host と TLS の不一致。コンテナを再起動した後も遮断されること。
+  - 停止: bash の子孫プロセスが、タイムアウトとキャンセルで止まること。
+  - 配送: start の応答が失われても alarm で収束すること。cancel が start より先に届いた場合。cancel の配送が失敗した後の再送。古いタスクが止まるまで次のタスクが始まらないこと。
+  - 取り込み: 重複しないこと、ページの終端、終端イベントまで取り込んでから終端に確定すること。
+  - 期限と usage が、再起動の後も引き継がれること。
+  - 検証の失敗と、修正回数の上限。
+  - 予算: 残りが次の呼び出しの見積もりより少なければ、呼ばずに `budget_exceeded` になること。
+  - 許可したホストへの疎通（git / npm）が通るだけでは、セキュリティ要件を満たした証明にはならない。遮断の確認が M1 と E2E の必須項目である。
 - 手動の受入試験（acceptance.md に追加）
   - AI Gateway の作成、Authenticated Gateway、BYOK の登録。
   - 本物の Claude で小さな実装タスクが完了すること。

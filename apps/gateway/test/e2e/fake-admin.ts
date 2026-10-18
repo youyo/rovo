@@ -1,0 +1,37 @@
+import type {
+  FakeRepository,
+  FaultTarget,
+  RecordedRequest,
+  TeamState,
+} from "../fake-github/server";
+
+/** 偽 GitHub の管理 API（POST {url}/__admin/<command>）の HTTP クライアント。 */
+export function fakeGitHubAdmin(url: string) {
+  async function post(command: string, body: Record<string, unknown> = {}) {
+    const res = await fetch(`${url}/__admin/${command}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`fake github admin ${command}: ${res.status}`);
+    return (await res.json()) as Record<string, unknown>;
+  }
+  return {
+    reset: () => post("reset"),
+    /** 追加したユーザーが「現在のユーザー」になる（/authorize でログインする人） */
+    addUser: (user: { id: number; login: string }) => post("users", user),
+    setCurrentUser: (login: string) => post("current-user", { login }),
+    setTeam: (org: string, team: string, login: string, state: TeamState) =>
+      post("teams", { org, team, login, state }),
+    setInstallation: (id: number, repositories: FakeRepository[]) =>
+      post("installations", { id, repositories }),
+    expireAccessTokens: () => post("expire-access-tokens"),
+    revokeRefreshTokens: () => post("revoke-refresh-tokens"),
+    setFault: (target: FaultTarget, status: number | null, count?: number) =>
+      post("fault", { target, status, count }),
+    async requests(): Promise<RecordedRequest[]> {
+      return ((await post("requests")).requests ?? []) as RecordedRequest[];
+    },
+  };
+}
+export type FakeAdmin = ReturnType<typeof fakeGitHubAdmin>;

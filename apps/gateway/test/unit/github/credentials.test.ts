@@ -14,14 +14,18 @@ const HOUR = 60 * MIN;
 
 class MemoryStorage implements CredentialStorage {
   value: StoredCredential | null = null;
+  generation = 0;
   async get() {
-    return this.value ? structuredClone(this.value) : null;
+    return {
+      generation: this.generation,
+      credential: this.value ? structuredClone(this.value) : null,
+    };
   }
-  async put(v: StoredCredential) {
-    this.value = structuredClone(v);
-  }
-  async delete() {
-    this.value = null;
+  async compareAndPut(expected: number, v: StoredCredential | null) {
+    if (expected !== this.generation) return false;
+    this.value = v ? structuredClone(v) : null;
+    this.generation += 1;
+    return true;
   }
 }
 
@@ -366,5 +370,85 @@ describe("withToken", () => {
     const results = await Promise.all([mgr.withToken(fn), mgr.withToken(fn), mgr.withToken(fn)]);
     expect(results).toEqual(Array(3).fill("acc-after-ref-1"));
     expect(refreshToken).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("世代の CAS（再ログイン・clear との競合）", () => {
+  function deferred<T>() {
+    let resolve: (v: T) => void = () => {};
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+
+  it("refresh 中に clear され、その後 refresh が成功しても資格は空のまま（reauth_required）", async () => {
+    const gate = deferred<TokenSet>();
+    const { mgr, storage, advance } = setup({ refresh: () => gate.promise });
+    await mgr.save(tokens());
+    advance(9 * HOUR);
+    const pending = codeOf(mgr.getToken());
+    await tick();
+    await mgr.clear();
+    gate.resolve(tokens({ accessToken: "stale-refresh-result" }));
+    expect(await pending).toBe("reauth_required");
+    expect(storage.value).toBeNull();
+  });
+
+  it("clear -> 再ログイン -> 古い refresh 成功の順でも、再ログインの資格が残る（ABA にならない）", async () => {
+    const gate = deferred<TokenSet>();
+    const { mgr, storage, advance } = setup({ refresh: () => gate.promise });
+    await mgr.save(tokens());
+    advance(9 * HOUR);
+    const pending = mgr.getToken();
+    await tick();
+    await mgr.clear();
+    await mgr.save(tokens({ accessToken: "relogin", accessExpiresAt: T0 + 20 * HOUR }));
+    gate.resolve(tokens({ accessToken: "stale-refresh-result" }));
+    expect(await pending).toBe("relogin");
+    expect(await mgr.getToken()).toBe("relogin");
+    expect(storage.value).not.toBeNull();
+  });
+
+  it("世代は単調増加で、削除でも進む", async () => {
+    const { mgr, storage } = setup();
+    await mgr.save(tokens());
+    const g1 = storage.generation;
+    await mgr.clear();
+    expect(storage.generation).toBeGreaterThan(g1);
+    await mgr.save(tokens());
+    expect(storage.generation).toBeGreaterThan(g1 + 1);
+  });
+
+  it("refresh の結果の暗号化を待っている間に再ログインが完了しても、再ログインの資格が残る", async () => {
+    const { mgr, storage, advance } = setup();
+    await mgr.save(tokens());
+    advance(9 * HOUR);
+    // refresh 結果の暗号化（access の AES-GCM）を保留して、その間に再ログインを完了させる
+    const hold = deferred<void>();
+    let armed = false;
+    const real = crypto.subtle.encrypt.bind(crypto.subtle);
+    const spy = vi.spyOn(crypto.subtle, "encrypt").mockImplementation(async (...args) => {
+      if (armed) {
+        armed = false;
+        await hold.promise;
+      }
+      return real(...(args as Parameters<typeof real>));
+    });
+    try {
+      armed = true;
+      const pending = mgr.getToken();
+      await tick();
+      expect(armed).toBe(false); // refresh が暗号化に入って保留されている
+      spy.mockRestore();
+      await mgr.save(tokens({ accessToken: "relogin", accessExpiresAt: T0 + 20 * HOUR }));
+      hold.resolve();
+      expect(await pending).toBe("relogin");
+      expect(await mgr.getToken()).toBe("relogin");
+      expect(storage.value).not.toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

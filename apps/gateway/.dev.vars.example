@@ -1,0 +1,17 @@
+# ローカル開発用。`cp .dev.vars.example .dev.vars` して値を埋める（.dev.vars は gitignore 済み）。
+# 本番の secret は `wrangler secret put <NAME>` で設定する（このファイルには書かない）。
+
+# GitHub App（ユーザー認可を有効にしたもの）の Client ID / Client secret
+GITHUB_APP_CLIENT_ID=
+GITHUB_APP_CLIENT_SECRET=
+
+# ログインを許可する org と team（slug）
+ALLOWED_ORG=
+ALLOWED_TEAM=
+
+# GitHub トークンの暗号化鍵（base64 の 32 バイト）: openssl rand -base64 32
+TOKEN_ENC_KEY=
+
+# ローカル開発では公開 URL を localhost にする。GitHub App のコールバック URL は
+# http://localhost:8787/callback を追加登録する。
+PUBLIC_BASE_URL=http://localhost:8787

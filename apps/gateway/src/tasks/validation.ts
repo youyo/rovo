@@ -42,7 +42,8 @@ const stringList = z.array(z.string().min(1).max(MAX_LIST_ITEM_LENGTH)).max(MAX_
 
 /** task_start の入力（design.md 4.3）。idempotency_key は含めない。 */
 export const taskInputSchema = z.object({
-  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "owner/name 形式"),
+  // GitHub の上限: owner は 39 文字、リポジトリ名は 100 文字
+  repository: z.string().regex(/^[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name 形式"),
   base_ref: z.string().min(1).max(255),
   base_sha: z.string().regex(/^[0-9a-fA-F]{7,40}$/, "7〜40桁の16進"),
   title: z.string().min(1).max(MAX_TITLE),
@@ -50,6 +51,13 @@ export const taskInputSchema = z.object({
   acceptance_criteria: stringList.default([]),
   constraints: stringList.default([]),
 });
+
+/** 入力全体（JSON）の上限。項目ごとの上限だけでは合計が大きくなりうるため。 */
+export const MAX_INPUT_BYTES = 256 * 1024;
+
+export function exceedsInputLimit(input: unknown): boolean {
+  return new TextEncoder().encode(JSON.stringify(input)).length > MAX_INPUT_BYTES;
+}
 
 export type TaskInput = z.infer<typeof taskInputSchema>;
 

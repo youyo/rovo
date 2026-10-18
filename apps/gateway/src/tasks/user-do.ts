@@ -1,4 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  CredentialManager,
+  type CredentialState,
+  type CredentialStorage,
+  GitHubClient,
+  GitHubError,
+  type GitHubErrorCode,
+  resolveGitHubBaseUrls,
+  type StoredCredential,
+  type TokenSet,
+} from "../github";
 import { isTerminal } from "./state";
 import type { TaskDO } from "./task-do";
 import { ulid } from "./ulid";
@@ -7,6 +18,8 @@ import { ulid } from "./ulid";
 export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** 未作成の予約を回収し始めるまでの運用値。安全性は TaskDO の tombstone が保証する。 */
 export const RESERVATION_RECLAIM_AFTER_MS = 10 * 60 * 1000;
+/** team 所属の再検証結果をキャッシュする時間。team から外れてから使えなくなるまでの遅れの上限。 */
+export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
 /** 照合中に予約が入れ替わったときの再判定の上限。 */
 const MAX_RECONCILE_ATTEMPTS = 5;
 
@@ -17,17 +30,47 @@ export type ReserveResult =
 type ReservationRow = { active_task_id: string | null; reserved_at: number; version: number };
 type RequestRow = { task_id: string; fingerprint: string };
 
+/**
+ * GitHub 連携の失敗。GitHubError の code をそのまま使い、想定外の例外だけ internal にする。
+ * Workers RPC は Error の独自プロパティを落とすので、throw ではなく戻り値で返す。
+ */
+export type AuthzFailure = {
+  ok: false;
+  code: GitHubErrorCode | "internal";
+  message: string;
+};
+export type MemberResult = { ok: true } | AuthzFailure;
+export type StartAuthzResult =
+  | { ok: true; repositoryId: number; installationId: number }
+  | AuthzFailure;
+
+type CredentialRow = {
+  generation: number;
+  access_token_enc: string | null;
+  refresh_token_enc: string | null;
+  access_expires_at: number | null;
+  refresh_expires_at: number | null;
+  version: number | null;
+  updated_at: number | null;
+};
+
 type TaskInspector = Pick<DurableObjectStub<TaskDO>, "inspect" | "abandonIfUncreated">;
 
 /**
- * ユーザーごとの状態。この段階（M2）では同時実行の予約と冪等キー(requests)だけを持つ。
- * membership_cache / github_credential は GitHub 連携（M3）で追加する。
+ * ユーザーごとの状態。同時実行の予約・冪等キー(requests)・GitHub 資格（暗号化）・team 所属のキャッシュ。
  *
+ * GitHub のトークンはこの DO の中だけで取り出して使い、RPC の戻り値には含めない
+ * （入ってくるのはログイン時の saveCredential だけ）。
  * DO 間の呼び出しは UserDO → TaskDO（照合のみ）に限る。
  */
 export class UserDO extends DurableObject<Env> {
   /** 現在時刻(ms)。テストで差し替える。 */
   now: () => number = () => Date.now();
+  /** GitHub への fetch。テストで差し替える。 */
+  githubFetch: typeof fetch = (...args) => fetch(...args);
+  private credentials: CredentialManager | null = null;
+  private githubClientInstance: GitHubClient | null = null;
+  private memberInflight: Promise<MemberResult> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -45,6 +88,23 @@ export class UserDO extends DurableObject<Env> {
       reserved_at INTEGER NOT NULL,
       version INTEGER NOT NULL
     )`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS membership_cache (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      checked_at INTEGER NOT NULL,
+      result TEXT NOT NULL
+    )`);
+    // 資格の正本。access_token_enc が NULL の行は「削除済み」（世代だけを残す tombstone）。
+    sql.exec(`CREATE TABLE IF NOT EXISTS github_credential (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      generation INTEGER NOT NULL,
+      access_token_enc TEXT,
+      refresh_token_enc TEXT,
+      access_expires_at INTEGER,
+      refresh_expires_at INTEGER,
+      version INTEGER,
+      updated_at INTEGER
+    )`);
+    sql.exec("INSERT OR IGNORE INTO github_credential (singleton, generation) VALUES (1, 0)");
     sql.exec(
       "INSERT OR IGNORE INTO reservation (singleton, active_task_id, reserved_at, version) VALUES (1, NULL, 0, 0)",
     );
@@ -179,5 +239,164 @@ export class UserDO extends DurableObject<Env> {
       return this.clearIfUnchanged(taskId, cur.version);
     });
     return { released };
+  }
+
+  // ---- GitHub 連携 ----
+
+  private readonly credentialStorage: CredentialStorage = {
+    get: (): CredentialState => {
+      const r = this.ctx.storage.sql
+        .exec<CredentialRow>("SELECT * FROM github_credential WHERE singleton = 1")
+        .one();
+      if (r.access_token_enc === null) return { generation: r.generation, credential: null };
+      const credential: StoredCredential = {
+        accessTokenEnc: r.access_token_enc,
+        refreshTokenEnc: r.refresh_token_enc,
+        accessExpiresAt: r.access_expires_at,
+        refreshExpiresAt: r.refresh_expires_at,
+        version: r.version ?? 0,
+        updatedAt: r.updated_at ?? 0,
+      };
+      return { generation: r.generation, credential };
+    },
+    // 世代の比較と書き込みを同期区間で行う（await を挟まないので原子的）。
+    compareAndPut: (expected: number, value: StoredCredential | null): boolean =>
+      this.ctx.storage.transactionSync(() => {
+        const sql = this.ctx.storage.sql;
+        const cur = sql
+          .exec<{ generation: number }>("SELECT generation FROM github_credential")
+          .one();
+        if (cur.generation !== expected) return false;
+        sql.exec(
+          `UPDATE github_credential SET generation = ?, access_token_enc = ?, refresh_token_enc = ?,
+             access_expires_at = ?, refresh_expires_at = ?, version = ?, updated_at = ? WHERE singleton = 1`,
+          expected + 1,
+          value?.accessTokenEnc ?? null,
+          value?.refreshTokenEnc ?? null,
+          value?.accessExpiresAt ?? null,
+          value?.refreshExpiresAt ?? null,
+          value?.version ?? null,
+          value?.updatedAt ?? null,
+        );
+        return true;
+      }),
+  };
+
+  private github(): { client: GitHubClient; credentials: CredentialManager } {
+    if (this.credentials && this.githubClientInstance) {
+      return { client: this.githubClientInstance, credentials: this.credentials };
+    }
+    const {
+      GITHUB_APP_CLIENT_ID: id,
+      GITHUB_APP_CLIENT_SECRET: secret,
+      TOKEN_ENC_KEY: key,
+    } = this.env;
+    if (!id || !secret || !key || !this.env.ALLOWED_ORG || !this.env.ALLOWED_TEAM) {
+      throw new Error("GitHub integration is not configured");
+    }
+    const urls = resolveGitHubBaseUrls(this.env);
+    const client = new GitHubClient({
+      clientId: id,
+      clientSecret: secret,
+      oauthBase: urls.oauthBase,
+      apiBase: urls.apiBase,
+      fetch: (...args) => this.githubFetch(...args),
+      now: () => this.now(),
+    });
+    // CredentialManager は 1 つを使い回す（進行中のリフレッシュを共有する single-flight のため）。
+    const credentials = new CredentialManager({
+      storage: this.credentialStorage,
+      encryptionKey: key,
+      client,
+      now: () => this.now(),
+    });
+    this.githubClientInstance = client;
+    this.credentials = credentials;
+    return { client, credentials };
+  }
+
+  /** GitHubError は code を保ち、それ以外は内容を出さず internal にする。 */
+  private toFailure(e: unknown): AuthzFailure {
+    if (e instanceof GitHubError) return { ok: false, code: e.code, message: e.message };
+    // メッセージにトークン等が入りうるので、エラー名だけを記録する
+    console.error("user_do_error", e instanceof Error ? e.name : typeof e);
+    return { ok: false, code: "internal", message: "internal error" };
+  }
+
+  /** ログイン（callback）で得た資格を保存する。既存を上書きし、team 所属のキャッシュは捨てる。 */
+  async saveCredential(tokens: TokenSet): Promise<void> {
+    await this.github().credentials.save(tokens);
+    this.ctx.storage.sql.exec("DELETE FROM membership_cache");
+  }
+
+  /**
+   * 指定 org / team の active メンバーであることを確かめる（結果は 5 分キャッシュ）。
+   * fail-closed: GitHub に確かめられないときは必ず失敗を返す。失敗はキャッシュしない。
+   */
+  async ensureMember(githubUserId: number): Promise<MemberResult> {
+    try {
+      const cached = this.cachedMembership();
+      if (cached === "active") return { ok: true };
+      if (cached === "denied") return this.notMember();
+      // 同時の問い合わせは進行中の確認を共有する
+      this.memberInflight ??= this.checkMembership(githubUserId).finally(() => {
+        this.memberInflight = null;
+      });
+      return await this.memberInflight;
+    } catch (e) {
+      return this.toFailure(e);
+    }
+  }
+
+  /** メンバー確認に加え、対象リポジトリが App の Installation 経由で push 可能かを確かめる。 */
+  async authorizeStart(githubUserId: number, repository: string): Promise<StartAuthzResult> {
+    const member = await this.ensureMember(githubUserId);
+    if (!member.ok) return member;
+    try {
+      const { client, credentials } = this.github();
+      const r = await credentials.withToken((tok) =>
+        client.findWritableRepository(tok, repository),
+      );
+      return { ok: true, repositoryId: r.repositoryId, installationId: r.installationId };
+    } catch (e) {
+      return this.toFailure(e);
+    }
+  }
+
+  private notMember(): AuthzFailure {
+    return { ok: false, code: "forbidden", message: "not an active member of the required team" };
+  }
+
+  private cachedMembership(): "active" | "denied" | null {
+    const row = this.ctx.storage.sql
+      .exec<{ checked_at: number; result: string }>(
+        "SELECT checked_at, result FROM membership_cache WHERE singleton = 1",
+      )
+      .toArray()[0];
+    if (!row) return null;
+    const age = this.now() - row.checked_at;
+    if (age < 0 || age >= MEMBERSHIP_CACHE_TTL_MS) return null;
+    return row.result === "active" ? "active" : "denied";
+  }
+
+  private async checkMembership(githubUserId: number): Promise<MemberResult> {
+    const { client, credentials } = this.github();
+    const state = await credentials.withToken(async (tok) => {
+      // login は改名されうるので、毎回 GET /user で現在の値を得る。資格が別人のものなら拒否する。
+      const user = await client.getUser(tok);
+      if (user.id !== githubUserId) return "mismatch" as const;
+      return client.getTeamMembership(tok, {
+        org: this.env.ALLOWED_ORG,
+        teamSlug: this.env.ALLOWED_TEAM,
+        username: user.login,
+      });
+    });
+    if (state === "mismatch") return this.notMember();
+    this.ctx.storage.sql.exec(
+      "INSERT OR REPLACE INTO membership_cache (singleton, checked_at, result) VALUES (1, ?, ?)",
+      this.now(),
+      state === "active" ? "active" : "denied",
+    );
+    return state === "active" ? { ok: true } : this.notMember();
   }
 }

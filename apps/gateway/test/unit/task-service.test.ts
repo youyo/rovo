@@ -81,6 +81,19 @@ describe("task service: start", () => {
     expect(r).toMatchObject({ ok: false, error: { code: "invalid_input" } });
   });
 
+  it("入力全体が大きすぎれば invalid_input（予約しない）", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    const r = await svc.start(p, {
+      ...startInput,
+      instructions: "x".repeat(100_000),
+      acceptance_criteria: Array(50).fill("y".repeat(2_000)),
+      constraints: Array(50).fill("z".repeat(2_000)),
+    });
+    expect(r).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+    expect((await svc.start(p, { ...startInput })).ok).toBe(true);
+  });
+
   it("repository_id / installation_id を TaskDO に渡す", async () => {
     const svc = createTaskService(env);
     const p = principal();

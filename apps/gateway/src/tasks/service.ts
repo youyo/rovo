@@ -3,7 +3,13 @@ import type { TaskStatus } from "./state";
 import type { TaskDO, TaskEvent, TaskView } from "./task-do";
 import { isTaskId, ulid } from "./ulid";
 import type { UserDO } from "./user-do";
-import { computeFingerprint, isValidIdempotencyKey, taskInputSchema } from "./validation";
+import {
+  computeFingerprint,
+  exceedsInputLimit,
+  isValidIdempotencyKey,
+  type TaskInput,
+  taskInputSchema,
+} from "./validation";
 
 /**
  * ユースケース層。Gateway（MCP ツール）が UserDO / TaskDO を正しい順序で呼ぶための関数群。
@@ -65,6 +71,27 @@ const startInputSchema = taskInputSchema.extend({
   idempotency_key: z.unknown().optional(),
 });
 
+export type CheckedStartInput = { input: TaskInput; idempotency_key: string | undefined };
+
+/**
+ * task_start の入力検証（形式・サイズ・idempotency_key）。外部（GitHub / DO）を呼ぶ前に行う。
+ */
+export function checkStartInput(rawInput: unknown): ServiceResult<CheckedStartInput> {
+  const parsed = startInputSchema.safeParse(rawInput);
+  if (!parsed.success) {
+    return fail(
+      "invalid_input",
+      parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+    );
+  }
+  const { idempotency_key: key, ...input } = parsed.data;
+  if (key !== undefined && !isValidIdempotencyKey(key)) {
+    return fail("invalid_input", "idempotency_key must match [A-Za-z0-9_-]{1,128}");
+  }
+  if (exceedsInputLimit(input)) return fail("invalid_input", "input is too large");
+  return { ok: true, value: { input, idempotency_key: key } };
+}
+
 export function createTaskService(
   env: Pick<Env, "USER_DO" | "TASK_DO">,
   overrides: Partial<TaskServiceDeps> = {},
@@ -85,17 +112,9 @@ export function createTaskService(
       rawInput: unknown,
       options: StartOptions = {},
     ): Promise<ServiceResult<StartValue>> {
-      const parsed = startInputSchema.safeParse(rawInput);
-      if (!parsed.success) {
-        return fail(
-          "invalid_input",
-          parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
-        );
-      }
-      const { idempotency_key: key, ...input } = parsed.data;
-      if (key !== undefined && !isValidIdempotencyKey(key)) {
-        return fail("invalid_input", "idempotency_key must match [A-Za-z0-9_-]{1,128}");
-      }
+      const checked = checkStartInput(rawInput);
+      if (!checked.ok) return checked;
+      const { idempotency_key: key, input } = checked.value;
       // 省略時はサーバーで生成する（再試行の重複排除は保証しない）。':' を含むので利用者のキーと衝突しない。
       const requestKey = key ?? `auto:${ulid()}`;
 

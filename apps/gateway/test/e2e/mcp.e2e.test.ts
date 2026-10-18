@@ -4,7 +4,6 @@ import {
   StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { describe, expect, inject, it } from "vitest";
-import { connectAuthenticated } from "./oauth-client";
 
 const baseUrl = inject("baseUrl");
 
@@ -41,22 +40,7 @@ describe("未認証", () => {
   });
 });
 
-describe("認証後（DCR -> /authorize スタブ -> token(PKCE)）", () => {
-  it("ping ツールが一覧にあり、呼び出すと pong と認証済みユーザーが返る", async () => {
-    const client = await connectAuthenticated(baseUrl);
-    try {
-      const { tools } = await client.listTools();
-      expect(tools.map((t) => t.name)).toContain("ping");
-
-      const result = await client.callTool({ name: "ping", arguments: {} });
-      expect(result.isError).toBeFalsy();
-      const text = (result.content as { type: string; text: string }[])[0]?.text ?? "";
-      expect(JSON.parse(text)).toEqual({ pong: true, login: "e2e-user", githubUserId: 1001 });
-    } finally {
-      await client.close();
-    }
-  });
-
+describe("認証後", () => {
   it("不正なアクセストークンは 401", async () => {
     const res = await fetch(`${baseUrl}/mcp`, {
       method: "POST",

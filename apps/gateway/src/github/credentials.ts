@@ -13,10 +13,21 @@ export interface StoredCredential {
 
 type MaybePromise<T> = T | Promise<T>;
 
+/** 資格の現在値と世代。世代は単調増加で、削除（tombstone）でも進む。 */
+export interface CredentialState {
+  generation: number;
+  credential: StoredCredential | null;
+}
+
+/**
+ * 資格の保存先。書き込みはすべて世代の compare-and-set で行う。
+ * compareAndPut は「世代が expectedGeneration と一致するときだけ」値（null なら削除）を書き、
+ * 世代を 1 進めて true を返す。不一致なら何もせず false。比較と書き込みは原子的でなければならない
+ * （UserDO では transactionSync の中で行う）。
+ */
 export interface CredentialStorage {
-  get(): MaybePromise<StoredCredential | null>;
-  put(value: StoredCredential): MaybePromise<void>;
-  delete(): MaybePromise<void>;
+  get(): MaybePromise<CredentialState>;
+  compareAndPut(expectedGeneration: number, value: StoredCredential | null): MaybePromise<boolean>;
 }
 
 export interface RefreshClient {
@@ -34,6 +45,7 @@ export interface CredentialManagerOptions {
 }
 
 const DEFAULT_SKEW_MS = 5 * 60_000;
+const MAX_CAS_ATTEMPTS = 8;
 
 export class CredentialManager {
   private readonly storage: CredentialStorage;
@@ -53,19 +65,35 @@ export class CredentialManager {
     this.keyPromise.catch(() => {});
   }
 
-  /** ログイン（または再ログイン）で得た資格を保存する。既存を上書きし version を進める。 */
+  /**
+   * ログイン（または再ログイン）で得た資格を保存する。既存を上書きし、世代を進める（新しいものが勝つ）。
+   * 暗号化は先に済ませ、比較と書き込みは storage の原子的な compareAndPut に任せる。
+   */
   async save(tokens: TokenSet): Promise<void> {
-    const current = await this.storage.get();
-    await this.write(tokens, (current?.version ?? 0) + 1);
+    const sealed = await this.seal(tokens);
+    for (let i = 0; i < MAX_CAS_ATTEMPTS; i++) {
+      const state = await this.storage.get();
+      if (
+        await this.storage.compareAndPut(state.generation, this.stamp(sealed, state.generation + 1))
+      ) {
+        return;
+      }
+    }
+    throw new Error("could not store GitHub credential");
   }
 
   async clear(): Promise<void> {
-    await this.storage.delete();
+    for (let i = 0; i < MAX_CAS_ATTEMPTS; i++) {
+      const state = await this.storage.get();
+      if (state.credential === null) return;
+      if (await this.storage.compareAndPut(state.generation, null)) return;
+    }
+    throw new Error("could not clear GitHub credential");
   }
 
   /** 有効な access token を返す。期限切れ・残り 5 分未満ならリフレッシュする。 */
   async getToken(): Promise<string> {
-    const cred = await this.storage.get();
+    const { credential: cred } = await this.storage.get();
     if (!cred) throw new GitHubError("reauth_required", "no GitHub credential");
     if (cred.accessExpiresAt === null || cred.accessExpiresAt - this.now() >= this.skew) {
       return this.decrypt(cred.accessTokenEnc, "access");
@@ -93,7 +121,7 @@ export class CredentialManager {
   /** 401 を受けたトークンが既に入れ替わっていれば、それを使う。そうでなければ強制リフレッシュ。 */
   private async forceRefresh(failedToken: string): Promise<string> {
     if (this.inflight) return this.inflight;
-    const cred = await this.storage.get();
+    const { credential: cred } = await this.storage.get();
     if (!cred) throw new GitHubError("reauth_required", "no GitHub credential");
     const stored = await this.decrypt(cred.accessTokenEnc, "access");
     if (stored !== failedToken) return stored;
@@ -110,13 +138,13 @@ export class CredentialManager {
   }
 
   private async doRefresh(): Promise<string> {
-    const cred = await this.storage.get();
+    const start = await this.storage.get();
+    const cred = start.credential;
     if (!cred) throw new GitHubError("reauth_required", "no GitHub credential");
-    const startVersion = cred.version;
 
     const refreshExpired = cred.refreshExpiresAt !== null && cred.refreshExpiresAt <= this.now();
     if (cred.refreshTokenEnc === null || refreshExpired) {
-      await this.deleteIfVersion(startVersion);
+      await this.storage.compareAndPut(start.generation, null);
       throw new GitHubError("reauth_required", "GitHub refresh token unavailable or expired");
     }
     const refreshToken = await this.decrypt(cred.refreshTokenEnc, "refresh");
@@ -126,34 +154,35 @@ export class CredentialManager {
       next = await this.client.refreshToken(refreshToken);
     } catch (e) {
       if (e instanceof GitHubError && e.code === "reauth_required") {
-        const latest = await this.storage.get();
-        // 更新中に再ログインされていたら、新しい資格を守って、それを返す
-        if (latest && latest.version !== startVersion) {
-          return this.decrypt(latest.accessTokenEnc, "access");
+        // 開始時の世代のままのときだけ消す。更新中に再ログイン / clear されていたら触らない。
+        if (!(await this.storage.compareAndPut(start.generation, null))) {
+          return this.currentAccessTokenOrReauth();
         }
-        await this.storage.delete();
       }
       throw e;
     }
 
-    // 旧 refresh token は使用済み。新しい資格を最優先で保存する。
-    // ただし更新中に再ログインされていたら（version が変わっていたら）そちらが勝つ。
-    const latest = await this.storage.get();
-    if (latest && latest.version !== startVersion) {
-      return this.decrypt(latest.accessTokenEnc, "access");
+    // 旧 refresh token は使用済み。暗号化を先に済ませ、開始時の世代に対する CAS で保存する。
+    // 更新中に再ログイン・clear・別の更新があって世代が進んでいたら、この結果は捨てる。
+    const sealed = await this.seal(next);
+    if (
+      await this.storage.compareAndPut(start.generation, this.stamp(sealed, start.generation + 1))
+    ) {
+      return next.accessToken;
     }
-    await this.write(next, startVersion + 1);
-    return next.accessToken;
+    return this.currentAccessTokenOrReauth();
   }
 
-  private async deleteIfVersion(version: number): Promise<void> {
-    const latest = await this.storage.get();
-    if (latest && latest.version === version) await this.storage.delete();
+  /** CAS に負けたとき: 勝った側の資格を使う。資格が無ければ（clear された）再ログインが必要。 */
+  private async currentAccessTokenOrReauth(): Promise<string> {
+    const { credential } = await this.storage.get();
+    if (!credential) throw new GitHubError("reauth_required", "no GitHub credential");
+    return this.decrypt(credential.accessTokenEnc, "access");
   }
 
-  private async write(tokens: TokenSet, version: number): Promise<void> {
+  private async seal(tokens: TokenSet): Promise<Omit<StoredCredential, "version" | "updatedAt">> {
     const key = await this.keyPromise;
-    await this.storage.put({
+    return {
       accessTokenEnc: await encryptString(key, tokens.accessToken, "access"),
       refreshTokenEnc:
         tokens.refreshToken === null
@@ -161,9 +190,14 @@ export class CredentialManager {
           : await encryptString(key, tokens.refreshToken, "refresh"),
       accessExpiresAt: tokens.accessExpiresAt,
       refreshExpiresAt: tokens.refreshExpiresAt,
-      version,
-      updatedAt: this.now(),
-    });
+    };
+  }
+
+  private stamp(
+    sealed: Omit<StoredCredential, "version" | "updatedAt">,
+    version: number,
+  ): StoredCredential {
+    return { ...sealed, version, updatedAt: this.now() };
   }
 
   private async decrypt(enc: string, aad: "access" | "refresh"): Promise<string> {

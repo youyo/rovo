@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isTaskId, ulid } from "../../src/tasks/ulid";
 import {
   computeFingerprint,
+  exceedsInputLimit,
   isValidIdempotencyKey,
   parseCursor,
   parseTimeoutSeconds,
@@ -100,6 +101,8 @@ describe("taskInputSchema", () => {
   it.each([
     ["repository が owner/name でない", { repository: "just-name" }],
     ["repository に余分なスラッシュ", { repository: "a/b/c" }],
+    ["repository の owner が 40 文字", { repository: `${"a".repeat(40)}/repo` }],
+    ["repository の name が 101 文字", { repository: `owner/${"a".repeat(101)}` }],
     ["base_sha が 6 桁", { base_sha: "012345" }],
     ["base_sha が 41 桁", { base_sha: "a".repeat(41) }],
     ["base_sha が 16 進でない", { base_sha: "ghijklm" }],
@@ -108,6 +111,21 @@ describe("taskInputSchema", () => {
     ["base_ref が空", { base_ref: "" }],
   ])("%s は拒否する", (_name, patch) => {
     expect(taskInputSchema.safeParse({ ...base, ...patch }).success).toBe(false);
+  });
+  it("repository は owner 39 文字・name 100 文字まで受け付ける", () => {
+    const repository = `${"a".repeat(39)}/${"b".repeat(100)}`;
+    expect(taskInputSchema.safeParse({ ...base, repository }).success).toBe(true);
+  });
+  it("入力全体のサイズ上限（MAX_INPUT_BYTES）を超えると exceedsInputLimit が true", () => {
+    const big = {
+      ...base,
+      instructions: "x".repeat(100_000),
+      acceptance_criteria: Array(50).fill("y".repeat(2_000)),
+      constraints: Array(50).fill("z".repeat(2_000)),
+    };
+    const parsed = taskInputSchema.parse(big);
+    expect(exceedsInputLimit(parsed)).toBe(true);
+    expect(exceedsInputLimit(taskInputSchema.parse(base))).toBe(false);
   });
   it("base_sha は 7 桁と 40 桁の境界を受け付ける", () => {
     expect(taskInputSchema.safeParse({ ...base, base_sha: "a".repeat(7) }).success).toBe(true);

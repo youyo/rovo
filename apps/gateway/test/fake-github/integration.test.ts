@@ -13,14 +13,15 @@ const KEY = Buffer.alloc(32, 1).toString("base64");
 
 class Mem implements CredentialStorage {
   v: StoredCredential | null = null;
+  generation = 0;
   get() {
-    return this.v;
+    return { generation: this.generation, credential: this.v };
   }
-  put(v: StoredCredential) {
+  compareAndPut(expected: number, v: StoredCredential | null) {
+    if (expected !== this.generation) return false;
     this.v = v;
-  }
-  delete() {
-    this.v = null;
+    this.generation += 1;
+    return true;
   }
 }
 

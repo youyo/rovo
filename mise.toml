@@ -22,7 +22,7 @@ dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
 [tasks."test:e2e"]
-description = "E2E テスト（wrangler dev で実 Worker を起動し MCP SDK Client から接続）"
+description = "E2E テスト（wrangler dev で実 Worker と偽 GitHub を起動し、MCP SDK Client から通しで検証）"
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 
@@ -53,9 +53,9 @@ dir = "apps/gateway"
 run = "pnpm exec wrangler deploy --dry-run --outdir dist"
 
 [tasks.dev]
-description = "wrangler dev でローカル起動（ENVIRONMENT=test のスタブ認可を有効にする）"
+description = "wrangler dev でローカル起動（apps/gateway/.dev.vars を読む。.dev.vars.example 参照）"
 dir = "apps/gateway"
-run = "pnpm exec wrangler dev --var ENVIRONMENT:test --var PUBLIC_BASE_URL:http://localhost:8787"
+run = "pnpm exec wrangler dev"
 
 [tasks."test:fake-github"]
 description = "偽 GitHub サーバーと GitHub クライアントの結合テスト（Node）"

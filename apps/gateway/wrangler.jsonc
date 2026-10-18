@@ -13,9 +13,14 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] }],
   "vars": {
-    // "test" のときだけ E2E 用のスタブ認可と上書き設定を許す。本番は必ず "production"。
+    // "test" のときだけ GitHub の接続先（GITHUB_OAUTH_BASE / GITHUB_API_BASE）の上書きを許す。本番は必ず "production"。
     "ENVIRONMENT": "production",
     // 公開 URL（OAuth の issuer / resource の元になる）。デプロイ時に実 URL へ置き換える。
-    "PUBLIC_BASE_URL": "https://rovo-gateway.example.workers.dev"
+    "PUBLIC_BASE_URL": "https://rovo-gateway.example.workers.dev",
+    // GitHub App のクライアント ID（秘密ではない）。デプロイ時に実値へ置き換える。空のままだとログインは失敗する（fail closed）。
+    "GITHUB_APP_CLIENT_ID": "",
+    // ログインを許可する GitHub org と team の slug。どちらかが空ならログインは失敗する。
+    "ALLOWED_ORG": "",
+    "ALLOWED_TEAM": ""
   }
 }

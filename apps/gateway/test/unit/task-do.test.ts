@@ -308,6 +308,21 @@ describe("TaskDO.wait", () => {
     expect(await waiterCount(stub)).toBe(0);
   });
 
+  it("呼び出し側が切断（結果を捨てる）しても、待機者は timeout で必ず片付き枠が戻る", async () => {
+    const { stub } = await createTask();
+    // 切断を模す: 16 件の wait を投げっぱなしにし、結果を誰も待たない
+    for (let i = 0; i < 16; i++) void stub.wait(OWNER, "1", 1).catch(() => {});
+    await waitForWaiters(stub, 16);
+    const full = await stub.wait(OWNER, "1", 1);
+    expect(full.ok && full.retry_after_seconds).toBeGreaterThan(0);
+    // timeout_seconds 経過後（上限 60 秒でクランプされる）には全員片付く
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(await waiterCount(stub)).toBe(0);
+    const again = stub.wait(OWNER, "1", 1);
+    await waitForWaiters(stub, 1); // 新しい wait が枠を使える
+    expect((await again).ok).toBe(true);
+  });
+
   it("上限に達していても、イベントがあれば即座に返す（待機枠を使わない）", async () => {
     const { stub } = await createTask();
     const pendings = Array.from({ length: 16 }, () => stub.wait(OWNER, "1", 30));

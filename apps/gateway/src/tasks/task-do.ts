@@ -340,6 +340,12 @@ export class TaskDO extends DurableObject<Env> {
   /**
    * bounded long polling。seq > cursor のイベントを最大 100 件返す。
    * blockConcurrencyWhile では包まない（待機中も cancel などを受け付けるため）。
+   *
+   * 呼び出し側（Gateway / クライアント）の切断は検知しない。DO の RPC では、呼び出し側が
+   * 切断・中断しても被呼び出し側にはそれが伝わらない（AbortSignal 等を渡せない）ため。
+   * その代わり、待機者は必ず最大 timeout_seconds（上限 60 秒）のタイマーで解放する。
+   * 切断済みの待機が残るのは最長でもその間だけで、waiters 上限（MAX_CONCURRENT_WAITERS）で
+   * 同時数も抑えている。切断で取りこぼしたイベントは、同じ cursor での再試行で受け取れる。
    */
   async wait(
     ownerId: number,

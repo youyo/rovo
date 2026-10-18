@@ -283,6 +283,30 @@ describe("getToken", () => {
     expect(await pending).toBe("relogin");
     expect(storage.value).not.toBeNull();
   });
+
+  it("古い資格を読んだ後に別の呼び出しがリフレッシュを終えても、GitHub へのリフレッシュ要求は 1 回だけ", async () => {
+    const { mgr, storage, refreshToken, advance } = setup();
+    await mgr.save(tokens());
+    advance(9 * HOUR); // 期限切れ
+    // 1 回目の get（呼び出し A の読み取り）だけ、古い値を返したあと解放を待つ
+    const realGet = storage.get.bind(storage);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let n = 0;
+    storage.get = async () => {
+      const snapshot = await realGet();
+      if (++n === 1) await gate;
+      return snapshot;
+    };
+    const a = mgr.getToken(); // 古い資格を読んで保留
+    const b = await mgr.getToken(); // 別の呼び出しがリフレッシュを完了する
+    expect(refreshToken).toHaveBeenCalledTimes(1);
+    release();
+    expect(await a).toBe(b);
+    expect(refreshToken).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("withToken", () => {

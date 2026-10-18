@@ -125,22 +125,33 @@ export class CredentialManager {
     if (!cred) throw new GitHubError("reauth_required", "no GitHub credential");
     const stored = await this.decrypt(cred.accessTokenEnc, "access");
     if (stored !== failedToken) return stored;
-    return this.refresh();
+    return this.refresh(failedToken);
   }
 
-  private refresh(): Promise<string> {
+  private refresh(failedToken?: string): Promise<string> {
     if (this.inflight) return this.inflight;
-    const p = this.doRefresh().finally(() => {
+    const p = this.doRefresh(failedToken).finally(() => {
       if (this.inflight === p) this.inflight = null;
     });
     this.inflight = p;
     return p;
   }
 
-  private async doRefresh(): Promise<string> {
+  /**
+   * failedToken: GitHub に 401 とされたトークン（強制リフレッシュのとき）。
+   * 冒頭で資格を読み直し、他の呼び出しが既に更新済みならそれを返す（二重リフレッシュの防止）。
+   */
+  private async doRefresh(failedToken?: string): Promise<string> {
     const start = await this.storage.get();
     const cred = start.credential;
     if (!cred) throw new GitHubError("reauth_required", "no GitHub credential");
+
+    if (failedToken !== undefined) {
+      const stored = await this.decrypt(cred.accessTokenEnc, "access");
+      if (stored !== failedToken) return stored;
+    } else if (cred.accessExpiresAt === null || cred.accessExpiresAt - this.now() >= this.skew) {
+      return this.decrypt(cred.accessTokenEnc, "access");
+    }
 
     const refreshExpired = cred.refreshExpiresAt !== null && cred.refreshExpiresAt <= this.now();
     if (cred.refreshTokenEnc === null || refreshExpired) {

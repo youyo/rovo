@@ -157,6 +157,61 @@ describe("task_start / status / wait / cancel", () => {
   });
 });
 
+describe("SDK の入力検証に届く前の不正（必須欠落・型不一致）", () => {
+  const cases: [string, string, Record<string, unknown>][] = [
+    [
+      "task_start",
+      "title 欠落",
+      (() => {
+        const { title: _t, ...rest } = startArgs("x");
+        return rest;
+      })(),
+    ],
+    ["task_start", "idempotency_key が数値", startArgs("x", { idempotency_key: 123 })],
+    [
+      "task_start",
+      "acceptance_criteria が数値の配列",
+      startArgs("x", { acceptance_criteria: [1] }),
+    ],
+    ["task_status", "task_id 欠落", {}],
+    ["task_wait", "cursor が数値", { task_id: "t", cursor: 1 }],
+    ["task_wait", "timeout_seconds が文字列", { task_id: "t", timeout_seconds: "5" }],
+    ["task_cancel", "task_id が数値", { task_id: 1 }],
+  ];
+  it.each(cases)(
+    "%s: %s は invalid_input + code で返り、GitHub は呼ばれない",
+    async (name, _label, args) => {
+      const u = await user("alice");
+      const client = await connect(createApiApp(), u.props);
+      const before = u.gh.calls.length;
+      const r = await client.callTool({ name, arguments: args });
+      expect(r.isError).toBe(true);
+      const b = body(r);
+      expect(b.code).toBe("invalid_input");
+      expect(typeof b.message).toBe("string");
+      expect(u.gh.calls.length).toBe(before);
+      await client.close();
+    },
+  );
+
+  it("tools/list の JSON Schema は利用者に分かる型を保つ", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const start = tools.find((t) => t.name === "task_start");
+    const props = start?.inputSchema.properties as Record<string, { type?: string }>;
+    expect(props.title?.type).toBe("string");
+    expect(props.acceptance_criteria?.type).toBe("array");
+    expect(start?.inputSchema.required).toEqual(
+      expect.arrayContaining(["repository", "base_ref", "base_sha", "title", "instructions"]),
+    );
+    const wait = tools.find((t) => t.name === "task_wait");
+    const waitProps = wait?.inputSchema.properties as Record<string, { type?: string }>;
+    expect(waitProps["timeout_seconds"]?.type).toBe("number");
+    await client.close();
+  });
+});
+
 describe("エラーの返し方", () => {
   it("入力が不正なら invalid_input。GitHub は呼ばない", async () => {
     const u = await user("alice");

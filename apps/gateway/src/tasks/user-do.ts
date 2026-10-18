@@ -20,6 +20,10 @@ export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const RESERVATION_RECLAIM_AFTER_MS = 10 * 60 * 1000;
 /** team 所属の再検証結果をキャッシュする時間。team から外れてから使えなくなるまでの遅れの上限。 */
 export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
+/** 所属確認の途中で再ログインされ、結果を捨てたことを示す。 */
+const STALE = Symbol("stale");
+/** 再ログインと重なって確認をやり直す回数の上限。 */
+const MAX_MEMBER_ATTEMPTS = 3;
 /** 照合中に予約が入れ替わったときの再判定の上限。 */
 const MAX_RECONCILE_ATTEMPTS = 5;
 
@@ -70,7 +74,13 @@ export class UserDO extends DurableObject<Env> {
   githubFetch: typeof fetch = (...args) => fetch(...args);
   private credentials: CredentialManager | null = null;
   private githubClientInstance: GitHubClient | null = null;
-  private memberInflight: Promise<MemberResult> | null = null;
+  /**
+   * ログインの世代。saveCredential のたびに進める（メモリ上のみ。進行中の確認もメモリ上にしかないので十分）。
+   * 旧世代の資格で始まった所属確認の結果は、キャッシュにも呼び出し元にも使わない。
+   */
+  private loginEpoch = 0;
+  /** 進行中の所属確認。キーは「世代:githubUserId」。同じキーの呼び出しだけが共有する。 */
+  private memberInflight = new Map<string, Promise<MemberResult | typeof STALE>>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -91,8 +101,17 @@ export class UserDO extends DurableObject<Env> {
     sql.exec(`CREATE TABLE IF NOT EXISTS membership_cache (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       checked_at INTEGER NOT NULL,
-      result TEXT NOT NULL
+      result TEXT NOT NULL,
+      github_user_id INTEGER
     )`);
+    // 旧スキーマ（github_user_id なし）の DO を移行する。NULL の行はキャッシュとして使わない。
+    const hasUserIdColumn = sql
+      .exec<{ name: string }>("PRAGMA table_info(membership_cache)")
+      .toArray()
+      .some((c) => c.name === "github_user_id");
+    if (!hasUserIdColumn) {
+      sql.exec("ALTER TABLE membership_cache ADD COLUMN github_user_id INTEGER");
+    }
     // 資格の正本。access_token_enc が NULL の行は「削除済み」（世代だけを残す tombstone）。
     sql.exec(`CREATE TABLE IF NOT EXISTS github_credential (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -326,6 +345,9 @@ export class UserDO extends DurableObject<Env> {
   /** ログイン（callback）で得た資格を保存する。既存を上書きし、team 所属のキャッシュは捨てる。 */
   async saveCredential(tokens: TokenSet): Promise<void> {
     await this.github().credentials.save(tokens);
+    // 保存の完了後に世代を進める。旧資格で進行中の確認は、結果を捨てて新しい資格でやり直される。
+    this.loginEpoch++;
+    this.memberInflight.clear();
     this.ctx.storage.sql.exec("DELETE FROM membership_cache");
   }
 
@@ -335,14 +357,34 @@ export class UserDO extends DurableObject<Env> {
    */
   async ensureMember(githubUserId: number): Promise<MemberResult> {
     try {
-      const cached = this.cachedMembership();
-      if (cached === "active") return { ok: true };
-      if (cached === "denied") return this.notMember();
-      // 同時の問い合わせは進行中の確認を共有する
-      this.memberInflight ??= this.checkMembership(githubUserId).finally(() => {
-        this.memberInflight = null;
-      });
-      return await this.memberInflight;
+      for (let attempt = 0; attempt < MAX_MEMBER_ATTEMPTS; attempt++) {
+        const cached = this.cachedMembership(githubUserId);
+        if (cached === "active") return { ok: true };
+        if (cached === "denied") return this.notMember();
+        const epoch = this.loginEpoch;
+        // 同時の問い合わせは、同じ世代・同じユーザーの進行中の確認だけを共有する
+        const key = `${epoch}:${githubUserId}`;
+        let p = this.memberInflight.get(key);
+        if (!p) {
+          const created: Promise<MemberResult | typeof STALE> = this.checkMembership(
+            githubUserId,
+            epoch,
+          ).finally(() => {
+            // 自分が登録したものだけを消す（再ログインで作り直された新しい確認を消さない）
+            if (this.memberInflight.get(key) === created) this.memberInflight.delete(key);
+          });
+          this.memberInflight.set(key, created);
+          p = created;
+        }
+        const r = await p;
+        if (r !== STALE) return r;
+        // 確認中に再ログインされた: 古い結果を捨てて、新しい資格でやり直す
+      }
+      return {
+        ok: false,
+        code: "upstream_unavailable",
+        message: "membership check was interrupted by re-login; retry",
+      };
     } catch (e) {
       return this.toFailure(e);
     }
@@ -367,19 +409,23 @@ export class UserDO extends DurableObject<Env> {
     return { ok: false, code: "forbidden", message: "not an active member of the required team" };
   }
 
-  private cachedMembership(): "active" | "denied" | null {
+  /** キャッシュは、確認したユーザー本人の問い合わせにだけ使う（別の id は必ず確認し直す）。 */
+  private cachedMembership(githubUserId: number): "active" | "denied" | null {
     const row = this.ctx.storage.sql
-      .exec<{ checked_at: number; result: string }>(
-        "SELECT checked_at, result FROM membership_cache WHERE singleton = 1",
+      .exec<{ checked_at: number; result: string; github_user_id: number | null }>(
+        "SELECT checked_at, result, github_user_id FROM membership_cache WHERE singleton = 1",
       )
       .toArray()[0];
-    if (!row) return null;
+    if (!row || row.github_user_id !== githubUserId) return null;
     const age = this.now() - row.checked_at;
     if (age < 0 || age >= MEMBERSHIP_CACHE_TTL_MS) return null;
     return row.result === "active" ? "active" : "denied";
   }
 
-  private async checkMembership(githubUserId: number): Promise<MemberResult> {
+  private async checkMembership(
+    githubUserId: number,
+    epoch: number,
+  ): Promise<MemberResult | typeof STALE> {
     const { client, credentials } = this.github();
     const state = await credentials.withToken(async (tok) => {
       // login は改名されうるので、毎回 GET /user で現在の値を得る。資格が別人のものなら拒否する。
@@ -391,11 +437,14 @@ export class UserDO extends DurableObject<Env> {
         username: user.login,
       });
     });
+    // 確認中に再ログインされていたら、結果はキャッシュにも呼び出し元にも使わない
+    if (epoch !== this.loginEpoch) return STALE;
     if (state === "mismatch") return this.notMember();
     this.ctx.storage.sql.exec(
-      "INSERT OR REPLACE INTO membership_cache (singleton, checked_at, result) VALUES (1, ?, ?)",
+      "INSERT OR REPLACE INTO membership_cache (singleton, checked_at, result, github_user_id) VALUES (1, ?, ?, ?)",
       this.now(),
       state === "active" ? "active" : "denied",
+      githubUserId,
     );
     return state === "active" ? { ok: true } : this.notMember();
   }

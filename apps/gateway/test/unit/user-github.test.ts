@@ -1,6 +1,6 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { MEMBERSHIP_CACHE_TTL_MS } from "../../src/tasks/user-do";
+import { MEMBERSHIP_CACHE_TTL_MS, type UserDO } from "../../src/tasks/user-do";
 import { FakeGitHubFetch, installFakeGitHub } from "./fake-github-fetch";
 import { newUserId } from "./helpers";
 
@@ -18,6 +18,12 @@ function clock(start = Date.now()) {
 
 function sql<T>(stub: Awaited<ReturnType<typeof installFakeGitHub>>, q: string) {
   return runInDurableObject(stub, (_i, state) => state.storage.sql.exec(q).toArray() as T[]);
+}
+
+/** DO の中で解決した Promise を await すると呼び出し元が DO の I/O 文脈に入るので、タイマーで見に行く。 */
+async function waitUntil(cond: () => boolean) {
+  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+  if (!cond()) throw new Error("timeout waiting for condition");
 }
 
 describe("UserDO.saveCredential", () => {
@@ -200,6 +206,133 @@ describe("UserDO.ensureMember", () => {
     });
     const r = await stub.ensureMember(1);
     expect(r).toEqual({ ok: false, code: "internal", message: "internal error" });
+  });
+});
+
+describe("UserDO.ensureMember: 再ログインとの競合", () => {
+  it("再ログイン前に始まった確認の古い denied は、キャッシュにも呼び出し元にも使われない", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.team = "none";
+    const stub = await installFakeGitHub(newUserId(), gh);
+
+    // 最初の team 確認だけ、応答を作ったあと解放まで保留する
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let isHeld = false;
+    const held = () => {
+      isHeld = true;
+    };
+    let first = true;
+    await runInDurableObject(stub, (instance: UserDO) => {
+      instance.githubFetch = async (input, init) => {
+        const res = await gh.fetch(input, init);
+        if (first && new URL(new Request(input, init).url).pathname.includes("/memberships/")) {
+          first = false;
+          held();
+          await gate;
+        }
+        return res;
+      };
+    });
+
+    const old = stub.ensureMember(1); // 旧資格 + denied の応答が保留される
+    await waitUntil(() => isHeld);
+    gh.team = "active"; // team に追加された
+    await stub.saveCredential(gh.issue()); // 再ログイン成功
+    release(); // 旧 denied の応答が到着
+    expect(await old).toEqual({ ok: true }); // 古い結果は捨てられ、新しい資格で確認し直される
+    const rows = await sql<{ result: string }>(stub, "SELECT result FROM membership_cache");
+    expect(rows.map((r) => r.result)).toEqual(["active"]);
+    expect(await stub.ensureMember(1)).toEqual({ ok: true });
+  });
+
+  it("再ログイン後の呼び出しは、旧世代の進行中の確認に合流しない", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.team = "none";
+    const stub = await installFakeGitHub(newUserId(), gh);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let isHeld = false;
+    const held = () => {
+      isHeld = true;
+    };
+    let first = true;
+    await runInDurableObject(stub, (instance: UserDO) => {
+      instance.githubFetch = async (input, init) => {
+        const res = await gh.fetch(input, init);
+        if (first && new URL(new Request(input, init).url).pathname.includes("/memberships/")) {
+          first = false;
+          held();
+          await gate;
+        }
+        return res;
+      };
+    });
+    const old = stub.ensureMember(1);
+    await waitUntil(() => isHeld);
+    gh.team = "active";
+    await stub.saveCredential(gh.issue());
+    // 旧応答がまだ保留中でも、再ログイン後の呼び出しは新しい確認で ok になる
+    expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    release();
+    expect(await old).toEqual({ ok: true });
+  });
+
+  it("キャッシュ済みでも、確認済みと別の githubUserId の問い合わせは拒否される", async () => {
+    const gh = new FakeGitHubFetch();
+    const stub = await installFakeGitHub(newUserId(), gh);
+    expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    expect(await stub.ensureMember(999)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await stub.ensureMember(1)).toEqual({ ok: true });
+  });
+
+  it("並列の呼び出しでも、githubUserId が一致しないものは進行中の確認に相乗りできず拒否される", async () => {
+    const gh = new FakeGitHubFetch();
+    const stub = await installFakeGitHub(newUserId(), gh);
+    const [a, b, c] = await Promise.all([
+      stub.ensureMember(999),
+      stub.ensureMember(1),
+      stub.ensureMember(999),
+    ]);
+    expect(a).toMatchObject({ ok: false, code: "forbidden" });
+    expect(b).toEqual({ ok: true });
+    expect(c).toMatchObject({ ok: false, code: "forbidden" });
+  });
+});
+
+describe("UserDO: 本番での GitHub URL 上書きの拒否", () => {
+  it("ENVIRONMENT=production で URL を上書きすると、トークン付きの外部リクエストを送らずに失敗する", async () => {
+    const gh = new FakeGitHubFetch();
+    const stub = await installFakeGitHub(newUserId(), gh);
+    const urls: string[] = [];
+    await runInDurableObject(stub, (instance: UserDO) => {
+      instance.githubFetch = async (input, init) => {
+        urls.push(new Request(input, init).url);
+        return gh.fetch(input, init);
+      };
+      const i = instance as unknown as {
+        env: Record<string, unknown>;
+        credentials: null;
+        githubClientInstance: null;
+      };
+      i.env = {
+        ...i.env,
+        ENVIRONMENT: "production",
+        GITHUB_API_BASE: "https://attacker.example/api",
+        GITHUB_OAUTH_BASE: "https://attacker.example",
+      };
+      i.credentials = null;
+      i.githubClientInstance = null;
+    });
+    const member = await stub.ensureMember(1);
+    expect(member).toEqual({ ok: false, code: "internal", message: "internal error" });
+    const start = await stub.authorizeStart(1, "acme/widgets");
+    expect(start).toMatchObject({ ok: false, code: "internal" });
+    expect(urls).toEqual([]);
   });
 });
 

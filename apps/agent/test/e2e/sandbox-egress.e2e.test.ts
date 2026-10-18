@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { WorkspaceSpec } from "../../src/sandbox-port";
 import { type FakeUpstream, startFakeUpstream } from "../support/fake-upstream";
 import { sandboxClient } from "../support/sandbox-client";
 import { type RunningWrangler, startWrangler } from "../support/wrangler";
@@ -10,6 +11,7 @@ let upstream: FakeUpstream;
 let wrangler: RunningWrangler;
 let persistDir: string;
 let sb: ReturnType<typeof sandboxClient>;
+let spec: WorkspaceSpec;
 
 beforeAll(async () => {
   upstream = await startFakeUpstream();
@@ -21,13 +23,20 @@ beforeAll(async () => {
     persistDir,
   });
   sb = sandboxClient(wrangler.baseUrl, "egress");
-  // 最初の exec でコンテナを起動し、傍受の設定完了を待つ
+  spec = {
+    repository: "acme/hello",
+    baseSha: upstream.helloSha,
+    branch: "agent/task-egress",
+    deadlineAt: Date.now() + 3_600_000,
+  };
+  // ensureReady でコンテナを起動し、傍受の設定完了と clone まで待つ
+  await sb.ensureReady(spec);
   const r = await sb.exec(["true"]);
   expect(r.exitCode).toBe(0);
 });
 
 afterAll(async () => {
-  await sb?.stop().catch(() => {});
+  await sb?.terminate().catch(() => {});
   await wrangler?.stop();
   await upstream?.stop();
   if (persistDir) rmSync(persistDir, { recursive: true, force: true });
@@ -222,17 +231,21 @@ describe("プロセス管理", () => {
 
 describe("コンテナ再起動後も傍受が効く", () => {
   it("destroy → 再起動後も example.com は 403、許可ホストは通る", async () => {
-    await sb.stop();
+    await sb.restart(spec);
     expect((await sb.curl("https://example.com/")).code).toBe("403");
     expect((await sb.curl("http://169.254.169.254/")).code).toBe("403");
     expect((await sb.curl("https://registry.npmjs.org/tiny-pkg")).code).toBe("200");
   });
 
   it("起動直後の並行 exec でも、傍受の設定前に外へ出るものがない", async () => {
-    await sb.stop();
-    const results = await Promise.all(
+    await sb.destroy();
+    // コンテナが落ちた状態で並行して操作する。最初の 1 件は「再起動した」エラーになりうるが、
+    // 結果が返ったものはすべて 403（傍受の設定前に外へ出るものがない）。
+    const results = await Promise.allSettled(
       Array.from({ length: 4 }, () => sb.curl("https://example.com/")),
     );
-    expect(results.map((r) => r.code)).toEqual(["403", "403", "403", "403"]);
+    const done = results.filter((r) => r.status === "fulfilled");
+    expect(done.length).toBeGreaterThan(0);
+    expect(done.map((r) => r.value.code).every((c) => c === "403")).toBe(true);
   });
 });

@@ -12,6 +12,8 @@ import {
 export interface ScriptStep {
   text?: string;
   toolCall?: { name: string; arguments: Record<string, string | number | boolean> };
+  /** このターンで消費したトークン数。費用は scripted モデルの単価（$1/100万トークン）で計算する。 */
+  usage?: { input?: number; output?: number };
 }
 
 export const SCRIPTED_PROVIDER_ID = "scripted";
@@ -24,11 +26,18 @@ const MODEL: Model<string> = {
   provider: SCRIPTED_PROVIDER_ID,
   baseUrl: "http://scripted.invalid",
   input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
   reasoning: false,
   contextWindow: 100_000,
   maxTokens: 4096,
 };
+
+function userText(context: TranscriptContext): string {
+  const first = context.messages.find((m) => m.role === "user");
+  if (!first) return "";
+  if (typeof first.content === "string") return first.content;
+  return first.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+}
 
 const ZERO_USAGE = {
   input: 0,
@@ -43,12 +52,32 @@ const ZERO_USAGE = {
  * 台本付きの fake provider（本物のモデルを呼ばないテスト用）。
  * 何番目の応答かは「transcript 中の assistant メッセージ数」で決めるので、DO が再起動しても
  * 内部状態に依存せず同じ台本を進められる。台本を使い切ったら "script exhausted" で止まる。
+ * 台本は「最初の user メッセージの本文」(= operation の入力) をキーに引くので、同じ DO で複数の
+ * operation を流しても台本が干渉しない。
  */
-export function createScriptedProvider(getScript: () => readonly ScriptStep[]): Provider {
+export function createScriptedProvider(
+  getScript: (key: string) => readonly ScriptStep[],
+  onCall?: () => void,
+): Provider {
   const stream = (_model: Model<string>, context: TranscriptContext) => {
     const out = createAssistantMessageEventStream();
+    onCall?.();
     const turn = context.messages.filter((m) => m.role === "assistant").length;
-    const step = getScript()[turn] ?? { text: "script exhausted" };
+    const step = getScript(userText(context))[turn] ?? { text: "script exhausted" };
+    const inTok = step.usage?.input ?? 0;
+    const outTok = step.usage?.output ?? 0;
+    const usage = {
+      ...ZERO_USAGE,
+      input: inTok,
+      output: outTok,
+      totalTokens: inTok + outTok,
+      cost: {
+        ...ZERO_USAGE.cost,
+        input: inTok / 1e6,
+        output: outTok / 1e6,
+        total: (inTok + outTok) / 1e6,
+      },
+    };
     const content: AssistantMessage["content"] = [];
     if (step.text) content.push({ type: "text", text: step.text });
     let toolCall: ToolCall | undefined;
@@ -67,7 +96,7 @@ export function createScriptedProvider(getScript: () => readonly ScriptStep[]): 
       api: "scripted",
       provider: SCRIPTED_PROVIDER_ID,
       model: SCRIPTED_MODEL_ID,
-      usage: ZERO_USAGE,
+      usage,
       stopReason: toolCall ? "toolUse" : "stop",
       timestamp: Date.now(),
     };

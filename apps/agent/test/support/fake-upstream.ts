@@ -8,6 +8,8 @@ import { join } from "node:path";
 /** OutboundGateway が許可した通信の転送先になる偽サーバー。`x-original-host` で本来のホストを判別する。 */
 export interface FakeUpstream {
   url: string;
+  /** 偽 GitHub の acme/hello（main）の先頭コミット SHA */
+  helloSha: string;
   /** 受け取った（= 許可されて上流まで届いた）リクエスト */
   requests: {
     host: string;
@@ -31,7 +33,7 @@ const git = (cwd: string, ...args: string[]) =>
     },
   });
 
-function buildRepo(root: string) {
+function buildRepo(root: string): string {
   const work = join(root, "work");
   mkdirSync(work, { recursive: true });
   git(work, "init", "-q", "-b", "main");
@@ -41,6 +43,7 @@ function buildRepo(root: string) {
   const bare = join(root, "repos", "acme", "hello.git");
   mkdirSync(join(root, "repos", "acme"), { recursive: true });
   git(root, "clone", "-q", "--bare", work, bare);
+  return git(work, "rev-parse", "HEAD").toString().trim();
 }
 
 function buildTarball(root: string): { file: Buffer; integrity: string; shasum: string } {
@@ -103,7 +106,7 @@ function gitBackend(root: string, req: IncomingMessage, res: ServerResponse, bod
 
 export async function startFakeUpstream(): Promise<FakeUpstream> {
   const root = mkdtempSync(join(tmpdir(), "rovo-upstream-"));
-  buildRepo(root);
+  const helloSha = buildRepo(root);
   const tar = buildTarball(root);
   const requests: FakeUpstream["requests"] = [];
 
@@ -155,6 +158,7 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
   const port = typeof addr === "object" && addr ? addr.port : 0;
   return {
     url: `http://127.0.0.1:${port}`,
+    helloSha,
     requests,
     stop: () =>
       new Promise((resolve) => {

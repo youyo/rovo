@@ -13,7 +13,8 @@ describe("decideOutbound: GitHub", () => {
 
   it(".git なしの URL も許可する", () => {
     expect(
-      get("https://github.com/octocat/Hello-World/info/refs?service=git-upload-pack").allow,
+      get("https://github.com/octocat/Hello-World/info/refs?service=git-upload-pack", { repo })
+        .allow,
     ).toBe(true);
   });
 
@@ -115,7 +116,25 @@ describe("decideOutbound: 拒否", () => {
 
   it("拒否には理由を付ける", () => {
     const d = get("https://example.com/");
-    expect(d).toEqual({ allow: false, reason: expect.stringContaining("example.com") });
+    expect(d).toEqual({
+      allow: false,
+      reason: expect.stringContaining("example.com"),
+      code: "host_not_allowed",
+    });
+  });
+
+  it("コードは固定の識別子で、入力（ホストやパス）を含まない", () => {
+    const urls = [
+      "https://evil-%s.example/x",
+      "http://registry.npmjs.org/%s",
+      "https://github.com/%s/x/info/refs?service=git-upload-pack",
+    ];
+    for (const u of urls) {
+      const d = get(u.replace("%s", "secretvalue"), { repo });
+      if (d.allow) throw new Error("unexpected allow");
+      expect(d.code).toMatch(/^[a-z_]+$/);
+      expect(d.code).not.toContain("secretvalue");
+    }
   });
 
   it("不正な URL は拒否する", () => {
@@ -135,5 +154,39 @@ describe("decideOutbound: Upgrade / CONNECT", () => {
     expect(
       decideOutbound({ method: "CONNECT", url: "https://registry.npmjs.org/" }, {}).allow,
     ).toBe(false);
+  });
+});
+
+describe("decideOutbound: リポジトリ未設定は fail-closed", () => {
+  const urls = [
+    "https://github.com/octocat/Hello-World.git/info/refs?service=git-upload-pack",
+    "https://github.com/anything/else/info/refs?service=git-upload-pack",
+  ];
+  it.each(urls)("repo が無ければ github.com は何も許可しない: %s", (url) => {
+    expect(decideOutbound({ method: "GET", url }, {}).allow).toBe(false);
+    expect(decideOutbound({ method: "GET", url }).allow).toBe(false);
+    expect(decideOutbound({ method: "GET", url }, { repo: undefined }).allow).toBe(false);
+  });
+  it("repo が無ければ git-upload-pack の POST も拒否する", () => {
+    expect(
+      decideOutbound(
+        { method: "POST", url: "https://github.com/octocat/Hello-World.git/git-upload-pack" },
+        {},
+      ).allow,
+    ).toBe(false);
+  });
+  it("別リポジトリの info/refs と git-upload-pack は、repo が設定されていても拒否する", () => {
+    expect(
+      get("https://github.com/evil/repo/info/refs?service=git-upload-pack", { repo }).allow,
+    ).toBe(false);
+    expect(
+      decideOutbound(
+        { method: "POST", url: "https://github.com/evil/repo.git/git-upload-pack" },
+        { repo },
+      ).allow,
+    ).toBe(false);
+  });
+  it("レジストリは repo が無くても許可する", () => {
+    expect(get("https://registry.npmjs.org/x").allow).toBe(true);
   });
 });

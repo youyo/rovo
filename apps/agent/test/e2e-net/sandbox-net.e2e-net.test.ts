@@ -19,11 +19,17 @@ beforeAll(async () => {
     persistDir,
   });
   sb = sandboxClient(wrangler.baseUrl, "net");
+  await sb.ensureReady({
+    repository: "octocat/Hello-World",
+    baseSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+    branch: "agent/task-net",
+    deadlineAt: Date.now() + 3_600_000,
+  });
   expect((await sb.exec(["true"])).exitCode).toBe(0);
 });
 
 afterAll(async () => {
-  await sb?.stop().catch(() => {});
+  await sb?.terminate().catch(() => {});
   await wrangler?.stop();
   if (persistDir) rmSync(persistDir, { recursive: true, force: true });
 });

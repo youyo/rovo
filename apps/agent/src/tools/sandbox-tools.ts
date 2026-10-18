@@ -39,6 +39,19 @@ function headBytes(text: string, maxBytes: number): { text: string; cut: boolean
   };
 }
 
+const SEARCH_EXIT_NOT_FOUND = 97;
+const SEARCH_EXIT_OUTSIDE = 98;
+/** $1=root $2=target、残りが rg の引数。target を realpath で解決し、root の外なら実行しない。 */
+const SEARCH_SCRIPT = `root=$1; t=$2; shift 2
+real=$(realpath -e -- "$t") || exit ${SEARCH_EXIT_NOT_FOUND}
+case "$real" in "$root"|"$root"/*) ;; *) echo "path is outside $root (symlink): $t" >&2; exit ${SEARCH_EXIT_OUTSIDE};; esac
+exec "$@" -- "$real"`;
+
+/** search の実行 argv。rgArgs は "rg" から始まる引数列（"--" と対象パスは含めない）。 */
+export function searchCommand(root: string, target: string, rgArgs: string[]): string[] {
+  return ["bash", "-c", SEARCH_SCRIPT, "rovo-search", root, target, ...rgArgs];
+}
+
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) {
@@ -97,7 +110,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         let lineCut = false;
         for (; next <= last; next++) {
           const line = `${next}\t${lines[next - 1] ?? ""}`;
-          bytes += line.length + 1;
+          bytes += new TextEncoder().encode(line).byteLength + 1;
           if (bytes > READ_MAX_BYTES && body.length > 0) break;
           if (bytes > READ_MAX_BYTES) lineCut = true;
           body.push(bytes > READ_MAX_BYTES ? headBytes(line, READ_MAX_BYTES).text : line);
@@ -211,12 +224,15 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         if (args.case_insensitive) argv.push("-i");
         if (args.fixed_strings) argv.push("-F");
         if (args.glob) argv.push("-g", args.glob);
-        argv.push("-e", args.pattern, "--", target);
-        const r = await port.exec(argv, {
+        argv.push("-e", args.pattern);
+        // target の realpath 検査と rg の実行を 1 回の呼び出しにまとめる（検査と実行の間にリンクを差し替えられない）
+        const r = await port.exec(searchCommand(root, target, argv), {
           ...cwdOpts,
           timeoutMs: 60_000,
           maxOutputBytes: 512 * 1024,
         });
+        if (r.exitCode === SEARCH_EXIT_NOT_FOUND)
+          return fail("search", `cannot resolve path (not found): ${target}`);
         if (r.exitCode === 1) return ok("search", "no matches");
         if (r.exitCode !== 0) return fail("search", r.stderr || `rg exited with ${r.exitCode}`);
         const lines = r.stdout.split("\n").filter(Boolean);
@@ -264,17 +280,14 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         const content = await port.readFile(path);
         const first = content.indexOf(args.old_string);
         if (first < 0) throw new Error(`old_string not found in ${path} (0 matches)`);
-        let count = 0;
-        for (
-          let i = content.indexOf(args.old_string);
-          i >= 0;
-          i = content.indexOf(args.old_string, i + args.old_string.length)
-        )
-          count++;
-        if (count > 1)
+        // 重なる一致も重複として数える（最初の一致の次の位置から 2 個目を探す）
+        if (content.indexOf(args.old_string, first + 1) >= 0) {
+          let count = 0;
+          for (let i = first; i >= 0; i = content.indexOf(args.old_string, i + 1)) count++;
           throw new Error(
             `old_string matches ${count} times in ${path}; add more context so it is unique`,
           );
+        }
         const updated =
           content.slice(0, first) + args.new_string + content.slice(first + args.old_string.length);
         await port.writeFile(path, updated);
@@ -309,7 +322,14 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
           maxOutputBytes: BASH_MAX_OUTPUT_BYTES,
         });
         const parts = [`exit code: ${r.exitCode}`];
-        if (r.timedOut) parts.push("the command timed out and was killed");
+        if (r.timedOut) {
+          parts.push(
+            "the command timed out. The sandbox container was destroyed to guarantee it stopped: " +
+              "ALL uncommitted changes (and any local commits not in the base) in the workspace were lost. " +
+              "Your next tool call re-clones the workspace from the base commit; redo your work, " +
+              "and avoid long-running commands.",
+          );
+        }
         if (r.truncated)
           parts.push(`output truncated to the last ${BASH_MAX_OUTPUT_BYTES} bytes per stream`);
         if (r.stdout) parts.push(`--- stdout ---\n${r.stdout}`);

@@ -3,33 +3,59 @@
  * 判定にコンテナ内のファイル（pidfile など）は使わない。/proc を走査し、次の 2 つ以外を対象にする。
  *   - 基準プロセス（起動直後に記録した "pid:starttime" の集合。PID 1 など）
  *   - このスクリプト自身とその祖先
+ * これは正常に終わったコマンドの後の「ベストエフォートの片付け」であり、停止の保証ではない
+ * （コンテナ内の処理は root で動き、偽装できる。保証が要る場面は container.destroy() で止める）。
+ *
+ * /proc/<pid>/stat は全体を読み、最後の ") " より後ろを厳密に解析する（comm には改行や ") " を入れられる）。
+ * 解析できない・欠けているプロセスは「止める対象」として扱う（fail-closed）。
+ *
  * mode:
- *   list: 基準にするプロセスの一覧を "pid:starttime" で標準出力へ
+ *   list: 基準にするプロセスの一覧を "pid:starttime" で標準出力へ。解析できないものがあれば失敗（終了コード 1）
  *   kill: 対象をすべて SIGKILL し、残っていないことを確かめて "clean" を出力（終了コード 0）。止まらなければ "stuck"（1）
  */
 export const PROCESS_SCRIPT = `
 mode=$1; shift
 baseline=" $* "
+# $1=/proc/<pid>/stat を厳密に解析して state / ppid / start を設定する。
+# 戻り値 0: 解析できた / 1: 解析できない・不完全 / 2: 読めない（プロセスが消えた）
+readstat() {
+  l=
+  { IFS= read -r -d '' l; } 2>/dev/null < "$1"
+  [ -n "$l" ] || return 2
+  rest=\${l##*) }
+  [ "$rest" != "$l" ] || return 1
+  set -f; set -- $rest; set +f
+  [ $# -ge 20 ] || return 1
+  state=$1; ppid=$2; start=\${20}
+  case "$state" in [A-Za-z]) ;; *) return 1;; esac
+  case "$ppid" in ""|*[!0-9]*) return 1;; esac
+  case "$start" in ""|*[!0-9]*) return 1;; esac
+  return 0
+}
 anc=" "
 p=$$
 while [ -n "$p" ] && [ "$p" != 0 ]; do
   anc="$anc$p "
-  l=
-  read -r l < /proc/$p/stat 2>/dev/null || break
-  set -- \${l##*) }
-  p=$2
+  readstat /proc/$p/stat || break
+  p=$ppid
 done
+bad=
 scan() {
-  # $1=list|kill。kill では対象があれば 1 を返す
+  # kill では対象があれば 1 を返す
   found=0
   for d in /proc/[0-9]*; do
     pid=\${d#/proc/}
     case "$anc" in *" $pid "*) continue;; esac
-    l=
-    read -r l < $d/stat 2>/dev/null || continue
-    set -- \${l##*) }
-    [ "$1" = Z ] && continue
-    id="$pid:\${20}"
+    readstat $d/stat
+    rc=$?
+    [ $rc = 2 ] && continue
+    if [ $rc = 0 ]; then
+      [ "$state" = Z ] && continue
+      id="$pid:$start"
+    else
+      if [ "$mode" = list ]; then bad=1; continue; fi
+      id="$pid:?"
+    fi
     if [ "$mode" = list ]; then echo "$id"; continue; fi
     case "$baseline" in *" $id "*) continue;; esac
     kill -KILL "$pid" 2>/dev/null
@@ -37,7 +63,11 @@ scan() {
   done
   return $found
 }
-if [ "$mode" = list ]; then scan; exit 0; fi
+if [ "$mode" = list ]; then
+  scan
+  [ -z "$bad" ] || { echo "unparsable process" >&2; exit 1; }
+  exit 0
+fi
 n=0
 while [ $n -lt 200 ]; do
   scan

@@ -35,6 +35,7 @@ const INACTIVITY_TIMEOUT_MS = 2 * 60 * 60_000;
 const KEEPALIVE_MS = 60_000;
 const REAPER_TIMEOUT_MS = 10_000;
 const STREAM_GRACE_MS = 2_000;
+const DESTROY_WAIT_MS = 15_000;
 const CLONE_TIMEOUT_MS = 5 * 60_000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -72,6 +73,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private queue: Promise<unknown> = Promise.resolve();
   private failNextReapFlag = false;
   private reapQueue: Promise<unknown> = Promise.resolve();
+  /** destroy の監視期限（ms）。destroy() の Promise を待つ前から数える。 */
+  private destroyWaitMs = DESTROY_WAIT_MS;
 
   // ---- 永続状態 ----
 
@@ -84,8 +87,12 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private baseline(): string[] | undefined {
     return this.ctx.storage.kv.get<string[]>("baseline");
   }
+  /** コンテナのハンドル。vitest 上では ctx.container が無いので、Unit は fake に差し替える。 */
+  private maybeContainer(): Container | undefined {
+    return this.ctx.container;
+  }
   private container(): Container {
-    const c = this.ctx.container;
+    const c = this.maybeContainer();
     if (!c) throw new Error("container binding is not configured");
     return c;
   }
@@ -187,7 +194,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
    * 再開は可能（次の操作で再起動する）。キューを待たない。
    */
   async stop(): Promise<{ stopped: boolean }> {
-    const container = this.ctx.container;
+    const container = this.maybeContainer();
     if (!container?.running) return { stopped: true };
     const clean = await this.reap();
     if (clean) return { stopped: true };
@@ -196,21 +203,42 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /**
-   * 永続的な終端停止（cancel 用）。コンテナを止め、以後の ensureReady / exec / ファイル操作を拒否する。
-   * 遅れて届いた指示で再起動しないための tombstone。
+   * 永続的な終端停止（cancel 用）。コンテナを破棄し、以後の ensureReady / exec / ファイル操作を拒否する。
+   * 遅れて届いた指示で再起動しないための tombstone。停止の保証は destroy だけで行う。
+   * 進行中の boot は無効化し、収束した後にもう一度停止を確かめる。
    */
   async terminate(): Promise<{ stopped: boolean }> {
     this.ctx.storage.kv.put("terminated", true);
+    this.invalidateBoot();
     await this.ctx.storage.deleteAlarm();
-    await this.destroyContainer();
-    return { stopped: !this.ctx.container?.running };
+    let error: unknown;
+    for (let i = 0; i < 3; i++) {
+      try {
+        await this.destroyContainer();
+        error = undefined;
+      } catch (e) {
+        error = e;
+      }
+      // 進行中の boot が収束するのを待つ（無効化済みなので、これ以上 start はしない）
+      const booting = this.booting;
+      if (booting) await booting.promise.catch(() => undefined);
+      if (!this.maybeContainer()?.running) break;
+    }
+    if (error && this.maybeContainer()?.running) throw error;
+    return { stopped: !this.maybeContainer()?.running };
+  }
+
+  /** 進行中の boot を無効化する（世代を進める）。boot は次の確認点で止まる。 */
+  private invalidateBoot(): void {
+    this.gen += 1;
+    this.readyGen = -1;
   }
 
   /** コンテナを起こさずに状態を返す（E2E と監視用）。 */
   status(): { running: boolean; terminated: boolean; expired: boolean; hasSpec: boolean } {
     const spec = this.spec();
     return {
-      running: this.ctx.container?.running === true,
+      running: this.maybeContainer()?.running === true,
       terminated: this.terminated(),
       expired: spec ? Date.now() >= spec.deadlineAt : false,
       hasSpec: spec !== undefined,
@@ -249,7 +277,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       }
       return;
     }
-    if (this.ctx.container?.running) await this.armAlarm();
+    if (this.maybeContainer()?.running) await this.armAlarm();
   }
 
   // ---- 起動 ----
@@ -275,7 +303,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (this.booting) return this.booting.promise.then(() => false);
     if (this.readyGen === this.gen && container.running) return Promise.resolve(false);
     const g = ++this.gen;
-    const promise = this.boot().then((started) => {
+    const promise = this.boot(g).then((started) => {
       if (this.gen === g) this.readyGen = g;
       return started;
     });
@@ -288,11 +316,19 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     return promise;
   }
 
-  private async boot(): Promise<boolean> {
+  /** boot の確認点: terminate・期限・起動世代が変わっていたら、それ以上進まない。 */
+  private assertBootCurrent(g: number): WorkspaceSpec {
+    if (this.gen !== g) throw new Error("boot was superseded");
+    return this.requireSpec(); // terminated / 期限切れならここで投げる
+  }
+
+  private async boot(g: number): Promise<boolean> {
     const container = this.container();
-    const spec = this.requireSpec();
+    const spec = this.assertBootCurrent(g);
     // 基準プロセスの記録が無いコンテナは信用できないので、作り直す
     if (container.running && !this.baseline()) await this.destroyContainer();
+    // destroy を待っている間に terminate・期限・世代が変わりうる。start の直前に必ず確かめ直す
+    this.assertBootCurrent(g);
     let started = false;
     if (!container.running) {
       this.ctx.storage.kv.delete("baseline");
@@ -312,6 +348,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const gateway = this.ctx.exports.OutboundGateway({ props });
     await container.interceptOutboundHttps("*", gateway);
     await container.interceptAllOutboundHttp(gateway);
+    this.assertBootCurrent(g);
     // 起動直後は exec が失敗しうるので、応答するまで待つ
     const deadline = Date.now() + 120_000;
     for (;;) {
@@ -321,9 +358,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       } catch {
         // まだ起動中
       }
+      this.assertBootCurrent(g);
       if (Date.now() > deadline) throw new Error("container did not become ready");
       await sleep(500);
     }
+    this.assertBootCurrent(g);
     if (started) {
       await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
       // 信頼できる状態（ユーザーのコードを動かす前）で、残してよいプロセスを記録する
@@ -331,9 +370,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         timeoutMs: REAPER_TIMEOUT_MS,
       });
       if (list.exitCode !== 0) throw new Error("could not record baseline processes");
+      this.assertBootCurrent(g);
       this.ctx.storage.kv.put("baseline", list.stdout.split("\n").filter(Boolean));
     }
     await this.prepareWorkspace(spec);
+    this.assertBootCurrent(g);
     await this.armAlarm();
     return started;
   }
@@ -446,7 +487,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       return false;
     }
     const baseline = this.baseline();
-    if (!baseline || !this.ctx.container?.running) return false;
+    if (!baseline || !this.maybeContainer()?.running) return false;
     const r = await this.rawExec(
       ["bash", "-c", PROCESS_SCRIPT, "rovo-reaper", "kill", ...baseline],
       { timeoutMs: REAPER_TIMEOUT_MS },
@@ -464,14 +505,20 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (!(await this.reap())) await this.destroyContainer();
   }
 
-  /** コンテナを止め、止まったことを確かめる。 */
+  /**
+   * コンテナを破棄し、止まったことを確かめる。これが停止の唯一の保証（コンテナ内のプロセスの走査は偽装できる）。
+   * 監視の期限は destroy() の Promise を待つ前から数える（Promise が返らなくても期限が効く）。
+   */
   private async destroyContainer(): Promise<void> {
     const container = this.container();
+    const until = Date.now() + this.destroyWaitMs;
     this.readyGen = -1;
     this.ctx.storage.kv.delete("baseline");
     if (!container.running) return;
-    await container.destroy().catch(() => {});
-    const until = Date.now() + 15_000;
+    const destroyed = Promise.resolve()
+      .then(() => container.destroy())
+      .catch(() => {});
+    await Promise.race([destroyed, sleep(this.destroyWaitMs)]);
     while (container.running && Date.now() < until) await sleep(100);
     if (container.running) throw new Error("container did not stop");
   }
@@ -497,15 +544,29 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       });
       const a = drain(proc.stdout, out);
       const b = drain(proc.stderr, err);
-      timer = setTimeout(() => {
-        timedOut = true;
-        // 子孫を含め、基準以外のプロセスをすべて止める。その後に abort する（exec 自体の後始末）。
-        void this.reapOrDestroy().finally(() => ac.abort());
-      }, timeoutMs);
-      const exitCode = await proc.exitCode.catch(() => (timedOut ? 137 : -1));
+      const exited = proc.exitCode.catch(() => -1);
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      });
+      const first = await Promise.race([exited, timeout]);
       clearTimeout(timer);
-      // 子が掴んだままのパイプで読み取りが終わらないことがある。reaper の後に少しだけ待って打ち切る。
-      await this.reapOrDestroy();
+      let exitCode: number;
+      if (first === "timeout") {
+        timedOut = true;
+        // 停止の保証はコンテナの破棄だけ。コンテナ内のプロセスの走査は、root で動く信用できないコードに偽装されうる。
+        // 作業ツリーの未 commit の変更は失われ、次の操作で再 clone される。
+        try {
+          await this.destroyContainer();
+        } finally {
+          ac.abort();
+        }
+        exitCode = 137;
+      } else {
+        exitCode = first;
+        // 正常に終わったコマンドの後の片付け（ベストエフォート）。失敗したらコンテナごと破棄する
+        await this.reapOrDestroy();
+      }
+      // 子が掴んだままのパイプで読み取りが終わらないことがある。少しだけ待って打ち切る。
       await Promise.race([Promise.all([a.done, b.done]), sleep(STREAM_GRACE_MS)]);
       a.cancel();
       b.cancel();

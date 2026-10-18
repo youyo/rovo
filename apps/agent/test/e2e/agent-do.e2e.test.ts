@@ -165,7 +165,7 @@ describe("AgentDO + 実コンテナ", () => {
         timeout: 60_000,
       })
       .toBe(true);
-    expect(await agent.cancel()).toEqual({ stopped: true });
+    expect(await agent.cancel()).toMatchObject({ stopped: true });
     const st = await sandbox.status();
     expect(st.terminated).toBe(true);
     expect(st.running).toBe(false);
@@ -177,7 +177,7 @@ describe("AgentDO + 実コンテナ", () => {
       data: { phase: "cancelled" },
     });
     // 冪等: 2 回目も stopped:true
-    expect(await agent.cancel()).toEqual({ stopped: true });
+    expect(await agent.cancel()).toMatchObject({ stopped: true });
     // 遅れて届いた start は拒否される
     expect(await agent.start(s)).toEqual({ status: "cancelled" });
   });

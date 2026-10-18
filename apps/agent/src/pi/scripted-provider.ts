@@ -14,6 +14,8 @@ export interface ScriptStep {
   toolCall?: { name: string; arguments: Record<string, string | number | boolean> };
   /** このターンで消費したトークン数。費用は scripted モデルの単価（$1/100万トークン）で計算する。 */
   usage?: { input?: number; output?: number };
+  /** 応答を返すまでの待ち（ms）。呼び出しの途中で cancel されるケースの再現用。abort しても応答は返る（usage が後から増える）。 */
+  delayMs?: number;
 }
 
 export const SCRIPTED_PROVIDER_ID = "scripted";
@@ -59,7 +61,11 @@ export function createScriptedProvider(
   getScript: (key: string) => readonly ScriptStep[],
   onCall?: () => void,
 ): Provider {
-  const stream = (_model: Model<string>, context: TranscriptContext) => {
+  const stream = (
+    _model: Model<string>,
+    context: TranscriptContext,
+    options?: { signal?: AbortSignal },
+  ) => {
     const out = createAssistantMessageEventStream();
     onCall?.();
     const turn = context.messages.filter((m) => m.role === "assistant").length;
@@ -100,11 +106,37 @@ export function createScriptedProvider(
       stopReason: toolCall ? "toolUse" : "stop",
       timestamp: Date.now(),
     };
-    queueMicrotask(() => {
-      out.push({ type: "start", partial: message });
+    const emit = () => {
+      if (!step.delayMs) out.push({ type: "start", partial: message });
       out.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
       out.end(message);
-    });
+    };
+    if (step.delayMs) {
+      // 実際の provider と同じく、abort されると「中断」で終わり、それまでに消費した usage を報告する
+      const signal = options?.signal;
+      let settled = false;
+      // 生成の途中経過（内容と、それまでの usage）を先に報告する。abort されても Pi はこの途中経過を usage に計上する
+      queueMicrotask(() => out.push({ type: "start", partial: message }));
+      const timer = setTimeout(() => {
+        settled = true;
+        emit();
+      }, step.delayMs);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          // 中断の応答が返るまで少し遅れる（abort の後に usage が確定する）
+          setTimeout(() => {
+            const aborted: AssistantMessage = { ...message, content: [], stopReason: "aborted" };
+            out.push({ type: "error", reason: "aborted", error: aborted });
+            out.end(aborted);
+          }, 150);
+        },
+        { once: true },
+      );
+    } else queueMicrotask(emit);
     return out;
   };
   return createProvider({

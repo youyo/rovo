@@ -4,9 +4,16 @@ import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
+import { aiGatewayRejection } from "./agent/config";
 import { getAgentTestOverrides } from "./agent/deps";
-import { estimateCallCostUsd, estimateTokens, priceFor } from "./agent/pricing";
+import {
+  estimateCallCostUsd,
+  estimateTokens,
+  priceFor,
+  REQUEST_OVERHEAD_TOKENS,
+} from "./agent/pricing";
 import { AgentStore, ZERO_USAGE } from "./agent/store";
+import { decideTerminal, type StopIntent, type TerminalRequest } from "./agent/terminal";
 import { detectTestTampering } from "./agent/test-patterns";
 import {
   type CancelResult,
@@ -15,7 +22,6 @@ import {
   type ResultDto,
   type StartResult,
   type TaskSpec,
-  type TerminalPhase,
   type UsageDto,
   type VerificationCommandResult,
   type VerificationSummary,
@@ -28,7 +34,7 @@ import {
   SCRIPTED_PROVIDER_ID,
   type ScriptStep,
 } from "./pi/scripted-provider";
-import type { SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import type { ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
 import { createSandboxTools } from "./tools";
 import { createToolContext } from "./tools/context";
 import type { SandboxToolsFactory } from "./tools/types";
@@ -55,12 +61,6 @@ const BG: any = Object.freeze({
   toString: () => "[Context rovo agent background]",
 });
 
-interface FinalizeOptions {
-  phase: TerminalPhase;
-  reason?: string;
-  skipPatch?: boolean;
-}
-
 function tail(text: string, n = OUTPUT_TAIL): string {
   return text.length > n ? `...${text.slice(text.length - n)}` : text;
 }
@@ -76,6 +76,9 @@ export class AgentDO extends DurableObject<Env> {
   private watching: Promise<void> | undefined;
   private finalizing: Promise<void> | undefined;
   private aborting: Promise<boolean> | undefined;
+  private sandboxStopping: Promise<{ stopped: boolean }> | undefined;
+  /** 確定を求められた終端（完了・失敗）。確定のトランザクションで停止の意図と合わせて判定する。 */
+  private requests: TerminalRequest[] = [];
 
   private readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
@@ -226,21 +229,25 @@ export class AgentDO extends DurableObject<Env> {
     const started = this.store.meta("fingerprint") !== undefined;
     this.store.tx(() => {
       this.store.setMeta("tombstone", true);
-      if (started && !isTerminal(this.store.phase())) {
-        this.store.setMeta("result", { reason: "cancelled" });
-        this.store.setPhase("cancelled", "cancel");
-      }
+      if (started && !isTerminal(this.store.phase())) this.recordIntent("cancel");
     });
-    // 停止を先に始め、並行して Pi の abort を呼ぶ。両方の完了を確かめるまで stopped:true は返さない。
-    const stop = this.terminalStop("cancel");
-    const abort = started ? this.abortRun() : Promise.resolve(true);
-    const both = Promise.all([stop, abort]).then(([s, a]) => s.stopped && a);
+    // 意図を記録したら、すぐに Sandbox の破棄と Pi の abort を始める（patch の取得はしない）
+    const { sandbox, abort } = this.beginStop("cancel", started);
+    const work = (async (): Promise<CancelResult> => {
+      // モデルの停止を待って最終 usage を保存し、終端を確定する
+      if (started && !isTerminal(this.store.phase())) await this.finalize(undefined, abort);
+      const [s, a] = await Promise.all([sandbox, abort]);
+      if (!s.stopped || !a || (started && !isTerminal(this.store.phase()))) {
+        return { stopped: false };
+      }
+      // stopped:true のときは、最終の usage を含むすべてのイベントが永続化済みで、以後は増えない
+      return { stopped: true, finalSeq: this.store.lastSeq() };
+    })().catch(() => ({ stopped: false }));
     const wait = this.overrides().cancelWaitMs ?? DEFAULT_CANCEL_WAIT_MS;
-    const stopped = await Promise.race([
-      both,
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), wait)),
+    return Promise.race([
+      work,
+      new Promise<CancelResult>((resolve) => setTimeout(() => resolve({ stopped: false }), wait)),
     ]);
-    return { stopped };
   }
 
   async getEvents(afterSeq: number, limit: number): Promise<EventsPage> {
@@ -294,15 +301,6 @@ export class AgentDO extends DurableObject<Env> {
     return this.deadlineAt();
   }
 
-  /**
-   * 暫定: Gateway の /__spike/agent-ping と gateway-link E2E が使う疎通確認。ENVIRONMENT=test 限定。
-   * M3c（Gateway の task_start 統合）で Gateway の経路ごと削除する。
-   */
-  ping(message: string): string {
-    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
-    return `agent:${message}`;
-  }
-
   /** テスト専用: fake モデルの台本を保存する（key は最初の user メッセージ = spec.instructions）。 */
   setScript(key: string, script: ScriptStep[]): void {
     if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
@@ -316,6 +314,8 @@ export class AgentDO extends DurableObject<Env> {
       return "invalid_spec";
     }
     if (!(spec.budgetUsd > 0) || !Number.isFinite(spec.deadlineAt)) return "invalid_spec";
+    const gw = aiGatewayRejection(this.env as AgentEnv);
+    if (gw) return gw;
     if (!priceFor(this.modelId(), (this.env as AgentEnv).ENVIRONMENT === "test")) {
       return `unknown_model: ${this.modelId()}`;
     }
@@ -377,10 +377,8 @@ export class AgentDO extends DurableObject<Env> {
 
   private async onRunSettled(status: string, reason: string | undefined): Promise<void> {
     if (!isTerminal(this.store.phase())) {
-      const stop = this.store.meta<string>("stop_reason");
-      if (stop === "deadline") await this.finalize({ phase: "failed", reason: "deadline" });
-      else if (stop === "budget_exceeded") await this.finalize({ phase: "budget_exceeded" });
-      else if (status === "unanswered") {
+      // 停止の意図があれば、確定のトランザクションがそれを優先する
+      if (this.stopIntents().length === 0 && status === "unanswered") {
         this.emit("error", { message: `model run ended: ${reason ?? "unknown"}` });
         await this.finalize({ phase: "failed", reason: `model_error: ${reason ?? "unknown"}` });
       } else {
@@ -436,42 +434,67 @@ export class AgentDO extends DurableObject<Env> {
     return this.aborting;
   }
 
-  /** 期限・予算の超過を記録し、確定と片付けを始める（待たない。Pi のタスクの中からも呼ばれる）。 */
-  private requestStop(reason: "deadline" | "budget_exceeded"): void {
-    if (isTerminal(this.store.phase()) || this.store.meta("stop_reason")) return;
-    this.store.setMeta("stop_reason", reason);
-    this.emit("error", { message: reason });
-    void this.finalize(
-      reason === "deadline"
-        ? { phase: "failed", reason: "deadline" }
-        : { phase: "budget_exceeded", reason: "budget_exceeded" },
-    )
-      .then(async () => {
-        await Promise.allSettled([
-          this.terminalStop(reason === "deadline" ? "deadline" : "finished"),
-          this.abortRun(),
-        ]);
-      })
-      .catch(() => undefined);
+  /** Sandbox の破棄と Pi の abort を同時に始める。進行中のものがあれば共有する。 */
+  private beginStop(
+    why: "cancel" | "deadline" | "finished",
+    abortRun = true,
+  ): { sandbox: Promise<{ stopped: boolean }>; abort: Promise<boolean> } {
+    this.sandboxStopping ??= this.terminalStop(why).finally(() => {
+      this.sandboxStopping = undefined;
+    });
+    return {
+      sandbox: this.sandboxStopping,
+      abort: abortRun ? this.abortRun() : Promise.resolve(true),
+    };
   }
 
-  private finalize(options: FinalizeOptions): Promise<void> {
+  private stopIntents(): StopIntent[] {
+    return this.store.meta<StopIntent[]>("stop_intents") ?? [];
+  }
+
+  /** 停止の意図を記録する（公開する終端の確定とは別）。 */
+  private recordIntent(intent: StopIntent): void {
+    this.store.tx(() => {
+      const cur = this.stopIntents();
+      if (cur.includes(intent)) return;
+      this.store.setMeta("stop_intents", [...cur, intent]);
+      if (intent !== "cancel") this.emit("error", { message: intent });
+    });
+  }
+
+  /** 期限・予算の超過を記録し、すぐに停止を始めて確定まで進める（待たない。Pi のタスクの中からも呼ばれる）。 */
+  private requestStop(reason: "deadline" | "budget_exceeded"): void {
+    if (isTerminal(this.store.phase()) || this.stopIntents().includes(reason)) return;
+    this.recordIntent(reason);
+    const { abort } = this.beginStop(reason === "deadline" ? "deadline" : "finished");
+    void this.finalize(undefined, abort).catch(() => undefined);
+  }
+
+  /**
+   * 終端を確定する（単一実行）。request は完了・失敗の要求で、停止の意図があれば意図が勝つ。
+   * waitFor は、停止の意図による確定のときだけ渡す（モデルの停止を待ってから最終 usage を保存する）。
+   * ツールの中から呼ぶ確定（完了）は待たない: abort は idle を待つので、自分自身を待つことになる。
+   */
+  private finalize(request?: TerminalRequest, waitFor?: Promise<unknown>): Promise<void> {
     if (isTerminal(this.store.phase())) return Promise.resolve();
-    this.finalizing ??= this.doFinalize(options).finally(() => {
+    if (request) this.requests.push(request);
+    this.finalizing ??= this.doFinalize(waitFor).finally(() => {
       this.finalizing = undefined;
     });
     return this.finalizing;
   }
 
-  private async doFinalize(options: FinalizeOptions): Promise<void> {
+  private async doFinalize(waitFor: Promise<unknown> | undefined): Promise<void> {
     const spec = this.spec();
     const warnings: string[] = [];
     let patch: string | undefined;
     let diffstat: string | undefined;
     let patchTooLarge = false;
-    if (spec && !options.skipPatch) {
+    // 停止の意図があれば Sandbox はもう壊れている（または壊れる）ので、patch は取らない
+    const patchRequest = [...this.requests].reverse().find((r) => !r.skipPatch);
+    if (spec && patchRequest && this.stopIntents().length === 0) {
       try {
-        const cap = await this.capturePatch(spec);
+        const cap = await this.capturePatch(spec, patchRequest.sha);
         patch = cap.patch;
         diffstat = cap.diffstat;
         patchTooLarge = cap.tooLarge;
@@ -480,34 +503,44 @@ export class AgentDO extends DurableObject<Env> {
         warnings.push(`patch を取得できませんでした: ${String(e)}`);
       }
     }
-    const verification = this.store.meta<VerificationSummary>("verification");
-    if (options.phase === "completed" && !verification?.verified) {
-      warnings.push("検証コマンドが指定されていないため未検証です（モデルの申告のみ）");
-    }
+    // モデルの停止を待ってから最終の usage を保存する
+    if (waitFor) await waitFor.catch(() => undefined);
     await this.refreshUsage().catch(() => undefined);
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
-      if (patch !== undefined) this.store.savePatch(patch);
+      // 古い指示をそのまま採用せず、確定の時点の意図と要求から決める
+      const decision = decideTerminal(this.stopIntents(), this.requests);
+      const keepPatch = decision.phase === "completed" || this.stopIntents().length === 0;
+      const verification = this.store.meta<VerificationSummary>("verification");
+      if (decision.phase === "completed" && !verification?.verified) {
+        warnings.push("検証コマンドが指定されていないため未検証です（モデルの申告のみ）");
+      }
+      if (keepPatch && patch !== undefined) this.store.savePatch(patch);
       this.store.setMeta("result", {
-        reason: options.reason,
+        reason: decision.reason,
         summary: this.store.meta<string>("last_summary") ?? "",
         warnings,
-        patchTooLarge,
-        diffstat,
-        hasPatch: patch !== undefined,
+        patchTooLarge: keepPatch ? patchTooLarge : false,
+        diffstat: keepPatch ? diffstat : undefined,
+        hasPatch: keepPatch && patch !== undefined,
       });
-      this.store.setPhase(options.phase, options.reason);
+      this.store.setPhase(decision.phase, decision.reason);
+      this.requests = [];
     });
   }
 
-  private async capturePatch(spec: TaskSpec): Promise<{
+  private async capturePatch(
+    spec: TaskSpec,
+    sha?: string,
+  ): Promise<{
     patch?: string;
     diffstat?: string;
     tooLarge: boolean;
     warnings: string[];
   }> {
     const sb = this.sandbox();
-    const range = `${spec.baseSha}..HEAD`;
+    const tip = sha ?? "HEAD";
+    const range = `${spec.baseSha}..${tip}`;
     const cwd = WORKSPACE_ROOT;
     const warnings: string[] = [];
 
@@ -526,7 +559,7 @@ export class AgentDO extends DurableObject<Env> {
       ...detectTestTampering({
         nameStatus: names.exitCode === 0 ? names.stdout : "",
         baseScripts: await readScripts(spec.baseSha),
-        headScripts: await readScripts("HEAD"),
+        headScripts: await readScripts(tip),
       }),
     );
 
@@ -568,7 +601,8 @@ export class AgentDO extends DurableObject<Env> {
       }
     }
     const prev = this.store.usage();
-    if (JSON.stringify(prev) !== JSON.stringify(total)) {
+    // 累計は単調増加。古い読み取りで巻き戻さない
+    if (total.costUsd >= prev.costUsd && JSON.stringify(prev) !== JSON.stringify(total)) {
       this.store.tx(() => {
         if (isTerminal(this.store.phase())) return;
         this.store.setMeta("usage", total);
@@ -585,7 +619,7 @@ export class AgentDO extends DurableObject<Env> {
     const spec = this.spec();
     const maxTokens = this.overrides().maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     if (!spec) return { maxTokens, metadata: {} }; // タスクとして開始する前（M1 スパイク）
-    if (isTerminal(this.store.phase()) || this.store.meta("stop_reason")) {
+    if (isTerminal(this.store.phase()) || this.stopIntents().length > 0) {
       return { block: "task is stopping" };
     }
     if (this.now() >= this.deadlineAt()) {
@@ -595,7 +629,11 @@ export class AgentDO extends DurableObject<Env> {
     const price = priceFor(this.modelId(), (this.env as AgentEnv).ENVIRONMENT === "test");
     if (!price) return { block: "unknown_model" };
     const spent = await this.refreshUsage();
-    const estimate = estimateCallCostUsd(price, estimateTokens(JSON.stringify(context)), maxTokens);
+    const estimate = estimateCallCostUsd(
+      price,
+      estimateTokens(JSON.stringify(context)) + REQUEST_OVERHEAD_TOKENS,
+      maxTokens,
+    );
     if (spent.costUsd + estimate > spec.budgetUsd) {
       this.requestStop("budget_exceeded");
       return { block: "budget_exceeded" };
@@ -608,7 +646,7 @@ export class AgentDO extends DurableObject<Env> {
   private piHooks(): AgentPiHooks {
     return {
       beforeTool: async (call) => {
-        if (isTerminal(this.store.phase()) || this.store.meta("stop_reason")) {
+        if (isTerminal(this.store.phase()) || this.stopIntents().length > 0) {
           return "the task has ended";
         }
         if (this.spec() && this.now() >= this.deadlineAt()) {
@@ -682,7 +720,7 @@ export class AgentDO extends DurableObject<Env> {
     summary: string,
   ): Promise<{ text: string; isError: boolean; terminate: boolean }> {
     const spec = this.spec();
-    if (!spec || isTerminal(this.store.phase())) {
+    if (!spec || isTerminal(this.store.phase()) || this.stopIntents().length > 0) {
       return { text: "The task has already ended.", isError: true, terminate: true };
     }
     this.store.tx(() => {
@@ -692,24 +730,53 @@ export class AgentDO extends DurableObject<Env> {
     });
     const sb = this.sandbox();
     const back = (text: string) => {
-      this.store.setPhase("running");
+      if (this.stopIntents().length === 0) this.store.setPhase("running");
       return { text, isError: true, terminate: false };
     };
+    const git = (args: string[], timeoutMs = 60_000) =>
+      sb.exec(["git", ...args], { cwd: WORKSPACE_ROOT, timeoutMs });
+    // 終了コード 0・タイムアウトなし・切り詰めなしのときだけ、結果を信用する
+    const trusted = (r: ExecResult) => r.exitCode === 0 && !r.timedOut && !r.truncated;
+    const why = (r: ExecResult) =>
+      r.timedOut
+        ? "timed out"
+        : r.truncated
+          ? "output truncated"
+          : `exit ${r.exitCode}: ${tail(r.stderr || r.stdout, 300)}`;
 
-    const head = await sb.exec(["git", "rev-parse", "HEAD"], { cwd: WORKSPACE_ROOT });
+    const commands = spec.verificationCommands ?? [];
+    const prev = this.store.meta<VerificationSummary>("verification");
+    // 保存済みの試行回数が上限なら、何も実行せずに failed（再起動などで試行が消費された後の再実行を防ぐ）
+    if (commands.length > 0 && (prev?.attempts ?? 0) >= MAX_VERIFY_ATTEMPTS) {
+      await this.finalize({
+        phase: "failed",
+        reason: "verification_failed",
+        ...(prev?.commitSha ? { sha: prev.commitSha } : {}),
+      });
+      return {
+        text: "Verification failed and no attempts remain.",
+        isError: true,
+        terminate: true,
+      };
+    }
+
+    const head = await git(["rev-parse", "HEAD"]);
     const sha = head.stdout.trim();
-    if (head.exitCode !== 0 || !sha)
-      return back("Could not read HEAD. Make sure the repository is intact.");
-    const status = await sb.exec(["git", "status", "--porcelain"], { cwd: WORKSPACE_ROOT });
+    if (!trusted(head) || !sha) {
+      return back(`Could not read HEAD (${why(head)}). Make sure the repository is intact.`);
+    }
+    const status = await git(["status", "--porcelain"]);
+    if (!trusted(status)) {
+      return back(
+        `Could not check the working tree (git status: ${why(status)}). Fix the repository and call report_completion again.`,
+      );
+    }
     if (status.stdout.trim() !== "") {
       return back(
         `There are uncommitted changes:\n${tail(status.stdout, 1000)}\nCommit them with git_commit, then call report_completion again.`,
       );
     }
 
-    const commands = spec.verificationCommands ?? [];
-    const prev = this.store.meta<VerificationSummary>("verification");
-    const attempts = (prev?.attempts ?? 0) + (commands.length > 0 ? 1 : 0);
     if (commands.length === 0) {
       this.store.setMeta("verification", {
         commands,
@@ -718,13 +785,14 @@ export class AgentDO extends DurableObject<Env> {
         attempts: 0,
         commitSha: sha,
       } satisfies VerificationSummary);
-      await this.finalize({ phase: "completed" });
+      await this.finalize({ phase: "completed", sha });
       return {
         text: "Completion recorded (no verification commands were given).",
         isError: false,
         terminate: true,
       };
     }
+    const attempts = (prev?.attempts ?? 0) + 1;
     // 試行回数は実行前に永続化する（途中で落ちても消費したものとして数える）
     this.store.setMeta("verification", {
       ...(prev ?? { commands, results: [], verified: false }),
@@ -733,13 +801,24 @@ export class AgentDO extends DurableObject<Env> {
       commitSha: sha,
     });
 
+    // 固定した SHA を checkout した状態で検証する（前後で HEAD と作業ツリーを確かめる）
+    const branch = `agent/task-${spec.taskId}`;
     const results: VerificationCommandResult[] = [];
     let passed = true;
-    for (const cmd of commands) {
+    let destroyed = false;
+    const fail = (argv: string[], output: string) => {
+      results.push({ argv, exitCode: -1, timedOut: false, output });
+      passed = false;
+    };
+    const pin = await git(["checkout", "-q", "--detach", sha]);
+    const pinned = trusted(pin) ? await git(["rev-parse", "HEAD"]) : undefined;
+    if (!pinned || !trusted(pinned) || pinned.stdout.trim() !== sha) {
+      fail(["git", "checkout", "--detach", sha], `could not pin ${sha}: ${why(pin)}`);
+    }
+    for (const cmd of passed ? commands : []) {
       const cwd = this.resolveCwd(cmd.cwd);
       if (cwd === undefined) {
-        results.push({ argv: cmd.argv, exitCode: -1, timedOut: false, output: "invalid cwd" });
-        passed = false;
+        fail(cmd.argv, "invalid cwd");
         break;
       }
       const r = await sb.exec(cmd.argv, { cwd, timeoutMs: (cmd.timeoutSeconds ?? 600) * 1000 });
@@ -749,9 +828,28 @@ export class AgentDO extends DurableObject<Env> {
         timedOut: r.timedOut,
         output: tail(`${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`),
       });
+      if (r.timedOut) destroyed = true; // タイムアウトでコンテナは破棄され、作業ツリーは作り直される
       if (r.exitCode !== 0 || r.timedOut) {
         passed = false;
         break;
+      }
+    }
+    if (!destroyed) {
+      // 実行後: HEAD が動いておらず、追跡ファイルが変わっていないこと（未追跡の生成物は許す）
+      const after = await git(["rev-parse", "HEAD"]);
+      const dirty = await git(["status", "--porcelain", "--untracked-files=no"]);
+      if (!trusted(after) || after.stdout.trim() !== sha) {
+        fail(["git", "rev-parse", "HEAD"], `HEAD moved during verification (${why(after)})`);
+      } else if (!trusted(dirty) || dirty.stdout.trim() !== "") {
+        fail(
+          ["git", "status"],
+          `verification modified tracked files (${trusted(dirty) ? tail(dirty.stdout, 500) : why(dirty)})`,
+        );
+      }
+      // 作業ブランチを検証した SHA に戻す（検証中にブランチが動かされていても）
+      const restore = await git(["switch", "-q", "-C", branch, sha]);
+      if (!trusted(restore)) {
+        fail(["git", "switch", branch], `could not restore the branch: ${why(restore)}`);
       }
     }
     const verification: VerificationSummary = {
@@ -766,7 +864,7 @@ export class AgentDO extends DurableObject<Env> {
       this.store.appendEvent("verification", { attempt: attempts, passed, commitSha: sha });
     });
     if (passed) {
-      await this.finalize({ phase: "completed" });
+      await this.finalize({ phase: "completed", sha });
       return {
         text: "Verification passed. The task is complete.",
         isError: false,
@@ -774,16 +872,20 @@ export class AgentDO extends DurableObject<Env> {
       };
     }
     if (attempts >= MAX_VERIFY_ATTEMPTS) {
-      await this.finalize({ phase: "failed", reason: "verification_failed" });
+      await this.finalize({ phase: "failed", reason: "verification_failed", sha });
       return {
         text: "Verification failed and no attempts remain.",
         isError: true,
         terminate: true,
       };
     }
-    const failed = results[results.length - 1];
+    const failedResult = results[results.length - 1];
     return back(
-      `Verification failed (attempt ${attempts} of ${MAX_VERIFY_ATTEMPTS}). Command: ${failed?.argv.join(" ")} exit=${failed?.exitCode}${failed?.timedOut ? " (timed out)" : ""}\n${failed?.output ?? ""}\nFix the problem, commit, and call report_completion again.`,
+      `Verification failed (attempt ${attempts} of ${MAX_VERIFY_ATTEMPTS}). Command: ${failedResult?.argv.join(" ")} exit=${failedResult?.exitCode}${failedResult?.timedOut ? " (timed out)" : ""}\n${failedResult?.output ?? ""}\n${
+        destroyed
+          ? "The sandbox container was destroyed because the command timed out: ALL uncommitted changes and local commits in the workspace were lost; your next tool call re-clones the base commit. Redo your work.\n"
+          : ""
+      }Fix the problem, commit, and call report_completion again.`,
     );
   }
 

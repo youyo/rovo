@@ -161,7 +161,22 @@ describe("exec", () => {
     });
     expect(r.timedOut).toBe(true);
     expect(r.exitCode).toBe(137);
+    // 停止の保証はコンテナの破棄だけ: タイムアウトでコンテナ自体が止まっている
+    expect((await c.status()).running).toBe(false);
+    // 次の操作は再 clone したことを伝えるエラーになり、その後は新しいコンテナで使える（子孫は残っていない）
+    await expect(c.exec(["true"])).rejects.toThrow(/restart/i);
     expect(await leftovers(c, "sleep 77")).toBe("");
+  });
+
+  it("タイムアウトで未 commit の変更は失われ、再 clone した作業ツリーで続けられる", async () => {
+    const c = client("timeout-lost");
+    await c.ensureReady(specFor("timeout-lost"));
+    await c.writeFile("/workspace/uncommitted.txt", "work in progress\n");
+    const r = await c.exec(["bash", "-c", "sleep 600"], { timeoutMs: 2_000 });
+    expect(r.timedOut).toBe(true);
+    await expect(c.exec(["true"])).rejects.toThrow(/uncommitted/i);
+    expect((await c.exec(["test", "-e", "/workspace/uncommitted.txt"])).exitCode).not.toBe(0);
+    expect((await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim()).toBe(upstream.helloSha);
   });
 
   it("& で残した通常の背景プロセスも、呼び出しが終わると消える", async () => {
@@ -181,6 +196,36 @@ describe("exec", () => {
       "setsid sleep 777 >/dev/null 2>&1 < /dev/null & nohup sleep 778 >/dev/null 2>&1 & echo ok",
     ]);
     expect(await leftovers(c, "sleep 77")).toBe("");
+  });
+
+  it("comm に改行と ') Z' を仕込んだプロセスをゾンビ扱いせず、呼び出しが終わると止める（reaper の fail-closed）", async () => {
+    const c = client("comm-forge");
+    await c.ensureReady(specFor("comm-forge"));
+    // サブシェルが自分の comm を "x) Z\nfoo" に書き換える（/proc/<pid>/stat の 1 行目が "N (x) Z" になる）
+    // node は 1 回の write で comm を書く（bash の printf は改行で書き込みを分けてしまい、"foo" だけが残る）
+    const js = `require("fs").writeFileSync("/proc/self/comm","x) Z\\nfoo");setInterval(()=>{},1000)`;
+    const r = await c.exec([
+      "bash",
+      "-c",
+      `node -e '${js}' >/dev/null 2>&1 & sleep 1.5; echo started`,
+    ]);
+    expect(r.stdout.trim()).toBe("started");
+    // 呼び出しの後の reaper が、偽装したプロセスを残さない
+    // comm が "x) Z\nfoo" のプロセス（stat に "foo) " を含む）が残っていないこと
+    const survivors = await c.exec([
+      "bash",
+      "-c",
+      "grep -l 'foo) ' /proc/[0-9]*/stat 2>/dev/null; true",
+    ]);
+    expect(survivors.stdout.trim()).toBe("");
+  });
+
+  it("偽装の前提の確認: comm に改行と ') Z' を書くと、stat の 1 行目が \"N (x) Z\" で終わる", async () => {
+    const c = client("comm-forge-premise");
+    await c.ensureReady(specFor("comm-forge-premise"));
+    const js = `const fs=require("fs");fs.writeFileSync("/proc/self/comm","x) Z\\nfoo");process.stdout.write(fs.readFileSync("/proc/self/stat","utf8"))`;
+    const r = await c.exec(["node", "-e", js]);
+    expect(r.stdout.split("\n")[0]).toMatch(/^\d+ \(x\) Z$/);
   });
 
   it("出力は上限で末尾だけ残し、truncated を立てる", async () => {
@@ -293,6 +338,25 @@ describe("stop / terminate", () => {
     await expect(c.exec(["true"])).rejects.toThrow(/terminated/i);
     await expect(c.ensureReady(spec)).rejects.toThrow(/terminated/i);
     expect((await c.status()).running).toBe(false);
+  });
+});
+
+describe("terminate と進行中の boot", () => {
+  it("ensureReady の最中に terminate しても、収束した後にコンテナは動いていない", async () => {
+    const c = client("boot-terminate");
+    const ensure = c.ensureReady(specFor("boot-terminate")).then(
+      () => "ok",
+      (e: Error) => e.message,
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await c.terminate()).toEqual({ stopped: true });
+    await ensure;
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 1_000));
+      const st = await c.status();
+      expect(st.running).toBe(false);
+      expect(st.terminated).toBe(true);
+    }
   });
 });
 

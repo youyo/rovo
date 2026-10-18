@@ -260,10 +260,13 @@ apps/gateway (既存 Worker)
 
 実装上の注意:
 
-- `proc.pid` はホスト側の pid なので、コンテナ内のプロセスグループには使えない。子孫プロセスの停止は、`setsid` + pidfile + `kill -KILL -- -PGID` で行う。
+- `proc.pid` はホスト側の pid なので、コンテナ内のプロセスグループには使えない。当初は `setsid` + pidfile + `kill -KILL -- -PGID` で止める案だったが、M2 レビューで破棄した（コンテナ内は root で動き、偽装できるため）。現在の方式は次のとおり。
+  - 停止の保証は `container.destroy()` だけで行う（bash のタイムアウト、cancel / terminate、期限、予算、reaper の失敗）。
+  - コンテナ内の reaper（`/proc` の走査。`/proc/<pid>/stat` は全体を読み、最後の `) ` より後ろを厳密に解析し、解析できないものは止める対象にする）は、正常に終わったコマンドの後の「ベストエフォートの片付け」として残す。
+  - 詳細は末尾の「codex レビュー（M2、2026-10-18）を受けた決定」。
 - イメージに procps が無い（`ps` / `pkill` が無い）。`npm install` には `--no-audit` を付ける（audit の POST が 403 になるため）。
 - PiHarness の `EntryRecord` を RPC の戻り値に直接使うと TS2589 になる。DTO にする。
-- Gateway の `/__spike/agent-ping` は、M3 で `task_start` を実装するときに削除する。
+- Gateway の `/__spike/agent-ping` と AgentDO の `ping` は、M3 / M4 で削除済み。
 
 ## マイルストーン
 
@@ -312,3 +315,10 @@ apps/gateway (既存 Worker)
 - 保存済みの試行回数が上限（4回）に達していたら、実行する前に failed にする。
 - 検証では、固定した SHA を checkout した状態で実行し、実行の前後で HEAD と作業ツリーが clean であることを確かめる。patch は base..検証済みの SHA で作る。
 - `git status` などの終了コード・タイムアウト・切り詰めを確かめ、失敗は clean として扱わない。
+
+## codex レビュー（M3、2026-10-18）と M4 での実装メモ
+
+- cancel の契約: `cancel()` は `{stopped: boolean, finalSeq?: number}` を返す。`stopped: true` のときは、Sandbox の破棄とモデルの停止が確かめられ、最終の usage を含むすべてのイベントが永続化済みで、以後イベントは追加されない（`finalSeq` は最後のイベントの seq）。終端の後に呼ばれた cancel も同じ。モデルの停止と最終 usage の保存が済んでいなければ `stopped: false` を返し、Gateway が再送する。終端の後に補正の usage イベントを出す方式は採らない。
+- 停止の意図（cancel / deadline / budget_exceeded）は `stop_intents` に記録し、記録した時点で Sandbox の破棄と Pi の abort を始める。公開する終端は、モデルの停止を待って最終 usage を保存してから、1 つのトランザクションの中で cancel > deadline > budget_exceeded > failed > completed の順に判定して確定する。停止の意図があるタスクでは Sandbox が既に破棄されているため、patch は保存しない。
+- 検証: 固定した SHA を `git checkout --detach` した状態で実行し、前後で HEAD と追跡ファイルの変更の有無を確かめる（実行で生まれる未追跡の生成物は許す）。検証の後に作業ブランチを検証した SHA に戻し、patch は `base..検証済み SHA` で作る。
+- 本番（`ENVIRONMENT` が test 以外）で `AI_GATEWAY_ID` が空なら、`start` は `rejected`（`ai_gateway_not_configured`）を返す。

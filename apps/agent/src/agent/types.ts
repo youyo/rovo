@@ -56,7 +56,13 @@ export type StartResult =
   | { status: "rejected"; reason: string };
 
 export interface CancelResult {
+  /**
+   * true のときは、Sandbox の破棄とモデルの停止が確かめられ、最終の usage を含むすべてのイベントが
+   * 永続化済み。以後イベントは追加されない。false なら Gateway が再送する。
+   */
   stopped: boolean;
+  /** stopped が true のとき、最後のイベントの seq（イベントが無ければ 0） */
+  finalSeq?: number;
 }
 
 export interface UsageDto {

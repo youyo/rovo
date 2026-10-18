@@ -124,6 +124,17 @@ describe("read_file", () => {
     expect(r.text).toMatch(/truncated/i);
   });
 
+  it("バイト数の上限は UTF-8 のバイト数で数える（日本語でも 64KiB を超えない）", async () => {
+    const { sandbox, run } = setup();
+    sandbox.files.set(
+      "/workspace/jp.txt",
+      Array.from({ length: 3000 }, () => "あ".repeat(100)).join("\n"),
+    );
+    const r = await run("read_file", { path: "jp.txt" });
+    expect(new TextEncoder().encode(r.text).byteLength).toBeLessThan(64 * 1024 + 1024);
+    expect(r.text).toMatch(/truncated/i);
+  });
+
   it("外に出るパスと不正な範囲は拒否する", async () => {
     const { sandbox, run } = setup();
     sandbox.files.set("/etc/passwd", "root");
@@ -211,6 +222,15 @@ describe("edit_file", () => {
     expect(sandbox.files.get("/workspace/a")).toBe("foo foo");
   });
 
+  it("重なる一致も重複として扱う（aa は aaa の 0 と 1 で 2 件）", async () => {
+    const { sandbox, run } = setup();
+    sandbox.files.set("/workspace/a", "aaa");
+    const r = await run("edit_file", { path: "a", old_string: "aa", new_string: "b" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/2 times|matches/);
+    expect(sandbox.files.get("/workspace/a")).toBe("aaa");
+  });
+
   it("空の old_string、old と new が同じ、外のパスは拒否する", async () => {
     const { sandbox, run } = setup();
     sandbox.files.set("/workspace/a", "abc");
@@ -263,12 +283,19 @@ describe("search", () => {
     const { sandbox, run } = setup(() => ({ stdout: "src/a.ts:3:needle\n" }));
     const r = await run("search", { pattern: "--files; rm -rf /", path: "src", glob: "*.ts" });
     expect(r.isError).toBe(false);
+    // realpath の検査と rg の実行は 1 つの bash 呼び出しにまとめる。パターンは位置引数で渡り、シェルを通らない
     const argv = sandbox.calls[0]?.argv ?? [];
-    expect(argv[0]).toBe("rg");
-    expect(argv[argv.indexOf("-e") + 1]).toBe("--files; rm -rf /");
-    expect(argv.indexOf("--")).toBeGreaterThan(argv.indexOf("-e"));
-    expect(argv.at(-1)).toBe("/workspace/src");
-    expect(argv[argv.lastIndexOf("-g") + 1]).toBe("*.ts");
+    expect(argv[0]).toBe("bash");
+    expect(argv[1]).toBe("-c");
+    expect(argv[2]).toContain("realpath");
+    expect(argv[2]).not.toContain("rm -rf");
+    const rest = argv.slice(4);
+    expect(rest[0]).toBe("/workspace"); // root
+    expect(rest[1]).toBe("/workspace/src"); // target
+    const rg = rest.slice(2);
+    expect(rg[0]).toBe("rg");
+    expect(rg[rg.indexOf("-e") + 1]).toBe("--files; rm -rf /");
+    expect(rg[rg.lastIndexOf("-g") + 1]).toBe("*.ts");
     expect(r.text).toContain("src/a.ts:3:needle");
   });
 
@@ -281,6 +308,21 @@ describe("search", () => {
     const r2 = await bad.run("search", { pattern: "(" });
     expect(r2.isError).toBe(true);
     expect(r2.text).toContain("regex parse error");
+  });
+
+  it("target が /workspace の外を指すシンボリックリンクなら拒否の結果にする（実行と一体の検査）", async () => {
+    const { sandbox, run } = setup(() => ({ exitCode: 98, stderr: "path is outside /workspace" }));
+    const r = await run("search", { pattern: "x", path: "link" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/outside/);
+    expect(sandbox.calls).toHaveLength(1); // 検査と実行は別の呼び出しに分かれない
+  });
+
+  it("target が存在しないなら (exit 97) エラー", async () => {
+    const { run } = setup(() => ({ exitCode: 97 }));
+    const r = await run("search", { pattern: "x", path: "nope" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/not found|resolve/i);
   });
 
   it("結果の件数に上限を設ける", async () => {
@@ -335,6 +377,15 @@ describe("bash", () => {
     expect(sandbox.calls[0]?.options.cwd).toBe("/workspace/sub");
     expect((await run("bash", { command: "pwd", cwd: "/etc" })).isError).toBe(true);
     expect(sandbox.calls).toHaveLength(1);
+  });
+
+  it("タイムアウトしたら、コンテナが破棄され未 commit の変更が失われることをモデルに伝える", async () => {
+    const { run } = setup(() => ({ exitCode: 137, timedOut: true }));
+    const r = await run("bash", { command: "sleep 9999" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/destroyed/i);
+    expect(r.text).toMatch(/uncommitted/i);
+    expect(r.text).toMatch(/re-?clon/i);
   });
 
   it("失敗時は終了コードと stderr を返し、タイムアウトと切り詰めを明記する", async () => {

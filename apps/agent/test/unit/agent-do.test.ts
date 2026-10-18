@@ -50,7 +50,7 @@ describe("start の冪等性", () => {
 describe("cancel", () => {
   it("start より先に cancel が届くと、start は cancelled を返して何も始めない", async () => {
     const fx = newFixture("cancel-first", [report()]);
-    expect(await fx.stub.cancel()).toEqual({ stopped: true });
+    expect(await fx.stub.cancel()).toMatchObject({ stopped: true });
     expect(await fx.stub.start(makeSpec("cancel-first"))).toEqual({ status: "cancelled" });
     expect(fx.sandbox.readySpecs).toHaveLength(0);
     expect(fx.modelCalls.count).toBe(0);
@@ -63,7 +63,7 @@ describe("cancel", () => {
     await fx.gate.waitEntered();
     expect(await fx.stub.cancel()).toEqual({ stopped: false });
     fx.gate.release();
-    expect(await fx.stub.cancel()).toEqual({ stopped: true });
+    expect(await fx.stub.cancel()).toMatchObject({ stopped: true });
     expect(fx.sandbox.terminateCount).toBeGreaterThanOrEqual(2);
     expect(fx.sandbox.stopCount).toBe(0);
     await waitForPhase(fx, "cancelled");
@@ -87,7 +87,7 @@ describe("終端停止は terminate を使う", () => {
 
   it("start より先の cancel（何も始まっていない）でも terminate する", async () => {
     const fx = newFixture("term-cancel-first", []);
-    expect(await fx.stub.cancel()).toEqual({ stopped: true });
+    expect(await fx.stub.cancel()).toMatchObject({ stopped: true });
     expect(fx.sandbox.terminateCount).toBe(1);
     expect(fx.sandbox.stopCount).toBe(0);
   });
@@ -141,7 +141,7 @@ describe("終端停止は terminate を使う", () => {
     await fx.gate.waitEntered();
     expect(await fx.stub.cancel()).toEqual({ stopped: false });
     fx.gate.release();
-    expect(await fx.stub.cancel()).toEqual({ stopped: true });
+    expect(await fx.stub.cancel()).toMatchObject({ stopped: true });
   });
 });
 
@@ -195,7 +195,9 @@ describe("完了判定", () => {
     expect(fx.verifyCalls).toEqual([["npm", "test"]]);
     // format-patch は base..HEAD
     expect(
-      fx.sandbox.calls.some((c) => c.argv.join(" ") === "git format-patch base000..HEAD --stdout"),
+      fx.sandbox.calls.some(
+        (c) => c.argv.join(" ") === "git format-patch base000..c0ffee --stdout",
+      ),
     ).toBe(true);
   });
 
@@ -373,11 +375,13 @@ describe("期限", () => {
     await runInDurableObject(fx.stub, (inst: { onJob(c: unknown): Promise<unknown> }) =>
       inst.onJob({ job: { fn: "deadline" }, attempt: 1 }),
     );
+    // Sandbox の破棄は直ちに始まる。公開する終端は、モデル（ツール）の停止を待ってから確定する
+    await waitUntil(() => fx.sandbox.terminateCount >= 1);
+    expect((await fx.stub.getEvents(0, 1)).phase).toBe("running");
+    fx.gate.release();
     expect(await waitForTerminal(fx)).toBe("failed");
     expect(done(await fx.stub.getResult()).reason).toBe("deadline");
-    await waitUntil(() => fx.sandbox.terminateCount >= 1);
     expect(fx.sandbox.stopCount).toBe(0);
-    fx.gate.release();
   });
 
   it("開始から 2 時間を超える deadlineAt は 2 時間に丸める", async () => {
@@ -427,5 +431,201 @@ describe("再起動（evict）", () => {
     expect(r.usage.inputTokens).toBe(100_000);
     // ensureReady は再起動でやり直さない
     expect(fx.sandbox.readySpecs).toHaveLength(1);
+  });
+});
+
+describe("cancel の契約: stopped:true なら最終 usage を含む全イベントが永続化済み", () => {
+  it("モデル呼び出しの途中で cancel しても、abort 後に増えた usage がイベントに入り、finalSeq の後にイベントは無い", async () => {
+    const fx = newFixture("cancel-usage", [
+      { ...call("write_note", { text: "x" }), usage: { input: 100_000 } },
+      { text: "遅い応答", usage: { input: 500_000 }, delayMs: 1500 },
+    ]);
+    await fx.stub.start(makeSpec("cancel-usage"));
+    await waitUntil(() => fx.modelCalls.count === 2);
+    await new Promise((r) => setTimeout(r, 400)); // 2 回目の呼び出しが進行中
+    const res = await fx.stub.cancel();
+    expect(res.stopped).toBe(true);
+    expect(res.finalSeq).toBeGreaterThan(0);
+    // 最終 usage（abort の後に確定した分）が、終端より前のイベントとして入っている
+    const events = await allEvents(fx);
+    const last = events[events.length - 1];
+    expect(last).toMatchObject({ seq: res.finalSeq, type: "phase", data: { phase: "cancelled" } });
+    const usageEvents = events.filter((e) => e.type === "usage");
+    const finalUsage = usageEvents[usageEvents.length - 1]?.data as unknown as UsageDto;
+    expect(finalUsage.inputTokens).toBe(600_000);
+    expect(done(await fx.stub.getResult()).usage.inputTokens).toBe(600_000);
+    // stopped:true の後はイベントが増えない
+    await new Promise((r) => setTimeout(r, 1000));
+    const page = await fx.stub.getEvents(res.finalSeq ?? 0, 100);
+    expect(page.events).toEqual([]);
+  });
+
+  it("終端（completed）の後の cancel も stopped:true と finalSeq を返す", async () => {
+    const fx = newFixture("cancel-after-done", [report()]);
+    await fx.stub.start(makeSpec("cancel-after-done"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const events = await allEvents(fx);
+    const res = await fx.stub.cancel();
+    expect(res).toEqual({ stopped: true, finalSeq: events[events.length - 1]?.seq });
+    expect((await allEvents(fx)).length).toBe(events.length);
+  });
+
+  it("start より先の cancel は finalSeq 0", async () => {
+    const fx = newFixture("cancel-first-seq", []);
+    expect(await fx.stub.cancel()).toEqual({ stopped: true, finalSeq: 0 });
+  });
+
+  it("モデルがまだ止まっていなければ stopped:false（finalSeq なし）", async () => {
+    const fx = newFixture("cancel-notyet", [call("gate")], { cancelWaitMs: 200 });
+    await fx.stub.start(makeSpec("cancel-notyet"));
+    await fx.gate.waitEntered();
+    expect(await fx.stub.cancel()).toEqual({ stopped: false });
+    fx.gate.release();
+    const again = await fx.stub.cancel();
+    expect(again.stopped).toBe(true);
+    expect(again.finalSeq).toBeGreaterThan(0);
+  });
+});
+
+describe("終端の確定順序: cancel > deadline > budget_exceeded > failed > completed", () => {
+  const fireDeadline = (fx: { stub: unknown }) =>
+    (runInDurableObject as unknown as (s: unknown, f: (i: unknown) => unknown) => Promise<unknown>)(
+      fx.stub,
+      (inst: unknown) =>
+        (inst as { onJob(c: unknown): Promise<unknown> }).onJob({
+          job: { fn: "deadline" },
+          attempt: 1,
+        }),
+    );
+
+  it("completed の finalize（patch 取得の await）中に deadline が来たら failed（deadline）", async () => {
+    const fx = newFixture("prio-completed-deadline", [report()]);
+    fx.patchGate.hold();
+    await fx.stub.start(makeSpec("prio-completed-deadline", { deadlineAt: T0 + 1000 }));
+    await fx.patchGate.waitEntered();
+    fx.clock.now = T0 + 5000;
+    await fireDeadline(fx);
+    fx.patchGate.release();
+    expect(await waitForTerminal(fx)).toBe("failed");
+    const r = done(await fx.stub.getResult());
+    expect(r.reason).toBe("deadline");
+    // 破棄済みの Sandbox から取った patch は残さない
+    expect(r.patch).toBeUndefined();
+    expect(fx.sandbox.terminateCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("deadline の後に cancel が来たら cancelled が勝つ", async () => {
+    const fx = newFixture("prio-cancel-deadline", [call("gate")], { cancelWaitMs: 200 });
+    await fx.stub.start(makeSpec("prio-cancel-deadline", { deadlineAt: T0 + 1000 }));
+    await fx.gate.waitEntered();
+    fx.clock.now = T0 + 5000;
+    await fireDeadline(fx);
+    await fx.stub.cancel();
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+  });
+
+  it("停止の意図があるとき、report_completion は受け付けない", async () => {
+    const fx = newFixture("prio-no-report", [call("gate"), report()], { cancelWaitMs: 200 });
+    await fx.stub.start(makeSpec("prio-no-report", { deadlineAt: T0 + 1000 }));
+    await fx.gate.waitEntered();
+    fx.clock.now = T0 + 5000;
+    await fireDeadline(fx);
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(done(await fx.stub.getResult()).reason).toBe("deadline");
+    expect(fx.verifyCalls).toHaveLength(0);
+  });
+});
+
+describe("予算: UTF-8 バイト数でのハードキャップ", () => {
+  it("CJK の長文は文字数/3 の見積もりなら通るが、バイト数の見積もりでは呼ばない", async () => {
+    const fx = newFixture("budget-cjk", [report()]);
+    // 15 万文字 = 45 万バイト ≈ 最大 $0.45（$1/M）。文字数/3 なら $0.05
+    await fx.stub.start(
+      makeSpec("budget-cjk", { budgetUsd: 0.4, instructions: "漢".repeat(150_000) }),
+    );
+    expect(await waitForTerminal(fx)).toBe("budget_exceeded");
+    expect(fx.modelCalls.count).toBe(0);
+  });
+});
+
+describe("検証の固定", () => {
+  it("保存済みの試行回数が上限に達していたら、実行せずに failed", async () => {
+    const fx = newFixture("verify-cap", [call("gate"), report()]);
+    await fx.stub.start(makeSpec("verify-cap"));
+    await fx.gate.waitEntered();
+    await runInDurableObject(fx.stub, (inst: unknown) =>
+      (inst as { store: { setMeta(k: string, v: unknown): void } }).store.setMeta("verification", {
+        commands: [{ argv: ["npm", "test"] }],
+        results: [],
+        verified: false,
+        attempts: 4,
+      }),
+    );
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("failed");
+    const r = done(await fx.stub.getResult());
+    expect(r.reason).toBe("verification_failed");
+    expect(fx.verifyCalls).toHaveLength(0);
+  });
+
+  it("固定した SHA を checkout して検証し、patch は base..検証済み SHA、検証後はブランチを SHA に戻す", async () => {
+    const fx = newFixture("verify-pin", [report()]);
+    await fx.stub.start(makeSpec("verify-pin"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const cmds = fx.sandbox.calls.map((c) => c.argv.join(" "));
+    const co = cmds.indexOf("git checkout -q --detach c0ffee");
+    const test = cmds.indexOf("npm test");
+    const back = cmds.indexOf("git switch -q -C agent/task-verify-pin c0ffee");
+    expect(co).toBeGreaterThanOrEqual(0);
+    expect(test).toBeGreaterThan(co);
+    expect(back).toBeGreaterThan(test);
+    expect(cmds).toContain("git format-patch base000..c0ffee --stdout");
+    expect(cmds.some((c) => c.endsWith("HEAD --stdout"))).toBe(false);
+  });
+
+  it("検証の後に HEAD が動いていたら、検証は無効（失敗扱い）で、モデルに伝える", async () => {
+    const fx = newFixture("verify-head-moved", [report("1"), report("2")]);
+    // 1 回目: 検証前の HEAD 確認 c0ffee、検証後は別の SHA。2 回目以降は c0ffee
+    fx.revParse.push("c0ffee", "c0ffee", "deadbeef");
+    await fx.stub.start(makeSpec("verify-head-moved"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const r = done(await fx.stub.getResult());
+    expect(r.verification.attempts).toBe(2);
+  });
+
+  it("git status が失敗（終了コード≠0）したら clean 扱いせず、検証しない", async () => {
+    const fx = newFixture("verify-status-fail", [report("1"), report("2")]);
+    fx.statusResults.push({ exitCode: 128, stderr: "fatal: not a git repository" });
+    await fx.stub.start(makeSpec("verify-status-fail"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const r = done(await fx.stub.getResult());
+    expect(r.verification.attempts).toBe(1); // 1 回目の report は検証に進まず、2 回目だけが検証した
+    expect(fx.verifyCalls).toHaveLength(1);
+    const reports = (await allEvents(fx)).filter((e) => e.type === "completion_report");
+    expect(reports).toHaveLength(2);
+  });
+
+  it("git status がタイムアウト・切り詰めでも clean 扱いしない", async () => {
+    const fx = newFixture("verify-status-trunc", [report("1"), report("2"), report("3")]);
+    fx.statusResults.push({ timedOut: true }, { truncated: true });
+    await fx.stub.start(makeSpec("verify-status-trunc"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.verifyCalls).toHaveLength(1);
+    const reports = (await allEvents(fx)).filter((e) => e.type === "completion_report");
+    expect(reports).toHaveLength(3);
+  });
+});
+
+describe("start の事前検証", () => {
+  it("test 環境以外で AI_GATEWAY_ID が空なら ai_gateway_not_configured", async () => {
+    const { aiGatewayRejection } = await import("../../src/agent/config");
+    expect(aiGatewayRejection({ ENVIRONMENT: "production", AI_GATEWAY_ID: "" })).toBe(
+      "ai_gateway_not_configured",
+    );
+    expect(aiGatewayRejection({ ENVIRONMENT: "production" })).toBe("ai_gateway_not_configured");
+    expect(aiGatewayRejection({ ENVIRONMENT: "production", AI_GATEWAY_ID: "gw" })).toBeUndefined();
+    expect(aiGatewayRejection({ ENVIRONMENT: "test", AI_GATEWAY_ID: "" })).toBeUndefined();
   });
 });

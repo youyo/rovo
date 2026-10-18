@@ -209,6 +209,9 @@ describe("プロセス管理", () => {
     const r = await sb.exec(["bash", "-c", "sleep 777 & sleep 778 & wait"], { timeoutMs: 3_000 });
     expect(r.timedOut).toBe(true);
     expect(r.exitCode).toBe(137);
+    // 停止の保証はコンテナの破棄だけ。次の操作は再起動を伝えるエラーになり、その後は新しいコンテナ（子孫なし）
+    expect((await sb.status()).running).toBe(false);
+    await expect(sb.exec(["true"])).rejects.toThrow(/restart/i);
     const left = await sb.exec([
       "bash",
       "-c",

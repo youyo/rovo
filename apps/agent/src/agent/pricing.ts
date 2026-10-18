@@ -47,19 +47,31 @@ export function priceFor(modelId: string, allowTest: boolean): ModelPrice | unde
   return undefined;
 }
 
-/** 文字数から保守的に見積もったトークン数（3 文字 = 1 トークン）。 */
+/**
+ * 入力トークン数の上限: UTF-8 のバイト数。byte-level BPE では 1 トークンは 1 バイト以上なので、
+ * トークン数がバイト数を超えることはない（文字数からの見積もりは CJK で実際を下回る）。
+ */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
+  return new TextEncoder().encode(text).byteLength;
 }
 
-/** 次の 1 回の呼び出しの最大費用: 現在のコンテキスト × 入力単価 + 出力上限 × 出力単価。 */
+/** リクエストの枠組み（ロール表記など）の分として、入力の見積もりに足す固定の余裕。 */
+export const REQUEST_OVERHEAD_TOKENS = 1024;
+
+/**
+ * 次の 1 回の呼び出しの最大費用（ハードキャップ用。過大に見積もる）:
+ * 入力は input と cacheWrite の高い方、価格帯があればその最大値。出力は max_tokens × 出力単価の最大値。
+ */
 export function estimateCallCostUsd(
   price: ModelPrice,
   contextTokens: number,
   maxOutputTokens: number,
 ): number {
-  const upper = price.tier && contextTokens > price.tier.inputTokensAbove ? price.tier : undefined;
-  const input = upper?.inputPerMTok ?? price.inputPerMTok;
-  const output = upper?.outputPerMTok ?? price.outputPerMTok;
+  const input = Math.max(
+    price.inputPerMTok,
+    price.cacheWritePerMTok,
+    price.tier?.inputPerMTok ?? 0,
+  );
+  const output = Math.max(price.outputPerMTok, price.tier?.outputPerMTok ?? 0);
   return (contextTokens * input + maxOutputTokens * output) / 1_000_000;
 }

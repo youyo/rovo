@@ -93,6 +93,14 @@ export class AgentStore {
     return { events: rows.slice(0, limit), hasMore: rows.length > limit };
   }
 
+  /** 最後のイベントの seq（無ければ 0） */
+  lastSeq(): number {
+    const row = this.ctx.storage.sql
+      .exec<{ seq: number | null }>("SELECT MAX(seq) AS seq FROM agent_events")
+      .one();
+    return row.seq ?? 0;
+  }
+
   usage(): UsageDto {
     return this.meta<UsageDto>("usage") ?? ZERO_USAGE;
   }

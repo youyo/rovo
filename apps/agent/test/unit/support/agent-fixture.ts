@@ -48,6 +48,12 @@ export interface Fixture {
   gate: { waitEntered: () => Promise<void>; release: () => void };
   patch: { value: string };
   nameStatus: { value: string };
+  /** git format-patch を止めておく（finalize の patch 取得中に別の出来事を起こすため） */
+  patchGate: { hold: () => void; waitEntered: () => Promise<void>; release: () => void };
+  /** git rev-parse HEAD の応答を先頭から順に使う。尽きたら c0ffee */
+  revParse: string[];
+  /** git status --porcelain の結果を先頭から順に使う。尽きたら clean */
+  statusResults: Partial<ExecResult>[];
 }
 
 /** AgentDO を 1 つ用意する。sandbox は fake、モデルは台本、ツールはテスト用の小さな factory。 */
@@ -64,12 +70,22 @@ export function newFixture(
   const nameStatus = { value: "" };
   // DO の中と外で Promise を共有すると I/O の所有者が混ざるので、フラグのポーリングにする
   const gateState = { entered: false, released: false };
+  const patchState = { held: false, entered: false };
+  const revParse: string[] = [];
+  const statusResults: Partial<ExecResult>[] = [];
 
-  const sandbox = new FakeSandbox((argv) => {
+  const sandbox = new FakeSandbox(async (argv) => {
     const [a0, a1] = argv;
-    if (a0 === "git" && a1 === "rev-parse") return { stdout: "c0ffee\n" };
-    if (a0 === "git" && a1 === "status") return { stdout: "" };
-    if (a0 === "git" && a1 === "format-patch") return { stdout: patch.value };
+    if (a0 === "git" && a1 === "rev-parse") return { stdout: `${revParse.shift() ?? "c0ffee"}\n` };
+    if (a0 === "git" && a1 === "status") return statusResults.shift() ?? { stdout: "" };
+    if (a0 === "git" && (a1 === "checkout" || a1 === "switch")) return {};
+    if (a0 === "git" && a1 === "format-patch") {
+      if (patchState.held) {
+        patchState.entered = true;
+        while (patchState.held) await new Promise((r) => setTimeout(r, 10));
+      }
+      return { stdout: patch.value };
+    }
     if (a0 === "git" && a1 === "diff" && argv.includes("--name-status")) {
       return { stdout: nameStatus.value };
     }
@@ -143,6 +159,19 @@ export function newFixture(
     },
     patch,
     nameStatus,
+    revParse,
+    statusResults,
+    patchGate: {
+      hold: () => {
+        patchState.held = true;
+      },
+      waitEntered: async () => {
+        while (!patchState.entered) await new Promise((r) => setTimeout(r, 10));
+      },
+      release: () => {
+        patchState.held = false;
+      },
+    },
   };
 }
 

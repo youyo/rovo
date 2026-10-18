@@ -26,6 +26,15 @@ export function createDefaultApp(deps: LoginDeps = {}) {
   app.get("/", (c) => c.text("rovo gateway"));
   registerLoginRoutes(app, deps);
 
+  // M1 スパイク: Gateway → Agent の DO RPC 疎通確認。ENVIRONMENT=test のときだけ有効。
+  app.get("/__spike/agent-ping", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const agents = c.env.AGENT_DO as unknown as {
+      getByName(name: string): { ping(message: string): Promise<string> };
+    };
+    return c.text(await agents.getByName("spike").ping(c.req.query("m") ?? "hi"));
+  });
+
   // 想定外の例外は内容を出さない（トークンやスタックを漏らさない）
   app.onError((error, c) => {
     console.error("default_handler_error", error instanceof Error ? error.name : typeof error);

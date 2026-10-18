@@ -8,7 +8,9 @@
   "durable_objects": {
     "bindings": [
       { "name": "TASK_DO", "class_name": "TaskDO" },
-      { "name": "USER_DO", "class_name": "UserDO" }
+      { "name": "USER_DO", "class_name": "UserDO" },
+      // apps/agent の AgentDO（別 Worker）。ローカルでは両方を同時に wrangler dev で起動すること（片方だけだと本番の DO を叩く）。
+      { "name": "AGENT_DO", "class_name": "AgentDO", "script_name": "rovo-agent" }
     ]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] }],

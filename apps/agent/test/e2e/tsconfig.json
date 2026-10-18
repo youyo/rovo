@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "types": ["node"]
+  },
+  "include": [
+    "./**/*.ts",
+    "../support/**/*.ts",
+    "../../src/sandbox-port.ts",
+    "../../vitest.e2e.config.ts",
+    "../../vitest.e2e-net.config.ts"
+  ]
+}

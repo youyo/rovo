@@ -28,6 +28,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次の 4 つ�
   - `/authorize`（同意画面）→ GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
   - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の予約。GitHub のトークンは DO の外へ返さない
   - `TaskDO`（タスクごと）: 状態とイベント
+- `apps/agent`（Phase 2 の土台。M1 スパイク段階）: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ（現状は疎通確認用の `/__spike/agent-ping` のみ、`ENVIRONMENT=test` 限定）
 
 ## 同意画面（confused deputy 対策）
 
@@ -43,6 +44,8 @@ DCR（動的クライアント登録）が有効なため、`/authorize` は Git
 
 ランタイム（node / pnpm）は [mise](https://mise.jdx.dev/) で固定している。コマンドはすべて `mise run` 経由で実行する。
 
+**Docker が必要**: `apps/agent` の E2E（`mise run test:e2e:docker`、したがって `mise run test`）は `wrangler dev` が Docker でコンテナ（`apps/agent/Dockerfile`）をビルド・起動する。Docker Desktop など、ローカルで Docker が動いていること。初回はイメージのビルド（`cloudflare/sandbox:1.0.1` の取得を含む）に数分かかる。
+
 ```sh
 mise install          # node / pnpm を入れる
 mise run install      # 依存パッケージ（pnpm install --frozen-lockfile）
@@ -52,11 +55,15 @@ mise run lint         # Biome + 型検査
 
 | タスク | 内容 |
 |---|---|
-| `mise run test:unit` | vitest + `@cloudflare/vitest-plugin`（workerd 上で実行） |
+| `mise run test:unit` | gateway と agent の Unit。vitest + `@cloudflare/vitest-plugin`（workerd 上で実行）。個別は `test:unit:gateway` / `test:unit:agent`。agent の Unit ではコンテナが使えないので、`SandboxPort` を fake にする |
 | `mise run test:fake-github` | 偽 GitHub サーバーと GitHub クライアントの結合テスト（Node） |
-| `mise run test:e2e` | `wrangler dev` で実 Worker と偽 GitHub を起動し、MCP SDK の Client から DCR → `/authorize` → 偽 GitHub → `/callback` → token(PKCE) → 4 つのツールまで通す |
+| `mise run test:e2e` | `test:e2e:gateway` + `test:e2e:docker` |
+| `mise run test:e2e:gateway` | `wrangler dev` で実 Worker と偽 GitHub を起動し、MCP SDK の Client から DCR → `/authorize` → 偽 GitHub → `/callback` → token(PKCE) → 4 つのツールまで通す |
+| `mise run test:e2e:docker` | **Docker 必須**。`wrangler dev` で実コンテナを起動し、ローカルの偽サーバー（偽 GitHub の git smart HTTP と偽 npm レジストリ）を許可先にして、外向き通信の許可・拒否（非許可ホスト、push、内部 IP、非 80/443 ポート、IPv6、CONNECT、WebSocket、リダイレクト、ヘッダ除去、再起動後の傍受）と `npm install` / `git clone`、Gateway → Agent の DO RPC（`-c gateway -c agent` の同時起動）を検証する |
+| `mise run test:e2e:net` | **Docker 必須・実ネットワーク**。上の E2E の実ネットワーク版（実 registry.npmjs.org、`octocat/Hello-World` の匿名 clone）。CI で不安定になりうるため `test` には含めない。認証付きアクセスや push はしない |
 | `mise run lint` / `mise run fmt` | Biome の lint / 整形、`tsc` の型検査 |
-| `mise run typegen` | `wrangler.jsonc` を変えたら実行して `worker-configuration.d.ts` を更新する |
+| `mise run typegen` | `wrangler.jsonc` を変えたら実行して両アプリの `worker-configuration.d.ts` を更新する |
+| `mise run dev:all` | gateway と agent を同時にローカル起動する（Docker 必須）。`AGENT_DO` は `script_name` 付きなので、片方だけ起動すると本番の DO を参照してしまう（wrangler の known issue）。必ず両方を同時に起動する。`wrangler login` やデプロイは不要 |
 | `mise run build` | Worker のバンドル確認（`--dry-run`。デプロイはしない） |
 | `mise run dev` | ローカル起動（`http://localhost:8787`）。`apps/gateway/.dev.vars` を読む |
 

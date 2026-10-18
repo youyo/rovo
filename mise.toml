@@ -11,29 +11,70 @@ CI = "1"
 description = "依存パッケージをインストール"
 run = "pnpm install --frozen-lockfile"
 
-[tasks.typegen]
-description = "wrangler types で Env 型を生成"
+[tasks."typegen:gateway"]
+description = "gateway: wrangler types で Env 型を生成"
 dir = "apps/gateway"
 run = "pnpm exec wrangler types --env-interface Env --strict-vars=false"
 
-[tasks."test:unit"]
-description = "Unit テスト（vitest + workerd）"
+[tasks."typegen:agent"]
+description = "agent: wrangler types で Env 型を生成"
+dir = "apps/agent"
+run = "pnpm exec wrangler types --env-interface Env --strict-vars=false"
+
+[tasks.typegen]
+description = "両アプリの Env 型を生成（wrangler.jsonc を変えたら実行）"
+depends = ["typegen:gateway", "typegen:agent"]
+
+[tasks."test:unit:gateway"]
+description = "gateway の Unit テスト（vitest + workerd）"
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
-[tasks."test:e2e"]
-description = "E2E テスト（wrangler dev で実 Worker と偽 GitHub を起動し、MCP SDK Client から通しで検証）"
+[tasks."test:unit:agent"]
+description = "agent の Unit テスト（vitest + workerd。コンテナは使えないので SandboxPort は fake）"
+dir = "apps/agent"
+run = "pnpm exec vitest run --config vitest.config.ts"
+
+[tasks."test:unit"]
+description = "Unit テスト（gateway + agent）"
+depends = ["test:unit:gateway", "test:unit:agent"]
+
+[tasks."test:e2e:gateway"]
+description = "gateway の E2E（wrangler dev で実 Worker と偽 GitHub を起動し、MCP SDK Client から通しで検証）"
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 
+[tasks."test:e2e:docker"]
+description = "agent の E2E（Docker 必須）。wrangler dev で実コンテナを起動し、偽サーバーで外向き通信の許可・拒否と Gateway→Agent の DO RPC を検証"
+dir = "apps/agent"
+run = "pnpm exec vitest run --config vitest.e2e.config.ts"
+
+[tasks."test:e2e"]
+description = "E2E（gateway + agent。agent は Docker 必須）"
+depends = ["test:e2e:gateway", "test:e2e:docker"]
+
+[tasks."test:e2e:net"]
+description = "agent の E2E の実ネットワーク版（Docker 必須。実 npm / 公開 GitHub リポジトリの匿名 clone。CI の test には含めない）"
+dir = "apps/agent"
+run = "pnpm exec vitest run --config vitest.e2e-net.config.ts"
+
 [tasks.test]
-description = "Unit + E2E"
+description = "Unit + 偽 GitHub + E2E（Docker 必須。実ネットワーク版 test:e2e:net は含まない）"
 depends = ["test:unit", "test:fake-github", "test:e2e"]
 
-[tasks.typecheck]
-description = "TypeScript の型検査"
+[tasks."typecheck:gateway"]
+description = "gateway の型検査"
 dir = "apps/gateway"
 run = "pnpm exec tsc -p tsconfig.json && pnpm exec tsc -p test/e2e/tsconfig.json && pnpm exec tsc -p test/fake-github/tsconfig.json"
+
+[tasks."typecheck:agent"]
+description = "agent の型検査"
+dir = "apps/agent"
+run = "pnpm exec tsc -p tsconfig.json && pnpm exec tsc -p test/e2e/tsconfig.json"
+
+[tasks.typecheck]
+description = "TypeScript の型検査（両アプリ）"
+depends = ["typecheck:gateway", "typecheck:agent"]
 
 [tasks."lint:biome"]
 description = "Biome による lint / format チェック"
@@ -53,9 +94,13 @@ dir = "apps/gateway"
 run = "pnpm exec wrangler deploy --dry-run --outdir dist"
 
 [tasks.dev]
-description = "wrangler dev でローカル起動（apps/gateway/.dev.vars を読む。.dev.vars.example 参照）"
+description = "wrangler dev でローカル起動（apps/gateway/.dev.vars を読む。.dev.vars.example 参照）。gateway 単体"
 dir = "apps/gateway"
 run = "pnpm exec wrangler dev"
+
+[tasks."dev:all"]
+description = "gateway と agent を同時にローカル起動（Docker 必須）。script_name 付きバインディングは両方を同時に起動しないと本番の DO を参照する"
+run = "node apps/gateway/node_modules/wrangler/bin/wrangler.js dev -c apps/gateway/wrangler.jsonc -c apps/agent/wrangler.jsonc"
 
 [tasks."test:fake-github"]
 description = "偽 GitHub サーバーと GitHub クライアントの結合テスト（Node）"

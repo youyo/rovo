@@ -15,5 +15,5 @@
 
 # web_browse（Browser Run の Kitesurf）を有効にするか（"true" のときだけ。既定は無効）。
 # ローカルの BROWSER バインディングは実際のブラウザを持たないので、取得には remote: true が要る（実アカウントを使う）。
-# 有効にする前に docs/specs/phase5.md の「有効化前のゲート」を満たすこと。apps/agent・apps/gateway の同名の var も合わせる。
+# 有効にする前に docs/specs/acceptance.md の「web_browse（有効化前のゲート）」を満たすこと。apps/agent・apps/gateway の同名の var も合わせる。
 # WEB_BROWSE_ENABLED=false

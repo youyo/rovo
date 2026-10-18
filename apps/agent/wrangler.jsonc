@@ -49,7 +49,7 @@
     "WEB_FETCH_LIMIT_PER_TASK": "100",
     "WEB_BROWSE_LIMIT_PER_TASK": "20",
     // web_browse を子のツールとして出すか（"true" のときだけ。既定は無効で、ツールもシステムプロンプトの記述も出さない）。
-    // 有効にする前に、phase5.md の「有効化前のゲート」を満たすこと。apps/web と apps/gateway の同名の var も合わせる。
+    // 有効にする前に、docs/specs/acceptance.md の「web_browse（有効化前のゲート）」を満たすこと。apps/web と apps/gateway の同名の var も合わせる。
     "WEB_BROWSE_ENABLED": "false"
   }
 }

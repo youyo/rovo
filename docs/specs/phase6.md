@@ -113,7 +113,7 @@
 - 監査イベントは、1行の構造化 JSON で `console.log` に出す。`{"audit": true, "event": "...", "ts": ..., ...}`。
 - **Workers Logs の `console.log` だけでは、best-effort**。head sampling と短い保持期間のために、行が欠落しうる。これは監査として十分ではない。
 - 監査として成立する条件（下流の設定。rovo は環境固有の値を持たないので、推奨値ではなく**条件**として書く）:
-  - Workers Logs の head sampling が 100%（`observability.logs.head_sampling_rate = 1` 相当）。
+  - Workers Logs の head sampling が 100%（`observability` の `head_sampling_rate: 1`。`observability.logs.head_sampling_rate` でもよい）。
   - Logpush で、保持期間を自分で決められる宛先に流す。
   - この条件が満たされていない環境では、監査ログは調査の補助でしかない。docs/deploy.md に、この条件と、満たしているかの確かめ方を書く。
 - 保存先と保持期間は下流が決める。
@@ -221,7 +221,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 | M2（実装済み） | agent + `packages/audit` | `audit()` を `packages/audit`（`@rovo/audit`）へ移す（ステップ 0）。SandboxDO の実行時間と起動世代のカウンタの永続化、usage イベントの `sandbox: {...}`。違反ログの JSON 化、特権操作、リース相当の失効イベント | Unit: SandboxDO の起動→停止で `runtimeMs` が累計され、DO を作り直しても値が残る。Unit（パッケージ）: トークン形式が先頭でなくてもマスクされる |
 | M3（実装済み） | gateway + `packages/audit`（`task_summary` の追加のみ） | `agent-events.ts` で sandbox の usage を写す。summary レコードの生成 | Unit: usage イベントの `sandbox` が公開用の payload に写る（欠けた値は 0）。summary に title が入らない |
 | M4（実装済み） | gateway | R2 アーカイブ（`needsAlarm` の拡張を含む） | Unit（fake の R2）: `finished && finalize_done` の前には書かず、成立後に1回呼んでも2回呼んでも同じ結果（冪等）。続けて、再試行と打ち切り。最後に wrangler のローカル R2 で通し |
-| M5（web の監査は実装済み、ドキュメントは未） | web + ドキュメント | web の監査（block / unknown / robots / redirect）。design 15.7、推奨値の下書きをこの文書の該当の節に置く（docs/deploy.md 自体は Phase 7 で作る）、README、acceptance 14 以降 | Unit: web の block / unknown / robots / redirect_policy が `audit()` の許可したフィールドだけで出る |
+| M5（実装済み） | web + ドキュメント | web の監査（block / unknown / robots / redirect）。design 15.7、推奨値の下書きをこの文書の該当の節に置く（docs/deploy.md 自体は Phase 7 で作る）、README、acceptance 14 以降 | Unit: web の block / unknown / robots / redirect_policy が `audit()` の許可したフィールドだけで出る |
 
 ## テスト
 
@@ -236,7 +236,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - E2E（通し）
   - 完了したタスクの events.jsonl / result.json / summary.json が、wrangler dev のローカル R2（`LOGS`）に保存されること。summary.json が最後に書かれること。
   - キャンセルと予算超過で、`/__test/audit` から監査イベントが読めること。トークンの発行・失効が events にも積まれていること。
-  - `LOGS` を外した構成でも、タスクが完了し、`archive_skipped` が出ること。
+  - LOGS 無しの fail-open は Unit（apps/gateway/test/unit/task-archive.test.ts）で確認する。gateway の E2E は wrangler dev を 1 つだけ起動する構成のため。
 
 ## 未決事項
 

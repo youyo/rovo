@@ -22,7 +22,7 @@
     // Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block / caution
     "SAFETY_BLOCK_THRESHOLD": "0.8",
     "SAFETY_CAUTION_THRESHOLD": "0.4",
-    // web_browse の有効化（"true" のときだけ有効。既定は無効）。有効にする前に、phase5.md の「有効化前のゲート」を満たすこと。
+    // web_browse の有効化（"true" のときだけ有効。既定は無効）。有効にする前に、docs/specs/acceptance.md の「web_browse（有効化前のゲート）」を満たすこと。
     // gateway / agent の同名の var も合わせる（それぞれ web_browse ツールを出すかを決める）。
     "WEB_BROWSE_ENABLED": "false",
     // ENVIRONMENT=test のときだけ有効。AI（run / websearch / toMarkdown）と取得を向ける偽サーバーの URL。空なら本物を使う。

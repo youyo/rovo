@@ -39,7 +39,7 @@
     "WEB_FETCH_DAILY_LIMIT": "500",
     "WEB_BROWSE_DAILY_LIMIT": "50",
     // web_browse を MCP のツールとして公開するか（"true" のときだけ。既定は無効で、tools/list にも出ない）。
-    // 有効にする前に、phase5.md の「有効化前のゲート」を満たすこと。apps/web と apps/agent の同名の var も合わせる。
+    // 有効にする前に、docs/specs/acceptance.md の「web_browse（有効化前のゲート）」を満たすこと。apps/web と apps/agent の同名の var も合わせる。
     "WEB_BROWSE_ENABLED": "false",
     // 要約（task_summary / summary.json）の「推定」金額の単価（USD）。Cloudflare の公式料金表（取得日 2026-10-19）の既定値で、
     // 料金改定や instance_type の変更に合わせて下流が上書きする。タスクの予算（$10）には含めない。出典は docs/specs/phase6.md。

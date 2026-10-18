@@ -1104,11 +1104,15 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - **R2（9.2、Phase 6）** は「終端後の正」ではなくコピーとする。正は TaskDO のまま。
   - TaskDO の `events` / `questions` / `git_token` の削除は Phase 7 で決める。
   - 書き込みは、費用の精算（`finished`）と GitHub の終端処理（`finalize_done`）が済んだ後に、冪等に行う。失敗が続けば `archive_failed` を監査ログに出して打ち切る。タスクの結果と予算の精算には影響させない。
-  - バインディング（`LOGS`）が無いときは、アーカイブをスキップする（fail-open）。
+  - バインディング（`LOGS`）が無いときは、アーカイブをスキップする（fail-open。`archive_skipped`）。
+  - `apps/gateway/wrangler.jsonc` には `r2_buckets` を置かない（バケット名は環境固有で、下流が `LOGS` として束ねる。16）。ローカルの E2E は、E2E が生成する一時の wrangler 設定にだけ `LOGS` を足す。
+  - キーは `tasks/<yyyy>/<mm>/<task_id>/{events.jsonl,result.json,summary.json}`（`<yyyy>/<mm>` はタスク作成時刻の UTC）。`summary.json` を最後に書き、これが完了の印。ライフサイクルの設定（例: 90 日）は下流で行う。
+  - コンテナのスナップショット（beta）は見送る。復旧は push 済みのチェックポイントで成立している。
   - 保存するのは公開イベントの全件・結果・要約。タスクの入力（instructions / acceptance_criteria / constraints）、title、親の answer / steer の本文、トークンは保存しない。
   - events.jsonl は未加工で、読む側が非信頼データとして扱う。バケットは非公開、バインディングは gateway だけ、MCP からの一覧・読み出しは作らない。
 - **監査ログ（11.2）** は、1行の構造化 JSON で出す。
   - Workers Logs の `console.log` だけでは best-effort（head sampling と短い保持で欠落しうる）。監査として成立する条件は、sampling 100% と Logpush で保持を自分で決められる宛先に流すこと。これは下流の設定で、rovo は環境固有の値を持たない。
   - 欠落してはならない事象（トークンの発行・失効、特権操作、cancel、配送の打ち切り）は TaskDO の events にも固定コードで積み、R2 の events.jsonl にも残す。
   - 11.2 の「実行リースの失効・再取得」は、起動世代の破棄、tombstone 後の start、start の衝突、agent の cancel の受理を監査する。
-- **観測性（11.1）** の Sandbox 実行時間と復旧回数は、SandboxDO が永続化するカウンタから取る。Sandbox と Web の金額は単価をかけた**推定値**で、単価は `vars` の既定値を下流が上書きできる（16）。
+  - 出力は `packages/audit`（`@rovo/audit`）の `audit()` に一本化する。gateway・agent・web が workspace 依存で使い、閉じたイベント名の一覧と許可したフィールドだけを通す（呼び出し側は allowlist を渡せない）。web の block / unknown は `web_blocked` として出す。
+- **観測性（11.1）** の Sandbox 実行時間と復旧回数は、SandboxDO が永続化するカウンタから取る。Sandbox と Web の金額は単価をかけた**推定値**で、単価（`SANDBOX_USD_PER_HOUR`、`WEB_USD_PER_1K_SEARCH` / `FETCH` / `BROWSE`）は gateway の `vars` の既定値を下流が上書きできる（16）。要約（`summary.json` と監査ログの `task_summary`）の金額は `sandbox_usd_estimate` / `web_usd_estimate` で、タスクの予算には含めない。

@@ -231,13 +231,14 @@ Phase 6（R2 へのアーカイブ、監査ログ、観測性）のコードが�
 - [ ] タスクが完了した後、`tasks/<yyyy>/<mm>/<task_id>/` に `events.jsonl`、`result.json`、`summary.json` の3つが出る。`<yyyy>/<mm>` はタスクの作成時刻（UTC）
 - [ ] `events.jsonl` の最後の seq が、`task_wait` で読んだ最後のイベントの seq と一致する。終端の後に積まれた warning（あれば）と、監査の二重化のイベント（`credential_issued` / `credential_revoked` など）が含まれる
 - [ ] `result.json` が `task_result` の応答と同じ内容（patch、検証の出力、warnings）
-- [ ] `summary.json` に Task ID、User ID、repository、PR URL、状態遷移、実行時間、Claude の使用量と費用、Sandbox の実行時間と起動世代、Web の回数、質問の回数、復旧の回数、検証の結果が入る。Sandbox と Web の金額が「推定」と分かる名前で入る。**title は入らない**
+- [ ] `summary.json` に Task ID、User ID、repository、PR URL、状態遷移、実行時間、Claude の使用量と費用、Sandbox の実行時間と起動世代、Web の回数、質問の回数、復旧の回数、検証の結果が入る。Sandbox と Web の金額が `sandbox_usd_estimate` / `web_usd_estimate`（推定）として入り、使った単価が `unit_prices` に入る。**title は入らない**
 - [ ] タスクの入力（`instructions` / `acceptance_criteria` / `constraints`）と、親の answer / steer の本文が、3つのどれにも入っていない
 - [ ] キャンセル、失敗、予算超過で終わったタスクでも、同じ3つが出る
 - [ ] 同じタスクを再度アーカイブさせても（alarm の再実行）、キーが増えず、内容が変わらない
-- [ ] `LOGS` のバインディングを外した構成で、タスクが普通に完了して結果が返る。監査ログに `archive_skipped` が出る
+- [ ] `LOGS` のバインディングを外した構成で、タスクが普通に完了して結果が返る。監査ログに `archive_skipped`（`reason: no_binding`）が出る
+- [ ] 成功したアーカイブは、監査ログに `archive_completed`（`prefix` と `bytes`。キー全体や本文は出ない）が出る
 - [ ] バケットに匿名でアクセスできない（公開 URL が無い）。MCP のツールから、アーカイブを一覧・読み出しできない
-- [ ] 実機でアーカイブの失敗を起こせれば（バケットの権限を一時的に外すなど）、`archive_failed` が監査ログに出て、タスクの結果と予算の精算に影響しない（起こせなければ、自動テストで確認済みとして省略可）
+- [ ] 実機でアーカイブの失敗を起こせれば（バケットの権限を一時的に外すなど）、`archive_failed`（`reason`: `result_unavailable` / `put_failed`）が監査ログに出て、タスクの結果と予算の精算に影響しない（起こせなければ、自動テストで確認済みとして省略可）
 
 ## 15. アーカイブの中に秘密が無い
 
@@ -248,7 +249,8 @@ Phase 6（R2 へのアーカイブ、監査ログ、観測性）のコードが�
 ## 16. 監査ログ（Logpush）
 
 - [ ] 次の事象を起こす: 許可されていない team のアカウントのログイン、他人の `task_id` の操作、`task_cancel`、予算超過（`BUDGET_EXCEEDED`）、子の外向き通信の違反、`web_fetch` の block / robots
-- [ ] それぞれの監査行（`"audit": true`）が、Logpush の宛先に**欠けずに**見える。行の件数が、TaskDO の events の `audit` の件数（二重化したもの）と合う
+- [ ] それぞれの監査行（`"audit": true`）が、Logpush の宛先に**欠けずに**見える。期待するイベント: `auth_failed`、`authz_denied`（`not_team_member` / `not_owner` など）、`task_cancelled`、`task_ended_by_limit`（`budget_exceeded`）、`outbound_denied`（`dest` と `reason`）、`web_blocked`（`kind` と `reason`）、`task_summary`
+- [ ] gateway の二重化したイベント（`credential_issued` / `credential_revoked` / `delivery_given_up`、`credential_revoke_given_up` の `setup_failure`）の行の件数が、同じタスクの TaskDO の events の `audit` の件数と合う。agent の `agent_cancelled` と `sandbox_privileged_op`（`set_deadline` / `extend_deadline`）も合うが、`terminate` は終端後の片付けの分がログにだけ出るので、ログのほうが多くてよい
 - [ ] 監査行に、本文、URL のパスやクエリ、トークン、タスクの入力が無い。host は出てよい
 - [ ] Logpush を通さない Workers Logs だけでは、欠落しうることを確かめる（sampling を下げた構成で行が減ることを記録する。実施が難しければ、設定が条件を満たしていることの確認だけでよい）
 - [ ] トークンの発行・失効（`credential_issued` / `credential_revoked`）が、タスクの終端までの間に events と監査ログの両方に出る

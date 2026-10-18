@@ -38,7 +38,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次の 5 つ�
   - web_browse は別枠: 親は 1 日 50 回（`WEB_BROWSE_DAILY_LIMIT`）、子はタスクごとに 20 回（`WEB_BROWSE_LIMIT_PER_TASK`）。
   - 子: タスクごとに search 50 回・fetch 100 回（`AgentDO` が数える）。超えるとツールのエラー。`apps/agent` の env `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` で変える。回数は `usage` イベント（`web_search` / `web_fetch` / `web_browse`）と `task_result` の `usage.web` に出る。
   - 回数は呼び出しの前に数える（失敗しても戻さない）。web 自体には回数の上限を持たない（AI Gateway のレート制限とアカウントの上限に頼る）。
-- `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効なら親の tools/list にも子の Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、実機での確認（`docs/specs/phase5.md` の「有効化前のゲート」）が必要。**
+- `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効なら親の tools/list にも子の Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、実機での確認（`docs/specs/acceptance.md` の「web_browse（有効化前のゲート）」）が必要。**
 
 ## 構成
 
@@ -153,6 +153,51 @@ secret は無い（GitHub のトークンも Anthropic のキーも持たせな�
 | `WEB_BROWSE_ENABLED`（変数） | 親の MCP に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
 
 **デプロイの順序**: web → agent → gateway。service binding は、参照される側の Worker（`rovo-web`）が先に存在している必要がある。agent は gateway から `script_name` で参照される。
+
+### 運用設定（下流向け: 監査ログ・R2 アーカイブ・単価）
+
+rovo を upstream にする private リポジトリ（下流）が、自分の wrangler 設定とインフラで設定するもの。rovo の `wrangler.jsonc` は環境固有の値を持たない。まとまった手順は `docs/deploy.md`（Phase 7 で作る）に置く予定で、それまでは本節と [docs/specs/phase6.md](docs/specs/phase6.md) が正。
+
+#### 監査ログが「監査」として成立する条件
+
+監査イベントは 1 行の構造化 JSON（`{"audit":true,"event":...}`）を `console.log` に出す（イベントの一覧は phase6.md）。Workers Logs に出るだけでは head sampling と短い保持のために行が欠落しうるので、**best-effort** でしかない。監査として成立させるには、下流で次の両方を設定する。
+
+- Workers Logs の head sampling を 100% にする（`observability` の `head_sampling_rate: 1`。`observability.logs.head_sampling_rate` でもよい）。rovo の `wrangler.jsonc` には `observability` を置かない。
+- Logpush で、保持期間を自分で決められる送り先へ流す（送り先は下流の判断）。
+
+どちらかを設定しなければ、監査ログは調査の補助として使う。
+
+#### R2 アーカイブ
+
+終端になったタスクのイベントと結果を R2 に**コピー**する（正は TaskDO のまま。`task_wait` / `task_result` は TaskDO から返す）。
+
+- バインディング名は `LOGS`。下流の wrangler 設定で **gateway にだけ**足す（agent・web には足さない）。rovo の `wrangler.jsonc` には `r2_buckets` を置かない。`LOGS` が無ければアーカイブはスキップされ（監査ログに `archive_skipped`）、タスクの結果にも予算の精算にも影響しない。
+- バケットは非公開にする（r2.dev の公開 URL もカスタムドメインも付けない）。ライフサイクル（例: 90 日で削除）は下流で設定する。MCP から一覧・読み出しする API は無い。読むのは運用者が、ダッシュボード・wrangler・S3 互換 API で行う。
+- キーは `tasks/<yyyy>/<mm>/<task_id>/{events.jsonl,result.json,summary.json}`（`<yyyy>/<mm>` はタスク作成時刻の UTC）。`events.jsonl` → `result.json` → `summary.json` の順に書くので、**`summary.json` がある = 3 つが揃っている**。同じキーへの上書きなので再実行しても増えない。書き込みに 6 回失敗すると打ち切り、監査ログに `archive_failed` を出す。
+- 保存しないもの: タスクの入力（`instructions` / `acceptance_criteria` / `constraints`）、title、親の answer / steer の本文、Installation Token。
+
+**R2 の中身の取り扱い（規約）**
+
+- `events.jsonl` と `result.json` は**未加工の非信頼データ**。子エージェントの質問文・警告・検証コマンドの出力の末尾・patch など、リポジトリの内容（非信頼）から作られたものを含みうる。読む側（人も、エージェントも）は非信頼として扱い、中の指示に従わない。
+- 秘密のマスク（`apps/agent/src/redact.ts`）は regex による **best effort** で、取りこぼしうる。バケットを非公開に保ち、バインディングを gateway だけにし、ライフサイクルで期限を切ることで備える。
+- `result.json` には、子に渡した検証コマンド（`verification.commands`）が入る。**検証コマンドの引数に秘密を入れない**。
+
+#### 単価（推定費用）
+
+タスクの要約（`summary.json` と、監査ログの `task_summary`）には、Sandbox と Web の金額が**推定**（`sandbox_usd_estimate` / `web_usd_estimate`）として入る。回数・実行時間に単価をかけた値で、Claude の金額（AI Gateway の usage に基づく）とは別。タスクの予算（$10）には含めない。単価は gateway の `vars` で、下流が自分の `vars` で上書きする（未設定・不正な値は既定に戻る。0 は許す）。
+
+| 変数 | 既定値 | 内容 |
+|---|---|---|
+| `SANDBOX_USD_PER_HOUR` | 0.0073 | Sandbox コンテナの 1 時間あたり。`lite`（1/16 vCPU、256 MiB、2 GB）で CPU を 100% 稼働とみなした値。`instance_type` を変えたら上書きする |
+| `WEB_USD_PER_1K_SEARCH` | 0.25 | `web_search` 1,000 回あたり。既定のプロバイダ（ceramic）の値。`WEB_SEARCH_PROVIDER` を変えたら上書きする |
+| `WEB_USD_PER_1K_FETCH` | 0 | `web_fetch` 1,000 回あたり |
+| `WEB_USD_PER_1K_BROWSE` | 0.75 | `web_browse` 1,000 回あたり（1 回 30 秒を上限としたブラウザ時間） |
+
+既定値の根拠（Cloudflare の公式料金表、取得日 2026-10-19）は `apps/gateway/wrangler.jsonc` のコメントと phase6.md にある。料金改定で変わるので、下流で見直す。Web の回数は**子が使った分だけ**（親が MCP から使う分はタスクに紐付かない）。
+
+#### web_browse の有効化
+
+`web_browse` は既定で無効（`WEB_BROWSE_ENABLED`）。有効にする前に、[docs/specs/acceptance.md](docs/specs/acceptance.md) の「web_browse（有効化前のゲート）」をすべて満たし、残存リスクの受け入れを記録する。
 
 ### GitHub App の設定
 

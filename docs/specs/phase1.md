@@ -39,14 +39,26 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   2. code をトークンに交換する。
   3. `GET /user` で id と login を得る。
   4. 指定 org・指定 team への所属を `GET /orgs/{org}/teams/{team_slug}/memberships/{username}` で確かめる。`state == "active"` だけを許可する。
-- props には `githubUserId`、`login`、GitHub のユーザートークン（とリフレッシュトークン・期限）を入れる。
-  - props は OAuthProvider が暗号化して保存する。トークンはログに出さない。
+- props には `githubUserId` と `login` だけを入れる。
+  - GitHub のトークンは UserDO に保存する（後述）。
+  - トークンはログに出さない。
 - GitHub のユーザートークンの期限は、App の設定とトークン応答の `expires_in` に従って保存する（8時間と決め打ちしない）。
-- **Phase 1 ではリフレッシュしない。**
-  - 期限切れ、または GitHub が 401 を返したら、どのツールでも `reauth_required` を返す。
-  - 再認証は、新たに GitHub の認可を通すことで行う。古い MCP grant のリフレッシュだけでは復帰させない。
-  - MCP トークンの期限と GitHub 資格の期限は別物として扱う。
-  - リフレッシュは Phase 2 以降で検討する。そのときは single-flight で更新し、更新した資格を永続化し、古い props を持つ既存のアクセストークンの扱いも決める。
+- **GitHub トークンのリフレッシュは Phase 1 で実装する。**
+  - 資格情報の正本は UserDO に置く。props には置かない。
+    - UserDO が持つもの: access token、refresh token、それぞれの期限、version。
+    - 理由: GitHub のリフレッシュはトークンを入れ替える。旧 access token と旧 refresh token はその時点で無効になる。MCP の grant ごとに props へコピーすると、古いコピーが残ってしまう。
+    - 同じユーザーの MCP grant が複数あっても、UserDO の1つの資格を共有する。
+  - 保存時は、Worker Secret の鍵（`TOKEN_ENC_KEY`）を使い AES-GCM で暗号化する。
+  - アクセス時の流れ
+    - UserDO の `getGitHubToken()` を呼ぶ。期限切れ、または期限まで残り5分未満なら、UserDO 内でリフレッシュしてから返す。
+    - DO は処理を直列化するので、リフレッシュは自然に single-flight になる。ただし fetch の await 中に入ってきた別の呼び出しは、進行中の Promise を共有させる。二重にリフレッシュさせない。
+    - GitHub API が 401 を返したら、1回だけ強制リフレッシュして再試行する。
+  - 失敗時の扱い
+    - リフレッシュが `bad_refresh_token` などで失敗した場合（refresh token の期限切れ・失効）は、資格を消して `reauth_required` を返す。
+    - GitHub が 5xx の場合は、資格を残したまま `upstream_unavailable` を返す。
+  - 再ログイン（新しい GitHub 認可）で得た資格は、UserDO の資格を上書きする（新しいものが勝つ）。
+  - MCP トークンの期限と GitHub 資格の期限は別物として扱う。MCP トークンが有効でも、GitHub 資格を回復できなければ `reauth_required` になる。
+  - 期限は、トークン応答の `expires_in` / `refresh_token_expires_in` から計算する。期限切れにならないトークン（App の設定で期限を無効にした場合）にも対応する。
 - team 所属の再検証
   - ログイン時だけでなく、全ツールの呼び出しで確かめる。
   - 結果は UserDO に短時間（TTL 5分）キャッシュする。team から外れてから使えなくなるまでの遅れは最大5分。
@@ -131,6 +143,7 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
     - 保存期間は 7日。
   - `reservation`（1行）: active_task_id or NULL, reserved_at, version
   - `membership_cache`: checked_at, result
+  - `github_credential`（1行）: 暗号化した access_token / refresh_token, access_expires_at, refresh_expires_at, version, updated_at
 - `idempotency_key` の扱い
   - 1〜128文字の `[A-Za-z0-9_-]` とする。
   - 省略された場合は、再試行の重複排除を保証しない（ツールの説明に明記する）。
@@ -197,7 +210,14 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - GitHub が 401 なら reauth_required、403 なら forbidden、429 / 5xx なら upstream_unavailable
   - team に所属していない、または `state=pending` なら拒否
   - ログイン後に team から外された場合、TTL が切れた後の呼び出しで拒否される
-  - GitHub 資格の期限切れは reauth_required
+  - GitHub 資格の期限切れ
+    - refresh token が有効なら、自動でリフレッシュして成功する
+    - refresh token も無効なら reauth_required
+  - リフレッシュで入れ替わった後の旧トークンが使われない
+  - 同時に呼び出してもリフレッシュは1回だけ（single-flight）
+  - 401 を受けたら1回だけ強制リフレッシュして再試行する
+  - 再ログインで資格が上書きされる
+  - 保存されている資格が暗号化されている（平文が DO に無い）
 - 入力検証
   - cursor が負数・小数・安全整数を超える値・未来の値
   - timeout が負数・小数
@@ -215,6 +235,8 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - team に所属していないユーザーはログインできない
   - state の不一致・再使用は拒否される
   - 公開リポジトリだが App が未導入なら、task_start は forbidden
+  - 偽 GitHub でアクセストークンを期限切れにすると、自動でリフレッシュされてツール呼び出しが成功する
+  - 偽 GitHub で refresh token を失効させると reauth_required
 - 偽 GitHub サーバーはテストからユーザー・team・権限を設定できるようにする。
 
 ### 受入試験（手動。自動化できないため記録だけ残す）

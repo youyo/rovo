@@ -240,3 +240,35 @@ apps/gateway (既存 Worker)
 - Web 調査（Phase 5）
 - snapshot による高速な復旧、R2（Phase 6）
 - 実環境へのデプロイ（ユーザーの指示があるまで行わない）
+
+## M1 スパイクの結果（2026-10-18）
+
+4項目のうち3つ（1・3・4）が成立した。2（vitest でコンテナを動かす）は成立しなかったため、テスト方針を確定した。
+
+1. 外向き制御: 成立。
+   - HTTP（80）は `interceptAllOutboundHttp`、HTTPS（443）は `interceptOutboundHttps("*")` で受ける。
+   - 次のものは `enableInternet:false` で接続自体ができない: 他ポート、IPv6、HTTPS の裸 IP。
+   - CONNECT は通らない（501）。
+   - OutboundGateway が見るホストは Host ヘッダ由来で、判定と接続先に同じ値を使う。コンテナが選んだ宛先 IP は無視される。
+   - 傍受はコンテナを起動するたびに登録し直す（`boot()`）。
+   - DO だけが再起動してコンテナが生き残った場合に傍受が維持されるかは、未検証。
+2. vitest-plugin 上では `ctx.container` が `undefined` になる。Unit は `SandboxPort` の fake、E2E は wrangler dev + Docker に確定。
+3. 台本付きの fake provider（`src/pi/scripted-provider.ts`）で、PiHarness を DO 上で動かせる。台本は transcript 中の assistant メッセージ数で進めるので、DO が再起動しても続きから進む。
+4. Gateway → Agent は、`script_name` 付きの DO バインディングで RPC できる（複数設定の `wrangler dev`）。Gateway の Unit では、vitest.config.ts で `AGENT_DO` を同じ Worker 内のクラスに差し替える。
+
+実装上の注意:
+
+- `proc.pid` はホスト側の pid なので、コンテナ内のプロセスグループには使えない。子孫プロセスの停止は、`setsid` + pidfile + `kill -KILL -- -PGID` で行う。
+- イメージに procps が無い（`ps` / `pkill` が無い）。`npm install` には `--no-audit` を付ける（audit の POST が 403 になるため）。
+- PiHarness の `EntryRecord` を RPC の戻り値に直接使うと TS2589 になる。DTO にする。
+- Gateway の `/__spike/agent-ping` は、M3 で `task_start` を実装するときに削除する。
+
+## マイルストーン
+
+- M2a（並行）: SandboxDO の本実装と、ツール群（`src/tools/`）。
+  - SandboxDO: `ensureRunning`（clone / checkout / ブランチ作成）、`exec`（タイムアウト・リングバッファ・マスク）、ファイル操作、`stop`、期限、keepalive。
+- M2b（並行）: AgentDO の本実装。
+  - start / cancel / getEvents、phase、イベントの永続化、呼び出し前の予算判定、期限、検証、patch の保存。
+  - ツールは、注入された factory から受け取る。
+- M3: Gateway の統合と、通しの E2E。
+  - start / cancel の配送の収束、イベントの取り込み、UserDO の月額予算、`task_result`、`verification_commands`。

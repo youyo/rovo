@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { newUserId, sampleInput, taskStub, userStub } from "./helpers";
 
@@ -300,20 +300,33 @@ describe("UserDO.reserve の照合による回収", () => {
     });
   });
 
-  it("停止確認の後に UserDO への終了通知が届かなくても、次の reserve の照合で回収される", async () => {
+  it("停止確認の後に UserDO への終了通知が届かないあいだは、reserve の照合で回収されない（finishTask の再送で収束する）", async () => {
     const uid = newUserId();
     const stub = userStub(uid);
     const a = await reserveOk(stub, "key-1");
     await create(uid, a.task_id);
     await runInDurableObject(taskStub(a.task_id), (i) => {
-      (i as unknown as { userStub: () => unknown }).userStub = () => {
-        throw new Error("user do unreachable");
+      const t = i as unknown as { userStub: (n: number) => unknown; __down?: boolean };
+      const orig = t.userStub.bind(i);
+      t.__down = true;
+      t.userStub = (n: number) => {
+        if (t.__down) throw new Error("user do unreachable");
+        return orig(n);
       };
     });
     await taskStub(a.task_id).cancel(uid);
     await taskStub(a.task_id).advance(); // 停止は確認できたが、finishTask は届かない
     expect(await taskStub(a.task_id).inspect()).toMatchObject({ stopped: true });
     expect((await reservation(stub)).active_task_id).toBe(a.task_id);
+    expect(await stub.reserve("key-2", FP2)).toMatchObject({
+      ok: false,
+      code: "concurrency_limit",
+    });
+    expect((await reservation(stub)).active_task_id).toBe(a.task_id);
+    await runInDurableObject(taskStub(a.task_id), (i) => {
+      (i as unknown as { __down: boolean }).__down = false;
+    });
+    await runDurableObjectAlarm(taskStub(a.task_id));
     expect((await stub.reserve("key-2", FP2)).ok).toBe(true);
   });
 });

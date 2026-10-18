@@ -265,6 +265,11 @@ describe("SDK の入力検証に届く前の不正（必須欠落・型不一致
     ["task_result", "task_id が数値", { task_id: 1 }],
     [
       "task_start",
+      "verification_commands の未知のキー(timeoutSeconds の誤記)",
+      startArgs("x", { verification_commands: [{ argv: ["npm", "test"], timeoutSeconds: 60 }] }),
+    ],
+    [
+      "task_start",
       "verification_commands の argv が文字列",
       startArgs("x", { verification_commands: [{ argv: "npm test" }] }),
     ],

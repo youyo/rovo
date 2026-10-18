@@ -189,7 +189,9 @@ apps/gateway (既存 Worker)
 - UserDO
   - 月額の費用上限を持つ（初期値は env で設定。既定 $100）。
   - タスク予算の予約、usage の冪等な精算、終了時の差額の返却を行う。
-  - 同時実行枠の解放と照合は、TaskDO の「停止確認済み」を条件にする。
+  - 予算と同時実行枠の返却は、最終精算と同じトランザクションの `finishTask` だけが行う。`reserve` 時の照合で回収できるのは、一度も作られなかった予約（abandoned）だけで、停止確認済みでも精算前のタスクは返さない。`finishTask` が届かないときは TaskDO の alarm が再送して収束する。
+  - Phase 1 で作られた CREATING のタスク（`agent_link` が無いもの）は移行しない（本番データ無し）。照合では abandoned と同じ扱いで回収してよく、`task_status` などではそのまま表示する。
+  - AgentDO の `cancel` が `{stopped:true, finalSeq}` を返したら、TaskDO は取り込みカーソルが `finalSeq` に達するまで取り込み、その後で `finishTask` する。`task_wait` の内部 RPC は入口で決めた期限（timeout 0 と終端は短い猶予のみ）を超えて待たず、保存済みのイベントで返す。
 
 ## テスト
 

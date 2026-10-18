@@ -29,6 +29,8 @@ export const ALARM_INTERVAL_MS = 10_000;
 /** task_wait が待機中に AgentDO から取り込み直す間隔。 */
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const EVENT_PAGE_LIMIT = 100;
+/** task_wait が入口の取り込みを最低限待つ時間。timeout 0 や終端のタスクでも、速い応答は拾う。 */
+const SYNC_GRACE_MS = 500;
 /** 1 回の取り込みで読むページ数の上限（残りは次の alarm / wait で取り込む）。 */
 const MAX_PAGES_PER_SYNC = 20;
 
@@ -73,7 +75,12 @@ export type EnsureCreatedResult =
 export type TaskInspection =
   | { kind: "uncreated" }
   | { kind: "abandoned" }
-  | { kind: "created"; status: TaskStatus; stopped: boolean };
+  | { kind: "created"; status: TaskStatus; stopped: boolean }
+  /**
+   * Phase 1 で作られたタスク（agent_link が無い）。子エージェントは存在せず、精算するものも無い。
+   * UserDO は abandoned と同じ扱いで予約を回収してよい。
+   */
+  | { kind: "legacy" };
 
 export type AbandonResult =
   | { result: "abandoned" }
@@ -121,6 +128,8 @@ type LinkRow = {
   usage_micro: number;
   settled_seq: number;
   finished: number;
+  /** AgentDO の cancel が stopped:true と共に返した最後のイベントの seq。無ければ NULL。 */
+  final_seq: number | null;
 };
 
 export type GetStatusResult = { ok: true; task: TaskView } | { ok: false; code: "not_found" };
@@ -170,7 +179,9 @@ const ABANDONED_KEY = "abandoned_at";
 /**
  * タスク1件の状態とイベントログを持つ（SQLite バックエンド）。
  * 状態変更・seq 採番・イベント挿入は同じ transactionSync の中で行う。
- * このクラスは UserDO を呼ばない（DO 間の呼び出しが循環しないようにする）。
+ *
+ * DO 間の呼び出し: TaskDO → UserDO は settleUsage / finishTask、UserDO → TaskDO は inspect /
+ * abandonIfUncreated だけ。UserDO は TaskDO の取り込み（sync）を待たない（待つと相互に待って循環するため）。
  */
 export class TaskDO extends DurableObject<Env> {
   /** wait 中の呼び出し。イベント追加時に全員を起こし、各自が自分の cursor で再読する。 */
@@ -250,6 +261,7 @@ export class TaskDO extends DurableObject<Env> {
       settled_seq INTEGER NOT NULL DEFAULT 0,
       finished INTEGER NOT NULL DEFAULT 0
     )`);
+    this.addColumnIfMissing("agent_link", "final_seq", "INTEGER");
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -483,7 +495,12 @@ export class TaskDO extends DurableObject<Env> {
   /** UserDO が予約を照合するための問い合わせ（owner を問わない。UserDO → TaskDO の照合専用）。 */
   async inspect(): Promise<TaskInspection> {
     const row = this.getRow();
-    if (row) return { kind: "created", status: this.statusOf(row), stopped: this.isStopped() };
+    if (row) {
+      // Phase 1 のタスク（agent_link なし）は移行しない。照合では abandoned と同じく回収できる扱いにする。
+      // task_status などの表示は変えない（そのまま CREATING などと表示する）。
+      if (!this.getLink()) return { kind: "legacy" };
+      return { kind: "created", status: this.statusOf(row), stopped: this.isStopped() };
+    }
     return this.isAbandoned() ? { kind: "abandoned" } : { kind: "uncreated" };
   }
 
@@ -545,8 +562,14 @@ export class TaskDO extends DurableObject<Env> {
     const t = parseTimeoutSeconds(timeoutSeconds);
     if (!t.ok) return { ok: false, code: "invalid_input" };
 
-    // 返す前に AgentDO から取り込む（失敗しても、すでに取り込んだ分は返せる）。
-    await this.trySync();
+    // 期限は入口で決める。AgentDO / UserDO への RPC が応答しなくても、期限を超えて待たない。
+    const deadline = Date.now() + t.value * 1000;
+    // 返す前に AgentDO から取り込む（失敗・遅延しても、保存済みのイベントで返せる）。
+    // timeout 0 や終端のタスクでも、速い取り込みは拾えるよう、短い猶予（SYNC_GRACE_MS）だけは待つ。
+    const entryDeadline = isTerminal(this.currentStatus())
+      ? Date.now() + SYNC_GRACE_MS
+      : Math.max(deadline, Date.now() + SYNC_GRACE_MS);
+    await this.trySync(entryDeadline);
     if (c.value > this.latestSeq()) return { ok: false, code: "invalid_cursor" };
 
     let events = this.readEvents(c.value);
@@ -559,7 +582,6 @@ export class TaskDO extends DurableObject<Env> {
 
     // 待機者を登録してから再読する（登録前に追加されたイベントを取りこぼさない）。
     // 子エージェントが動いている間は、pollIntervalMs ごとに取り込み直す（alarm の 10 秒を待たせない）。
-    const deadline = Date.now() + t.value * 1000;
     const waiter: Waiter = { wake: () => {} };
     this.waiters.add(waiter);
     try {
@@ -575,7 +597,7 @@ export class TaskDO extends DurableObject<Env> {
           waiter.timer = setTimeout(resolve, slice);
         });
         clearTimeout(waiter.timer);
-        if (this.isIngesting()) await this.trySync();
+        if (this.isIngesting()) await this.trySync(deadline);
       }
     } finally {
       clearTimeout(waiter.timer);
@@ -729,8 +751,14 @@ export class TaskDO extends DurableObject<Env> {
     if (link?.cancel_state !== "pending") return;
     const r = await this.agentStub().cancel();
     if (!r.stopped) return;
+    // 契約: stopped:true なら以後イベントは増えない。finalSeq は最後のイベントの seq。
+    const finalSeq =
+      typeof r.finalSeq === "number" && Number.isSafeInteger(r.finalSeq) && r.finalSeq >= 0
+        ? r.finalSeq
+        : null;
     this.ctx.storage.sql.exec(
-      "UPDATE agent_link SET cancel_state = 'stopped' WHERE cancel_state = 'pending'",
+      "UPDATE agent_link SET cancel_state = 'stopped', final_seq = ? WHERE cancel_state = 'pending'",
+      finalSeq,
     );
   }
 
@@ -745,8 +773,25 @@ export class TaskDO extends DurableObject<Env> {
     return link !== undefined && this.shouldIngest(link);
   }
 
-  private async trySync(): Promise<void> {
-    await this.guard("sync", () => this.syncFromAgent());
+  /**
+   * 取り込みを試し、deadline（epoch ms）までは待つ。超えたら待つのをやめる。
+   * 進行中の取り込みは止めない（syncFromAgent の単一化は保たれ、続きは alarm が担う）。
+   */
+  private async trySync(deadline: number): Promise<void> {
+    const sync = this.guard("sync", () => this.syncFromAgent());
+    const ms = deadline - Date.now();
+    if (ms <= 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        sync,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** イベントの取り込みと精算。同時に呼ばれても AgentDO への問い合わせは 1 本に束ねる。 */
@@ -760,11 +805,22 @@ export class TaskDO extends DurableObject<Env> {
   private async doSync(): Promise<void> {
     const link = this.getLink();
     if (!link) return;
-    // 停止確認の「後に」取り込みが最後まで済んだときだけ、終了処理（枠の解放）に進める。
     const stoppedBefore = link.cancel_state === "stopped";
     let complete = true;
     if (this.shouldIngest(link)) complete = await this.ingest();
-    await this.settle(stoppedBefore && complete);
+    await this.settle(this.readyToFinish(stoppedBefore && complete));
+  }
+
+  /**
+   * 終了処理（finishTask）に進んでよいか。停止確認済みで、最終 usage まで取り込み済みのとき。
+   * finalSeq が分かっていれば、取り込みカーソルがそこに達していること。
+   * 分からない場合（finalSeq を返さない AgentDO）は、停止確認の後に取り込みが最後まで済んだこと。
+   */
+  private readyToFinish(drainedAfterStop: boolean): boolean {
+    const link = this.getLink();
+    if (link?.cancel_state !== "stopped") return false;
+    if (link.final_seq !== null) return link.ingest_cursor >= link.final_seq;
+    return drainedAfterStop;
   }
 
   /** hasMore が false になるまで取り込む。最後まで読めたら true。 */
@@ -939,7 +995,17 @@ function shapeUsage(u: UsageDto): ResultView["usage"] {
   };
 }
 
-/** 検証コマンドの出力 1 件あたりの上限。AgentDO が持つ全文のうち、末尾だけを返す。 */
+/** 文字列の末尾を、UTF-8 で maxBytes 以下になるように残す（文字の途中では切らない）。 */
+function tailUtf8(text: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length <= maxBytes) return text;
+  let start = bytes.length - maxBytes;
+  // 継続バイト（10xxxxxx）から始まるなら、文字の途中なので次の文字の先頭まで進める
+  while (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start++;
+  return new TextDecoder().decode(bytes.subarray(start));
+}
+
+/** 検証コマンドの出力 1 件あたりの上限（UTF-8 のバイト数）。AgentDO が持つ全文のうち、末尾だけを返す。 */
 const MAX_RESULT_OUTPUT = 16 * 1024;
 
 function shapeResult(
@@ -957,7 +1023,7 @@ function shapeResult(
         argv: r.argv,
         exit_code: r.exitCode,
         timed_out: r.timedOut,
-        output: r.output.length > MAX_RESULT_OUTPUT ? r.output.slice(-MAX_RESULT_OUTPUT) : r.output,
+        output: tailUtf8(r.output, MAX_RESULT_OUTPUT),
       })),
       verified: v.verified,
       attempts: v.attempts,

@@ -488,6 +488,171 @@ describe("TaskDO: usage の精算と終了時の返却", () => {
   });
 });
 
+describe("TaskDO: 最終取り込みは finalSeq まで", () => {
+  async function reservedTask() {
+    const uid = newUserId();
+    const user = userStub(uid);
+    const r = await user.reserve("k", "f".repeat(64));
+    if (!r.ok) throw new Error("reserve");
+    const stub = taskStub(r.task_id);
+    await stub.ensureCreated(sampleInput(r.task_id, uid));
+    return { uid, user, id: r.task_id, stub, agent: fakeAgent(r.task_id) };
+  }
+  const budget = (user: ReturnType<typeof userStub>, id: string) =>
+    runInDurableObject(
+      user,
+      (_i, s) =>
+        s.storage.sql
+          .exec("SELECT settled_micro, closed FROM task_budget WHERE task_id = ?", id)
+          .toArray() as { settled_micro: number; closed: number }[],
+    );
+
+  it("cancel の stopped:true と finalSeq を記録し、取り込みカーソルは finalSeq に達する", async () => {
+    const { uid, stub, agent } = await reservedTask();
+    await stub.advance();
+    await agent.setUsage(1);
+    await stub.cancel(uid);
+    await stub.advance();
+    const [link] = await rows<{ final_seq: number | null; ingest_cursor: number }>(
+      stub,
+      "SELECT final_seq, ingest_cursor FROM agent_link",
+    );
+    expect(link?.final_seq).toBeGreaterThan(0);
+    expect(link?.ingest_cursor).toBe(link?.final_seq);
+  });
+
+  it("停止確認の前後に usage があっても、finalSeq までの usage をすべて精算してから finish する", async () => {
+    const { uid, user, id, stub, agent } = await reservedTask();
+    await stub.advance();
+    await agent.setUsage(1);
+    await stub.advance();
+    await agent.setProgram({ cancel: ["not_stopped", "stopped"] });
+    await stub.cancel(uid);
+    await stub.advance(); // 未停止
+    await agent.setUsage(4); // 停止処理の途中で積まれた最後の usage
+    await stub.advance(); // 停止確認 + finalSeq まで取り込み
+    expect(await budget(user, id)).toEqual([{ settled_micro: 4_000_000, closed: 1 }]);
+  });
+
+  it("読み取りが遅れて finalSeq に届かないページ(hasMore:false)では finish しない。届いてから finish する", async () => {
+    const { uid, user, id, stub, agent } = await reservedTask();
+    await stub.advance();
+    const first = await agent.setUsage(1);
+    await agent.setUsage(4);
+    // 最後の usage がまだ読めない
+    await agent.setProgram({ visibleThrough: first });
+    await stub.cancel(uid);
+    await stub.advance();
+    expect(await budget(user, id)).toEqual([{ settled_micro: 1_000_000, closed: 0 }]);
+    const res = await runInDurableObject(user, (_i, s) =>
+      s.storage.sql.exec("SELECT active_task_id FROM reservation").one(),
+    );
+    expect(res.active_task_id).toBe(id);
+    expect(await alarmOf(stub)).not.toBeNull();
+
+    await agent.setProgram({});
+    await runDurableObjectAlarm(stub);
+    expect(await budget(user, id)).toEqual([{ settled_micro: 4_000_000, closed: 1 }]);
+    expect(await alarmOf(stub)).toBeNull();
+  });
+});
+
+describe("TaskDO: task_wait は期限内に返る", () => {
+  /** AgentDO / UserDO への RPC を、5 秒後に失敗するまで応答しないものに差し替える。 */
+  async function hangRpc(stub: TaskStub, targets: { agent?: boolean; user?: boolean }) {
+    await runInDurableObject(stub, (i) => {
+      const t = i as unknown as {
+        agentStub: () => unknown;
+        userStub: (n: number) => unknown;
+        __hung: { getEvents: number };
+      };
+      const hang = () =>
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("hung rpc")), 5_000));
+      t.__hung = { getEvents: 0 };
+      const origAgent = t.agentStub.bind(i);
+      const origUser = t.userStub.bind(i);
+      if (targets.agent) {
+        t.agentStub = () => ({
+          ...(origAgent() as object),
+          getEvents: () => {
+            t.__hung.getEvents++;
+            return hang();
+          },
+        });
+      }
+      if (targets.user) {
+        t.userStub = (n: number) => ({
+          settleUsage: hang,
+          finishTask: hang,
+          ...(origUser(n) as object),
+        });
+      }
+    });
+  }
+  const hungCalls = (stub: TaskStub) =>
+    runInDurableObject(stub, (i) => (i as unknown as { __hung: { getEvents: number } }).__hung);
+
+  async function timed(p: PromiseLike<unknown>) {
+    const t0 = Date.now();
+    const v = await Promise.race([
+      Promise.resolve(p),
+      new Promise<"never">((r) => setTimeout(() => r("never"), 4_000)),
+    ]);
+    return { v, ms: Date.now() - t0 };
+  }
+
+  it("timeout_seconds=0: getEvents が応答しなくても、すぐ保存済みのイベントで返る", async () => {
+    const { stub } = await createTask();
+    await stub.advance();
+    await hangRpc(stub, { agent: true });
+    const { v, ms } = await timed(stub.wait(OWNER, "0", 0));
+    expect(v).not.toBe("never");
+    expect(ms).toBeLessThan(2_000);
+    expect(v).toMatchObject({ ok: true, status: "RUNNING" });
+    expect((v as { events: unknown[] }).events.length).toBeGreaterThan(0);
+  });
+
+  it("短い timeout(1 秒): 待機の全体が期限(約 1 秒)で終わる", async () => {
+    const { stub } = await createTask();
+    await stub.advance();
+    await hangRpc(stub, { agent: true });
+    const latest = await stub.getStatus(OWNER);
+    const cursor = latest.ok ? latest.task.latest_cursor : "0";
+    const { v, ms } = await timed(stub.wait(OWNER, cursor, 1));
+    expect(v).toMatchObject({ ok: true, events: [] });
+    expect(ms).toBeGreaterThanOrEqual(900);
+    expect(ms).toBeLessThan(2_500);
+  });
+
+  it("進行中の取り込みは単一のまま: 続けて wait しても getEvents を重ねて呼ばない", async () => {
+    const { stub } = await createTask();
+    await stub.advance();
+    await hangRpc(stub, { agent: true });
+    await timed(stub.wait(OWNER, "0", 0));
+    await timed(stub.wait(OWNER, "0", 0));
+    expect((await hungCalls(stub)).getEvents).toBe(1);
+  });
+
+  it("終端のタスク: 精算 / 終了通知が応答しなくても待たずに返る", async () => {
+    const { uid, stub } = await (async () => {
+      const uid = newUserId();
+      const id = newTaskId();
+      const stub = taskStub(id);
+      await stub.ensureCreated(sampleInput(id, uid));
+      return { uid, stub };
+    })();
+    await stub.advance();
+    await stub.cancel(uid);
+    await stub.advance(); // 停止確認まで済ませる
+    // 終了通知が未達の状態に戻す（次の取り込みで finishTask を呼ぼうとする）
+    await rows(stub, "UPDATE agent_link SET finished = 0");
+    await hangRpc(stub, { user: true });
+    const { v, ms } = await timed(stub.wait(uid, "0", 30));
+    expect(v).toMatchObject({ ok: true, status: "CANCELLED" });
+    expect(ms).toBeLessThan(2_500);
+  });
+});
+
 describe("TaskDO.result", () => {
   it("owner が違えば not_found", async () => {
     const { stub } = await createTask();
@@ -562,6 +727,72 @@ describe("TaskDO.result", () => {
         },
       },
     });
+  });
+
+  it("verification の output は UTF-8 のバイト数で 16KiB に切り詰める（末尾を残し、文字を壊さない）", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    const output = `HEAD${"あ".repeat(10_000)}TAIL`; // 約 30KB。UTF-16 の長さでは 10,008 しかない
+    await agent.setProgram({
+      result: {
+        status: "completed",
+        summary: "s",
+        verification: {
+          commands: [],
+          results: [{ argv: ["t"], exitCode: 0, timedOut: false, output }],
+          verified: true,
+          attempts: 1,
+        },
+        warnings: [],
+        patchTooLarge: false,
+        usage: {
+          costUsd: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    });
+    await agent.setPhase("completed");
+    await stub.advance();
+    const r = await stub.result(OWNER);
+    if (!r.ok) throw new Error("result");
+    const out = r.result.verification.results[0]?.output ?? "";
+    expect(new TextEncoder().encode(out).length).toBeLessThanOrEqual(16 * 1024);
+    expect(out.endsWith("TAIL")).toBe(true);
+    expect(out).not.toContain("\uFFFD");
+    expect(out).not.toContain("HEAD");
+  });
+
+  it("短い output はそのまま返す", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    await agent.setProgram({
+      result: {
+        status: "completed",
+        summary: "s",
+        verification: {
+          commands: [],
+          results: [{ argv: ["t"], exitCode: 0, timedOut: false, output: "日本語ok" }],
+          verified: true,
+          attempts: 1,
+        },
+        warnings: [],
+        patchTooLarge: false,
+        usage: {
+          costUsd: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    });
+    await agent.setPhase("completed");
+    await stub.advance();
+    const r = await stub.result(OWNER);
+    expect(r.ok && r.result.verification.results[0]?.output).toBe("日本語ok");
   });
 
   it("start より先に cancel して AgentDO に結果が無いときは、TaskDO の状態から合成して返す", async () => {

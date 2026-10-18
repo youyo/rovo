@@ -1,6 +1,6 @@
-import { runInDurableObject } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { FP, newUserId, sampleInput, taskStub, userStub } from "./helpers";
+import { FP, fakeAgent, newUserId, sampleInput, taskStub, userStub } from "./helpers";
 
 type UserStub = ReturnType<typeof userStub>;
 
@@ -238,6 +238,102 @@ describe("UserDO: 照合は TaskDO の停止確認済みを条件にする", () 
     const clock = await setup(user, { limitUsd: 10 });
     const id = await reserveOk(user, "k1");
     clock.set(Date.UTC(2026, 0, 15) + 11 * 60_000);
+    expect((await reserve(user, "k2")).ok).toBe(true);
+    expect(await sql(user, "SELECT closed FROM task_budget WHERE task_id = ?", id)).toEqual([
+      { closed: 1 },
+    ]);
+  });
+});
+
+/** TaskDO → UserDO の呼び出しを止める / 戻す（精算や終了通知が届かない状況の再現）。 */
+async function setUserDown(task: ReturnType<typeof taskStub>, down: boolean) {
+  await runInDurableObject(task, (i) => {
+    const t = i as unknown as { userStub: (n: number) => unknown; __userDown?: boolean };
+    if (t.__userDown === undefined) {
+      const orig = t.userStub.bind(i);
+      t.userStub = (n: number) => {
+        if (t.__userDown) throw new Error("user do unreachable");
+        return orig(n);
+      };
+    }
+    t.__userDown = down;
+  });
+}
+
+describe("UserDO: 予算の返却は最終精算(finishTask)だけが行う", () => {
+  async function runningTask(uid: number, user: UserStub, key: string) {
+    const id = await reserveOk(user, key);
+    const task = taskStub(id);
+    await task.ensureCreated(sampleInput(id, uid));
+    await task.advance(); // RUNNING
+    return { id, task, agent: fakeAgent(id) };
+  }
+
+  it("反例: 停止確認だけの A を回収して予算を返すと、A の精算後に合計が上限($15)を超える", async () => {
+    const uid = newUserId();
+    const user = userStub(uid);
+    await setup(user, { limitUsd: 15 });
+    const a = await runningTask(uid, user, "k1");
+    await a.agent.setUsage(9);
+    await a.agent.setPhase("completed");
+    await setUserDown(a.task, true);
+    await a.task.advance(); // 取り込みと停止確認は済むが、精算も終了通知も UserDO に届かない
+    expect(await a.task.inspect()).toMatchObject({ status: "COMPLETED", stopped: true });
+
+    // B: 停止が確認できていても、A の予算と枠は戻らない
+    expect(await reserve(user, "k2")).toMatchObject({ ok: false, code: "concurrency_limit" });
+    expect(await sql(user, "SELECT active_task_id FROM reservation")).toEqual([
+      { active_task_id: a.id },
+    ]);
+    expect(
+      await sql(user, "SELECT reserved_micro, settled_micro, closed FROM task_budget"),
+    ).toEqual([{ reserved_micro: 10 * MICRO, settled_micro: 0, closed: 0 }]);
+
+    // TaskDO の alarm が精算と終了通知を再送して収束する
+    await setUserDown(a.task, false);
+    await runDurableObjectAlarm(a.task);
+    expect(await sql(user, "SELECT settled_micro, closed FROM task_budget")).toEqual([
+      { settled_micro: 9 * MICRO, closed: 1 },
+    ]);
+    expect(await sql(user, "SELECT active_task_id FROM reservation")).toEqual([
+      { active_task_id: null },
+    ]);
+    // 9 使用済み + 10 > 15: 二重に予算を渡さない
+    expect(await reserve(user, "k2")).toMatchObject({ ok: false, code: "budget_exceeded" });
+  });
+
+  it("alarm で収束したあとは、枠も予算も戻って次を始められる", async () => {
+    const uid = newUserId();
+    const user = userStub(uid);
+    await setup(user, { limitUsd: 25 });
+    const a = await runningTask(uid, user, "k1");
+    await a.agent.setUsage(9);
+    await a.agent.setPhase("completed");
+    await setUserDown(a.task, true);
+    await a.task.advance();
+    expect(await reserve(user, "k2")).toMatchObject({ ok: false, code: "concurrency_limit" });
+    await setUserDown(a.task, false);
+    await runDurableObjectAlarm(a.task);
+    expect((await reserve(user, "k2")).ok).toBe(true);
+  });
+});
+
+describe("UserDO: Phase 1 の CREATING(agent_link なし)は照合で回収する", () => {
+  it("agent_link が無いタスクは abandoned と同じ扱いで回収される。task_status では表示できる", async () => {
+    const uid = newUserId();
+    const user = userStub(uid);
+    await setup(user, { limitUsd: 10 });
+    const id = await reserveOk(user, "k1");
+    const task = taskStub(id);
+    await task.ensureCreated(sampleInput(id, uid));
+    // Phase 1 で作られたタスクを再現する: 子エージェントとの配送状態が無い
+    await runInDurableObject(task, (_i, s) => {
+      s.storage.sql.exec("DELETE FROM agent_link");
+    });
+    expect(await task.inspect()).toEqual({ kind: "legacy" });
+    const st = await task.getStatus(uid);
+    expect(st.ok && st.task.status).toBe("CREATING");
+
     expect((await reserve(user, "k2")).ok).toBe(true);
     expect(await sql(user, "SELECT closed FROM task_budget WHERE task_id = ?", id)).toEqual([
       { closed: 1 },

@@ -153,11 +153,14 @@ const startSchema = z.object({
   constraints: z.array(z.string()).optional(),
   verification_commands: z
     .array(
-      z.object({
-        argv: z.array(z.string()).describe("実行ファイルと引数（シェルは通らない）"),
-        cwd: z.string().optional().describe("リポジトリのルートからの相対パス"),
-        timeout_seconds: z.number().optional().describe("1〜1800"),
-      }),
+      z
+        .object({
+          argv: z.array(z.string()).describe("実行ファイルと引数（シェルは通らない）"),
+          cwd: z.string().optional().describe("リポジトリのルートからの相対パス"),
+          timeout_seconds: z.number().optional().describe("1〜1800"),
+        })
+        // 未知のキー（timeoutSeconds の誤記など）を黙って捨てず、invalid_input にする
+        .strict(),
     )
     .optional(),
   idempotency_key: z.string().optional(),

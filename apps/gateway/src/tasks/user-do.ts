@@ -10,7 +10,6 @@ import {
   type StoredCredential,
   type TokenSet,
 } from "../github";
-import { isTerminal } from "./state";
 import type { TaskDO } from "./task-do";
 import { ulid } from "./ulid";
 
@@ -79,7 +78,7 @@ type TaskInspector = Pick<DurableObjectStub<TaskDO>, "inspect" | "abandonIfUncre
  *
  * GitHub のトークンはこの DO の中だけで取り出して使い、RPC の戻り値には含めない
  * （入ってくるのはログイン時の saveCredential だけ）。
- * DO 間の呼び出しは UserDO → TaskDO（照合のみ）に限る。
+ * DO 間の呼び出しは UserDO → TaskDO（照合のみ。TaskDO の取り込みは待たない）に限る。
  */
 export class UserDO extends DurableObject<Env> {
   /** 現在時刻(ms)。テストで差し替える。 */
@@ -290,22 +289,28 @@ export class UserDO extends DurableObject<Env> {
     return { kind: "done", result: { ok: true, task_id: taskId, reused: false } };
   }
 
-  /** TaskDO に照合して、予約を解放してよいか判定する。 */
+  /**
+   * TaskDO に照合して、予約を解放してよいか判定する。
+   * 回収できるのは「一度も作られなかった」予約だけ（abandoned、または未作成で tombstone を打てたもの）。
+   * Phase 1 のタスク（agent_link が無い CREATING。子エージェントも精算も無い）も同じ扱いで回収する。
+   * 作成済みのタスクは、停止が確認できていても返さない。予算と同時実行枠の返却は、最終精算と同じ
+   * トランザクションの finishTask だけが行う（未精算の予算を返して二重に渡さないため）。
+   * finishTask が届かないときは、TaskDO の alarm が再送して収束する。
+   */
   private async shouldRelease(taskId: string, reservedAt: number): Promise<boolean> {
     const task = this.taskStub(taskId);
     const inspection = await task.inspect();
     switch (inspection.kind) {
       case "abandoned":
+      case "legacy":
         return true;
       case "created":
-        // 終端でも、AgentDO の停止が確認できるまでは解放しない（古いタスクが動いたまま次が始まらないように）
-        return isTerminal(inspection.status) && inspection.stopped;
+        return false;
       case "uncreated": {
         if (this.now() - reservedAt < RESERVATION_RECLAIM_AFTER_MS) return false;
         // 回収は tombstone を打てたときだけ。作成済みが返れば解放しない。
         const r = await task.abandonIfUncreated();
-        if (r.result === "abandoned") return true;
-        return isTerminal(r.status) && r.stopped;
+        return r.result === "abandoned";
       }
     }
   }

@@ -30,6 +30,8 @@ export type FakeProgram = {
   getEventsDelayMs?: number;
   /** 1 ページの上限（呼び出し側の limit よりこちらが小さければ優先）。 */
   pageCap?: number;
+  /** getEvents が返すイベントを seq <= n に制限する（hasMore は false）。読み取りの遅れの再現に使う。 */
+  visibleThrough?: number;
   /** getEvents が 1 回だけ afterSeq を無視して先頭から返す（古いページの再配送）。 */
   staleOnce?: boolean;
   rejectReason?: string;
@@ -152,7 +154,10 @@ export class FakeAgentDO extends DurableObject {
     this.tombstone = true;
     if (this.spec !== undefined && !this.isTerminal()) this.setPhase("cancelled", "cancel");
     if (step === "lose") throw new Error("fake agent: cancel response lost");
-    return { stopped: step === "stopped" };
+    // 契約: stopped:true なら、以後イベントは追加されない。finalSeq は最後のイベントの seq。
+    return step === "stopped"
+      ? { stopped: true, finalSeq: this.events.length }
+      : { stopped: false };
   }
 
   async getEvents(afterSeq: number, limit: number): Promise<EventsPage> {
@@ -172,7 +177,8 @@ export class FakeAgentDO extends DurableObject {
       from = 0;
     }
     const delay = this.program.getEventsDelayMs ?? 0;
-    const snapshot = [...this.events];
+    const visible = this.program.visibleThrough;
+    const snapshot = this.events.filter((e) => visible === undefined || e.seq <= visible);
     const phase = this.phase;
     const phaseSeq = this.phaseSeq;
     const usage = this.usage;

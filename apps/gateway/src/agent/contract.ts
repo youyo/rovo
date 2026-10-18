@@ -41,6 +41,12 @@ export type StartResult =
 
 export interface CancelResult {
   stopped: boolean;
+  /**
+   * stopped が true のときだけ付く。最後のイベントの seq。
+   * stopped:true を返した時点で、最終 usage を含むすべてのイベントが永続化済みで、以後イベントは追加されない。
+   * Gateway は取り込みカーソルがこの seq に達するまで取り込んでから終了処理（finishTask）に進む。
+   */
+  finalSeq?: number;
 }
 
 export interface UsageDto {

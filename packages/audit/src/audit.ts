@@ -31,6 +31,10 @@ export const AUDIT_EVENTS = [
   "start_conflict",
   // gateway（M3）: タスクの要約（数値と固定コードだけ）
   "task_summary",
+  // gateway（M4）: R2 アーカイブ（本文は出さない。キーの接頭辞とサイズだけ）
+  "archive_skipped",
+  "archive_failed",
+  "archive_completed",
   // web（M5）
   "web_blocked",
 ] as const;
@@ -57,6 +61,10 @@ export type AuditFields = {
   dest?: string;
   /** task_summary だけ: 数値の項目（キーは TASK_SUMMARY_METRICS のどれか。値は非負の有限数） */
   metrics?: Record<string, number>;
+  /** archive_completed だけ: R2 のキーの接頭辞（`tasks/<yyyy>/<mm>/<task_id>/`。キーの全体ではない） */
+  prefix?: string;
+  /** archive_completed だけ: 書き込んだ 3 オブジェクトの合計サイズ（バイト） */
+  bytes?: number;
 };
 
 /** 出力される 1 件。キーの順序は固定。 */
@@ -105,12 +113,16 @@ const OUTBOUND_DEST_SET: ReadonlySet<unknown> = new Set(OUTBOUND_DESTS);
 
 /** イベント固有のフィールド。ここに無いイベントは共通のものだけ通す。 */
 const EVENT_FIELDS: Readonly<
-  Partial<Record<AuditEventName, readonly ("op" | "dest" | "metrics")[]>>
+  Partial<Record<AuditEventName, readonly ("op" | "dest" | "metrics" | "prefix" | "bytes")[]>>
 > = {
   sandbox_privileged_op: ["op"],
   outbound_denied: ["dest"],
   task_summary: ["metrics"],
+  archive_completed: ["prefix", "bytes"],
 };
+
+/** R2 のキーの接頭辞。キーの全体や任意の文字列は通さない。 */
+const ARCHIVE_PREFIX_RE = /^tasks\/\d{4}\/\d{2}\/[A-Za-z0-9_-]{1,64}\/$/;
 
 /** metrics: 固定のキーの、非負の有限数だけを通す（自分のプロパティだけ読む）。1 つも無ければ出さない。 */
 function safeMetrics(v: unknown): Record<string, number> | undefined {
@@ -201,6 +213,14 @@ export function buildAudit(
   if (extra.includes("dest")) {
     const dest = own("dest");
     put("dest", OUTBOUND_DEST_SET.has(dest) ? dest : undefined);
+  }
+  if (extra.includes("prefix")) put("prefix", safeCode(own("prefix"), ARCHIVE_PREFIX_RE));
+  if (extra.includes("bytes")) {
+    const bytes = own("bytes");
+    put(
+      "bytes",
+      typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : undefined,
+    );
   }
   if (extra.includes("metrics")) put("metrics", safeMetrics(own("metrics")));
   return record as AuditRecord;

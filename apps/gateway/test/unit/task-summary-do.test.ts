@@ -130,6 +130,12 @@ describe("task_summary（終端時の要約）", () => {
     expect(line).not.toContain("SECRET-TITLE");
     expect(line).not.toContain("ghs_");
     expect(line).not.toContain("OAuth");
+    // 回帰: 監査ログの task_summary 行には repository と pr_url を出さない（それらは R2 の summary.json にだけある）
+    expect(recs[0]).not.toHaveProperty("repository");
+    expect(recs[0]).not.toHaveProperty("pr_url");
+    expect(recs[0]).not.toHaveProperty("prUrl");
+    expect(line).not.toContain(REPO);
+    expect(line).not.toMatch(/pull|https?:/);
 
     const s = await summaryOf(t.stub);
     expect(s.status).toBe("COMPLETED");

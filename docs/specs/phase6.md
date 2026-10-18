@@ -50,8 +50,8 @@
 - バインディング名は `LOGS`、**gateway だけ**に持たせる。agent と web には持たせない。
 - バケットは非公開にする（r2.dev の公開 URL もカスタムドメインも付けない）。
 - gateway の MCP から、アーカイブの一覧・読み出しの API は作らない。読むのは運用者が、Cloudflare のダッシュボード・wrangler・S3 互換 API で行う。
-- `apps/gateway/wrangler.jsonc` には、ローカル用の `r2_buckets`（例: `{"binding": "LOGS", "bucket_name": "rovo-logs"}`）だけを足す。本番のバケット名は下流（rovo-mcp）の設定で上書きする（design 16: 本番用の値を持たない）。
-  - ローカルの `wrangler dev` / miniflare はこのバインディングで R2 を実体なしに動かせる。E2E の通しはこれを使う。
+- `apps/gateway/wrangler.jsonc` には **`r2_buckets` を置かない**（M4 で決めた。「M4 で決めたこと」）。バケット名は環境固有の値で、下流（rovo-mcp）が `LOGS` として束ねる（design 16: 本番用の値を持たない）。束ねられていなければ fail-open でスキップする。
+  - ローカルの R2 は test 構成だけが束ねる（Unit は fake の R2、E2E は E2E が生成する wrangler 設定の `r2_buckets`）。
 
 ### 保存の条件と手順
 
@@ -220,7 +220,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 | M1（実装済み） | gateway | `audit()`、allowlist、test 用のシンク。認証失敗・認可拒否・cancel・トークンの発行/失効・配送の打ち切りのイベント（二重化を含む） | Unit: `audit()` が、禁止したフィールド（トークン、URL のパス、本文）と未知のフィールドを出力しない |
 | M2（実装済み） | agent + `packages/audit` | `audit()` を `packages/audit`（`@rovo/audit`）へ移す（ステップ 0）。SandboxDO の実行時間と起動世代のカウンタの永続化、usage イベントの `sandbox: {...}`。違反ログの JSON 化、特権操作、リース相当の失効イベント | Unit: SandboxDO の起動→停止で `runtimeMs` が累計され、DO を作り直しても値が残る。Unit（パッケージ）: トークン形式が先頭でなくてもマスクされる |
 | M3（実装済み） | gateway + `packages/audit`（`task_summary` の追加のみ） | `agent-events.ts` で sandbox の usage を写す。summary レコードの生成 | Unit: usage イベントの `sandbox` が公開用の payload に写る（欠けた値は 0）。summary に title が入らない |
-| M4 | gateway | R2 アーカイブ（`needsAlarm` の拡張を含む） | Unit（fake の R2）: `finished && finalize_done` の前には書かず、成立後に1回呼んでも2回呼んでも同じ結果（冪等）。続けて、再試行と打ち切り。最後に wrangler のローカル R2 で通し |
+| M4（実装済み） | gateway | R2 アーカイブ（`needsAlarm` の拡張を含む） | Unit（fake の R2）: `finished && finalize_done` の前には書かず、成立後に1回呼んでも2回呼んでも同じ結果（冪等）。続けて、再試行と打ち切り。最後に wrangler のローカル R2 で通し |
 | M5（web の監査は実装済み、ドキュメントは未） | web + ドキュメント | web の監査（block / unknown / robots / redirect）。design 15.7、推奨値の下書きをこの文書の該当の節に置く（docs/deploy.md 自体は Phase 7 で作る）、README、acceptance 14 以降 | Unit: web の block / unknown / robots / redirect_policy が `audit()` の許可したフィールドだけで出る |
 
 ## テスト
@@ -242,7 +242,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 - ~~`audit()` の置き場所~~ → M2 で決めた（`packages/audit`。「audit() の置き場所」）。
 - ~~DO の外で発行する監査イベント（認証の失敗など）の、E2E 用の記録先~~ → M1 で決めた（下の「M1 で決めたこと」）。
-- アーカイブの状態の置き場所（`agent_link` の列か、専用のテーブルか）。M4 で決める。
+- ~~アーカイブの状態の置き場所~~ → M4 で決めた（`agent_link` の列。「M4 で決めたこと」）。
 - ~~Sandbox と Web の単価の既定値~~ → M3 で決めた（下の「M3 で決めたこと」）。
 - R2 を正にするかと、TaskDO の `events` / `questions` / `git_token` の削除（Phase 7）。
 
@@ -300,7 +300,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 ### テスト
 
 - E2E で監査イベントを検証する方法を、stdout の走査から、`testDeliveryStates` / `/__test/` ルートと同じ形の test 用のシンクに変えた。
-- ローカルの R2 は、wrangler dev の `r2_buckets`（gateway/wrangler.jsonc にローカル用を足す。本番名は下流）にした。
+- ローカルの R2 は、wrangler dev の `r2_buckets` にした。ただし M4 で、gateway/wrangler.jsonc には足さず、E2E が生成する設定だけに足すことにした（「M4 で決めたこと」）。
 
 ### 構成とドキュメント
 
@@ -443,8 +443,8 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 ### `task_summary` 監査イベント
 
 - 発行元: TaskDO。`finished = 1` かつ（`finalize_done = 1` または GitHub と紐付かない）かつ終端になった最初の `advance()` の終わりに 1 回。`agent_link.summary_logged` で再発行を防ぐ（flag の更新と出力は同じトランザクション）。出力の失敗はタスクの進行を止めない。
-- `@rovo/audit` に `task_summary` を追加した（**packages/audit の変更はこれだけ**）。イベント固有のフィールド `metrics`: 固定のキー（`TASK_SUMMARY_METRICS`）の、非負の有限数だけを通す。それ以外のキー・値は落とす。`kind` に終端の状態（`completed` / `failed` / `budget_exceeded` / `cancelled`）、`reason` に終端の reason（固定コードの形のとき）、`userId`、`taskId`、`caller: "system"` を入れる。repository・PR URL・title は入れない（summary.json 側にある）。
-- M4 は `buildSummary` と同じ純関数で summary.json を作って R2 に書く（`summary_logged` と `archive_done` は別の印）。`task_summary` の発行は R2 の有無に依存しない。
+- `@rovo/audit` に `task_summary` を追加した（M3 での packages/audit の変更はこれだけ。M4 で `archive_*` を足した）。イベント固有のフィールド `metrics`: 固定のキー（`TASK_SUMMARY_METRICS`）の、非負の有限数だけを通す。それ以外のキー・値は落とす。`kind` に終端の状態（`completed` / `failed` / `budget_exceeded` / `cancelled`）、`reason` に終端の reason（固定コードの形のとき）、`userId`、`taskId`、`caller: "system"` を入れる。repository・PR URL・title は入れない（summary.json 側にある）。
+- M4 は `buildTaskSummary`（`buildSummary` が入力を集める）と同じ純関数で summary.json を作って R2 に書く（`summary_logged` と `archive_done` は別の印）。`task_summary` の発行は R2 の有無に依存しない。
 
 ### M3 のテスト
 
@@ -459,3 +459,41 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - 既存の `web_research`(観測用、全 verdict)は変更せず併存する。`web_blocked` は `audit()` 経由の別ログで、同じ事象は 2 行出る。
 - web は状態を持たないので、test シンクは作らない。unit で console.log を捕捉して検証した。E2E は M5 では書いていない。
 - web の `userId` は数字だけの値以外を `audit()` が落とす（gateway は GitHub の数値 ID を渡す前提）。
+
+## M4 で決めたこと（2026-10-19）
+
+### アーカイブの状態は `agent_link` の列
+- `archive_done`・`archive_attempts`・`archive_retry_at`（次の試行時刻）を `agent_link` に `addColumnIfMissing` で足した（M3 の `summary_logged` と同じ流儀。専用テーブルにしなかった理由: 1 タスク 1 行の singleton で、`finished` / `summary_logged` と同じ「終端後の進み具合」だから）。`summary_logged` と `archive_done` は別の印。
+- 既存の（M4 より前の）終端タスクは、`archive_done = 0` で始まる。次に `advance()` が走ったときに書かれる（`advance()` が走らないタスクには影響しない）。
+
+### 書き込みの条件・順序・冪等
+- 条件は `finished = 1` かつ終端かつ（`github_link` が無い、または `finalize_done = 1`）。`task_summary` と同じ。`advance()` の中で `logSummaryIfReady()` の次に `archiveIfReady()` を呼ぶ。同時に 2 つ走らない（`running` の `archive`）。
+- 順序は `events.jsonl` → `result.json` → `summary.json`。3 つとも書けたら `archive_done = 1` にして `archive_completed` を出す（同じトランザクション）。途中で失敗したら 3 つとも書き直す（固定のキーへの上書き）。
+- `events.jsonl` は `seq` / `type` / `payload` / `created_at`（ISO）の 1 行 1 イベント。`result.json` は `task_result` と同じ組み立て（`composeResult`。`result()` と共有）を JSON にしたもの。`summary.json` は `buildTaskSummary` の出力。`result.json` を作るために AgentDO の `getResult` を呼ぶ（タイムアウトは `task_result` と同じ）。
+- 結果を待つ間にも状態が進みうるので、`events.jsonl` と `summary.json` は結果を得た後に同期で作る。
+- キーは `tasks/<yyyy>/<mm>/<task_id>/`（タスク作成時刻の UTC）。put のコンテンツタイプは `application/x-ndjson`（events.jsonl）と `application/json`。1 回の put は 15 秒で打ち切る。
+
+### 再試行と打ち切り
+- 失敗（`getResult` の失敗・put の失敗・タイムアウト）は `archive_attempts` を増やし、`archive_retry_at = now + min(60s, 5s * 2^(n-1))`（finalize と同じ 5, 10, 20, 40, 60 秒）にする。`ARCHIVE_MAX_ATTEMPTS = 6`。6 回目の失敗で `archive_done = 1` にして、監査ログに `archive_failed`（`reason`: `result_unavailable` / `put_failed`）を出す。events には入れない。
+- `needsAlarm()` は、終端の後も `archive_done = 0` の間は true。`archive_done = 1`（完了・打ち切り・スキップ）で止まる。`finishTask` と `task_result` には影響しない（失敗は握りつぶし、エラー名だけを `console.error` に出す）。
+
+### fail-open と、バインディングの置き方
+- `env.LOGS` が無ければ、`archive_done = 1` にして `archive_skipped`（`reason: no_binding`）を出すだけ。タスクの結果は変わらない。`Env` には任意の型（`LOGS?: R2Bucket`、`src/env.d.ts`）として足し、wrangler の生成型には出さない。
+- **本番の `apps/gateway/wrangler.jsonc` に `r2_buckets` を置かない**（当初案の「ローカル用の `r2_buckets` を足す」を変えた）。バケット名は環境固有で、下流が束ねる。置くと、下流が上書きしない限り、バケット名が空のまま・または固定名のままデプロイされうる。
+- Unit は fake の R2（`test/unit/task-archive.test.ts` の `FakeR2`。DO の `env` に差し込む。vitest の設定には R2 を足さないので、他のテストは `LOGS` 無し = `archive_skipped`）。
+- E2E は `test/e2e/global-setup.ts` が `wrangler.jsonc` を読み、`main` を絶対パスにして `r2_buckets: [{binding: "LOGS", ...}]` を足した設定を一時ディレクトリに書いて、`wrangler dev -c` に渡す。R2 の中身は、ENVIRONMENT=test のときだけある `POST /__test/archive`（`{task_id}`）で読む。
+
+### `archive_*` 監査イベントと packages/audit の変更
+- `AUDIT_EVENTS` に `archive_skipped` / `archive_failed` / `archive_completed` を追加した。
+- イベント固有のフィールドを 2 つ追加した（`archive_completed` だけ）: `prefix`（`^tasks/\d{4}/\d{2}/<task_id>/$` の形だけ。キー全体やファイル名は出さない）と `bytes`（書いた 3 オブジェクトの合計。非負の整数）。他のイベントでは出ない。
+- `archive_*` は gateway の `emitAudit` から出す（`caller: "system"`、`userId`、`taskId`）。events には積まない。
+
+### 保存しないものの確認
+- events.jsonl は TaskDO の `events` テーブルをそのまま書く（アーカイブの境界で足すものは無い）。タスクの入力・title・answer / steer の本文・`git_token`（と暗号文）は、`events` にも result / summary にも入らないので書かれない。Unit で、title・instructions・acceptance_criteria・constraints・answer・steer の本文と、トークン形式（`ghs_` 等）が 3 つのどこにも無いことを確かめる（トークンが実際に発行されていることも確認する）。
+- 回帰テスト: `task_summary` の監査レコードに `repository` と `pr_url` が出ない（`task-summary-do.test.ts`）。
+
+### M4 のテスト
+- Unit（パッケージ）: `packages/audit/test/archive.test.ts`（`archive_*` の名前、`prefix` / `bytes` の allowlist）。
+- Unit（gateway）: `task-archive.test.ts`（`finalize_done` の前には書かない、書く順序とキー、GitHub 無しのタスク、cancel でも書く、冪等、再試行とバックオフ、6 回での打ち切りと `archive_failed`、`LOGS` 無しの fail-open、alarm の止まり方、保存しないもの・トークン形式、events.jsonl / result.json / summary.json の中身）。
+- E2E（gateway）: `archive.e2e.test.ts`（cancel の後にローカル R2 に 3 オブジェクトが出る、summary.json が最後、中身にトークン形式と入力が無い、二重化した監査イベントが events.jsonl に残る、`archive_completed` のキーの接頭辞とサイズ）。
+- E2E で `LOGS` を外した構成（`archive_skipped`）は、gateway の E2E の wrangler dev が 1 つなので書いていない。Unit で確かめる。

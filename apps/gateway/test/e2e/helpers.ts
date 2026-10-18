@@ -90,3 +90,18 @@ export async function waitForAudit(
     await new Promise((r) => setTimeout(r, 200));
   }
 }
+
+export type ArchivedObject = { key: string; size: number; uploaded: number; text: string };
+
+/** ENVIRONMENT=test のときだけある /__test/archive から、そのタスクについて R2（LOGS）に保存されたオブジェクトを読む。 */
+export async function archivedObjects(
+  taskId: string,
+): Promise<{ bound: boolean; objects: ArchivedObject[] }> {
+  const res = await fetch(`${baseUrl}/__test/archive`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  if (!res.ok) throw new Error(`/__test/archive failed: ${res.status}`);
+  return (await res.json()) as { bound: boolean; objects: ArchivedObject[] };
+}

@@ -76,6 +76,10 @@ const BACKOFF_MAX_MS = 60_000;
 const RETRY_AFTER_MAX_MS = 10 * 60 * 1000;
 /** 終端の PR 更新を諦めるまでの試行回数（諦めてもトークンの失効は行う）。 */
 const FINALIZE_MAX_ATTEMPTS = 6;
+/** R2 アーカイブを諦めるまでの試行回数（諦めたら archive_failed を監査ログに出して打ち切る）。FINALIZE_MAX_ATTEMPTS と同じ。 */
+export const ARCHIVE_MAX_ATTEMPTS = 6;
+/** R2 への 1 回の put を待つ上限。超えたら失敗として再試行に回す（advance を固めない）。 */
+const ARCHIVE_PUT_TIMEOUT_MS = 15_000;
 /** トークンの暗号文の AAD。task id を含め、他のタスクの暗号文を差し込まれても復号できないようにする。 */
 const tokenAad = (taskId: string) => `installation_token:${taskId}`;
 /** 終端のトークン失効を諦めるまでの試行回数（諦めたら記録を閉じて token_revoke_failed を出す）。 */
@@ -204,6 +208,11 @@ type LinkRow = {
   usage_public: string;
   /** task_summary を出したか（1 回だけ出す） */
   summary_logged: number;
+  /** R2 アーカイブが済んだ（または打ち切った・スキップした）か。summary_logged とは別の印 */
+  archive_done: number;
+  archive_attempts: number;
+  /** この時刻（epoch ms）までは再試行しない */
+  archive_retry_at: number;
 };
 
 export type GetStatusResult = { ok: true; task: TaskView } | { ok: false; code: "not_found" };
@@ -410,6 +419,10 @@ export class TaskDO extends DurableObject<Env> {
     // Phase 6 M3: 要約（task_summary）のための累計と、出力済みの印
     this.addColumnIfMissing("agent_link", "usage_public", "TEXT NOT NULL DEFAULT '{}'");
     this.addColumnIfMissing("agent_link", "summary_logged", "INTEGER NOT NULL DEFAULT 0");
+    // Phase 6 M4: R2 アーカイブの状態（summary_logged と同じ agent_link に足す。finished / finalize_done とは独立）
+    this.addColumnIfMissing("agent_link", "archive_done", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("agent_link", "archive_attempts", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("agent_link", "archive_retry_at", "INTEGER NOT NULL DEFAULT 0");
     // Phase 3: Draft PR・Installation Token・終端処理の進み具合（1 行）。Phase 2 で作られたタスクには無い。
     sql.exec(`CREATE TABLE IF NOT EXISTS github_link (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -1029,6 +1042,7 @@ export class TaskDO extends DurableObject<Env> {
       await this.pump();
     } finally {
       this.logSummaryIfReady();
+      await this.archiveIfReady();
       await this.syncAlarm();
     }
     const row = this.getRow();
@@ -1056,16 +1070,20 @@ export class TaskDO extends DurableObject<Env> {
     if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
     const status = this.statusOf(row);
     if (!isTerminal(status) || !this.isStopped()) return { ok: false, code: "not_ready" };
-    let dto: ResultDto;
     try {
-      dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
+      return { ok: true, result: await this.composeResult(row, status) };
     } catch (e) {
       console.error("task_do_result_error", e instanceof Error ? e.name : typeof e);
       return { ok: false, code: "upstream_unavailable" };
     }
+  }
+
+  /** task_result と R2 の result.json が共有する結果の組み立て。AgentDO の getResult が失敗・タイムアウトしたら throw する。 */
+  private async composeResult(row: TaskRow, status: TaskStatus): Promise<ResultView> {
+    const dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
     const view =
       dto.status === "not_ready" ? this.synthesizeResult(row, status) : shapeResult(status, dto);
-    return { ok: true, result: this.withGithub(view) };
+    return this.withGithub(view);
   }
 
   /** GitHub 側の情報（Draft PR・終端で読んだ head・警告）を結果に足す。 */
@@ -2218,6 +2236,115 @@ export class TaskDO extends DurableObject<Env> {
     }
   }
 
+  // ---- R2 アーカイブ（phase6.md「R2 への保存」「M4 で決めたこと」）----
+
+  /** `tasks/<yyyy>/<mm>/<task_id>/`。<yyyy>/<mm> はタスクの作成時刻（UTC）なので、再試行でキーが変わらない。 */
+  private archivePrefix(row: TaskRow): string {
+    const d = new Date(row.created_at);
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    return `tasks/${d.getUTCFullYear()}/${mm}/${row.id}/`;
+  }
+
+  /** 公開イベントの全件（TaskDO が既に持っているもの。archive の境界で新たに生のデータを足さない）を 1 行 1 イベントで。 */
+  private eventsJsonl(): string {
+    return `${this.ctx.storage.sql
+      .exec<EventRow>("SELECT seq, type, payload, created_at FROM events ORDER BY seq")
+      .toArray()
+      .map((e) =>
+        JSON.stringify({
+          seq: e.seq,
+          type: e.type,
+          payload: JSON.parse(e.payload) as EventPayload,
+          created_at: new Date(e.created_at).toISOString(),
+        }),
+      )
+      .join("\n")}\n`;
+  }
+
+  /**
+   * 終端で、費用の精算（finished）と GitHub の終了処理（finalize_done。GitHub と紐付かないタスクは満たしているものとして扱う）が
+   * 済んだら、events.jsonl → result.json → summary.json の順で R2 に書く（summary.json が完了の印）。コピーであり、
+   * 失敗してもタスクの結果と予算の精算には影響させない。LOGS が無ければ fail-open（archive_skipped）。
+   */
+  private async archiveIfReady(): Promise<void> {
+    if (this.running.has("archive")) return;
+    this.running.add("archive");
+    try {
+      await this.runArchive();
+    } catch (e) {
+      console.error("task_archive_error", e instanceof Error ? e.name : typeof e);
+    } finally {
+      this.running.delete("archive");
+    }
+  }
+
+  private async runArchive(): Promise<void> {
+    const row = this.getRow();
+    const link = this.getLink();
+    if (!row || !link || link.archive_done === 1 || link.finished === 0) return;
+    const status = this.statusOf(row);
+    if (!isTerminal(status)) return;
+    const gl = this.getGithub();
+    if (gl !== undefined && gl.finalize_done === 0) return;
+    if (this.now() < link.archive_retry_at) return;
+
+    const bucket = this.env.LOGS;
+    if (!bucket) {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("UPDATE agent_link SET archive_done = 1 WHERE singleton = 1");
+        this.emitAudit("archive_skipped", { userId: row.owner_id, reason: "no_binding" });
+      });
+      return;
+    }
+
+    let stage: "result_unavailable" | "put_failed" = "result_unavailable";
+    try {
+      const result = await this.composeResult(row, status);
+      // 結果を待っている間にも状態は進みうる。要約と events は、書く直前に同期で作る（同じ時点のスナップショット）
+      const link2 = this.getLink() as LinkRow;
+      const files: [string, string, string][] = [
+        ["events.jsonl", this.eventsJsonl(), "application/x-ndjson"],
+        ["result.json", JSON.stringify(result), "application/json"],
+        ["summary.json", JSON.stringify(this.buildSummary(row, link2)), "application/json"],
+      ];
+      stage = "put_failed";
+      const prefix = this.archivePrefix(row);
+      let bytes = 0;
+      for (const [name, body, contentType] of files) {
+        await this.withTimeout(
+          Promise.resolve(bucket.put(prefix + name, body, { httpMetadata: { contentType } })),
+          ARCHIVE_PUT_TIMEOUT_MS,
+        );
+        bytes += new TextEncoder().encode(body).length;
+      }
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("UPDATE agent_link SET archive_done = 1 WHERE singleton = 1");
+        this.emitAudit("archive_completed", { userId: row.owner_id, prefix, bytes });
+      });
+    } catch (e) {
+      // エラーのメッセージにはデータが入りうるので、名前だけを記録する
+      console.error("task_archive_attempt_error", stage, e instanceof Error ? e.name : typeof e);
+      const attempts = link.archive_attempts + 1;
+      if (attempts >= ARCHIVE_MAX_ATTEMPTS) {
+        // アーカイブの後（events の確定後）なので、events には入れず、監査ログにだけ出す
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec(
+            "UPDATE agent_link SET archive_done = 1, archive_attempts = ? WHERE singleton = 1",
+            attempts,
+          );
+          this.emitAudit("archive_failed", { userId: row.owner_id, reason: stage });
+        });
+      } else {
+        const backoff = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (attempts - 1));
+        this.ctx.storage.sql.exec(
+          "UPDATE agent_link SET archive_attempts = ?, archive_retry_at = ? WHERE singleton = 1",
+          attempts,
+          this.now() + backoff,
+        );
+      }
+    }
+  }
+
   /** テスト専用: 現在の状態から作った要約レコード。ENVIRONMENT=test のときだけ。 */
   testSummary(): TaskSummary {
     if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
@@ -2237,7 +2364,8 @@ export class TaskDO extends DurableObject<Env> {
     return (
       link.usage_seq > link.settled_seq ||
       link.finished === 0 ||
-      (gl !== undefined && gl.finalize_done === 0)
+      (gl !== undefined && gl.finalize_done === 0) ||
+      link.archive_done === 0
     );
   }
 

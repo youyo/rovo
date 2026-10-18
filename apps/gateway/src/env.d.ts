@@ -11,6 +11,12 @@ interface Env {
   GITHUB_APP_PRIVATE_KEY: string;
   /** GitHub トークンを UserDO に暗号化保存する鍵。base64 の 32 バイト */
   TOKEN_ENC_KEY: string;
+  // ---- R2 アーカイブ（Phase 6 M4）----
+  /**
+   * アーカイブ先の R2 バケット。**任意**: wrangler.jsonc には置かない（バケット名は環境固有の値で、下流が束ねる）。
+   * 無ければアーカイブをスキップする（fail-open。archive_skipped）。Unit / E2E の test 構成だけが束ねる。
+   */
+  LOGS?: R2Bucket;
   // ---- ENVIRONMENT=test のときだけ上書きできる GitHub の接続先 ----
   GITHUB_OAUTH_BASE?: string;
   GITHUB_API_BASE?: string;

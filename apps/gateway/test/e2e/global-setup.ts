@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +28,49 @@ const READY_DEADLINE_MS = 90_000;
 const READY_FETCH_TIMEOUT_MS = 2_000;
 const CLOSE_GRACE_MS = 5_000;
 const KILL_CONFIRM_MS = 3_000;
+
+/** JSONC のコメントを落とす（文字列の中の // は残す）。wrangler.jsonc は末尾カンマを使っていない。 */
+function stripJsonComments(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i] as string;
+    const next = text[i + 1];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else if (c === "/" && next === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (c === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? text.length : end + 2;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
+/**
+ * E2E 用の wrangler 設定。本番の wrangler.jsonc には R2 のバケット名（環境固有の値）を置かないので、
+ * ローカルの R2（LOGS）はこの生成した設定だけに足す。main は絶対パスにして、設定の置き場所に依らないようにする。
+ */
+function writeE2eConfig(dir: string): string {
+  const base = JSON.parse(
+    stripJsonComments(readFileSync(join(GATEWAY_DIR, "wrangler.jsonc"), "utf8")),
+  ) as Record<string, unknown>;
+  const config = {
+    ...base,
+    main: join(GATEWAY_DIR, String(base.main)),
+    r2_buckets: [{ binding: "LOGS", bucket_name: "rovo-logs-e2e" }],
+  };
+  const path = join(dir, "wrangler.e2e.jsonc");
+  writeFileSync(path, JSON.stringify(config, null, 2));
+  return path;
+}
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -129,6 +172,7 @@ export default async function setup(project: TestProject) {
     const inspectorPort = await freePort();
     const baseUrl = `http://127.0.0.1:${port}`;
     resources.persistDir = mkdtempSync(join(tmpdir(), "rovo-e2e-"));
+    const e2eConfig = writeE2eConfig(resources.persistDir);
     const wranglerBin = join(GATEWAY_DIR, "node_modules", "wrangler", "bin", "wrangler.js");
 
     // .dev.vars があっても結果が変わらないよう、必要な値はすべて --var で明示する
@@ -156,7 +200,7 @@ export default async function setup(project: TestProject) {
         "dev",
         // gateway と、AGENT_DO の相手になる偽の agent Worker（script_name 付きのバインディングを解決するため）
         "-c",
-        "wrangler.jsonc",
+        e2eConfig,
         "-c",
         FAKE_AGENT_CONFIG,
         "--ip",

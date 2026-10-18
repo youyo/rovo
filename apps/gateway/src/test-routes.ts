@@ -94,6 +94,29 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ records });
   });
 
+  // R2 アーカイブ（LOGS）に、そのタスクについて保存されたオブジェクトを返す（キー・サイズ・書き込み時刻・本文）。
+  // LOGS が束ねられていない構成では bound:false。MCP のツールではなく、E2E 専用のルート。
+  app.post("/__test/archive", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const id = await taskIdOf(c.req);
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    const bucket = c.env.LOGS;
+    if (!bucket) return c.json({ bound: false, objects: [] });
+    const listed = await bucket.list({ prefix: "tasks/" });
+    const objects = [];
+    for (const o of listed.objects) {
+      if (!o.key.includes(`/${id}/`)) continue;
+      const body = await bucket.get(o.key);
+      objects.push({
+        key: o.key,
+        size: o.size,
+        uploaded: o.uploaded.getTime(),
+        text: (await body?.text()) ?? "",
+      });
+    }
+    return c.json({ bound: true, objects });
+  });
+
   app.post("/__test/agent/set-script", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();
     let body: { key?: unknown; script?: unknown };

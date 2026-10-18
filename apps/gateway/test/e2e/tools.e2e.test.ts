@@ -326,7 +326,9 @@ describe("Draft PR（偽 GitHub の App API 経由）", () => {
       expect(result.pr).toMatchObject({
         number: pr?.number,
         url: status.draft_pr_url,
-        head_sha: expect.stringMatching(/^[0-9a-f]{40}$/),
+        // キャンセルでは push しない（pushedSha なし）ので、PR の head は比べず記録もしない
+        head_sha: null,
+        head_matches_verified: null,
       });
     } finally {
       await client.close();

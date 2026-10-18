@@ -87,23 +87,35 @@ export const READY_FALLBACK_NOTE =
   "> **rovo is working on this branch. Do not merge until the task has finished.** (Draft pull requests are not available in this repository, so this is a regular pull request.)";
 
 function cmdLabel(argv: string[]): string {
-  return neutralize(argv.join(" ")).replaceAll("`", "'").slice(0, 200);
+  // 改行・制御文字は 1 つの空白にして、インラインコードの 1 行に収める
+  return neutralize(argv.join(" "))
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}\s]+/gu, " ")
+    .trim()
+    .replaceAll("`", "'")
+    .slice(0, 200);
+}
+
+/** コンテナ由来の SHA は、40 / 64 桁の 16 進だけを通す。それ以外（Markdown のリンクなど）は捨てる。 */
+function sha(v: string | null | undefined): string | undefined {
+  return v !== undefined && v !== null && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(v) ? v : undefined;
 }
 
 function render(r: PrReport, showCost: boolean, scale: number): string {
   const cap = (n: number) => Math.max(200, Math.floor(n * scale));
   const lines: string[] = [MANAGED_BEGIN, "## rovo", ""];
   lines.push(`Status: **${r.status}** (task \`${neutralize(r.taskId)}\`)`);
-  if (r.reason) lines.push(`Reason: ${fenceUntrusted(r.reason, cap(500))}`);
+  if (r.reason) lines.push("Reason:", "", fenceUntrusted(r.reason, cap(500)));
   lines.push("");
+  const commitSha = sha(r.commitSha);
+  const headSha = sha(r.headSha);
   lines.push(
     `Verification: ${r.verified ? "**passed**" : "**not verified**"}${
-      r.commitSha ? ` at \`${r.commitSha}\`` : ""
+      commitSha ? ` at \`${commitSha}\`` : ""
     }`,
   );
-  if (r.headSha) {
+  if (headSha) {
     lines.push(
-      `PR head: \`${r.headSha}\`${r.headMatches === false ? " (**differs from the verified commit**)" : ""}`,
+      `PR head: \`${headSha}\`${r.headMatches === false ? " (**differs from the verified commit**)" : ""}`,
     );
   }
   if (showCost && r.costUsd !== undefined) lines.push(`Cost: $${r.costUsd.toFixed(2)}`);

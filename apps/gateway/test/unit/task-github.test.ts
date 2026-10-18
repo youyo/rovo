@@ -80,6 +80,7 @@ function completedResult(
     },
     warnings: [],
     patchTooLarge: false,
+    pushedSha: commitSha,
     usage: {
       costUsd: 1.5,
       inputTokens: 1,
@@ -314,6 +315,58 @@ describe("Draft PR を作れない場合（DRAFT_PR_FALLBACK）", () => {
     expect((await status(stub)).status).toBe("FAILED");
     expect(await failReason(stub)).toBe("github_unprocessable");
     expect(pullOf(branch)).toBeUndefined();
+  });
+});
+
+describe("Draft の判定と既存 PR の再利用", () => {
+  it("base_ref の名前に draft を含むだけの無関係な 422 では、ready でも通常の PR に切り替えない", async () => {
+    app().setFault({
+      pattern: "^POST /repos/.*/pulls$",
+      status: 422,
+      count: 1, // 通常の PR への切り替えが起きれば、2 回目は成功してしまう
+      message: "Validation Failed",
+      body: {
+        message: "Validation Failed",
+        errors: [
+          {
+            resource: "PullRequest",
+            field: "base",
+            message: "base branch draft-feature is invalid",
+          },
+        ],
+      },
+    });
+    const { stub, branch } = await createTask();
+    await setEnv(stub, { DRAFT_PR_FALLBACK: "ready" });
+    await stub.advance();
+    expect(await failReason(stub)).toBe("github_unprocessable");
+    expect(pullOf(branch)).toBeUndefined();
+  });
+
+  it("既存の open PR が Draft でなければ、既定（fail）では FAILED（existing_pr_not_draft）", async () => {
+    const { stub, branch } = await createTask();
+    app().setFault({ pattern: "^POST /repos/.*/pulls$", status: 500, count: 1 });
+    await stub.advance();
+    app().seedPull(REPO, { head: branch, base: "main", draft: false });
+    await warp(stub, 120_000);
+    await runDurableObjectAlarm(stub);
+    expect((await status(stub)).status).toBe("FAILED");
+    expect(await failReason(stub)).toBe("existing_pr_not_draft");
+  });
+
+  it("既存の open PR が Draft でなくても、ready なら警告（existing_pr_not_draft）付きで使う", async () => {
+    const { stub, branch } = await createTask();
+    await setEnv(stub, { DRAFT_PR_FALLBACK: "ready" });
+    app().setFault({ pattern: "^POST /repos/.*/pulls$", status: 500, count: 1 });
+    await stub.advance();
+    const number = app().seedPull(REPO, { head: branch, base: "main", draft: false });
+    await warp(stub, 120_000);
+    await runDurableObjectAlarm(stub);
+    expect((await status(stub)).status).toBe("RUNNING");
+    expect((await eventsOf(stub, "draft_pr_created"))[0]).toMatchObject({ number, draft: false });
+    const codes = (await eventsOf(stub, "warning")).map((w) => w.code);
+    expect(codes).toContain("existing_pr_not_draft");
+    expect(codes).not.toContain("draft_pr_unavailable");
   });
 });
 
@@ -553,7 +606,8 @@ describe("終端: PR の更新とトークンの失効", () => {
     await t.stub.advance();
     const head = app().branch(REPO, t.branch) as string;
     await t.agent.setProgram({
-      result: completedResult(commitMatches ? head : "f".repeat(40), over),
+      // 検証したコミットと違うコミットが push された（pushedSha は PR の head と同じ）
+      result: completedResult(commitMatches ? head : "f".repeat(40), { pushedSha: head, ...over }),
     });
     await t.agent.setPhase("completed");
     await t.stub.advance();
@@ -795,5 +849,127 @@ describe("終端: PR の更新とトークンの失効", () => {
     const r = await stub.result(OWNER);
     if (!r.ok) throw new Error("not ready");
     expect(r.result.pr).toMatchObject({ head_sha: null, head_matches_verified: null });
+  });
+  it("push に失敗した（pushedSha なし）ときは head を比べない: head_matches は null、head_moved の警告なし", async () => {
+    const t = await createTask();
+    await t.stub.advance();
+    const head = app().branch(REPO, t.branch) as string;
+    await t.agent.setProgram({
+      // 検証済みのコミットはあるが、push できなかった
+      result: completedResult("e".repeat(40), {
+        pushedSha: undefined,
+        warnings: ["push_failed: network"],
+      }),
+    });
+    await t.agent.setPhase("completed");
+    await t.stub.advance();
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.pr).toMatchObject({ head_sha: null, head_matches_verified: null });
+    expect(r.result.warnings.join("\n")).not.toMatch(/head_moved_after_verification/);
+    expect(r.result.warnings).toContain("push_failed: network");
+    const body = pullOf(t.branch)?.body ?? "";
+    expect(body).not.toMatch(/differs from the verified commit/);
+    expect(body).not.toContain(head);
+    expect(await gl(t.stub)).toMatchObject({
+      head_sha: null,
+      head_matches: null,
+      finalize_done: 1,
+    });
+  });
+
+  it("pushedSha と検証済みの commit_sha が食い違えば、head が pushedSha と同じでも不一致として警告する", async () => {
+    const { stub, branch } = await runToCompleted({}, false);
+    const r = await stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.pr?.head_matches_verified).toBe(false);
+    expect(pullOf(branch)?.body).toMatch(/differs from the verified commit/);
+  });
+
+  it("コンテナ由来の commit_sha / pushedSha が SHA の形でなければ、PR 本文にも task_result にも出さない", async () => {
+    const evil = "abc](https://evil.example/x) [click";
+    const t = await createTask();
+    await t.stub.advance();
+    await t.agent.setProgram({ result: completedResult(evil, { pushedSha: evil }) });
+    await t.agent.setPhase("completed");
+    await t.stub.advance();
+    const body = pullOf(t.branch)?.body ?? "";
+    expect(body).not.toContain("evil.example");
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(JSON.stringify(r.result)).not.toContain("evil.example");
+    expect(r.result.verification.commit_sha).toBeUndefined();
+    expect(r.result.pr?.head_matches_verified).toBeNull();
+  });
+
+  describe("トークンの失効が失敗し続けるとき", () => {
+    it.each([403, 422, 500])(
+      "%i が続いても有限回で止まり、token_revoke_failed を出して finalize_done にする",
+      async (code) => {
+        app().setFault({ pattern: "^DELETE /installation/token$", status: code });
+        const { stub, agent, branch } = await createTask();
+        await stub.advance();
+        await agent.setProgram({ result: completedResult(app().branch(REPO, branch) as string) });
+        await agent.setPhase("completed");
+        await stub.advance();
+        for (let i = 1; i <= 12; i++) {
+          await warp(stub, i * 120_000);
+          await runDurableObjectAlarm(stub).catch(() => {});
+        }
+        expect((await gl(stub)).finalize_done).toBe(1);
+        expect(await runInDurableObject(stub, (_i, s) => s.storage.getAlarm())).toBeNull();
+        const codes = (await eventsOf(stub, "warning")).map((w) => w.code);
+        expect(codes).toContain("token_revoke_failed");
+        expect(codes).not.toContain("pr_update_failed");
+        const deletes = app()
+          .requests()
+          .filter((r) => r.method === "DELETE" && r.path === "/installation/token").length;
+        expect(deletes).toBeLessThanOrEqual(8);
+        expect(
+          (await rows<{ revoked: number }>(stub, "SELECT revoked FROM git_token")).every(
+            (t) => t.revoked === 1,
+          ),
+        ).toBe(true);
+      },
+    );
+
+    it("PR を作る前に FAILED になったタスクでも、pr_update_failed ではなく token_revoke_failed になる", async () => {
+      app().markMissing(REPO, "0123456789abcdef");
+      app().setFault({ pattern: "^DELETE /installation/token$", status: 500 });
+      const { stub } = await createTask();
+      await stub.advance();
+      for (let i = 1; i <= 12; i++) {
+        await warp(stub, i * 120_000);
+        await runDurableObjectAlarm(stub).catch(() => {});
+      }
+      expect(await failReason(stub)).toBe("base_sha_not_found");
+      expect((await gl(stub)).finalize_done).toBe(1);
+      const codes = (await eventsOf(stub, "warning")).map((w) => w.code);
+      expect(codes).toContain("token_revoke_failed");
+      expect(codes).not.toContain("pr_update_failed");
+    });
+  });
+
+  it("トークンの暗号文は task id に束縛される: 他のタスクの暗号文は復号できず、失効の記録だけ閉じる", async () => {
+    const a = await createTask();
+    const b = await createTask();
+    await a.stub.advance();
+    await b.stub.advance();
+    const [encA] = await rows<{ enc: string }>(a.stub, "SELECT enc FROM git_token");
+    await runInDurableObject(b.stub, (_i, s) =>
+      s.storage.sql.exec("UPDATE git_token SET enc = ?", encA?.enc),
+    );
+    await b.agent.setProgram({ result: completedResult(app().branch(REPO, b.branch) as string) });
+    await b.agent.setPhase("completed");
+    await b.stub.advance();
+    const g = await gl(b.stub);
+    expect(g.finalize_done).toBe(1);
+    // A のトークンを B の失効処理で使っていない
+    const tokenOfA = (await a.agent.calls()).specs[0]?.gitCredential.token;
+    expect(
+      app()
+        .tokenList()
+        .find((t) => t.token === tokenOfA)?.revoked,
+    ).toBe(false);
   });
 });

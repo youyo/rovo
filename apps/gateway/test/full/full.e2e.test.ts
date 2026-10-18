@@ -272,11 +272,18 @@ async function waitFor<T>(
 }
 
 /** 終端の後処理（PR 本文の更新・head の読み取り・トークンの失効）まで済んだ task_result を取る。 */
-async function settledResult(client: Client, taskId: string) {
+async function settledResult(client: Client, taskId: string, opts: { pushed?: boolean } = {}) {
   return waitFor(`finalize of ${taskId}`, async () => {
     const r = await resultOf(client, taskId);
     const pr = r.pr as { head_sha: string | null } | null;
-    return pr !== null && pr.head_sha !== null ? r : undefined;
+    if (pr === null) return undefined;
+    // push した（pushedSha がある）タスクは、終端で読んだ head が入るまで。push していない（キャンセルなど）
+    // タスクは head を比べず記録もしない（null）ので、PR 本文が終端の内容に更新されるまで待つ。
+    if (opts.pushed === false) {
+      const body = pullOf(taskId)?.body ?? "";
+      return body.includes("Status: **") && !body.includes("Status: **RUNNING**") ? r : undefined;
+    }
+    return pr.head_sha !== null ? r : undefined;
   });
 }
 
@@ -459,7 +466,7 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     expect(status).toBe("CANCELLED");
     expect(events.some((e) => e.type === "cancelled")).toBe(true);
 
-    const r = await settledResult(client, taskId);
+    const r = await settledResult(client, taskId, { pushed: false });
     expect(r).toMatchObject({ task_id: taskId, status: "CANCELLED" });
     // 停止後でも usage が取れる（最終 usage を含めて確定済み）
     expect((r.usage as { cost_usd: number }).cost_usd).toBeGreaterThanOrEqual(0);

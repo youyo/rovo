@@ -44,6 +44,9 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
       case "destroy":
         await sandbox.destroyForTest();
         return Response.json({ ok: true });
+      case "seed-workspace":
+        await sandbox.seedWorkspaceForTest();
+        return Response.json({ ok: true });
       case "fail-next-reap":
         await sandbox.failNextReapForTest();
         return Response.json({ ok: true });

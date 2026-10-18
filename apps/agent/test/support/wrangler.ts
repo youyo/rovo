@@ -1,4 +1,5 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -43,6 +44,88 @@ function listAgentContainers(): Set<string> {
 }
 
 const LOCK_DIR = join(tmpdir(), "rovo-e2e-docker.lock");
+
+/**
+ * startWrangler 全体の時間配分。vitest の hookTimeout（400 秒）の中に、ロック待ちと ready 待ちの合計が収まるようにする。
+ * （超えると beforeAll がタイムアウトして afterAll が走らず、wrangler が残る原因になる）
+ */
+export const LOCK_WAIT_MS = 60_000;
+export const DEFAULT_READY_MS = 300_000;
+
+/** この起動で立てた wrangler の子（プロセスグループ）。exit / SIGINT / SIGTERM で止める。 */
+const liveChildren = new Map<ChildProcess, Set<string>>();
+let cleanupInstalled = false;
+
+function killLiveChildren(signal: NodeJS.Signals): void {
+  for (const [child, containersBefore] of liveChildren) {
+    if (child.pid !== undefined) signalGroup(child.pid, signal);
+    // stop() が走れない終わり方でも、この起動中に増えた rovo-agent のコンテナ（サイドカー）は残さない
+    removeNewContainers(containersBefore);
+  }
+}
+
+function removeNewContainers(before: Set<string>): void {
+  const leftovers = [...listAgentContainers()].filter((id) => !before.has(id));
+  if (leftovers.length === 0) return;
+  try {
+    execFileSync("docker", ["rm", "-f", ...leftovers], { stdio: "ignore" });
+  } catch {
+    // 片付けの失敗でテスト結果を変えない
+  }
+}
+
+function installProcessCleanup(): void {
+  if (cleanupInstalled) return;
+  cleanupInstalled = true;
+  // exit は同期処理しか走れないので、SIGKILL を送るだけにする（通常の停止は stop() が済ませている）
+  process.on("exit", () => killLiveChildren("SIGKILL"));
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.once(sig, () => {
+      killLiveChildren("SIGTERM");
+      // 既定の動作（終了）に戻して、同じシグナルをもう一度受ける
+      process.kill(process.pid, sig);
+    });
+  }
+}
+
+/** 起動した wrangler の記録。テストのプロセスが SIGKILL などで死んでも、次の起動が自分の残りだけを掃除できるようにする。 */
+const PID_DIR = join(tmpdir(), "rovo-e2e-wrangler-pids");
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** 持ち主（テストのプロセス）が死んでいる rovo の wrangler を止める。他のプロジェクトのプロセスは見ない。 */
+function sweepStaleWranglers(): void {
+  let names: string[];
+  try {
+    names = readdirSync(PID_DIR);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const owner = Number.parseInt(name, 10);
+    if (!Number.isFinite(owner) || pidAlive(owner)) continue;
+    const file = join(PID_DIR, name);
+    const child = Number.parseInt(readFileSync(file, "utf8"), 10);
+    rmSync(file, { force: true });
+    if (!Number.isFinite(child) || child <= 1) continue;
+    try {
+      // pid の使い回しに備え、rovo の wrangler であることを確かめてから止める
+      const cmd = execFileSync("ps", ["-o", "command=", "-p", String(child)], { encoding: "utf8" });
+      if (cmd.includes(join(AGENT_DIR, "node_modules", "wrangler", "bin", "wrangler.js"))) {
+        signalGroup(child, "SIGKILL");
+      }
+    } catch {
+      // 既にいない
+    }
+  }
+}
 
 /**
  * wrangler dev + Docker の E2E は同時に 1 つだけ走らせる（プロセス間の排他ロック。docker-lock.ts）。
@@ -90,7 +173,7 @@ export interface StartWranglerOptions {
   /** 起動完了とみなす URL（baseUrl からの相対）。応答が返れば ready。 */
   readyPath: string;
   persistDir: string;
-  /** ready 待ちの上限。Docker イメージのビルドを含むので長め。 */
+  /** ready 待ちの上限。Docker イメージのビルドを含むので長め。LOCK_WAIT_MS との合計が hookTimeout に収まるようにする。 */
   readyDeadlineMs?: number;
   /** 待ち受けポート。事前に決める必要があるとき（PUBLIC_BASE_URL を vars に入れる等）だけ指定する。省略時は空きポート。 */
   port?: number;
@@ -101,8 +184,16 @@ export interface StartWranglerOptions {
  * SIGTERM で wrangler が起動したコンテナも片付く。
  */
 export async function startWrangler(opts: StartWranglerOptions): Promise<RunningWrangler> {
-  const releaseLock = await acquireDockerLock(30 * 60_000);
+  let releaseLock: () => void;
   try {
+    releaseLock = await acquireDockerLock(LOCK_WAIT_MS);
+  } catch (e) {
+    throw new Error(
+      `${LOCK_WAIT_MS / 1000} 秒待っても Docker E2E のロックを取れませんでした。別の E2E が実行中か、残っている vitest / wrangler を確認してください。\n${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  try {
+    sweepStaleWranglers();
     return await startLocked(opts, releaseLock);
   } catch (e) {
     releaseLock();
@@ -155,6 +246,15 @@ async function startLocked(
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
+  liveChildren.set(child, containersBefore);
+  installProcessCleanup();
+  const pidFile = join(PID_DIR, String(process.pid));
+  try {
+    mkdirSync(PID_DIR, { recursive: true });
+    if (child.pid !== undefined) writeFileSync(pidFile, String(child.pid));
+  } catch {
+    // 記録できなくても起動は続ける（掃除の保険が減るだけ）
+  }
   const debug = process.env.E2E_DEBUG === "1";
   const collect = (d: unknown) => {
     logs.push(String(d));
@@ -164,34 +264,37 @@ async function startLocked(
   child.stdout?.on("data", collect);
   child.stderr?.on("data", collect);
 
+  const forget = () => {
+    liveChildren.delete(child);
+    rmSync(pidFile, { force: true });
+  };
   const stop = async () => {
     const pid = child.pid;
-    if (pid === undefined) return;
-    if (!signalGroup(pid, "SIGTERM")) return;
-    if (await groupGone(pid, 15_000)) return;
-    signalGroup(pid, "SIGKILL");
-    await groupGone(pid, 3_000);
+    try {
+      if (pid === undefined) return;
+      if (!signalGroup(pid, "SIGTERM")) return;
+      if (await groupGone(pid, 15_000)) return;
+      signalGroup(pid, "SIGKILL");
+      await groupGone(pid, 3_000);
+    } finally {
+      forget();
+    }
   };
   const stopAndClean = async () => {
     await e2eLog().timed("wrangler stop", stop);
     restoreDevVars();
     // wrangler はプロキシのサイドカーを残すことがある。この起動中に増えた分だけ片付ける（既存の開発セッションは触らない）
-    const leftovers = [...listAgentContainers()].filter((id) => !containersBefore.has(id));
-    if (leftovers.length > 0) {
-      try {
-        execFileSync("docker", ["rm", "-f", ...leftovers], { stdio: "ignore" });
-      } catch {
-        // 片付けの失敗でテスト結果を変えない
-      }
-    }
+    removeNewContainers(containersBefore);
     releaseLock();
     process.stderr.write(`[rovo-e2e] wrangler のログ: ${wranglerLog.path}\n`);
   };
 
   const startedAt = Date.now();
-  const deadline = Date.now() + (opts.readyDeadlineMs ?? 300_000);
+  const deadline = Date.now() + (opts.readyDeadlineMs ?? DEFAULT_READY_MS);
   for (;;) {
     if (child.exitCode !== null) {
+      if (child.pid !== undefined) signalGroup(child.pid, "SIGKILL"); // 子孫が残っていれば止める
+      forget();
       restoreDevVars();
       throw new Error(
         `wrangler dev が終了しました (code=${child.exitCode})。ログ: ${wranglerLog.path}\n${logs.join("")}`,

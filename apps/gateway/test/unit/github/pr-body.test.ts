@@ -135,4 +135,27 @@ describe("renderReportBlock", () => {
     expect(b.startsWith(MANAGED_BEGIN)).toBe(true);
     expect(b.endsWith(MANAGED_END)).toBe(true);
   });
+  it("SHA の形でない commitSha / headSha（Markdown のリンクなど）は本文に出さない", () => {
+    const evil = "a](https://evil.example/x)";
+    const out = renderReportBlock({ ...base, commitSha: evil, headSha: evil }, { showCost: false });
+    expect(out).not.toContain("evil.example");
+    expect(out).toContain("Verification:");
+  });
+
+  it("Reason は改行してからフェンスで囲む", () => {
+    const out = renderReportBlock({ ...base, reason: "boom" }, { showCost: false });
+    expect(out).toMatch(/\nReason:\n\n```\nboom\n```\n/);
+  });
+
+  it("コマンド名の改行は 1 つの空白にし、200 文字に切る", () => {
+    const argv = ["echo", "a\n## injected\r\nb", "x".repeat(500)];
+    const out = renderReportBlock(
+      { ...base, results: [{ argv, exitCode: 1, timedOut: false, output: "bad" }] },
+      { showCost: false },
+    );
+    const line = out.split("\n").find((l) => l.startsWith("- `echo")) ?? "";
+    expect(line).toContain("echo a ## injected b ");
+    expect(out).not.toMatch(/^## injected/m);
+    expect(line.length).toBeLessThan(260);
+  });
 });

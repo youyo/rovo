@@ -318,6 +318,27 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     await this.destroyContainer();
   }
 
+  /**
+   * E2E 専用: 作業ブランチだけを持つ空の作業ツリーを、起動済みのコンテナに用意する。
+   * 認証なしの実ネットワーク E2E（clone が 401 で失敗する）で、exec に進めるようにするため。冪等。
+   */
+  async seedWorkspaceForTest(): Promise<void> {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("only available in test");
+    this.requireSpec();
+    await this.serial(async () => {
+      const spec = this.requireSpec();
+      const script =
+        'git -C "$1" rev-parse --verify -q HEAD >/dev/null 2>&1 && exit 0; ' +
+        'mkdir -p "$1" && git init -q -b "$2" "$1" && ' +
+        'git -C "$1" -c user.name=t -c user.email=t@e commit -q --allow-empty -m seed';
+      const r = await this.rawExec(["bash", "-c", script, "rovo-seed", WORKSPACE, spec.branch], {
+        timeoutMs: 60_000,
+        cwd: "/",
+      });
+      if (r.exitCode !== 0) throw new Error(`seed failed: ${r.stderr.trim().slice(0, 300)}`);
+    });
+  }
+
   /** E2E 専用: 次の reaper を失敗させる。 */
   failNextReapForTest(): void {
     if (this.env.ENVIRONMENT !== "test") throw new Error("only available in test");

@@ -35,6 +35,7 @@ import {
   SCRIPTED_PROVIDER_ID,
   type ScriptStep,
 } from "./pi/scripted-provider";
+import { maskSecrets } from "./redact";
 import type { ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
 import { createSandboxTools } from "./tools";
 import { createToolContext } from "./tools/context";
@@ -1106,7 +1107,9 @@ export class AgentDO extends DurableObject<Env> {
       sb.exec(argv, { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes: 32 * 1024 });
     const ok = (r: ExecResult) => r.exitCode === 0 && !r.timedOut;
     const why = (r: ExecResult) =>
-      r.timedOut ? "timed out" : `exit ${r.exitCode}: ${tail((r.stderr || r.stdout).trim(), 300)}`;
+      r.timedOut
+        ? "timed out"
+        : `exit ${r.exitCode}: ${tail(maskSecrets((r.stderr || r.stdout).trim()), 300)}`;
     /** ls-remote の出力から ref の先頭を読む。無ければ ""。SHA の形でなければ例外 */
     const readRemote = async (): Promise<string> => {
       const ls = await exec(["git", "ls-remote", "origin", ref], 60_000);

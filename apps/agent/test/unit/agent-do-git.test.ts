@@ -275,6 +275,24 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     expect(String(failed[0]?.data.message)).toContain("denied 3");
   });
 
+  it("push の失敗理由に資格情報が混ざっても、push_failed のイベントにも警告にも出さない", async () => {
+    const fx = newFixture("sync-mask", [report()], { pushRetryDelayMs: 0 });
+    fx.remote.sha = D;
+    const secret = `ghs_${"A".repeat(36)}`;
+    for (let i = 0; i < 4; i++) {
+      fx.pushResults.push({
+        exitCode: 1,
+        stderr: `fatal: https://x-access-token:${secret}@github.com/o/r.git denied`,
+      });
+    }
+    await fx.stub.start(makeSpec("sync-mask"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const r = done(await fx.stub.getResult());
+    const events = await allEvents(asFx(fx.stub));
+    expect(JSON.stringify([r, events])).not.toContain(secret);
+    expect(r.warnings.some((w) => /push_failed/.test(w))).toBe(true);
+  });
+
   it("push が成功しても ls-remote で先頭が一致しなければ失敗として扱う（検証済みと言わない）", async () => {
     const fx = newFixture("sync-mismatch", [report()], { pushRetryDelayMs: 0 });
     const other = `${"e".repeat(40)}\t${REF("sync-mismatch")}\n`;

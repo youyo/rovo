@@ -49,6 +49,8 @@ export function sandboxClient(baseUrl: string, name: string) {
     terminate: () => op("terminate") as Promise<{ stopped: boolean }>,
     /** コンテナだけを強制的に落とす（DO の状態は残す）。再起動の検証用。 */
     destroy: () => op("destroy"),
+    /** 作業ブランチだけを持つ空の作業ツリーを仕込む（ensureReady がコンテナを起動した後。実ネットワーク E2E 用）。 */
+    seedWorkspace: () => op("seed-workspace"),
     /** 次に走る reaper を失敗させる（fail-closed の検証用）。 */
     failNextReap: () => op("fail-next-reap"),
     status: () =>

@@ -223,11 +223,11 @@ describe("task_start の追加入力と task_result", () => {
       summary: "fake summary",
       verification: { verified: false },
       patch_too_large: false,
-      // Draft PR の情報。検証済みの commit が無いので head_matches_verified は比較できない（null）
+      // Draft PR の情報。偽の AgentDO は push していない（pushedSha なし）ので、head は比べず記録もしない（null）
       pr: {
         number: expect.any(Number),
         url: expect.stringMatching(/\/pull\/\d+$/),
-        head_sha: expect.stringMatching(/^[0-9a-f]{40}$/),
+        head_sha: null,
         head_matches_verified: null,
       },
     });

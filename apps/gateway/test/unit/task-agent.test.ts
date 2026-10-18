@@ -691,9 +691,10 @@ describe("TaskDO.result", () => {
           results: [{ argv: ["npm", "test"], exitCode: 0, timedOut: false, output: "ok" }],
           verified: true,
           attempts: 1,
-          commitSha: "abc",
+          commitSha: "a".repeat(40),
         },
         warnings: ["w"],
+        pushedSha: "a".repeat(40),
         patch: "diff --git",
         patchTooLarge: false,
         usage: {
@@ -718,13 +719,13 @@ describe("TaskDO.result", () => {
           results: [{ argv: ["npm", "test"], exit_code: 0, timed_out: false, output: "ok" }],
           verified: true,
           attempts: 1,
-          commit_sha: "abc",
+          commit_sha: "a".repeat(40),
         },
         warnings: ["w", expect.stringMatching(/^head_moved_after_verification/)],
         pr: {
           number: expect.any(Number),
           url: expect.stringMatching(/\/pull\/\d+$/),
-          // 終端の PR 更新（head の読み取り）が済んでいる。commit_sha "abc" は PR の head と一致しない。
+          // 終端の PR 更新（head の読み取り）が済んでいる。commit_sha（pushedSha と同じ）は PR の head と一致しない。
           head_sha: expect.stringMatching(/^[0-9a-f]{40}$/),
           head_matches_verified: false,
         },

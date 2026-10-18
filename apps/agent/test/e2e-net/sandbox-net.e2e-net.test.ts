@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +15,7 @@ import { E2E_TOKEN_ENC_KEY, type RunningWrangler, startWrangler } from "../suppo
 let wrangler: RunningWrangler;
 let persistDir: string;
 let sb: ReturnType<typeof sandboxClient>;
+let sbNoAuth: ReturnType<typeof sandboxClient>;
 
 const SPEC = {
   repository: "octocat/Hello-World",
@@ -24,31 +24,6 @@ const SPEC = {
   initialSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
   deadlineAt: Date.now() + 3_600_000,
 };
-
-/**
- * 認証なしの clone は失敗するので、SandboxDO は作業ツリーを用意できず、そのままでは exec に進めない。
- * 起動済みのコンテナに docker exec で空の作業ブランチを作り、SandboxDO が「用意済み」と判断できるようにする
- * （実ネットワークに対する許可・拒否の確認だけが目的。SandboxDO の本番コードには手を入れない）。
- */
-function seedWorkspaceInContainer(branch: string): void {
-  const ids = execFileSync(
-    "docker",
-    ["ps", "--filter", "name=workerd-rovo-agent-", "--format", "{{.ID}}"],
-    { encoding: "utf8" },
-  )
-    .split("\n")
-    .filter(Boolean);
-  const script = `mkdir -p /workspace && git init -q -b ${branch} /workspace && git -C /workspace -c user.name=t -c user.email=t@e commit -q --allow-empty -m seed`;
-  for (const id of ids) {
-    try {
-      execFileSync("docker", ["exec", id, "bash", "-c", script], { stdio: "pipe" });
-      return;
-    } catch {
-      // プロキシのサイドカーなど、作業用でないコンテナ
-    }
-  }
-  throw new Error("workspace container not found");
-}
 
 beforeAll(async () => {
   persistDir = mkdtempSync(join(tmpdir(), "rovo-agent-net-"));
@@ -59,21 +34,27 @@ beforeAll(async () => {
     readyPath: "/",
     persistDir,
   });
+  // 認証なしの clone は失敗するので、ensureReady は作業ツリーの用意で止まる（コンテナは起動し、傍受も登録される）。
+  // SandboxDO の ENVIRONMENT=test 限定の経路で空の作業ブランチを仕込み、以降の各テストが exec だけで独立に動けるようにする。
   sb = sandboxClient(wrangler.baseUrl, "net");
+  await expect(sb.ensureReady(SPEC, { credential: null })).rejects.toThrow(/git clone failed/);
+  await sb.seedWorkspace();
 }, 600_000);
 
 afterAll(async () => {
   await sb?.terminate().catch(() => {});
+  await sbNoAuth?.terminate().catch(() => {});
   await wrangler?.stop();
   if (persistDir) rmSync(persistDir, { recursive: true, force: true });
 });
 
 describe("実ネットワーク", () => {
   it("トークンが無いと、作業ブランチの clone は 401 で失敗する（ensureReady が失敗する）", async () => {
-    // コンテナは起動し（傍受も登録され）、作業ツリーの用意で止まる。以降のテストはこのコンテナを使う
-    await expect(sb.ensureReady(SPEC, { credential: null })).rejects.toThrow(/git clone failed/);
-    seedWorkspaceInContainer(SPEC.branch);
-    expect((await sb.exec(["true"])).exitCode).toBe(0);
+    // 他のテストと独立させるため、専用のサンドボックスで確かめる
+    sbNoAuth = sandboxClient(wrangler.baseUrl, "net-noauth");
+    await expect(sbNoAuth.ensureReady(SPEC, { credential: null })).rejects.toThrow(
+      /git clone failed/,
+    );
   });
 
   it("github.com への認証なしの clone は 401 で落ちる", async () => {

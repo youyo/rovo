@@ -17,6 +17,14 @@ import {
 
 afterEach(() => clearAgentTestOverrides());
 
+// private メンバーを観測するための薄いラッパ。型の再帰が深くなるので、スタブの型を畳む
+// biome-ignore lint/suspicious/noExplicitAny: private メンバーの観測
+type Inst = any;
+const runInDO = runInDurableObject as unknown as <T>(
+  stub: unknown,
+  fn: (inst: Inst) => Promise<T> | T,
+) => Promise<T>;
+
 describe("start の冪等性", () => {
   it("同一の spec の再送は受理済みを返し、異なる spec は conflict", async () => {
     const fx = newFixture("idem-1", [call("gate")]);
@@ -36,6 +44,8 @@ describe("start の冪等性", () => {
       deadlineAt: spec.deadlineAt,
     });
     fx.gate.release();
+    // 後始末: run を最後まで進めて終端にする（走らせたまま overrides を消すと、本物の SandboxDO を呼んでしまう）
+    expect(await waitForTerminal(fx)).toBe("failed");
   });
 
   it("未知のモデルは起動時に拒否し、何も始めない", async () => {
@@ -392,6 +402,8 @@ describe("期限", () => {
     );
     expect(deadline).toBe(T0 + 2 * 60 * 60 * 1000);
     fx.gate.release();
+    // 後始末: run を最後まで進めて終端にする（走らせたまま overrides を消すと、本物の SandboxDO を呼んでしまう）
+    expect(await waitForTerminal(fx)).toBe("failed");
   });
 });
 
@@ -726,15 +738,22 @@ describe("start は Sandbox の準備を待たない", () => {
 });
 
 describe("停止の確定は Pi の abort を無期限には待たない", () => {
-  it("上限を超えたら、呼び出し前の見積額を usage に含めて確定する", async () => {
+  const pendingAbort = (fx: ReturnType<typeof newFixture>) =>
+    runInDO<boolean>(fx.stub, (inst) => inst.aborting !== undefined);
+
+  it("上限を超えたら、呼び出し前の見積額を usage に含めて確定する。cancel は上限内に abort が終わらなければ stopped:false、再送で abort の完了後に true", async () => {
+    // 確定の上限 100ms、abort の完了は abort の 150ms 後、cancel の待ちは 120ms
     const fx = newFixture(
       "finalize-cap",
       [{ text: "遅い応答", usage: { input: 500_000 }, delayMs: 4000 }],
-      { cancelWaitMs: 300, finalizeWaitMs: 100 },
+      { cancelWaitMs: 120, finalizeWaitMs: 100 },
     );
     await fx.stub.start(makeSpec("finalize-cap"));
     await waitUntil(() => fx.modelCalls.count === 1);
-    await fx.stub.cancel();
+    await new Promise((r) => setTimeout(r, 300)); // 生成の途中経過（usage）が Pi に届くまで
+    // 1 回目: abort が終わる前に待ちの上限が来る
+    expect(await fx.stub.cancel()).toEqual({ stopped: false });
+    expect(await pendingAbort(fx)).toBe(true);
     // モデルの応答（4 秒）を待たずに確定する
     expect(await waitForTerminal(fx, 2000)).toBe("cancelled");
     const r = done(await fx.stub.getResult());
@@ -742,9 +761,87 @@ describe("停止の確定は Pi の abort を無期限には待たない", () =>
     const events = await allEvents(fx);
     const last = events[events.length - 1];
     expect(last).toMatchObject({ type: "phase", data: { phase: "cancelled" } });
+    // 再送で true になった時点では、abort は終わっている
+    const end = Date.now() + 3000;
+    let again = await fx.stub.cancel();
+    while (!again.stopped && Date.now() < end) {
+      await new Promise((r) => setTimeout(r, 30));
+      again = await fx.stub.cancel();
+    }
+    expect(again.stopped).toBe(true);
+    expect(again.finalSeq).toBe(last?.seq);
+    expect(await pendingAbort(fx)).toBe(false);
     // 確定の後に遅れて届く実費でイベントは増えない
     await new Promise((r) => setTimeout(r, 300));
     expect((await allEvents(fx)).length).toBe(events.length);
+  });
+
+  it("確定の後に遅れて戻った usage の読み取りは、実費が見積額を超えていてもイベントを積まない", async () => {
+    // 見積額（約 $0.004）より実費（$0.5）が大きい。読み取りを止めたまま確定させ、確定の後で解放する
+    const fx = newFixture(
+      "late-usage",
+      [{ text: "遅い応答", usage: { input: 500_000 }, delayMs: 4000 }],
+      { cancelWaitMs: 300, finalizeWaitMs: 100, usageReadWaitMs: 100, maxOutputTokens: 1000 },
+    );
+    await fx.stub.start(makeSpec("late-usage"));
+    await waitUntil(() => fx.modelCalls.count === 1);
+    await new Promise((r) => setTimeout(r, 300)); // 生成の途中経過（usage）が Pi に届くまで
+    fx.usageGate.hold();
+    await fx.stub.cancel();
+    expect(await waitForTerminal(fx, 3000)).toBe("cancelled");
+    await fx.usageGate.waitEntered(); // 確定の中の読み取りが止まっている
+    const settled = done(await fx.stub.getResult());
+    expect(settled.usage.costUsd).toBeGreaterThan(0);
+    expect(settled.usage.costUsd).toBeLessThan(0.1); // 確定した値は見積額
+    const events = await allEvents(fx);
+    // abort が終わって実費が確定した後で、止めていた読み取りを戻す
+    await new Promise((r) => setTimeout(r, 400));
+    fx.usageGate.release();
+    await new Promise((r) => setTimeout(r, 400));
+    expect((await allEvents(fx)).length).toBe(events.length);
+    expect(done(await fx.stub.getResult()).usage).toEqual(settled.usage);
+  });
+
+  it("モデルの応答が返った後（ツール実行中）に cancel が上限を超えたら、見積額ではなく実費で確定する", async () => {
+    // 見積額は約 $1、実費は $0.1。応答は返っていて実費が分かっているので、見積額で上書きしない
+    const fx = newFixture(
+      "finalize-actual",
+      [{ ...call("gate"), usage: { input: 100_000 } }, report()],
+      { cancelWaitMs: 300, finalizeWaitMs: 100, maxOutputTokens: 1_000_000 },
+    );
+    await fx.stub.start(makeSpec("finalize-actual"));
+    await fx.gate.waitEntered();
+    await fx.stub.cancel();
+    expect(await waitForTerminal(fx, 3000)).toBe("cancelled");
+    expect(done(await fx.stub.getResult()).usage.costUsd).toBeCloseTo(0.1, 6);
+    fx.gate.release();
+  });
+});
+
+describe("launch の投入中に cancel が確定した場合", () => {
+  it("submit が戻った後に launched を書かず、投入した run を abort する", async () => {
+    const fx = newFixture("launch-cancel", [report()], { cancelWaitMs: 300 });
+    fx.submitGate.hold();
+    await fx.stub.start(makeSpec("launch-cancel"));
+    await fx.submitGate.waitEntered();
+    // ensureReady の後、submit の直前で止まっている
+    // 何も投入されていない間に cancel が確定する（started=true なので cancelled で確定する）
+    await fx.stub.cancel();
+    expect(await waitForTerminal(fx, 3000)).toBe("cancelled");
+    let aborts = 0;
+    await runInDO(fx.stub, (inst) => {
+      const orig = inst.harness.abort.bind(inst.harness);
+      inst.harness.abort = (...a: unknown[]) => {
+        aborts += 1;
+        return orig(...a);
+      };
+    });
+    fx.submitGate.release(); // この後 submit が走る
+    await waitUntil(() => aborts >= 1, 2000);
+    const launched = await runInDO(fx.stub, (inst) => inst.store.meta("launched"));
+    expect(launched).toBeUndefined();
+    expect(done(await fx.stub.getResult()).status).toBe("cancelled");
+    expect(fx.modelCalls.count).toBe(0);
   });
 });
 

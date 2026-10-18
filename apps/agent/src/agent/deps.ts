@@ -18,6 +18,12 @@ export interface AgentTestOverrides {
   cancelWaitMs?: number;
   /** 停止の意図による確定が Pi の abort を待つ上限（ms） */
   finalizeWaitMs?: number;
+  /** 費用の読み取り（pi.usage）を待つ上限（ms）。既定 2000 */
+  usageReadWaitMs?: number;
+  /** refreshUsage が Pi の usage を読む直前に待つ（読み取りが遅れて戻るケースの再現用） */
+  beforeUsageRead?: () => Promise<void>;
+  /** doLaunch が Pi へ run を投入する直前に待つ（投入中に cancel が確定するケースの再現用） */
+  beforeSubmit?: () => Promise<void>;
   /** モデル呼び出し（fake provider が実際に呼ばれた回数の観測用） */
   onModelCall?: () => void;
 }

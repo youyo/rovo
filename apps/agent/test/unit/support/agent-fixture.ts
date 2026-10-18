@@ -58,6 +58,10 @@ export interface Fixture {
   patchGate: { hold: () => void; waitEntered: () => Promise<void>; release: () => void };
   /** git status / git switch の exec を止めておく（report_completion が sandbox RPC を await 中に別の出来事を起こすため） */
   execGate: Record<"status" | "switch", ExecGate>;
+  /** 費用の読み取り（pi.usage）の直前を止める。止めた読み取りは release まで戻らない */
+  usageGate: ExecGate;
+  /** Pi への run の投入（harness.submit）の直前を止める */
+  submitGate: ExecGate;
   /** git rev-parse HEAD の応答を先頭から順に使う。尽きたら c0ffee */
   revParse: string[];
   /** git status --porcelain の結果を先頭から順に使う。尽きたら clean */
@@ -73,6 +77,7 @@ export function newFixture(
     modelId?: string;
     cancelWaitMs?: number;
     finalizeWaitMs?: number;
+    usageReadWaitMs?: number;
   } = {},
 ): Fixture {
   const clock = { now: T0 };
@@ -87,6 +92,13 @@ export function newFixture(
   const execState = {
     status: { held: false, entered: false },
     switch: { held: false, entered: false },
+  };
+  const usageState = { held: false, entered: false };
+  const submitState = { held: false, entered: false };
+  const hold = async (g: { held: boolean; entered: boolean }) => {
+    if (!g.held) return;
+    g.entered = true;
+    while (g.held) await new Promise((r) => setTimeout(r, 10));
   };
   const revParse: string[] = [];
   const statusResults: Partial<ExecResult>[] = [];
@@ -163,6 +175,9 @@ export function newFixture(
     modelId: opts.modelId,
     cancelWaitMs: opts.cancelWaitMs,
     finalizeWaitMs: opts.finalizeWaitMs,
+    usageReadWaitMs: opts.usageReadWaitMs,
+    beforeUsageRead: () => hold(usageState),
+    beforeSubmit: () => hold(submitState),
     onModelCall: () => {
       modelCalls.count += 1;
     },
@@ -187,6 +202,8 @@ export function newFixture(
     nameStatus,
     revParse,
     statusResults,
+    usageGate: gateOf(usageState),
+    submitGate: gateOf(submitState),
     execGate: {
       status: gateOf(execState.status),
       switch: gateOf(execState.switch),

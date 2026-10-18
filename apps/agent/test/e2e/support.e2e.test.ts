@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEV_VARS_BACKUP_SUFFIX, recoverDevVars, writeDevVars } from "../support/dev-vars";
 import { acquireLock } from "../support/docker-lock";
+import { createE2eLog } from "../support/e2e-log";
 
 // E2E の起動補助（Docker は使わない）。異常終了の後始末とロックの奪取を確かめる。
 const dirs: string[] = [];
@@ -93,5 +94,49 @@ describe("排他ロック", () => {
     const won = results.filter((r) => r.status === "fulfilled");
     expect(won).toHaveLength(1);
     for (const r of won) if (r.status === "fulfilled") r.value();
+  });
+});
+
+describe("E2E の診断ログ", () => {
+  it("ログは root 配下のタイムスタンプ付きディレクトリに作られ、timed は成功した段階の所要時間を timing.log に追記する", async () => {
+    const root = tmp();
+    const log = createE2eLog({ root, debug: false });
+    expect(log.dir.startsWith(`${root}/`)).toBe(true);
+    expect(await log.timed("exec", async () => 42)).toBe(42);
+    const text = readFileSync(join(log.dir, "timing.log"), "utf8");
+    expect(text).toMatch(/exec ok \d+ms/);
+  });
+
+  it("失敗した段階も所要時間つきで記録し、例外はそのまま伝える", async () => {
+    const log = createE2eLog({ root: tmp(), debug: false });
+    await expect(
+      log.timed("ensureReady", async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(readFileSync(join(log.dir, "timing.log"), "utf8")).toMatch(
+      /ensureReady failed \d+ms: boom/,
+    );
+  });
+
+  it("wrangler の出力は、テストを流した場所の外（log.dir）のファイルに追記される", () => {
+    const log = createE2eLog({ root: tmp(), debug: false });
+    const w = log.wranglerLog("agent");
+    w.write("line 1\n");
+    w.write("line 2\n");
+    expect(w.path.startsWith(`${log.dir}/`)).toBe(true);
+    expect(readFileSync(w.path, "utf8")).toBe("line 1\nline 2\n");
+    // 同名でも別ファイルになる（上書きしない）
+    expect(log.wranglerLog("agent").path).not.toBe(w.path);
+  });
+
+  it("古いログのディレクトリは新しい keep 個だけ残して消す", () => {
+    const root = tmp();
+    for (const n of ["2020-01-01", "2020-01-02", "2020-01-03"]) mkdirSync(join(root, n));
+    const log = createE2eLog({ root, debug: false, keep: 2 });
+    expect(existsSync(join(root, "2020-01-01"))).toBe(false);
+    expect(existsSync(join(root, "2020-01-02"))).toBe(false);
+    expect(existsSync(join(root, "2020-01-03"))).toBe(true);
+    expect(existsSync(log.dir)).toBe(true);
   });
 });

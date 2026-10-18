@@ -358,7 +358,13 @@ export class AgentDO extends DurableObject<Env> {
         throw e;
       }
       if (this.store.meta("tombstone") || isTerminal(this.store.phase())) return;
+      await this.overrides().beforeSubmit?.();
       await this.harness.submit(spec.instructions, { operationId: this.operationId() });
+      // submit の間に cancel などが確定まで進んだなら、launched は書かず、投入してしまった run を止める
+      if (this.store.meta("tombstone") || isTerminal(this.store.phase())) {
+        await this.abortRun();
+        return;
+      }
       this.store.tx(() => {
         this.store.setMeta("launched", true);
         this.store.setPhase("running");
@@ -522,7 +528,10 @@ export class AgentDO extends DurableObject<Env> {
       timedOut = await this.raceTimeout(waitFor, limit);
     }
     if (timedOut) {
-      await this.raceTimeout(this.refreshUsage(), USAGE_READ_WAIT_MS);
+      await this.raceTimeout(
+        this.refreshUsage(),
+        this.overrides().usageReadWaitMs ?? USAGE_READ_WAIT_MS,
+      );
       this.includeInflightEstimate();
     } else {
       await this.refreshUsage().catch(() => undefined);
@@ -576,6 +585,8 @@ export class AgentDO extends DurableObject<Env> {
     const inflight = this.store.meta<{ baseCostUsd: number; estimateUsd: number }>("inflight");
     if (!inflight) return;
     const prev = this.store.usage();
+    // 呼び出しの開始時より実費が増えているなら、応答は返っていて実費が分かっている。見積額で上書きしない
+    if (prev.costUsd > inflight.baseCostUsd) return;
     const upper = inflight.baseCostUsd + inflight.estimateUsd;
     if (upper <= prev.costUsd) return;
     const total: UsageDto = { ...prev, costUsd: upper };
@@ -645,6 +656,7 @@ export class AgentDO extends DurableObject<Env> {
 
   /** pi().usage() から累計の実費を読み、変化があれば usage イベントを積む。 */
   private async refreshUsage(): Promise<UsageDto> {
+    await this.overrides().beforeUsageRead?.();
     const pi = await this.harness.pi();
     const state = await pi.usage(BG);
     const total: UsageDto = { ...ZERO_USAGE };

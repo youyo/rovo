@@ -72,6 +72,10 @@ mise run lint         # Biome + 型検査
 
 E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` の出力も表示される。E2E は GitHub に接続しない（偽 GitHub を使う）。
 
+**E2E の診断ログ**: E2E（Docker を使うもの）は、テストを流した場所の外に診断ログを常に残す。保存先は `$TMPDIR/rovo-e2e-logs/<タイムスタンプ>-xxxxxx/`（テストファイルごとに 1 つ。新しい 30 個を残して古いものは消える。`ROVO_E2E_LOG_DIR` でルートを変えられる）。
+- `wrangler-<設定名>.log`: `wrangler dev` の出力（stdout / stderr）。E2E の終了時に `[rovo-e2e] wrangler のログ: <パス>` と表示される。起動に失敗したときのエラーにもパスが入る
+- `timing.log`: 主要な段階（`wrangler ready` / `wrangler stop`、Sandbox の `ensure-ready` / `exec` / `stop`（reaper）/ `terminate` / `destroy`、Agent の各 RPC）の所要時間。失敗した段階は `failed` で記録される。`E2E_DEBUG=1` なら stderr にも出る（タイムアウトの値は変えていない）
+
 ## 設定
 
 ### 変数（`wrangler.jsonc` の `vars`、またはローカルは `.dev.vars`）

@@ -1,4 +1,5 @@
 import type { ExecResult, WorkspaceSpec } from "../../src/sandbox-port";
+import { e2eLog } from "./e2e-log";
 
 /** wrangler dev 上の E2E 用ルート（ENVIRONMENT=test のときだけ有効）経由で Sandbox を操作する。 */
 export function sandboxClient(baseUrl: string, name: string) {
@@ -12,8 +13,13 @@ export function sandboxClient(baseUrl: string, name: string) {
     if (!res.ok) throw new Error(`${path}: ${res.status} ${await res.text()}`);
     return res.json();
   };
-  const op = (path: string, body: Record<string, unknown> = {}) =>
-    post(`/test/sandbox/${path}`, { name, ...body });
+  // 主要な段階の所要時間を残す（ensure-ready / exec / stop（reaper）/ terminate / destroy など。不安定さの切り分け用）
+  const op = (path: string, body: Record<string, unknown> = {}) => {
+    const argv = Array.isArray(body.argv) ? ` ${String(body.argv[0])}` : "";
+    return e2eLog().timed(`sandbox ${name} ${path}${argv}`, () =>
+      post(`/test/sandbox/${path}`, { name, ...body }),
+    );
+  };
   return {
     name,
     ensureReady: (spec: WorkspaceSpec) => op("ensure-ready", { spec }) as Promise<{ ok: true }>,

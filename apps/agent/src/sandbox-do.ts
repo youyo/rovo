@@ -166,6 +166,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     });
   }
 
+  // readFile / writeFile は、terminate / 期限切れの後も例外（"sandbox was terminated" など）を投げる。exec のように結果型へそろえない。
+  // 理由: (1) 戻り値が文字列 / void で、結果型にすると SandboxPort の契約と全ツール・fake・AgentDO を巻き込む。
+  // (2) 呼び出し元はツール（guarded が例外をツールのエラー結果にする）だけで、AgentDO は終端後に呼ばない。
+  //     終端の後に呼ばれうるのは中断し損ねた実行中ツール 1 回分程度で、その分の Uncaught ログは許容する。
+  // (3) exec を結果型にしたのは、AgentDO の確定処理（patch の取得・検証）が終端の後にも呼ぶため。
   async readFile(path: string): Promise<string> {
     const abs = resolveWorkspacePath(WORKSPACE, path);
     this.requireSpec();

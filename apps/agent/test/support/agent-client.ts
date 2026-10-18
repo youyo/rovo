@@ -6,10 +6,11 @@ import type {
   TaskSpec,
 } from "../../src/agent/types";
 import type { ScriptStep } from "../../src/pi/scripted-provider";
+import { e2eLog } from "./e2e-log";
 
 /** wrangler dev 上の E2E 用ルート（ENVIRONMENT=test のときだけ有効）経由で AgentDO を操作する。 */
 export function agentClient(baseUrl: string, name: string) {
-  const op = async (action: string, body: Record<string, unknown> = {}, timeoutMs = 280_000) => {
+  const send = async (action: string, body: Record<string, unknown>, timeoutMs: number) => {
     const res = await fetch(`${baseUrl}/test/agent/${action}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -19,6 +20,11 @@ export function agentClient(baseUrl: string, name: string) {
     if (!res.ok) throw new Error(`${action}: ${res.status} ${await res.text()}`);
     return res.json();
   };
+  // 所要時間を残す。events は待ち合わせで何度も呼ぶので記録しない
+  const op = (action: string, body: Record<string, unknown> = {}, timeoutMs = 280_000) =>
+    action === "events"
+      ? send(action, body, timeoutMs)
+      : e2eLog().timed(`agent ${name} ${action}`, () => send(action, body, timeoutMs));
   const api = {
     name,
     setScript: (key: string, script: ScriptStep[]) => op("set-script", { key, script }),

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { writeDevVars } from "./dev-vars";
 import { acquireLock } from "./docker-lock";
+import { e2eLog } from "./e2e-log";
 
 export const AGENT_DIR = join(import.meta.dirname, "..", "..");
 export const REPO_ROOT = join(AGENT_DIR, "..", "..");
@@ -140,6 +141,10 @@ async function startLocked(
   };
   process.on("exit", restoreDevVars);
   const containersBefore = listAgentContainers();
+  // wrangler の出力は、テストを流した場所の外（$TMPDIR/rovo-e2e-logs/…）に保存する。失敗の調査はこのファイルを読む
+  const wranglerLog = e2eLog().wranglerLog(
+    opts.configs.map((c) => c.split("/").slice(-2, -1)[0] ?? "wrangler").join("+"),
+  );
   const logs: string[] = [];
   const child: ChildProcess = spawn(process.execPath, args, {
     cwd: REPO_ROOT,
@@ -150,6 +155,7 @@ async function startLocked(
   const debug = process.env.E2E_DEBUG === "1";
   const collect = (d: unknown) => {
     logs.push(String(d));
+    wranglerLog.write(String(d));
     if (debug) process.stderr.write(String(d));
   };
   child.stdout?.on("data", collect);
@@ -164,7 +170,7 @@ async function startLocked(
     await groupGone(pid, 3_000);
   };
   const stopAndClean = async () => {
-    await stop();
+    await e2eLog().timed("wrangler stop", stop);
     restoreDevVars();
     // wrangler はプロキシのサイドカーを残すことがある。この起動中に増えた分だけ片付ける（既存の開発セッションは触らない）
     const leftovers = [...listAgentContainers()].filter((id) => !containersBefore.has(id));
@@ -176,17 +182,23 @@ async function startLocked(
       }
     }
     releaseLock();
+    process.stderr.write(`[rovo-e2e] wrangler のログ: ${wranglerLog.path}\n`);
   };
 
+  const startedAt = Date.now();
   const deadline = Date.now() + (opts.readyDeadlineMs ?? 300_000);
   for (;;) {
     if (child.exitCode !== null) {
       restoreDevVars();
-      throw new Error(`wrangler dev が終了しました (code=${child.exitCode})\n${logs.join("")}`);
+      throw new Error(
+        `wrangler dev が終了しました (code=${child.exitCode})。ログ: ${wranglerLog.path}\n${logs.join("")}`,
+      );
     }
     if (Date.now() > deadline) {
       await stopAndClean();
-      throw new Error(`wrangler dev の起動がタイムアウトしました\n${logs.slice(-40).join("")}`);
+      throw new Error(
+        `wrangler dev の起動がタイムアウトしました。ログ: ${wranglerLog.path}\n${logs.slice(-40).join("")}`,
+      );
     }
     try {
       const res = await fetch(`${baseUrl}${opts.readyPath}`, {
@@ -198,5 +210,6 @@ async function startLocked(
       await sleep(500);
     }
   }
+  e2eLog().record("wrangler ready", Date.now() - startedAt);
   return { baseUrl, stop: stopAndClean };
 }

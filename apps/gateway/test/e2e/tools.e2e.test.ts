@@ -19,28 +19,28 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const started = bodyOf(
         await client.callTool({ name: "task_start", arguments: startArgs("t1") }),
       );
-      expect(started).toMatchObject({ status: "CREATING", draft_pr_url: null });
+      expect(started).toMatchObject({ status: "RUNNING", draft_pr_url: null });
       const taskId = started.task_id as string;
 
       const status = bodyOf(
         await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
       );
       expect(status).toMatchObject({
-        status: "CREATING",
+        status: "RUNNING",
         repository: "acme/widgets",
         title: "t1",
-        latest_cursor: "1",
+        latest_cursor: "2",
       });
 
       const t0 = Date.now();
       const timedOut = bodyOf(
         await client.callTool({
           name: "task_wait",
-          arguments: { task_id: taskId, cursor: "1", timeout_seconds: 1 },
+          arguments: { task_id: taskId, cursor: "2", timeout_seconds: 1 },
         }),
       );
       expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
-      expect(timedOut).toMatchObject({ status: "CREATING", cursor: "1", events: [] });
+      expect(timedOut).toMatchObject({ status: "RUNNING", cursor: "2", events: [] });
 
       expect(
         bodyOf(await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } })),
@@ -53,11 +53,11 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const cancelled = bodyOf(
         await client.callTool({
           name: "task_wait",
-          arguments: { task_id: taskId, cursor: "1", timeout_seconds: 30 },
+          arguments: { task_id: taskId, cursor: "2", timeout_seconds: 30 },
         }),
       );
       expect(Date.now() - t1).toBeLessThan(5000);
-      expect(cancelled).toMatchObject({ status: "CANCELLED", cursor: "2" });
+      expect(cancelled).toMatchObject({ status: "CANCELLED", cursor: "3" });
       expect((cancelled.events as { type: string }[]).map((e) => e.type)).toEqual(["cancelled"]);
     } finally {
       await client.close();
@@ -73,13 +73,13 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const t0 = Date.now();
       const waiting = client.callTool({
         name: "task_wait",
-        arguments: { task_id: taskId, cursor: "1", timeout_seconds: 30 },
+        arguments: { task_id: taskId, cursor: "2", timeout_seconds: 30 },
       });
       await new Promise((r) => setTimeout(r, 500));
       await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
       const w = bodyOf(await waiting);
       expect(Date.now() - t0).toBeLessThan(10_000);
-      expect(w).toMatchObject({ status: "CANCELLED", cursor: "2" });
+      expect(w).toMatchObject({ status: "CANCELLED", cursor: "3" });
     } finally {
       await client.close();
     }
@@ -112,6 +112,48 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
     }
   });
 
+  it("verification_commands を受け付け、task_result は実行中なら not_ready、キャンセル後は結果を返す", async () => {
+    const { client } = await memberClient();
+    try {
+      const started = bodyOf(
+        await client.callTool({
+          name: "task_start",
+          arguments: startArgs("with-verification", {
+            verification_commands: [{ argv: ["npm", "test"], cwd: "pkg", timeout_seconds: 60 }],
+          }),
+        }),
+      );
+      const taskId = started.task_id as string;
+      const notReady = await client.callTool({
+        name: "task_result",
+        arguments: { task_id: taskId },
+      });
+      expect(notReady.isError).toBe(true);
+      expect(bodyOf(notReady).code).toBe("not_ready");
+
+      await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
+      const done = await client.callTool({ name: "task_result", arguments: { task_id: taskId } });
+      expect(done.isError).toBeFalsy();
+      expect(bodyOf(done)).toMatchObject({ task_id: taskId, status: "CANCELLED" });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("不正な verification_commands は invalid_input", async () => {
+    const { client } = await memberClient();
+    try {
+      const r = await client.callTool({
+        name: "task_start",
+        arguments: startArgs("bad", { verification_commands: [{ argv: ["npm"], cwd: "../x" }] }),
+      });
+      expect(r.isError).toBe(true);
+      expect(bodyOf(r).code).toBe("invalid_input");
+    } finally {
+      await client.close();
+    }
+  });
+
   it("別のユーザーのタスクは status / wait / cancel のどれも not_found", async () => {
     const alice = newUser("alice");
     const bob = newUser("bob");
@@ -124,7 +166,7 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const { task_id: taskId } = bodyOf(
         await ca.callTool({ name: "task_start", arguments: startArgs("secret") }),
       ) as { task_id: string };
-      for (const name of ["task_status", "task_wait", "task_cancel"]) {
+      for (const name of ["task_status", "task_wait", "task_cancel", "task_result"]) {
         const r = await cb.callTool({
           name,
           arguments: { task_id: taskId, ...(name === "task_wait" ? { timeout_seconds: 0 } : {}) },
@@ -135,7 +177,7 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       // 本人にはまだ見える（他人の cancel が効いていない）
       expect(
         bodyOf(await ca.callTool({ name: "task_status", arguments: { task_id: taskId } })).status,
-      ).toBe("CREATING");
+      ).toBe("RUNNING");
     } finally {
       await Promise.all([ca.close(), cb.close()]);
     }
@@ -180,7 +222,7 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
         arguments: startArgs("after-refresh"),
       });
       expect(r.isError).toBeFalsy();
-      expect(bodyOf(r).status).toBe("CREATING");
+      expect(bodyOf(r).status).toBe("RUNNING");
       const grants = (await admin.requests()).filter(
         (q) => q.path === "/login/oauth/access_token" && q.body?.grant_type === "refresh_token",
       );

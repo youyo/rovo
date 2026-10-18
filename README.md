@@ -3,32 +3,33 @@
 Claude Code / Cowork から Remote MCP 経由でコーディングタスクを委譲するための Task Gateway（Cloudflare Workers）。
 設計は [docs/specs/design.md](docs/specs/design.md)、Phase 1 の実装計画は [docs/specs/phase1.md](docs/specs/phase1.md)、手動の受入試験は [docs/specs/acceptance.md](docs/specs/acceptance.md)。
 
-## 現状（Phase 1）
+## 現状（Phase 2: Gateway と子エージェントの統合）
 
-GitHub App のユーザー認可でログインし、`/mcp` から次の 4 つのツールを使える。
+GitHub App のユーザー認可でログインし、`/mcp` から次の 5 つのツールを使える。
 
 | ツール | 内容 |
 |---|---|
-| `task_start` | タスクを作る。`{task_id, status, draft_pr_url, note}` |
+| `task_start` | タスクを作り、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, note}`。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される |
 | `task_status` | 状態を返す |
-| `task_wait` | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling） |
-| `task_cancel` | キャンセルする（終端状態でも冪等） |
+| `task_wait` | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling）。待機中に子エージェントのイベントを取り込む |
+| `task_result` | 終端になったタスクの成果（要約・検証結果・patch・費用）を返す。終端でなければ `not_ready` |
+| `task_cancel` | キャンセルする（終端状態でも冪等）。子エージェントの停止を確認するまで Gateway が再送する |
 
-**Phase 1 の制約（ツールの応答にも明記している）**
+**制約（ツールの応答にも明記している）**
 
-- 子エージェントが未実装のため、`task_start` で作ったタスクは **`CREATING` のまま進まない**。
-- Draft PR は作られない（`draft_pr_url` は常に `null`）。
+- push と Draft PR は作られない（`draft_pr_url` は常に `null`）。成果は patch として `task_result` で返る。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
-- 利用者ごとの同時実行は 1 件まで。
+- 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
+- 1 タスクにつき $10 を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。
 
 ## 構成
 
 - `apps/gateway`: Cloudflare Worker。Hono でルーティングし、`@cloudflare/workers-oauth-provider` で全体を包む。
   - `/mcp`（要 OAuth）: `agents/mcp/server` の `createMcpHandler` + `@modelcontextprotocol/server`。リクエストごとに McpServer を作り、ユーザー情報は共有しない
   - `/authorize`（同意画面）→ GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
-  - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の予約。GitHub のトークンは DO の外へ返さない
-  - `TaskDO`（タスクごと）: 状態とイベント
-- `apps/agent`（Phase 2 の土台。M1 スパイク段階）: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ（現状は疎通確認用の `/__spike/agent-ping` のみ、`ENVIRONMENT=test` 限定）
+  - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の予約、月額予算（タスクごとの予約・usage の冪等な精算・終了時の返却）。GitHub のトークンは DO の外へ返さない
+  - `TaskDO`（タスクごと）: 状態とイベント。AgentDO への start / cancel の配送、イベントの取り込み、usage の精算を alarm で収束させる
+- `apps/agent`（Phase 2 の土台。M1 スパイク段階）: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
 
 ## 同意画面（confused deputy 対策）
 

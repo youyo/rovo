@@ -103,8 +103,16 @@ describe("TaskDO.ensureCreated", () => {
 describe("TaskDO.abandonIfUncreated", () => {
   it("作成済みなら何もせず現在の状態を返す", async () => {
     const { stub } = await createTask();
-    expect(await stub.abandonIfUncreated()).toEqual({ result: "created", status: "CREATING" });
-    expect(await stub.inspect()).toEqual({ kind: "created", status: "CREATING" });
+    expect(await stub.abandonIfUncreated()).toEqual({
+      result: "created",
+      status: "CREATING",
+      stopped: false,
+    });
+    expect(await stub.inspect()).toEqual({
+      kind: "created",
+      status: "CREATING",
+      stopped: false,
+    });
   });
 
   it("冪等: 2回目も abandoned。inspect は abandoned", async () => {

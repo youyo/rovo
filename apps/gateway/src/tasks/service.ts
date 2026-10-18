@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { TaskStatus } from "./state";
-import type { TaskDO, TaskEvent, TaskView } from "./task-do";
+import type { ResultView, TaskDO, TaskEvent, TaskView } from "./task-do";
 import { isTaskId, ulid } from "./ulid";
 import type { UserDO } from "./user-do";
 import {
@@ -24,6 +24,9 @@ export type ErrorCode =
   | "conflict"
   | "expired"
   | "concurrency_limit"
+  | "budget_exceeded"
+  | "not_ready"
+  | "upstream_unavailable"
   | "invalid_cursor"
   | "invalid_input";
 
@@ -45,7 +48,7 @@ export type StartValue = {
 };
 
 export const START_NOTE =
-  "Phase 1: 子エージェントはまだ無いため、タスクは CREATING のまま進みません。Draft PR も作られません（draft_pr_url は null）。";
+  "Phase 2: 子エージェントが Sandbox で編集・テスト・ローカル commit までを行います。push と Draft PR は作られません（draft_pr_url は null）。成果は終端になってから task_result で取得できます。";
 
 export type StatusValue = Omit<TaskView, "owner_id">;
 export type WaitValue = {
@@ -56,6 +59,7 @@ export type WaitValue = {
   retry_after_seconds?: number;
 };
 export type CancelValue = { task_id: string; status: TaskStatus };
+export type ResultValue = { task_id: string } & ResultView;
 
 function fail(
   code: ErrorCode,
@@ -121,9 +125,14 @@ export function createTaskService(
       const fingerprint = await computeFingerprint(input);
       const reserved = await deps.users(principal.githubUserId).reserve(requestKey, fingerprint);
       if (!reserved.ok) {
-        return reserved.code === "conflict"
-          ? fail("conflict", "idempotency_key was already used with different input")
-          : fail("concurrency_limit", "another task is already running for this user");
+        switch (reserved.code) {
+          case "conflict":
+            return fail("conflict", "idempotency_key was already used with different input");
+          case "budget_exceeded":
+            return fail("budget_exceeded", "the monthly budget is insufficient for a new task");
+          default:
+            return fail("concurrency_limit", "another task is already running for this user");
+        }
       }
 
       const created = await deps.tasks(reserved.task_id).ensureCreated({
@@ -144,11 +153,20 @@ export function createTaskService(
             return fail("invalid_input", "invalid task input");
         }
       }
+      // 子エージェントへの start を 1 回試みる。失敗・応答喪失でも TaskDO の alarm が再送するので、
+      // ここで失敗しても task_start は成功として返す（利用者の再試行に頼らない）。
+      let status = created.task.status;
+      try {
+        const advanced = await deps.tasks(reserved.task_id).advance();
+        if (advanced) status = advanced.status;
+      } catch (e) {
+        console.error("task_start_advance_error", e instanceof Error ? e.name : typeof e);
+      }
       return {
         ok: true,
         value: {
           task_id: created.task.task_id,
-          status: created.task.status,
+          status,
           draft_pr_url: created.task.draft_pr_url,
           note: START_NOTE,
         },
@@ -196,16 +214,36 @@ export function createTaskService(
     },
 
     /**
-     * TaskDO を先に CANCELLED に確定させ、その後 UserDO.release(task_id) を呼ぶ。
-     * release が失敗（例外）したら例外のまま返す。同じ cancel を再試行すれば、
-     * TaskDO 側は冪等に成功し、release も再試行される。
+     * TaskDO を CANCELLED に確定する（cancel の配送意図も同じトランザクションで記録される）。
+     * その後 advance で cancel を 1 回配送してみる。停止が確認できなくても成功として返す
+     * （TaskDO の alarm が stopped:true まで再送する）。同時実行の枠は、停止確認の後に TaskDO が解放する。
      */
     async cancel(principal: Principal, taskId: string): Promise<ServiceResult<CancelValue>> {
       if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
-      const r = await deps.tasks(taskId).cancel(principal.githubUserId);
+      const task = deps.tasks(taskId);
+      const r = await task.cancel(principal.githubUserId);
       if (!r.ok) return fail("not_found", NOT_FOUND);
-      await deps.users(principal.githubUserId).release(taskId);
+      try {
+        await task.advance();
+      } catch (e) {
+        console.error("task_cancel_advance_error", e instanceof Error ? e.name : typeof e);
+      }
       return { ok: true, value: { task_id: taskId, status: r.status } };
+    },
+
+    /** 終端（かつ AgentDO の停止確認済み）のタスクの成果を返す。それ以外は not_ready。 */
+    async result(principal: Principal, taskId: string): Promise<ServiceResult<ResultValue>> {
+      if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
+      const r = await deps.tasks(taskId).result(principal.githubUserId);
+      if (r.ok) return { ok: true, value: { task_id: taskId, ...r.result } };
+      switch (r.code) {
+        case "not_ready":
+          return fail("not_ready", "the task has not finished yet");
+        case "upstream_unavailable":
+          return fail("upstream_unavailable", "the agent is temporarily unavailable; retry later");
+        default:
+          return fail("not_found", NOT_FOUND);
+      }
     },
   };
 }

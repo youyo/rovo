@@ -40,6 +40,34 @@ const MAX_LIST_ITEM_LENGTH = 2_000;
 
 const stringList = z.array(z.string().min(1).max(MAX_LIST_ITEM_LENGTH)).max(MAX_LIST_ITEMS);
 
+// 検証コマンドの上限。AgentDO が Sandbox で実行するので、件数・長さ・時間を抑える（bash ツールの上限 30 分に合わせる）。
+export const MAX_VERIFICATION_COMMANDS = 10;
+const MAX_ARGV_ITEMS = 64;
+const MAX_ARGV_ITEM_LENGTH = 1_000;
+const MAX_CWD_LENGTH = 500;
+export const MAX_VERIFICATION_TIMEOUT_SECONDS = 1_800;
+
+/** リポジトリのルートからの相対パス。絶対パス・.. ・NUL・空要素を許さない。 */
+function isSafeRelativePath(p: string): boolean {
+  if (p.includes("\0") || p.startsWith("/")) return false;
+  return p.split("/").every((seg) => seg !== ".." && seg !== "");
+}
+
+export const verificationCommandSchema = z
+  .object({
+    argv: z.array(z.string().min(1).max(MAX_ARGV_ITEM_LENGTH)).min(1).max(MAX_ARGV_ITEMS),
+    cwd: z
+      .string()
+      .min(1)
+      .max(MAX_CWD_LENGTH)
+      .refine(isSafeRelativePath, "リポジトリのルートからの相対パス")
+      .optional(),
+    timeout_seconds: z.number().int().min(1).max(MAX_VERIFICATION_TIMEOUT_SECONDS).optional(),
+  })
+  .strict();
+
+export type VerificationCommandInput = z.infer<typeof verificationCommandSchema>;
+
 /** task_start の入力（design.md 4.3）。idempotency_key は含めない。 */
 export const taskInputSchema = z.object({
   // GitHub の上限: owner は 39 文字、リポジトリ名は 100 文字
@@ -50,6 +78,10 @@ export const taskInputSchema = z.object({
   instructions: z.string().min(1).max(MAX_INSTRUCTIONS),
   acceptance_criteria: stringList.default([]),
   constraints: stringList.default([]),
+  verification_commands: z
+    .array(verificationCommandSchema)
+    .max(MAX_VERIFICATION_COMMANDS)
+    .default([]),
 });
 
 /** 入力全体（JSON）の上限。項目ごとの上限だけでは合計が大きくなりうるため。 */
@@ -66,10 +98,10 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * 項目を固定順の配列にして JSON 化するので、プロパティ順や連結の曖昧さに影響されない。
  * 正規化: repository と base_sha は小文字化（GitHub 上は大文字小文字を区別しない）。
  * 配列の省略は空配列として扱う。base_ref などは区別するのでそのまま。
+ * verification_commands は argv / cwd / timeout_seconds を順序込みで含める（検証の入力が違えば別のタスク）。
  */
 export async function computeFingerprint(input: TaskInput): Promise<string> {
-  const canonical = JSON.stringify([
-    "v1",
+  const fields: unknown[] = [
     input.repository.toLowerCase(),
     input.base_ref,
     input.base_sha.toLowerCase(),
@@ -77,7 +109,16 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
     input.instructions,
     input.acceptance_criteria ?? [],
     input.constraints ?? [],
+  ];
+  // 検証コマンドが無ければ v1 のまま（Phase 1 で保存済みの値と一致させる）。あれば v2 として末尾に足す。
+  const commands = (input.verification_commands ?? []).map((c) => [
+    c.argv,
+    c.cwd ?? null,
+    c.timeout_seconds ?? null,
   ]);
+  const canonical = JSON.stringify(
+    commands.length === 0 ? ["v1", ...fields] : ["v2", ...fields, commands],
+  );
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

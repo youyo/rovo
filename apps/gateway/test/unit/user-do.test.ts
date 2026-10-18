@@ -177,6 +177,7 @@ describe("UserDO.reserve の照合による回収", () => {
     const a = await reserveOk(stub, "key-1");
     await create(uid, a.task_id);
     await taskStub(a.task_id).cancel(uid);
+    await taskStub(a.task_id).advance(); // AgentDO の停止を確認する（これが済むまで枠は解放されない）
     const b = await reserveOk(stub, "key-2", FP2);
     expect(b.task_id).not.toBe(a.task_id);
     expect((await reservation(stub)).active_task_id).toBe(b.task_id);
@@ -295,15 +296,23 @@ describe("UserDO.reserve の照合による回収", () => {
     expect(await taskStub(retry.task_id).inspect()).toEqual({
       kind: "created",
       status: "CREATING",
+      stopped: false,
     });
   });
 
-  it("cancel 後に release が失敗しても、次の reserve の照合で回収される", async () => {
+  it("停止確認の後に UserDO への終了通知が届かなくても、次の reserve の照合で回収される", async () => {
     const uid = newUserId();
     const stub = userStub(uid);
     const a = await reserveOk(stub, "key-1");
     await create(uid, a.task_id);
-    await taskStub(a.task_id).cancel(uid); // release は呼ばれなかった
+    await runInDurableObject(taskStub(a.task_id), (i) => {
+      (i as unknown as { userStub: () => unknown }).userStub = () => {
+        throw new Error("user do unreachable");
+      };
+    });
+    await taskStub(a.task_id).cancel(uid);
+    await taskStub(a.task_id).advance(); // 停止は確認できたが、finishTask は届かない
+    expect(await taskStub(a.task_id).inspect()).toMatchObject({ stopped: true });
     expect((await reservation(stub)).active_task_id).toBe(a.task_id);
     expect((await stub.reserve("key-2", FP2)).ok).toBe(true);
   });

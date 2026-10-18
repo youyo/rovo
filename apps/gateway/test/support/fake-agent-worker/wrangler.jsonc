@@ -1,0 +1,9 @@
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "rovo-agent",
+  "main": "index.ts",
+  "compatibility_date": "2026-10-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "AGENT_DO", "class_name": "AgentDO" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AgentDO"] }]
+}

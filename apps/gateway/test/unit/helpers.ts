@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { ulid } from "../../src/tasks/ulid";
+import type { FakeAgentDO } from "../support/fake-agent-do";
 
 export function newTaskId(): string {
   return ulid();
@@ -7,6 +8,11 @@ export function newTaskId(): string {
 
 export function taskStub(taskId: string) {
   return env.TASK_DO.getByName(taskId);
+}
+
+/** 偽の AgentDO（vitest.config.ts で AGENT_DO を差し替えている）。台本の登録と呼び出し回数の確認に使う。 */
+export function fakeAgent(taskId: string) {
+  return (env.AGENT_DO as unknown as DurableObjectNamespace<FakeAgentDO>).getByName(taskId);
 }
 
 let userSeq = 1_000_000 + Math.floor(Math.random() * 1_000_000);
@@ -39,3 +45,5 @@ export function sampleInput(
     ...overrides,
   };
 }
+
+export const FP = "f".repeat(64);

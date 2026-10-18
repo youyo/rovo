@@ -10,4 +10,6 @@ interface Env {
   // ---- ENVIRONMENT=test のときだけ上書きできる GitHub の接続先 ----
   GITHUB_OAUTH_BASE?: string;
   GITHUB_API_BASE?: string;
+  /** 月額の費用上限（USD）。未設定は 100 */
+  MONTHLY_BUDGET_USD?: string;
 }

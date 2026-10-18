@@ -4,12 +4,18 @@ import { z } from "zod";
 import { isAuthProps } from "../auth/props";
 import { checkStartInput, createTaskService, type Principal } from "../tasks/service";
 
-/** ツールが返すエラーコード（phase1.md の一覧 + 想定外の internal）。 */
+/**
+ * ツールが返すエラーコード（phase1.md の一覧 + 想定外の internal）。
+ * Phase 2 で追加: budget_exceeded（月額の枠が足りず task_start を拒否。concurrency_limit と違い待っても空かない）、
+ * not_ready（task_result の対象がまだ終端でない）。
+ */
 export type ToolErrorCode =
   | "not_found"
   | "conflict"
   | "expired"
   | "concurrency_limit"
+  | "budget_exceeded"
+  | "not_ready"
   | "invalid_cursor"
   | "forbidden"
   | "reauth_required"
@@ -24,8 +30,11 @@ type Outcome = { ok: true; value: unknown } | { ok: false; error: ToolError };
 const UPSTREAM_RETRY_AFTER_SECONDS = 30;
 
 const START_DESCRIPTION = [
-  "リポジトリに対するコーディングタスクを作成する。応答は {task_id, status, draft_pr_url, note}。",
-  "Phase 1 では子エージェントが未実装のため、タスクは CREATING のまま進まず、Draft PR も作られない（draft_pr_url は常に null）。",
+  "リポジトリに対するコーディングタスクを作成し、子エージェントを起動する。応答は {task_id, status, draft_pr_url, note}。",
+  "子エージェントが start を受理すると status は RUNNING になる（受理を確認できなかった場合は CREATING のままで、Gateway が自動で再送する）。進捗は task_wait、成果（要約・検証結果・patch）は終端になってから task_result で取得する。",
+  "Phase 2 では push も Draft PR も作られない（draft_pr_url は常に null）。成果は patch として返る。",
+  "verification_commands（任意）は {argv: string[], cwd?: リポジトリ内の相対パス, timeout_seconds?} の配列（最大 10 件）。完了の申告後に Sandbox で実行され、全部が終了コード 0 なら COMPLETED になる。指定しない場合はモデルの申告だけで完了し、結果は「未検証」と記される。",
+  "1 タスクにつき $10 を月額の枠から予約する。枠が足りなければ budget_exceeded で拒否される。",
   "idempotency_key（1〜128 文字の [A-Za-z0-9_-]）を渡すと、同じキー・同じ入力の再試行で同じ task_id が返る。",
   "省略した場合は再試行の重複排除を保証しない（応答が失われて再送すると別タスクになりうる）。",
   "利用者ごとに同時に実行できるタスクは 1 件まで。対象リポジトリは GitHub App が導入済みで、利用者に push 権限が必要。",
@@ -142,6 +151,15 @@ const startSchema = z.object({
   instructions: z.string(),
   acceptance_criteria: z.array(z.string()).optional(),
   constraints: z.array(z.string()).optional(),
+  verification_commands: z
+    .array(
+      z.object({
+        argv: z.array(z.string()).describe("実行ファイルと引数（シェルは通らない）"),
+        cwd: z.string().optional().describe("リポジトリのルートからの相対パス"),
+        timeout_seconds: z.number().optional().describe("1〜1800"),
+      }),
+    )
+    .optional(),
   idempotency_key: z.string().optional(),
 });
 const taskIdSchema = z.object({ task_id: z.string() });
@@ -217,10 +235,27 @@ export function createRovoServer(env: Env): McpServer {
   );
 
   server.registerTool(
+    "task_result",
+    {
+      description:
+        "終端になったタスクの成果を返す。{task_id, status, summary, verification: {commands, results, verified, attempts, commit_sha?}, warnings, patch | diffstat, patch_too_large, usage}。verified が false のときは検証コマンドを通っていない（未指定、またはモデルの申告のみ）。warnings にテスト設定の変更などが記される。タスクが終端でない、またはエージェントの停止を確認できていない間は not_ready エラーを返すので、task_wait で終端を待ってから呼ぶ。自分のタスクだけ参照できる。",
+      inputSchema: publishedSchema(taskIdSchema),
+    },
+    async (args) =>
+      runTool(env, "task_result", async (principal, userDo) => {
+        const typed = parseToolInput(taskIdSchema, args);
+        if (!typed.ok) return typed;
+        const { task_id } = typed.value;
+        const denied = await requireMember(principal, userDo);
+        return denied ?? service.result(principal, task_id);
+      }),
+  );
+
+  server.registerTool(
     "task_cancel",
     {
       description:
-        "タスクをキャンセルする。終端状態のタスクに対しても冪等に成功し、現在の状態を返す。{task_id, status}。",
+        "タスクをキャンセルする。終端状態のタスクに対しても冪等に成功し、現在の状態を返す。{task_id, status}。CANCELLED は即座に確定するが、子エージェントの停止の確認は Gateway が収束するまで再送する（確認できるまで次のタスクは始められない）。",
       inputSchema: publishedSchema(taskIdSchema),
     },
     async (args) =>

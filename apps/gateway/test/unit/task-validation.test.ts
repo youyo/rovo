@@ -208,3 +208,54 @@ describe("ulid", () => {
     expect(isTaskId(`${"0".repeat(25)}U`)).toBe(false);
   });
 });
+
+describe("verification_commands の検証", () => {
+  const ok = { argv: ["npm", "test"] };
+  const parseVc = (vc: unknown) =>
+    taskInputSchema.safeParse({ ...base, verification_commands: vc });
+
+  it("省略できる（空配列が既定）", () => {
+    const r = taskInputSchema.safeParse(base);
+    expect(r.success && r.data.verification_commands).toEqual([]);
+  });
+  it("argv / cwd / timeout_seconds を受け付ける", () => {
+    const r = parseVc([{ argv: ["pnpm", "test"], cwd: "packages/app", timeout_seconds: 600 }, ok]);
+    expect(r.success).toBe(true);
+  });
+  it.each([
+    ["argv が空配列", [{ argv: [] }]],
+    ["argv の要素が空文字", [{ argv: ["npm", ""] }]],
+    ["argv が文字列", [{ argv: "npm test" }]],
+    ["argv の要素が多すぎる", [{ argv: Array(65).fill("a") }]],
+    ["argv の要素が長すぎる", [{ argv: ["a".repeat(1_001)] }]],
+    ["件数が多すぎる", Array(11).fill(ok)],
+    ["cwd が絶対パス", [{ argv: ["a"], cwd: "/etc" }]],
+    ["cwd に ..", [{ argv: ["a"], cwd: "../x" }]],
+    ["cwd の途中に ..", [{ argv: ["a"], cwd: "a/../../x" }]],
+    ["cwd に NUL", [{ argv: ["a"], cwd: "a\0b" }]],
+    ["cwd が空", [{ argv: ["a"], cwd: "" }]],
+    ["timeout_seconds が 0", [{ argv: ["a"], timeout_seconds: 0 }]],
+    ["timeout_seconds が小数", [{ argv: ["a"], timeout_seconds: 1.5 }]],
+    ["timeout_seconds が上限超過", [{ argv: ["a"], timeout_seconds: 1_801 }]],
+    ["未知の項目", [{ argv: ["a"], shell: true }]],
+  ])("%s は拒否する", (_n, vc) => {
+    expect(parseVc(vc).success).toBe(false);
+  });
+  it("fingerprint: 検証コマンドが違えば別の値、省略と空配列は同じ", async () => {
+    const none = await computeFingerprint(taskInputSchema.parse(base));
+    const empty = await computeFingerprint(
+      taskInputSchema.parse({ ...base, verification_commands: [] }),
+    );
+    const a = await computeFingerprint(
+      taskInputSchema.parse({ ...base, verification_commands: [ok] }),
+    );
+    const b = await computeFingerprint(
+      taskInputSchema.parse({ ...base, verification_commands: [{ argv: ["npm", "run", "lint"] }] }),
+    );
+    const c = await computeFingerprint(
+      taskInputSchema.parse({ ...base, verification_commands: [{ ...ok, cwd: "x" }] }),
+    );
+    expect(empty).toBe(none);
+    expect(new Set([none, a, b, c]).size).toBe(4);
+  });
+});

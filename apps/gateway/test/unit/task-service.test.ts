@@ -1,7 +1,8 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { createTaskService, type Principal } from "../../src/tasks/service";
-import { newTaskId, newUserId, taskStub, userStub } from "./helpers";
+import { fakeAgent, newTaskId, newUserId, taskStub, userStub } from "./helpers";
 
 const startInput = {
   repository: "acme/widgets",
@@ -18,12 +19,12 @@ function principal(): Principal {
 }
 
 describe("task service: start", () => {
-  it("task_id と CREATING を返し、draft_pr_url は null、note を含む", async () => {
+  it("task_id と、AgentDO が start を受理した RUNNING を返し、draft_pr_url は null、note を含む", async () => {
     const svc = createTaskService(env);
     const r = await svc.start(principal(), { ...startInput });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toMatchObject({ status: "CREATING", draft_pr_url: null });
+    expect(r.value).toMatchObject({ status: "RUNNING", draft_pr_url: null });
     expect(r.value.task_id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
     expect(r.value.note).toEqual(expect.any(String));
   });
@@ -138,7 +139,68 @@ describe("task service: start", () => {
       error: { code: "concurrency_limit" },
     });
     const retry = await svc.start(p, { ...startInput, idempotency_key: "k1" });
-    expect(retry).toMatchObject({ ok: true, value: { status: "CREATING" } });
+    expect(retry).toMatchObject({ ok: true, value: { status: "RUNNING" } });
+  });
+
+  it("AgentDO への start が失敗しても task_start は成功し、CREATING のまま（alarm が再送する）", async () => {
+    const svc = createTaskService(env, {
+      tasks: (id) => {
+        const real = taskStub(id);
+        return new Proxy(real, {
+          get(target, prop) {
+            if (prop === "advance") {
+              return async () => {
+                throw new Error("task do unreachable");
+              };
+            }
+            return Reflect.get(target, prop);
+          },
+        });
+      },
+    });
+    const r = await svc.start(principal(), { ...startInput });
+    expect(r).toMatchObject({ ok: true, value: { status: "CREATING" } });
+  });
+
+  it("verification_commands を検証し、taskSpec として AgentDO に渡す", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    const bad = await svc.start(p, { ...startInput, verification_commands: [{ argv: [] }] });
+    expect(bad).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+    const r = await svc.start(p, {
+      ...startInput,
+      verification_commands: [{ argv: ["npm", "test"], cwd: "pkg", timeout_seconds: 120 }],
+    });
+    if (!r.ok) throw new Error("start failed");
+    const { specs } = await fakeAgent(r.value.task_id).calls();
+    expect(specs[0]).toMatchObject({
+      taskId: r.value.task_id,
+      userId: String(p.githubUserId),
+      verificationCommands: [{ argv: ["npm", "test"], cwd: "pkg", timeoutSeconds: 120 }],
+      budgetUsd: 10,
+    });
+  });
+
+  it("verification_commands が違えば同じキーでも conflict", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    await svc.start(p, { ...startInput, idempotency_key: "k" });
+    const r = await svc.start(p, {
+      ...startInput,
+      idempotency_key: "k",
+      verification_commands: [{ argv: ["npm", "test"] }],
+    });
+    expect(r).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+
+  it("月額の枠が足りなければ budget_exceeded（TaskDO も作らない）", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    await runInDurableObject(userStub(p.githubUserId), (i) => {
+      (i as unknown as { monthlyLimitUsd: () => number }).monthlyLimitUsd = () => 5;
+    });
+    const r = await svc.start(p, { ...startInput });
+    expect(r).toMatchObject({ ok: false, error: { code: "budget_exceeded" } });
   });
 
   it("回収済み(tombstone)のキーで再試行すると expired", async () => {
@@ -195,11 +257,11 @@ describe("task service: status / wait / cancel", () => {
     const r = await svc.status(p, taskId);
     expect(r.ok && r.value).toMatchObject({
       task_id: taskId,
-      status: "CREATING",
+      status: "RUNNING",
       repository: "acme/widgets",
       title: "Implement authentication",
       draft_pr_url: null,
-      latest_cursor: "1",
+      latest_cursor: "2",
     });
     expect(r.ok && Date.parse(r.value.created_at)).not.toBeNaN();
     expect(r.ok && Date.parse(r.value.updated_at)).not.toBeNaN();
@@ -223,7 +285,7 @@ describe("task service: status / wait / cancel", () => {
   it("wait は task_id を付けて返し、invalid_cursor / invalid_input を写す", async () => {
     const { svc, p, taskId } = await started();
     const r = await svc.wait(p, { task_id: taskId, cursor: "0", timeout_seconds: 0 });
-    expect(r.ok && r.value).toMatchObject({ task_id: taskId, status: "CREATING", cursor: "1" });
+    expect(r.ok && r.value).toMatchObject({ task_id: taskId, status: "RUNNING", cursor: "2" });
     expect(await svc.wait(p, { task_id: taskId, cursor: "99" })).toMatchObject({
       ok: false,
       error: { code: "invalid_cursor" },
@@ -237,7 +299,7 @@ describe("task service: status / wait / cancel", () => {
   it("wait の retry_after_seconds を error ではなく結果に含める", async () => {
     const { svc, p, taskId } = await started();
     const pendings = Array.from({ length: 16 }, () =>
-      svc.wait(p, { task_id: taskId, cursor: "1", timeout_seconds: 30 }),
+      svc.wait(p, { task_id: taskId, cursor: "2", timeout_seconds: 30 }),
     );
     const { runInDurableObject } = await import("cloudflare:test");
     for (let i = 0; i < 200; i++) {
@@ -247,7 +309,7 @@ describe("task service: status / wait / cancel", () => {
       if (n >= 16) break;
       await new Promise((r) => setTimeout(r, 10));
     }
-    const over = await svc.wait(p, { task_id: taskId, cursor: "1" });
+    const over = await svc.wait(p, { task_id: taskId, cursor: "2" });
     expect(over.ok && over.value.retry_after_seconds).toBeGreaterThan(0);
     await svc.cancel(p, taskId);
     await Promise.all(pendings);
@@ -257,7 +319,7 @@ describe("task service: status / wait / cancel", () => {
     const { svc, p, taskId } = await started();
     const c = await svc.cancel(p, taskId);
     expect(c).toMatchObject({ ok: true, value: { task_id: taskId, status: "CANCELLED" } });
-    const w = await svc.wait(p, { task_id: taskId, cursor: "1", timeout_seconds: 5 });
+    const w = await svc.wait(p, { task_id: taskId, cursor: "2", timeout_seconds: 5 });
     expect(w.ok && w.value.events.map((e) => e.type)).toEqual(["cancelled"]);
     const next = await svc.start(p, { ...startInput, title: "next" });
     expect(next.ok).toBe(true);
@@ -268,43 +330,71 @@ describe("task service: status / wait / cancel", () => {
     await svc.cancel(p, taskId);
     expect(await svc.cancel(p, taskId)).toMatchObject({ ok: true, value: { status: "CANCELLED" } });
     const w = await svc.wait(p, { task_id: taskId, timeout_seconds: 0 });
-    expect(w.ok && w.value.events).toHaveLength(2);
+    expect(w.ok && w.value.events).toHaveLength(3);
   });
 
-  it("release が失敗しても cancel の再試行で解放される", async () => {
-    let failRelease = true;
-    const svc = createTaskService(env, {
-      users: (id) => {
-        const real = userStub(id);
-        return new Proxy(real, {
-          get(target, prop) {
-            if (prop === "release") {
-              return async (taskId: string) => {
-                if (failRelease) {
-                  failRelease = false;
-                  throw new Error("release lost");
-                }
-                return target.release(taskId);
-              };
-            }
-            return Reflect.get(target, prop);
-          },
-        });
-      },
+  it("停止が確認できるまで枠は解放されない。確認できたら次の start が通る", async () => {
+    const { svc, p, taskId } = await started();
+    await fakeAgent(taskId).setProgram({ cancel: ["not_stopped"] });
+    expect(await svc.cancel(p, taskId)).toMatchObject({ ok: true, value: { status: "CANCELLED" } });
+    // AgentDO の停止が確認できていない
+    expect(await svc.start(p, { ...startInput, title: "next" })).toMatchObject({
+      ok: false,
+      error: { code: "concurrency_limit" },
     });
+    // alarm の代わりに advance で再送する（stopped:true が返る）
+    await taskStub(taskId).advance();
+    expect((await svc.start(p, { ...startInput, title: "next" })).ok).toBe(true);
+  });
+});
+
+describe("task service: result", () => {
+  async function started() {
+    const svc = createTaskService(env);
     const p = principal();
-    const s = await svc.start(p, { ...startInput });
-    if (!s.ok) throw new Error("start failed");
-    await expect(svc.cancel(p, s.value.task_id)).rejects.toThrow("release lost");
-    // TaskDO は CANCELLED 確定済み
-    const st = await svc.status(p, s.value.task_id);
-    expect(st.ok && st.value.status).toBe("CANCELLED");
-    // 再試行で解放される: 予約が空いている
-    expect((await svc.cancel(p, s.value.task_id)).ok).toBe(true);
-    const { runInDurableObject } = await import("cloudflare:test");
-    const [res] = await runInDurableObject(userStub(p.githubUserId), (_i, state) =>
-      state.storage.sql.exec("SELECT active_task_id FROM reservation").toArray(),
-    );
-    expect(res).toEqual({ active_task_id: null });
+    const r = await svc.start(p, { ...startInput });
+    if (!r.ok) throw new Error("start failed");
+    return { svc, p, taskId: r.value.task_id };
+  }
+
+  it("終端でなければ not_ready", async () => {
+    const { svc, p, taskId } = await started();
+    expect(await svc.result(p, taskId)).toMatchObject({ ok: false, error: { code: "not_ready" } });
+  });
+
+  it("別ユーザー・存在しない・形式不正の task_id は not_found", async () => {
+    const { svc, taskId } = await started();
+    for (const id of [taskId, newTaskId(), "bad", ""]) {
+      expect(await svc.result(principal(), id)).toMatchObject({
+        ok: false,
+        error: { code: "not_found" },
+      });
+    }
+  });
+
+  it("終端になれば結果を返す", async () => {
+    const { svc, p, taskId } = await started();
+    const agent = fakeAgent(taskId);
+    await agent.setPhase("completed");
+    await taskStub(taskId).advance();
+    const r = await svc.result(p, taskId);
+    expect(r).toMatchObject({
+      ok: true,
+      value: { task_id: taskId, status: "COMPLETED", summary: "fake summary" },
+    });
+  });
+
+  it("AgentDO が使えなければ upstream_unavailable", async () => {
+    const { svc, p, taskId } = await started();
+    await svc.cancel(p, taskId);
+    await runInDurableObject(taskStub(taskId), (i) => {
+      (i as unknown as { agentStub: () => unknown }).agentStub = () => {
+        throw new Error("down");
+      };
+    });
+    expect(await svc.result(p, taskId)).toMatchObject({
+      ok: false,
+      error: { code: "upstream_unavailable" },
+    });
   });
 });

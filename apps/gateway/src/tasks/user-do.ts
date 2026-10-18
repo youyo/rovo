@@ -27,9 +27,23 @@ const MAX_MEMBER_ATTEMPTS = 3;
 /** 照合中に予約が入れ替わったときの再判定の上限。 */
 const MAX_RECONCILE_ATTEMPTS = 5;
 
+/** タスク 1 件に予約する予算（USD）。AgentDO の budgetUsd にも同じ値を渡す。 */
+export const TASK_BUDGET_USD = 10;
+const MICRO = 1_000_000;
+/** MONTHLY_BUDGET_USD が未設定・不正なときの月額上限（USD）。 */
+export const DEFAULT_MONTHLY_BUDGET_USD = 100;
+
 export type ReserveResult =
   | { ok: true; task_id: string; reused: boolean }
-  | { ok: false; code: "conflict" | "concurrency_limit" };
+  | { ok: false; code: "conflict" | "concurrency_limit" | "budget_exceeded" };
+
+export type SettleResult = { ok: true; applied: boolean } | { ok: false };
+export type FinishResult = { ok: true; released: boolean };
+
+/** 開始時刻の月（UTC, "YYYY-MM"）。月またぎのタスクは開始した月に計上する。 */
+function monthOf(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 7);
+}
 
 type ReservationRow = { active_task_id: string | null; reserved_at: number; version: number };
 type RequestRow = { task_id: string; fingerprint: string };
@@ -98,6 +112,17 @@ export class UserDO extends DurableObject<Env> {
       reserved_at INTEGER NOT NULL,
       version INTEGER NOT NULL
     )`);
+    // タスクごとの予算。reserved は開始時に予約した額、settled は取り込んだ usage の累計（実費）。
+    // closed の後は予約を数えず、実費だけが月の枠を使う。単位はマイクロドル（整数）。
+    sql.exec(`CREATE TABLE IF NOT EXISTS task_budget (
+      task_id TEXT PRIMARY KEY,
+      month TEXT NOT NULL,
+      reserved_micro INTEGER NOT NULL,
+      settled_micro INTEGER NOT NULL DEFAULT 0,
+      settled_seq INTEGER NOT NULL DEFAULT 0,
+      closed INTEGER NOT NULL DEFAULT 0
+    )`);
+    sql.exec("CREATE INDEX IF NOT EXISTS task_budget_month ON task_budget (month)");
     sql.exec(`CREATE TABLE IF NOT EXISTS membership_cache (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       checked_at INTEGER NOT NULL,
@@ -129,6 +154,13 @@ export class UserDO extends DurableObject<Env> {
     );
   }
 
+  /** 月額の費用上限（USD）。env の MONTHLY_BUDGET_USD（既定 100）。不正な値は既定に戻す。テストで差し替える。 */
+  monthlyLimitUsd: () => number = () => {
+    const raw = this.env.MONTHLY_BUDGET_USD;
+    const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
+    return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MONTHLY_BUDGET_USD;
+  };
+
   /** 照合先の TaskDO。テストで差し替える。 */
   protected taskStub(taskId: string): TaskInspector {
     return this.env.TASK_DO.getByName(taskId);
@@ -147,7 +179,21 @@ export class UserDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       "UPDATE reservation SET active_task_id = NULL, version = version + 1 WHERE singleton = 1",
     );
+    // 枠を手放したタスクは、予約額をもう数えない（実費だけが残る）。
+    this.ctx.storage.sql.exec("UPDATE task_budget SET closed = 1 WHERE task_id = ?", taskId);
     return true;
+  }
+
+  /** 月の枠のうち、使用済みと予約中の合計（マイクロドル）。 */
+  private committedMicro(month: string): number {
+    return this.ctx.storage.sql
+      .exec<{ total: number }>(
+        `SELECT COALESCE(SUM(CASE WHEN closed = 1 THEN settled_micro
+                                  ELSE MAX(reserved_micro, settled_micro) END), 0) AS total
+         FROM task_budget WHERE month = ?`,
+        month,
+      )
+      .one().total;
   }
 
   /**
@@ -215,7 +261,20 @@ export class UserDO extends DurableObject<Env> {
       };
     }
 
+    // 同時実行の枠が空いていても、月額の枠が足りなければ始めない（request_key は消費しない）。
+    const month = monthOf(at);
+    const reservedMicro = Math.round(TASK_BUDGET_USD * MICRO);
+    if (this.committedMicro(month) + reservedMicro > Math.round(this.monthlyLimitUsd() * MICRO)) {
+      return { kind: "done", result: { ok: false, code: "budget_exceeded" } };
+    }
+
     const taskId = ulid(at);
+    sql.exec(
+      "INSERT INTO task_budget (task_id, month, reserved_micro) VALUES (?, ?, ?)",
+      taskId,
+      month,
+      reservedMicro,
+    );
     sql.exec(
       "INSERT INTO requests (request_key, task_id, fingerprint, created_at) VALUES (?, ?, ?, ?)",
       requestKey,
@@ -239,13 +298,14 @@ export class UserDO extends DurableObject<Env> {
       case "abandoned":
         return true;
       case "created":
-        return isTerminal(inspection.status);
+        // 終端でも、AgentDO の停止が確認できるまでは解放しない（古いタスクが動いたまま次が始まらないように）
+        return isTerminal(inspection.status) && inspection.stopped;
       case "uncreated": {
         if (this.now() - reservedAt < RESERVATION_RECLAIM_AFTER_MS) return false;
         // 回収は tombstone を打てたときだけ。作成済みが返れば解放しない。
         const r = await task.abandonIfUncreated();
         if (r.result === "abandoned") return true;
-        return isTerminal(r.status);
+        return isTerminal(r.status) && r.stopped;
       }
     }
   }
@@ -258,6 +318,59 @@ export class UserDO extends DurableObject<Env> {
       return this.clearIfUnchanged(taskId, cur.version);
     });
     return { released };
+  }
+
+  /**
+   * usage（累計）の精算。TaskDO が取り込んだ usage イベントの seq ごとに冪等に呼ばれる。
+   * seq が記録済み以下なら何もしない。AgentDO は直接ここへ計上しない（一方向 RPC）。
+   */
+  async settleUsage(taskId: string, usageSeq: number, costMicroUsd: number): Promise<SettleResult> {
+    const r = this.ctx.storage.transactionSync(() =>
+      this.applySettle(taskId, usageSeq, costMicroUsd),
+    );
+    return r === "unknown" ? { ok: false } : { ok: true, applied: r === "applied" };
+  }
+
+  /** 精算を反映する。同期区間内で呼ぶこと。 */
+  private applySettle(
+    taskId: string,
+    usageSeq: number,
+    costMicroUsd: number,
+  ): "applied" | "ignored" | "unknown" {
+    const sql = this.ctx.storage.sql;
+    const row = sql
+      .exec<{ settled_seq: number }>(
+        "SELECT settled_seq FROM task_budget WHERE task_id = ?",
+        taskId,
+      )
+      .toArray()[0];
+    if (!row) return "unknown";
+    if (!Number.isSafeInteger(usageSeq) || !Number.isFinite(costMicroUsd) || costMicroUsd < 0) {
+      return "ignored";
+    }
+    if (usageSeq <= row.settled_seq) return "ignored";
+    sql.exec(
+      "UPDATE task_budget SET settled_micro = ?, settled_seq = ? WHERE task_id = ?",
+      Math.round(costMicroUsd),
+      usageSeq,
+      taskId,
+    );
+    return "applied";
+  }
+
+  /**
+   * タスクの終了。最終の実費を精算し、予約を閉じて（予約額との差額は月の枠に戻る）、
+   * 同時実行の枠を解放する。TaskDO が「終端 + AgentDO の停止確認済み」になってから呼ぶ。冪等。
+   */
+  async finishTask(taskId: string, usageSeq: number, costMicroUsd: number): Promise<FinishResult> {
+    const released = this.ctx.storage.transactionSync(() => {
+      this.applySettle(taskId, usageSeq, costMicroUsd);
+      this.ctx.storage.sql.exec("UPDATE task_budget SET closed = 1 WHERE task_id = ?", taskId);
+      const cur = this.reservationRow();
+      if (cur.active_task_id !== taskId) return false;
+      return this.clearIfUnchanged(taskId, cur.version);
+    });
+    return { ok: true, released };
   }
 
   // ---- GitHub 連携 ----

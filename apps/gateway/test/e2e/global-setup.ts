@@ -14,6 +14,8 @@ declare module "vitest" {
 }
 
 const GATEWAY_DIR = join(import.meta.dirname, "..", "..");
+// AGENT_DO（script_name: rovo-agent）の相手になる偽の agent Worker。
+const FAKE_AGENT_CONFIG = join("test", "support", "fake-agent-worker", "wrangler.jsonc");
 
 /** テスト用の固定値（実在の secret ではない）。 */
 const ALLOWED_ORG = "acme";
@@ -145,6 +147,11 @@ export default async function setup(project: TestProject) {
       [
         wranglerBin,
         "dev",
+        // gateway と、AGENT_DO の相手になる偽の agent Worker（script_name 付きのバインディングを解決するため）
+        "-c",
+        "wrangler.jsonc",
+        "-c",
+        FAKE_AGENT_CONFIG,
         "--ip",
         "127.0.0.1",
         "--port",

@@ -1,10 +1,11 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { describe, expect, it } from "vitest";
 import { createApiApp } from "../../src/app";
 import { FakeGitHubFetch, installFakeGitHub } from "./fake-github-fetch";
-import { newUserId } from "./helpers";
+import { fakeAgent, newUserId, taskStub, userStub } from "./helpers";
 
 // OAuthProvider が apiHandler に渡す ExecutionContext を模す（props はリクエスト単位）
 function ctxWithProps(props: Record<string, unknown>): ExecutionContext {
@@ -59,19 +60,26 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("4 つのツールだけを公開し、Phase 1 の制約を説明に書く", async () => {
+  it("5 つのツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "task_cancel",
+      "task_result",
       "task_start",
       "task_status",
       "task_wait",
     ]);
     const start = tools.find((t) => t.name === "task_start");
-    expect(start?.description).toContain("CREATING");
+    expect(start?.description).toContain("RUNNING");
     expect(start?.description).toContain("idempotency_key");
+    expect(start?.description).toContain("verification_commands");
+    expect(start?.description).toContain("budget_exceeded");
+    const props = start?.inputSchema.properties as Record<string, { type?: string }>;
+    expect(props.verification_commands?.type).toBe("array");
+    const result = tools.find((t) => t.name === "task_result");
+    expect(result?.description).toContain("not_ready");
     await client.close();
   });
 });
@@ -84,7 +92,7 @@ describe("task_start / status / wait / cancel", () => {
     const started = await client.callTool({ name: "task_start", arguments: startArgs("t1") });
     expect(started.isError).toBeFalsy();
     const s = body(started);
-    expect(s).toMatchObject({ status: "CREATING", draft_pr_url: null });
+    expect(s).toMatchObject({ status: "RUNNING", draft_pr_url: null });
     expect(typeof s.note).toBe("string");
 
     const status = body(
@@ -92,21 +100,21 @@ describe("task_start / status / wait / cancel", () => {
     );
     expect(status).toMatchObject({
       task_id: s.task_id,
-      status: "CREATING",
+      status: "RUNNING",
       repository: "acme/widgets",
       title: "t1",
       draft_pr_url: null,
-      latest_cursor: "1",
+      latest_cursor: "2",
     });
     expect(Object.keys(status)).not.toContain("owner_id");
 
     const w1 = body(
       await client.callTool({
         name: "task_wait",
-        arguments: { task_id: s.task_id, cursor: "1", timeout_seconds: 0 },
+        arguments: { task_id: s.task_id, cursor: "2", timeout_seconds: 0 },
       }),
     );
-    expect(w1).toMatchObject({ status: "CREATING", cursor: "1", events: [] });
+    expect(w1).toMatchObject({ status: "RUNNING", cursor: "2", events: [] });
 
     const c = body(
       await client.callTool({ name: "task_cancel", arguments: { task_id: s.task_id } }),
@@ -114,9 +122,9 @@ describe("task_start / status / wait / cancel", () => {
     expect(c).toEqual({ task_id: s.task_id, status: "CANCELLED" });
 
     const w2 = body(
-      await client.callTool({ name: "task_wait", arguments: { task_id: s.task_id, cursor: "1" } }),
+      await client.callTool({ name: "task_wait", arguments: { task_id: s.task_id, cursor: "2" } }),
     );
-    expect(w2).toMatchObject({ status: "CANCELLED", cursor: "2" });
+    expect(w2).toMatchObject({ status: "CANCELLED", cursor: "3" });
     expect((w2.events as { type: string }[]).map((e) => e.type)).toEqual(["cancelled"]);
     await client.close();
   });
@@ -157,6 +165,83 @@ describe("task_start / status / wait / cancel", () => {
   });
 });
 
+describe("task_start の追加入力と task_result", () => {
+  it("verification_commands を受け付け、不正なら invalid_input", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const bad = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { verification_commands: [{ argv: [] }] }),
+    });
+    expect(bad.isError).toBe(true);
+    expect(body(bad).code).toBe("invalid_input");
+    const ok = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", {
+        verification_commands: [{ argv: ["npm", "test"], cwd: "pkg", timeout_seconds: 60 }],
+      }),
+    });
+    expect(ok.isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("月額の枠が足りなければ budget_exceeded（concurrency_limit とは別コード）", async () => {
+    const u = await user("alice");
+    await runInDurableObject(userStub(u.id), (i) => {
+      (i as unknown as { monthlyLimitUsd: () => number }).monthlyLimitUsd = () => 1;
+    });
+    const client = await connect(createApiApp(), u.props);
+    const r = await client.callTool({ name: "task_start", arguments: startArgs("t") });
+    expect(r.isError).toBe(true);
+    expect(body(r).code).toBe("budget_exceeded");
+    await client.close();
+  });
+
+  it("task_result: 実行中は not_ready、終端なら成果を返す。他人のタスクは not_found", async () => {
+    const alice = await user("alice");
+    const bob = await user("bob");
+    const ca = await connect(createApiApp(), alice.props);
+    const cb = await connect(createApiApp(), bob.props);
+    const started = body(await ca.callTool({ name: "task_start", arguments: startArgs("t") }));
+    const taskId = started.task_id as string;
+
+    const notReady = await ca.callTool({ name: "task_result", arguments: { task_id: taskId } });
+    expect(notReady.isError).toBe(true);
+    expect(body(notReady).code).toBe("not_ready");
+
+    const other = await cb.callTool({ name: "task_result", arguments: { task_id: taskId } });
+    expect(body(other).code).toBe("not_found");
+
+    await fakeAgent(taskId).setPhase("completed");
+    await taskStub(taskId).advance();
+    const done = await ca.callTool({ name: "task_result", arguments: { task_id: taskId } });
+    expect(done.isError).toBeFalsy();
+    expect(body(done)).toMatchObject({
+      task_id: taskId,
+      status: "COMPLETED",
+      summary: "fake summary",
+      verification: { verified: false },
+      patch_too_large: false,
+    });
+    await ca.close();
+    await cb.close();
+  });
+
+  it("task_result は team 非所属なら forbidden、入力が不正なら invalid_input", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const bad = await client.callTool({ name: "task_result", arguments: {} });
+    expect(body(bad).code).toBe("invalid_input");
+    u.gh.team = "none";
+    const r = await client.callTool({
+      name: "task_result",
+      arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+    });
+    expect(body(r).code).toBe("forbidden");
+    await client.close();
+  });
+});
+
 describe("SDK の入力検証に届く前の不正（必須欠落・型不一致）", () => {
   const cases: [string, string, Record<string, unknown>][] = [
     [
@@ -177,6 +262,12 @@ describe("SDK の入力検証に届く前の不正（必須欠落・型不一致
     ["task_wait", "cursor が数値", { task_id: "t", cursor: 1 }],
     ["task_wait", "timeout_seconds が文字列", { task_id: "t", timeout_seconds: "5" }],
     ["task_cancel", "task_id が数値", { task_id: 1 }],
+    ["task_result", "task_id が数値", { task_id: 1 }],
+    [
+      "task_start",
+      "verification_commands の argv が文字列",
+      startArgs("x", { verification_commands: [{ argv: "npm test" }] }),
+    ],
   ];
   it.each(cases)(
     "%s: %s は invalid_input + code で返り、GitHub は呼ばれない",
@@ -250,6 +341,7 @@ describe("エラーの返し方", () => {
       ["task_status", { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" }],
       ["task_wait", { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" }],
       ["task_cancel", { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" }],
+      ["task_result", { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" }],
     ] as const) {
       const r = await client.callTool({ name, arguments: args });
       expect(r.isError).toBe(true);

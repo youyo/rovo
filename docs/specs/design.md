@@ -374,6 +374,18 @@ Durable Objectsで以下を保持する。
 
 リース更新と再取得を区別し、二重実行を防ぐ。
 
+新しいリースの仕組みは作らず、実装済みの仕組みで次のように満たす（15.7）。
+
+| 5.3 の要件 | 実装 |
+|---|---|
+| 二重実行の防止 | タスクごとに TaskDO / AgentDO / SandboxDO が1つだけあり、DO の一意性で直列化される |
+| 期限切れの実行主体が操作できない | SandboxDO の起動世代（`assertBootCurrent`）、AgentDO の tombstone と停止の意図、終端の後は何もしないガード |
+| Fencing Token | 起動世代と operationId（`run:<taskId>`、`answer:<qid>`、`steer:<id>:<n>`）、Installation Token の expiresAt の単調増加 |
+| 更新と再取得の区別 | 配送の意図（start / cancel / answer / steer / credential）と、その配送状態 |
+| Expiration | SandboxDO の `deadlineAt` と AgentDO の期限。延長は単調増加だけを受け付ける |
+| Allowed Operations / Resource Limits | 外向き通信の許可リスト、push 先 ref を `props` の taskId だけから作ること、呼び出し前の予算のハードキャップ |
+| 復旧（9.3 の `RECOVERING`） | AgentDO のフェーズに `RECOVERING` は無く、agent は入らない。作り直しと起動のやり直しは SandboxDO の中で完結する。復旧の回数は SandboxDO のカウンタからしか取れない |
+
 ---
 
 ## 6. GitHub連携
@@ -1072,3 +1084,31 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - 結果（タイトル・URL・説明文）は外部コンテンツなので、信用しないデータとして扱う。説明文は 8.5 の安全性評価（Clef-flash）にかける。
 - ローカル開発で呼ぶと、実際のアカウントに課金される。そのため、Unit / E2E では `websearch()` を fake に差し替える。
 - ページ本文の取得（web_fetch）は別に扱い、Phase 5 で決める（Browser Run / Kitesurf が候補）。
+
+### 15.7 Phase 6: Security / Recovery / 観測性（2026-10-19 決定）
+
+詳細は `phase6.md`。
+
+- **Execution Lease（5.3）** は新しい仕組みを作らず、実装済みの仕組みで満たす。
+
+| 5.3 の要件 | 実装 |
+|---|---|
+| 二重実行の防止 | タスクごとに TaskDO / AgentDO / SandboxDO が1つだけあり、DO の一意性で直列化される |
+| 期限切れの実行主体が操作できない | SandboxDO の起動世代（`assertBootCurrent`）、AgentDO の tombstone と停止の意図、終端の後は何もしないガード |
+| Fencing Token | 起動世代と operationId（`run:<taskId>`、`answer:<qid>`、`steer:<id>:<n>`）、Installation Token の expiresAt の単調増加 |
+| 更新と再取得の区別 | 配送の意図（start / cancel / answer / steer / credential）と、その配送状態 |
+| Expiration | SandboxDO の `deadlineAt` と AgentDO の期限。延長は単調増加だけを受け付ける |
+| Allowed Operations / Resource Limits | 外向き通信の許可リスト、push 先 ref を `props` の taskId だけから作ること、呼び出し前の予算のハードキャップ |
+| 復旧（9.3 の `RECOVERING`） | AgentDO のフェーズに `RECOVERING` は無く、agent は入らない。作り直しと起動のやり直しは SandboxDO の中で完結する。復旧の回数は SandboxDO のカウンタからしか取れない |
+
+- **R2（9.2、Phase 6）** は「終端後の正」ではなくコピーとする。正は TaskDO のまま。
+  - TaskDO の `events` / `questions` / `git_token` の削除は Phase 7 で決める。
+  - 書き込みは、費用の精算（`finished`）と GitHub の終端処理（`finalize_done`）が済んだ後に、冪等に行う。失敗が続けば `archive_failed` を監査ログに出して打ち切る。タスクの結果と予算の精算には影響させない。
+  - バインディング（`LOGS`）が無いときは、アーカイブをスキップする（fail-open）。
+  - 保存するのは公開イベントの全件・結果・要約。タスクの入力（instructions / acceptance_criteria / constraints）、title、親の answer / steer の本文、トークンは保存しない。
+  - events.jsonl は未加工で、読む側が非信頼データとして扱う。バケットは非公開、バインディングは gateway だけ、MCP からの一覧・読み出しは作らない。
+- **監査ログ（11.2）** は、1行の構造化 JSON で出す。
+  - Workers Logs の `console.log` だけでは best-effort（head sampling と短い保持で欠落しうる）。監査として成立する条件は、sampling 100% と Logpush で保持を自分で決められる宛先に流すこと。これは下流の設定で、rovo は環境固有の値を持たない。
+  - 欠落してはならない事象（トークンの発行・失効、特権操作、cancel、配送の打ち切り）は TaskDO の events にも固定コードで積み、R2 の events.jsonl にも残す。
+  - 11.2 の「実行リースの失効・再取得」は、起動世代の破棄、tombstone 後の start、start の衝突、agent の cancel の受理を監査する。
+- **観測性（11.1）** の Sandbox 実行時間と復旧回数は、SandboxDO が永続化するカウンタから取る。Sandbox と Web の金額は単価をかけた**推定値**で、単価は `vars` の既定値を下流が上書きできる（16）。

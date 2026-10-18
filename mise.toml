@@ -11,6 +11,10 @@ CI = "1"
 description = "依存パッケージをインストール"
 run = "pnpm install --frozen-lockfile"
 
+[tasks."install:update-lock"]
+description = "依存を追加・変更したあとに pnpm-lock.yaml を更新する（通常の install は --frozen-lockfile）"
+run = "pnpm install --no-frozen-lockfile"
+
 [tasks."typegen:gateway"]
 description = "gateway: wrangler types で Env 型を生成"
 dir = "apps/gateway"
@@ -30,6 +34,11 @@ run = "pnpm exec wrangler types --env-interface Env --strict-vars=false"
 description = "全アプリの Env 型を生成（wrangler.jsonc を変えたら実行）"
 depends = ["typegen:gateway", "typegen:agent", "typegen:web"]
 
+[tasks."test:unit:audit"]
+description = "packages/audit の Unit テスト（vitest。純粋関数だけなので workerd は使わない）"
+dir = "packages/audit"
+run = "pnpm exec vitest run --config vitest.config.ts"
+
 [tasks."test:unit:gateway"]
 description = "gateway の Unit テスト（vitest + workerd）"
 dir = "apps/gateway"
@@ -46,8 +55,8 @@ dir = "apps/web"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
 [tasks."test:unit"]
-description = "Unit テスト（gateway + agent + web）"
-depends = ["test:unit:gateway", "test:unit:agent", "test:unit:web"]
+description = "Unit テスト（audit + gateway + agent + web）"
+depends = ["test:unit:audit", "test:unit:gateway", "test:unit:agent", "test:unit:web"]
 
 [tasks."test:e2e:gateway"]
 description = "gateway の E2E（wrangler dev で実 Worker と偽 GitHub を起動し、MCP SDK Client から通しで検証）"
@@ -80,6 +89,11 @@ run = "pnpm exec vitest run --config vitest.e2e-net.config.ts"
 description = "Unit + 偽 GitHub + E2E（Docker 必須。実ネットワーク版 test:e2e:net は含まない）"
 depends = ["test:unit", "test:fake-github", "test:e2e"]
 
+[tasks."typecheck:audit"]
+description = "packages/audit の型検査"
+dir = "packages/audit"
+run = "pnpm exec tsc -p tsconfig.json"
+
 [tasks."typecheck:gateway"]
 description = "gateway の型検査"
 dir = "apps/gateway"
@@ -97,7 +111,7 @@ run = "pnpm exec tsc -p tsconfig.json"
 
 [tasks.typecheck]
 description = "TypeScript の型検査（全アプリ）"
-depends = ["typecheck:gateway", "typecheck:agent", "typecheck:web"]
+depends = ["typecheck:audit", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
 
 [tasks."lint:biome"]
 description = "Biome による lint / format チェック"
@@ -111,10 +125,24 @@ depends = ["lint:biome", "typecheck"]
 description = "Biome で整形"
 run = "pnpm exec biome check --write ."
 
-[tasks.build]
-description = "Worker をバンドル（デプロイはしない）"
+[tasks."build:gateway"]
+description = "gateway をバンドル（デプロイはしない）"
 dir = "apps/gateway"
 run = "pnpm exec wrangler deploy --dry-run --outdir dist"
+
+[tasks."build:agent"]
+description = "agent をバンドル（デプロイはしない。Docker イメージのビルドは --containers-rollout=none で省く）"
+dir = "apps/agent"
+run = "pnpm exec wrangler deploy --dry-run --containers-rollout=none --outdir dist"
+
+[tasks."build:web"]
+description = "web をバンドル（デプロイはしない）"
+dir = "apps/web"
+run = "pnpm exec wrangler deploy --dry-run --outdir dist"
+
+[tasks.build]
+description = "3 つの Worker をバンドル（デプロイはしない。バンドルが通るかの確認）"
+depends = ["build:gateway", "build:agent", "build:web"]
 
 [tasks.dev]
 description = "wrangler dev でローカル起動（apps/gateway/.dev.vars を読む。.dev.vars.example 参照）。gateway 単体"

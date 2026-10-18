@@ -3,7 +3,6 @@ import {
   buildTestUpstreamUrl,
   buildUpstreamHeaders,
   classifyDestination,
-  formatViolationLog,
   limitBody,
 } from "../../src/outbound-gateway";
 
@@ -56,19 +55,6 @@ describe("classifyDestination", () => {
     expect(classifyDestination("pypi.org")).toBe("registry");
     expect(classifyDestination("evil.example")).toBe("other");
     expect(classifyDestination("169.254.169.254")).toBe("other");
-  });
-});
-
-describe("formatViolationLog", () => {
-  it("コード・task・分類だけを含み、path や query を含まない", () => {
-    const line = formatViolationLog({
-      code: "host_not_allowed",
-      task: "agent/task-1",
-      category: "other",
-    });
-    expect(line).toContain("host_not_allowed");
-    expect(line).toContain("agent/task-1");
-    expect(line).toContain("other");
   });
 });
 

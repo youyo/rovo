@@ -1,4 +1,4 @@
-import type { GitCredential } from "./agent/types";
+import type { GitCredential, SandboxMetrics } from "./agent/types";
 
 export interface ExecOptions {
   cwd?: string;
@@ -67,4 +67,9 @@ export interface SandboxPort {
    * cancel と、タスクの終端（期限・予算・失敗・完了）の片付けで使う。無い実装には stop で代用する。
    */
   terminate?(): Promise<{ stopped: boolean }>;
+  /**
+   * 実行時間・作り直し・起動のやり直しのカウンタ（永続。定義は sandbox-do.ts）。AgentDO が usage イベントに載せる。
+   * 無い実装、または読めない（undefined / 例外）ときは、usage に sandbox を載せない。
+   */
+  metrics?(): Promise<SandboxMetrics | undefined>;
 }

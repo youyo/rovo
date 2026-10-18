@@ -96,6 +96,18 @@ export interface UsageDto {
   cacheWriteTokens: number;
   /** 子が使った web の回数（タスクごとの累計）。web 自体の費用は costUsd に含めない */
   web: WebUsage;
+  /** SandboxDO のカウンタ。読めなかったとき・読めない実装（fake）では無い。gateway が公開用の形に写す（M3） */
+  sandbox?: SandboxMetrics;
+}
+
+/** SandboxDO のカウンタ（永続）。定義は sandbox-do.ts の「実行時間と起動世代のカウンタ」 */
+export interface SandboxMetrics {
+  /** コンテナを動かした時間の累計（ms） */
+  runtimeMs: number;
+  /** コンテナの作り直しの回数（2 回目以降の start） */
+  restarts: number;
+  /** 起動の確認点で止まった・破棄された試行の回数 */
+  bootRetries: number;
 }
 
 export interface WebUsage {

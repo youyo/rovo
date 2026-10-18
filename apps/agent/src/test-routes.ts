@@ -52,6 +52,10 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
         return Response.json({ ok: true });
       case "status":
         return Response.json(await sandbox.status());
+      case "metrics":
+        return Response.json(await sandbox.metrics());
+      case "audit":
+        return Response.json({ records: await sandbox.testAudit() });
       default:
         return undefined;
     }
@@ -67,6 +71,7 @@ const AGENT_ACTIONS = [
   "events",
   "result",
   "debug",
+  "audit",
   "set-git-credential",
   "answer",
   "steer",
@@ -114,6 +119,8 @@ async function handleAgentRoute(
         return Response.json(await agent.getResult());
       case "debug":
         return Response.json({ deadlineAt: await agent.debugDeadlineAt() });
+      case "audit":
+        return Response.json({ records: await agent.testAudit() });
       default:
         return undefined;
     }

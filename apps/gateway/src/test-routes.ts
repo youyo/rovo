@@ -1,6 +1,6 @@
+import type { AuditRecord } from "@rovo/audit";
 import type { Hono } from "hono";
 import type { AgentRpc, TaskSpec } from "./agent/contract";
-import type { AuditRecord } from "./audit";
 import { readWorkerAudit } from "./audit-sink";
 
 /**

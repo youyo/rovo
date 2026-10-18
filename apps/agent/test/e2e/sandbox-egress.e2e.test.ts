@@ -84,6 +84,31 @@ describe("拒否される通信（上流に届かない）", () => {
     expect(upstream.requests.length).toBe(before);
   });
 
+  it("拒否は outbound_denied の JSON として監査され、コード・taskId・宛先の分類だけを持つ（ホスト名・path・トークンは入らない）", async () => {
+    expect((await sb.curl("https://example.com/secret/path?token=ghs_abcdefghijklmnop")).code).toBe(
+      "403",
+    );
+    await expect
+      .poll(async () => (await sb.audit()).filter((r) => r.event === "outbound_denied").length, {
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(0);
+    const denied = (await sb.audit()).filter((r) => r.event === "outbound_denied");
+    expect(denied.at(-1)).toEqual({
+      audit: true,
+      event: "outbound_denied",
+      ts: expect.any(Number),
+      taskId: "egress",
+      caller: "child",
+      reason: "host_not_allowed",
+      dest: "other",
+    });
+    const text = JSON.stringify(denied);
+    for (const leaked of ["example.com", "secret/path", "token=", "ghs_"]) {
+      expect(text).not.toContain(leaked);
+    }
+  });
+
   it("対象リポジトリ以外の git-receive-pack（info/refs・POST）は 403 で、上流に届かない", async () => {
     const before = upstream.requests.length;
     expect(

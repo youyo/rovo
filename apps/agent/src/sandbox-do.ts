@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { posix } from "node:path";
 import { Files } from "@cloudflare/sandbox";
-import type { GitCredential } from "./agent/types";
+import type { AuditFields, AuditRecord } from "@rovo/audit";
+import type { GitCredential, SandboxMetrics } from "./agent/types";
+import { appendTestAudit, emitAudit, readTestAudit } from "./audit-adapter";
 import { PROCESS_SCRIPT } from "./container-scripts";
 import { decryptString, encryptString, importEncryptionKey } from "./crypto";
 import type { OutboundGatewayProps } from "./outbound-gateway";
@@ -145,6 +147,102 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     return p;
   }
 
+  // ---- 監査 ----
+
+  /** 監査イベントを出す（@rovo/audit 経由。test のときだけ DO にも記録する）。taskId は DO の名前。 */
+  private audit(event: string, fields: AuditFields = {}): void {
+    emitAudit(this.env, this.ctx.storage.kv, event, {
+      taskId: this.ctx.id.name,
+      caller: "child",
+      ...fields,
+    });
+  }
+
+  /** E2E / Unit 専用: この DO が出した監査イベント（outbound_denied を含む）を発行順に返す。test 以外は例外。 */
+  async testAudit(): Promise<unknown[]> {
+    return readTestAudit(this.env, this.ctx.storage.kv);
+  }
+
+  /** E2E 専用: OutboundGateway（DO ではない）が出した監査イベントを、タスクの SandboxDO に記録する。 */
+  testRecordAudit(record: unknown): void {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    appendTestAudit(this.ctx.storage.kv, record as AuditRecord);
+  }
+
+  // ---- 実行時間と起動世代のカウンタ（永続。観測性 11.1 / phase6.md「観測性」）----
+  //
+  // 定義（Unit で固定する）:
+  //  - runtimeMs: コンテナの start から停止（destroy の確認）までの累計。実行中の区間は現在までを足して返す。
+  //    DO が退避されて停止を観測できなかったときは、keepalive の alarm が最後に観測した時刻（rt_seen）までを数える。
+  //  - restarts: コンテナの作り直し。start の回数から最初の 1 回を引いたもの（止まった起動の破棄 → 再 start も数える）。
+  //  - bootRetries: 起動の確認点で止まった試行（BOOT_ATTEMPT_MS 内に ready にならなかった）と、
+  //    世代が変わって破棄された（superseded）boot の回数。成功した起動は数えない。
+  // メモリ上の gen は DO が退避されると 0 に戻るので、カウンタは ctx.storage.kv に持つ。
+
+  private num(key: string): number {
+    return this.ctx.storage.kv.get<number>(key) ?? 0;
+  }
+
+  /** 実行区間を開く（コンテナを start した、または動いているのを初めて見た）。開いていれば何もしない。 */
+  private openRuntime(now = Date.now()): void {
+    const kv = this.ctx.storage.kv;
+    if (kv.get<number>("rt_since") !== undefined) return;
+    kv.put("rt_since", now);
+    kv.put("rt_seen", now);
+  }
+
+  /** 実行区間を end で閉じて累計に足す。開いていなければ何もしない。 */
+  private closeRuntime(end: number): void {
+    const kv = this.ctx.storage.kv;
+    const since = kv.get<number>("rt_since");
+    if (since === undefined) return;
+    kv.put("rt_total", this.num("rt_total") + Math.max(0, end - since));
+    kv.delete("rt_since");
+    kv.delete("rt_seen");
+  }
+
+  /** 開いたままの区間が、コンテナが落ちていたのに閉じられていないなら、最後に観測した時刻で閉じる。 */
+  private settleRuntime(): void {
+    const kv = this.ctx.storage.kv;
+    const since = kv.get<number>("rt_since");
+    if (since === undefined) return;
+    if (this.maybeContainer()?.running) {
+      kv.put("rt_seen", Date.now());
+    } else {
+      this.closeRuntime(Math.max(since, this.num("rt_seen")));
+    }
+  }
+
+  /** コンテナを start した記録（restarts の元の回数と、実行区間の開始）。 */
+  private recordStart(): void {
+    // 前の区間が閉じられていなければ（落ちたのを観測できなかった）、最後に観測した時刻で閉じる
+    const since = this.ctx.storage.kv.get<number>("rt_since");
+    if (since !== undefined) this.closeRuntime(Math.max(since, this.num("rt_seen")));
+    this.ctx.storage.kv.put("starts", this.num("starts") + 1);
+    this.openRuntime();
+  }
+
+  private recordBootRetry(): void {
+    this.ctx.storage.kv.put("boot_retries", this.num("boot_retries") + 1);
+  }
+
+  /** AgentDO が usage イベントに載せる値。読み取りだけで書き込まない。 */
+  async metrics(): Promise<SandboxMetrics> {
+    const since = this.ctx.storage.kv.get<number>("rt_since");
+    let open = 0;
+    if (since !== undefined) {
+      const end = this.maybeContainer()?.running
+        ? Date.now()
+        : Math.max(since, this.num("rt_seen"));
+      open = Math.max(0, end - since);
+    }
+    return {
+      runtimeMs: this.num("rt_total") + open,
+      restarts: Math.max(0, this.num("starts") - 1),
+      bootRetries: this.num("boot_retries"),
+    };
+  }
+
   // ---- SandboxPort ----
 
   async ensureReady(input: WorkspaceSpec): Promise<void> {
@@ -183,6 +281,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const spec = this.checkedDeadline(deadlineAt);
     if (deadlineAt <= spec.deadlineAt) return;
     this.ctx.storage.kv.put("spec", { ...spec, deadlineAt });
+    this.audit("sandbox_privileged_op", { op: "extend_deadline" });
     await this.armAlarm();
   }
 
@@ -193,6 +292,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   async setDeadline(deadlineAt: number): Promise<void> {
     const spec = this.checkedDeadline(deadlineAt);
     this.ctx.storage.kv.put("spec", { ...spec, deadlineAt });
+    this.audit("sandbox_privileged_op", { op: "set_deadline" });
     await this.armAlarm();
   }
 
@@ -321,7 +421,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (!container?.running) return { stopped: true };
     const clean = await this.reap();
     if (clean) return { stopped: true };
-    await this.destroyContainer();
+    await this.destroyAudited("reap_failed");
     return { stopped: !container.running };
   }
 
@@ -331,6 +431,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
    * 進行中の boot は無効化し、収束した後にもう一度停止を確かめる。
    */
   async terminate(): Promise<{ stopped: boolean }> {
+    this.audit("sandbox_privileged_op", { op: "terminate" });
     this.ctx.storage.kv.put("terminated", true);
     this.ctx.storage.kv.delete("git_credential");
     this.invalidateBoot();
@@ -412,6 +513,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   /** 1 分ごとの keepalive を兼ねる。期限を超えていたら自分でコンテナを止める（AgentDO へは通知しない）。 */
   override async alarm(): Promise<void> {
+    this.settleRuntime();
     const spec = this.spec();
     if (!spec) return;
     if (this.terminated() || Date.now() >= spec.deadlineAt) {
@@ -464,7 +566,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   /** boot の確認点: terminate・期限・起動世代が変わっていたら、それ以上進まない。 */
   private assertBootCurrent(g: number): WorkspaceSpec {
-    if (this.gen !== g) throw new Error("boot was superseded");
+    if (this.gen !== g) {
+      this.recordBootRetry();
+      this.audit("boot_superseded", { caller: "system", reason: "generation_changed" });
+      throw new Error("boot was superseded");
+    }
     return this.requireSpec(); // terminated / 期限切れならここで投げる
   }
 
@@ -475,6 +581,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (container.running && !this.baseline()) await this.destroyContainer(this.bootDestroyMs);
     // destroy を待っている間に terminate・期限・世代が変わりうる。start の直前に必ず確かめ直す
     this.assertBootCurrent(g);
+    // 動いているコンテナを初めて見たなら、ここから実行区間を数える（start を見ていない DO の再起動の後など）
+    if (container.running) this.openRuntime();
     let started = false;
     const trace: string[] = [];
     let ready = false;
@@ -484,6 +592,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       const until = attemptStart + this.bootAttemptMs;
       if (!container.running) {
         this.ctx.storage.kv.delete("baseline");
+        this.recordStart();
         container.start({
           image: container.images.workspace,
           enableInternet: false,
@@ -553,6 +662,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         `#${attempt} ${ready ? "ready" : `stalled-at-${stage}`} ${stageEnds.join(" ")} probes=${probes}${lastError ? ` last="${lastError}"` : ""}`,
       );
       if (ready) break;
+      this.recordBootRetry();
       // 起動が止まった: 破棄して停止を確かめ、最初からやり直す。破棄の時間は待ちの期限に数えない
       await this.destroyContainer(this.bootDestroyMs);
       this.assertBootCurrent(g);
@@ -761,7 +871,13 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   private async reapOrDestroy(): Promise<void> {
-    if (!(await this.reap())) await this.destroyContainer();
+    if (!(await this.reap())) await this.destroyAudited("reap_failed");
+  }
+
+  /** 破棄は特権操作（作業ツリーの未 push の変更が失われる）なので、監査してから破棄する。 */
+  private async destroyAudited(reason: "reap_failed" | "exec_timeout"): Promise<void> {
+    this.audit("sandbox_privileged_op", { op: "destroy", reason });
+    await this.destroyContainer();
   }
 
   /**
@@ -773,13 +889,17 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const until = Date.now() + waitMs;
     this.readyGen = -1;
     this.ctx.storage.kv.delete("baseline");
-    if (!container.running) return;
+    if (!container.running) {
+      this.settleRuntime();
+      return;
+    }
     const destroyed = Promise.resolve()
       .then(() => container.destroy())
       .catch(() => {});
     await Promise.race([destroyed, sleep(waitMs)]);
     while (container.running && Date.now() < until) await sleep(100);
     if (container.running) throw new Error("container did not stop");
+    this.closeRuntime(Date.now());
   }
 
   private async runExec(
@@ -815,7 +935,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         // 停止の保証はコンテナの破棄だけ。コンテナ内のプロセスの走査は、root で動く信用できないコードに偽装されうる。
         // 作業ツリーの未 commit の変更は失われ、次の操作で再 clone される。
         try {
-          await this.destroyContainer();
+          await this.destroyAudited("exec_timeout");
         } finally {
           ac.abort();
         }

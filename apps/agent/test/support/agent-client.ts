@@ -41,6 +41,8 @@ export function agentClient(baseUrl: string, name: string) {
       op("events", { afterSeq, limit }) as Promise<EventsPage>,
     getResult: () => op("result") as Promise<ResultDto>,
     debug: () => op("debug") as Promise<{ deadlineAt: number }>,
+    /** この AgentDO が出した監査イベント（ENVIRONMENT=test のときだけ）。 */
+    audit: async () => ((await op("audit")) as { records: Record<string, unknown>[] }).records,
     /** 全イベントを limit 件ずつのページングで集める。 */
     async allEvents(limit = 100) {
       const out: { seq: number; type: string; data: Record<string, unknown> }[] = [];

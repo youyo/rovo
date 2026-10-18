@@ -99,6 +99,9 @@ describe("AgentDO + 実コンテナ", () => {
     expect(r.patch).toContain("-exports.add = (a, b) => a - b;");
     expect(r.patch).toContain("+exports.add = (a, b) => a + b;");
     expect(r.patch).toContain("fix: correct add");
+    // Sandbox のカウンタが usage に載る（実コンテナを動かしたので runtimeMs > 0、作り直しは無い）
+    expect(r.usage.sandbox).toMatchObject({ restarts: 0 });
+    expect(r.usage.sandbox?.runtimeMs).toBeGreaterThan(0);
 
     const events = await agent.allEvents();
     const toolEnds = events.filter((e) => e.type === "tool_end").map((e) => e.data);
@@ -181,10 +184,24 @@ describe("AgentDO + 実コンテナ", () => {
       type: "phase",
       data: { phase: "cancelled" },
     });
+    // cancel の受理と Sandbox の停止は、events（audit）にも監査ログにも残る
+    const audits = events.filter((e) => e.type === "audit").map((e) => e.data);
+    expect(audits).toContainEqual({ code: "agent_cancelled" });
+    expect(audits).toContainEqual({ code: "sandbox_privileged_op", op: "terminate" });
+    expect((await agent.audit()).filter((r) => r.event === "agent_cancelled")).toHaveLength(1);
+    expect(
+      (await sandbox.audit()).filter((r) => r.event === "sandbox_privileged_op").map((r) => r.op),
+    ).toContain("terminate");
+    const cancelled = await agent.getResult();
+    if (cancelled.status === "not_ready") throw new Error("not ready");
+    expect(cancelled.usage.sandbox?.runtimeMs).toBeGreaterThan(0); // 停止した実コンテナの実行時間
     // 冪等: 2 回目も stopped:true
     expect(await agent.cancel()).toMatchObject({ stopped: true });
-    // 遅れて届いた start は拒否される
+    // 遅れて届いた start は拒否され、リース相当の失効として監査される（events には積まない）
     expect(await agent.start(s)).toEqual({ status: "cancelled" });
+    expect(
+      (await agent.audit()).filter((r) => r.event === "start_cancelled_by_tombstone"),
+    ).toHaveLength(1);
   });
 
   it("deadline 超過で failed（理由 deadline）になり、terminate される", async () => {

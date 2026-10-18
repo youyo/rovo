@@ -1,4 +1,4 @@
-import { type AuditFields, type AuditRecord, audit } from "./audit";
+import { type AuditFields, type AuditRecord, audit } from "@rovo/audit";
 
 /**
  * 監査イベントの test 用シンク（ENVIRONMENT=test のときだけ有効。それ以外は何も記録しない）。

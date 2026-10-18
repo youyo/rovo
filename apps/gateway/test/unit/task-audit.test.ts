@@ -1,8 +1,8 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
+import type { AuditRecord } from "@rovo/audit";
 import { describe, expect, it } from "vitest";
 import type { ResultDto } from "../../src/agent/contract";
-import type { AuditRecord } from "../../src/audit";
 import { getFakeApp, type UnitGitHubEnv } from "../support/unit-github";
 import { fakeAgent, newTaskId, sampleInput, taskStub } from "./helpers";
 

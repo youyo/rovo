@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AUDIT_EVENTS, audit } from "../../src/audit";
+import { AUDIT_EVENTS, audit } from "../src/index";
 
 /** audit() の出力（log に渡された行）と戻り値を集める。 */
 function run(event: string, fields: Record<string, unknown>, now = 1_700_000_000_000) {
@@ -211,5 +211,163 @@ describe("audit(): イベント名", () => {
     ]) {
       expect(AUDIT_EVENTS).toContain(e);
     }
+  });
+});
+
+describe("audit(): トークン形式の検出は接頭辞が先頭でなくても効く（M1 レビュー low）", () => {
+  const host = (h: unknown) =>
+    (run("outbound_denied", { host: h }).record as { host?: string }).host;
+  const requestId = (v: unknown) =>
+    (run("auth_failed", { requestId: v }).record as { requestId?: string }).requestId;
+
+  const tokens = [
+    "ghs_abcdefghij",
+    "ghu_abcdefghij",
+    "gho_abcdefghij",
+    "ghp_abcdefghij",
+    "ghr_abcdefghij",
+    "github_pat_11AAAAAAA0",
+    "sk-abcdefghij",
+    "xoxb-1234567890",
+    "xoxp-1234567890",
+    "eyJhbGciOiJIUzI1NiJ9",
+  ];
+
+  it("host: 接頭辞がラベルの途中にあってもマスクする（短い値でも）", () => {
+    for (const t of tokens) {
+      for (const label of [t, `x${t}`, `a-${t}`, `${t}zz`]) {
+        const out = host(`${label}.example.com`) ?? "";
+        expect(out, label).toBe("masked.example.com");
+      }
+    }
+  });
+
+  it("host: 大文字小文字を区別せずマスクする", () => {
+    expect(host("XGHS_abc.example.com")).toBe("masked.example.com");
+    expect(host("EYJabc.example.com")).toBe("masked.example.com");
+  });
+
+  it("host: トークンを含まない普通のラベルはそのまま通す", () => {
+    expect(host("api.github.com")).toBe("api.github.com");
+    expect(host("registry.npmjs.org")).toBe("registry.npmjs.org");
+    expect(host("files.pythonhosted.org")).toBe("files.pythonhosted.org");
+  });
+
+  it("requestId: 接頭辞が途中にある値は出さない", () => {
+    for (const t of tokens) {
+      expect(requestId(`x${t}`), t).toBeUndefined();
+      expect(requestId(`a-${t}`), t).toBeUndefined();
+    }
+    expect(requestId("8a1b2c3d4e5f-NRT")).toBe("8a1b2c3d4e5f-NRT");
+  });
+});
+
+describe("audit(): レコードの枠（audit / event / ts）は fields で上書きできない", () => {
+  it("fields に audit / event / ts / __proto__ があっても無視する", () => {
+    const fields = JSON.parse(
+      '{"audit":false,"event":"forged","ts":1,"__proto__":{"userId":9},"reason":"ok"}',
+    ) as Record<string, unknown>;
+    const { record, lines } = run("auth_failed", fields, 1_700_000_000_000);
+    expect(record).toEqual({
+      audit: true,
+      event: "auth_failed",
+      ts: 1_700_000_000_000,
+      reason: "ok",
+    });
+    expect(JSON.parse(lines[0] as string)).toEqual(record);
+  });
+
+  it("継承されたプロパティ（プロトタイプ上の値）は読まない", () => {
+    const inherited = Object.create({ userId: 5, reason: "inherited" }) as Record<string, unknown>;
+    inherited.taskId = "t1";
+    expect(run("task_cancelled", inherited).record).toEqual({
+      audit: true,
+      event: "task_cancelled",
+      ts: 1_700_000_000_000,
+      taskId: "t1",
+    });
+  });
+});
+
+describe("audit(): allowlist は呼び出し側から変えられない", () => {
+  it("第 3 引数に allowlist らしきものを渡しても、効かない", () => {
+    const lines: string[] = [];
+    const r = audit("auth_failed", { reason: "x", op: "terminate", token: "ghs_abc" }, {
+      now: 1,
+      log: (l: string) => lines.push(l),
+      allow: ["op", "token"],
+      allowlist: ["token"],
+    } as never);
+    expect(r).toEqual({ audit: true, event: "auth_failed", ts: 1, reason: "x" });
+    expect(lines.join("")).not.toContain("ghs_");
+  });
+});
+
+describe("audit(): イベント別の allowlist（共通 + イベント固有）", () => {
+  it("op は sandbox_privileged_op だけで、固定の値（terminate / destroy / set_deadline / extend_deadline）だけ", () => {
+    for (const op of ["terminate", "destroy", "set_deadline", "extend_deadline"]) {
+      expect(run("sandbox_privileged_op", { op }).record).toHaveProperty("op", op);
+    }
+    for (const bad of ["Terminate", "rm -rf", "", 1, "ghs_x"]) {
+      expect(run("sandbox_privileged_op", { op: bad }).record).not.toHaveProperty("op");
+    }
+    // 他のイベントでは op を出さない
+    expect(run("outbound_denied", { op: "terminate" }).record).not.toHaveProperty("op");
+    expect(run("auth_failed", { op: "terminate" }).record).not.toHaveProperty("op");
+  });
+
+  it("dest は outbound_denied だけで、github / registry / other だけ", () => {
+    for (const dest of ["github", "registry", "other"]) {
+      expect(run("outbound_denied", { dest }).record).toHaveProperty("dest", dest);
+    }
+    for (const bad of ["evil.example", "GitHub", "", 1]) {
+      expect(run("outbound_denied", { dest: bad }).record).not.toHaveProperty("dest");
+    }
+    expect(run("boot_superseded", { dest: "github" }).record).not.toHaveProperty("dest");
+  });
+
+  it("agent のイベント（M2）を閉じた一覧に含む", () => {
+    for (const e of [
+      "sandbox_privileged_op",
+      "outbound_denied",
+      "agent_cancelled",
+      "boot_superseded",
+      "start_cancelled_by_tombstone",
+      "start_conflict",
+    ]) {
+      expect(AUDIT_EVENTS).toContain(e);
+    }
+  });
+
+  it("キーの順序は固定（audit, event, ts, 共通, 固有）", () => {
+    const { lines } = run("outbound_denied", {
+      dest: "other",
+      host: "evil.example",
+      reason: "host_not_allowed",
+      taskId: "t1",
+    });
+    expect(Object.keys(JSON.parse(lines[0] as string))).toEqual([
+      "audit",
+      "event",
+      "ts",
+      "taskId",
+      "reason",
+      "host",
+      "dest",
+    ]);
+  });
+});
+
+describe("audit(): 既定の出力先は console.log（globalThis 経由。Node / Cloudflare の型に依存しない）", () => {
+  it("log を渡さないと console.log に 1 行出す", () => {
+    const orig = globalThis.console.log;
+    const seen: unknown[] = [];
+    globalThis.console.log = (...a: unknown[]) => void seen.push(...a);
+    try {
+      audit("auth_failed", { reason: "x" }, { now: 5 });
+    } finally {
+      globalThis.console.log = orig;
+    }
+    expect(seen).toEqual(['{"audit":true,"event":"auth_failed","ts":5,"reason":"x"}']);
   });
 });

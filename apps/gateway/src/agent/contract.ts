@@ -71,6 +71,17 @@ export interface UsageDto {
   cacheWriteTokens: number;
   /** 子が使った web の回数（タスクごとの累計。Phase 5）。web 自体の費用は costUsd に含めない */
   web: WebUsageDto;
+  /**
+   * Sandbox のカウンタ（Phase 6 M2。agent が読めたときだけ付く）。公開用の形への写しは M3（agent-events.ts）。
+   * runtimeMs: コンテナを動かした累計 ms / restarts: コンテナの作り直しの回数 / bootRetries: 起動の確認点で止まった・破棄された試行の回数
+   */
+  sandbox?: SandboxUsageDto;
+}
+
+export interface SandboxUsageDto {
+  runtimeMs: number;
+  restarts: number;
+  bootRetries: number;
 }
 
 export interface WebUsageDto {

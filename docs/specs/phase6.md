@@ -137,22 +137,22 @@
 | `credential_issued` / `credential_revoked` | gateway（TaskDO） | `kind`: start / refresh / final（トークンそのものは出さない）。revoked の reason: `revoked` / `already_expired`（期限切れで API を呼ばずに閉じた） | する（`audit`） |
 | `credential_issue_failed` | gateway（TaskDO） | 発行の失敗。`kind` と reason（`github_error_<status>`、`github_app_not_configured` など）。再試行のたびに出る | しない（再試行で増える。FAILED になれば `status_changed` の reason が残る） |
 | `credential_revoke_given_up` | gateway（TaskDO） | 失効を諦めた。reason: `attempts_exhausted`（`REVOKE_MAX_ATTEMPTS`）/ `not_retryable`（403 など）/ `setup_failure`（App の設定が失われた・復号できない） | する（`attempts_exhausted` と `not_retryable` は既存の `warning`: `token_revoke_failed`。`setup_failure` は warning が無い経路なので `audit`） |
-| `sandbox_privileged_op` | agent（SandboxDO） | `op`: terminate / destroy / set_deadline / extend_deadline | する（`audit`） |
-| `outbound_denied` | agent（OutboundGateway） | 既存の違反コード（`host_not_allowed` など）、宛先の分類 | しない |
+| `sandbox_privileged_op` | agent（SandboxDO が監査ログを出し、AgentDO が events に積む） | `op`: terminate / destroy / set_deadline / extend_deadline（固定の値）。destroy は `reason`: `reap_failed` / `exec_timeout` | する（`audit`: `{code:"sandbox_privileged_op", op}`。`destroy` は AgentDO が呼ばないので監査ログだけ） |
+| `outbound_denied` | agent（OutboundGateway） | 既存の違反コード（`host_not_allowed` など）を `reason` に、宛先の分類を `dest`（github / registry / other）に。`taskId`、`caller`: `child` | しない |
 | `web_blocked` | web | verdict が block / unknown、`robots` / `redirect_policy` / `bot_challenge` による blocked | しない |
 | `task_cancelled` | gateway | `caller`: cancel の主体（今は `parent` だけ。reason は `parent_requested`）。変化があったときだけ（終端への再 cancel では出さない） | する（既存の `cancelled`） |
-| `agent_cancelled` | agent（AgentDO） | cancel（停止の意図）を受理した | する（`audit`） |
+| `agent_cancelled` | agent（AgentDO） | cancel を受理した最初の 1 回。`caller`: `parent`。reason: `stop_intent_recorded`（停止の意図を記録した）/ `not_started`（start より先の cancel。tombstone だけ）/ `already_terminal` | する（`audit`: `{code:"agent_cancelled"}`。`stop_intent_recorded` のときだけ。タスクが無い・終端済みのときは積まない） |
 | `task_ended_by_limit` | gateway / agent | `budget_exceeded` / `deadline` / `input_timeout` | する（既存の `status_changed` の reason） |
 | `delivery_given_up` | gateway（TaskDO） | 終端で、未配送の意図を取りやめた（`kind`: start / answer / steer。reason は `skipped_on_terminal`）。**再送の回数の上限による打ち切りは、今の実装には無い**（start / cancel / answer / steer / credential は成功まで alarm で再送する）ので、cancel と credential の kind は出ない | する（`audit`） |
-| `boot_superseded` | agent（SandboxDO） | 古い起動世代の boot の破棄 | しない |
-| `start_cancelled_by_tombstone` | agent（AgentDO） | tombstone の後に届いた start を cancelled にした | しない |
-| `start_conflict` | agent（AgentDO） | 同じタスクの start が衝突して拒否された | しない |
+| `boot_superseded` | agent（SandboxDO） | 古い起動世代の boot の破棄。reason: `generation_changed`、`caller`: `system` | しない |
+| `start_cancelled_by_tombstone` | agent（AgentDO） | tombstone の後に届いた start を cancelled にした（再送のたびに出る）。`caller`: `parent` | しない |
+| `start_conflict` | agent（AgentDO） | 同じタスクの start が衝突して拒否された。reason: `spec_mismatch`。`caller`: `parent`。同一 spec の再送（冪等）では出さない | しない |
 | `task_summary` | gateway（TaskDO） | 要約の生成（`finished` と `finalize_done` の後。数値と固定コードだけ） | しない |
 | `archive_skipped` / `archive_failed` / `archive_completed` | gateway（TaskDO） | `LOGS` が無い / 再試行の上限 / 成功 | しない（アーカイブの後） |
 
 ### フィールドと allowlist
 
-- 共通のフィールドは `event`、`ts`、`userId`、`taskId`、`caller`、`reason`（固定のコード）、`requestId`、`host`。
+- 共通のフィールドは `event`、`ts`、`userId`、`taskId`、`caller`、`reason`（固定のコード）、`requestId`、`host`、`kind`。イベント固有のフィールドは、そのイベントにだけ通す（M2 で追加: `sandbox_privileged_op` の `op`、`outbound_denied` の `dest`。どちらも固定の値だけ）。
   - `caller` は `parent`（MCP 経由）/ `child`（agent 経由）/ `system`（alarm・内部）。
   - `requestId` は**任意**。DO の alarm の中では取れない。HTTP リクエストの中や、web の AI Gateway の request id のように、取れる場面だけ出す。
   - `host` は**常に出してよい**（web は既に全ての fetch で host を出している）。ただし URL のパス・クエリ・userinfo は出さない。host のラベルにデータを載せて外へ出す手口（DNS 経由の持ち出し）があるので、`audit()` が host の長さを制限し、トークン形式をマスクして通す。agent の違反ログは、今の宛先の分類（`dest`）を保ち、host を足すかは `audit()` への移行時に決めてよい（足すなら host だけ）。
@@ -160,18 +160,24 @@
 - 出力を1か所の関数（`audit(event, fields)`）にまとめ、許可したフィールドだけを通す（allowlist）。未知のフィールドは黙って落とす。
 - web は既に `web_research` というログ（`console.log(JSON.stringify(...))`）を持つ。これは観測用で、`audit` の対象のもの（block / unknown / blocked）だけを `audit()` 経由でも出す。
 
-### audit() の置き場所は未決
+### audit() の置き場所（M2 で決定: `packages/audit`）
 
-- **M2（agent に着手する前）に決める。**
-- 選択肢:
-  1. `packages/audit` を新設する（pnpm のワークスペースは今 `apps/*` だけなので、`pnpm-workspace.yaml` の変更と、3つの Worker からの依存の追加が要る）。
-  2. gateway / agent / web の3つに複製する。複製なら、**allowlist のテストを各 app に置く**（複製の間でフィールドの許可がずれても、各 app のテストが落ちるようにする）。
-- M1（gateway）は、まず gateway 内に置いて始めてよい。決めた結果によって、移す。
+- **`packages/audit`（`@rovo/audit`）に置く。3 つの Worker が workspace 依存（`"@rovo/audit": "workspace:*"`）で使う。** 複製案（3 Worker に複製して各 app に allowlist のテストを置く）は取らない。複製だと、フィールドの許可やマスクの規則が app の間でずれる。
+- パッケージは `exports["."]` が `./src/index.ts` を直接指す（ビルドしない。wrangler の esbuild と vitest がそのまま読む）。`pnpm-workspace.yaml` に `packages/*` を足した。
+- パッケージが持つもの: 閉じたイベント名の一覧、共通 + イベント別の allowlist、固定コードの実行時検証、host の制限とマスク、レコードの生成（`buildAudit`）と出力（`audit`）。
+  - **呼び出し側は allowlist を渡せない・上書きできない**（API に引数が無い）。`fields` に `audit` / `event` / `ts` / `__proto__` があっても枠は変わらない（枠を先に作り、許可したキーだけを自分のプロパティから読む）。
+  - Worker 生成の `Env` 型にも Cloudflare 専用の型にも Node 専用の API にも依存しない（出力の既定は `globalThis.console.log`）。
+- 各 app の薄い adapter に残すもの: console 出力以外の出力先、`ENVIRONMENT=test` の判定、test 用のシンク（gateway は `audit-sink.ts` と TaskDO の `test_audit`、agent は `src/audit-adapter.ts`）。
+- パッケージの Unit は `mise run test:unit:audit`、型検査は `mise run typecheck:audit`（どちらも `test:unit` / `typecheck` の集約に入っている）。lockfile の更新は `mise run install:update-lock`（通常の `install` は `--frozen-lockfile`）。3 Worker のバンドル確認は `mise run build`（`wrangler deploy --dry-run`）。
 
-### agent の違反ログの JSON 化
+### agent の違反ログの JSON 化（M2 で実装）
 
-- agent の違反ログは今、整形した文字列（`outbound denied: code=... task=... dest=...`、`outbound-gateway.ts` の `formatViolationLog`）で、`console.warn` に出ている。これを `audit()` の JSON に変える。
-- 実作業で、`formatViolationLog` の Unit テスト（`outbound-gateway.test.ts`）と、違反ログを見ているアサーション（E2E を含む）が変わる。**テストを弱めない**: 「コード・task・分類だけを含み、path や query を含まない」を、JSON のフィールドの検証に置き換える。
+- 以前は整形した文字列（`outbound denied: code=... task=... dest=...`、`formatViolationLog`）を `console.warn` に出していた。`@rovo/audit` の `outbound_denied` に置き換え、`formatViolationLog` は削除した。
+- 形: `{"audit":true,"event":"outbound_denied","ts":...,"taskId":"<task id>","caller":"child","reason":"<違反コード>","dest":"github|registry|other"}`。1 行の JSON を `console.log` に出す。
+  - `reason` は既存の違反コード（`host_not_allowed`、`body_too_large`、`credential_unavailable`、receive-pack の検証の各コードなど。英小文字・数字・`_`）。
+  - **host は足さない**。宛先の分類（`dest`）を保つ。ホスト名は攻撃者が決める値で、ラベルに載せた持ち出しの帯域になる。`audit()` が長さの制限とマスクをかけるとはいえ、必要が出るまで出さない。
+  - 作業ブランチ名（`task`）は出さない。`taskId`（認証済みの `props.taskId`）に置き換えた。
+- テスト: 「コード・task・分類だけを含み、path や query を含まない」は、JSON のフィールドの検証に置き換えた（`outbound-handler.test.ts`。レコード全体を `toEqual` し、URL の path / query / host / トークンが行に無いことも確かめる）。E2E（`sandbox-egress.e2e.test.ts`）は、実コンテナからの拒否が `outbound_denied` として SandboxDO の test 用シンクに残り、同じ内容であることを確かめる。
 
 ### E2E で監査イベントを検証する方法
 
@@ -197,7 +203,7 @@
   - **`restarts` / `bootRetries` は、今の agent には無い**。`sandbox-do.ts` の `this.gen`（起動世代）はメモリ上の値で、DO が退避されると 0 に戻るので、そのままでは使えない。`ensureRunning` が世代を進める箇所で、**永続化したカウンタ**を増やす。
     - `restarts`: コンテナの作り直し（2回目以降の起動）の回数。
     - `bootRetries`: 起動の確認点で失敗した・破棄された（superseded）やり直しの回数。
-    - 定義は M2 の Unit で固定する。
+    - 定義は M2 の Unit（`sandbox-do-metrics.test.ts`）で固定した。下の「M2 で決めたこと」。
   - AgentDO は、この値を usage イベントに載せる（`sandbox: {runtimeMs, restarts, bootRetries}`）。gateway の `agent-events.ts` が、公開用の形に写す（M3）。
   - 復旧の回数は、**このカウンタからしか取れない**（`RECOVERING` に agent は入らない。Execution Lease の節）。
 - 費用は、Claude（AI Gateway）、Sandbox（実行時間）、Web（回数）を分けて記録する（11.3）。
@@ -212,7 +218,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 | M | 範囲 | 内容 | 最初の Red になるテスト |
 |---|---|---|---|
 | M1（実装済み） | gateway | `audit()`、allowlist、test 用のシンク。認証失敗・認可拒否・cancel・トークンの発行/失効・配送の打ち切りのイベント（二重化を含む） | Unit: `audit()` が、禁止したフィールド（トークン、URL のパス、本文）と未知のフィールドを出力しない |
-| M2 | agent | SandboxDO の実行時間と起動世代のカウンタの永続化、usage イベントの `sandbox: {...}`。違反ログの JSON 化、特権操作、リース相当の失効イベント | Unit: SandboxDO の起動→停止で `runtimeMs` が累計され、DO を作り直しても値が残る。**着手前に audit() の置き場所を決める** |
+| M2（実装済み） | agent + `packages/audit` | `audit()` を `packages/audit`（`@rovo/audit`）へ移す（ステップ 0）。SandboxDO の実行時間と起動世代のカウンタの永続化、usage イベントの `sandbox: {...}`。違反ログの JSON 化、特権操作、リース相当の失効イベント | Unit: SandboxDO の起動→停止で `runtimeMs` が累計され、DO を作り直しても値が残る。Unit（パッケージ）: トークン形式が先頭でなくてもマスクされる |
 | M3 | gateway | `agent-events.ts` で sandbox の usage を写す。summary レコードの生成 | Unit: usage イベントの `sandbox` が公開用の payload に写る（欠けた値は 0）。summary に title が入らない |
 | M4 | gateway | R2 アーカイブ（`needsAlarm` の拡張を含む） | Unit（fake の R2）: `finished && finalize_done` の前には書かず、成立後に1回呼んでも2回呼んでも同じ結果（冪等）。続けて、再試行と打ち切り。最後に wrangler のローカル R2 で通し |
 | M5 | web + ドキュメント | web の監査（block / unknown / robots / redirect）。design 15.7、推奨値の下書きをこの文書の該当の節に置く（docs/deploy.md 自体は Phase 7 で作る）、README、acceptance 14 以降 | Unit: web の block / unknown / robots / redirect_policy が `audit()` の許可したフィールドだけで出る |
@@ -234,7 +240,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 ## 未決事項
 
-- `audit()` の置き場所（`packages/audit` の新設か、3 Worker への複製か）。M2 に着手する前に決める。M1 は gateway の `src/audit.ts`（純粋関数）に置いた。
+- ~~`audit()` の置き場所~~ → M2 で決めた（`packages/audit`。「audit() の置き場所」）。
 - ~~DO の外で発行する監査イベント（認証の失敗など）の、E2E 用の記録先~~ → M1 で決めた（下の「M1 で決めたこと」）。
 - アーカイブの状態の置き場所（`agent_link` の列か、専用のテーブルか）。M4 で決める。
 - Sandbox と Web の単価の既定値（実装時に公式の料金表から取る）。
@@ -305,9 +311,9 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 ## M1 で決めたこと（2026-10-19）
 
-### `audit()` と allowlist（`apps/gateway/src/audit.ts`）
+### `audit()` と allowlist（M1 では `apps/gateway/src/audit.ts`。M2 で `packages/audit/src/audit.ts` へ移した）
 
-- 純粋関数 `audit(event, fields, {now, log})`（出力）と `buildAudit(event, fields, now)`（組み立て）。env にも DO にも触らない。後で `packages/audit` や agent / web へ移すときは、このファイルと `test/unit/audit.test.ts` を移す。
+- 純粋関数 `audit(event, fields, {now, log})`（出力）と `buildAudit(event, fields, now)`（組み立て）。env にも DO にも触らない。M2 で `packages/audit` へ移し、テストも `packages/audit/test/audit.test.ts` へ移した。
 - イベント名は閉じた一覧（`AUDIT_EVENTS`）。一覧に無い名前は何も出さない。
 - フィールドは `userId` / `taskId` / `caller` / `reason` / `requestId` / `host` / `kind` だけ。**未知のフィールドも、形の合わない値も黙って落とす**（変換して通さない）。
   - `reason` / `kind` は固定コードの形（英小文字・数字・`_`。それぞれ 64 / 32 文字まで）。自由な文は出ない。
@@ -347,6 +353,49 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 - Unit: `audit.test.ts`（allowlist）、`audit-sink.test.ts`（シンクと `/__test/audit`、production で無効）、`task-audit.test.ts`（TaskDO の各イベントと二重化）、`login.test.ts` / `mcp.test.ts` / `worker-audit.test.ts`（Worker 側の auth_failed / authz_denied）。
 - E2E: `test/e2e/audit.e2e.test.ts`（gateway: 認証失敗・認可拒否・cancel とトークンの発行/失効・件数の一致）、`test/full/full.e2e.test.ts` の c（cancel の監査と二重化）と x（予算超過 `BUDGET_EXCEEDED` の `task_ended_by_limit`）。
+
+## M2 で決めたこと（2026-10-19）
+
+### `packages/audit`
+
+- 上の「audit() の置き場所」。M1 のテストのうち allowlist の純粋なものは `packages/audit/test/audit.test.ts` へ移し、gateway の他のテストは変えていない。
+- M1 レビューの low を直した: トークン形式（`ghs_` / `ghu_` / `gho_` / `ghp_` / `ghr_` / `github_pat_` / `sk-` / `xox?-` / `eyJ`）の検出が先頭一致だけだった（`xghs_...` のように接頭辞が先頭でない短い値が通った）。**位置を問わず**検出し、host のラベル（`masked` に置換）と `requestId`（出さない）の両方に効く。代償として `desk-1` のような普通のラベルも `sk-` に当たってマスクされる（監査ログでは取りこぼしより過検出を選ぶ）。
+- イベント固有のフィールド: `sandbox_privileged_op` の `op`（terminate / destroy / set_deadline / extend_deadline）、`outbound_denied` の `dest`（github / registry / other）。他のイベントでは、渡されても出さない。
+
+### SandboxDO のカウンタ（`sandbox-do.ts`。`ctx.storage.kv` に永続）
+
+| カウンタ | 定義 | 数え方 |
+|---|---|---|
+| `runtimeMs` | コンテナを動かした時間の累計 | `container.start` の直前に区間を開き（`rt_since`）、`destroyContainer` が停止を確かめたら閉じて累計（`rt_total`）に足す。実行中の区間は、`metrics()` が現在までを足して返す（書き込まない）。keepalive の alarm が `rt_seen`（最後に観測した時刻）を更新し、DO が停止を観測できなかった（コンテナが自分で止まった・DO が退避した）場合は `rt_seen` までで閉じる（過大に数えない。落ちた時刻は分からないので、実際より少なくなりうる） |
+| `restarts` | コンテナの作り直しの回数 | `starts`（`container.start` の回数）から最初の 1 回を引いたもの。止まった起動を破棄して再 start した分も数える |
+| `bootRetries` | 起動の確認点で止まった・破棄された試行の回数 | ready に至らず破棄してやり直した試行（最後の試行も含む）と、起動世代が変わって破棄された（superseded）boot。成功した起動は数えない |
+
+- DO が退避されるとメモリ上の `gen` は 0 に戻るが、カウンタは storage にあるので残る（Unit: `abortAllDurableObjects()` の前後で同じ値）。
+- RPC は `SandboxDO.metrics()`。`SandboxPort.metrics?()` は任意で、fake や読めない実装では usage に `sandbox` を載せない。
+
+### AgentDO の usage イベントの `sandbox: {runtimeMs, restarts, bootRetries}`
+
+- `refreshUsage` が `metrics()` を読み、保存済みの値を**下回らない**ように反映する（巻き戻さない）。
+- `runtimeMs` は増え続けるので、**途中の usage イベントは `restarts` / `bootRetries` が変わったときと、最初の 1 回だけ**に載せる。終端の確定（`doFinalize`）では最新の値に更新する（値が変わっていれば、cost が変わらなくても usage イベントを 1 件積む）。
+- 読み出しの失敗はタスクに影響させない（`sandbox` が載らないだけ）。結果（`getResult`）と `getEvents` の `usage` にも載る。
+- gateway の `agent/contract.ts` に型（`UsageDto.sandbox?`）だけ足した。公開用の形への写し（欠けた値は 0）と summary は M3。
+
+### AgentDO / SandboxDO が出す監査
+
+- 出し方: 監査ログ（`@rovo/audit` の 1 行 JSON、`console.log`）と、ENVIRONMENT=test のときだけ DO のストレージ（`test_audit`）への記録。読み出しは `AgentDO.testAudit()` / `SandboxDO.testAudit()`（test 以外は例外）と、E2E 用の `POST /test/agent/audit` / `POST /test/sandbox/audit`。`OutboundGateway`（DO ではない）の `outbound_denied` は、test のときだけタスクの SandboxDO（`testRecordAudit`）に記録する。
+- events に積むもの（type `audit`、payload は固定コードだけ）:
+  - `agent_cancelled`: `{code:"agent_cancelled"}`。停止の意図を記録した cancel の最初の 1 回だけ。
+  - `sandbox_privileged_op`: `{code:"sandbox_privileged_op", op}`。`terminate` は呼び出すたびに 1 件（cancel の再送や片付けの再 terminate で複数になりうる。各呼び出しが特権操作の試行。終端の後・タスクが始まる前は積まない。ログ側は常に出る）、`set_deadline` / `extend_deadline` は Sandbox が受理した後（拒否・失敗した試行は積まない）。
+  - 監査ログの本体は SandboxDO が出す（実行した側）。AgentDO は events に二重化するだけで、ログを重ねて出さない。gateway が M3 で events の `audit` を公開用に写すときは、ログに出し直さない方針（二重に出ないように。最終判断は M3）。
+- 監査ログだけ: `boot_superseded`、`start_cancelled_by_tombstone`、`start_conflict`、`outbound_denied`、`sandbox_privileged_op` の `destroy`。
+- `task_ended_by_limit` は agent では出さない。agent の期限・予算・回答待ちの上限は、既存の `error` イベントと終端の `phase`（reason）が残り、gateway が `status_changed` の reason から M1 で出している。
+- acceptance 16 の件数合わせ（監査ログの行と events の `audit` の件数）は、agent 側では完全には一致しない: `terminate` は、終端の後の片付けやタスク開始前のものはログにだけ出る。`agent_cancelled` と `set_deadline` / `extend_deadline` は一致する。
+
+### M2 のテスト
+
+- Unit（パッケージ）: `packages/audit/test/audit.test.ts`（28 件。M1 の 16 件 + トークン形式の位置・枠の上書き・イベント別 allowlist・allowlist を渡せないこと・既定の出力先）。
+- Unit（agent）: `sandbox-do-metrics.test.ts`（カウンタの定義、退避をまたぐ永続、監査、本番で無効）、`agent-do-audit.test.ts`（usage の `sandbox`、cancel / tombstone / conflict / 特権操作の監査、本番で無効）、`outbound-handler.test.ts`（違反ログの JSON）。
+- E2E（agent、Docker）: `sandbox-do.e2e.test.ts`（実コンテナでカウンタ）、`sandbox-egress.e2e.test.ts`（`outbound_denied`）、`agent-do.e2e.test.ts`（usage の `sandbox`、cancel の監査と二重化、tombstone）。
 
 ### 次の M へ送ること
 

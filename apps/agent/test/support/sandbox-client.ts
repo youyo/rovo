@@ -53,6 +53,11 @@ export function sandboxClient(baseUrl: string, name: string) {
     seedWorkspace: () => op("seed-workspace"),
     /** 次に走る reaper を失敗させる（fail-closed の検証用）。 */
     failNextReap: () => op("fail-next-reap"),
+    /** 実行時間・作り直し・起動のやり直しのカウンタ（SandboxDO.metrics）。 */
+    metrics: () =>
+      op("metrics") as Promise<{ runtimeMs: number; restarts: number; bootRetries: number }>,
+    /** この Sandbox（と、そのタスクの OutboundGateway）が出した監査イベント（ENVIRONMENT=test のときだけ）。 */
+    audit: async () => ((await op("audit")) as { records: Record<string, unknown>[] }).records,
     status: () =>
       op("status") as Promise<{
         running: boolean;

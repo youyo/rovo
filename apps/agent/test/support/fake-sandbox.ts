@@ -1,4 +1,4 @@
-import type { GitCredential } from "../../src/agent/types";
+import type { GitCredential, SandboxMetrics } from "../../src/agent/types";
 import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "../../src/sandbox-port";
 
 export type ExecHandler = (
@@ -23,6 +23,10 @@ export class FakeSandbox implements SandboxPort {
   terminateCount = 0;
   /** terminate() の戻り値を先頭から順に使う（空なら stopped:true）。 */
   terminateResults: boolean[] = [];
+
+  /** metrics() の戻り値。undefined なら読めない実装の再現（undefined を返す）。metricsError を立てると例外 */
+  metricsValue: SandboxMetrics | undefined;
+  metricsError: Error | undefined;
 
   /** extendDeadline で受け取った期限（古い順） */
   readonly extended: number[] = [];
@@ -58,6 +62,11 @@ export class FakeSandbox implements SandboxPort {
     this.order.push("credential");
     this.credentials.push(credential);
     this.credentialAlive = true;
+  }
+
+  async metrics(): Promise<SandboxMetrics | undefined> {
+    if (this.metricsError) throw this.metricsError;
+    return this.metricsValue && { ...this.metricsValue };
   }
 
   async extendDeadline(deadlineAt: number): Promise<void> {

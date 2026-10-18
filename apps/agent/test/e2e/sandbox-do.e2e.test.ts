@@ -129,6 +129,31 @@ describe("ensureReady", () => {
   });
 });
 
+describe("実行時間と起動世代のカウンタ（実コンテナ）", () => {
+  it("runtimeMs は起動から停止までを累計し、作り直しで restarts が増え、terminate で閉じる", async () => {
+    const c = client("metrics");
+    expect(await c.metrics()).toEqual({ runtimeMs: 0, restarts: 0, bootRetries: 0 });
+    await c.ensureReady(specFor("metrics"));
+    const first = await c.metrics();
+    expect(first.restarts).toBe(0);
+    expect(first.runtimeMs).toBeGreaterThan(0);
+    await c.destroy();
+    const stopped = await c.metrics();
+    expect(stopped.runtimeMs).toBeGreaterThanOrEqual(first.runtimeMs);
+    await expect(c.exec(["true"])).rejects.toThrow(/restart/i); // 作り直して再 clone した
+    const second = await c.metrics();
+    expect(second.restarts).toBe(1);
+    expect(second.runtimeMs).toBeGreaterThan(stopped.runtimeMs);
+    await c.terminate();
+    const closed = await c.metrics();
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect((await c.metrics()).runtimeMs).toBe(closed.runtimeMs); // 停止後は増えない
+    // 特権操作は監査される
+    const ops = (await c.audit()).filter((r) => r.event === "sandbox_privileged_op");
+    expect(ops.map((r) => r.op)).toContain("terminate");
+  });
+});
+
 describe("外向き通信の制限（clone 対象リポジトリだけ）", () => {
   it("対象以外のリポジトリの clone・info/refs・upload-pack は拒否され、上流に届かない", async () => {
     const c = client("clone-only");

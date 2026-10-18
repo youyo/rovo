@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {},
   "dependencies": {
+    "@rovo/audit": "workspace:*",
     "agents": "0.28.1"
   },
   "devDependencies": {

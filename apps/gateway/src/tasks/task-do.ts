@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "@rovo/audit";
 import type { z } from "zod";
 import { count, mapAgentEvent } from "../agent/agent-events";
 import type {
@@ -9,7 +10,6 @@ import type {
   TaskSpec,
   UsageDto,
 } from "../agent/contract";
-import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "../audit";
 import {
   applyManagedBlock,
   decryptString,

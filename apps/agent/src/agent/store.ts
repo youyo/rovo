@@ -30,7 +30,10 @@ export function sameUsage(a: UsageDto, b: UsageDto): boolean {
     a.cacheWriteTokens === b.cacheWriteTokens &&
     a.web.search === b.web.search &&
     a.web.fetch === b.web.fetch &&
-    a.web.browse === b.web.browse
+    a.web.browse === b.web.browse &&
+    a.sandbox?.runtimeMs === b.sandbox?.runtimeMs &&
+    a.sandbox?.restarts === b.sandbox?.restarts &&
+    a.sandbox?.bootRetries === b.sandbox?.bootRetries
   );
 }
 

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
+import type { AuditFields } from "@rovo/audit";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
@@ -22,6 +23,7 @@ import {
   type GitCredential,
   isTerminal,
   type ResultDto,
+  type SandboxMetrics,
   type StartResult,
   type TaskSpec,
   type UsageDto,
@@ -29,6 +31,7 @@ import {
   type VerificationSummary,
   type WebUsage,
 } from "./agent/types";
+import { emitAudit, readTestAudit } from "./audit-adapter";
 import { type AgentPiHooks, createAgentExtension } from "./pi/extension";
 import { guardProvider } from "./pi/guard-provider";
 import {
@@ -51,6 +54,10 @@ import {
   type WebPort,
   type WebToolResult,
 } from "./tools/web";
+
+/** 0 以上の有限の数だけ通す（壊れた値は 0） */
+const finiteCount = (v: unknown): number =>
+  typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
 const WORKSPACE_ROOT = "/workspace";
@@ -224,6 +231,32 @@ export class AgentDO extends DurableObject<Env> {
     return o ?? createSandboxTools;
   }
 
+  // ---- 監査 ----
+
+  /** 監査イベントを出す（@rovo/audit 経由の 1 行 JSON。test のときだけ DO にも記録する）。 */
+  private audit(event: string, fields: AuditFields = {}): void {
+    emitAudit(this.env, this.ctx.storage.kv, event, { taskId: this.taskName(), ...fields });
+  }
+
+  /**
+   * Sandbox の特権操作を、events に audit として積む（二重化。R2 の events.jsonl に残る）。
+   * terminate は発行した時点、期限の設定・延長は Sandbox が受理した後に積む。ログ側（監査の本体）は SandboxDO が出す。
+   */
+  private recordPrivilegedOp(op: "terminate" | "set_deadline" | "extend_deadline"): void {
+    // タスクが始まっていなければ events の対象が無い（ログ側は SandboxDO が出す）
+    if (this.store.meta("fingerprint") === undefined) return;
+    try {
+      this.emit("audit", { code: "sandbox_privileged_op", op });
+    } catch {
+      // 監査の記録の失敗で、特権操作そのものを失敗させない
+    }
+  }
+
+  /** E2E / Unit 専用: この DO が出した監査イベントを発行順に返す。test 以外は例外。 */
+  async testAudit(): Promise<unknown[]> {
+    return readTestAudit(this.env, this.ctx.storage.kv);
+  }
+
   private taskName(): string {
     return this.ctx.id.name ?? this.lifecycle.name ?? "unknown";
   }
@@ -316,12 +349,18 @@ export class AgentDO extends DurableObject<Env> {
 
   async start(input: TaskSpec): Promise<StartResult> {
     await this.lifecycle.start();
-    if (this.store.meta("tombstone")) return { status: "cancelled" };
+    if (this.store.meta("tombstone")) {
+      this.audit("start_cancelled_by_tombstone", { caller: "parent" });
+      return { status: "cancelled" };
+    }
     // Installation Token は spec の同一性（fingerprint）にも永続化にも含めない。更新されるたびに conflict になってしまうため
     const { gitCredential, ...spec } = input;
     const canonical = JSON.stringify(spec);
     const existing = this.store.meta<string>("fingerprint");
-    if (existing !== undefined && existing !== canonical) return { status: "conflict" };
+    if (existing !== undefined && existing !== canonical) {
+      this.audit("start_conflict", { caller: "parent", reason: "spec_mismatch" });
+      return { status: "conflict" };
+    }
     if (existing === undefined) {
       const rejected = this.validate(input);
       if (rejected) return { status: "rejected", reason: rejected };
@@ -389,10 +428,20 @@ export class AgentDO extends DurableObject<Env> {
   async cancel(): Promise<CancelResult> {
     await this.lifecycle.start();
     const started = this.store.meta("fingerprint") !== undefined;
+    const firstTime = this.store.meta("tombstone") !== true;
+    let reason = "not_started";
     this.store.tx(() => {
       this.store.setMeta("tombstone", true);
-      if (started && !isTerminal(this.store.phase())) this.recordIntent("cancel");
+      if (started && !isTerminal(this.store.phase())) {
+        this.recordIntent("cancel");
+        reason = "stop_intent_recorded";
+        // 受理は 1 回だけ events に積む（recordIntent が意図を追加したときだけ）
+        if (firstTime) this.emit("audit", { code: "agent_cancelled" });
+      } else if (started) {
+        reason = "already_terminal";
+      }
     });
+    if (firstTime) this.audit("agent_cancelled", { caller: "parent", reason });
     // 意図を記録したら、すぐに Sandbox の破棄と Pi の abort を始める（patch の取得はしない）
     const { sandbox, abort } = this.beginStop("cancel", started);
     const work = (async (): Promise<CancelResult> => {
@@ -731,6 +780,7 @@ export class AgentDO extends DurableObject<Env> {
     const deadlineAt = this.baseDeadline() + pausedTotal;
     try {
       await this.sandbox().setDeadline(deadlineAt);
+      this.recordPrivilegedOp("set_deadline");
     } catch {
       // 失敗の間に cancel などが確定していたら、再送を促さない
       return this.refused() ? { ok: true, ignored: true } : { ok: false };
@@ -893,6 +943,7 @@ export class AgentDO extends DurableObject<Env> {
     try {
       // 終端では再開させない terminate を使う。無い実装（fake 等）には stop で代用する
       const sb = this.sandbox();
+      this.recordPrivilegedOp("terminate");
       return await (sb.terminate ? sb.terminate() : sb.stop());
     } catch {
       return { stopped: false };
@@ -992,12 +1043,12 @@ export class AgentDO extends DurableObject<Env> {
     }
     if (timedOut) {
       await this.raceTimeout(
-        this.refreshUsage(),
+        this.refreshUsage(true),
         this.overrides().usageReadWaitMs ?? USAGE_READ_WAIT_MS,
       );
       this.includeInflightEstimate();
     } else {
-      await this.refreshUsage().catch(() => undefined);
+      await this.refreshUsage(true).catch(() => undefined);
     }
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
@@ -1127,13 +1178,15 @@ export class AgentDO extends DurableObject<Env> {
   // ---- 費用 ----
 
   /** pi().usage() から累計の実費を読み、変化があれば usage イベントを積む。 */
-  private async refreshUsage(): Promise<UsageDto> {
+  private async refreshUsage(final = false): Promise<UsageDto> {
     await this.overrides().beforeUsageRead?.();
     const pi = await this.harness.pi();
     const state = await pi.usage(BG);
     // web の回数は Pi の usage には無い。AgentDO が数えた値を引き継ぐ
     const prev = this.store.usage();
     const total: UsageDto = { ...ZERO_USAGE, web: prev.web };
+    const sandbox = await this.sandboxUsage(prev.sandbox, final);
+    if (sandbox) total.sandbox = sandbox;
     for (const bucket of [state.models, state.tools]) {
       for (const u of Object.values(bucket)) {
         total.costUsd += u.cost.total;
@@ -1155,6 +1208,32 @@ export class AgentDO extends DurableObject<Env> {
       });
     }
     return this.store.usage();
+  }
+
+  /**
+   * SandboxDO のカウンタを読み、usage に載せる値を返す。読めない実装・失敗のときは保存済みの値のまま。
+   * 値は巻き戻さない。実行時間は増え続けるので、usage イベントを増やさないよう、runtimeMs だけの増加は
+   * 終端の確定（final）のときだけ反映する（restarts / bootRetries が変わったときは、いつでも反映する）。
+   */
+  private async sandboxUsage(
+    prev: SandboxMetrics | undefined,
+    final: boolean,
+  ): Promise<SandboxMetrics | undefined> {
+    let m: SandboxMetrics | undefined;
+    try {
+      m = await this.sandbox().metrics?.();
+    } catch {
+      return prev;
+    }
+    if (!m) return prev;
+    const next: SandboxMetrics = {
+      runtimeMs: Math.max(prev?.runtimeMs ?? 0, finiteCount(m.runtimeMs)),
+      restarts: Math.max(prev?.restarts ?? 0, finiteCount(m.restarts)),
+      bootRetries: Math.max(prev?.bootRetries ?? 0, finiteCount(m.bootRetries)),
+    };
+    if (!prev) return next;
+    const counters = next.restarts !== prev.restarts || next.bootRetries !== prev.bootRetries;
+    return final || counters ? next : prev;
   }
 
   /** モデル呼び出しの直前。期限と予算を確かめ、払えなければ呼ばせない。 */
@@ -1468,6 +1547,7 @@ export class AgentDO extends DurableObject<Env> {
     );
     try {
       await this.sandbox().extendDeadline(sandboxDeadline);
+      this.recordPrivilegedOp("extend_deadline");
     } catch (e) {
       if (this.refused()) return ended;
       return reject(

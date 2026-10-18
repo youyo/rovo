@@ -1,4 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { type AuditFields, audit } from "@rovo/audit";
 import type { GitCredential } from "./agent/types";
 import { parseReceivePackHead } from "./git-pkt";
 import { decideOutbound, type GitRoute, gitRoute } from "./outbound-policy";
@@ -6,7 +7,7 @@ import { decideOutbound, type GitRoute, gitRoute } from "./outbound-policy";
 export interface OutboundGatewayProps {
   /** clone / push を許す唯一のリポジトリ。未設定なら github.com へは何も通さない。 */
   repo?: { owner: string; name: string };
-  /** 違反ログに残す識別子（作業ブランチ名など。利用者の入力ではなく認証済みの値）。 */
+  /** 作業ブランチ名（認証済みの値）。違反の監査には使わない（taskId だけを出す）。 */
   task?: string;
   /**
    * このコンテナのタスク ID（SandboxDO の名前）。トークンの読み出しと、push を許す ref
@@ -36,11 +37,6 @@ export function classifyDestination(host: string): "github" | "registry" | "othe
   if (h === "registry.npmjs.org" || h === "pypi.org" || h === "files.pythonhosted.org")
     return "registry";
   return "other";
-}
-
-/** 違反ログの 1 行。固定のコード、task、宛先の分類だけで、path・query・本文は残さない。 */
-export function formatViolationLog(v: { code: string; task?: string; category: string }): string {
-  return `outbound denied: code=${v.code} task=${v.task ?? "-"} dest=${v.category}`;
 }
 
 /**
@@ -112,6 +108,11 @@ export interface OutboundDeps {
   readCredential(taskId: string): Promise<GitCredential | undefined>;
   fetchUpstream(url: string, init: RequestInit): Promise<Response>;
   now(): number;
+  /**
+   * 違反（outbound_denied）の監査の出し先。省略すると @rovo/audit の audit() で console.log に 1 行の JSON を出す。
+   * 渡されるのは許可したフィールド（taskId / caller / reason / dest）だけ。
+   */
+  audit?(event: "outbound_denied", fields: AuditFields): void;
   /** E2E 用: 許可した通信だけを偽サーバーへ向ける。 */
   testUpstream?: string;
   limits?: {
@@ -131,14 +132,19 @@ function denied(
   status = 403,
   body = `rovo: outbound request denied (${code})`,
 ): Response {
-  // path・query・本文は残さない（トークンなどが含まれうる）。固定コードと宛先の分類だけを記録する。
-  console.warn(
-    formatViolationLog({
-      code,
-      task: deps.props.task,
-      category: classifyDestination(url.hostname),
-    }),
-  );
+  // path・query・本文・ホスト名は残さない（トークンなどが含まれうる）。固定コード・taskId・宛先の分類だけを記録する。
+  const fields: AuditFields = {
+    taskId: deps.props.taskId,
+    caller: "child",
+    reason: code,
+    dest: classifyDestination(url.hostname),
+  };
+  try {
+    if (deps.audit) deps.audit("outbound_denied", fields);
+    else audit("outbound_denied", fields);
+  } catch {
+    // 監査の出力の失敗で、拒否の応答を変えない
+  }
   return text(status, body);
 }
 
@@ -337,6 +343,16 @@ export class OutboundGateway extends WorkerEntrypoint<Env, OutboundGatewayProps>
       },
       fetchUpstream: (url, init) => fetch(url, init),
       now: () => Date.now(),
+      audit: (event, fields) => {
+        const record = audit(event, fields);
+        // E2E 専用: 記録はタスクの SandboxDO に残す（本番では何もしない）。待たず、失敗は握りつぶす
+        if (record !== null && env.ENVIRONMENT === "test" && props.taskId) {
+          const stub = env.SANDBOX_DO.getByName(props.taskId) as unknown as {
+            testRecordAudit(record: unknown): Promise<void>;
+          };
+          this.ctx.waitUntil(stub.testRecordAudit(record).catch(() => undefined));
+        }
+      },
       testUpstream: env.ENVIRONMENT === "test" && env.TEST_UPSTREAM ? env.TEST_UPSTREAM : undefined,
     });
   }

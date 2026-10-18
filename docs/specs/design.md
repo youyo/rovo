@@ -1057,3 +1057,18 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - `wrangler.jsonc` はローカル開発とテスト用の設定とし、本番用の値（KV の id など）を持たない。
 - 下流が upstream の変更をコンフリクトなく取り込めるようにする。下流は「新しいファイルを足すだけ」でデプロイできる構成にする（例: 下流の本番用 wrangler 設定を `-c` で指定してデプロイする mise タスク）。下流に upstream のファイルを書き換えさせない。
 - 公開の前に、LICENSE、公開向けの README、下流でのデプロイ手順（`docs/deploy.md`）を用意する。
+
+### 15.6 Web 検索（2026-10-18 決定）
+
+- 検索には Cloudflare Web Search API（beta、2026-10-02 公開）を使う。Workers AI バインディングの `env.AI.websearch()` で呼ぶ。
+  - AI Gateway を経由し、AI Gateway のクレジット（Unified Billing）で課金される。検索プロバイダの API キーを持たなくてよい（BYOK も任意）。
+  - 既存の `ai` バインディングを使うので、npm の依存は増えない。Pi 用のアダプタ（`agents/websearch/pi` の `webSearchTool`）は、既に依存している `agents` に含まれる。
+  - 必要な workerd は 1.20260924.1 以降（rovo は 1.20261012.1 で満たす）。
+- プロバイダの既定は Ceramic.ai。
+  - Zero Data Retention に対応している。
+  - $0.25 / 1,000 リクエスト。
+  - 結果の説明文は最大 8,000 文字。
+  - Exa と Linkup にも、パラメータを変えるだけで切り替えられる。Tavily は選択肢にないので使わない。
+- 結果（タイトル・URL・説明文）は外部コンテンツなので、信用しないデータとして扱う。説明文は 8.5 の安全性評価（Clef-flash）にかける。
+- ローカル開発で呼ぶと、実際のアカウントに課金される。そのため、Unit / E2E では `websearch()` を fake に差し替える。
+- ページ本文の取得（web_fetch）は別に扱い、Phase 5 で決める（Browser Run / Kitesurf が候補）。

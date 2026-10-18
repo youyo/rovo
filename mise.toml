@@ -28,12 +28,12 @@ run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 
 [tasks.test]
 description = "Unit + E2E"
-depends = ["test:unit", "test:e2e"]
+depends = ["test:unit", "test:fake-github", "test:e2e"]
 
 [tasks.typecheck]
 description = "TypeScript の型検査"
 dir = "apps/gateway"
-run = "pnpm exec tsc -p tsconfig.json && pnpm exec tsc -p test/e2e/tsconfig.json"
+run = "pnpm exec tsc -p tsconfig.json && pnpm exec tsc -p test/e2e/tsconfig.json && pnpm exec tsc -p test/fake-github/tsconfig.json"
 
 [tasks."lint:biome"]
 description = "Biome による lint / format チェック"
@@ -56,3 +56,8 @@ run = "pnpm exec wrangler deploy --dry-run --outdir dist"
 description = "wrangler dev でローカル起動（ENVIRONMENT=test のスタブ認可を有効にする）"
 dir = "apps/gateway"
 run = "pnpm exec wrangler dev --var ENVIRONMENT:test --var PUBLIC_BASE_URL:http://localhost:8787"
+
+[tasks."test:fake-github"]
+description = "偽 GitHub サーバーと GitHub クライアントの結合テスト（Node）"
+dir = "apps/gateway"
+run = "pnpm exec vitest run --config vitest.fake-github.config.ts"

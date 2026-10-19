@@ -2,6 +2,7 @@ import { AuthorizationError, authorizationErrorRedirect } from "@cloudflare/work
 import type { Hono } from "hono";
 import { auditFromWorker } from "../audit-sink";
 import { GitHubClient, GitHubError, resolveGitHubBaseUrls } from "../github";
+import { type AllowRules, isUserIdAllowed, loadAllowRules } from "./allowlist";
 import { CONSENT_CSP, renderConsentPage } from "./consent";
 import type { AuthProps } from "./props";
 
@@ -14,15 +15,17 @@ export interface LoginDeps {
 
 interface LoginConfig {
   client: GitHubClient;
-  org: string;
-  team: string;
+  rules: AllowRules;
   redirectUri: string;
 }
 
 /** 設定が足りない・不正なら null（呼び出し側は 500 で止める。fail closed）。 */
 function loadConfig(env: Env, deps: LoginDeps): LoginConfig | null {
   const { GITHUB_APP_CLIENT_ID: id, GITHUB_APP_CLIENT_SECRET: secret } = env;
-  if (!id || !secret || !env.ALLOWED_ORG || !env.ALLOWED_TEAM || !env.PUBLIC_BASE_URL) return null;
+  if (!id || !secret || !env.PUBLIC_BASE_URL) return null;
+  // org/team と user ID の許可ルール。不正・不足（org/team の片方だけ、ID の不正な要素など）なら null
+  const rules = loadAllowRules(env);
+  if (!rules) return null;
   let urls: ReturnType<typeof resolveGitHubBaseUrls>;
   try {
     // 本番（ENVIRONMENT !== "test"）で既定値以外が指定されていたら例外
@@ -38,8 +41,7 @@ function loadConfig(env: Env, deps: LoginDeps): LoginConfig | null {
       apiBase: urls.apiBase,
       ...(deps.fetch ? { fetch: deps.fetch } : {}),
     }),
-    org: env.ALLOWED_ORG,
-    team: env.ALLOWED_TEAM,
+    rules,
     redirectUri: `${env.PUBLIC_BASE_URL.replace(/\/+$/, "")}/callback`,
   };
 }
@@ -188,11 +190,16 @@ export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
     try {
       const tokens = await config.client.exchangeCode({ code, redirectUri: config.redirectUri });
       const user = await config.client.getUser(tokens.accessToken);
-      const member = await config.client.isActiveTeamMember(tokens.accessToken, {
-        org: config.org,
-        teamSlug: config.team,
-        username: user.login,
-      });
+      // user ID のルールは GET /user で得た id で判定する。通らず、org/team の対があるときだけ team を確認する
+      const { rules } = config;
+      const member =
+        isUserIdAllowed(rules, user.id) ||
+        (rules.team !== null &&
+          (await config.client.isActiveTeamMember(tokens.accessToken, {
+            org: rules.team.org,
+            teamSlug: rules.team.team,
+            username: user.login,
+          })));
       if (!member) {
         await auditFromWorker(c.env, "authz_denied", {
           userId: user.id,

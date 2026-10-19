@@ -116,8 +116,9 @@ run = "pnpm exec wrangler deploy -c ../../deploy/web.wrangler.jsonc"
 | `ENVIRONMENT` | gateway / agent / web | 既定 `production` | `production` | `test` は E2E 専用。**本番で `test` にしない**（本番で GitHub の接続先の上書きを指定すると起動時に拒否される） |
 | `PUBLIC_BASE_URL` | gateway | 必須 | `https://<YOUR_GATEWAY_HOST>` | 公開 URL。OAuth の issuer と `/mcp` の resource、GitHub のコールバック URL（`<PUBLIC_BASE_URL>/callback`）になる。本番は `https` |
 | `GITHUB_APP_CLIENT_ID` | gateway | 必須 | `<YOUR_GITHUB_APP_CLIENT_ID>` | GitHub App の Client ID（秘密ではない）。空だとログインは失敗する（fail closed） |
-| `ALLOWED_ORG` | gateway | 必須 | `<YOUR_ORG>` | ログインと全ツール呼び出しを許す org の slug。空だとログインできない |
-| `ALLOWED_TEAM` | gateway | 必須 | `<YOUR_TEAM>` | 許す team の slug。子 team のメンバーも許可される。空だとログインできない |
+| `ALLOWED_ORG` | gateway | org/team か `ALLOWED_USER_IDS` のどちらかが必須（org/team は対） | `<YOUR_ORG>` | ログインと全ツール呼び出しを許す org の slug。`ALLOWED_TEAM` と対で設定する。**片方だけ設定すると設定の誤りとしてログインできない**（`ALLOWED_USER_IDS` に切り替わらない） |
+| `ALLOWED_TEAM` | gateway | 同上 | `<YOUR_TEAM>` | 許す team の slug。子 team のメンバーも許可される。`ALLOWED_ORG` と対 |
+| `ALLOWED_USER_IDS` | gateway | org/team か `ALLOWED_USER_IDS` のどちらかが必須 | `<YOUR_GITHUB_USER_ID>`（複数はカンマ区切り） | ログインと全ツール呼び出しを許す GitHub の**数値の user ID**。個人アカウントには team が無いので、個人で使うときはこちらを使う。自分の ID は `gh api user --jq .id`。login（ユーザー名）は改名でき、空いた名前を他人が取れるので使わない。前後の空白は無視する。**1 つでも不正な要素（数字以外・0・重複・空要素）があれば、設定全体が不正としてログインできない**（不正な要素を読み飛ばさない）。org/team と両方を設定した場合は、どちらかを満たせば許可する。ID で許可する場合も、トークンの持ち主の確認（`GET /user`）は省略しない |
 | `GITHUB_APP_ID` | gateway | 必須 | `<YOUR_GITHUB_APP_ID>` | GitHub App の App ID（秘密ではない）。Installation Token の発行に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる |
 | `DRAFT_PR_FALLBACK` | gateway | 任意 | `fail` | Draft PR を作れないリポジトリ（Free プランの private など）での扱い。`fail`（既定）/ `ready`。不正な値は `fail` |
 | `PR_SHOW_COST` | gateway | 任意 | `false` | `true` のときだけ費用を PR 本文に載せる。公開リポジトリでは誰でも見られる |
@@ -141,6 +142,8 @@ run = "pnpm exec wrangler deploy -c ../../deploy/web.wrangler.jsonc"
 | `SAFETY_BLOCK_THRESHOLD` | web | 任意 | `0.8` | Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block。**仮の値**で、受入で調整する |
 | `SAFETY_CAUTION_THRESHOLD` | web | 任意 | `0.4` | 同上。caution |
 | `TEST_FAKE_BASE` | web | 本番では不要 | （空） | `ENVIRONMENT=test` のときだけ有効。E2E 専用。本番では設定しない |
+
+> **キャッシュの注意**: ツール呼び出しごとの認可の結果は、UserDO に最大 5 分（`membership_cache` の TTL）キャッシュされる。`ALLOWED_USER_IDS` から ID を外しても、team から外しても、再デプロイ後 TTL が切れるまでは、そのユーザーは有効なままになる（最大 5 分）。
 
 ### Secret（`wrangler secret put <NAME> -c <下流の設定>`）
 
@@ -174,8 +177,8 @@ GitHub の Settings > Developer settings > GitHub Apps で作る（OAuth App は
 - **Request user authorization (OAuth) during installation**: 不要。**Webhook**: 無効でよい
 - **Expire user authorization tokens**: 有効にする（既定）。トークンは 8 時間で切れ、refresh token（約 6 か月）で自動更新される。無効にした場合も動く
 - **Repository permissions**: Metadata: Read-only / Contents: Read and write / Pull requests: Read and write
-- **Organization permissions**: Members: Read-only（team 所属の確認に使う）
-- App を対象の org / リポジトリに **Install** する。`task_start` は、利用者のトークンで見える Installation に対象リポジトリが含まれ、利用者に push 権限があるときだけ成功する（公開リポジトリでも App が未導入なら `forbidden`）
+- **Organization permissions**: Members: Read-only（team 所属の確認に使う。`ALLOWED_USER_IDS` だけで認可する個人利用では使わない）
+- App を対象の org / リポジトリに **Install** する。個人アカウントのリポジトリでも、`task_start` の Installation と push 権限の確認はそのまま動く（`ALLOWED_USER_IDS` で認可した利用者は、org の Members 権限を使わない）。`task_start` は、利用者のトークンで見える Installation に対象リポジトリが含まれ、利用者に push 権限があるときだけ成功する（公開リポジトリでも App が未導入なら `forbidden`）
 
 **秘密鍵の変換**: GitHub がダウンロードさせる鍵は PKCS#1（`BEGIN RSA PRIVATE KEY`）。gateway は PKCS#8 を受け付けるので、変換してから投入する。鍵のファイルはリポジトリに置かない。
 
@@ -200,7 +203,7 @@ wrangler secret put GITHUB_APP_PRIVATE_KEY -c <YOUR_GATEWAY_CONFIG> < app.pkcs8.
 - MCP の URL: `<PUBLIC_BASE_URL>/mcp`
 - ユーザーごとの OAuth: Portal の「Require user auth」を有効にする。
 - OAuth のエンドポイント: DCR は `/oauth/register`、認可は `/authorize`、トークンは `/oauth/token`（いずれも `<PUBLIC_BASE_URL>` 配下）。protected resource metadata は Worker が公開する。
-- Portal の Access ポリシーは直接の URL で迂回できる。実際の防御線は gateway の `ALLOWED_ORG` / `ALLOWED_TEAM` と、タスクごとの push 権限の検証。
+- Portal の Access ポリシーは直接の URL で迂回できる。実際の防御線は gateway の `ALLOWED_ORG` / `ALLOWED_TEAM`（または `ALLOWED_USER_IDS`）と、タスクごとの push 権限の検証。
 - 登録後の接続確認: [acceptance.md](specs/acceptance.md) の「前提」と 1 節。
 
 ## 9. R2 アーカイブの設定
@@ -291,7 +294,7 @@ R2 の画面操作、ライフサイクルの設定画面: **【実機で確認�
 
 | 症状 | 原因 |
 |---|---|
-| ログインできない | `ALLOWED_ORG` / `ALLOWED_TEAM` が空、または所属していない。`GITHUB_APP_CLIENT_ID` が空 |
+| ログインできない | `ALLOWED_ORG` / `ALLOWED_TEAM` / `ALLOWED_USER_IDS` のどのルールも設定されていない、`ALLOWED_ORG` と `ALLOWED_TEAM` の片方だけ、`ALLOWED_USER_IDS` に不正な要素がある、または許可されていない。`GITHUB_APP_CLIENT_ID` が空 |
 | `task_start` が `github_app_not_configured` で FAILED | `GITHUB_APP_ID` または `GITHUB_APP_PRIVATE_KEY` が未設定 |
 | `task_start` が `ai_gateway_not_configured` で拒否される | agent の `AI_GATEWAY_ID` が空 |
 | `task_start` が `forbidden` | App が対象リポジトリに未導入、または push 権限が無い |

@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { isUserIdAllowed, loadAllowRules } from "../auth/allowlist";
 import {
   CredentialManager,
   type CredentialState,
@@ -481,7 +482,7 @@ export class UserDO extends DurableObject<Env> {
       GITHUB_APP_CLIENT_SECRET: secret,
       TOKEN_ENC_KEY: key,
     } = this.env;
-    if (!id || !secret || !key || !this.env.ALLOWED_ORG || !this.env.ALLOWED_TEAM) {
+    if (!id || !secret || !key || !loadAllowRules(this.env)) {
       throw new Error("GitHub integration is not configured");
     }
     const urls = resolveGitHubBaseUrls(this.env);
@@ -598,13 +599,20 @@ export class UserDO extends DurableObject<Env> {
     epoch: number,
   ): Promise<MemberResult | typeof STALE> {
     const { client, credentials } = this.github();
+    // 設定は毎回読み直す。不正・不足なら例外（toFailure で internal。fail closed）
+    const rules = loadAllowRules(this.env);
+    if (!rules) throw new Error("allow rules are not configured");
     const state = await credentials.withToken(async (tok) => {
       // login は改名されうるので、毎回 GET /user で現在の値を得る。資格が別人のものなら拒否する。
       const user = await client.getUser(tok);
       if (user.id !== githubUserId) return "mismatch" as const;
+      // user ID のルールは、その場で取得した user.id で判定する（通れば team の確認は不要）
+      if (isUserIdAllowed(rules, user.id)) return "active" as const;
+      // ID で通らず、org/team の対が設定されているときだけ team を確認する。無ければ拒否
+      if (!rules.team) return "none" as const;
       return client.getTeamMembership(tok, {
-        org: this.env.ALLOWED_ORG,
-        teamSlug: this.env.ALLOWED_TEAM,
+        org: rules.team.org,
+        teamSlug: rules.team.team,
         username: user.login,
       });
     });

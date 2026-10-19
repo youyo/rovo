@@ -141,7 +141,8 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `ENVIRONMENT` | `production`（既定）。`test` のときだけ `GITHUB_OAUTH_BASE` / `GITHUB_API_BASE` の上書きを許す。**本番で `test` にしないこと**（本番で上書きを指定すると起動時に拒否される） |
 | `PUBLIC_BASE_URL` | 公開 URL。OAuth の issuer と `/mcp` の resource、GitHub のコールバック URL（`<PUBLIC_BASE_URL>/callback`）になる。本番は `https`、ローカルのみ loopback の `http` が許される |
 | `GITHUB_APP_CLIENT_ID` | GitHub App の Client ID（秘密ではない） |
-| `ALLOWED_ORG` / `ALLOWED_TEAM` | ログインと全ツール呼び出しを許す org と team の slug。子 team のメンバーも許可される。空だとログインできない（fail closed） |
+| `ALLOWED_ORG` / `ALLOWED_TEAM` | ログインと全ツール呼び出しを許す org と team の slug。子 team のメンバーも許可される。対で設定する（片方だけだとログインできない）。`ALLOWED_USER_IDS` のどちらかが必須 |
+| `ALLOWED_USER_IDS` | ログインと全ツール呼び出しを許す GitHub の数値の user ID（カンマ区切り。`gh api user --jq .id` で分かる）。team の無い個人アカウントで使うときはこちらを使う。org/team と両方を設定した場合は、どちらかを満たせば許可する。不正な要素が 1 つでもあれば全体が不正になり、ログインできない（fail closed） |
 | `GITHUB_APP_ID` | GitHub App の App ID（秘密ではない）。Installation Access Token の発行（JWT の `iss`）に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる（fail closed） |
 | `DRAFT_PR_FALLBACK` | Draft PR を作れないリポジトリ（Free プランの private リポジトリなど）での扱い。`fail`（既定。タスクを `draft_pr_unsupported` で FAILED にする）/ `ready`（`[WIP]` を付けた通常の PR を作り、本文冒頭に注記し、警告 `draft_pr_unavailable` を付ける）。**不正な値は `fail` として扱う**。判定は Draft に関する 422 のときだけ |
 | `PR_SHOW_COST` | `true` のときだけ、費用を PR 本文に載せる（既定は載せない。公開リポジトリでは誰でも見られるため） |

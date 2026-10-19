@@ -146,6 +146,8 @@ async function stopProcessGroup(child: ChildProcess): Promise<void> {
 export interface SetupOptions {
   /** LOGS（R2）をバインドするか。既定は true */
   logs?: boolean;
+  /** 既定の var を上書きする（認可の構成を変える E2E 用。例: ALLOWED_USER_IDS だけの構成） */
+  vars?: Record<string, string>;
 }
 
 export default function setup(project: TestProject) {
@@ -201,6 +203,7 @@ export async function startGateway(project: TestProject, options: SetupOptions =
       GITHUB_APP_ID: APP_ID,
       // 改行を避けるため、ヘッダーなしの base64（1 行）で渡す。PEM 本体と同じ内容
       GITHUB_APP_PRIVATE_KEY: keys.privatePem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, ""),
+      ...options.vars,
     };
     const varArgs = Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`]);
 

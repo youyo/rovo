@@ -11,6 +11,22 @@ export const MAX_COMMAND_SECTION_BYTES = 64 * 1024;
 /** pkt-line 1 個の最大長（長さの 4 バイトを含む）。git の LARGE_PACKET_MAX と同じ。 */
 const MAX_PKT_LEN = 65520;
 
+/** 解析が返しうる拒否のコードの全部（outbound_denied の reason になる）。 */
+export const RECEIVE_PACK_REJECT_CODES = [
+  "bad_pkt_len",
+  "shallow",
+  "push_cert",
+  "bad_command",
+  "delete",
+  "bad_ref",
+  "push_options",
+  "object_format",
+  "head_too_large",
+  "no_command",
+  "multiple_commands",
+] as const;
+export type ReceivePackRejectCode = (typeof RECEIVE_PACK_REJECT_CODES)[number];
+
 export interface ReceivePackCommand {
   oldSha: string;
   newSha: string;
@@ -21,11 +37,11 @@ export type ReceivePackHead =
   /** flush までまだ届いていない。続きを読んでからもう一度呼ぶ。 */
   | { kind: "need_more" }
   /** code は固定の識別子（ログ用。入力を含まない） */
-  | { kind: "reject"; code: string }
+  | { kind: "reject"; code: ReceivePackRejectCode }
   /** headEnd は flush の直後のオフセット（以降が packfile）。 */
   | { kind: "ok"; command: ReceivePackCommand; capabilities: string[]; headEnd: number };
 
-const reject = (code: string): ReceivePackHead => ({ kind: "reject", code });
+const reject = (code: ReceivePackRejectCode): ReceivePackHead => ({ kind: "reject", code });
 const SHA1 = /^[0-9a-f]{40}$/;
 const ZERO = "0".repeat(40);
 const HEX4 = /^[0-9a-fA-F]{4}$/;
@@ -47,7 +63,7 @@ function latin1(bytes: Uint8Array): string {
 
 type PktRead =
   | { kind: "need_more" }
-  | { kind: "reject"; code: string }
+  | { kind: "reject"; code: ReceivePackRejectCode }
   | { kind: "flush"; next: number }
   | { kind: "data"; payload: Uint8Array; next: number };
 

@@ -13,11 +13,37 @@ export interface OutboundOptions {
    */
   branch?: string;
 }
-/** code は固定の識別子（ログ用。入力を含まない）。reason は人間向けの説明で、入力のホスト名などを含みうる。 */
-export type OutboundDecision = { allow: true } | { allow: false; reason: string; code: string };
 
 const REGISTRY_HOSTS = new Set(["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"]);
-const deny = (code: string, reason: string): OutboundDecision => ({ allow: false, reason, code });
+/**
+ * decideOutbound が返しうる違反コードの全部（outbound_denied の reason になる）。
+ * deny() の引数の型にしてあるので、足し忘れるとコンパイルが通らない。テスト（outbound-denied-reasons.test.ts）が表の過不足を確かめる。
+ */
+export const POLICY_DENY_CODES = [
+  "invalid_url",
+  "upgrade_not_allowed",
+  "non_https",
+  "port_not_allowed",
+  "url_credentials",
+  "registry_method",
+  "host_not_allowed",
+  "github_path",
+  "github_no_repo",
+  "github_other_repo",
+  "github_push_not_allowed",
+  "github_service",
+  "github_method",
+] as const;
+export type PolicyDenyCode = (typeof POLICY_DENY_CODES)[number];
+/** code は固定の識別子（ログ用。入力を含まない）。reason は人間向けの説明で、入力のホスト名などを含みうる。 */
+export type OutboundDecision =
+  | { allow: true }
+  | { allow: false; reason: string; code: PolicyDenyCode };
+const deny = (code: PolicyDenyCode, reason: string): OutboundDecision => ({
+  allow: false,
+  reason,
+  code,
+});
 
 /**
  * Sandbox からの外向き通信を許可するか判定する純粋関数（design 7.2）。

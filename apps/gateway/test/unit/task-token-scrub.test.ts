@@ -183,6 +183,26 @@ describe("git_token の暗号文の削除（finalize_done の後）", () => {
     expect(toks.every((x) => x.enc === "" && x.revoked === 1)).toBe(true);
   });
 
+  it("再試行しても直らない 4xx（403）で失効を諦めた場合は、再試行せずその場で空になる", async () => {
+    app().setFault({ pattern: "^DELETE /installation/token$", status: 403 });
+    const t = await runToTerminal();
+    await t.stub.advance();
+    // 5xx と違い、1 回目の失敗で打ち切る（backoff の再試行に入らない）
+    expect(await finalizeDone(t.stub)).toBe(1);
+    const toks = await tokens(t.stub);
+    expect(toks.length).toBeGreaterThan(0);
+    expect(toks.every((x) => x.enc === "" && x.revoked === 1)).toBe(true);
+    const given = await audits(t.stub, "credential_revoke_given_up");
+    expect(given.map((r) => (r as unknown as { reason?: string }).reason)).toEqual([
+      "not_retryable",
+    ]);
+    const attempts = await rows<{ revoke_attempts: number }>(
+      t.stub,
+      "SELECT revoke_attempts FROM github_link",
+    );
+    expect(attempts[0]?.revoke_attempts).toBe(1);
+  });
+
   it("PR を作る前に FAILED になったタスクでも空になる", async () => {
     app().markMissing(REPO, "0123456789abcdef");
     const t = await createTask();

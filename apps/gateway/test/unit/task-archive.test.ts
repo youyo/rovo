@@ -291,6 +291,54 @@ describe("R2 アーカイブ（再試行と打ち切り）", () => {
   });
 });
 
+describe("R2 アーカイブ（結果を作れない: result_unavailable）", () => {
+  it("結果を作れないまま 6 回で打ち切ったら archive_failed(reason: result_unavailable) を出し、archive_done = 1 にする。R2 には何も書かない。結果と精算は変わらない", async () => {
+    const r2 = new FakeR2();
+    const t = await createTask(r2);
+    await t.stub.advance();
+    // composeResult が失敗する（メッセージにはデータが入りうる）
+    await runInDurableObject(t.stub, (i) => {
+      (i as unknown as { composeResult: () => Promise<never> }).composeResult = async () => {
+        throw new Error("compose failed ghs_leak");
+      };
+    });
+    await complete(t);
+    // 1 回目は再試行待ち（まだ打ち切らない）
+    expect(await archiveState(t.stub)).toMatchObject({ archive_done: 0, archive_attempts: 1 });
+    expect(await audits(t.stub, "archive_failed")).toEqual([]);
+    let at = Date.now();
+    for (let i = 0; i < 8; i++) {
+      at += 10 * 60_000;
+      const clock = () => at;
+      await setClock(t.stub, clock);
+      await t.stub.advance();
+    }
+    expect(r2.attempted).toEqual([]); // put の段階に進んでいない
+    expect(await archiveState(t.stub)).toMatchObject({
+      archive_done: 1,
+      archive_attempts: 6,
+      finished: 1,
+    });
+    const failed = await audits(t.stub, "archive_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({
+      taskId: t.id,
+      caller: "system",
+      reason: "result_unavailable",
+    });
+    expect(JSON.stringify(failed[0])).not.toContain("ghs_leak");
+    expect(await audits(t.stub, "archive_completed")).toEqual([]);
+    expect(await alarmOf(t.stub)).toBeNull();
+    // 結果と精算は変わらない（composeResult の差し替えを戻して確かめる）
+    await runInDurableObject(t.stub, (i) => {
+      delete (i as unknown as { composeResult?: unknown }).composeResult;
+    });
+    const res = await t.stub.result(OWNER);
+    expect(res.ok && res.result.status).toBe("COMPLETED");
+    expect(await archiveState(t.stub)).toMatchObject({ finished: 1 });
+  });
+});
+
 describe("R2 アーカイブ（LOGS が無い構成は fail-open）", () => {
   it("archive_skipped だけ出し、archive_done = 1 にして alarm を止める。結果は変わらない", async () => {
     const t = await createTask(null);

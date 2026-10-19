@@ -65,12 +65,18 @@ description = "gateway の E2E（wrangler dev で実 Worker と偽 GitHub を起
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 
+[tasks."test:e2e:gateway:nologs"]
+description = "gateway の E2E（LOGS = R2 を外した構成。archive_skipped で fail-open になることを検証）。dev registry の取り違えを避けるため test:e2e:gateway の後に直列で走らせる"
+dir = "apps/gateway"
+run = "pnpm exec vitest run --config vitest.e2e-nologs.config.ts"
+wait_for = ["test:e2e:gateway"]
+
 [tasks."test:e2e:docker"]
 description = "agent の E2E（Docker 必須）。wrangler dev で実コンテナを起動し、偽サーバーで外向き通信の許可・拒否と Gateway→Agent の DO RPC を検証"
 dir = "apps/agent"
 run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 # 負荷によるタイムアウトを避けるため、Unit などの他のテストと同時には走らせない
-wait_for = ["test:unit:gateway", "test:unit:agent", "test:unit:web", "test:fake-github", "test:e2e:gateway"]
+wait_for = ["test:unit:gateway", "test:unit:agent", "test:unit:web", "test:fake-github", "test:e2e:gateway", "test:e2e:gateway:nologs"]
 
 [tasks."test:e2e:full"]
 description = "Gateway(MCP) → AgentDO → SandboxDO（実コンテナ）と、Web Research Service（apps/web。3つの Worker を同時に起動し、偽の Web / Clef / Web Search API を使う）の通しの E2E（Docker 必須）。Phase 3 のゴール（Draft PR・push・PR 本文の更新・トークンの失効）、Phase 4 の対話、Phase 5 の web_search / web_fetch の検証。test:e2e:docker と Docker コンテナの片付けが干渉しないよう、同時には走らせない"
@@ -80,7 +86,7 @@ wait_for = ["test:e2e:docker"]
 
 [tasks."test:e2e"]
 description = "E2E（gateway + agent + 通し。agent と通しは Docker 必須）"
-depends = ["test:e2e:gateway", "test:e2e:docker", "test:e2e:full"]
+depends = ["test:e2e:gateway", "test:e2e:gateway:nologs", "test:e2e:docker", "test:e2e:full"]
 
 [tasks."test:e2e:net"]
 description = "agent の E2E の実ネットワーク版（Docker 必須。実 npm への GET・許可外ホストの拒否・github.com への認証なし clone が 401 で落ちること。CI の test には含めない）"

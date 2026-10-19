@@ -1,8 +1,8 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { type AuditFields, audit } from "@rovo/audit";
 import type { GitCredential } from "./agent/types";
-import { parseReceivePackHead } from "./git-pkt";
-import { decideOutbound, type GitRoute, gitRoute } from "./outbound-policy";
+import { parseReceivePackHead, type ReceivePackRejectCode } from "./git-pkt";
+import { decideOutbound, type GitRoute, gitRoute, type PolicyDenyCode } from "./outbound-policy";
 
 export interface OutboundGatewayProps {
   /** clone / push を許す唯一のリポジトリ。未設定なら github.com へは何も通さない。 */
@@ -17,6 +17,24 @@ export interface OutboundGatewayProps {
 }
 
 export type { GitCredential };
+
+/**
+ * このファイルが自分で出す違反コードの全部（policy の判定と receive-pack の解析のコードは別に持つ）。
+ * denied() / fail() の引数の型にしてあるので、足し忘れるとコンパイルが通らない。
+ */
+export const GATEWAY_DENY_CODES = [
+  "body_too_large",
+  "content_encoding",
+  "content_type",
+  "credential_unavailable",
+  "no_body",
+  "head_timeout",
+  "truncated_head",
+  "ref_not_allowed",
+  "read_error",
+] as const;
+export type GatewayDenyCode = (typeof GATEWAY_DENY_CODES)[number];
+type DenyCode = GatewayDenyCode | PolicyDenyCode | ReceivePackRejectCode;
 
 /** git-receive-pack（push）のリクエスト本文の上限。 */
 export const MAX_RECEIVE_PACK_BYTES = 50 * 1024 * 1024;
@@ -128,7 +146,7 @@ const text = (status: number, body: string) => new Response(`${body}\n`, { statu
 function denied(
   deps: OutboundDeps,
   url: URL,
-  code: string,
+  code: DenyCode,
   status = 403,
   body = `rovo: outbound request denied (${code})`,
 ): Response {
@@ -168,7 +186,7 @@ async function authorization(deps: OutboundDeps): Promise<string | undefined> {
 
 type HeadResult =
   | { ok: true; body: ReadableStream<Uint8Array> }
-  | { ok: false; code: string; status: number };
+  | { ok: false; code: DenyCode; status: number };
 
 /**
  * receive-pack の本文のコマンド部を flush まで読んで検証する。検証できたら、読んだ分と残りをつなぎ直した
@@ -188,7 +206,7 @@ async function readReceivePackHead(
   const timeout = new Promise<"timeout">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), headTimeoutMs);
   });
-  const fail = (code: string, status = 403): HeadResult => {
+  const fail = (code: DenyCode, status = 403): HeadResult => {
     void reader.cancel().catch(() => {});
     return { ok: false, code, status };
   };

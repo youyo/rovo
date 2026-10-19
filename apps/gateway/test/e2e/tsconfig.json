@@ -12,5 +12,5 @@
     "verbatimModuleSyntax": true,
     "types": ["node"]
   },
-  "include": ["./**/*.ts", "../../vitest.e2e.config.ts"]
+  "include": ["./**/*.ts", "../../vitest.e2e.config.ts", "../../vitest.e2e-nologs.config.ts"]
 }

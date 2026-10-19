@@ -58,14 +58,15 @@ function stripJsonComments(text: string): string {
  * E2E 用の wrangler 設定。本番の wrangler.jsonc には R2 のバケット名（環境固有の値）を置かないので、
  * ローカルの R2（LOGS）はこの生成した設定だけに足す。main は絶対パスにして、設定の置き場所に依らないようにする。
  */
-function writeE2eConfig(dir: string): string {
+function writeE2eConfig(dir: string, opts: { logs: boolean }): string {
   const base = JSON.parse(
     stripJsonComments(readFileSync(join(GATEWAY_DIR, "wrangler.jsonc"), "utf8")),
   ) as Record<string, unknown>;
   const config = {
     ...base,
     main: join(GATEWAY_DIR, String(base.main)),
-    r2_buckets: [{ binding: "LOGS", bucket_name: "rovo-logs-e2e" }],
+    // logs: false は LOGS を外した構成（本番の wrangler.jsonc と同じく r2_buckets なし）
+    ...(opts.logs ? { r2_buckets: [{ binding: "LOGS", bucket_name: "rovo-logs-e2e" }] } : {}),
   };
   const path = join(dir, "wrangler.e2e.jsonc");
   writeFileSync(path, JSON.stringify(config, null, 2));
@@ -142,7 +143,18 @@ async function stopProcessGroup(child: ChildProcess): Promise<void> {
   await groupGone(pid, KILL_CONFIRM_MS);
 }
 
-export default async function setup(project: TestProject) {
+export interface SetupOptions {
+  /** LOGS（R2）をバインドするか。既定は true */
+  logs?: boolean;
+}
+
+export default function setup(project: TestProject) {
+  return startGateway(project, { logs: true });
+}
+
+/** gateway（と偽 GitHub・偽 agent Worker）を起動して baseUrl / githubUrl を提供する。戻り値は後始末。 */
+export async function startGateway(project: TestProject, options: SetupOptions = {}) {
+  const withLogsBucket = options.logs ?? true;
   const resources: {
     github?: FakeGitHub;
     child?: ChildProcess;
@@ -172,7 +184,7 @@ export default async function setup(project: TestProject) {
     const inspectorPort = await freePort();
     const baseUrl = `http://127.0.0.1:${port}`;
     resources.persistDir = mkdtempSync(join(tmpdir(), "rovo-e2e-"));
-    const e2eConfig = writeE2eConfig(resources.persistDir);
+    const e2eConfig = writeE2eConfig(resources.persistDir, { logs: withLogsBucket });
     const wranglerBin = join(GATEWAY_DIR, "node_modules", "wrangler", "bin", "wrangler.js");
 
     // .dev.vars があっても結果が変わらないよう、必要な値はすべて --var で明示する

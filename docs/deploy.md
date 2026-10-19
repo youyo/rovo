@@ -249,7 +249,7 @@ R2 の画面操作、ライフサイクルの設定画面: **【実機で確認�
 
 `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**実験的で、既定で無効**。
 
-- 有効にする前に、[acceptance.md](specs/acceptance.md) の「web_browse（有効化前のゲート）」をすべて確かめ、残存リスクの受け入れを記録する。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。
+- 有効にする前に、[acceptance.md](specs/acceptance.md) の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを運用者が判断して記録する。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。実機のゲート（付録 A）は任意で、このリポジトリの作者は行わずに有効にしている。
 - 有効にするには、3 つの Worker の `WEB_BROWSE_ENABLED` を `"true"` にする。順序は web → agent → gateway（4 の順序と同じ）。無効のままなら、親の `tools/list` にも子のツールにも出ない。
 - web の `BROWSER` バインディングは、下流の設定で `remote` を指定する（ローカルの `BROWSER` は実際のブラウザを持たない）。設定の方法、wrangler の版と `compatibility_date`: **【実機で確認して追記】**
 - 有効化後は、`tools/list` に `web_browse` が現れることを確かめる。

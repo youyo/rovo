@@ -1129,5 +1129,7 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - **デプロイ用のタスク（D3）**: 16 の例（upstream に置くデプロイの mise タスク）は採らない。upstream の `mise.toml` には `deploy:*` を置かない。下流が、新しいファイル（`mise-tasks/` のファイルタスク、または `MISE_ENV` で読まれる `mise.<env>.toml`）を足してタスクを持つ。手順は `docs/deploy.md`。デプロイの順序は web → agent → gateway。
 - **付属ファイル（D4）**: `SECURITY.md` を置く。連絡先は GitHub の private vulnerability reporting で、公開の直後に有効にする。CONTRIBUTING と CI（GitHub Actions）は置かない。ライセンスは MIT（著作権者は youyo）。
 - **web_browse（D5）**: 実機のゲートの結果によらず、コードは残して既定で無効のまま公開する。README に「実験的で、既定で無効」と明記する。外すかどうかは、ゲートの結果が深刻な場合に改めて決める。
+  - 2026-10-20 の決定: 実機のゲートは行わず、運用者の本番では有効にする。upstream の既定は無効のまま。確かめていない点を残存リスクとして受け入れ、acceptance.md の 11 節に記録する。
 - **実機での障害の起こし方（D6）**: コードに検証用の分岐を入れない。Cloudflare 側の操作でコンテナを止める方法を基本とし、具体的な手段は M7 で調べて手順に書く。手段が無ければ、実コンテナの E2E で確認済みとして記録し、実機で確かめられない限界を残す。
-  - M7 で調べた結果（2026-10-19、ドキュメントによる）: rovo は `scheduling_policy: durable_object` なので、再デプロイでは Sandbox のインスタンスは止まらず、障害の再現に使えない。有力な手段は、`wrangler containers ssh` で入り、主プロセス（`tini -- sleep infinity`）を落とす方法。実機での確認は M10。詳細は acceptance.md の 18 節。
+  - M7 で調べた結果（2026-10-19、ドキュメントによる）: rovo は `scheduling_policy: durable_object` なので、再デプロイでは Sandbox のインスタンスは止まらず、障害の再現に使えない。有力な手段は、`wrangler containers ssh` で入り、主プロセス（`tini -- sleep infinity`）を落とす方法。詳細は acceptance.md の 18 節。
+  - 2026-10-20 の決定: この方法は試験の間だけでも本番のコンテナに ssh の口を開けるので採らず、復旧の試験は実機では行わない。実コンテナの E2E で確認済みとして記録し、本物の Containers での停止と作り直しを確かめていない限界を残す。

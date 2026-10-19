@@ -72,7 +72,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
   - web_browse は別枠: 親は 1 日 50 回（`WEB_BROWSE_DAILY_LIMIT`）、子はタスクごとに 20 回（`WEB_BROWSE_LIMIT_PER_TASK`）。
   - 子: タスクごとに search 50 回・fetch 100 回（`AgentDO` が数える）。超えるとツールのエラー。`apps/agent` の env `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` で変える。回数は `usage` イベント（`web_search` / `web_fetch` / `web_browse`）と `task_result` の `usage.web` に出る。
   - 回数は呼び出しの前に数える（失敗しても戻さない）。web 自体には回数の上限を持たない（AI Gateway のレート制限とアカウントの上限に頼る）。
-- `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効なら親の tools/list にも子の Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、実機での確認（`docs/specs/acceptance.md` の「web_browse（有効化前のゲート）」）が必要。**
+- `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効なら親の tools/list にも子の Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、`docs/specs/acceptance.md` の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを判断してほしい。** 実機のゲートは任意で、作者は行わずに有効にしている。
 
 ## 構成
 
@@ -233,7 +233,7 @@ rovo を upstream にする private リポジトリ（下流）が、自分の w
 
 #### web_browse の有効化
 
-`web_browse` は既定で無効（`WEB_BROWSE_ENABLED`）。有効にする前に、[docs/specs/acceptance.md](docs/specs/acceptance.md) の「web_browse（有効化前のゲート）」をすべて満たし、残存リスクの受け入れを記録する。
+`web_browse` は既定で無効（`WEB_BROWSE_ENABLED`）。有効にする前に、[docs/specs/acceptance.md](docs/specs/acceptance.md) の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを判断して記録する。実機のゲート（付録 A）は任意。
 
 ### GitHub App の設定
 

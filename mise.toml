@@ -3,9 +3,11 @@ node = "24.21.0"
 pnpm = "12.14.0"
 
 [env]
-# wrangler の対話・テレメトリを止める（CI=1 は pnpm install を frozen-lockfile 扱いにもする）
+# wrangler のテレメトリを止める
+# CI=1 はここに置かない。mise の [env] は対話シェル全体に export されるため、
+# Claude Code などの CLI が色を無効化する（supports-color は CI があると色レベル 0 を返す）。
+# pnpm install の frozen-lockfile は install タスクで明示している
 WRANGLER_SEND_METRICS = "false"
-CI = "1"
 
 [tasks.install]
 description = "依存パッケージをインストール"

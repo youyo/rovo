@@ -526,6 +526,39 @@ export class AgentDO extends DurableObject<Env> {
     return this.ctx.storage.kv.get<string[][]>("test:model_tool_results") ?? [];
   }
 
+  /**
+   * テスト専用: 失敗した E2E の診断。phase、最後の agent イベント（seq・時刻・種別）、Sandbox の状態
+   * （ready になった時刻、starts / restarts / bootRetries）。Sandbox が診断を持たないとき（fake）は null。
+   */
+  async testDiagnostics(): Promise<{
+    phase: string | undefined;
+    now: number;
+    lastEvents: { seq: number; ts: number; type: string; data: string }[];
+    sandbox: unknown;
+  }> {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    const last = this.store.lastSeq();
+    const { events } = this.store.events(Math.max(0, last - 8), 8);
+    let sandbox: unknown = null;
+    try {
+      const sb = this.sandbox() as unknown as { testDiagnostics?: () => Promise<unknown> };
+      sandbox = sb.testDiagnostics ? await sb.testDiagnostics() : null;
+    } catch (e) {
+      sandbox = { error: e instanceof Error ? e.message : String(e) };
+    }
+    return {
+      phase: this.store.phase(),
+      now: Date.now(),
+      lastEvents: events.map((e) => ({
+        seq: e.seq,
+        ts: e.ts,
+        type: e.type,
+        data: e.data.slice(0, 160),
+      })),
+      sandbox,
+    };
+  }
+
   private recordModelCall(userTexts: string[], toolResults: string[]): void {
     if (this.env.ENVIRONMENT !== "test") return;
     const calls = this.ctx.storage.kv.get<string[][]>("test:model_calls") ?? [];

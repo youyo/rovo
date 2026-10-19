@@ -121,6 +121,7 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
       "/__test/hold-deliveries",
       "/__test/agent/model-calls",
       "/__test/agent/model-tool-results",
+      "/__test/agent/diagnostics",
       "/__test/task/deliveries",
     ]) {
       for (const environment of ["production", "", undefined]) {
@@ -150,6 +151,7 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
     for (const path of [
       "/__test/agent/model-calls",
       "/__test/agent/model-tool-results",
+      "/__test/agent/diagnostics",
       "/__test/task/deliveries",
     ]) {
       expect((await app.request(path, post({}), withEnv("test"))).status, path).toBe(400);
@@ -157,6 +159,16 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
         400,
       );
     }
+  });
+
+  it("test の diagnostics は AgentDO の testDiagnostics の結果をそのまま返す（失敗した collect の診断用）", async () => {
+    const res = await createDefaultApp().request(
+      "/__test/agent/diagnostics",
+      post({ task_id: "diag-task" }),
+      withEnv("test"),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ fake: true, task: "diag-task" });
   });
 
   it("withTestScripts は、hold-deliveries の間 answer / steer を AgentDO に届けず ok:false を返す。解除すれば届く", async () => {

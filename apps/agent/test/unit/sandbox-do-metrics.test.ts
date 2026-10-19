@@ -280,3 +280,31 @@ describe("SandboxDO の監査（@rovo/audit 経由。ENVIRONMENT=test のとき�
     });
   });
 });
+
+describe("SandboxDO.testDiagnostics（失敗した E2E の診断。ENVIRONMENT=test のときだけ）", () => {
+  it("起動前は readyAt が無く、ensureReady の後は ready になった時刻と starts / restarts / bootRetries を返す", async () => {
+    await runInDO(sandbox("d-ready"), async (inst: Inst) => {
+      const fake = new FakeContainer();
+      inst.maybeContainer = () => fake;
+      const before = await inst.testDiagnostics();
+      expect(before).toMatchObject({ starts: 0, restarts: 0, bootRetries: 0, running: false });
+      expect(before.readyAt).toBeUndefined();
+      const t0 = Date.now();
+      await inst.ensureReady(spec());
+      const d = await inst.testDiagnostics();
+      expect(d).toMatchObject({ starts: 1, restarts: 0, bootRetries: 0, running: true });
+      expect(d.readyAt).toBeGreaterThanOrEqual(t0);
+      expect(d.readyAt).toBeLessThanOrEqual(Date.now());
+      expect(typeof d.runtimeMs).toBe("number");
+      await inst.terminate();
+    });
+  });
+
+  it("ENVIRONMENT が test 以外なら例外（本番）", async () => {
+    await runInDO(sandbox("d-prod"), async (inst: Inst) => {
+      inst.env = { ...inst.env, ENVIRONMENT: "production" };
+      inst.maybeContainer = () => new FakeContainer();
+      await expect(inst.testDiagnostics()).rejects.toThrow(/test/);
+    });
+  });
+});

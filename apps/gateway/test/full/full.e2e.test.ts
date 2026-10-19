@@ -1,9 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { e2eLog } from "../../../agent/test/support/e2e-log";
 import { type FakeUpstream, startFakeUpstream } from "../../../agent/test/support/fake-upstream";
 import {
   E2E_TOKEN_ENC_KEY,
@@ -20,6 +22,7 @@ import { fakeGitHubAdmin } from "../e2e/fake-admin";
 import { connectAuthenticated } from "../e2e/oauth-client";
 import { type FakeGitHub, startFakeGitHub } from "../fake-github/server";
 import { generateAppKeyPair } from "../support/app-keys";
+import { type CollectTiming, collectUntil } from "../support/collect";
 import { gitRepoStore } from "../support/git-store";
 
 // Phase 3 / Phase 4 / Phase 5 のゴールの通し検証: MCP クライアント → Gateway（OAuth・TaskDO・UserDO・GitHub App）→ AgentDO → SandboxDO（実コンテナ）。
@@ -233,27 +236,138 @@ interface Ev {
 }
 const TERMINAL = new Set(["COMPLETED", "FAILED", "BUDGET_EXCEEDED", "CANCELLED"]);
 
-/** task_wait を cursor でつないで、条件が満たされる（既定: 終端になる）までイベントを集める。 */
+/**
+ * task_wait を cursor でつないで、条件が満たされる（既定: 終端になる）までイベントを集める。
+ * 上限（timeoutMs）は変えない。落ちるときは、AgentDO / SandboxDO の状態などの診断をメッセージに含める（support/collect.ts）。
+ * 成功したときも、所要時間と Sandbox の状態を timing.log に記録する（通しと単独の比較用）。
+ */
 async function collect(
   client: Client,
   taskId: string,
   until: (status: string, events: Ev[]) => boolean = (s) => TERMINAL.has(s),
   timeoutMs = 240_000,
 ) {
-  const events: Ev[] = [];
-  let cursor: string | undefined;
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const w = await call(client, "task_wait", {
-      task_id: taskId,
-      ...(cursor !== undefined ? { cursor } : {}),
-      timeout_seconds: 20,
-    });
-    expect(w.isError, JSON.stringify(w.body)).toBe(false);
-    events.push(...(w.body.events as Ev[]));
-    cursor = w.body.cursor as string;
-    if (until(w.body.status as string, events)) return { status: w.body.status as string, events };
-    if (Date.now() > deadline) throw new Error(`timeout; status=${w.body.status}`);
+  const r = await collectUntil({
+    wait: async (cursor) => {
+      const w = await call(client, "task_wait", {
+        task_id: taskId,
+        ...(cursor !== undefined ? { cursor } : {}),
+        timeout_seconds: 20,
+      });
+      expect(w.isError, JSON.stringify(w.body)).toBe(false);
+      return {
+        status: w.body.status as string,
+        events: w.body.events as Ev[],
+        cursor: w.body.cursor as string,
+      };
+    },
+    until,
+    timeoutMs,
+    diagnose: () => diagnoseTask(client, taskId),
+  });
+  await recordCollect(taskId, r.timing, r.status);
+  return { status: r.status, events: r.events as Ev[] };
+}
+
+/** 現在のテスト名の先頭（"g." など）。timing.log のラベル用。 */
+const scenarioLabel = () =>
+  (expect.getState().currentTestName ?? "?").split(" > ").pop()?.split(" ")[0] ?? "?";
+
+/**
+ * AgentDO / SandboxDO の状態を整形する。時刻は「いま」からの相対 ms。
+ * 注意: イベントの data は E2E 専用の偽データ（台本・偽 GitHub のトークン）だけで、実アカウントの値は入らない。
+ * 診断はエラーメッセージに入るので、collectUntil が maskTokens でトークンらしい文字列を伏せる。
+ */
+async function agentDiagnostics(taskId: string): Promise<string> {
+  const res = await fetch(`${wrangler.baseUrl}/__test/agent/diagnostics`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const d = (await res.json()) as {
+    phase?: string;
+    now: number;
+    lastEvents: { seq: number; ts: number; type: string; data: string }[];
+    sandbox: {
+      starts: number;
+      restarts: number;
+      bootRetries: number;
+      runtimeMs: number;
+      running: boolean;
+      lastStartAt?: number;
+      readyAt?: number;
+    } | null;
+  };
+  const ago = (t: number | undefined) => (t === undefined ? "n/a" : `${d.now - t}ms ago`);
+  const sb = d.sandbox;
+  const sandbox = sb
+    ? `starts=${sb.starts} restarts=${sb.restarts} bootRetries=${sb.bootRetries} running=${sb.running} runtimeMs=${sb.runtimeMs} lastStart=${ago(sb.lastStartAt)} ready=${ago(sb.readyAt)} boot=${
+        sb.lastStartAt !== undefined && sb.readyAt !== undefined
+          ? `${sb.readyAt - sb.lastStartAt}ms`
+          : "n/a"
+      }`
+    : "null";
+  const last = d.lastEvents.map((e) => `#${e.seq} ${e.type} ${e.data} (${ago(e.ts)})`).join(", ");
+  return `agent: phase=${d.phase} lastEvents=[${last}]\nsandbox: ${sandbox}`;
+}
+
+/**
+ * 失敗した collect の診断: AgentDO / SandboxDO、task_status、wrangler のログの末尾、docker ps（rovo のコンテナだけ）。
+ * wrangler のログも E2E 専用の偽データ（偽 GitHub・偽 upstream）しか含まない。
+ */
+async function diagnoseTask(client: Client, taskId: string): Promise<string> {
+  const parts: string[] = [`task=${taskId}`];
+  const safe = async (name: string, fn: () => Promise<string> | string) => {
+    try {
+      parts.push(await fn());
+    } catch (e) {
+      parts.push(`${name} failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  await safe("agent", () => agentDiagnostics(taskId));
+  await safe("task_status", async () => {
+    const s = await call(client, "task_status", { task_id: taskId });
+    return `task_status: ${JSON.stringify(s.body).slice(0, 800)}`;
+  });
+  await safe(
+    "docker ps",
+    () =>
+      `docker ps -a (rovo のコンテナだけ):\n${execFileSync(
+        "docker",
+        [
+          "ps",
+          "-a",
+          "--filter",
+          "name=workerd-rovo-",
+          "--format",
+          "{{.ID}} {{.Names}} {{.Status}} {{.CreatedAt}}",
+        ],
+        { encoding: "utf8", timeout: 10_000 },
+      ).trim()}`,
+  );
+  await safe("wrangler log", () => {
+    const dir = e2eLog().dir;
+    const file = readdirSync(dir).find((f) => f.startsWith("wrangler-"));
+    if (!file) return "wrangler log: none";
+    const lines = readFileSync(join(dir, file), "utf8").split("\n");
+    const boot = lines.filter((l) => l.includes("[sandbox-boot]")).slice(-5);
+    return `wrangler log (${join(dir, file)}):\n[sandbox-boot] ${boot.length} lines:\n${boot.join("\n")}\ntail:\n${lines.slice(-30).join("\n")}`;
+  });
+  return parts.join("\n");
+}
+
+/** 成功した collect の所要時間と Sandbox の状態を timing.log に残す（失敗しても無視）。 */
+async function recordCollect(taskId: string, timing: CollectTiming, status: string) {
+  try {
+    const diag = await agentDiagnostics(taskId);
+    const sb = diag.split("\n")[1] ?? "";
+    e2eLog().record(
+      `collect ${scenarioLabel()} task=${taskId} status=${status} firstRunning=${timing.firstRunningMs === undefined ? "n/a" : `${timing.firstRunningMs}ms`} ${sb}`,
+      timing.totalMs,
+    );
+  } catch {
+    // 記録の失敗でテストを変えない
   }
 }
 
@@ -719,15 +833,21 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
   it("g. 完了の後に PR の head が動いたら、head_moved_after_verification の警告が出る", async () => {
     const client = await newClient("heidi");
     let moved: string | undefined;
-    // TaskDO が終端で PR の head を読む直前（= AgentDO が検証済みの SHA に揃えた後）に、別の人が push した状況にする
+    // TaskDO が終端で PR の head を読む直前（= AgentDO が検証済みの SHA に揃えた後）に、別の人が push した状況にする。
+    // 作用させるのは、head が「検証済みの commit」のときだけ。初期コミット（TaskDO が API で作る。親は base）や base のままの間は
+    // 何もしない（Sandbox が push する前に動かすと、push が fast-forward でなくなって通しが止まる）。
+    // 検証済みの commit は初期コミットの子（親が base でない）で、最後に task_result の verification.commit_sha と突き合わせる。
+    let headBeforeMove: string | undefined;
     app().beforeHandle = async (key) => {
       if (moved !== undefined || !/^GET \/repos\/acme\/calc\/pulls\/\d+$/.test(key)) return;
       const pr = app()
         .pulls(REPO.fullName)
         .find((p) => `GET /repos/acme/calc/pulls/${p.number}` === key);
       const head = pr && app().branch(REPO.fullName, pr.head);
-      // 検証済みの SHA に揃った後（= 初期コミットでも base でもない）の head にだけ作用させる
       if (!pr || !head || head === upstream.calcSha) return;
+      const parent = app().commit(REPO.fullName, head)?.parents[0];
+      if (parent === undefined || parent === upstream.calcSha) return; // 初期コミット（親が base）
+      headBeforeMove = head;
       moved = await app().addCommit(REPO.fullName, head, "someone else pushed");
       app().setBranch(REPO.fullName, pr.head, moved);
     };
@@ -738,6 +858,8 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
       const r = await settledResult(client, taskId);
       const v = r.verification as { commit_sha?: string };
       expect(moved).toBeDefined();
+      // 動かす前の head は、検証済みの commit だった
+      expect(headBeforeMove).toBe(v.commit_sha);
       expect(moved).not.toBe(v.commit_sha);
       expect(r.pr).toMatchObject({ head_sha: moved, head_matches_verified: false });
       expect(

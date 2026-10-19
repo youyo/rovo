@@ -111,6 +111,11 @@ export class FakeAgentDO extends DurableObject {
 
   // ---- 制御用 RPC（テストから呼ぶ）----
 
+  /** E2E 用の診断（/__test/agent/diagnostics の結果）。本物の AgentDO.testDiagnostics の代わり。 */
+  testDiagnostics(): unknown {
+    return { fake: true, task: this.ctx.id.name };
+  }
+
   setProgram(p: FakeProgram): void {
     this.program = {
       ...p,

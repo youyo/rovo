@@ -67,6 +67,18 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ calls: await agent.testModelToolResults() });
   });
 
+  // AgentDO / SandboxDO の診断（最後の agent イベント、sandbox の ready 時刻・restarts・bootRetries）。
+  // 失敗した collect が、原因（Sandbox が終端に至らなかったのか、遅かっただけか）を追えるようにする
+  app.post("/__test/agent/diagnostics", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const id = await taskIdOf(c.req);
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    const agent = c.env.AGENT_DO.getByName(id) as unknown as {
+      testDiagnostics(): Promise<unknown>;
+    };
+    return c.json(await agent.testDiagnostics());
+  });
+
   // TaskDO の回答・steer の配送状態（pending / delivered / skipped）
   app.post("/__test/task/deliveries", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();

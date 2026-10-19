@@ -792,3 +792,33 @@ describe("steer の引き戻しと確定中", () => {
     expect(await waitForTerminal(fx)).toBe("completed");
   });
 });
+
+describe("testDiagnostics（失敗した E2E の診断。最後のイベントと sandbox の状態）", () => {
+  it("phase・最後のイベント（seq・時刻・種別）と、sandbox の診断（無ければ null）を返す", async () => {
+    const fx = newFixture("diag-1", [ask("Q?"), report()]);
+    await startAndAsk(fx, "diag-1");
+    const d = (await fx.stub.testDiagnostics()) as unknown as {
+      phase: string;
+      lastEvents: { seq: number; ts: number; type: string }[];
+      sandbox: unknown;
+    };
+    expect(d.phase).toBe("input_required");
+    expect(d.lastEvents.length).toBeGreaterThan(0);
+    const all = await allEvents(fx);
+    expect(d.lastEvents.at(-1)).toMatchObject({ seq: all.at(-1)?.seq });
+    expect(typeof d.lastEvents.at(-1)?.ts).toBe("number");
+    expect(typeof d.lastEvents.at(-1)?.type).toBe("string");
+    expect(d.lastEvents.length).toBeLessThanOrEqual(8);
+    // FakeSandbox には診断が無い
+    expect(d.sandbox).toBeNull();
+  });
+
+  it("ENVIRONMENT が test 以外なら例外（本番）", async () => {
+    const fx = newFixture("diag-prod", [report()]);
+    await fx.stub.start(makeSpec("diag-prod"));
+    await runInDO(fx.stub, async (inst) => {
+      inst.env = { ...inst.env, ENVIRONMENT: "production" };
+      await expect(inst.testDiagnostics()).rejects.toThrow(/test/);
+    });
+  });
+});

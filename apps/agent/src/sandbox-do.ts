@@ -219,6 +219,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const since = this.ctx.storage.kv.get<number>("rt_since");
     if (since !== undefined) this.closeRuntime(Math.max(since, this.num("rt_seen")));
     this.ctx.storage.kv.put("starts", this.num("starts") + 1);
+    // E2E の診断用: 最後に start した時刻（ready までの時間を出す）
+    if (this.env.ENVIRONMENT === "test") this.ctx.storage.kv.put("last_start_at", Date.now());
     this.openRuntime();
   }
 
@@ -240,6 +242,32 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       runtimeMs: this.num("rt_total") + open,
       restarts: Math.max(0, this.num("starts") - 1),
       bootRetries: this.num("boot_retries"),
+    };
+  }
+
+  /** E2E 専用: 失敗した E2E の診断（ready になった時刻、start の回数、restarts / bootRetries など）。test 以外は例外。 */
+  async testDiagnostics(): Promise<{
+    starts: number;
+    restarts: number;
+    bootRetries: number;
+    runtimeMs: number;
+    running: boolean;
+    lastStartAt?: number;
+    readyAt?: number;
+  }> {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    const m = await this.metrics();
+    const kv = this.ctx.storage.kv;
+    const lastStartAt = kv.get<number>("last_start_at");
+    const readyAt = kv.get<number>("ready_at");
+    return {
+      starts: this.num("starts"),
+      restarts: m.restarts,
+      bootRetries: m.bootRetries,
+      runtimeMs: m.runtimeMs,
+      running: this.maybeContainer()?.running === true,
+      ...(lastStartAt !== undefined ? { lastStartAt } : {}),
+      ...(readyAt !== undefined ? { readyAt } : {}),
     };
   }
 
@@ -674,6 +702,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       throw new Error(`container did not become ready${detail}`);
     }
     this.assertBootCurrent(g);
+    if (this.env.ENVIRONMENT === "test") this.ctx.storage.kv.put("ready_at", Date.now());
     if (started) {
       await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
       // 信頼できる状態（ユーザーのコードを動かす前）で、残してよいプロセスを記録する

@@ -77,6 +77,13 @@ const PHRASE_RULES: PhraseRule[] = [
     category: "instruction_override",
   },
   {
+    // 日本語の資格情報の外部送信。「送信します」のような説明文を拾わないよう、依頼・命令の形に限る
+    rule: "credential_exfiltration",
+    re: /(?:api ?キー|シークレット|トークン|認証情報|資格情報|パスワード|秘密鍵|秘密情報|クッキー|環境変数|\.env)(?:(?!入力|設定|発行|保存|作成|登録|生成|取得|更新|変更)[^。、\n]){0,60}?(?:https?:\/\/|外部|サーバー|メール|[へに])(?:(?!入力|設定|発行|保存|作成|登録|生成|取得|更新|変更)[^。、\n]){0,30}?(?:(?:送信|転送|アップロード|投稿|送付)(?:して|しろ|せよ|すること|しなさい|する事)|送(?:って|れ|りなさい)|メールして)/,
+    verdict: "block",
+    category: "credential_exfiltration",
+  },
+  {
     rule: "credential_exfiltration",
     re: /\b(?:send|post|upload|email|e-mail|exfiltrate|transmit|forward|leak|submit)\b[^.\n]{0,60}\b(?:api[ _-]?keys?|secrets?|access tokens?|auth tokens?|credentials?|passwords?|private keys?|ssh keys?|\.env|cookies?|environment variables)\b/,
     verdict: "block",
@@ -112,6 +119,13 @@ const HTML_COMMENT = /<!--([\s\S]*?)-->/g;
 const AI_ADDRESSEE = /\b(?:ai|llm|assistant|agent|model|claude|gpt|chatgpt|chatbot|copilot)s?\b/;
 const IMPERATIVE =
   /\b(?:must|should|need to|ignore|send|post|execute|run|reveal|tell|instruction|prompt|override|disregard|do not|don't|important)\b/;
+
+// 「ロボット」の「ボット」に当たらないよう、ボットは前が片仮名でないときだけ
+const AI_ADDRESSEE_JA =
+  /\bai\b|エージェント|アシスタント|\bllm\b|言語モデル|チャットボット|(?<![ァ-ヶー])ボット/;
+// 「AI 生成の画像を出力」のような名詞の使い方を拾わないよう、動詞は命令・依頼の形に限る
+const IMPERATIVE_JA =
+  /(?:実行|無視|送信|転送|アップロード|開示|出力)(?:して|しろ|せよ|すること|しなさい|する事)|伝えない|知らせない|言わない|従って|従え|してください|しなさい|せよ/;
 
 // ゼロ幅（ZWSP・ZWNJ・Word Joiner・BOM）。LRM / RLM は右から左の文字の組版で正当に使われるので対象にしない。
 const ZERO_WIDTH = /[\u200B\u200C\u2060\uFEFF]/gu;
@@ -165,7 +179,10 @@ function htmlCommentFindings(raw: string): Finding[] {
   const out: Finding[] = [];
   for (const m of raw.matchAll(HTML_COMMENT)) {
     const body = flatten(m[1] ?? "");
-    if (AI_ADDRESSEE.test(body) && IMPERATIVE.test(body)) {
+    if (
+      (AI_ADDRESSEE.test(body) && IMPERATIVE.test(body)) ||
+      (AI_ADDRESSEE_JA.test(body) && IMPERATIVE_JA.test(body))
+    ) {
       out.push({
         rule: "html_comment_instruction",
         verdict: "block",

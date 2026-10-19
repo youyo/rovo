@@ -2,6 +2,7 @@
 gitleaks = "8.30.1"
 node = "24.21.0"
 pnpm = "12.14.0"
+terraform = "1.15.8"
 
 [env]
 # wrangler のテレメトリを止める
@@ -57,9 +58,17 @@ description = "web の Unit テスト（vitest + workerd。WebSearchSource / fet
 dir = "apps/web"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
+[tasks."test:deploy"]
+description = "デプロイスクリプト（scripts/deploy.sh）の自己確認。pnpm を偽物に差し替えるので wrangler も Cloudflare も呼ばない。ROVO_DEPLOY_DIR が未設定・設定ファイルが無いときに失敗し、wrangler を呼ばないことを確かめる"
+run = "bash scripts/test-deploy.sh"
+
 [tasks."test:unit"]
-description = "Unit テスト（audit + gateway + agent + web）"
-depends = ["test:unit:audit", "test:unit:gateway", "test:unit:agent", "test:unit:web"]
+description = "Unit テスト（audit + gateway + agent + web + デプロイスクリプト）"
+depends = ["test:unit:audit", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy"]
+
+[tasks."test:infra"]
+description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
+run = ["terraform -chdir=infra init -backend=false -input=false", "terraform -chdir=infra test"]
 
 [tasks."test:e2e:gateway"]
 description = "gateway の E2E（wrangler dev で実 Worker と偽 GitHub を起動し、MCP SDK Client から通しで検証）"
@@ -101,8 +110,8 @@ dir = "apps/agent"
 run = "pnpm exec vitest run --config vitest.e2e-net.config.ts"
 
 [tasks.test]
-description = "Unit + 偽 GitHub + E2E（Docker 必須。実ネットワーク版 test:e2e:net は含まない）"
-depends = ["test:unit", "test:fake-github", "test:e2e"]
+description = "Unit + infra + 偽 GitHub + E2E（Docker 必須。実ネットワーク版 test:e2e:net は含まない）"
+depends = ["test:unit", "test:infra", "test:fake-github", "test:e2e"]
 
 [tasks."typecheck:audit"]
 description = "packages/audit の型検査"
@@ -132,13 +141,25 @@ depends = ["typecheck:audit", "typecheck:gateway", "typecheck:agent", "typecheck
 description = "Biome による lint / format チェック"
 run = "pnpm exec biome check ."
 
+[tasks."lint:infra"]
+description = "infra/ の整形の確認（terraform fmt -check）。init も資格情報も要らない"
+run = "terraform fmt -check -recursive infra"
+
 [tasks.lint]
-description = "lint + 型検査 + 文書の点検（docs:check は node のスクリプトだけで 1 秒未満）"
-depends = ["lint:biome", "typecheck", "docs:check"]
+description = "lint + 型検査 + 文書の点検（docs:check は node のスクリプトだけで 1 秒未満）+ Terraform の整形"
+depends = ["lint:biome", "lint:infra", "typecheck", "docs:check"]
 
 [tasks.fmt]
 description = "Biome で整形"
 run = "pnpm exec biome check --write ."
+
+[tasks."infra:fmt"]
+description = "infra/ の Terraform を整形する"
+run = "terraform fmt -recursive infra"
+
+[tasks."infra:validate"]
+description = "infra/ の Terraform の構文と型の検証（init -backend=false のあと validate。資格情報は要らない）"
+run = ["terraform -chdir=infra init -backend=false -input=false", "terraform -chdir=infra validate"]
 
 [tasks."build:gateway"]
 description = "gateway をバンドル（デプロイはしない）"
@@ -196,3 +217,27 @@ run = [
   "bash scripts/scan-secrets.sh",
   "pnpm audit",
 ]
+
+# ---- デプロイ（下流の wrangler 設定を ROVO_DEPLOY_DIR で指定する。docs/deploy.md の 4） ----
+# ROVO_DEPLOY_DIR が未設定、または設定ファイル（<dir>/{gateway,agent,web}.wrangler.jsonc）が無ければ、何もせずに失敗する。
+# upstream の apps/*/wrangler.jsonc（本番の値が無い）は決して渡さない。雛形は deploy.example/。
+
+[tasks."deploy:web"]
+description = "web をデプロイする（ROVO_DEPLOY_DIR/web.wrangler.jsonc。未設定なら失敗する）"
+run = "bash scripts/deploy.sh web"
+
+[tasks."deploy:agent"]
+description = "agent をデプロイする（ROVO_DEPLOY_DIR/agent.wrangler.jsonc。Docker が要る。未設定なら失敗する）"
+run = "bash scripts/deploy.sh agent"
+
+[tasks."deploy:gateway"]
+description = "gateway をデプロイする（ROVO_DEPLOY_DIR/gateway.wrangler.jsonc。未設定なら失敗する）"
+run = "bash scripts/deploy.sh gateway"
+
+[tasks."deploy:all"]
+description = "web → agent → gateway の順にデプロイする（設定が 1 つでも欠けていたら何もしない）"
+run = "bash scripts/deploy.sh all"
+
+[tasks."deploy:secrets"]
+description = "secret を wrangler secret put で対話的に入れる（gateway: GITHUB_APP_CLIENT_SECRET / GITHUB_APP_PRIVATE_KEY / TOKEN_ENC_KEY、agent: TOKEN_ENC_KEY）。値は引数・env に載せない"
+run = "bash scripts/deploy.sh secrets"

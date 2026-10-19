@@ -1,0 +1,29 @@
+# コピーして使う（実際の値を書いたファイルは、下流の private リポジトリにだけ置く）。
+#   cp terraform.tfvars.example terraform.tfvars
+# このファイルには実在の値を書かない。
+
+# 必須: Cloudflare のアカウント ID（32 桁の 16 進数）
+account_id = "<YOUR_ACCOUNT_ID>"
+
+# 作るリソースの名前の接頭辞（既定 rovo）。バケットは <接頭辞>-archive / <接頭辞>-audit になる
+# name_prefix = "rovo"
+
+# オブジェクトを削除するまでの日数
+# archive_retention_days = 90
+# audit_retention_days   = 365
+
+# Logpush の対象にする Worker の名前（各 wrangler 設定の name と一致させる）
+# worker_names = {
+#   gateway = "rovo-gateway"
+#   agent   = "rovo-agent"
+#   web     = "rovo-web"
+# }
+
+# AI Gateway のログ収集
+# ai_gateway_collect_logs = true
+
+# Logpush のジョブを有効にするか
+# logpush_enabled = true
+
+# 通常は指定しない。権限グループが名前で見つからないときだけ指定する
+# r2_item_write_permission_group_id = "<PERMISSION_GROUP_ID>"

@@ -15,6 +15,10 @@ GITHUB_APP_PRIVATE_KEY=
 # true のときだけ費用を PR 本文に載せる
 # PR_SHOW_COST=false
 
+# タスク 1 件に予約する予算（USD。既定 10。0 以下・不正な値は 10）。子エージェントの budgetUsd にも同じ値を渡す。
+# 月額の枠（MONTHLY_BUDGET_USD）を 10 未満にするときは、これも下げる
+# TASK_BUDGET_USD=10
+
 # ログインを許可する org と team（slug）
 ALLOWED_ORG=
 ALLOWED_TEAM=

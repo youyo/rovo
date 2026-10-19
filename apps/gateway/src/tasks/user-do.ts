@@ -10,6 +10,7 @@ import {
   type StoredCredential,
   type TokenSet,
 } from "../github";
+import { taskBudgetUsd } from "./budget";
 import type { TaskDO } from "./task-do";
 import { ulid } from "./ulid";
 
@@ -43,8 +44,6 @@ const MAX_MEMBER_ATTEMPTS = 3;
 /** 照合中に予約が入れ替わったときの再判定の上限。 */
 const MAX_RECONCILE_ATTEMPTS = 5;
 
-/** タスク 1 件に予約する予算（USD）。AgentDO の budgetUsd にも同じ値を渡す。 */
-export const TASK_BUDGET_USD = 10;
 const MICRO = 1_000_000;
 /** MONTHLY_BUDGET_USD が未設定・不正なときの月額上限（USD）。 */
 export const DEFAULT_MONTHLY_BUDGET_USD = 100;
@@ -326,7 +325,7 @@ export class UserDO extends DurableObject<Env> {
 
     // 同時実行の枠が空いていても、月額の枠が足りなければ始めない（request_key は消費しない）。
     const month = monthOf(at);
-    const reservedMicro = Math.round(TASK_BUDGET_USD * MICRO);
+    const reservedMicro = Math.round(taskBudgetUsd(this.env) * MICRO);
     if (this.committedMicro(month) + reservedMicro > Math.round(this.monthlyLimitUsd() * MICRO)) {
       return { kind: "done", result: { ok: false, code: "budget_exceeded" } };
     }

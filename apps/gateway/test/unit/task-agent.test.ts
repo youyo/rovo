@@ -58,6 +58,29 @@ describe("TaskDO: start の配送", () => {
     expect(await statusOf(stub)).toBe("CREATING");
   });
 
+  it("TASK_BUDGET_USD を変えると、taskSpec の budgetUsd も同じ値になる（既定は 10）", async () => {
+    const id = newTaskId();
+    const stub = taskStub(id);
+    // env は他のテストと共有されるので、必ず戻す。
+    const setBudget = (v: string | undefined) =>
+      runInDurableObject(stub, (i) => {
+        const env = (i as unknown as { env: Record<string, string | undefined> }).env;
+        const old = env.TASK_BUDGET_USD;
+        env.TASK_BUDGET_USD = v;
+        return old;
+      });
+    const restore = await setBudget("1.5");
+    let r: Awaited<ReturnType<typeof stub.ensureCreated>>;
+    try {
+      r = await stub.ensureCreated(sampleInput(id, OWNER));
+    } finally {
+      await setBudget(restore);
+    }
+    if (!r.ok) throw new Error(`ensureCreated failed: ${r.code}`);
+    const [link] = await rows<{ spec: string }>(stub, "SELECT spec FROM agent_link");
+    expect(JSON.parse(link?.spec ?? "{}").budgetUsd).toBe(1.5);
+  });
+
   it("advance: AgentDO.start を呼び、accepted なら RUNNING へ（status_changed イベント）", async () => {
     const { id, stub, agent } = await createTask();
     await stub.advance();

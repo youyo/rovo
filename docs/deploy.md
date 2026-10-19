@@ -121,7 +121,8 @@ run = "pnpm exec wrangler deploy -c ../../deploy/web.wrangler.jsonc"
 | `GITHUB_APP_ID` | gateway | 必須 | `<YOUR_GITHUB_APP_ID>` | GitHub App の App ID（秘密ではない）。Installation Token の発行に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる |
 | `DRAFT_PR_FALLBACK` | gateway | 任意 | `fail` | Draft PR を作れないリポジトリ（Free プランの private など）での扱い。`fail`（既定）/ `ready`。不正な値は `fail` |
 | `PR_SHOW_COST` | gateway | 任意 | `false` | `true` のときだけ費用を PR 本文に載せる。公開リポジトリでは誰でも見られる |
-| `MONTHLY_BUDGET_USD` | gateway | 任意 | `100` | ユーザーごとの月額の費用上限（USD）。1 タスクにつき $10 を予約する |
+| `MONTHLY_BUDGET_USD` | gateway | 任意 | `100` | ユーザーごとの月額の費用上限（USD）。1 タスクにつき `TASK_BUDGET_USD` を予約する |
+| `TASK_BUDGET_USD` | gateway | 任意 | `10` | 1 タスクに予約する予算（USD）。子エージェントの `budgetUsd`（超えると `budget_exceeded` で止まる）にも同じ値を渡す。0 以下・不正な値は 10。`MONTHLY_BUDGET_USD` より大きいとタスクを始められないので、月額を 10 未満にするときはこれも下げる |
 | `WEB_SEARCH_DAILY_LIMIT` | gateway | 任意 | `200` | 親の `web_search` の、ユーザーごと・UTC の 1 日あたりの上限 |
 | `WEB_FETCH_DAILY_LIMIT` | gateway | 任意 | `500` | 親の `web_fetch` の同上 |
 | `WEB_BROWSE_DAILY_LIMIT` | gateway | 任意 | `50` | 親の `web_browse` の同上 |
@@ -275,7 +276,7 @@ R2 の画面操作、ライフサイクルの設定画面: **【実機で確認�
 
 ## 15. 運用の注意
 
-- 予算: タスクごとに $10 を月額の枠（`MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。ユーザーごとの同時実行は 1 件まで。
+- 予算: タスクごとに `TASK_BUDGET_USD`（既定 $10）を月額の枠（`MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。ユーザーごとの同時実行は 1 件まで。
 - 秘密のローテーション:
   - `TOKEN_ENC_KEY`（gateway）を変えると、保存済みの GitHub 資格は復号できなくなり、全員が再ログインになる。
   - `TOKEN_ENC_KEY`（agent）を変えると、実行中のタスクは次のトークン更新まで push / clone が 401 になる。実行中のタスクが無いときに変える。

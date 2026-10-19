@@ -54,7 +54,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 - Phase 3（M1: Gateway 側）: `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。成果は patch としても `task_result` で返る。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
 - 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
-- 1 タスクにつき $10 を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。
+- 1 タスクにつき既定で $10（env `TASK_BUDGET_USD`。0 以下・不正な値は 10）を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。子エージェントの予算の上限（`budgetUsd`）にも同じ値を渡す。足りなければ `budget_exceeded`。月額の枠を 10 未満にするときは `TASK_BUDGET_USD` も下げる（受入試験で数ドルに抑えたいとき）。
 
 ### Web Research Service（`web_search` / `web_fetch` / `web_browse`）
 

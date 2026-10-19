@@ -2,7 +2,7 @@
 # scan:secrets の自己確認。ダミーの秘密を入れた一時的な git リポジトリで次を確かめる。
 #  (a) ダミーの秘密を HEAD でも履歴（削除済み）でも検出して失敗すること
 #  (b) 許可リストのダミーだけなら 0 件で通ること
-#  (c) Claude-Session は検出しても失敗にしないこと（既知）
+#  (c) Claude-Session は 1 本でもコミットメッセージにあれば失敗にすること（上限 0）
 # ダミーは実行時に組み立てる（このファイル自体が点検で引っかからないように）。
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,13 +51,18 @@ echo "h = rovo.example.workers.dev" >> "$work/c/f.txt"
 commit "$work/c" "add" "x"
 "$scan" "$work/c" >/dev/null 2>&1; expect "(b) 許可リストのダミーは検出しない" 0 $?
 
-# (c) Claude-Session は既知
+# (c) Claude-Session は上限 0（1 本でもあれば失敗）
 mk "$work/d"
 echo hello > "$work/d/f.txt"
 commit "$work/d" "add" "Claude-Session: $sess"
 out="$("$scan" "$work/d" 2>&1)"; rc=$?
-expect "(c1) Claude-Session だけなら失敗にしない" 0 $rc
-echo "$out" | grep -q "既知、M11" ; expect "(c2) 既知として表示する" 0 $?
+expect "(c1) メッセージに Claude-Session が 1 本でもあれば失敗にする" 1 $rc
+echo "$out" | grep -q "上限 0" ; expect "(c2) 上限 0 として表示する" 0 $?
+echo "$out" | grep -q "既知" ; expect "(c4) 既知の扱いはしない" 1 $?
+mk "$work/m"
+echo hello > "$work/m/f.txt"
+commit "$work/m" "add" "x"
+"$scan" "$work/m" >/dev/null 2>&1; expect "(c5) Claude-Session が 0 本なら通る" 0 $?
 
 # (c) Claude-Session がファイルに入っていたら失敗
 mk "$work/e"

@@ -1,7 +1,7 @@
 // gitleaks が見つけないものを、自前の正規表現で調べる（mise run scan:secrets から呼ばれる）。
 // 使い方: node scripts/scan-patterns.mjs [repoDir]
 // 出力には「規則名・場所（ファイル:行・コミット）」だけを書き、見つけた値そのものは書かない。
-// 終了コード: 0 = 失敗なし（既知・参考は除く） / 1 = 許可リストに無い検出がある
+// 終了コード: 0 = 失敗なし（参考は除く） / 1 = 許可リストに無い検出がある
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -9,7 +9,6 @@ const repo = path.resolve(process.argv[2] ?? ".");
 
 // ---- 規則 ---------------------------------------------------------------
 // kind: "fail"   = 検出したら失敗（許可リストを除く）
-//       "known"  = 既知。検出しても失敗にしない（件数の上限を超えたら失敗）
 //       histKind = 履歴の点検だけ kind を変える（HEAD は kind のまま）
 //       "review" = 参考。文書の点検（M6 の作業 5）用に件数だけ出す。失敗にしない
 const RULES = [
@@ -28,7 +27,7 @@ const RULES = [
   { id: "workers-dev-host", kind: "fail", re: /(?:[A-Za-z0-9-]+\.)+workers\.dev\b/g },
   { id: "local-abs-path", kind: "fail", re: /\/Users\/[A-Za-z0-9_.-]+\//g },
   // 実際のセッション ID（8 文字以上）だけを対象にする。文書中の「claude.ai/code/session_ という文字列」の言及は含めない
-  { id: "claude-session-url", kind: "known", re: /claude\.ai\/code\/session_[A-Za-z0-9]{8,}/g },
+  { id: "claude-session-url", kind: "fail", re: /claude\.ai\/code\/session_[A-Za-z0-9]{8,}/g },
   // 公開しない他のリポジトリの名前。名前そのものをここに書くと自分が検出されるので、実行時に組み立てる。
   // HEAD では失敗、履歴では消せないので参考（件数だけ）にする
   {
@@ -108,9 +107,9 @@ const FORBIDDEN_PATHS = [
   { re: /(^|\/)\.env(\.|$)/, why: ".env は追跡しない" },
 ];
 
-// 既知の Claude-Session トレーラーの上限（コミット数）。M11 で git filter-repo により 0 にする（phase7.md D2 案 b）。
-// 新しいコミットが増やしたら失敗にする。
-const KNOWN_SESSION_COMMITS_MAX = 55;
+// Claude-Session トレーラーを持つコミット数の上限。2026-10-20 に git filter-repo で履歴を書き換え済みなので 0
+// （phase7.md D2 案 b）。1 本でもあれば失敗にする。
+const SESSION_COMMITS_MAX = 0;
 
 // ---- 実装 ---------------------------------------------------------------
 function git(args, opts = {}) {
@@ -208,8 +207,7 @@ function report(title, hits, fbs, scope) {
     const rs = hits.filter((h) => h.rule === rule.id);
     const bad = rs.filter((h) => !h.allowed);
     const ok = rs.filter((h) => h.allowed);
-    const tag =
-      rule.kind === "fail" ? "" : rule.kind === "known" ? " [既知、M11 で除去]" : " [参考]";
+    const tag = rule.kind === "fail" ? "" : " [参考]";
     console.log(`${rule.id}${tag}: 検出 ${bad.length} 件 / 許可 ${ok.length} 件`);
     if (bad.length) console.log(`    場所: ${fmtLoc(bad)}`);
     if (ok.length)
@@ -230,13 +228,13 @@ report(
   "hist",
 );
 
-// 既知: Claude-Session は、コミットメッセージの中だけにあり、件数が上限以内であること
+// Claude-Session は、1 本でもあれば失敗（上限 0）。件数を上限と比べる
 const sess = hist.filter((h) => h.rule === "claude-session-url");
 const sessCommits = new Set(sess.map((h) => h.commit));
 const sessOutsideMsg = sess.filter((h) => !h.inMessage);
 const sessInHead = head.filter((h) => h.rule === "claude-session-url");
 console.log(
-  `\nClaude-Session: ${sessCommits.size} コミット（上限 ${KNOWN_SESSION_COMMITS_MAX}）。既知、M11 の git filter-repo で除去する`,
+  `\nClaude-Session: ${sessCommits.size} コミット（上限 ${SESSION_COMMITS_MAX}。履歴は 2026-10-20 に書き換え済み）`,
 );
 if (sessInHead.length) {
   console.log(`    HEAD のファイルに存在: ${fmtLoc(sessInHead)}`);
@@ -246,14 +244,14 @@ if (sessOutsideMsg.length) {
   console.log(`    メッセージ以外に存在: ${fmtLoc(sessOutsideMsg)}`);
   failed = true;
 }
-if (sessCommits.size > KNOWN_SESSION_COMMITS_MAX) {
-  console.log("    上限を超えている（新しいコミットに付けない決定: phase7.md D2）");
+if (sessCommits.size > SESSION_COMMITS_MAX) {
+  console.log("    上限 0 を超えている（Claude-Session を付けない決定: phase7.md D2）");
   failed = true;
 }
 
 console.log(
   failed
     ? "\nscan-patterns: 失敗（上の検出を確認する）"
-    : "\nscan-patterns: OK（許可・既知・参考を除いて 0 件）",
+    : "\nscan-patterns: OK（許可・参考を除いて 0 件）",
 );
 process.exit(failed ? 1 : 0);

@@ -7,7 +7,7 @@
 
 - `git filter-repo` が要る: `mise use -g pipx:git-filter-repo`（または `pipx install git-filter-repo`）。`git filter-repo --version` で確かめる。
 - 作業ツリーがきれいで、公開する内容がすべてコミット済みであること（`git status` が空）。
-- 先に `mise run release:check` を実行し、`scan:secrets` が通ること（Claude-Session は既知として表示される）。
+- 先に `mise run release:check` を実行し、`scan:secrets` が通ること（Claude-Session は上限 0 で、1 本でもあれば失敗する）。
 - 文書の中に、古いコミット ID を参照する箇所が無いこと。書き換えるとすべての ID が変わる。見つかったら、件名・タグ・Phase 名に直してからコミットする。
 
 ## 1. バックアップ

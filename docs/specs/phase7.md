@@ -84,6 +84,7 @@ Phase 7 の中身は 2 つ。(A) 実環境での E2E・受入試験（acceptance
 - メール（author / committer の `1003ni@gmail.com`）は、書き換えない。
 - `Claude-Session` トレーラーは**案 b**。`git filter-repo` でメッセージ中の `Claude-Session:` 行だけを消し、`Co-Authored-By` は残す。
   - 実行するのは M11 の公開直前で、ユーザーと一緒に行う（M6 は手順書までで、実行しない）。
+  - 2026-10-20 に履歴を書き換え済み。`Claude-Session` 入りのコミットは 0 本になったので、`scan:secrets` の上限を 55 から 0 にした（1 本でもあれば失敗）。
   - 書き換えた後、**全履歴（全ブランチ・全タグ）で `claude.ai/code/session_` が 0 件**になったことを確かめる（`git log --all --format=%B | grep -c 'claude.ai/code/session_'` と、gitleaks と同じ範囲の自前の正規表現）。
   - 書き換えるとコミット ID が全部変わる。文書の中で古いコミット ID を参照している箇所が無いか、書き換えの前に点検する（M6）。2026-10-19 時点で、リポジトリ内（`docs/`、README、ソース）に現行のコミット ID を参照する箇所は見つからなかった。見つかった場合は、ID を使わない書き方（件名・タグ・Phase 名）に直してから書き換える。書き換えの後にも、同じ点検を再実行する。
   - `.claude/handover/` など追跡されていない手元のファイルに古い ID が残っていても、公開には影響しない。ただし、書き換えの前にバックアップ（ミラークローン）を取る。
@@ -478,5 +479,5 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - design の本文は評価器を「Jev」と呼ぶが、実装は Clef-flash（D7）。
 - design 12 の Phase 7 の項目 8「Web 検索は隔離環境で実行」は、web_browse が既定で無効であることと合わせて読む（web_search / web_fetch が対象）。
 - phase6.md と README が、docs/deploy.md を「Phase 7 で作る」と書いている（M4・M5 で事実に合わせる）。
-- git の履歴に `Claude-Session` のセッション URL が 55 本入っている（D2。メールは公開してよいと決定済み）。
+- git の履歴に `Claude-Session` のセッション URL が 55 本入っていた（D2。メールは公開してよいと決定済み）。2026-10-20 に履歴を書き換えて 0 本にし、`scan:secrets` の上限を 55 から 0 にした。
 - `mise.toml` にデプロイ用のタスクが無い（design 16 の例との差。D3）。

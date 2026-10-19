@@ -25,6 +25,7 @@ import {
   resolveGitHubBaseUrls,
 } from "../github";
 import { testDraftFallback, withTestScripts } from "../test-routes";
+import { taskBudgetUsd } from "./budget";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import {
   buildTaskSummary,
@@ -35,7 +36,7 @@ import {
   type TaskSummary,
 } from "./summary";
 import { isTaskId, ulid } from "./ulid";
-import { TASK_BUDGET_USD, type UserDO } from "./user-do";
+import type { UserDO } from "./user-do";
 import {
   computeFingerprint,
   isValidIdempotencyKey,
@@ -819,7 +820,7 @@ export class TaskDO extends DurableObject<Env> {
             }
           : {}),
         constraints: data.constraints,
-        budgetUsd: TASK_BUDGET_USD,
+        budgetUsd: taskBudgetUsd(this.env),
         deadlineAt: at + AGENT_DEADLINE_MS,
       };
       this.ctx.storage.sql.exec(

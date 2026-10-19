@@ -176,11 +176,11 @@ description = "文書の機械的な点検（acceptance.md の節番号の連続
 run = "node --test scripts/docs-check.test.mjs && node scripts/docs-check.mjs"
 
 [tasks."scan:secrets:selftest"]
-description = "scan:secrets の自己確認（ダミーの秘密を入れた一時リポジトリで、検出・許可・既知の動作を確かめる）。test / lint には含めない"
+description = "scan:secrets の自己確認（ダミーの秘密を入れた一時リポジトリで、検出・許可と、Claude-Session の上限 0 の動作を確かめる）。test / lint には含めない"
 run = "bash scripts/test-scan-secrets.sh"
 
 [tasks."scan:secrets"]
-description = "公開前の点検: HEAD と全履歴の秘密・個人の値を gitleaks と自前の正規表現で調べる。Claude-Session は既知（M11 で除去）として表示し失敗にしない。test / lint には含めない"
+description = "公開前の点検: HEAD と全履歴の秘密・個人の値を gitleaks と自前の正規表現で調べる。Claude-Session は上限 0（1 本でもあれば失敗）。test / lint には含めない"
 run = "bash scripts/scan-secrets.sh"
 
 [tasks."release:check"]

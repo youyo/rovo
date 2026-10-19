@@ -1,5 +1,6 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { taskBudgetUsd } from "../../src/tasks/budget";
 import { FP, fakeAgent, newUserId, sampleInput, taskStub, userStub } from "./helpers";
 
 type UserStub = ReturnType<typeof userStub>;
@@ -27,6 +28,16 @@ function sql<T>(stub: UserStub, q: string, ...b: unknown[]): Promise<T[]> {
 
 async function reserve(stub: UserStub, key: string) {
   return stub.reserve(key, FP);
+}
+
+/** env の TASK_BUDGET_USD を差し替え、元の値を返す（env は他のテストと共有されるので、必ず戻すこと）。 */
+async function setTaskBudget(stub: UserStub, v: string | undefined): Promise<string | undefined> {
+  return runInDurableObject(stub, (i) => {
+    const env = (i as unknown as { env: Record<string, string | undefined> }).env;
+    const old = env.TASK_BUDGET_USD;
+    env.TASK_BUDGET_USD = v;
+    return old;
+  });
 }
 
 async function reserveOk(stub: UserStub, key: string) {
@@ -104,6 +115,54 @@ describe("UserDO: 月額枠の予約", () => {
       return out;
     });
     expect(limits).toEqual([100, 250, 100, 100, 100]);
+  });
+});
+
+describe("UserDO: タスクの予約額（TASK_BUDGET_USD）", () => {
+  it("既定は 10、環境変数で変えられ、0 以下・数でない値は既定に戻す", async () => {
+    const stub = userStub(newUserId());
+    const budgets = await runInDurableObject(stub, (i) => {
+      const u = i as unknown as { env: Record<string, unknown> };
+      const out: number[] = [];
+      for (const v of [undefined, "1.5", "abc", "0", "-3", "", " ", "Infinity", "NaN"]) {
+        u.env.TASK_BUDGET_USD = v;
+        out.push(taskBudgetUsd(u.env as { TASK_BUDGET_USD?: string }));
+      }
+      u.env.TASK_BUDGET_USD = undefined;
+      return out;
+    });
+    expect(budgets).toEqual([10, 1.5, 10, 10, 10, 10, 10, 10, 10]);
+  });
+
+  it("env で 1.5 にすると reserved_micro は 1.5 ドル分になる", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub);
+    const restore = await setTaskBudget(stub, "1.5");
+    try {
+      await reserveOk(stub, "k1");
+      expect(await sql(stub, "SELECT reserved_micro FROM task_budget")).toEqual([
+        { reserved_micro: 1.5 * MICRO },
+      ]);
+    } finally {
+      await setTaskBudget(stub, restore);
+    }
+  });
+
+  it("月額 5・予約 1.5 なら、3 件目まで始められ 4 件目は拒否される", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub, { limitUsd: 5 });
+    const restore = await setTaskBudget(stub, "1.5");
+    try {
+      // 1 件ずつ実費 1.5 で完了させて月の枠に積む（同時実行は 1 件まで）。
+      for (const k of ["k1", "k2", "k3"]) {
+        const id = await reserveOk(stub, k); // 積み上がり 0 / 1.5 / 3.0 + 予約 1.5 <= 5
+        await stub.finishTask(id, 1, 1.5 * MICRO);
+      }
+      // 4.5 + 1.5 = 6 > 5
+      expect(await reserve(stub, "k4")).toEqual({ ok: false, code: "budget_exceeded" });
+    } finally {
+      await setTaskBudget(stub, restore);
+    }
   });
 });
 

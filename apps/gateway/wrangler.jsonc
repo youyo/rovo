@@ -48,6 +48,9 @@
     // Web（子が使った分）: 1,000 回あたり。search は Web Search API の ceramic、browse は Browser Run 30 秒/回の上限側の推定
     "WEB_USD_PER_1K_SEARCH": "0.25",
     "WEB_USD_PER_1K_FETCH": "0",
-    "WEB_USD_PER_1K_BROWSE": "0.75"
+    "WEB_USD_PER_1K_BROWSE": "0.75",
+    // タスク 1 件に予約する予算（USD）。月額の枠（MONTHLY_BUDGET_USD、既定 100）からこの額を予約し、子エージェントの上限（budgetUsd）にも同じ値を渡す。
+    // 不正な値・0 以下は 10。月額の枠を 10 未満にするときは、これも下げる（枠より大きいとタスクを始められない）。
+    "TASK_BUDGET_USD": "10"
   }
 }

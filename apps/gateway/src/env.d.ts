@@ -26,4 +26,6 @@ interface Env {
   PR_SHOW_COST?: string;
   /** 月額の費用上限（USD）。未設定は 100 */
   MONTHLY_BUDGET_USD?: string;
+  // TASK_BUDGET_USD（タスク 1 件に予約する予算 USD。既定 10。0 以下・不正は 10）は wrangler.jsonc の vars にあるので、
+  // worker-configuration.d.ts（mise run typegen:gateway）が型を出す。読むのは src/tasks/budget.ts の taskBudgetUsd だけ。
 }

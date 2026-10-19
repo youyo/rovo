@@ -1,11 +1,40 @@
 # rovo
 
 Claude Code / Cowork から Remote MCP 経由でコーディングタスクを委譲するための Task Gateway（Cloudflare Workers）。
-設計は [docs/specs/design.md](docs/specs/design.md)、Phase 1 の実装計画は [docs/specs/phase1.md](docs/specs/phase1.md)、手動の受入試験は [docs/specs/acceptance.md](docs/specs/acceptance.md)。
 
-## 現状（Phase 2: Gateway と子エージェントの統合）
+- MCP サーバー（gateway）が、GitHub App のユーザー認可でログインした利用者のタスクを受け付ける。
+- タスクは子エージェント（agent。Cloudflare Containers の隔離された Sandbox で動く）が実行し、作業ブランチへ push して Draft PR を作る。
+- Web の検索・取得は、別の Worker（web）が非信頼データとして扱い、安全性を評価して返す。
 
-GitHub App のユーザー認可でログインし、`/mcp` から次の 5 つのツールを使える。
+**状態: beta / 実験的。** Phase 6 まで実装済みで、自動テスト（偽の GitHub・偽のモデルを使った E2E を含む）は通っている。実環境（実 Claude Code / Cowork、実 GitHub、実 Cloudflare）での受入試験（[acceptance.md](docs/specs/acceptance.md)）は、まだ済んでいない。`web_browse` は**実験的で、既定で無効**。
+
+ライセンスは [MIT](LICENSE)。
+
+設計は [docs/specs/design.md](docs/specs/design.md)、デプロイ手順（rovo を upstream にする下流向け）は [docs/deploy.md](docs/deploy.md)、手動の受入試験は [docs/specs/acceptance.md](docs/specs/acceptance.md)、Phase ごとの実装計画は `docs/specs/phase*.md`。
+
+## 全体の構成
+
+```
+Claude Code / Cowork
+   |  Remote MCP（OAuth）
+   v
+apps/gateway  --- service binding --->  apps/web   (Web Research Service: search / fetch / browse)
+   |  Durable Object                        ^
+   v                                        | service binding
+apps/agent  (AgentDO -> SandboxDO + Container)
+packages/audit  (監査ログの共通ライブラリ。3 つの Worker が使う)
+```
+
+| ディレクトリ | 役割 |
+|---|---|
+| `apps/gateway` | MCP サーバー、OAuth、タスクの状態（`TaskDO`）、利用者の資格と予算（`UserDO`） |
+| `apps/agent` | 子エージェント（`AgentDO`）、Sandbox（`SandboxDO`）、外向き通信の制御（`OutboundGateway`） |
+| `apps/web` | Web Research Service（状態を持たない別 Worker） |
+| `packages/audit` | 監査イベントを 1 行の構造化 JSON で出す `audit()` |
+
+## 提供するツール（Phase 6 まで実装済み）
+
+GitHub App のユーザー認可でログインし、`/mcp` から次のツールを使える。
 
 | ツール | 内容 |
 |---|---|
@@ -14,17 +43,22 @@ GitHub App のユーザー認可でログインし、`/mcp` から次の 5 つ�
 | `task_wait` | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling）。待機中に子エージェントのイベントを取り込む |
 | `task_result` | 終端になったタスクの成果（要約・検証結果・patch・費用）を返す。終端でなければ `not_ready` |
 | `task_cancel` | キャンセルする（終端状態でも冪等）。子エージェントの停止を確認するまで Gateway が再送する |
+| `task_answer` | 子エージェントの質問（`INPUT_REQUIRED`）に答える |
+| `task_steer` | 実行中の子エージェントに追加の指示を送る |
+| `web_search` | Web Search API の結果（url・title・description）を返す。詳細は下の「Web Research Service」 |
+| `web_fetch` | 公開ページを取得して Markdown で返す（JS は実行しない） |
+| `web_browse` | **実験的・既定で無効。** JS を描画した後のページを取得する |
 
 **制約（ツールの応答にも明記している）**
 
-- Phase 3（M1: Gateway 側）: `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。子エージェント側の push は M2。成果は patch としても `task_result` で返る。
+- Phase 3（M1: Gateway 側）: `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。成果は patch としても `task_result` で返る。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
 - 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
 - 1 タスクにつき $10 を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。
 
-### Phase 5: Web Research Service（`web_search` / `web_fetch`）
+### Web Research Service（`web_search` / `web_fetch` / `web_browse`）
 
-親（MCP）に次の 2 つのツールが加わる。子（`apps/agent` の Pi）にも同名のツールがある。どちらも `apps/web` を service binding で呼ぶ。
+親（MCP）の `web_search` / `web_fetch` の説明。子（`apps/agent` の Pi）にも同名のツールがある。どちらも `apps/web` を service binding で呼ぶ。
 
 | ツール | 内容 |
 |---|---|
@@ -48,7 +82,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次の 5 つ�
   - `/authorize`（同意画面）→ GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
   - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の予約、月額予算（タスクごとの予約・usage の冪等な精算・終了時の返却）。GitHub のトークンは DO の外へ返さない
   - `TaskDO`（タスクごと）: 状態とイベント。AgentDO への start / cancel の配送、イベントの取り込み、usage の精算を alarm で収束させる
-- `apps/agent`（Phase 2 の土台。M1 スパイク段階）: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
+- `apps/agent`: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
 
 ## 同意画面（confused deputy 対策）
 
@@ -97,6 +131,8 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 - `timing.log`: 主要な段階（`wrangler ready` / `wrangler stop`、Sandbox の `ensure-ready` / `exec` / `stop`（reaper）/ `terminate` / `destroy`、Agent の各 RPC）の所要時間。失敗した段階は `failed` で記録される。`E2E_DEBUG=1` なら stderr にも出る（タイムアウトの値は変えていない）
 
 ## 設定
+
+デプロイ時に用意する値の完全な一覧は [docs/deploy.md](docs/deploy.md) の 5 にある（食い違う場合は deploy.md を正とする）。
 
 ### 変数（`wrangler.jsonc` の `vars`、またはローカルは `.dev.vars`）
 
@@ -156,7 +192,7 @@ secret は無い（GitHub のトークンも Anthropic のキーも持たせな�
 
 ### 運用設定（下流向け: 監査ログ・R2 アーカイブ・単価）
 
-rovo を upstream にする private リポジトリ（下流）が、自分の wrangler 設定とインフラで設定するもの。rovo の `wrangler.jsonc` は環境固有の値を持たない。まとまった手順は `docs/deploy.md`（Phase 7 で作る）に置く予定で、それまでは本節と [docs/specs/phase6.md](docs/specs/phase6.md) が正。
+rovo を upstream にする private リポジトリ（下流）が、自分の wrangler 設定とインフラで設定するもの。rovo の `wrangler.jsonc` は環境固有の値を持たない。まとまった手順は [docs/deploy.md](docs/deploy.md) にある。以下は要点で、食い違う場合は deploy.md を正とする。
 
 #### 監査ログが「監査」として成立する条件
 
@@ -226,5 +262,17 @@ mise run dev
 ## エラー
 
 ツールのエラーは `isError: true` で、本文は `{"code", "message", "retry_after_seconds"?}` の JSON。`code` は
-`not_found` / `conflict` / `expired` / `concurrency_limit` / `quota_exceeded`（web の1日の上限）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。
+`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded`（月額の枠が足りず `task_start` を拒否。待っても空かない）/ `quota_exceeded`（web の1日の上限）/ `not_ready`（`task_result` の対象がまだ終端でない）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。
 `reauth_required` は GitHub 資格を回復できないとき（MCP のトークンが有効でも）で、再ログインが必要。`internal` は想定外の失敗で、詳細は応答に含めない。
+
+## セキュリティ
+
+脆弱性は公開の Issue に書かず、GitHub の private vulnerability reporting で報告する。詳細は [SECURITY.md](SECURITY.md)。
+
+## コントリビューション
+
+個人プロジェクトとして公開している。Issue と Pull Request は歓迎するが、返信や取り込みの時期は約束できない。大きな変更は、先に Issue で相談してほしい。
+
+## ライセンス
+
+[MIT](LICENSE)

@@ -1,6 +1,7 @@
 {
   "name": "@rovo/gateway",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {},
   "dependencies": {

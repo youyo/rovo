@@ -1067,7 +1067,7 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 
 - 環境固有の値、秘密情報、個人情報をコミットしない。必要な値は env・secret・下流の設定ファイルで差し込む。
 - `wrangler.jsonc` はローカル開発とテスト用の設定とし、本番用の値（KV の id など）を持たない。
-- 下流が upstream の変更をコンフリクトなく取り込めるようにする。下流は「新しいファイルを足すだけ」でデプロイできる構成にする（例: 下流の本番用 wrangler 設定を `-c` で指定してデプロイする mise タスク）。下流に upstream のファイルを書き換えさせない。
+- 下流が upstream の変更をコンフリクトなく取り込めるようにする。下流は「新しいファイルを足すだけ」でデプロイできる構成にする（例: 下流の本番用 wrangler 設定を `-c` で指定してデプロイする mise タスク。ただし、そのタスクを upstream には置かない（15.8））。下流に upstream のファイルを書き換えさせない。
 - 公開の前に、LICENSE、公開向けの README、下流でのデプロイ手順（`docs/deploy.md`）を用意する。
 
 ### 15.6 Web 検索（2026-10-18 決定）
@@ -1116,3 +1116,15 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - 11.2 の「実行リースの失効・再取得」は、起動世代の破棄、tombstone 後の start、start の衝突、agent の cancel の受理を監査する。
   - 出力は `packages/audit`（`@rovo/audit`）の `audit()` に一本化する。gateway・agent・web が workspace 依存で使い、閉じたイベント名の一覧と許可したフィールドだけを通す（呼び出し側は allowlist を渡せない）。web の block / unknown は `web_blocked` として出す。
 - **観測性（11.1）** の Sandbox 実行時間と復旧回数は、SandboxDO が永続化するカウンタから取る。Sandbox と Web の金額は単価をかけた**推定値**で、単価（`SANDBOX_USD_PER_HOUR`、`WEB_USD_PER_1K_SEARCH` / `FETCH` / `BROWSE`）は gateway の `vars` の既定値を下流が上書きできる（16）。要約（`summary.json` と監査ログの `task_summary`）の金額は `sandbox_usd_estimate` / `web_usd_estimate` で、タスクの予算には含めない。
+
+### 15.8 Phase 7: End-to-End Test と公開の準備（2026-10-19 決定）
+
+詳細は `phase7.md`。
+
+- **読み替え**: 8・12・13・14 章の Jev は Clef に読み替える（実装は 15.5 の Clef-flash）。本文は直さない。
+- **TaskDO のデータ（D1）**: R2 は引き続きコピーで、正は TaskDO のまま。`git_token` の暗号文（`enc` 列）だけを、`finalize_done = 1`（トークンの失効の後）に空にする。行と id は残す（`cred_delivered_id` の参照と、`credential_*` の件数の突き合わせを保つため）。`events` / `questions` / `steers` は消さない。本文の保持期限が要件になった時に、別の Phase で決める。
+- **履歴の公開（D2）**: author / committer のメールは、そのまま公開する（書き換えない）。`Claude-Session` トレーラーは `git filter-repo` でメッセージ中の当該行だけを消す（`Co-Authored-By` は残す）。実行は公開の直前に、ユーザーと一緒に行う。書き換えの後、全履歴で `claude.ai/code/session_` が 0 件であることを確かめる。Phase 7 で今後作るコミットには `Claude-Session` 行を付けない。
+- **デプロイ用のタスク（D3）**: 16 の例（upstream に置くデプロイの mise タスク）は採らない。upstream の `mise.toml` には `deploy:*` を置かない。下流が、新しいファイル（`mise-tasks/` のファイルタスク、または `MISE_ENV` で読まれる `mise.<env>.toml`）を足してタスクを持つ。手順は `docs/deploy.md`。デプロイの順序は web → agent → gateway。
+- **付属ファイル（D4）**: `SECURITY.md` を置く。連絡先は GitHub の private vulnerability reporting で、公開の直後に有効にする。CONTRIBUTING と CI（GitHub Actions）は置かない。ライセンスは MIT（著作権者は youyo）。
+- **web_browse（D5）**: 実機のゲートの結果によらず、コードは残して既定で無効のまま公開する。README に「実験的で、既定で無効」と明記する。外すかどうかは、ゲートの結果が深刻な場合に改めて決める。
+- **実機での障害の起こし方（D6）**: コードに検証用の分岐を入れない。Cloudflare 側の操作でコンテナを止める方法を基本とし、具体的な手段は M7 で調べて手順に書く。手段が無ければ、実コンテナの E2E で確認済みとして記録し、実機で確かめられない限界を残す。

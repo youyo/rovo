@@ -159,3 +159,7 @@ run = "node apps/gateway/node_modules/wrangler/bin/wrangler.js dev -c apps/gatew
 description = "偽 GitHub サーバーと GitHub クライアントの結合テスト（Node）"
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.fake-github.config.ts"
+
+[tasks.licenses]
+description = "依存パッケージのライセンス一覧（全 workspace。dev 依存を含む。本番に入るものだけなら `pnpm -r licenses list --prod`）。公開前の点検用で、test / lint には含めない"
+run = "pnpm -r licenses list"

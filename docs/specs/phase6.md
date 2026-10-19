@@ -97,7 +97,7 @@
 ### キー設計とライフサイクル
 
 - キーは `tasks/<yyyy>/<mm>/<task_id>/` を維持する。ユーザー単位の削除のための `userId` の接頭辞は、今は要らない（ユーザー単位の削除の要件が出た時に、summary.json の userId から対象を引ける。キーの変更が必要になったら、そのとき移行を考える）。
-- R2 のライフサイクルの設定（例: 90日で削除）は、下流の Terraform で行う。docs/deploy.md に推奨値を書く（docs/deploy.md は Phase 7 の公開準備で作る）。
+- R2 のライフサイクルの設定（例: 90日で削除）は、下流の Terraform で行う。docs/deploy.md に推奨値を書く（docs/deploy.md は Phase 7 で作成済み）。
 
 ### コンテナのスナップショットは見送る
 
@@ -221,7 +221,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 | M2（実装済み） | agent + `packages/audit` | `audit()` を `packages/audit`（`@rovo/audit`）へ移す（ステップ 0）。SandboxDO の実行時間と起動世代のカウンタの永続化、usage イベントの `sandbox: {...}`。違反ログの JSON 化、特権操作、リース相当の失効イベント | Unit: SandboxDO の起動→停止で `runtimeMs` が累計され、DO を作り直しても値が残る。Unit（パッケージ）: トークン形式が先頭でなくてもマスクされる |
 | M3（実装済み） | gateway + `packages/audit`（`task_summary` の追加のみ） | `agent-events.ts` で sandbox の usage を写す。summary レコードの生成 | Unit: usage イベントの `sandbox` が公開用の payload に写る（欠けた値は 0）。summary に title が入らない |
 | M4（実装済み） | gateway | R2 アーカイブ（`needsAlarm` の拡張を含む） | Unit（fake の R2）: `finished && finalize_done` の前には書かず、成立後に1回呼んでも2回呼んでも同じ結果（冪等）。続けて、再試行と打ち切り。最後に wrangler のローカル R2 で通し |
-| M5（実装済み） | web + ドキュメント | web の監査（block / unknown / robots / redirect）。design 15.7、推奨値の下書きをこの文書の該当の節に置く（docs/deploy.md 自体は Phase 7 で作る）、README、acceptance 14 以降 | Unit: web の block / unknown / robots / redirect_policy が `audit()` の許可したフィールドだけで出る |
+| M5（実装済み） | web + ドキュメント | web の監査（block / unknown / robots / redirect）。design 15.7、推奨値の下書きをこの文書の該当の節に置く（docs/deploy.md 自体は Phase 7 で作成した）、README、acceptance 14 以降 | Unit: web の block / unknown / robots / redirect_policy が `audit()` の許可したフィールドだけで出る |
 
 ## テスト
 
@@ -249,7 +249,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 ## 前提・注意
 
 - R2 のバケットとライフサイクル、Logpush、Workers Logs の sampling の設定は、下流（rovo-mcp と cloudflare-infra）の Terraform で行う。このリポジトリには、バインディング名と、設定の条件・推奨値だけを書く。
-- 推奨値と運用（ライフサイクル、Logpush の条件、R2 の中身が非信頼であること）は docs/deploy.md に書く。docs/deploy.md は Phase 7 の公開準備で作る（design 16）。それまでは、この文書と README に書く。
+- 推奨値と運用（ライフサイクル、Logpush の条件、R2 の中身が非信頼であること）は docs/deploy.md に書く。docs/deploy.md は Phase 7 で作成した（design 16）。
 
 ## Phase 6 でやらないこと
 
@@ -307,7 +307,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - キー設計 `tasks/<yyyy>/<mm>/<task_id>/` は維持した。ユーザー単位の削除のための `userId` の接頭辞は、今は不要。
 - マイルストーンを M1〜M5 に分け、各 M の最初の Red を決めた。
 - acceptance.md に Phase 6 の受入（14 以降）を追加した。design.md に 15.7 を追加し、5.3 にも対応表を追記した。
-- README 参照だった推奨値の置き場所を、docs/deploy.md に統一した（design 16 が要求する。Phase 7 の公開準備で作る）。
+- README 参照だった推奨値の置き場所を、docs/deploy.md に統一した（design 16 が要求する。Phase 7 で作成した）。
 
 ## M1 で決めたこと（2026-10-19）
 

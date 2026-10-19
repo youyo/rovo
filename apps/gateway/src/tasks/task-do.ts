@@ -470,6 +470,39 @@ export class TaskDO extends DurableObject<Env> {
       revoked INTEGER NOT NULL DEFAULT 0,
       kind TEXT NOT NULL
     )`);
+    // Phase 7 M2: 終端済み（finalize_done = 1）で暗号文が残っている既存の行を空にする（冪等）
+    this.scrubTokenCiphertext();
+  }
+
+  /**
+   * finalize_done = 1（失効の記録を閉じた後）に、git_token の暗号文（enc）だけを空文字にする。
+   * 行と id は残す（cred_delivered_id の参照と、credential_* の件数の突き合わせを保つため）。
+   * finalize_done の後にトークンを復号する経路は無い（finalizeGithub は finalize_done = 1 で先に return する）。
+   * enc は NOT NULL なので、NULL ではなく空文字にする。冪等。
+   * github_link は 1 行だけ（singleton）である前提で、EXISTS で絞っている。
+   */
+  private scrubTokenCiphertext(): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE git_token SET enc = '' WHERE enc != '' AND EXISTS (SELECT 1 FROM github_link WHERE finalize_done = 1)",
+    );
+  }
+
+  /** テスト専用: git_token の状態（暗号文そのものは返さない）。ENVIRONMENT=test のときだけ。 */
+  testTokenState(): { finalizeDone: boolean; rows: number; encEmpty: number; encPresent: number } {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    const sql = this.ctx.storage.sql;
+    const t = sql
+      .exec<{ n: number; empty: number | null }>(
+        "SELECT COUNT(*) AS n, SUM(enc = '') AS empty FROM git_token",
+      )
+      .one();
+    const empty = t.empty ?? 0;
+    return {
+      finalizeDone: this.getGithub()?.finalize_done === 1,
+      rows: t.n,
+      encEmpty: empty,
+      encPresent: t.n - empty,
+    };
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -2030,7 +2063,10 @@ export class TaskDO extends DurableObject<Env> {
         return;
       }
     }
-    this.ctx.storage.sql.exec("UPDATE github_link SET finalize_done = 1");
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("UPDATE github_link SET finalize_done = 1");
+      this.scrubTokenCiphertext();
+    });
   }
 
   /**
@@ -2056,6 +2092,7 @@ export class TaskDO extends DurableObject<Env> {
           attempts,
           JSON.stringify([...(JSON.parse(gl.warnings) as string[]), warning]),
         );
+        this.scrubTokenCiphertext();
         this.appendEvent("warning", { code: "token_revoke_failed" }, this.now());
         // events には既存の warning(token_revoke_failed) があるので、監査ログだけに出す
         this.emitAudit("credential_revoke_given_up", {

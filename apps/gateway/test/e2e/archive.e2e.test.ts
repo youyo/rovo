@@ -9,6 +9,7 @@ import {
   login,
   newUser,
   startArgs,
+  tokenState,
   waitForAudit,
 } from "./helpers";
 
@@ -87,6 +88,36 @@ describe("R2 アーカイブ（wrangler dev のローカル R2 = LOGS）", () =>
       );
       expect(line).not.toContain("events.jsonl");
       expect(line).not.toContain("archive_failed");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("終端の後（finalize_done = 1）、TaskDO の git_token の暗号文は空になり、行は残る", async () => {
+    const alice = newUser("alice");
+    await addMember(alice);
+    await installApp();
+    const client = await login(alice);
+    try {
+      const { task_id: taskId } = bodyOf(
+        await client.callTool({ name: "task_start", arguments: startArgs("SCRUB") }),
+      ) as { task_id: string };
+      bodyOf(await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } }));
+      // アーカイブは finalize_done = 1 が成立してから書かれる
+      await waitForAudit((r) => r.event === "archive_completed", { taskId, timeoutMs: 30_000 });
+      const state = await tokenState(taskId);
+      expect(state.finalizeDone).toBe(true);
+      expect(state.rows).toBeGreaterThan(0);
+      expect(state).toEqual({
+        finalizeDone: true,
+        rows: state.rows,
+        encEmpty: state.rows,
+        encPresent: 0,
+      });
+      // 件数の突き合わせは壊れていない
+      const records = await auditRecords(taskId);
+      expect(records.filter((r) => r.event === "credential_issued")).toHaveLength(state.rows);
+      expect(records.filter((r) => r.event === "credential_revoked")).toHaveLength(state.rows);
     } finally {
       await client.close();
     }

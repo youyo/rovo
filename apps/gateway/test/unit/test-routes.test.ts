@@ -231,3 +231,31 @@ describe("E2E 用テストルート /__test/draft-fallback", () => {
     expect(await testDraftFallback(withEnv("test"))).toBeUndefined();
   });
 });
+
+describe("E2E 用テストルート /__test/task/token-state", () => {
+  it("ENVIRONMENT が test 以外（production・空・未設定）なら 404", async () => {
+    const app = createDefaultApp();
+    for (const environment of ["production", "", undefined]) {
+      const res = await app.request(
+        "/__test/task/token-state",
+        post({ task_id: "abc" }),
+        withEnv(environment),
+      );
+      expect(res.status).toBe(404);
+    }
+    const res = await SELF.fetch(
+      `${env.PUBLIC_BASE_URL}/__test/task/token-state`,
+      post({ task_id: "abc" }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("test でも task_id が不正なら 400", async () => {
+    const res = await createDefaultApp().request(
+      "/__test/task/token-state",
+      post({ task_id: "../x" }),
+      withEnv("test"),
+    );
+    expect(res.status).toBe(400);
+  });
+});

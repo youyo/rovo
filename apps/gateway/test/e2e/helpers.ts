@@ -105,3 +105,21 @@ export async function archivedObjects(
   if (!res.ok) throw new Error(`/__test/archive failed: ${res.status}`);
   return (await res.json()) as { bound: boolean; objects: ArchivedObject[] };
 }
+
+export type TokenState = {
+  finalizeDone: boolean;
+  rows: number;
+  encEmpty: number;
+  encPresent: number;
+};
+
+/** ENVIRONMENT=test のときだけある /__test/task/token-state から、git_token の暗号文が空かどうか（件数だけ。暗号文は返らない）を読む。 */
+export async function tokenState(taskId: string): Promise<TokenState> {
+  const res = await fetch(`${baseUrl}/__test/task/token-state`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  if (!res.ok) throw new Error(`/__test/task/token-state failed: ${res.status}`);
+  return (await res.json()) as TokenState;
+}

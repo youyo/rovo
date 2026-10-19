@@ -87,6 +87,14 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json(await c.env.TASK_DO.getByName(id).testDeliveryStates());
   });
 
+  // git_token の暗号文が空になったか（finalize_done の後）。暗号文そのものは返さず、件数と真偽だけを返す
+  app.post("/__test/task/token-state", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const id = await taskIdOf(c.req);
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    return c.json(await c.env.TASK_DO.getByName(id).testTokenState());
+  });
+
   // 監査イベント（audit-sink.ts）。Worker 側（KV）と、task_id を渡したときはその TaskDO の記録を、時刻順に返す
   app.post("/__test/audit", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();

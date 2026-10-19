@@ -978,6 +978,8 @@ Claude CodeとCoworkの両方からタスクの作成と状態確認ができる
 
 これらは初期の技術検証で優先的に確認する。
 
+結果の記録先は `docs/specs/acceptance.md` の各 Phase の結果表。各項目と受入の節の対応は、同文書の「design 13 の未検証事項と、受入の節の対応」に置く（15.8）。
+
 ---
 
 ## 14. 最終的な完成条件
@@ -1058,10 +1060,10 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 ## 16. 公開とデプロイの運用モデル（2026-10-18 決定）
 
 - このリポジトリ（`rovo`）は、最終的にパブリックにする。汎用のコードとドキュメントだけを置く。
-- デプロイは、private リポジトリ `rovo-mcp` から行う。
-  - `rovo-mcp` は upstream にこのリポジトリを登録し、更新を取り込む。
-  - 環境固有の値は `rovo-mcp` 側に置く。対象は、Cloudflare の account id、KV / AI Gateway の id、許可する org / team、公開 URL、secret の投入手順など。
-- MCP Server Portal / Access への登録は、`cloudflare-infra`（Terraform）で行う。
+- デプロイは、下流の private リポジトリから行う。
+  - 下流の private リポジトリは upstream にこのリポジトリを登録し、更新を取り込む。
+  - 環境固有の値は下流側に置く。対象は、Cloudflare の account id、KV / AI Gateway の id、許可する org / team、公開 URL、secret の投入手順など。
+- MCP Server Portal / Access への登録は、IaC のリポジトリ（Terraform）で行う。
 
 ### このリポジトリが守ること
 
@@ -1128,3 +1130,4 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - **付属ファイル（D4）**: `SECURITY.md` を置く。連絡先は GitHub の private vulnerability reporting で、公開の直後に有効にする。CONTRIBUTING と CI（GitHub Actions）は置かない。ライセンスは MIT（著作権者は youyo）。
 - **web_browse（D5）**: 実機のゲートの結果によらず、コードは残して既定で無効のまま公開する。README に「実験的で、既定で無効」と明記する。外すかどうかは、ゲートの結果が深刻な場合に改めて決める。
 - **実機での障害の起こし方（D6）**: コードに検証用の分岐を入れない。Cloudflare 側の操作でコンテナを止める方法を基本とし、具体的な手段は M7 で調べて手順に書く。手段が無ければ、実コンテナの E2E で確認済みとして記録し、実機で確かめられない限界を残す。
+  - M7 で調べた結果（2026-10-19、ドキュメントによる）: rovo は `scheduling_policy: durable_object` なので、再デプロイでは Sandbox のインスタンスは止まらず、障害の再現に使えない。有力な手段は、`wrangler containers ssh` で入り、主プロセス（`tini -- sleep infinity`）を落とす方法。実機での確認は M10。詳細は acceptance.md の 18 節。

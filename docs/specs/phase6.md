@@ -50,7 +50,7 @@
 - バインディング名は `LOGS`、**gateway だけ**に持たせる。agent と web には持たせない。
 - バケットは非公開にする（r2.dev の公開 URL もカスタムドメインも付けない）。
 - gateway の MCP から、アーカイブの一覧・読み出しの API は作らない。読むのは運用者が、Cloudflare のダッシュボード・wrangler・S3 互換 API で行う。
-- `apps/gateway/wrangler.jsonc` には **`r2_buckets` を置かない**（M4 で決めた。「M4 で決めたこと」）。バケット名は環境固有の値で、下流（rovo-mcp）が `LOGS` として束ねる（design 16: 本番用の値を持たない）。束ねられていなければ fail-open でスキップする。
+- `apps/gateway/wrangler.jsonc` には **`r2_buckets` を置かない**（M4 で決めた。「M4 で決めたこと」）。バケット名は環境固有の値で、下流（デプロイ用の private リポジトリ）が `LOGS` として束ねる（design 16: 本番用の値を持たない）。束ねられていなければ fail-open でスキップする。
   - ローカルの R2 は test 構成だけが束ねる（Unit は fake の R2、E2E は E2E が生成する wrangler 設定の `r2_buckets`）。
 
 ### 保存の条件と手順
@@ -248,7 +248,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 ## 前提・注意
 
-- R2 のバケットとライフサイクル、Logpush、Workers Logs の sampling の設定は、下流（rovo-mcp と cloudflare-infra）の Terraform で行う。このリポジトリには、バインディング名と、設定の条件・推奨値だけを書く。
+- R2 のバケットとライフサイクル、Logpush、Workers Logs の sampling の設定は、下流（デプロイ用の private リポジトリと IaC のリポジトリ）の Terraform で行う。このリポジトリには、バインディング名と、設定の条件・推奨値だけを書く。
 - 推奨値と運用（ライフサイクル、Logpush の条件、R2 の中身が非信頼であること）は docs/deploy.md に書く。docs/deploy.md は Phase 7 で作成した（design 16）。
 
 ## Phase 6 でやらないこと

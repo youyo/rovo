@@ -280,5 +280,5 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
 ## Phase 1 でやらないこと
 
 - 子エージェント、Sandbox、Draft PR 作成、Token Broker、Web Research、予算の本実装、R2
-- Portal / Access の設定（`cloudflare-infra` リポジトリの Terraform で管理し、別途登録する）
+- Portal / Access の設定（IaC のリポジトリの Terraform で管理し、別途登録する）
 - 実 Cloudflare 環境へのデプロイ（ユーザーの指示があるまで行わない）

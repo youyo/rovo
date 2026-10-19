@@ -6,7 +6,7 @@ Claude Code / Cowork から Remote MCP 経由でコーディングタスクを�
 - タスクは子エージェント（agent。Cloudflare Containers の隔離された Sandbox で動く）が実行し、作業ブランチへ push して Draft PR を作る。
 - Web の検索・取得は、別の Worker（web）が非信頼データとして扱い、安全性を評価して返す。
 
-**状態: beta / 実験的。** Phase 6 まで実装済みで、自動テスト（偽の GitHub・偽のモデルを使った E2E を含む）は通っている。実環境（実 Claude Code / Cowork、実 GitHub、実 Cloudflare）での受入試験（[acceptance.md](docs/specs/acceptance.md)）は、まだ済んでいない。`web_browse` は**実験的で、既定で無効**。
+**状態: 実験段階。** Phase 6 まで実装済みで、自動テスト（偽の GitHub・偽のモデルを使った E2E を含む）は通っている。実機（Claude Code / Cowork、GitHub、Cloudflare）での受入試験（[acceptance.md](docs/specs/acceptance.md)）が済むまでは、実験段階として扱ってほしい。`web_browse` は実験的で、既定では無効。
 
 ライセンスは [MIT](LICENSE)。
 

@@ -1,0 +1,15 @@
+# gitleaks の設定（mise run scan:secrets から使う）。
+# 既定のルールをそのまま使い、許可リストだけを足す。許可リストは小さく保つこと。
+# 足すときは必ず理由をコメントで書く。実在の値は絶対に足さない（足すなら先に失効させる）。
+title = "rovo gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "明らかなダミーだけを許可する"
+regexes = [
+  # scan:secrets の自己確認（scripts/test-scan-secrets.sh）で使う、全桁が 0 のダミーの GitHub PAT。
+  # 「許可リストに入れたダミーは検出されない」ことを確かめるための値で、実在しない。
+  '''ghp_0{36}''',
+]

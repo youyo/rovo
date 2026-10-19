@@ -27,8 +27,8 @@ Phase 7 の中身は 2 つ。(A) 実環境での E2E・受入試験（acceptance
 - やらないこと
   - 新機能（design 12 の Phase 1〜6 の範囲外のもの）、コンテナのスナップショット（Phase 6 で見送り済み）、監査ログの検索 UI、R2 の一覧・読み出し API
   - rovo の `wrangler.jsonc` に本番の値を置くこと（`r2_buckets` を含む。design 16）
-  - Portal / Access の登録（`cloudflare-infra` の範囲。このリポジトリは必要な情報を docs/deploy.md に書くだけ）
-  - 下流（rovo-mcp、cloudflare-infra）のファイルの作成・変更
+  - Portal / Access の登録（IaC のリポジトリの範囲。このリポジトリは必要な情報を docs/deploy.md に書くだけ）
+  - 下流（デプロイ用の private リポジトリ、IaC のリポジトリ）のファイルの作成・変更
 
 ## 作業の区分（ユーザーの作業とエージェントだけでできる作業）
 
@@ -73,7 +73,7 @@ Phase 7 の中身は 2 つ。(A) 実環境での E2E・受入試験（acceptance
 | 案 | 内容 | 注意 |
 |---|---|---|
 | a | そのまま残す | セッションの URL が公開される。URL から第三者がセッションを読めるかは不明（読めないと思われるが、確かめていない）。取り消せない |
-| b | メッセージだけ書き換える（`git filter-repo` の `--message-callback` または `--replace-message` で `Claude-Session:` 行を削除する。`Co-Authored-By` は残す） | 破壊的（コミット ID が全部変わる）。他のクローンや rovo-mcp の upstream 設定と整合を取る必要がある。書き換え後に全履歴で `claude.ai/code/session_` が 0 件であることを確かめる |
+| b | メッセージだけ書き換える（`git filter-repo` の `--message-callback` または `--replace-message` で `Claude-Session:` 行を削除する。`Co-Authored-By` は残す） | 破壊的（コミット ID が全部変わる）。他のクローンや下流の upstream 設定と整合を取る必要がある。書き換え後に全履歴で `claude.ai/code/session_` が 0 件であることを確かめる |
 | c | 履歴を捨てて、現在の tree を 1 コミットで新規に公開する | トレーラーも過去の秘密の心配もまとめて消える。開発の履歴（設計の経緯）を失う |
 
 - 推奨は置かなかった（ユーザーの判断事項）。参考: 履歴を残したいなら b、残す必要がなければ c が最も簡単。a は URL が公開される。
@@ -289,7 +289,7 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - README の見直し（公開向け）
   - 冒頭に、rovo が何か（3 行）、構成の図（gateway / agent / web / packages/audit）、状態（Phase 7 の実機の受入が済むまで「beta」か「実験的」と明記）、ライセンス。
   - 「現状（Phase 2）」の見出しを、現在の状態（Phase 6 まで実装済み）に直す。ツール一覧に Phase 4 のもの（`task_answer`、`task_steer`）と Phase 5 のもの（`web_search`、`web_fetch`、`web_browse`）を、表に揃える（現状は Phase 2 の 5 ツールの表と、Phase 5 の節が別れている）。
-  - 内部用語・個人の環境の記述を点検する（`rovo-mcp`、`cloudflare-infra` の名前は design 16 に書いてあるので出してよいが、それぞれの中身や URL は書かない）。
+  - 内部用語・個人の環境の記述を点検する（下流の private リポジトリと IaC のリポジトリは、名前も中身も URL も書かない）。
   - 「docs/deploy.md（Phase 7 で作る予定）」を、実際の docs/deploy.md へのリンクに直す。phase6.md 内の同じ記述も、事実に合わせて直す。
   - 脆弱性の報告（SECURITY.md へのリンク）、Issue / PR の方針を 1〜2 行。
 - `SECURITY.md`（D4 で置くと決定。公開 → 直後に PVR の順を書く）。
@@ -303,18 +303,18 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 ### M5. docs/deploy.md
 
-**目的**: 下流（rovo-mcp）が、upstream の rovo を取り込み、デプロイするための手順を、公開できる形で書く。環境固有の値は、すべてプレースホルダ（`<YOUR_...>`）にする。
+**目的**: 下流（デプロイ用の private リポジトリ）が、upstream の rovo を取り込み、デプロイするための手順を、公開できる形で書く。環境固有の値は、すべてプレースホルダ（`<YOUR_...>`）にする。
 
 **目次案**
 
-1. この文書の位置づけ（rovo は upstream、private の下流からデプロイ、Portal は cloudflare-infra。D3 の方針）
+1. この文書の位置づけ（rovo は upstream、private の下流からデプロイ、Portal は IaC のリポジトリ。D3 の方針）
 2. 前提（Cloudflare のプランと必要な機能: Workers、Durable Objects、Containers、R2、KV、AI Gateway、Browser Run〔web_browse を使う場合〕、Workers AI）と、課金されるもの
 3. 構成とデプロイの順序（web → agent → gateway。service binding と `script_name` 付き DO の依存）
 4. 下流のリポジトリの作り方（upstream の登録、更新の取り込み、`-c` で下流の wrangler 設定を指定する例〔D3〕。下流が upstream のファイルを書き換えなくてよい形）
 5. 下流が用意する値の一覧（表: 変数・secret・バインディングごとに、どの Worker か、必須か、例、説明）。README の「設定」節と重複する部分は、deploy.md を正にして README から参照する
 6. GitHub App の作成（権限、コールバック URL、Installation。README の節を移す）
 7. AI Gateway の設定（Claude、Web Search API、Clef-flash の経路。metadata〔userId / taskId / caller〕）
-8. Portal / Access への登録に必要な情報（MCP の URL、ユーザーごとの OAuth、DCR・認可・トークンの各 URL）。登録自体は cloudflare-infra の範囲
+8. Portal / Access への登録に必要な情報（MCP の URL、ユーザーごとの OAuth、DCR・認可・トークンの各 URL）。登録自体は IaC のリポジトリの範囲
 9. R2 アーカイブの設定（`LOGS` を gateway にだけ束ねる、非公開、ライフサイクルの推奨値〔例: 90 日〕、キーの構造、取り扱いの規約〔未加工の非信頼データ〕）
 10. 監査ログの設定（head sampling 100%、Logpush、確かめ方）
 11. 単価（推定費用）の上書き
@@ -345,9 +345,9 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
    - 追跡されているファイル: `.dev.vars` が追跡されていないこと（`.dev.vars.example` だけ）、`.claude/`（`handover` を含む）が追跡されていないこと、`dist/`・`.wrangler/` が追跡されていないこと。
 3. 既存の許容: テストの偽の値（`ghs_abcdefghijklmnop` のような明らかなダミー）は、許可リスト（理由つき）に登録する。許可リストは小さく保つ。
 4. 履歴の点検: 過去に入って消えた秘密・個人の値が無いか。見つかったら、D2 の判断材料にする。author / committer のメール（`1003ni@gmail.com`）は公開してよいと決定済みなので対象外。`Claude-Session` トレーラーの件数（55 本）は D2 の判断材料として再確認する。
-5. 公開してよい文書の点検: 文書内に、他のリポジトリや個人の環境の詳細（rovo-mcp、cloudflare-infra の中身）を書いていないか。
+5. 公開してよい文書の点検: 文書内に、他のリポジトリや個人の環境の詳細（下流の private リポジトリと IaC のリポジトリの中身）を書いていないか。
 6. 履歴の書き換えの手順書を用意する（D2 の b の場合の `git filter-repo --message-callback`（または `--replace-message`）の手順、検証コマンド、元に戻す方法〔書き換える前のバックアップ〕）。**実行はしない。**
-7. **rovo-mcp（private）側の確認項目**: rovo-mcp の履歴に rovo のコミットが入っていないか（たとえば、ローカルのパスから取り込んでいないか。upstream をリモートとして登録していれば履歴は共有されるので、書き換えると整合が崩れる）。確認はユーザーの作業（rovo-mcp はこのリポジトリの範囲外）。
+7. **下流（private）側の確認項目**: 下流のリポジトリの履歴に rovo のコミットが入っていないか（たとえば、ローカルのパスから取り込んでいないか。upstream をリモートとして登録していれば履歴は共有されるので、書き換えると整合が崩れる）。確認はユーザーの作業（下流のリポジトリはこのリポジトリの範囲外）。
 8. `.gitignore` は `.claude/handover` だけを無視している。`.claude/settings.json` などができると追跡されうるので、公開前に `.claude/` 配下に追跡対象が無いことを確かめる（必要なら `.gitignore` に足す）。
 
 **先に書くテスト（Red）**: 道具の確認として、(a) 意図的にダミーの秘密を入れた一時的なディレクトリ（スクラッチ）で、`scan:secrets` が検出すること、(b) 許可リストのダミーが検出されないこと、を確かめる。(a) が失敗する（道具が動いていない）状態から始める。
@@ -387,7 +387,7 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 ### M8 ★. デプロイと Phase 1〜4 の受入
 
-**ユーザーの作業**: 検証用のリポジトリ、GitHub App の作成と Install、Cloudflare のリソース（KV、AI Gateway、R2）、下流（rovo-mcp）の設定、デプロイ（web → agent → gateway）、secret の投入、Portal の登録（cloudflare-infra）、Claude Code / Cowork の操作。
+**ユーザーの作業**: 検証用のリポジトリ、GitHub App の作成と Install、Cloudflare のリソース（KV、AI Gateway、R2）、下流（デプロイ用の private リポジトリ）の設定、デプロイ（web → agent → gateway）、secret の投入、Portal の登録（IaC のリポジトリ）、Claude Code / Cowork の操作。
 **エージェントの作業**: deploy.md の手順に沿った確認の補助、不具合の切り分けと修正（TDD で、再現するテストを先に）、結果の記録、deploy.md の「印」の解消。
 
 **範囲**: acceptance.md の「前提」、1〜4（ログイン、ツール、待機、GitHub 資格）、5〜7（Draft PR・push、ブランチ保護、Free プラン）、8〜10（バックグラウンド待機、質問と回答、steer）、18（Sandbox・復旧の一部: 起動と外向き通信の強制）。3 節の実測（30 / 45 / 60 秒の待機が Portal 経由で通るか）の結果で、`DEFAULT_WAIT_SECONDS` / `MAX_WAIT_SECONDS` を見直す。
@@ -432,18 +432,18 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 ### M11 ★. 公開
 
-**ユーザーの作業**: D2 の決定（案 b）に沿った履歴の処理、push、リポジトリの公開（Visibility の変更）、その直後の private vulnerability reporting（PVR）の有効化、タグ、rovo-mcp の upstream の設定の確認。**エージェントは、ユーザーの明示の指示があるまで、push も公開もしない。**
+**ユーザーの作業**: D2 の決定（案 b）に沿った履歴の処理、push、リポジトリの公開（Visibility の変更）、その直後の private vulnerability reporting（PVR）の有効化、タグ、下流の upstream の設定の確認。**エージェントは、ユーザーの明示の指示があるまで、push も公開もしない。**
 
 **作業の内容**
 
 1. M6 の点検を、最新の HEAD と全履歴で再実行する（0 件）。
-2. **公開直前に**、D2 の決定（案 b）に沿って履歴を処理する（M6 の手順書に沿う。ユーザーと一緒に行う）。(a) 処理の前に、バックアップ（ミラークローン）を取る。(b) 文書内の古いコミット ID の参照を点検する。(c) `git filter-repo` で `Claude-Session:` 行だけを消す（`Co-Authored-By` は残す）。(d) 全履歴で `claude.ai/code/session_` が 0 件であることと、`Co-Authored-By` が残っていることを確かめる。(e) 処理の後、M6 の点検と文書内のコミット ID の点検を再実行する。(f) rovo-mcp が upstream として履歴を共有していれば、書き換えの影響をユーザーが確認する。
+2. **公開直前に**、D2 の決定（案 b）に沿って履歴を処理する（M6 の手順書に沿う。ユーザーと一緒に行う）。(a) 処理の前に、バックアップ（ミラークローン）を取る。(b) 文書内の古いコミット ID の参照を点検する。(c) `git filter-repo` で `Claude-Session:` 行だけを消す（`Co-Authored-By` は残す）。(d) 全履歴で `claude.ai/code/session_` が 0 件であることと、`Co-Authored-By` が残っていることを確かめる。(e) 処理の後、M6 の点検と文書内のコミット ID の点検を再実行する。(f) 下流が upstream として履歴を共有していれば、書き換えの影響をユーザーが確認する。
 3. README と docs/deploy.md の最終確認（リンク切れ、Phase の状態の記述）。
 4. 順番: (1) リポジトリの設定（説明、トピック、Issue の設定）、(2) 公開、(3) **公開の直後に PVR を有効化**（PVR は公開リポジトリで使える機能。実施の前に GitHub Docs で条件を確かめる）。SECURITY.md の文面にもこの順番を反映する。
-5. 公開後、下流（rovo-mcp）が公開された upstream を取り込めることを確認する（ユーザーの作業）。
+5. 公開後、下流（デプロイ用の private リポジトリ）が公開された upstream を取り込めることを確認する（ユーザーの作業）。
 6. 任意: バージョンタグ（例: `v0.1.0`）。
 
-**先に書くテスト（Red）**: 公開前の最終チェックリスト（`mise run release:check` として、`scan:secrets`、`docs:check`、`test`、`lint`、`build` をまとめる）を作る。最初は未実装で失敗する。
+**先に書くテスト（Red）**: 公開前の最終チェックリスト（`mise run release:check` として、点検の道具の自己テスト、`scan:secrets`、`pnpm audit` をまとめる。`docs:check` は `lint` の中で、`test`・`lint`・`build` は別に実行する。M6 で実装済み）を作る。最初は未実装で失敗する。
 
 **完了条件**: `mise run release:check` が通る。点検の結果が 0 件。リポジトリが公開され、匿名でクローンでき、LICENSE が表示される。全履歴で `claude.ai/code/session_` が 0 件で、`Co-Authored-By` は残っている（D2。メールは公開してよいと決定済み）。下流の取り込みが確認されている。
 
@@ -468,7 +468,7 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - 本番相当の環境へのデプロイ、GitHub App の作成、AI Gateway、Portal の登録、push は、ユーザーと一緒に行う（エージェントが単独で行わない）。
 - 実機の受入は課金される（実 Claude、Sandbox、Web Search API、Clef-flash、R2、Browser Run）。M7 で見積もりを出してから始める。
 - 公開リポジトリに秘密・個人の環境の値を入れない。受入の記録にも書かない。
-- Portal / Access の登録は rovo の範囲外（cloudflare-infra）。
+- Portal / Access の登録は rovo の範囲外（IaC のリポジトリ）。
 
 ## 気づいた矛盾・不明点（計画の作成時）
 

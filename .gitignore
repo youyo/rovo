@@ -6,4 +6,5 @@ dist/
 *.log
 .DS_Store
 .dev.vars.rovo-e2e-backup
-.claude/handover
+.claude/*
+!.claude/settings.json

@@ -155,7 +155,7 @@ TaskDO の CREATING で、AgentDO.start の前に行う。各ステップは冪�
 
 ## 前提・注意
 
-- GitHub App の秘密鍵は Worker Secret（下流の `rovo-mcp` から投入）。このリポジトリには置かない。
+- GitHub App の秘密鍵は Worker Secret（下流の private リポジトリから投入）。このリポジトリには置かない。
 - Draft PR は、プラン（private リポジトリの場合）によって作れないことがある。最新の条件は受入試験で確かめる。
 
 ## Phase 3 でやらないこと

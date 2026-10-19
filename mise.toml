@@ -1,4 +1,5 @@
 [tools]
+gitleaks = "8.30.1"
 node = "24.21.0"
 pnpm = "12.14.0"
 
@@ -126,8 +127,8 @@ description = "Biome による lint / format チェック"
 run = "pnpm exec biome check ."
 
 [tasks.lint]
-description = "lint + 型検査"
-depends = ["lint:biome", "typecheck"]
+description = "lint + 型検査 + 文書の点検（docs:check は node のスクリプトだけで 1 秒未満）"
+depends = ["lint:biome", "typecheck", "docs:check"]
 
 [tasks.fmt]
 description = "Biome で整形"
@@ -169,3 +170,23 @@ run = "pnpm exec vitest run --config vitest.fake-github.config.ts"
 [tasks.licenses]
 description = "依存パッケージのライセンス一覧（全 workspace。dev 依存を含む。本番に入るものだけなら `pnpm -r licenses list --prod`）。公開前の点検用で、test / lint には含めない"
 run = "pnpm -r licenses list"
+
+[tasks."docs:check"]
+description = "文書の機械的な点検（acceptance.md の節番号の連続、15 項目の対応表、全 Phase の結果表、区分表の網羅）。先に点検スクリプトの Unit（node:test）を流す"
+run = "node --test scripts/docs-check.test.mjs && node scripts/docs-check.mjs"
+
+[tasks."scan:secrets:selftest"]
+description = "scan:secrets の自己確認（ダミーの秘密を入れた一時リポジトリで、検出・許可・既知の動作を確かめる）。test / lint には含めない"
+run = "bash scripts/test-scan-secrets.sh"
+
+[tasks."scan:secrets"]
+description = "公開前の点検: HEAD と全履歴の秘密・個人の値を gitleaks と自前の正規表現で調べる。Claude-Session は既知（M11 で除去）として表示し失敗にしない。test / lint には含めない"
+run = "bash scripts/scan-secrets.sh"
+
+[tasks."release:check"]
+description = "公開前の点検一式（scan:secrets の自己確認、scan:secrets、pnpm audit）。test / lint には含めない"
+run = [
+  "bash scripts/test-scan-secrets.sh",
+  "bash scripts/scan-secrets.sh",
+  "pnpm audit",
+]

@@ -122,6 +122,10 @@ mise run lint         # Biome + 型検査
 | `mise run typegen` | `wrangler.jsonc` を変えたら実行して両アプリの `worker-configuration.d.ts` を更新する |
 | `mise run dev:all` | gateway・agent・web を同時にローカル起動する（Docker 必須）。`AGENT_DO` は `script_name` 付きなので、片方だけ起動すると本番の DO を参照してしまう（wrangler の known issue）。`WEB` の service binding も web が起動していないと解決できない。必ず全部を同時に起動する。web の `AI` バインディングは実アカウントに繋がるため、`web_search` / `web_fetch` を実際に呼ぶと課金される（`wrangler login` が必要）。それ以外の用途ではデプロイは不要 |
 | `mise run build` | Worker のバンドル確認（`--dry-run`。デプロイはしない） |
+| `mise run test:infra` | `infra/` の Terraform のテスト（`terraform test` + `mock_provider`。Cloudflare の資格情報もアカウントも要らない。provider の取得にネットワークが要る）。`mise run test` に含まれる |
+| `mise run test:deploy` | `scripts/deploy.sh` の自己確認（偽の `pnpm` に差し替える。`ROVO_DEPLOY_DIR` が未設定・設定ファイルが無いときに失敗し、wrangler を呼ばないことを確かめる）。`test:unit` に含まれる |
+| `mise run infra:fmt` / `mise run infra:validate` | `infra/` の整形 / 検証（`lint` は `terraform fmt -check` を含む） |
+| `mise run deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` / `deploy:secrets` | **実際にデプロイする**（`ROVO_DEPLOY_DIR` の下流の wrangler 設定を使う。未設定なら何もせずに失敗する）。[デプロイ](#デプロイ)を見る |
 | `mise run dev` | ローカル起動（`http://localhost:8787`）。`apps/gateway/.dev.vars` を読む |
 
 E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` の出力も表示される。E2E は GitHub に接続しない（偽 GitHub を使う）。
@@ -190,6 +194,15 @@ secret は無い（GitHub のトークンも Anthropic のキーも持たせな�
 | `WEB_BROWSE_ENABLED`（変数） | 親の MCP に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
 
 **デプロイの順序**: web → agent → gateway。service binding は、参照される側の Worker（`rovo-web`）が先に存在している必要がある。agent は gateway から `script_name` で参照される。
+
+### デプロイ
+
+rovo は誰が clone しても、自分の値を渡せばデプロイできるようにしてある。upstream が次の 2 つを持つ。
+
+- **`infra/`**: Cloudflare のリソース（R2 バケット 2 つ〔アーカイブ用・監査ログ用〕、KV、AI Gateway、監査ログの Logpush）を作る Terraform。使い方は [infra/README.md](infra/README.md)。
+- **`deploy:*` の mise タスク**: `ROVO_DEPLOY_DIR`（下流の wrangler 設定のディレクトリ。雛形は [deploy.example/](deploy.example/)）を指定して `mise run deploy:all`（web → agent → gateway）。secret は `mise run deploy:secrets`。未設定なら何もせずに失敗する。
+
+下流（デプロイする人の private リポジトリ）は、rovo を upstream として merge し、`deploy/` の wrangler 設定、tfvars、backend を**新しいファイルとして足す**だけで使う。手順の全体（Terraform apply → AI Gateway に BYOK → GitHub App → wrangler 設定 → `deploy:secrets` → `deploy:all`）は [docs/deploy.md](docs/deploy.md) の 4。MCP Server Portal と Access の登録はこの範囲外。
 
 ### 運用設定（下流向け: 監査ログ・R2 アーカイブ・単価）
 

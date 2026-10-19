@@ -11,7 +11,7 @@ rovo を upstream として取り込み、自分の Cloudflare アカウント�
 - 次の 2 つは、この文書の範囲外。
   - MCP Server Portal と Access の登録: Terraform など、下流のインフラ管理側で行う。登録に必要な情報だけを 8 に書く。
   - 下流のリポジトリ自体の中身（rovo には書かない）。
-- upstream には**デプロイ用の mise タスクを置かない**（[design.md の 15.8](specs/design.md)）。デプロイの順序・承認・変更の管理は下流の運用なので、下流がタスクを足す（4）。
+- upstream は、デプロイ用の mise タスク（`deploy:*`）と、Cloudflare のリソースを作る Terraform（`infra/`）を持つ（[design.md の 15.8](specs/design.md) の D3。2026-10-20 に見直した。理由は、誰でも clone して自分の値を渡せばデプロイできるようにするため）。下流が足すのは、`ROVO_DEPLOY_DIR` の wrangler 設定、Terraform の tfvars と backend、secret の値だけ。デプロイの承認・変更の管理は下流の運用（4）。
 
 ## 2. 前提
 
@@ -55,55 +55,48 @@ rovo を upstream として取り込み、自分の Cloudflare アカウント�
 
 ### 下流が足すファイル
 
+upstream のファイルは書き換えない。下流が**新しいファイルを足す**だけで使える。
+
 | ファイル（例） | 内容 |
 |---|---|
-| `deploy/gateway.wrangler.jsonc` / `deploy/agent.wrangler.jsonc` / `deploy/web.wrangler.jsonc` | 本番用の wrangler 設定。`main` などは upstream の `apps/<name>/` を指す |
-| デプロイ用のタスク | 次の「デプロイ用タスクの足し方」 |
+| `deploy/gateway.wrangler.jsonc` / `deploy/agent.wrangler.jsonc` / `deploy/web.wrangler.jsonc` | 本番用の wrangler 設定。雛形は upstream の `deploy.example/`。置き場所（`deploy/`）は `ROVO_DEPLOY_DIR` で指定する |
+| `infra/terraform.tfvars`（または `infra/<任意の名前>.auto.tfvars`） | Terraform の変数の実値。雛形は `infra/terraform.tfvars.example` |
+| `infra/backend.tf` | Terraform の state の置き場所。upstream は `backend` を持たない（`infra/README.md`） |
 | secret の投入手順 | 下流の運用文書。値そのものはリポジトリに置かない |
 
-本番用の wrangler 設定は、`apps/<name>/wrangler.jsonc` と同じ内容に、環境固有のもの（KV の id、`vars` の実値、gateway の `r2_buckets` と `observability` など）を足したものにする。wrangler の設定ファイル内のパスは、その設定ファイルからの相対パスで書く（例: `"main": "../apps/gateway/src/index.ts"`）。agent のコンテナの `dockerfile` も同様に、`apps/agent/Dockerfile` を指す相対パスにする。**【実機で確認して追記】**（`-c` で別の場所の設定を指定したときの `main` / `dockerfile` / `compatibility` の解決）
+本番用の wrangler 設定は、`deploy.example/` をコピーして `<...>` を実値に置き換える。内容は `apps/<name>/wrangler.jsonc` と同じものに、環境固有のもの（KV の id、`vars` の実値、gateway の `r2_buckets` と `observability` など）を足したもの。wrangler の設定ファイル内のパスは、その設定ファイルからの相対パスで書く（雛形は `deploy/` に置く前提で `"main": "../apps/gateway/src/index.ts"`）。
 
-> rovo の `wrangler.jsonc` に本番の値を書かないこと。特に `r2_buckets` は下流の設定にだけ置く。
+> rovo の `apps/*/wrangler.jsonc` に本番の値を書かないこと。特に `r2_buckets` は下流の設定にだけ置く。
 
-### デプロイ用タスクの足し方（upstream の `mise.toml` は書き換えない）
+確かめた範囲（2026-10-20）: `deploy.example/` の gateway と web を `wrangler deploy --dry-run -c <設定>`（`apps/<name>` で実行）でバンドルし、`main` が設定ファイルからの相対パスで解決されることを確かめた。agent も `--containers-rollout=none` で通った。コンテナのイメージのビルド（`dockerfile` の相対パスの解決）は、実際のデプロイでしか確かめられない。**【実機で確認して追記】**
 
-mise の公式ドキュメントで確かめた 2 つの方法がある。どちらも、下流が**新しいファイルを足す**だけで、upstream の `mise.toml` と衝突しない。
+### デプロイ用タスク（upstream が持つ）
 
-**方法 1（推奨）: `mise-tasks/` のファイルタスク**
+upstream の `mise.toml` に次のタスクがある。実体は `scripts/deploy.sh`（`wrangler deploy -c <下流の設定>` の形でだけ呼ぶ）。
 
-確かめた範囲: 別のスクラッチのディレクトリで、実行権限のあるスクリプトが `deploy:web` のようなタスク名で一覧に出ること、`mise run` で実行できること、`MISE_PROJECT_ROOT` が使えることまでは実行して確かめた。下のスクリプト例のとおりに `wrangler deploy -c` を実行するところは確かめていない。**【実機で確認して追記】**
+| タスク | 内容 |
+|---|---|
+| `deploy:web` / `deploy:agent` / `deploy:gateway` | 1 つの Worker をデプロイする |
+| `deploy:all` | web → agent → gateway の順にデプロイする。3 つの設定のどれかが欠けていたら、何も実行しない。途中で失敗したら後続は実行しない |
+| `deploy:secrets` | gateway の `GITHUB_APP_CLIENT_SECRET` / `GITHUB_APP_PRIVATE_KEY` / `TOKEN_ENC_KEY` と、agent の `TOKEN_ENC_KEY` を `wrangler secret put` で対話的に入れる。値は引数にも env にも載せない |
 
-- 実行権限のある（`chmod +x`）スクリプトを `mise-tasks/` に置くと、タスクになる。パスがタスク名になり、`/` は `:` に置き換わる（`mise-tasks/deploy/web` は `deploy:web`）。`#MISE description="..."` のようなヘッダでメタデータを書く。
-- 参考: <https://mise.jdx.dev/tasks/file-tasks.html>
+下流の設定の場所は env の `ROVO_DEPLOY_DIR` で渡す（相対パスは実行したディレクトリから）。中に `gateway.wrangler.jsonc` / `agent.wrangler.jsonc` / `web.wrangler.jsonc` を置く。
 
 ```bash
-#!/usr/bin/env bash
-#MISE description="web をデプロイする（下流の設定を -c で指定）"
-set -euo pipefail
-cd "$MISE_PROJECT_ROOT/apps/web"
-pnpm exec wrangler deploy -c ../../deploy/web.wrangler.jsonc
+ROVO_DEPLOY_DIR=deploy mise run deploy:all
 ```
 
-`mise-tasks/deploy/agent`、`mise-tasks/deploy/gateway` も同様に置く。まとめて順序を固定したい場合は、`mise-tasks/deploy/all` から `mise run deploy:web && mise run deploy:agent && mise run deploy:gateway` を呼ぶ。
+**`ROVO_DEPLOY_DIR` が未設定、またはディレクトリ・設定ファイルが無いときは、何もせずに失敗する。** upstream の `apps/*/wrangler.jsonc`（本番の値が無い）を誤ってデプロイしないため。**設定に `<...>` のプレースホルダ（`<AI_GATEWAY_ID>`、`<YOUR_...>` など。コメント行は除く）が残っているときも、何も実行せずに失敗する**（`deploy.example/` をそのまま使えない）。失敗するときは、ファイル名と行番号を表示する。`all` と `secrets` は、対象の設定を全部確かめてから実行する。`mise run test:deploy` が、これらの動作（失敗すること、wrangler を呼ばないこと）を、偽の `pnpm` で確かめている。
 
-**方法 2: `MISE_ENV` で読まれる `mise.<env>.toml`**
+### 手順の順番
 
-- `MISE_ENV=<env>`（または `-E <env>`、`.miserc.toml`）を指定すると、`mise.toml` の上に `mise.<env>.toml` が追加で読み込まれる。タスクを `mise.<env>.toml` に書けば、`mise.toml` のタスクと並んで使える（このリポジトリのバージョンで動作を確認済み）。ただし、`MISE_ENV` を毎回指定する必要がある。
-- 参考: <https://mise.jdx.dev/configuration/environments.html>
-
-```toml
-# mise.prod.toml（下流が新規に足すファイル）
-[tasks."deploy:web"]
-description = "web をデプロイする"
-dir = "apps/web"
-run = "pnpm exec wrangler deploy -c ../../deploy/web.wrangler.jsonc"
-```
-
-実行は `MISE_ENV=prod mise run deploy:web`。
-
-どちらの方法でも、誤って upstream の `wrangler.jsonc`（本番の値が無い）をデプロイしないよう、タスクは必ず `-c` で下流の設定を指定する。
-
-> `mise.local.toml` は `.gitignore` に入っているので、チームで共有する手段としては使えない。
+1. **Terraform apply**（`infra/`）: R2 バケット 2 つ、KV、AI Gateway、監査ログの Logpush を作る（9・10）。`infra/README.md` に従い、tfvars と backend を足してから行う。出力（`terraform output`）の値を 4 の wrangler 設定に書き写す。
+2. **AI Gateway に BYOK**: Anthropic の API キーを AI Gateway の画面で登録する（7）。Terraform には入れない。
+3. **GitHub App**: 作成して、Client ID・App ID・秘密鍵を用意する（6）。
+4. **wrangler 設定**: `deploy.example/` を `deploy/` にコピーし、`<...>` を実値に置き換える（5）。
+5. **`mise run deploy:secrets`**: secret を入れる。Worker がまだ無いときは、wrangler が最初の `secret put` で Worker を作るか確認する。うまくいかないときは、先に `deploy:all` で Worker を作ってから行う。**【実機で確認して追記】**
+6. **`mise run deploy:all`**: web → agent → gateway の順にデプロイする（3）。
+7. Portal / Access への登録（範囲外。8 の情報を渡す）と、初回デプロイの確認（13）。
 
 ## 5. 下流が用意する値の一覧
 
@@ -189,7 +182,8 @@ wrangler secret put GITHUB_APP_PRIVATE_KEY -c <YOUR_GATEWAY_CONFIG> < app.pkcs8.
 
 ## 7. AI Gateway の設定
 
-- AI Gateway を 1 つ作り、その ID を agent と web の `AI_GATEWAY_ID` に設定する（5）。Anthropic の API キーは AI Gateway に保管する（BYOK）。Worker・Sandbox にはキーを置かない。
+- AI Gateway を 1 つ作り、その ID を agent と web の `AI_GATEWAY_ID` に設定する（5）。`infra/` の Terraform が作る（認証なし、ログ収集あり、キャッシュとレート制限なし。`terraform output ai_gateway_id`）。Anthropic の API キーは AI Gateway に保管する（BYOK）。**BYOK の登録は AI Gateway の画面で行い、Terraform には入れない。** Worker・Sandbox にはキーを置かない。
+- AI Gateway の認証（`cf-aig-authorization`）は使わない。agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼ぶ（gateway token の secret は無い）。
 - 経路:
   - agent: `AI` バインディングが AI Gateway 経由で Claude を呼ぶ（子エージェントのモデル呼び出しは AI Gateway 経由だけ）。
   - web: `env.AI.websearch()`（Web Search API）と、安全性の評価（`env.AI.run` による Clef-flash）。どちらも AI Gateway を通る。
@@ -211,8 +205,8 @@ wrangler secret put GITHUB_APP_PRIVATE_KEY -c <YOUR_GATEWAY_CONFIG> < app.pkcs8.
 終端になったタスクのイベントと結果を R2 に**コピー**する。正は `TaskDO` のままで、`task_wait` / `task_result` は `TaskDO` から返す。
 
 - バインディング名は `LOGS`。下流の wrangler 設定で **gateway にだけ**足す（agent・web には足さない）。rovo の `wrangler.jsonc` には `r2_buckets` を置かない。`LOGS` が無ければアーカイブはスキップされ（監査ログに `archive_skipped`）、タスクの結果にも予算の精算にも影響しない（fail-open）。
-- バケットは非公開にする（r2.dev の公開 URL もカスタムドメインも付けない）。
-- ライフサイクルは下流で設定する。推奨値の例: **90 日で削除**。値は保持の要件に合わせて決める。
+- バケットは非公開にする（r2.dev の公開 URL もカスタムドメインも付けない）。`infra/` の Terraform が作るバケット（`terraform output archive_bucket_name`）は、公開の設定を付けないので非公開。
+- ライフサイクルは `infra/` の Terraform が付ける（`archive_retention_days`、既定 **90 日で削除**）。値は保持の要件に合わせて決める。Terraform を使わない場合は、下流で設定する。
 - キー: `tasks/<yyyy>/<mm>/<task_id>/{events.jsonl,result.json,summary.json}`（`<yyyy>/<mm>` はタスク作成時刻の UTC）。`events.jsonl` → `result.json` → `summary.json` の順に書くので、**`summary.json` がある = 3 つが揃っている**。同じキーへの上書きなので、再実行しても増えない。書き込みに 6 回失敗すると打ち切り、監査ログに `archive_failed` を出す。
 - 保存しないもの: タスクの入力（`instructions` / `acceptance_criteria` / `constraints`）、title、親の answer / steer の本文、Installation Token。
 - MCP から一覧・読み出しする API は無い。読むのは運用者が、ダッシュボード・wrangler・S3 互換 API で行う。
@@ -230,9 +224,11 @@ R2 の画面操作、ライフサイクルの設定画面: **【実機で確認�
 監査イベントは、1 行の構造化 JSON（`{"audit":true,"event":...}`）を `console.log` に出す。イベントの一覧は [phase6.md](specs/phase6.md)。Workers Logs に出るだけでは、head sampling と短い保持のために行が欠落しうるので、**best-effort** でしかない。監査として成立させるには、下流で次の**両方**を設定する。
 
 1. Workers Logs の head sampling を 100% にする。下流の wrangler 設定に `observability` を足し、`head_sampling_rate: 1` にする（`observability.logs.head_sampling_rate` でもよい）。rovo の `wrangler.jsonc` には `observability` を置かない。
-2. Logpush で、保持期間を自分で決められる送り先へ流す（送り先は下流の判断）。
+2. Logpush で、保持期間を自分で決められる送り先へ流す（送り先は下流の判断）。`infra/` の Terraform は、データセット `workers_trace_events` を、監査用の R2 バケット（`audit_retention_days`、既定 365 日で削除）へ送るジョブを作る。**ジョブの filter で `ScriptName` を rovo の 3 つの Worker（`worker_names`）に絞る**ので、アカウントの他の Worker のログは入らない。各 Worker の wrangler 設定に `"logpush": true` が要る（`deploy.example/` にある）。
 
 どちらかを設定しなければ、監査ログは調査の補助として使う。
+
+Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換の鍵）が平文で残る。state は非公開の場所に置く（`infra/README.md`）。
 
 確かめ方: 設定後にタスクを 1 件実行し、Logpush の送り先に監査行（`"audit":true`）が欠けずに届くことを、タスクの `TaskDO` の events（`credential_issued` / `credential_revoked` など）の件数と突き合わせる。具体的な手順は [acceptance.md](specs/acceptance.md) の 16 節。Logpush の画面操作: **【実機で確認して追記】**
 
@@ -271,7 +267,7 @@ R2 の画面操作、ライフサイクルの設定画面: **【実機で確認�
 
 ## 14. 更新手順とロールバック
 
-- 更新: upstream を取り込み（4）、`mise run test`（または自分の CI）で確認し、web → agent → gateway の順に再デプロイする。
+- 更新: upstream を取り込み（4）、`mise run test`（または自分の CI）で確認し、web → agent → gateway の順に再デプロイする（`ROVO_DEPLOY_DIR=<dir> mise run deploy:all`）。`deploy.example/` や `infra/` が変わっていたら、下流の `deploy/` と tfvars に差分を取り込む。
 - Durable Object のマイグレーション: gateway の `migrations`（`TaskDO` / `UserDO`）は upstream の `wrangler.jsonc` にある。下流の設定にも**同じ `migrations` を引き継ぐ**。クラス名の変更・削除は、保存済みのデータを失うので、upstream の更新で入った場合は内容を確認してから適用する。
 - 公開 API を変える更新（ツールの入出力）は、接続中のクライアントに影響する。upstream の変更を確認する。
 - ロールバック: Cloudflare の Worker のバージョン機能で前のバージョンに戻せるが、DO のマイグレーションと保存済みのデータは戻らない。**【実機で確認して追記】**（コンテナを含む agent のロールバック）

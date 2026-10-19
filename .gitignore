@@ -8,3 +8,10 @@ dist/
 .dev.vars.rovo-e2e-backup
 .claude/*
 !.claude/settings.json
+
+# Terraform（infra/）。state には Logpush の資格情報が平文で残るので、必ず除外する。
+# .terraform.lock.hcl は再現性のためコミットする。backend.tf と *.tfvars は下流（private）がコミットするので除外しない。
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/crash.log

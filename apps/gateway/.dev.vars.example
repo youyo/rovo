@@ -19,9 +19,13 @@ GITHUB_APP_PRIVATE_KEY=
 # 月額の枠（MONTHLY_BUDGET_USD）を 10 未満にするときは、これも下げる
 # TASK_BUDGET_USD=10
 
-# ログインを許可する org と team（slug）
+# ログインとツール呼び出しを許可する範囲。次の 2 つのうち少なくとも 1 つを設定する（どちらかを満たせば許可）。
+# 1. org と team（slug）。対で設定する。片方だけだと設定の誤りとしてログインできない
 ALLOWED_ORG=
 ALLOWED_TEAM=
+# 2. GitHub の数値の user ID（カンマ区切り。個人で使うときはこちら）。自分の ID: gh api user --jq .id
+#    不正な要素（数字以外・0・重複・空要素）が 1 つでもあれば全体が不正になる。例: ALLOWED_USER_IDS=12345,67890
+ALLOWED_USER_IDS=
 
 # GitHub トークンの暗号化鍵（base64 の 32 バイト）: openssl rand -base64 32
 TOKEN_ENC_KEY=

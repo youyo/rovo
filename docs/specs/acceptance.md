@@ -111,6 +111,7 @@ Phase 1 のコードが揃った後に、利用者と一緒に実施して結果
 - [ ] Chrome で、承認と拒否のどちらのリダイレクトも CSP に妨げられない
 - [ ] Cowork から Portal 経由で接続しても同様に使える
 - [ ] 許可した team に所属しないアカウントではログインできない（`access_denied` で終わる）
+- [ ] `ALLOWED_USER_IDS` だけで認可する構成（`ALLOWED_ORG` / `ALLOWED_TEAM` は空）で、リストにある ID のアカウントはログインでき、ツールが呼べる。リストに無いアカウントは `access_denied` で終わり、監査に `authz_denied`（`not_team_member`）が出る。`ALLOWED_USER_IDS` に不正な要素を入れる、または `ALLOWED_ORG` だけを設定すると、ログインできない
 - [ ] 2 回目以降の接続では GitHub 側の再承認が不要（または想定どおりの挙動）
 
 ## 2. ツール（Claude Code / Cowork の両方）

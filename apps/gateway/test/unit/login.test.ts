@@ -451,6 +451,96 @@ describe("GET /callback", () => {
   });
 });
 
+describe("ALLOWED_USER_IDS（数値の user ID の許可リスト）", () => {
+  beforeEach(clearWorkerAudit);
+  const NO_TEAM = { ALLOWED_ORG: "", ALLOWED_TEAM: "" };
+  const auditEnv = (over: EnvOver = {}) =>
+    makeEnv({ ENVIRONMENT: "test", OAUTH_KV: workerEnv.OAUTH_KV, ...over });
+  const memberships = (gh: ReturnType<typeof githubFetch>) =>
+    gh.calls.filter((r) => new URL(r.url).pathname.includes("/memberships/"));
+
+  it("ID のルールだけの構成: 一致すればログインでき、team の確認は呼ばない", async () => {
+    const gh = githubFetch({ team: "none" });
+    const { env, provider, saveCredential } = makeEnv({ ...NO_TEAM, ALLOWED_USER_IDS: "7,1001" });
+    const res = await app(gh.fetch).request(CALLBACK_URL, {}, env);
+    expect(res.headers.get("location")).toBe(
+      "http://localhost/cb?code=mcp-code&state=client-state",
+    );
+    expect(saveCredential).toHaveBeenCalledOnce();
+    expect(provider.completeAuthorization).toHaveBeenCalledOnce();
+    expect(memberships(gh)).toHaveLength(0);
+  });
+
+  it("ID のルールだけの構成: リストに無ければ拒否。監査は not_team_member と同じ", async () => {
+    const gh = githubFetch();
+    const { env, provider, saveCredential } = auditEnv({ ...NO_TEAM, ALLOWED_USER_IDS: "7,8" });
+    const res = await app(gh.fetch).request(CALLBACK_URL, {}, env);
+    expect(new URL(res.headers.get("location") ?? "").searchParams.get("error")).toBe(
+      "access_denied",
+    );
+    expect(saveCredential).not.toHaveBeenCalled();
+    expect(provider.completeAuthorization).not.toHaveBeenCalled();
+    expect(memberships(gh)).toHaveLength(0);
+    expect(await readWorkerAudit(env)).toEqual([
+      expect.objectContaining({
+        event: "authz_denied",
+        reason: "not_team_member",
+        userId: 1001,
+        caller: "parent",
+      }),
+    ]);
+  });
+
+  it("ID に無くても、org/team の active メンバーならログインできる", async () => {
+    const gh = githubFetch({ team: "active" });
+    const { env, provider } = makeEnv({ ALLOWED_USER_IDS: "7,8" });
+    const res = await app(gh.fetch).request(CALLBACK_URL, {}, env);
+    expect(res.headers.get("location")).toContain("code=mcp-code");
+    expect(provider.completeAuthorization).toHaveBeenCalledOnce();
+    expect(memberships(gh)).toHaveLength(1);
+  });
+
+  it("ID に無く、team にも居なければ拒否（team を確認する）", async () => {
+    const gh = githubFetch({ team: "none" });
+    const { env, provider } = auditEnv({ ALLOWED_USER_IDS: "7,8" });
+    const res = await app(gh.fetch).request(CALLBACK_URL, {}, env);
+    expect(res.headers.get("location")).toContain("error=access_denied");
+    expect(provider.completeAuthorization).not.toHaveBeenCalled();
+    expect(memberships(gh)).toHaveLength(1);
+    expect((await readWorkerAudit(env)).map((r) => r.reason)).toEqual(["not_team_member"]);
+  });
+
+  it.each([
+    ["org だけ + 一致する ID", { ALLOWED_TEAM: "", ALLOWED_USER_IDS: "1001" }],
+    ["team だけ + 一致する ID", { ALLOWED_ORG: "", ALLOWED_USER_IDS: "1001" }],
+    ["ID が不正（空要素）", { ...NO_TEAM, ALLOWED_USER_IDS: "1001,,2" }],
+    ["ID が不正（重複）", { ...NO_TEAM, ALLOWED_USER_IDS: "1001,1001" }],
+    ["org/team は完全だが ID が不正", { ALLOWED_USER_IDS: "abc" }],
+    ["どのルールも無い", { ...NO_TEAM, ALLOWED_USER_IDS: "" }],
+  ])("設定が不正ならログインを開始せず、callback も 500: %s", async (_name, over) => {
+    const a = makeEnv(over);
+    const res = await post(a.env, approveForm());
+    expect(res.status).toBe(500);
+    expect(a.provider.beginUpstream).not.toHaveBeenCalled();
+
+    const gh = githubFetch();
+    const b = makeEnv(over);
+    const cb = await app(gh.fetch).request(CALLBACK_URL, {}, b.env);
+    expect(cb.status).toBe(500);
+    expect(cb.headers.get("location")).toBeNull();
+    expect(b.saveCredential).not.toHaveBeenCalled();
+    expect(b.provider.completeAuthorization).not.toHaveBeenCalled();
+    expect(gh.calls).toHaveLength(0);
+  });
+
+  it("ID のルールだけの構成でも、/authorize は開始できる", async () => {
+    const { env, provider } = makeEnv({ ...NO_TEAM, ALLOWED_USER_IDS: "1001" });
+    const res = await post(env, approveForm());
+    expect(res.status).toBe(302);
+    expect(provider.beginUpstream).toHaveBeenCalledOnce();
+  });
+});
+
 describe("監査（auth_failed / authz_denied）", () => {
   beforeEach(clearWorkerAudit);
   // 記録先の KV だけ本物にして、ENVIRONMENT=test で出す

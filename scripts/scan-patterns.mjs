@@ -73,9 +73,9 @@ const ALLOW = [
   },
   {
     rule: "private-key",
-    where: /\/test\/unit\/(?:redact|github\/app)\.test\.ts/,
+    where: /\/test\/unit\/(?:redact|github\/app)\.test\.ts|scripts\/github-app\.test\.mjs/,
     reason:
-      "テスト内の PEM ヘッダだけのダミー（本体は MIIabc / AAAA の数文字）。マスキングと鍵の読み込み失敗の検証用",
+      "テスト内の PEM ヘッダだけのダミー（本体は MIIabc / AAAA の数文字、または見出しの文字列だけ）。マスキングと鍵の読み込み失敗、PKCS#8 の変換の検証用",
   },
   {
     rule: "bearer-header",

@@ -730,6 +730,30 @@ describe("SandboxDO: pnpm / yarn の本体の用意（pm-prepare）", () => {
     });
   });
 
+  it("タスクの期限が近いときは用意せずに諦める（起動を期限の先までブロックしない）", async () => {
+    await runInDO(sandboxStub("pm-ready-near-deadline"), async (inst) => {
+      const { fake } = setup(inst);
+      await inst.ensureReady({ ...spec(NO_DEPS), deadlineAt: Date.now() + 5_000 });
+      expect(fake.execLog.filter(isPrepare)).toHaveLength(0);
+    });
+  });
+
+  it("期限に余裕があれば、用意の待ちは期限を超えない長さに切り詰める", async () => {
+    await runInDO(sandboxStub("pm-ready-clamp"), async (inst) => {
+      const { fake } = setup(inst);
+      const calls: number[] = [];
+      const raw = inst.rawExec.bind(inst);
+      inst.rawExec = (argv: string[], opts: { timeoutMs: number }) => {
+        if (isPrepare(argv)) calls.push(opts.timeoutMs);
+        return raw(argv, opts);
+      };
+      await inst.ensureReady({ ...spec(NO_DEPS), deadlineAt: Date.now() + 60_000 });
+      expect(fake.execLog.filter(isPrepare)).toHaveLength(1);
+      expect(calls[0]).toBeLessThanOrEqual(60_000);
+      expect(calls[0]).toBeGreaterThan(0);
+    });
+  });
+
   it("キャッシュを作るコンテナでも、取り出しのあと・導入の前に呼ぶ。失敗しても作成は続く", async () => {
     await runInDO(sandboxStub("pm-build"), async (inst) => {
       const { fake } = setup(inst);
@@ -746,7 +770,7 @@ describe("SandboxDO: pnpm / yarn の本体の用意（pm-prepare）", () => {
         baseSha: SHA,
         branch: "agent/task-x",
         taskId: "task-x",
-        timeoutMs: 5_000,
+        timeoutMs: 60_000,
       });
       expect(r.ok).toBe(true);
       const fetchAt = fake.indexOfScript(DEPS_FETCH_SCRIPT);

@@ -13,6 +13,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,7 +53,9 @@ function env() {
 echo "corepack $*" >> "${log}"
 n=$(grep -c '^corepack' "${log}")
 if [ "\${FAKE_COREPACK_FAIL:-0}" -ge "$n" ]; then echo "boom" >&2; exit 1; fi
-spec="\${@: -1}"; name="\${spec%@*}"; ver="\${spec#*@}"
+spec="\${@: -1}"; name="\${spec%@*}"; rest="\${spec#*@}"; ver="\${rest%%+*}"
+hash=""; case "$rest" in *+*) hash="\${rest#*+}";; esac
+if [ -n "$hash" ] && [ "$hash" != "\${FAKE_COREPACK_HASH:-sha512.abc123}" ]; then echo "integrity check failed" >&2; exit 1; fi
 d="$COREPACK_HOME/v1/$name/$ver"
 mkdir -p "$d/bin"
 echo '{}' > "$d/.corepack"
@@ -159,12 +162,57 @@ describe("pnpm（native バイナリを持つ版）", () => {
 });
 
 describe("入力", () => {
-  it("ディレクトリを渡すと package.json の packageManager を読む（+sha512 は無視する）", () => {
+  it("ディレクトリを渡すと package.json の packageManager を読む", () => {
     const e = env();
-    const dir = pkgDir(e.root, "pnpm@12.14.0+sha512.abcdef");
+    const dir = pkgDir(e.root, "pnpm@12.14.0");
     const r = e.run([dir]);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(e.calls()[0], "corepack install -g --cache-only pnpm@12.14.0");
+  });
+
+  it("ハッシュ固定（+sha512.<hex>）があれば、ハッシュ込みの完全な spec を corepack に渡して検証させる", () => {
+    const e = env();
+    const r = e.run([pkgDir(e.root, "pnpm@12.14.0+sha512.abc123")]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(e.calls()[0], "corepack install -g --cache-only pnpm@12.14.0+sha512.abc123");
+    assert.ok(existsSync(join(e.dir("pnpm", "12.14.0"), "pnpm-native")));
+  });
+
+  it("ハッシュが一致しなければ、何も置かず失敗にする（native も取らない）", () => {
+    const e = env();
+    const r = e.run([pkgDir(e.root, "pnpm@12.14.0+sha512.deadbeef")]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /pm-prepare: corepack_failed/);
+    assert.ok(!existsSync(e.dir("pnpm", "12.14.0")), "キャッシュに置かない");
+    assert.equal(e.calls().filter((c) => c.startsWith("npm ")).length, 0);
+  });
+
+  it("ハッシュの形が +sha<桁>.<hex> でなければ、何もしない（corepack に任せる）", () => {
+    const e = env();
+    for (const h of [
+      "+sha512.",
+      "+sha512.XYZ",
+      "+md5.abc",
+      "+sha512.abc;rm",
+      "+abc",
+      "+sha512.a+x",
+    ]) {
+      const r = e.run([pkgDir(e.root, `pnpm@12.14.0${h}`)]);
+      assert.equal(r.status, 0, `${h}: ${r.stderr}`);
+    }
+    assert.deepEqual(e.calls(), []);
+  });
+
+  it("古い一時ディレクトリ(.pm-prepare-*)は開始時に掃除し、新しいものは残す", () => {
+    const e = env();
+    const d = e.dir("pnpm", "12.14.0");
+    mkdirSync(join(d, ".pm-prepare-old"), { recursive: true });
+    mkdirSync(join(d, ".pm-prepare-new"), { recursive: true });
+    const old = new Date(Date.now() - 3600_000);
+    utimesSync(join(d, ".pm-prepare-old"), old, old);
+    assert.equal(e.run(["pnpm@12.14.0"]).status, 0);
+    assert.ok(!existsSync(join(d, ".pm-prepare-old")));
+    assert.ok(existsSync(join(d, ".pm-prepare-new")));
   });
 
   it("yarn は wrapper だけを入れる（native バイナリを持たないので npm は呼ばない）", () => {

@@ -68,7 +68,7 @@ describe("detectDeps", () => {
     });
     // base_sha のコミット → その tree（再帰。入れ子の package.json の SHA も読む）の 2 回
     expect(f.calls).toEqual([`commit:${BASE}`, `tree:${TREE}`]);
-    expect(f.options).toEqual([{ recursive: true }]);
+    expect(f.options).toEqual([{ recursive: true, signal: expect.any(AbortSignal) }]);
   });
 
   it("pnpm-lock.yaml → pnpm install --frozen-lockfile、yarn.lock → yarn install --frozen-lockfile", async () => {
@@ -183,6 +183,21 @@ describe("detectDeps", () => {
       BASE,
     );
     expect(other?.manifestsSha).toBe(expected);
+  });
+
+  it("tree の取得が期限内に終わらなければ null（キャッシュなしで続ける）。signal も渡す", async () => {
+    let signal: AbortSignal | undefined;
+    const api = {
+      async getCommit(sha: string) {
+        return { sha, treeSha: TREE };
+      },
+      getTree(_sha: string, opt?: { recursive?: boolean; signal?: AbortSignal }) {
+        signal = opt?.signal;
+        return new Promise<never>(() => {});
+      },
+    };
+    expect(await detectDeps(api, 1, BASE, 30)).toBeNull();
+    expect(signal).toBeDefined();
   });
 
   it("tree が切り詰められた（truncated）ら null（一部の package.json を読めていない鍵は作らない）", async () => {

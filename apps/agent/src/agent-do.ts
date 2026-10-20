@@ -1416,7 +1416,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "no_push",
-        text: "Every git_commit is pushed to the task branch automatically; do not run git push yourself, do not change git remotes or credentials, and do not create pull requests. Credentials are not available inside the sandbox.",
+        text: "Every git_commit is pushed to the task branch automatically; do not run git push yourself, do not change git remotes or credentials, and do not create pull requests. Credentials are not available inside the sandbox. The gateway creates the draft pull request for the task branch (you never create it), and the parent reviews and merges it. So do not say in your summary that you did not create a pull request, and do not report the missing pull request as a problem: describe the changes you committed instead.",
       },
     ];
   }

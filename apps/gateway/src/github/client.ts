@@ -1,6 +1,13 @@
 import { DEFAULT_GITHUB_API_BASE, DEFAULT_GITHUB_OAUTH_BASE } from "./config";
 
-export type GitHubErrorCode = "reauth_required" | "forbidden" | "upstream_unavailable";
+export type GitHubErrorCode =
+  | "reauth_required"
+  | "forbidden"
+  | "upstream_unavailable"
+  // PR の操作（D9）: GitHub が操作そのものを拒否した。メッセージに GitHub の文言が入る
+  | "merge_blocked"
+  | "head_moved"
+  | "github_rejected";
 
 /** メッセージにトークン・シークレットは入れない。 */
 export class GitHubError extends Error {
@@ -39,6 +46,25 @@ export interface RepositoryAccess {
   installationId: number;
   fullName: string;
 }
+
+/** 利用者のトークンで読む PR（D9）。 */
+export interface UserPull {
+  nodeId: string;
+  number: number;
+  url: string;
+  draft: boolean;
+  state: string;
+  merged: boolean;
+  headSha: string;
+  headRef: string;
+  /** head / base のリポジトリ（owner/name）。fork の PR を見分けるのに使う */
+  headRepo: string | null;
+  baseRef: string;
+  baseRepo: string | null;
+}
+
+/** GitHub のエラーメッセージを呼び出し元に返すときの上限。 */
+const MAX_GITHUB_MESSAGE = 300;
 
 const MAX_PAGES = 50;
 const PER_PAGE = 100;
@@ -176,7 +202,176 @@ export class GitHubClient {
     throw denied();
   }
 
+  // ---- PR の操作（利用者のトークン。D9）----
+
+  /** PR を読む。node_id は GraphQL の Ready 化に要る。404 は forbidden（見えない・存在しない）。 */
+  async getPull(accessToken: string, repository: string, number: number): Promise<UserPull> {
+    const res = await this.api(accessToken, `${this.pullPath(repository, number)}`);
+    const p = (await this.json(res)) as {
+      number?: unknown;
+      node_id?: unknown;
+      html_url?: unknown;
+      draft?: unknown;
+      state?: unknown;
+      merged?: unknown;
+      head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } | null };
+      base?: { ref?: unknown; repo?: { full_name?: unknown } | null };
+    } | null;
+    if (
+      typeof p?.number !== "number" ||
+      typeof p.node_id !== "string" ||
+      typeof p.html_url !== "string" ||
+      typeof p.state !== "string" ||
+      typeof p.head?.sha !== "string" ||
+      typeof p.head.ref !== "string" ||
+      typeof p.base?.ref !== "string"
+    ) {
+      throw new GitHubError("upstream_unavailable", "unexpected pull response");
+    }
+    const repoName = (r: { full_name?: unknown } | null | undefined) =>
+      typeof r?.full_name === "string" ? r.full_name : null;
+    return {
+      nodeId: p.node_id,
+      number: p.number,
+      url: p.html_url,
+      draft: p.draft === true,
+      state: p.state,
+      merged: p.merged === true,
+      headSha: p.head.sha,
+      headRef: p.head.ref,
+      headRepo: repoName(p.head.repo),
+      baseRef: p.base.ref,
+      baseRepo: repoName(p.base.repo),
+    };
+  }
+
+  /** Draft の PR を Ready for review にする（GraphQL。REST には無い）。 */
+  async markReadyForReview(accessToken: string, pullRequestNodeId: string): Promise<void> {
+    const res = await this.send(accessToken, "POST", "/graphql", {
+      query:
+        "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { id isDraft } } }",
+      variables: { id: pullRequestNodeId },
+    });
+    if (!res.ok) await this.throwWriteError(res);
+    const body = (await this.json(res)) as {
+      data?: { markPullRequestReadyForReview?: { pullRequest?: { isDraft?: unknown } } } | null;
+      errors?: { type?: unknown; message?: unknown }[];
+    } | null;
+    const first = body?.errors?.[0];
+    if (first) {
+      const msg = cleanMessage(first.message);
+      const type = typeof first.type === "string" ? first.type : "";
+      if (type === "FORBIDDEN" || type === "NOT_FOUND" || type === "INSUFFICIENT_SCOPES") {
+        throw new GitHubError("forbidden", `GitHub refused the request: ${msg}`);
+      }
+      throw new GitHubError("github_rejected", `GitHub rejected the request: ${msg}`);
+    }
+    if (body?.data?.markPullRequestReadyForReview?.pullRequest?.isDraft !== false) {
+      throw new GitHubError("github_rejected", "GitHub did not mark the pull request as ready");
+    }
+  }
+
+  /**
+   * PR をマージする。sha（検証済みの head）を渡し、ブランチがそれより進んでいれば GitHub が 409 で拒否する。
+   * 405 / 422 はブランチ保護・必須チェック・レビュー要件・ルールなどによる拒否で、GitHub のメッセージを残す。
+   */
+  async mergePull(
+    accessToken: string,
+    repository: string,
+    number: number,
+    args: { sha: string; method: "squash" | "merge" | "rebase" },
+  ): Promise<{ sha: string | null }> {
+    const res = await this.send(accessToken, "PUT", `${this.pullPath(repository, number)}/merge`, {
+      sha: args.sha,
+      merge_method: args.method,
+    });
+    if (!res.ok) await this.throwWriteError(res, { merge: true });
+    const body = (await this.json(res)) as { sha?: unknown; merged?: unknown } | null;
+    if (body?.merged !== true) {
+      throw new GitHubError("merge_blocked", "GitHub did not merge the pull request");
+    }
+    return { sha: typeof body.sha === "string" ? body.sha : null };
+  }
+
+  /** ブランチを消す。すでに無い（422）ときは成功。 */
+  async deleteBranch(accessToken: string, repository: string, branch: string): Promise<void> {
+    const res = await this.send(
+      accessToken,
+      "DELETE",
+      `${this.repoPath(repository)}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`,
+    );
+    if (res.ok || res.status === 422) return;
+    await this.throwWriteError(res);
+  }
+
   // ---- 内部 ----
+
+  private repoPath(repository: string): string {
+    const m = /^([^/\s]+)\/([^/\s]+)$/.exec(repository);
+    if (!m) throw new GitHubError("forbidden", "invalid repository");
+    return `/repos/${encodeURIComponent(m[1] as string)}/${encodeURIComponent(m[2] as string)}`;
+  }
+
+  private pullPath(repository: string, number: number): string {
+    if (!Number.isSafeInteger(number) || number <= 0) {
+      throw new GitHubError("forbidden", "invalid pull request number");
+    }
+    return `${this.repoPath(repository)}/pulls/${number}`;
+  }
+
+  /** 書き込みの API 呼び出し（JSON 本文）。ネットワークの失敗は upstream_unavailable。 */
+  private async send(
+    accessToken: string,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Response> {
+    try {
+      return await this.fetchImpl(`${this.apiBase}${path}`, {
+        method,
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${accessToken}`,
+          "x-github-api-version": "2022-11-28",
+          "user-agent": "rovo-gateway",
+          ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+    } catch {
+      throw new GitHubError("upstream_unavailable", "network error contacting GitHub API");
+    }
+  }
+
+  /** 書き込みの失敗を GitHubError にする（常に throw）。GitHub のメッセージは整形して残す。 */
+  private async throwWriteError(res: Response, opts: { merge?: boolean } = {}): Promise<never> {
+    const s = res.status;
+    let message = "";
+    try {
+      message = cleanMessage(((await res.json()) as { message?: unknown } | null)?.message);
+    } catch {
+      // 本文なし
+    }
+    const detail = message === "" ? "" : `: ${message}`;
+    if (s === 401) throw new GitHubError("reauth_required", "GitHub returned 401", s);
+    if (s === 403) {
+      const limited =
+        res.headers.get("x-ratelimit-remaining") === "0" || res.headers.get("retry-after") !== null;
+      if (limited) throw new GitHubError("upstream_unavailable", "GitHub rate limited", s);
+      throw new GitHubError("forbidden", `GitHub refused the request (403)${detail}`, s);
+    }
+    if (s === 404) throw new GitHubError("forbidden", "GitHub returned 404", s);
+    if (opts.merge && s === 409) {
+      throw new GitHubError("head_moved", `GitHub rejected the merge (409)${detail}`, s);
+    }
+    if (opts.merge && (s === 405 || s === 422)) {
+      throw new GitHubError("merge_blocked", `GitHub refused the merge (${s})${detail}`, s);
+    }
+    if (s === 429 || s >= 500) {
+      throw new GitHubError("upstream_unavailable", `GitHub returned ${s}`, s);
+    }
+    throw new GitHubError("github_rejected", `GitHub rejected the request (${s})${detail}`, s);
+  }
 
   private async tokenRequest(extra: Record<string, string>): Promise<TokenSet> {
     let res: Response;
@@ -302,6 +497,16 @@ export class GitHubClient {
       }
     }
   }
+}
+
+/** GitHub のメッセージを返せる形にする: 制御文字を空白にし、前後の空白を落として 300 文字で切る。 */
+function cleanMessage(v: unknown): string {
+  if (typeof v !== "string") return "";
+  const printable = [...v].map((ch) => {
+    const code = ch.charCodeAt(0);
+    return code < 0x20 || code === 0x7f ? " " : ch;
+  });
+  return printable.join("").trim().slice(0, MAX_GITHUB_MESSAGE);
 }
 
 export function parseNextLink(header: string | null): string | null {

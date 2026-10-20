@@ -434,4 +434,18 @@ describe("システムプロンプト", () => {
     fx.gate.release();
     await waitForTerminal(fx);
   });
+
+  it("no_push の節は「Draft PR は gateway が作る（子は作らない）」と書き、summary で「PR を作っていない」と誤解させない", async () => {
+    const fx = newFixture("prompt-pr", [call("gate")]);
+    await fx.stub.start(makeSpec("prompt-pr"));
+    const section = await runInDO(fx.stub, (inst) =>
+      inst.promptSections().find((s: { key: string }) => s.key === "no_push"),
+    );
+    // 子は PR を作らない。作るのは gateway で、Draft PR がすでにある（または後から作られる）
+    expect(section.text).toMatch(/do not create pull requests/i);
+    expect(section.text).toMatch(/gateway creates the draft pull request/i);
+    expect(section.text).toMatch(/not your job|do not mention|do not say/i);
+    fx.gate.release();
+    await waitForTerminal(fx);
+  });
 });

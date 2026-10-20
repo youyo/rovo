@@ -10,6 +10,7 @@ import {
   resolveGitHubBaseUrls,
   type StoredCredential,
   type TokenSet,
+  type UserPull,
 } from "../github";
 import { taskBudgetUsd } from "./budget";
 import type { TaskDO } from "./task-do";
@@ -77,6 +78,36 @@ export type MemberResult = { ok: true } | AuthzFailure;
 export type StartAuthzResult =
   | { ok: true; repositoryId: number; installationId: number }
   | AuthzFailure;
+
+/** PR の操作の対象。TaskDO の記録から作る（呼び出し元の入力からは取らない）。 */
+export type PrTarget = { repository: string; number: number; branch: string };
+/**
+ * PR の操作の失敗。code は GitHub の失敗（GitHubError.code）か、PR の状態による conflict。
+ * reason は監査に出す固定のコード（英小文字・数字・_）。
+ */
+export type PrFailure = {
+  ok: false;
+  code: GitHubErrorCode | "conflict" | "internal";
+  message: string;
+  reason: string;
+};
+export type PrReadyResult = { ok: true; already_ready: boolean } | PrFailure;
+export type PrMergeOptions = {
+  /** 検証済みの head の sha。GitHub のマージ API に sha として渡し、ブランチが動いていたら GitHub が拒否する */
+  expectedSha: string;
+  method: "squash" | "merge" | "rebase";
+  deleteBranch: boolean;
+};
+export type PrMergeResult =
+  | {
+      ok: true;
+      already_merged: boolean;
+      merge_sha: string | null;
+      /** delete_branch を求めなかったときは null */
+      branch_deleted: boolean | null;
+      warnings: string[];
+    }
+  | PrFailure;
 
 type CredentialRow = {
   generation: number;
@@ -575,6 +606,139 @@ export class UserDO extends DurableObject<Env> {
     } catch (e) {
       return this.toFailure(e);
     }
+  }
+
+  // ---- PR の Ready 化とマージ（D9）----
+  // 利用者の GitHub のユーザートークンで行う（Installation Token は使わない: 利用者のブランチ保護の扱いと監査の主体を、
+  // 利用者本人に合わせるため）。トークンはこの DO の中だけで使い、戻り値には出さない。
+  // 対象（リポジトリ・PR 番号・ブランチ）は TaskDO の記録から来る。ここでは GitHub 上の PR がその記録と一致することを確かめる。
+
+  /** Draft の PR を Ready にする。すでに Ready なら成功（冪等）。 */
+  async prReady(target: PrTarget): Promise<PrReadyResult> {
+    try {
+      const { client, credentials } = this.github();
+      return await credentials.withToken(async (tok): Promise<PrReadyResult> => {
+        const pull = await client.getPull(tok, target.repository, target.number);
+        const bad = this.pullProblem(pull, target);
+        if (bad) return bad;
+        if (!pull.draft) return { ok: true, already_ready: true };
+        await client.markReadyForReview(tok, pull.nodeId);
+        return { ok: true, already_ready: false };
+      });
+    } catch (e) {
+      return this.toPrFailure(e);
+    }
+  }
+
+  /**
+   * PR をマージする。Ready であること・head が検証済みの sha であることを確かめ、sha 付きで GitHub に渡す
+   * （確かめた後にブランチが動けば GitHub が 409 で拒否する）。ブランチ保護に拒否されたら merge_blocked。
+   */
+  async prMerge(target: PrTarget, opts: PrMergeOptions): Promise<PrMergeResult> {
+    const { client, credentials } = this.github();
+    let outcome: { already: boolean; sha: string | null };
+    try {
+      const merged = await credentials.withToken(
+        async (tok): Promise<PrFailure | { already: boolean; sha: string | null }> => {
+          const pull = await client.getPull(tok, target.repository, target.number);
+          const bad = this.pullProblem(pull, target, { allowMerged: true });
+          if (bad) return bad;
+          if (pull.merged) {
+            return pull.headSha === opts.expectedSha
+              ? { already: true, sha: null }
+              : this.headMoved(pull.headSha);
+          }
+          if (pull.draft) {
+            return {
+              ok: false,
+              code: "conflict",
+              reason: "pr_draft",
+              message: "the pull request is still a draft; call task_pr_ready first",
+            };
+          }
+          if (pull.headSha !== opts.expectedSha) return this.headMoved(pull.headSha);
+          const r = await client.mergePull(tok, target.repository, target.number, {
+            sha: opts.expectedSha,
+            method: opts.method,
+          });
+          return { already: false, sha: r.sha };
+        },
+      );
+      if ("ok" in merged) return merged;
+      outcome = merged;
+    } catch (e) {
+      return this.toPrFailure(e);
+    }
+
+    // マージは取り消せない。ブランチの削除に失敗しても成功として返し、warnings に残す。
+    let branchDeleted: boolean | null = null;
+    const warnings: string[] = [];
+    if (opts.deleteBranch) {
+      try {
+        await credentials.withToken((tok) =>
+          client.deleteBranch(tok, target.repository, target.branch),
+        );
+        branchDeleted = true;
+      } catch (e) {
+        branchDeleted = false;
+        const detail = e instanceof GitHubError ? e.message : "unexpected error";
+        warnings.push(`branch_delete_failed: the pull request was merged, but ${detail}`);
+      }
+    }
+    return {
+      ok: true,
+      already_merged: outcome.already,
+      merge_sha: outcome.sha,
+      branch_deleted: branchDeleted,
+      warnings,
+    };
+  }
+
+  private headMoved(actual: string): PrFailure {
+    return {
+      ok: false,
+      code: "head_moved",
+      reason: "head_moved",
+      message: `the pull request head ${actual.slice(0, 12)} differs from the verified commit; review the new changes before merging`,
+    };
+  }
+
+  /** GitHub 上の PR が TaskDO の記録と一致し、開いているかを確かめる。問題があれば失敗を返す。 */
+  private pullProblem(
+    pull: UserPull,
+    target: PrTarget,
+    opts: { allowMerged?: boolean } = {},
+  ): PrFailure | null {
+    const same = (a: string | null) =>
+      a !== null && a.toLowerCase() === target.repository.toLowerCase();
+    if (
+      pull.number !== target.number ||
+      pull.headRef !== target.branch ||
+      !same(pull.headRepo) ||
+      !same(pull.baseRepo)
+    ) {
+      return {
+        ok: false,
+        code: "conflict",
+        reason: "pr_mismatch",
+        message: "the pull request no longer matches this task's branch",
+      };
+    }
+    if (pull.merged && opts.allowMerged) return null;
+    if (pull.merged || pull.state !== "open") {
+      return {
+        ok: false,
+        code: "conflict",
+        reason: "pr_closed",
+        message: pull.merged ? "the pull request is already merged" : "the pull request is closed",
+      };
+    }
+    return null;
+  }
+
+  private toPrFailure(e: unknown): PrFailure {
+    const f = this.toFailure(e);
+    return { ok: false, code: f.code, message: f.message, reason: f.code };
   }
 
   private notMember(): AuthzFailure {

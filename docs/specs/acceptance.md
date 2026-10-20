@@ -39,6 +39,7 @@
 | 18 | Sandbox・復旧 | ○（実コンテナの E2E） | ○ | ○ | ○ | ○ | 復旧は実機で行わない（18 節）。`test:e2e:net` は M7b で実施済み |
 | 19 | 15 項目の通し | 一部 | ○ | ○ | ○ | | 実 Claude Code / Cowork から。PR のレビューは人が行う |
 | 20 | 公開前の最終確認 | ○（`release:check`） | 公開後の確認 | | ○ | | 履歴の処理・公開・PVR の有効化はユーザーと一緒に行う |
+| 21 | PR の Ready 化とマージ（D9） | ○（偽 GitHub） | ○ | 小 | ○ | ○ | 検証用リポジトリで COMPLETED のタスクを作り、`task_pr_ready` / `task_pr_merge` を呼ぶ。ブランチ保護（必須レビューまたは必須チェック）で拒否されることも確かめる。App の権限（Pull requests / Contents の write）の確認を兼ねる |
 
 環境の準備が要る個別の項目（節をまたぐ）:
 
@@ -166,7 +167,7 @@ Phase 1 のコードが揃った後に、利用者と一緒に実施して結果
 - [ ] 子エージェントが `git_commit` するたびに、作業ブランチが進む（GitHub 上のコミット一覧で確認）
 - [ ] 完了時、PR の head が `task_result` の `verification.commit_sha` と一致し、`pr.head_matches_verified` が `true`
 - [ ] PR 本文の rovo の管理範囲（目印の間）が、状態・検証結果・未解決事項に更新される。目印の外側に手で書いた文章は残る
-- [ ] PR は Draft のまま。マージ・Ready for review は行われない
+- [ ] PR は Draft のまま。rovo 自身はマージも Ready for review もしない（呼び出し元の AI が行う Ready 化とマージは 21 節）
 - [ ] 実行中に `task_cancel` すると、PR は閉じずに残り、本文が `CANCELLED` で更新される
 - [ ] 終端の後、Installation Token が失効している。トークンの値はログにも出ないので、通常は確認できない。確認が必要なら、検証用に一時的にログへ出す改造をして、終端の後にそのトークンで GitHub API を呼び 401 になることを見る（省略可）
 - [ ] 完了の後に作業ブランチへ別のコミットを手で push してから終端の処理を行わせると、`head_moved_after_verification` の警告が出る（再現が難しければ省略可）
@@ -476,6 +477,28 @@ M6（点検）と M11（公開）の結果の記録。履歴の処理・push・�
 - [ ] 公開の直後に private vulnerability reporting を有効にした
 - [ ] 下流（デプロイ用の private リポジトリ）が、公開された upstream を取り込める
 - [ ] upstream の既定で web_browse が無効のままであることと、README の「実験的・既定で無効」の記述を確かめた
+
+## 21. PR の Ready 化とマージ（D9）
+
+呼び出し元の AI が Draft PR をレビューして Ready にし、`merge_policy` が `agent_merge` のタスクではマージまでできることの確認（design 15.8 の D9）。自動テスト（`test:unit` の `user-pr` / `task-pr` / `task-pr-service` / `mcp`、`test:e2e:gateway` の `pr.e2e.test.ts`）は偽 GitHub で済んでいる。ここでは実機（実 GitHub・利用者本人のトークン）で確かめる。
+
+前提: 検証用のリポジトリ（App を Install 済み）と、そのリポジトリに書き込める利用者。`task_start` は小さな課題（`verification_commands` つき）で、確認ごとに課金される（小）。
+
+- [ ] COMPLETED のタスクで `task_pr_ready` が通る: `draft: false`、`changed: true`。GitHub 上で PR が Ready for review になっている。もう一度呼ぶと `changed: false` で成功する（冪等）。`task_result` の `pr.draft` が `false`、`next_steps` が `merge_policy` に合った案内になっている
+- [ ] FAILED（または CANCELLED）のタスクで `task_pr_ready` が拒否される: `conflict`。PR は Draft のまま。実行中のタスクは `not_ready`
+- [ ] `merge_policy` が `human_review`（`task_start` で省略）のタスクで `task_pr_merge` が拒否される: `forbidden`。PR はマージされない。`task_pr_ready` は通る
+- [ ] `merge_policy: "agent_merge"` のタスクで、Draft のままの `task_pr_merge` は `conflict`（`task_pr_ready` を先に呼ぶよう返る）。`task_pr_ready` のあとの `task_pr_merge` でマージできる（既定は squash）。GitHub 上で PR が merged、`merge_sha` がマージのコミットを指している。`delete_branch: true` で作業ブランチ `agent/task-<id>` が消える
+- [ ] ブランチ保護で拒否される: 検証用リポジトリのデフォルトブランチに、必須レビュー（1 人の承認）または必須チェックの ruleset を入れ、`agent_merge` のタスクで `task_pr_merge` を呼ぶ。`merge_blocked` と GitHub の理由（例: 承認が必要）が返り、マージされない。承認（または保護の解除）のあとの再実行でマージできる。利用者が保護をバイパスできる設定の場合は、利用者本人の扱いで通る（App の権限ではない）ことを備考に書く
+- [ ] 検証のあとに PR のブランチへ手で push してから `task_pr_merge` を呼ぶと、`head_moved` でマージされない（`task_result` の `head_matches_verified` が false になった場合は `conflict`）
+- [ ] 監査ログに `pr_ready` / `pr_merged` / `pr_denied`（`taskId`・`userId`・`merge_policy`）が出ていて、トークン・PR の本文・GitHub のメッセージは含まれない
+- [ ] App の権限は Pull requests: Read and write / Contents: Read and write のままで足りた（権限を read にすると `forbidden` になる）。足りなければ `docs/deploy.md` の権限の節を直す
+- [ ] 実 Claude Code から、MCP の `instructions` と `next_steps` だけを頼りに（手順を教えずに）レビュー → `task_pr_ready` →（`agent_merge` なら）`task_pr_merge` まで進められた。迷った点を備考に書く
+
+### D9 の結果
+
+| 実施者 | 日付 | 環境 | 結果 | 備考 |
+|---|---|---|---|---|
+| | | | | |
 
 ## Phase 7 の結果
 

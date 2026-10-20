@@ -610,6 +610,9 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     expect(r.pr).toEqual({
       number: pr?.number,
       url: `https://github.test/${REPO.fullName}/pull/${pr?.number}`,
+      // 作成直後の Draft PR（task_pr_ready / task_pr_merge で変わる。D9）
+      draft: true,
+      merged: false,
       head_sha: v.commit_sha,
       head_matches_verified: true,
     });

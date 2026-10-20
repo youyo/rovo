@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { type FakeAppOptions, FakeGitHubApp } from "../support/fake-github-app";
+import { type FakeAppOptions, FakeGitHubApp, type FakeUser } from "../support/fake-github-app";
 
 /**
  * E2E 用の偽 GitHub（GitHub App のユーザー認可 + 必要な REST API だけ）。
@@ -361,6 +361,22 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
     return rec;
   }
 
+  /**
+   * 利用者のトークン（OAuth で発行した ghu_）での呼び出しなら、その人を返す。Installation Token や無効なトークンは undefined。
+   * App の API は、これを渡されたときだけ利用者のトークンとして扱う（Installation のリポジトリに push 権限があるものだけ見える）。
+   */
+  function userFor(req: IncomingMessage): FakeUser | undefined {
+    const who = bearer(req);
+    if (!who) return undefined;
+    return {
+      login: who.login,
+      canPush: (fullName) =>
+        [...state.installations.values()].some((repos) =>
+          repos.some((r) => r.push && r.fullName.toLowerCase() === fullName.toLowerCase()),
+        ),
+    };
+  }
+
   function paginate<T>(items: T[], url: URL, req: IncomingMessage) {
     const perPage = Math.min(
       Math.max(Number(url.searchParams.get("per_page") ?? 30) || 30, 1),
@@ -434,7 +450,7 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    if (app && /^\/(app\/|repos\/|installation\/)/.test(url.pathname)) {
+    if (app && /^\/(app\/|repos\/|installation\/|graphql$)/.test(url.pathname)) {
       // GitHub App の API は FakeGitHubApp（Request -> Response）に任せる
       const chunks: Buffer[] = [];
       for await (const c of req) chunks.push(c as Buffer);
@@ -451,6 +467,7 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
             headers,
             ...(hasBody ? { body: Buffer.concat(chunks) } : {}),
           }),
+          userFor(req),
         );
         const out = r ?? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
         res.writeHead(out.status, Object.fromEntries(out.headers));

@@ -9,7 +9,7 @@ GitHub App のユーザー認可（ログイン）は Phase 1 で済んでいる
 - `task_start` で、作業ブランチ `agent/task-<id>` と Draft PR が作られる（6.5）。`task_status`・`task_result`・イベントで、Draft PR の URL を返す。
 - 子エージェントの commit が作業ブランチに push され、Draft PR に反映される。
 - タスクの終端で、PR 本文が状態・検証結果・未解決事項で更新される。
-- PR は Draft のまま。マージはしない（design 1.3）。
+- PR は Draft のまま。マージはしない（design 1.3）。（D9 で変更: rovo 自身は Ready にもマージにもしないが、呼び出し元の AI が `task_pr_ready` / `task_pr_merge` で行える。design 15.8）
 
 ## 保証の範囲（正確に書く）
 

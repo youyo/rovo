@@ -284,3 +284,39 @@ describe("task_answer / task_steer の入力", () => {
     expect(steerInputSchema.safeParse({ ...ok, idempotency_key: "" }).success).toBe(false);
   });
 });
+
+describe("merge_policy（D9）", () => {
+  it("省略は human_review。human_review / agent_merge だけを受け付け、他は拒否する", () => {
+    expect(taskInputSchema.parse(base).merge_policy).toBe("human_review");
+    expect(taskInputSchema.parse({ ...base, merge_policy: "agent_merge" }).merge_policy).toBe(
+      "agent_merge",
+    );
+    for (const bad of ["auto", "AGENT_MERGE", "", 1, null]) {
+      expect(taskInputSchema.safeParse({ ...base, merge_policy: bad }).success).toBe(false);
+    }
+  });
+
+  it("fingerprint: 既定（human_review）は従来の値のまま。agent_merge は別のタスク", async () => {
+    const implicit = await computeFingerprint(taskInputSchema.parse(base));
+    const explicit = await computeFingerprint(
+      taskInputSchema.parse({ ...base, merge_policy: "human_review" }),
+    );
+    const merge = await computeFingerprint(
+      taskInputSchema.parse({ ...base, merge_policy: "agent_merge" }),
+    );
+    expect(explicit).toBe(implicit);
+    expect(merge).not.toBe(implicit);
+    // 検証コマンドがあっても、policy の違いは別のタスクにする
+    const cmd = { verification_commands: [{ argv: ["npm", "test"] }] };
+    const withCmd = await computeFingerprint(taskInputSchema.parse({ ...base, ...cmd }));
+    const withCmdMerge = await computeFingerprint(
+      taskInputSchema.parse({ ...base, ...cmd, merge_policy: "agent_merge" }),
+    );
+    expect(withCmdMerge).not.toBe(withCmd);
+    // 従来の fingerprint（v1 形式）が変わらない: 保存済みのタスクの再試行（同じ idempotency_key）が conflict にならない
+    const v1 = JSON.stringify(["v1", "owner/repo", "main", "0123456", "t", "i", ["a"], ["c"]]);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v1));
+    const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    expect(implicit).toBe(hex);
+  });
+});

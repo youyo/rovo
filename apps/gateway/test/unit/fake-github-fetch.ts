@@ -1,6 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import type { TokenSet } from "../../src/github";
 import type { UserDO } from "../../src/tasks/user-do";
+import type { FakeGitHubApp } from "../support/fake-github-app";
 import { userStub } from "./helpers";
 
 /**
@@ -17,6 +18,11 @@ export class FakeGitHubFetch {
   validTokens = new Set<string>();
   /** 有効な refresh token -> 発行する新しい access token */
   refreshTokens = new Set<string>();
+  /**
+   * 渡すと、/repos/... と /graphql を偽の GitHub App（利用者のトークンでの呼び出しとして）に任せる。
+   * PR の Ready 化・マージのテスト用。user.login の人が、リポジトリに push できるものとして扱う。
+   */
+  app: FakeGitHubApp | undefined = undefined;
   apiFault: number | null = null;
   tokenFault: number | null = null;
   calls: { method: string; path: string }[] = [];
@@ -70,6 +76,11 @@ export class FakeGitHubFetch {
     if (this.apiFault) return json({ message: "fault" }, this.apiFault);
     const token = /^Bearer (.+)$/.exec(req.headers.get("authorization") ?? "")?.[1];
     if (!token || !this.validTokens.has(token)) return json({ message: "Bad credentials" }, 401);
+
+    if (this.app && /^\/(repos\/|graphql$)/.test(url.pathname)) {
+      const r = await this.app.handle(req, { login: this.user.login, canPush: () => true });
+      return r ?? json({ message: "Not Found" }, 404);
+    }
 
     if (url.pathname === "/user") return json(this.user);
     if (url.pathname === `/orgs/acme/teams/core/memberships/${this.user.login}`) {

@@ -68,6 +68,14 @@ export const verificationCommandSchema = z
 
 export type VerificationCommandInput = z.infer<typeof verificationCommandSchema>;
 
+/**
+ * PR のマージの方針（D9）。human_review は人のレビューを待つ（task_pr_merge を使えない）、
+ * agent_merge は呼び出し元の AI がレビューしてマージまでできる。強制は利用者の GitHub のブランチ保護に任せる。
+ */
+export const MERGE_POLICIES = ["human_review", "agent_merge"] as const;
+export type MergePolicy = (typeof MERGE_POLICIES)[number];
+export const DEFAULT_MERGE_POLICY: MergePolicy = "human_review";
+
 /** task_start の入力（design.md 4.3）。idempotency_key は含めない。 */
 export const taskInputSchema = z.object({
   // GitHub の上限: owner は 39 文字、リポジトリ名は 100 文字
@@ -82,6 +90,7 @@ export const taskInputSchema = z.object({
     .array(verificationCommandSchema)
     .max(MAX_VERIFICATION_COMMANDS)
     .default([]),
+  merge_policy: z.enum(MERGE_POLICIES).default(DEFAULT_MERGE_POLICY),
 });
 
 /** 入力全体（JSON）の上限。項目ごとの上限だけでは合計が大きくなりうるため。 */
@@ -99,6 +108,7 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * 正規化: repository と base_sha は小文字化（GitHub 上は大文字小文字を区別しない）。
  * 配列の省略は空配列として扱う。base_ref などは区別するのでそのまま。
  * verification_commands は argv / cwd / timeout_seconds を順序込みで含める（検証の入力が違えば別のタスク）。
+ * merge_policy は既定（human_review）なら含めない（保存済みの値と一致させる）。agent_merge のときだけ v3 として足す。
  */
 export async function computeFingerprint(input: TaskInput): Promise<string> {
   const fields: unknown[] = [
@@ -117,7 +127,11 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
     c.timeout_seconds ?? null,
   ]);
   const canonical = JSON.stringify(
-    commands.length === 0 ? ["v1", ...fields] : ["v2", ...fields, commands],
+    input.merge_policy === "agent_merge"
+      ? ["v3", ...fields, commands, input.merge_policy]
+      : commands.length === 0
+        ? ["v1", ...fields]
+        : ["v2", ...fields, commands],
   );
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -148,3 +162,16 @@ export const steerInputSchema = z.object({
 });
 
 export type SteerInput = z.infer<typeof steerInputSchema>;
+
+/** task_pr_ready の入力。リポジトリと PR 番号は受け取らない（TaskDO の記録から取る）。余計な項目は捨てる。 */
+export const prReadyInputSchema = z.object({ task_id: z.string() });
+
+export const MERGE_METHODS = ["squash", "merge", "rebase"] as const;
+export type MergeMethod = (typeof MERGE_METHODS)[number];
+
+/** task_pr_merge の入力。sha も受け取らない（検証済みの head を TaskDO の記録から取る）。 */
+export const prMergeInputSchema = z.object({
+  task_id: z.string(),
+  merge_method: z.enum(MERGE_METHODS).default("squash"),
+  delete_branch: z.boolean().default(false),
+});

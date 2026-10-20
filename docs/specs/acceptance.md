@@ -563,7 +563,7 @@ AI Gateway の BYOK のキー（`provider_configs`）の有無で `models_list` 
 - [ ] **作業状態が混ざらない**: `hit` のタスクの `/workspace` に、キャッシュを作ったタスクのファイルが無い（子が `git status` で未追跡のファイルが `node_modules` だけであること、`/opt/deps-cache` が空であること）。`git log` が作業ブランチのコミットだけ
 - [ ] **トークンが入らない**: キャッシュを作る間・復元後のコンテナで `env` と `~/.git-credentials`・`~/.npmrc` を見ても、GitHub のトークン（`ghs_`）が無い
 - [ ] **無効にする**: `depsCache.enabled` を `false` にして再デプロイすると、`usage.deps_cache` が `disabled` で、従来どおり子が `npm ci` する
-- [ ] **使えないとき（fail-soft）**: アカウントでスナップショットを使えない、または `DepsCacheDO` が失敗した状態（例: 一時的に lockfile を壊して `npm ci` を失敗させる）で、タスクは失敗せず `usage.deps_cache` が `miss` になり、ログに `deps_cache_miss: <理由>`（トークンや入力の文面が無い）が出る。60 秒以内に同じ lockfile でもう一度実行しても、作り直さず `miss`（`cooldown`）で動く
+- [ ] **使えないとき（fail-soft）**: アカウントでスナップショットを使えない、または `DepsCacheDO` が失敗した状態（例: 一時的に lockfile を壊して `npm ci` を失敗させる）で、タスクは失敗せず `usage.deps_cache` が `miss` になり、ログに `deps_cache_miss: <理由>`（トークンや入力の文面が無い）が出る。`usage.deps_cache_miss_reason` にも同じ固定コードが出る。60 秒以内に同じ lockfile でもう一度実行しても、作り直さず `miss`（`cooldown`）で動く
 - [ ] **イメージの更新**: agent を再デプロイしてイメージが変わると、鍵が変わり、最初のタスクは `built` になる（古いスナップショットは使われない）
 - [ ] **pnpm**: `pnpm-lock.yaml` のリポジトリで `built` → `hit`（corepack 経由の pnpm の取得が `registry.npmjs.org` だけで済み、外向きの拒否が出ない）。ワークスペースの各パッケージの `node_modules` も戻っている
 - [ ] 監査ログ・R2 のアーカイブ・`task_summary` に、トークンや入力の文面が増えていない（`deps_cache` は固定の 4 値）

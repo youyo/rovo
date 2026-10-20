@@ -97,9 +97,13 @@ run = "node --test scripts/byok.test.mjs"
 description = "依存関係のキャッシュ（D14）のコンテナ内スクリプト（apps/agent/src/deps-scripts.ts）のテスト。一時ディレクトリの中で本物の bash を動かし、node_modules の退避・復元・取り出しを確かめる。Docker も Cloudflare も使わない"
 run = "node --test scripts/deps-scripts.test.mjs"
 
+[tasks."test:pm-prepare"]
+description = "pnpm / yarn の本体の用意スクリプト（apps/agent/container/pm-prepare.mjs。イメージのビルド時と clone のあとに呼ぶ）のテスト。偽の corepack と偽の npm を PATH に置き、一時ディレクトリの中だけで動かす。Docker もネットワークも使わない"
+run = "node --test scripts/pm-prepare.test.mjs"
+
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts"]
+description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + pnpm / yarn の本体の用意スクリプト）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:pm-prepare"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"

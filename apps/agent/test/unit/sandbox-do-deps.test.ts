@@ -331,6 +331,39 @@ describe("SandboxDO: キャッシュが使えないときは今までどおり�
       expect(fake.indexOfScript(DEPS_RESTORE_SCRIPT)).toBe(-1);
       expect((await inst.metrics()).depsCache).toBe("miss");
       expect(lines.join("\n")).toContain("deps_cache_miss: build_failed");
+      // ログにしか出ていなかった理由を、usage に出すカウンタにも載せる（miss のときだけ）
+      expect(await inst.metrics()).toMatchObject({
+        depsCache: "miss",
+        depsMissReason: "build_failed",
+      });
+    });
+  });
+
+  it("理由は miss のときだけ metrics に載る。hit のときは持たない", async () => {
+    await runInDO(sandboxStub("deps-miss-reason-hit"), async (inst) => {
+      setup(inst);
+      await inst.ensureReady(spec());
+      const m = await inst.metrics();
+      expect(m.depsCache).toBe("hit");
+      expect(m).not.toHaveProperty("depsMissReason");
+    });
+  });
+
+  it("理由は、miss になった経路ごとの固定コード（cooldown・restore_failed など）になる", async () => {
+    await runInDO(sandboxStub("deps-miss-reason-cooldown"), async (inst) => {
+      const { cache } = setup(inst);
+      cache.result = { ok: false, reason: "cooldown" };
+      await capturingWarn(() => inst.ensureReady(spec()));
+      expect(await inst.metrics()).toMatchObject({ depsCache: "miss", depsMissReason: "cooldown" });
+    });
+    await runInDO(sandboxStub("deps-miss-reason-restore"), async (inst) => {
+      const { fake } = setup(inst);
+      fake.restoreThrows = true;
+      await capturingWarn(() => inst.ensureReady(spec()));
+      expect(await inst.metrics()).toMatchObject({
+        depsCache: "miss",
+        depsMissReason: "restore_failed",
+      });
     });
   });
 
@@ -666,6 +699,86 @@ describe("SandboxDO: キャッシュを作るコンテナ（buildDepsSnapshot）
       await inst.buildDepsSnapshot(buildReq());
       const flat = JSON.stringify(fake.startCalls) + fake.execArgv();
       expect(flat).not.toMatch(/x-access-token|ghs_|Bearer|authorization/i);
+    });
+  });
+});
+
+// pnpm / yarn の本体を実行時のダウンロード（Node の fetch。本番で undici の assert で落ちた）に頼らないための、
+// 用意スクリプトの呼び出し。イメージに焼いていない版の packageManager でも、npm の経路で先に用意する。
+// 失敗してもタスクもキャッシュの作成も止めない（今までどおり corepack が自分で取りに行く）。
+describe("SandboxDO: pnpm / yarn の本体の用意（pm-prepare）", () => {
+  const PM_PREPARE = ["node", "/usr/local/lib/rovo/pm-prepare.mjs", "/workspace"];
+  const isPrepare = (a: string[]) => a[0] === "node" && a[1] === PM_PREPARE[1];
+
+  it("clone のあとに、作業ツリーを渡して 1 回呼ぶ", async () => {
+    await runInDO(sandboxStub("pm-ready"), async (inst) => {
+      const { fake } = setup(inst);
+      await inst.ensureReady(spec(NO_DEPS));
+      expect(fake.execLog.filter(isPrepare)).toEqual([PM_PREPARE]);
+      const clone = fake.execLog.findIndex((a) => a[0] === "git" && a[1] === "clone");
+      expect(clone).toBeGreaterThanOrEqual(0);
+      expect(fake.execLog.findIndex(isPrepare)).toBeGreaterThan(clone);
+    });
+  });
+
+  it("失敗しても ensureReady は成功する（fail-soft）", async () => {
+    await runInDO(sandboxStub("pm-ready-fail"), async (inst) => {
+      const { fake } = setup(inst);
+      fake.handler = (argv) => (isPrepare(argv) ? { code: 1 } : undefined);
+      await inst.ensureReady(spec(NO_DEPS)); // 投げなければ成功
+      expect(fake.execLog.filter(isPrepare)).toHaveLength(1);
+    });
+  });
+
+  it("タスクの期限が近いときは用意せずに諦める（起動を期限の先までブロックしない）", async () => {
+    await runInDO(sandboxStub("pm-ready-near-deadline"), async (inst) => {
+      const { fake } = setup(inst);
+      await inst.ensureReady({ ...spec(NO_DEPS), deadlineAt: Date.now() + 5_000 });
+      expect(fake.execLog.filter(isPrepare)).toHaveLength(0);
+    });
+  });
+
+  it("期限に余裕があれば、用意の待ちは期限を超えない長さに切り詰める", async () => {
+    await runInDO(sandboxStub("pm-ready-clamp"), async (inst) => {
+      const { fake } = setup(inst);
+      const calls: number[] = [];
+      const raw = inst.rawExec.bind(inst);
+      inst.rawExec = (argv: string[], opts: { timeoutMs: number }) => {
+        if (isPrepare(argv)) calls.push(opts.timeoutMs);
+        return raw(argv, opts);
+      };
+      await inst.ensureReady({ ...spec(NO_DEPS), deadlineAt: Date.now() + 60_000 });
+      expect(fake.execLog.filter(isPrepare)).toHaveLength(1);
+      expect(calls[0]).toBeLessThanOrEqual(60_000);
+      expect(calls[0]).toBeGreaterThan(0);
+    });
+  });
+
+  it("キャッシュを作るコンテナでも、取り出しのあと・導入の前に呼ぶ。失敗しても作成は続く", async () => {
+    await runInDO(sandboxStub("pm-build"), async (inst) => {
+      const { fake } = setup(inst);
+      fake.handler = (argv) => (isPrepare(argv) ? { code: 1 } : undefined);
+      const pnpm = {
+        ...deps,
+        lockfilePath: "pnpm-lock.yaml",
+        installCommand: "pnpm install --frozen-lockfile",
+      };
+      const r = await inst.buildDepsSnapshot({
+        key: "c".repeat(64),
+        deps: pnpm,
+        repository: "acme/hello",
+        baseSha: SHA,
+        branch: "agent/task-x",
+        taskId: "task-x",
+        timeoutMs: 60_000,
+      });
+      expect(r.ok).toBe(true);
+      const fetchAt = fake.indexOfScript(DEPS_FETCH_SCRIPT);
+      const prepareAt = fake.execLog.findIndex(isPrepare);
+      const installAt = fake.execLog.findIndex((a) => a[0] === "corepack");
+      expect(fetchAt).toBeGreaterThanOrEqual(0);
+      expect(prepareAt).toBeGreaterThan(fetchAt);
+      expect(installAt).toBeGreaterThan(prepareAt);
     });
   });
 });

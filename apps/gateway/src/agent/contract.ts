@@ -115,6 +115,19 @@ export interface SandboxUsageDto {
   bootRetries: number;
   /** 依存関係のキャッシュ（D14）の結果。起動を試みていなければ無い */
   depsCache?: "hit" | "miss" | "built" | "disabled";
+  /** depsCache が "miss" のときだけ: 使えなかった理由の固定コード（ログの deps_cache_miss: <reason> と同じ。build_failed / cooldown など） */
+  depsMissReason?:
+    | "ensure_failed"
+    | "ensure_timeout"
+    | "build_failed"
+    | "build_timeout"
+    | "cooldown"
+    | "snapshot_unsupported"
+    | "snapshot_failed"
+    | "restore_failed"
+    | "cert_missing"
+    | "move_failed"
+    | "invalid_deps";
   /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms。runtimeMs にも含む） */
   cacheBuildMs?: number;
   /** 実際にコンテナを起動した大きさ（standard-2 など）。一度も起動していなければ無い（Sandbox が必要になるまで起動しない） */

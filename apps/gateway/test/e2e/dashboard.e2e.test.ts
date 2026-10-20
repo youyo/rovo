@@ -63,12 +63,17 @@ describe("ダッシュボードの配信（SPA）", () => {
   });
 
   it("未知の /dashboard/api/x は JSON の 404", async () => {
-    const res = await get("/dashboard/api/x");
+    const res = await get("/dashboard/api/x", { headers: { "sec-fetch-site": "same-origin" } });
     expect(res.status).toBe(404);
     expect(res.headers.get("content-type")).toBe("application/json");
     expect(await res.json()).toEqual({ error: "not_found" });
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
     expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("Sec-Fetch-Site が無い API 呼び出し（ブラウザ以外）は 403（M4 で決定）", async () => {
+    const res = await get("/dashboard/api/x");
+    expect(res.status).toBe(403);
   });
 
   it("別サイトからの API 呼び出しは 403", async () => {

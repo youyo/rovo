@@ -108,6 +108,18 @@ describe("Worker 全体（OAuthProvider で包んだ構成）", () => {
     expect(res.headers.get("set-cookie")).toMatch(/__Host-oauth-upstream-/);
   });
 
+  it("OAuthProvider が発行する upstream の state は ^[A-Za-z0-9_-]{43}$ で、ダッシュボードの接頭辞 rovo-dash. と衝突しない（D2）", async () => {
+    // /callback の振り分けは state の接頭辞だけで行う。OAuthProvider の state の形が変わって . を含むようになったら、ここで落ちる
+    for (let i = 0; i < 3; i++) {
+      const { handle, cookie } = await openConsent();
+      const res = await submit(handle, "approve", cookie);
+      const state = new URL(res.headers.get("location") ?? "").searchParams.get("state") ?? "";
+      expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(state.startsWith("rovo-dash.")).toBe(false);
+      expect(state).not.toContain(".");
+    }
+  });
+
   it("拒否すると client の redirect_uri へ access_denied（state 付き）。GitHub へは行かない", async () => {
     const { handle, cookie } = await openConsent();
     const res = await submit(handle, "deny", cookie);

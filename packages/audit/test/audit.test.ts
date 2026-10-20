@@ -97,8 +97,8 @@ describe("audit(): allowlist（秘密・本文・URL のパスを出さない）
     expect(run("auth_failed", { reason: "github_error_403" }).record).toHaveProperty("reason");
   });
 
-  it("caller は parent / child / system だけ", () => {
-    for (const ok of ["parent", "child", "system"]) {
+  it("caller は parent / child / system / dashboard だけ（dashboard はブラウザのログイン。MCP と区別する）", () => {
+    for (const ok of ["parent", "child", "system", "dashboard"]) {
       expect(run("task_cancelled", { caller: ok }).record).toHaveProperty("caller", ok);
     }
     for (const bad of ["admin", "Parent", "", 1, null]) {

@@ -476,3 +476,115 @@ describe("世代の CAS（再ログイン・clear との競合）", () => {
     }
   });
 });
+
+// ダッシュボードのログイン（saveCredential）と MCP の withToken（リフレッシュ）は、同じ資格を共用する（D4 の案 A）。
+// 世代の CAS の勝ち負けで片方の結果が捨てられても、負けた側が勝った側の資格を使い、壊れた資格は残らないことを固定する。
+describe("ダッシュボードのログインと MCP の withToken の競合（D4）", () => {
+  function deferred<T>() {
+    let resolve: (v: T) => void = () => {};
+    let reject: (e: unknown) => void = () => {};
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const dashLogin = (name: string) =>
+    tokens({ accessToken: name, refreshToken: `${name}-ref`, accessExpiresAt: T0 + 30 * HOUR });
+
+  it("MCP のリフレッシュ中にダッシュボードのログインが保存されたら、リフレッシュの結果は捨て、ログインの資格を使う", async () => {
+    const gate = deferred<TokenSet>();
+    const { mgr, storage, advance, refreshToken } = setup({ refresh: () => gate.promise });
+    await mgr.save(tokens());
+    advance(9 * HOUR);
+    const used: string[] = [];
+    const mcp = mgr.withToken(async (t) => {
+      used.push(t);
+      return t;
+    });
+    await tick();
+    expect(refreshToken).toHaveBeenCalledTimes(1);
+    const generationBefore = storage.generation;
+    // ダッシュボードのログイン（サーバー側は同じ saveCredential）
+    await mgr.save(dashLogin("dash-login"));
+    gate.resolve(tokens({ accessToken: "stale-refresh-result", refreshToken: "stale-ref" }));
+    expect(await mcp).toBe("dash-login");
+    expect(used).toEqual(["dash-login"]);
+    // 保存されているのはダッシュボードのログインの資格。リフレッシュの結果（使用済みの refresh token から得たもの）は残らない
+    expect(await mgr.getToken()).toBe("dash-login");
+    expect(storage.generation).toBe(generationBefore + 1); // リフレッシュの書き込みは世代が合わず捨てられた
+  });
+
+  it("ダッシュボードのログインが先に完了していれば、MCP は期限切れの資格をリフレッシュせずに新しい資格を使う", async () => {
+    const { mgr, advance, refreshToken } = setup();
+    await mgr.save(tokens());
+    advance(9 * HOUR);
+    await mgr.save(dashLogin("dash-login"));
+    expect(await mgr.withToken(async (t) => t)).toBe("dash-login");
+    expect(refreshToken).not.toHaveBeenCalled();
+  });
+
+  it("MCP のリフレッシュが先に完了し、そのあとのダッシュボードのログインが勝つ（新しいものが勝つ）", async () => {
+    const { mgr, advance } = setup();
+    await mgr.save(tokens());
+    advance(9 * HOUR);
+    expect(await mgr.getToken()).toMatch(/^acc-after-/);
+    await mgr.save(dashLogin("dash-login"));
+    expect(await mgr.getToken()).toBe("dash-login");
+  });
+
+  it("同時に走るリフレッシュと保存を何度繰り返しても、復号できる有効な資格が 1 つだけ残る", async () => {
+    for (let i = 0; i < 5; i++) {
+      const { mgr, storage, advance } = setup();
+      await mgr.save(tokens());
+      advance(9 * HOUR);
+      const results = await Promise.all([
+        mgr.withToken(async (t) => t),
+        mgr.save(dashLogin(`dash-${i}`)),
+        mgr.withToken(async (t) => t),
+      ]);
+      // 残るのは、リフレッシュの結果かダッシュボードのログインのどちらか一方で、復号できる
+      const stored = await mgr.getToken();
+      expect(stored === `dash-${i}` || stored.startsWith("acc-after-")).toBe(true);
+      expect(storage.value).not.toBeNull();
+      // 呼び出し側が受け取った token は、その時点で有効だったもの（壊れた値・空ではない）
+      for (const r of [results[0], results[2]]) {
+        expect(r === `dash-${i}` || String(r).startsWith("acc-after-")).toBe(true);
+      }
+    }
+  });
+
+  it("D4 のリスク: 一方の側でリフレッシュが失効（reauth_required）すると、資格を共用する他方も再ログインが必要になる", async () => {
+    const { mgr, storage, advance } = setup({
+      refresh: async () => {
+        throw new GitHubError("reauth_required", "refresh token revoked");
+      },
+    });
+    await mgr.save(tokens()); // ダッシュボードのログインで保存された資格
+    advance(9 * HOUR);
+    // 閲覧中のリフレッシュが失効 → 資格を消す
+    expect(await codeOf(mgr.withToken(async (t) => t))).toBe("reauth_required");
+    expect(storage.value).toBeNull();
+    // MCP 側の次の呼び出しも再ログインが必要
+    expect(await codeOf(mgr.getToken())).toBe("reauth_required");
+    // 再ログイン（MCP でもダッシュボードでも）で両方が回復する
+    await mgr.save(dashLogin("relogin"));
+    expect(await mgr.getToken()).toBe("relogin");
+  });
+
+  it("失効の最中にダッシュボードのログインが保存されたら、失効の削除は世代が合わず、ログインの資格が残る", async () => {
+    const gate = deferred<TokenSet>();
+    const { mgr, storage, advance } = setup({ refresh: () => gate.promise });
+    await mgr.save(tokens());
+    advance(9 * HOUR);
+    const mcp = mgr.withToken(async (t) => t);
+    await tick();
+    await mgr.save(dashLogin("dash-login"));
+    gate.reject(new GitHubError("reauth_required", "refresh token revoked"));
+    // 失効を受けた側は、ログイン後の資格を見て、それを使う（消さない）
+    expect(await mcp).toBe("dash-login");
+    expect(storage.value).not.toBeNull();
+    expect(await mgr.getToken()).toBe("dash-login");
+  });
+});

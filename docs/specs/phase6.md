@@ -154,7 +154,7 @@
 ### フィールドと allowlist
 
 - 共通のフィールドは `event`、`ts`、`userId`、`taskId`、`caller`、`reason`（固定のコード）、`requestId`、`host`、`kind`。イベント固有のフィールドは、そのイベントにだけ通す（M2 で追加: `sandbox_privileged_op` の `op`、`outbound_denied` の `dest`。どちらも固定の値だけ）。
-  - `caller` は `parent`（MCP 経由）/ `child`（agent 経由）/ `system`（alarm・内部）。
+  - `caller` は `parent`（MCP 経由）/ `child`（agent 経由）/ `system`（alarm・内部）/ `dashboard`（ダッシュボードのブラウザのログイン。docs/specs/dashboard.md M4）。
   - `requestId` は**任意**。DO の alarm の中では取れない。HTTP リクエストの中や、web の AI Gateway の request id のように、取れる場面だけ出す。
   - `host` は**常に出してよい**（web は既に全ての fetch で host を出している）。ただし URL のパス・クエリ・userinfo は出さない。host のラベルにデータを載せて外へ出す手口（DNS 経由の持ち出し）があるので、`audit()` が host の長さを制限し、トークン形式をマスクして通す。agent の違反ログは、今の宛先の分類（`dest`）を保ち、host を足すかは `audit()` への移行時に決めてよい（足すなら host だけ）。
   - 本文、URL のパスやクエリ、トークン、リポジトリの中身、タスクの入力は出さない。
@@ -318,7 +318,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - イベント名は閉じた一覧（`AUDIT_EVENTS`）。一覧に無い名前は何も出さない。
 - フィールドは `userId` / `taskId` / `caller` / `reason` / `requestId` / `host` / `kind` だけ。**未知のフィールドも、形の合わない値も黙って落とす**（変換して通さない）。
   - `reason` / `kind` は固定コードの形（英小文字・数字・`_`。それぞれ 64 / 32 文字まで）。自由な文は出ない。
-  - `taskId` は `[A-Za-z0-9_-]{1,64}`、`userId` は非負の安全な整数（または数字だけの文字列）、`caller` は `parent` / `child` / `system`。
+  - `taskId` は `[A-Za-z0-9_-]{1,64}`、`userId` は非負の安全な整数（または数字だけの文字列）、`caller` は `parent` / `child` / `system` / `dashboard`。
   - `requestId` は `[A-Za-z0-9._-]{1,64}` で、トークンの接頭辞（`ghs_` など）で始まるものは出さない。Worker では `cf-ray` を使う。
   - `host` は、ホスト名の形（`[a-z0-9._-]`）だけを通し、スキーム・パス・クエリ・userinfo・ポートを含む値は出さない。小文字にし、トークン形式（`gh?_`・`github_pat_`・`sk-`・`xox?-`・`eyJ`）か 32 文字以上のラベルを `masked` に置き換え、全体を 100 文字に切る。**host は allowlist に入っているが、M1 の発行元は host を渡さない**（M2 以降の agent / web が使う）。
 - 出力は `console.log` の 1 行 JSON（`{"audit":true,"event":...,"ts":...,...}`）。

@@ -47,7 +47,8 @@ export const AUDIT_EVENTS = [
 ] as const;
 
 export type AuditEventName = (typeof AUDIT_EVENTS)[number];
-export type AuditCaller = "parent" | "child" | "system";
+/** dashboard: ブラウザのログイン（ダッシュボード）。MCP のログイン（parent）と区別する。 */
+export type AuditCaller = "parent" | "child" | "system" | "dashboard";
 
 /** 呼び出し側が渡せるフィールド。型は緩め（unknown）にして、値の検証は audit() が行う。 */
 export type AuditFields = {
@@ -123,7 +124,7 @@ const KIND_RE = /^[a-z0-9_]{1,32}$/;
 const TASK_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
 const DIGITS_RE = /^\d{1,20}$/;
-const CALLERS: ReadonlySet<unknown> = new Set(["parent", "child", "system"]);
+const CALLERS: ReadonlySet<unknown> = new Set(["parent", "child", "system", "dashboard"]);
 const EVENT_SET: ReadonlySet<string> = new Set(AUDIT_EVENTS);
 const SANDBOX_OP_SET: ReadonlySet<unknown> = new Set(SANDBOX_OPS);
 const OUTBOUND_DEST_SET: ReadonlySet<unknown> = new Set(OUTBOUND_DESTS);

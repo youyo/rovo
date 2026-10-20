@@ -1,4 +1,4 @@
-import type { DepsSpec } from "../deps-cache";
+import type { DepsMissReason, DepsSpec } from "../deps-cache";
 
 /** AgentDO の公開 RPC の型（戻り値は DTO。Pi の EntryRecord は返さない）。 */
 
@@ -184,6 +184,8 @@ export interface SandboxMetrics {
    * 起動を一度も試みていなければ無い。
    */
   depsCache?: "hit" | "miss" | "built" | "disabled";
+  /** depsCache が "miss" のときだけ: 使えなかった理由の固定コード（ログの deps_cache_miss: <reason> と同じ） */
+  depsMissReason?: DepsMissReason;
   /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms）。runtimeMs（Sandbox の時間）にも含む */
   cacheBuildMs?: number;
   /** 実際にコンテナを start() した大きさ。一度も起動していなければ無い（Sandbox が必要になるまで起動しない） */

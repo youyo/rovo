@@ -253,4 +253,52 @@ describe("usage の依存関係のキャッシュ（D14）", () => {
   it("sandbox が無い usage には deps_cache を付けない", () => {
     expect(payloadOf(mapAgentEvent(ev("usage", base)))).not.toHaveProperty("deps_cache");
   });
+
+  it("miss のときだけ、固定コードの理由を deps_cache_miss_reason に写す", () => {
+    for (const reason of [
+      "ensure_failed",
+      "ensure_timeout",
+      "build_failed",
+      "build_timeout",
+      "cooldown",
+      "snapshot_unsupported",
+      "snapshot_failed",
+      "restore_failed",
+      "cert_missing",
+      "move_failed",
+      "invalid_deps",
+    ]) {
+      const p = payloadOf(
+        mapAgentEvent(
+          ev("usage", {
+            ...base,
+            sandbox: { runtimeMs: 1, depsCache: "miss", depsMissReason: reason },
+          }),
+        ),
+      );
+      expect(p.deps_cache_miss_reason, reason).toBe(reason);
+    }
+  });
+
+  it("miss 以外・理由が無い・表に無い値には付けない（任意の文字列を流さない）", () => {
+    const cases: [string, unknown][] = [
+      ["hit", "build_failed"],
+      ["built", "build_failed"],
+      ["disabled", "cooldown"],
+      ["miss", undefined],
+      ["miss", "ERR_ASSERTION at /secret/path"],
+      ["miss", 7],
+      ["miss", null],
+    ];
+    for (const [depsCache, depsMissReason] of cases) {
+      const p = payloadOf(
+        mapAgentEvent(
+          ev("usage", { ...base, sandbox: { runtimeMs: 1, depsCache, depsMissReason } }),
+        ),
+      );
+      expect(p, `${depsCache} ${String(depsMissReason)}`).not.toHaveProperty(
+        "deps_cache_miss_reason",
+      );
+    }
+  });
 });

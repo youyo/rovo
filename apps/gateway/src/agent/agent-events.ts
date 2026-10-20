@@ -1,7 +1,7 @@
 import { SANDBOX_OPS } from "@rovo/audit";
 import { sandboxInstanceName } from "../sandbox-instance";
 import type { TaskStatus } from "../tasks/state";
-import type { AgentEventDto, AgentPhase } from "./contract";
+import type { AgentEventDto, AgentPhase, SandboxUsageDto } from "./contract";
 
 /** 公開イベントの値。DO の RPC で返せるようプリミティブに限る。 */
 export type PublicPayload = Record<string, string | number | boolean | null>;
@@ -90,7 +90,7 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
     sandbox_runtime_ms: n(s.runtimeMs),
     sandbox_restarts: count(s.restarts),
     sandbox_boot_retries: count(s.bootRetries),
-    ...depsCacheFields(s.depsCache, cacheBuildMs),
+    ...depsCacheFields(s.depsCache, cacheBuildMs, s.depsMissReason),
     // 実際に起動した大きさ。表にある名前だけ（任意の文字列を公開しない）。起動していなければ付けない
     ...(instance !== undefined ? { sandbox_instance: instance } : {}),
   };
@@ -106,10 +106,43 @@ export function depsCacheStatus(v: unknown): DepsCacheStatusDto | undefined {
     : undefined;
 }
 
-function depsCacheFields(status: unknown, buildMs: number): Record<string, string | number> {
+/**
+ * 依存関係のキャッシュを使えなかった理由（agent の DEPS_MISS_REASONS と同じ固定コード。ログの deps_cache_miss: <reason>）。
+ * 入力や例外の文面を含まない値だけを通す（表に無いものは公開しない）。
+ */
+export const DEPS_MISS_REASONS = [
+  "ensure_failed",
+  "ensure_timeout",
+  "build_failed",
+  "build_timeout",
+  "cooldown",
+  "snapshot_unsupported",
+  "snapshot_failed",
+  "restore_failed",
+  "cert_missing",
+  "move_failed",
+  "invalid_deps",
+] as const satisfies readonly NonNullable<SandboxUsageDto["depsMissReason"]>[];
+export type DepsMissReasonDto = (typeof DEPS_MISS_REASONS)[number];
+
+/** miss のときだけ意味がある。miss 以外・表に無い値は undefined */
+export function depsMissReason(status: unknown, v: unknown): DepsMissReasonDto | undefined {
+  if (depsCacheStatus(status) !== "miss") return undefined;
+  return typeof v === "string" && (DEPS_MISS_REASONS as readonly string[]).includes(v)
+    ? (v as DepsMissReasonDto)
+    : undefined;
+}
+
+function depsCacheFields(
+  status: unknown,
+  buildMs: number,
+  missReason?: unknown,
+): Record<string, string | number> {
   const st = depsCacheStatus(status);
+  const reason = depsMissReason(status, missReason);
   return {
     ...(st !== undefined ? { deps_cache: st } : {}),
+    ...(reason !== undefined ? { deps_cache_miss_reason: reason } : {}),
     ...(buildMs > 0 ? { cache_build_ms: buildMs } : {}),
   };
 }

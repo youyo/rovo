@@ -45,6 +45,8 @@ const BASE_ENV: Record<string, string> = {
   SSL_CERT_FILE: CA_CERT,
   // 作業ツリー（/workspace）に npm のキャッシュなどが書かれて git add -A に混ざらないよう、HOME は外に置く
   HOME: "/root",
+  // pnpm / yarn の本体はイメージのビルド時にここへ入れてある（apps/agent/Dockerfile）
+  COREPACK_HOME: "/opt/corepack",
   // corepack が pnpm / yarn の本体を取るときに「ダウンロードしてよいか」の確認で止まらないようにする
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
   GIT_TERMINAL_PROMPT: "0",
@@ -61,6 +63,11 @@ const REAPER_TIMEOUT_MS = 10_000;
 const STREAM_GRACE_MS = 2_000;
 const DESTROY_WAIT_MS = 15_000;
 const CLONE_TIMEOUT_MS = 5 * 60_000;
+/** pnpm / yarn の本体を用意するスクリプト（Dockerfile が置く）と、その期限。 */
+const PM_PREPARE_SCRIPT = "/usr/local/lib/rovo/pm-prepare.mjs";
+const PM_PREPARE_TIMEOUT_MS = 3 * 60_000;
+/** 残り時間がこれ未満なら、用意しない(間に合わない) */
+const PM_PREPARE_MIN_MS = 10_000;
 /**
  * コンテナが ready になる（exec が応答する）までの 1 回あたりの期限。
  * 正常な起動は E2E の実測で ensureReady 全体が 0.9 秒前後（最大 0.92 秒、clone を含む）。その約 25 倍を見る。
@@ -334,11 +341,16 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const depsCache = this.ctx.storage.kv.get<DepsCacheStatus>("deps_cache");
     const cacheBuildMs = this.num("cache_build_ms");
     const instance = this.ctx.storage.kv.get<SandboxInstance>("instance");
+    const depsMissReason =
+      depsCache === "miss"
+        ? this.ctx.storage.kv.get<DepsMissReason>("deps_miss_reason")
+        : undefined;
     return {
       runtimeMs: this.num("rt_total") + open,
       restarts: Math.max(0, this.num("starts") - 1),
       bootRetries: this.num("boot_retries"),
       ...(depsCache !== undefined ? { depsCache } : {}),
+      ...(depsMissReason !== undefined ? { depsMissReason } : {}),
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
       ...(instance !== undefined ? { instance } : {}),
     };
@@ -875,6 +887,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     await this.prepareWorkspace(spec);
     this.assertBootCurrent(g);
     this.recordDepsStatus(await this.finishDeps(deps, restoring));
+    // 起動をタスクの期限の先までブロックしない(足りなければ諦める。corepack が従来どおり自分で取る)
+    await this.preparePackageManager(spec.deadlineAt);
     await this.armAlarm();
     return started;
   }
@@ -901,6 +915,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   /** キャッシュを使えなかった理由を固定コードでログに残す（入力や例外の文面は出さない）。 */
   private logDepsMiss(reason: DepsMissReason): void {
+    // usage にも出すため、最後の理由を覚える（metrics は deps_cache が miss のときだけ載せる）
+    this.ctx.storage.kv.put("deps_miss_reason", reason);
     console.warn(`[sandbox-boot] deps_cache_miss: ${reason}`);
   }
 
@@ -955,6 +971,25 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private depsMiss(reason: DepsMissReason): DepsPlan {
     this.logDepsMiss(reason);
     return { kind: "miss", reason };
+  }
+
+  /**
+   * リポジトリの packageManager（pnpm / yarn）の本体を、npm の経路で先に corepack のキャッシュへ用意する。
+   * 大きな本体を実行時に Node の fetch で取らせると、外向き通信の中継越しに undici が落ちる（apps/agent/container/pm-prepare.mjs）。
+   * 焼き込んだ版と同じなら何もしない。失敗してもタスクは続ける（従来どおり corepack が自分で取りに行く）。
+   */
+  private async preparePackageManager(until = Number.POSITIVE_INFINITY): Promise<void> {
+    const timeoutMs = Math.min(PM_PREPARE_TIMEOUT_MS, until - Date.now());
+    if (timeoutMs < PM_PREPARE_MIN_MS) return;
+    const r = await this.rawExec(["node", PM_PREPARE_SCRIPT, WORKSPACE], {
+      timeoutMs,
+      cwd: "/",
+    });
+    if (r.exitCode !== 0) {
+      console.warn(
+        `[sandbox-boot] pm_prepare_failed: ${maskSecrets((r.stderr || r.stdout).trim()).slice(-200)}`,
+      );
+    }
   }
 
   /**
@@ -1186,6 +1221,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         `https://github.com/${req.repository}.git`,
         req.baseSha,
       ]);
+      // 導入の前に、packageManager の本体を npm の経路で用意する（失敗しても導入は続ける）
+      await this.preparePackageManager(until);
       await step("install", install, WORKSPACE);
       await step("stash", [
         "bash",

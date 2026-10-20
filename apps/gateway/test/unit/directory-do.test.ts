@@ -211,3 +211,37 @@ describe("DirectoryDO.summarize（見える / 見えないの集計）", () => {
     });
   });
 });
+
+describe("DirectoryDO.visibleModels（見えるタスクが使ったモデルの名前だけ）", () => {
+  it("見えるタスクのモデルだけを重複なしで返す。見えない・NULL・範囲外のタスクのモデルは返さない", async () => {
+    const d = dir();
+    await d.upsertTask(snap("A", { repository_id: 100, model: "m1", cost_micro: 5 }), 1);
+    await d.upsertTask(snap("B", { repository_id: 100, model: "m1" }), 1);
+    await d.upsertTask(snap("C", { repository_id: 100, model: "m3" }), 1);
+    await d.upsertTask(snap("D", { repository_id: 200, model: "m2" }), 1);
+    await d.upsertTask(snap("E", { repository_id: null, model: "m4" }), 1);
+    await d.upsertTask(
+      snap("F", { repository_id: 100, model: "m5", created_at: T0 - 40 * 24 * HOUR }),
+      1,
+    );
+    const r = await d.visibleModels({ repoIds: [100], from: T0 - HOUR, to: T0 + 31 * 24 * HOUR });
+    expect(r).toEqual({ ok: true, models: ["m1", "m3"] });
+    // 集合が空なら何も返さない（「制限なし」ではない）
+    expect(await d.visibleModels({ repoIds: [], from: T0 - HOUR, to: T0 + HOUR })).toEqual({
+      ok: true,
+      models: [],
+    });
+  });
+
+  it("不正な入力・大きすぎる集合は失敗（fail closed）", async () => {
+    const d = dir();
+    expect(
+      await d.visibleModels({ repoIds: ["x"] as unknown as number[], from: 0, to: 1 }),
+    ).toEqual({ ok: false, code: "invalid_input" });
+    const big = Array.from({ length: MAX_REPO_IDS + 1 }, (_, i) => i);
+    expect(await d.visibleModels({ repoIds: big, from: 0, to: 1 })).toEqual({
+      ok: false,
+      code: "too_many_repo_ids",
+    });
+  });
+});

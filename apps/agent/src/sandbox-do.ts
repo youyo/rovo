@@ -45,6 +45,8 @@ const BASE_ENV: Record<string, string> = {
   SSL_CERT_FILE: CA_CERT,
   // 作業ツリー（/workspace）に npm のキャッシュなどが書かれて git add -A に混ざらないよう、HOME は外に置く
   HOME: "/root",
+  // corepack が pnpm / yarn の本体を取るときに「ダウンロードしてよいか」の確認で止まらないようにする
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
   GIT_TERMINAL_PROMPT: "0",
   GIT_CONFIG_COUNT: "1",
   GIT_CONFIG_KEY_0: "safe.directory",

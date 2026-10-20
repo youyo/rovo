@@ -11,12 +11,24 @@ export interface DepsSpec {
   blobSha: string;
   /** 導入のコマンド（表示用。DEPS_INSTALLS の表にある文字列と一致するものだけ受け付ける） */
   installCommand: string;
+  /**
+   * base_sha 時点のルートの package.json の blob SHA。同じ lockfile でも scripts（postinstall など）が違えば
+   * node_modules の中身が変わりうるので、鍵に入れる。
+   */
+  packageJsonSha: string;
+  /** ルートの pnpm-workspace.yaml の blob SHA（無ければ null） */
+  workspaceSha: string | null;
+  /**
+   * 入れ子の package.json（workspace の各パッケージ）の「パスと blob SHA の一覧」の sha256（gateway が計算する。
+   * 無ければ null）。どれか 1 つでも変われば別の値になる。
+   */
+  manifestsSha: string | null;
 }
 
 /**
  * lockfile ごとの導入のコマンド。任意のコマンドは受け付けず、この表にある固定の argv だけを実行する。
- * pnpm / yarn は Dockerfile に入っていないので corepack 経由で呼ぶ（Node 24 のイメージに入っている。
- * 取得先は registry.npmjs.org で、外向き通信の許可に既にある）。
+ * pnpm / yarn は、Dockerfile で `corepack enable` した shim を corepack 経由で呼ぶ（Node 24 のイメージに入っている。
+ * 本体は packageManager に従って corepack が取る。取得先は registry.npmjs.org で、外向き通信の許可に既にある）。
  */
 export const DEPS_INSTALLS = {
   "pnpm-lock.yaml": {
@@ -60,7 +72,7 @@ const BLOB_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 export function parseDepsSpec(v: unknown): DepsSpec | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
   const o = v as Record<string, unknown>;
-  const { repositoryId, lockfilePath, blobSha, installCommand } = o;
+  const { repositoryId, lockfilePath, blobSha, installCommand, packageJsonSha } = o;
   if (
     typeof repositoryId !== "number" ||
     !Number.isSafeInteger(repositoryId) ||
@@ -76,21 +88,43 @@ export function parseDepsSpec(v: unknown): DepsSpec | null {
   ) {
     return null;
   }
-  return { repositoryId, lockfilePath, blobSha, installCommand };
+  if (typeof packageJsonSha !== "string" || !BLOB_SHA.test(packageJsonSha)) return null;
+  const workspaceSha = optionalSha(o.workspaceSha);
+  const manifestsSha = optionalSha(o.manifestsSha);
+  if (workspaceSha === undefined || manifestsSha === undefined) return null;
+  return {
+    repositoryId,
+    lockfilePath,
+    blobSha,
+    installCommand,
+    packageJsonSha,
+    workspaceSha,
+    manifestsSha,
+  };
+}
+
+/** 省略・null は null、正しい SHA はそのまま、それ以外は undefined（不正） */
+function optionalSha(v: unknown): string | null | undefined {
+  if (v === undefined || v === null) return null;
+  return typeof v === "string" && BLOB_SHA.test(v) ? v : undefined;
 }
 
 /**
- * キャッシュの鍵: sha256(repository_id, lockfile のパス, blob SHA, 導入のコマンド, イメージの参照)。
- * JSON の配列にしてから hash するので、フィールドの境界は曖昧にならない。イメージの参照は digest 付き
+ * キャッシュの鍵: sha256(版, repository_id, lockfile のパス, blob SHA, 導入のコマンド, ルートの package.json の
+ * blob SHA, pnpm-workspace.yaml の blob SHA, 入れ子の package.json の一覧の sha256, イメージの参照)。
+ * v2 で package.json 系を足した（v1 の鍵のキャッシュは使わない）。JSON の配列にしてから hash するので、フィールドの境界は曖昧にならない。イメージの参照は digest 付き
  * （container.images.workspace）なので、イメージが変わると別の鍵になる（スナップショットはイメージに結び付く）。
  */
 export async function depsCacheKey(deps: DepsSpec, image: string): Promise<string> {
   const input = JSON.stringify([
-    "rovo-deps-cache-v1",
+    "rovo-deps-cache-v2",
     deps.repositoryId,
     deps.lockfilePath,
     deps.blobSha,
     deps.installCommand,
+    deps.packageJsonSha,
+    deps.workspaceSha,
+    deps.manifestsSha,
     image,
   ]);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));

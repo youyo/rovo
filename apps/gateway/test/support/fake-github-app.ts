@@ -688,8 +688,12 @@ export class FakeGitHubApp {
     if (treeGet) {
       const sha = decodeURIComponent(treeGet[1] as string);
       const seeded = repo.trees.get(sha);
+      // seedRootFiles の path に "/" を含むもの（入れ子のファイル）は ?recursive=1 のときだけ返す
+      const recursive = url.searchParams.get("recursive") === "1";
       const entries = seeded
-        ? seeded.map((e) => ({ path: e.path, mode: "100644", type: "blob", sha: e.sha }))
+        ? seeded
+            .filter((e) => recursive || !e.path.includes("/"))
+            .map((e) => ({ path: e.path, mode: "100644", type: "blob", sha: e.sha }))
         : (repo.readTree?.(sha) ?? []);
       return res(200, { sha, truncated: false, tree: entries });
     }

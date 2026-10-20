@@ -2,7 +2,7 @@ import { SELECTABLE_SANDBOX_INSTANCES } from "@rovo/models";
 import { z } from "zod";
 
 export const DEFAULT_WAIT_SECONDS = 30;
-export const MAX_WAIT_SECONDS = 60;
+export const MAX_WAIT_SECONDS = 50;
 export const MAX_EVENTS_PER_WAIT = 100;
 export const MAX_CONCURRENT_WAITERS = 16;
 export const WAIT_RETRY_AFTER_SECONDS = 5;

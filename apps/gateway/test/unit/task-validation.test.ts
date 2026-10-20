@@ -54,12 +54,13 @@ describe("parseTimeoutSeconds", () => {
   it("省略は既定の 30 秒", () => {
     expect(parseTimeoutSeconds(undefined)).toEqual({ ok: true, value: 30 });
   });
-  it("0 以上の整数を受け付け、60 秒にクランプする", () => {
+  it("0 以上の整数を受け付け、50 秒にクランプする", () => {
     expect(parseTimeoutSeconds(0)).toEqual({ ok: true, value: 0 });
     expect(parseTimeoutSeconds(5)).toEqual({ ok: true, value: 5 });
-    expect(parseTimeoutSeconds(60)).toEqual({ ok: true, value: 60 });
-    expect(parseTimeoutSeconds(61)).toEqual({ ok: true, value: 60 });
-    expect(parseTimeoutSeconds(100000)).toEqual({ ok: true, value: 60 });
+    expect(parseTimeoutSeconds(50)).toEqual({ ok: true, value: 50 });
+    expect(parseTimeoutSeconds(51)).toEqual({ ok: true, value: 50 });
+    expect(parseTimeoutSeconds(60)).toEqual({ ok: true, value: 50 });
+    expect(parseTimeoutSeconds(100000)).toEqual({ ok: true, value: 50 });
   });
   it.each([-1, 1.5, 0.1, Number.NaN, Number.POSITIVE_INFINITY, "5" as unknown as number])(
     "不正な timeout %j は拒否する",

@@ -267,6 +267,45 @@ describe("consult: 予約と精算", () => {
     });
   });
 
+  it("例外・壊れた応答で予約額で確定した分は estimated_usd に入る。実費が分かった精算は入らない", async () => {
+    const p = principal();
+    const bad = createConsultService(env, {
+      agent: () => ({ consult: async () => ({ nonsense: true }) as unknown as ConsultResult }),
+    });
+    await createConsultService(env, { agent: fakeAgent(["throw"]).agent }).consult(p, input());
+    await bad.consult(p, input());
+    // 実費が分かった consult（既定の応答。0.0012）は estimated_usd に入らない
+    await createConsultService(env, { agent: fakeAgent().agent }).consult(p, input());
+    const status = await userStub(p.githubUserId).budgetStatus();
+    expect(status.estimated_usd).toBeCloseTo(1.0, 9);
+    expect(status.spent_usd).toBeCloseTo(1.0012, 9);
+  });
+
+  it("agent が costEstimated を立てた応答（失敗・usage の空の成功）は、その費用で確定して estimated_usd に入る", async () => {
+    const p = principal();
+    const fx = fakeAgent([
+      { ok: false, code: "model_error", message: "m", costUsd: 0.5, costEstimated: true },
+      {
+        ok: true,
+        text: "answer",
+        model: "anthropic/claude-sonnet-5-5",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        costUsd: 0.4,
+        usageMissing: true,
+        costEstimated: true,
+      },
+      // 実費が分かる失敗（costEstimated なし）
+      { ok: false, code: "model_error", message: "m", costUsd: 0.01 },
+    ]);
+    const svc = createConsultService(env, { agent: fx.agent });
+    await svc.consult(p, input());
+    await svc.consult(p, input());
+    await svc.consult(p, input());
+    const status = await userStub(p.githubUserId).budgetStatus();
+    expect(status.estimated_usd).toBeCloseTo(0.9, 9);
+    expect(status.spent_usd).toBeCloseTo(0.91, 9);
+  });
+
   it("AgentDO の応答が壊れた形でも、予約額で精算して internal を返す", async () => {
     const svc = createConsultService(env, {
       agent: () => ({ consult: async () => ({ nonsense: true }) as unknown as ConsultResult }),

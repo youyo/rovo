@@ -64,12 +64,18 @@ export type ConsultReserveResult =
 /** budget_status の応答（D10）。金額は USD。 */
 export type BudgetStatus = {
   monthly_budget_usd: number;
+  /** 今月使った実費（精算済み）。estimated_usd を含む */
   spent_usd: number;
+  /**
+   * spent_usd のうち、実費が分からず見積もり（予約額や最悪の見積り）で確定した分（spent_usd の内数）。
+   * 失敗して実費が分からない consult は予約額で確定する
+   */
+  estimated_usd: number;
   reserved_usd: number;
   remaining_usd: number;
   task_budget_usd: number;
   consult_budget_usd: number;
-  /** 月の残りから、タスクの予約額で何件分を予約できるか（同時実行の枠は別で、ユーザーごとに 1 件まで） */
+  /** 残りの月額予算で、タスクの予約額（task_budget_usd）を何件分予約できるかの見積もり。同時実行の上限ではない（上限は 1 件） */
   max_concurrent_tasks: number;
   /** 今月（UTC）。end は翌月の頭（含まない） */
   period: { start: string; end: string };
@@ -191,6 +197,8 @@ export class UserDO extends DurableObject<Env> {
       closed INTEGER NOT NULL DEFAULT 0
     )`);
     sql.exec("CREATE INDEX IF NOT EXISTS task_budget_month ON task_budget (month)");
+    // settled が実費ではなく見積もり（予約額など）で確定した行は 1。列の追加前の行は 0（見積もりではない扱い）。
+    this.addColumnIfMissing("task_budget", "settled_estimated", "INTEGER NOT NULL DEFAULT 0");
     // 親（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
     sql.exec(`CREATE TABLE IF NOT EXISTS web_usage (
       day TEXT NOT NULL,
@@ -299,11 +307,28 @@ export class UserDO extends DurableObject<Env> {
     return true;
   }
 
-  /** 月の枠のうち、使用済み（実費）と予約中の残り（マイクロドル）。committedMicro = spent + reserved。 */
-  private spentAndReservedMicro(month: string): { spent: number; reserved: number } {
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const sql = this.ctx.storage.sql;
+    const has = sql
+      .exec<{ name: string }>(`PRAGMA table_info(${table})`)
+      .toArray()
+      .some((c) => c.name === column);
+    if (!has) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  /**
+   * 月の枠のうち、使用済み（実費）と予約中の残り（マイクロドル）。committedMicro = spent + reserved。
+   * estimated は spent のうち見積もりで確定した分（内数）。
+   */
+  private spentAndReservedMicro(month: string): {
+    spent: number;
+    estimated: number;
+    reserved: number;
+  } {
     return this.ctx.storage.sql
-      .exec<{ spent: number; reserved: number }>(
+      .exec<{ spent: number; estimated: number; reserved: number }>(
         `SELECT COALESCE(SUM(settled_micro), 0) AS spent,
+                COALESCE(SUM(CASE WHEN settled_estimated = 1 THEN settled_micro ELSE 0 END), 0) AS estimated,
                 COALESCE(SUM(CASE WHEN closed = 1 THEN 0
                                   ELSE MAX(reserved_micro - settled_micro, 0) END), 0) AS reserved
          FROM task_budget WHERE month = ?`,
@@ -506,7 +531,7 @@ export class UserDO extends DurableObject<Env> {
   budgetStatus(): BudgetStatus {
     const at = this.now();
     const month = monthOf(at);
-    const { spent, reserved } = this.spentAndReservedMicro(month);
+    const { spent, estimated, reserved } = this.spentAndReservedMicro(month);
     const limit = Math.round(this.monthlyLimitUsd() * MICRO);
     const remaining = Math.max(0, limit - spent - reserved);
     const taskMicro = Math.round(taskBudgetUsd(this.env) * MICRO);
@@ -516,6 +541,7 @@ export class UserDO extends DurableObject<Env> {
     return {
       monthly_budget_usd: limit / MICRO,
       spent_usd: spent / MICRO,
+      estimated_usd: estimated / MICRO,
       reserved_usd: reserved / MICRO,
       remaining_usd: remaining / MICRO,
       task_budget_usd: taskMicro / MICRO,
@@ -572,7 +598,7 @@ export class UserDO extends DurableObject<Env> {
       const t = ulidTime(task_id.slice("consult-".length));
       if (t === undefined || at - t < CONSULT_STALE_AFTER_MS) continue;
       sql.exec(
-        "UPDATE task_budget SET settled_micro = MAX(settled_micro, reserved_micro), closed = 1 WHERE task_id = ?",
+        "UPDATE task_budget SET settled_micro = MAX(settled_micro, reserved_micro), settled_estimated = 1, closed = 1 WHERE task_id = ?",
         task_id,
       );
     }
@@ -582,8 +608,10 @@ export class UserDO extends DurableObject<Env> {
    * consult の精算: 実費（USD）を書いて閉じる。予約の余りは月の枠に戻る。1 回だけ（閉じた後の再送は applied:false）。
    * costUsd が null のとき（実費が分からない）は予約額で閉じる。壊れた値（負・NaN）は何もしない。
    * 実費が予約を超えて報告されたときは、そのまま実費を記録する（AgentDO が max_output_tokens で予約内に収める）。
+   * 予約額で閉じたとき（costUsd が null）と、AgentDO が costUsd を見積もりと申告したとき（estimated）は、
+   * 見積もりで確定した印（settled_estimated）を立てる（budget_status の estimated_usd に数える）。
    */
-  settleConsult(consultId: string, costUsd: number | null): SettleResult {
+  settleConsult(consultId: string, costUsd: number | null, estimated = false): SettleResult {
     if (!isConsultId(consultId)) return { ok: false };
     if (costUsd !== null && (!Number.isFinite(costUsd) || costUsd < 0)) {
       const known = this.ctx.storage.sql
@@ -603,8 +631,9 @@ export class UserDO extends DurableObject<Env> {
       if (row.closed === 1) return { ok: true, applied: false };
       const micro = costUsd === null ? row.reserved_micro : Math.round(costUsd * MICRO);
       sql.exec(
-        "UPDATE task_budget SET settled_micro = ?, closed = 1 WHERE task_id = ?",
+        "UPDATE task_budget SET settled_micro = ?, settled_estimated = ?, closed = 1 WHERE task_id = ?",
         micro,
+        costUsd === null || estimated ? 1 : 0,
         consultId,
       );
       return { ok: true, applied: true };

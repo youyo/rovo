@@ -116,8 +116,8 @@ describe("モデルごとの思考レベル（effort。gateway の解釈）", ()
     expect(effortOf({ MODEL_EFFORTS: "nonsense" }, "anthropic/claude-sonnet-5-5")).toBe("high");
   });
 
-  it("listModels の各モデルに effort（最終の値）が付く", () => {
-    const models = listModels({
+  it("listModels の各モデルに effort（最終の値）が付く", async () => {
+    const models = await listModels({
       AGENT_MODELS: "anthropic/claude-haiku-5-5,openai/gpt-6-sol",
       MODEL_EFFORTS: "openai/gpt-6-sol=high",
     });

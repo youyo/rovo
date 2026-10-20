@@ -37,6 +37,8 @@ export type ToolErrorCode =
   | "invalid_input"
   // consult でモデルがリクエストの中身を拒否した（4xx。例: 400 invalid_request_error）。retry_after_seconds は付かない。入力か model を変える
   | "model_rejected"
+  // 指定したモデルのプロバイダーのキーが AI Gateway に登録されていない（D10b）。models_list の available を見て選び直す
+  | "model_unavailable"
   // PR の Ready 化とマージ（D9）: GitHub が操作を拒否した（ブランチ保護など / 検証後にブランチが動いた / その他）
   | "merge_blocked"
   | "head_moved"
@@ -124,8 +126,8 @@ const PR_MERGE_DESCRIPTION = [
 ].join("\n");
 
 const MODELS_LIST_DESCRIPTION = [
-  "使えるモデルの一覧と単価を返す。入力は無い。応答は {models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort}]}。",
-  "id は task_start の model と consult の model に使える。単価は USD / 100 万トークン。tiers は、入力（input + キャッシュの読み書き）が input_tokens_above を超える呼び出しに、全体へ適用される上位の単価（無ければ空）。default: true が、model を省略したときのモデル。effort はそのモデルの思考レベル（off / minimal / low / medium / high / xhigh / max）で、思考レベルはモデルごとに決まっている（タスクごとには変えられない）。考える量が多いほど出力トークン＝費用が増える（思考のトークンは出力として課金される）。",
+  "使えるモデルの一覧と単価を返す。入力は無い。応答は {models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort, available, unavailable_reason?}]}。",
+  "id は task_start の model と consult の model に使える。単価は USD / 100 万トークン。tiers は、入力（input + キャッシュの読み書き）が input_tokens_above を超える呼び出しに、全体へ適用される上位の単価（無ければ空）。default: true が、model を省略したときのモデル（available なモデルの中から決まる。1 つも available でなければ default: true は無い）。available は今そのモデルを使えるか：Anthropic / OpenAI のモデルは、AI Gateway にそのプロバイダーのキー（BYOK。alias は default）が登録されていないと available: false（unavailable_reason: no_provider_key）で、task_start と consult は model_unavailable で拒否する。Workers AI のモデル（provider は workers-ai）はキー不要で常に available。available: true のモデルから選ぶ。effort はそのモデルの思考レベル（off / minimal / low / medium / high / xhigh / max）で、思考レベルはモデルごとに決まっている（タスクごとには変えられない）。考える量が多いほど出力トークン＝費用が増える（思考のトークンは出力として課金される）。",
   "タスクの難しさと予算に合わせて選ぶ。budget_status で残りを確かめられる。",
 ].join("\n");
 
@@ -137,7 +139,7 @@ const BUDGET_STATUS_DESCRIPTION = [
 
 const CONSULT_DESCRIPTION = [
   "セカンドオピニオン（設計の相談役）。モデルに 1 回質問して答えを得る。コードは書かせない。リポジトリも Sandbox も使わないので、相談に必要な文脈（コードの抜粋・制約など）は system と messages に自分で入れる。",
-  '入力は {model?, system?, messages: [{role: "user" | "assistant", content}], max_output_tokens?}。messages は 1〜100 件で、最初と最後は user（最後の user が質問）。model は models_list の id（省略は既定のモデル）。応答は {text, model, usage: {input, output, cache_read, cache_write}, cost_usd}。',
+  '入力は {model?, system?, messages: [{role: "user" | "assistant", content}], max_output_tokens?}。messages は 1〜100 件で、最初と最後は user（最後の user が質問）。model は models_list の id（available: true のもの。省略は既定のモデル。キーが無いプロバイダーのモデルは model_unavailable）。応答は {text, model, usage: {input, output, cache_read, cache_write}, cost_usd}。',
   "rovo は会話を保存しない（1 回で完結する）。続けて聞くときは、履歴のすべてを毎回 messages に渡す。",
   "プロンプトキャッシュ: Anthropic のモデルでは、system と、最後の user メッセージより前の部分にキャッシュを付ける。呼び出し元が同じ前置き（system と、それまでの履歴）を送れば、2 回目以降はキャッシュから読まれて安くなる（usage.cache_read に出る。短い前置きはキャッシュされない）。OpenAI のモデルは自動でキャッシュされる。",
   "費用: 呼ぶ前に CONSULT_BUDGET_USD（既定 $0.5。budget_status の consult_budget_usd）を月の枠から予約し、終わったら実費で精算する。月の枠が足りなければ budget_exceeded。max_output_tokens は予約額に収まるよう上限が掛かる。入力が大きく予約額に収まらないときは invalid_input。モデルの呼び出しが 5xx・タイムアウトなどで失敗したら upstream_unavailable（retry_after_seconds 後に再試行できる。かかった費用は精算される）。モデルがリクエストの中身を拒否した（4xx。例 invalid_request_error）ときは model_rejected で、待っても直らないので再試行しない（入力か model を変える）。思考レベル（effort）はモデルごとに決まっていて、考える量が多いほど出力トークン＝費用が増える（max_output_tokens の中に思考が含まれる）。",
@@ -150,7 +152,7 @@ const START_DESCRIPTION = [
   "作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントの commit は自動で push される（応答の draft_pr_url は作成前なので null。PR の URL は task_status・task_result・イベント draft_pr_created で返る）。PR は Draft のまま返り、rovo 自身は Ready にもマージにもしない。成果は patch としても返る。",
   'merge_policy（"human_review" | "agent_merge"、既定 human_review）は、完了後の PR の扱いを決める。終端になったら task_result で差分をレビューし、問題が無ければ task_pr_ready で Ready にする。human_review はそこで人のレビューを待つ（task_pr_merge は使えない）。agent_merge は、Ready にしたあと task_pr_merge でマージまでできる。最終的な強制は GitHub のブランチ保護（操作は利用者の GitHub トークンで行われる）。merge_policy は task_status・task_result にも返る。',
   'verification_commands（任意）は {argv: string[], cwd?: リポジトリ内の相対パス, timeout_seconds?} の配列（最大 10 件）。完了の申告後に Sandbox で実行され、全部が終了コード 0 なら COMPLETED になる。指定しない場合はモデルの申告だけで完了し、結果は「未検証」と記される。argv はシェルを通さずそのまま実行される。シェルの機能（パイプ・&&・リダイレクト・環境変数の展開）を使うなら、["sh", "-c", "npm ci && npm test"] のように sh -c で包む。',
-  'model（任意）は子のモデルの id（"anthropic/claude-haiku-5-5" など）。models_list で使えるモデルと単価を確かめて、タスクの難しさで選ぶ。省略は既定のモデル。使えないモデルは invalid_input。task_status・task_result に返る。',
+  'model（任意）は子のモデルの id（"anthropic/claude-haiku-5-5" など）。models_list で使えるモデルと単価を確かめて、タスクの難しさで選ぶ。省略は既定のモデル。使えないモデルは invalid_input、キーが無いプロバイダーのモデル（models_list の available: false）は model_unavailable。省略したときは、実際に使われたモデルが task_status・task_result に返る。',
   "1 タスクにつき TASK_BUDGET_USD（budget_status の task_budget_usd）を月額の枠から予約する。枠が足りなければ budget_exceeded で拒否される。",
   "idempotency_key（1〜128 文字の [A-Za-z0-9_-]）を渡すと、同じキー・同じ入力の再試行で同じ task_id が返る。",
   "省略した場合は再試行の重複排除を保証しない（応答が失われて再送すると別タスクになりうる）。",
@@ -482,7 +484,7 @@ export function createRovoServer(env: Env): McpServer {
     async () =>
       runTool(env, "models_list", async (principal, userDo) => {
         const denied = await requireMember(env, principal, userDo);
-        return denied ?? { ok: true, value: { models: listModels(env) } };
+        return denied ?? { ok: true, value: { models: await listModels(env) } };
       }),
   );
 

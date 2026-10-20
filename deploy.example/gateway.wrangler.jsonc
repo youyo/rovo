@@ -50,7 +50,13 @@
     // 使えるモデル。AGENT_MODEL は既定（task_start の model を省略したとき）、AGENT_MODELS はカンマ区切りの選べるモデル
     // （task_start の model と consult の model。models_list に出る）。空なら AGENT_MODEL だけ。agent の同名の var と同じ値にする。
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
-    "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5",
+    // Workers AI のモデル（workers-ai/@cf/...。キー不要。無料プランでも使えるものだけ）を入れておくと、Anthropic / OpenAI のキーが無いときの代わりになる。
+    "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5,workers-ai/@cf/openai/gpt-oss-120b,workers-ai/@cf/openai/gpt-oss-20b",
+    // AI Gateway に BYOK 登録されたプロバイダーキーを読んで、キーが無いプロバイダーのモデルを選べなくする（D10b）。
+    // AI_GATEWAY_ID は agent と同じ値（terraform output ai_gateway_id）、CLOUDFLARE_ACCOUNT_ID は Cloudflare の account id（公開しない値）。
+    // secret の CLOUDFLARE_API_TOKEN（権限は Account / AI Gateway / Read だけ）と合わせて設定する。どれかが空なら判定せず AGENT_MODELS だけで決める。
+    "AI_GATEWAY_ID": "<AI_GATEWAY_ID>",
+    "CLOUDFLARE_ACCOUNT_ID": "<YOUR_ACCOUNT_ID>",
     // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。models_list の effort と task_status / task_result に出る）。空なら upstream の既定。agent の同名の var と同じ値にする。
     "MODEL_EFFORTS": "",
     "WEB_SEARCH_DAILY_LIMIT": "200",

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import {
   addMember,
   admin,
@@ -9,6 +9,8 @@ import {
   installApp,
   login,
   newUser,
+  providerConfigsCalls,
+  resetProviderKeysCache,
   setConsultScript,
   startArgs,
   waitForAudit,
@@ -17,6 +19,13 @@ import {
 
 beforeEach(async () => {
   await admin.reset();
+  await resetProviderKeysCache();
+});
+
+// 後続のファイルにキャッシュ・失敗の記録・偽 API の状態を残さない
+afterAll(async () => {
+  await admin.reset();
+  await resetProviderKeysCache();
 });
 
 async function memberClient(prefix = "user") {
@@ -42,11 +51,13 @@ describe("D10: models_list（実 Worker・MCP SDK Client）", () => {
         ["anthropic/claude-haiku-5-5", "off"],
         ["anthropic/claude-sonnet-5-5", "high"],
         ["openai/gpt-6-sol", "xhigh"],
+        ["workers-ai/@cf/openai/gpt-oss-120b", "low"],
       ]);
       expect(models.map((m) => m.id)).toEqual([
         "anthropic/claude-haiku-5-5",
         "anthropic/claude-sonnet-5-5",
         "openai/gpt-6-sol",
+        "workers-ai/@cf/openai/gpt-oss-120b",
       ]);
       expect(models.filter((m) => m.default).map((m) => m.id)).toEqual([
         "anthropic/claude-sonnet-5-5",
@@ -276,6 +287,137 @@ describe("D10: budget_status と consult の予約・精算", () => {
         { reserved_usd: 0, spent_usd: 0 },
       );
     } finally {
+      await client.close();
+    }
+  });
+});
+
+const OSS = "workers-ai/@cf/openai/gpt-oss-120b";
+const SOL = "openai/gpt-6-sol";
+const SONNET = "anthropic/claude-sonnet-5-5";
+
+type Listing = { id: string; available: boolean; unavailable_reason?: string; default: boolean };
+async function listing(client: Awaited<ReturnType<typeof memberClient>>["client"]) {
+  const out = bodyOf(await client.callTool({ name: "models_list", arguments: {} }));
+  return out.models as Listing[];
+}
+
+describe("D10b: プロバイダーキー（provider_configs）で使えるモデルが決まる", () => {
+  it("両方のキーがある（偽の既定）: 全モデルが available。既定は sonnet", async () => {
+    const { client } = await memberClient();
+    try {
+      const models = await listing(client);
+      expect(models.every((m) => m.available)).toBe(true);
+      expect(models.filter((m) => m.default).map((m) => m.id)).toEqual([SONNET]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("OpenAI のキーが無い: gpt-6-sol は available: false（no_provider_key）。task_start と consult は model_unavailable で拒否する", async () => {
+    await admin.setProviderKeys([{ provider_slug: "anthropic", alias: "default" }]);
+    const { client } = await memberClient();
+    try {
+      const models = await listing(client);
+      expect(models.find((m) => m.id === SOL)).toMatchObject({
+        available: false,
+        unavailable_reason: "no_provider_key",
+      });
+      expect(models.find((m) => m.id === OSS)).toMatchObject({ available: true });
+      expect(models.find((m) => m.id === SONNET)).toMatchObject({ available: true });
+
+      const task = await client.callTool({
+        name: "task_start",
+        arguments: startArgs("t", { model: SOL }),
+      });
+      expect(task.isError).toBe(true);
+      const err = bodyOf(task);
+      expect(err.code).toBe("model_unavailable");
+      expect(String(err.message)).toContain("models_list");
+
+      const consult = await client.callTool({
+        name: "consult",
+        arguments: { model: SOL, messages: [{ role: "user", content: "hi" }] },
+      });
+      expect(consult.isError).toBe(true);
+      expect(bodyOf(consult).code).toBe("model_unavailable");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("alias が default でないキーは数えない（work という alias の Anthropic のキーだけ → Anthropic は使えない）", async () => {
+    await admin.setProviderKeys([{ provider_slug: "anthropic", alias: "work" }]);
+    const { client } = await memberClient();
+    try {
+      const models = await listing(client);
+      expect(models.find((m) => m.id === SONNET)?.available).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("どちらのキーも無い: Workers AI だけ。既定は gpt-oss-120b で、省略した task_start・consult はそれを使う（task_status・task_result に出る）", async () => {
+    await admin.setProviderKeys([]);
+    const { user, client } = await memberClient("nokeys");
+    try {
+      const models = await listing(client);
+      expect(models.filter((m) => m.available).map((m) => m.id)).toEqual([OSS]);
+      expect(models.filter((m) => m.default).map((m) => m.id)).toEqual([OSS]);
+
+      const started = bodyOf(
+        await client.callTool({ name: "task_start", arguments: startArgs("t") }),
+      );
+      const taskId = started.task_id as string;
+      const status = bodyOf(
+        await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+      );
+      expect(status.model).toBe(OSS);
+      expect(status.effort).toBe("low");
+      await finishAgent(taskId, "completed", completedResult("a".repeat(40)));
+      const result = await waitForResult(client, taskId, { needHead: false });
+      expect(result.model).toBe(OSS);
+
+      const q = `consult e2e nokeys ${user.id}`;
+      await setConsultScript(q, { text: "from workers ai", usage: { input: 100, output: 50 } });
+      const consult = bodyOf(
+        await client.callTool({
+          name: "consult",
+          arguments: { messages: [{ role: "user", content: q }] },
+        }),
+      );
+      expect(consult.model).toBe(OSS);
+      expect(consult.text).toBe("from workers ai");
+    } finally {
+      await client.close();
+    }
+  }, 90_000);
+
+  it("結果は 5 分キャッシュされる: キーを足しても、キャッシュを消すまで API は 1 回だけ。消すと反映される", async () => {
+    await admin.setProviderKeys([]);
+    const { client } = await memberClient("cache");
+    try {
+      const before = await providerConfigsCalls();
+      expect((await listing(client)).find((m) => m.id === SONNET)?.available).toBe(false);
+      await admin.setProviderKeys([{ provider_slug: "anthropic", alias: "default" }]);
+      expect((await listing(client)).find((m) => m.id === SONNET)?.available).toBe(false);
+      expect((await providerConfigsCalls()) - before).toBe(1);
+      await resetProviderKeysCache();
+      expect((await listing(client)).find((m) => m.id === SONNET)?.available).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("API が失敗し、キャッシュも無いとき: 判定できないので従来どおり AGENT_MODELS の全部が available（既定は sonnet）", async () => {
+    await admin.setFault("cloudflare", 500);
+    const { client } = await memberClient("fail");
+    try {
+      const models = await listing(client);
+      expect(models.every((m) => m.available)).toBe(true);
+      expect(models.filter((m) => m.default).map((m) => m.id)).toEqual([SONNET]);
+    } finally {
+      await admin.setFault("cloudflare", null);
       await client.close();
     }
   });

@@ -179,7 +179,15 @@ export type ConsultErrorCode =
   | "model_rejected";
 
 export type ConsultResult =
-  | { ok: true; text: string; model: string; usage: ConsultUsage; costUsd: number }
+  | {
+      ok: true;
+      text: string;
+      model: string;
+      usage: ConsultUsage;
+      costUsd: number;
+      /** 成功なのにプロバイダーが usage を返さなかった（トークンが 0）。costUsd は呼ぶ前の最悪の場合の見積り */
+      usageMissing?: true;
+    }
   /** 失敗。costUsd はそれまでにかかった実費（モデルを呼ぶ前の失敗は 0） */
   | { ok: false; code: ConsultErrorCode; message: string; costUsd: number };
 

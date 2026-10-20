@@ -10,7 +10,12 @@ import { type FakeAppOptions, FakeGitHubApp, type FakeUser } from "../support/fa
  */
 
 export type TeamState = "active" | "pending" | "none";
-export type FaultTarget = "api" | "token";
+export type FaultTarget = "api" | "token" | "cloudflare";
+
+/** 偽の Cloudflare API（List provider keys。D10b）が受け付ける Bearer トークン（実在のトークンではない） */
+export const FAKE_CLOUDFLARE_TOKEN = "e2e-cloudflare-token";
+
+export type FakeProviderKey = { provider_slug: string; alias: string };
 
 export interface FakeRepository {
   id: number;
@@ -74,7 +79,12 @@ class State {
   codes = new Map<string, string>();
   access = new Map<string, AccessRecord>();
   refresh = new Map<string, RefreshRecord>();
-  faults: Record<FaultTarget, Fault | null> = { api: null, token: null };
+  faults: Record<FaultTarget, Fault | null> = { api: null, token: null, cloudflare: null };
+  /** AI Gateway に BYOK 登録されたプロバイダーキー（List provider keys の応答）。既定は Anthropic と OpenAI の default */
+  providerKeys: FakeProviderKey[] = [
+    { provider_slug: "anthropic", alias: "default" },
+    { provider_slug: "openai", alias: "default" },
+  ];
   log: RecordedRequest[] = [];
 }
 
@@ -120,6 +130,9 @@ export function createAdmin(
     setFault(target: FaultTarget, status: number | null, count?: number) {
       getState().faults[target] =
         status === null ? null : { status, remaining: count ?? Number.POSITIVE_INFINITY };
+    },
+    setProviderKeys(keys: FakeProviderKey[]) {
+      getState().providerKeys = keys;
     },
     setConfig(config: Partial<Config>) {
       Object.assign(getState().config, config);
@@ -230,6 +243,9 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
           (body.status ?? null) as number | null,
           body.count === undefined ? undefined : Number(body.count),
         );
+        break;
+      case "provider-keys":
+        admin.setProviderKeys((body.keys ?? []) as FakeProviderKey[]);
         break;
       case "config":
         admin.setConfig(body as Partial<Config>);
@@ -394,6 +410,31 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
     return { slice, headers };
   }
 
+  /** 偽の Cloudflare API: GET /client/v4/accounts/:a/ai-gateway/gateways/:g/provider_configs（page / per_page） */
+  function providerConfigs(url: URL, req: IncomingMessage, res: ServerResponse) {
+    const fault = takeFault("cloudflare");
+    if (fault) return faultResponse(res, fault);
+    if (req.headers.authorization !== `Bearer ${FAKE_CLOUDFLARE_TOKEN}`) {
+      return sendJson(res, 401, { success: false, errors: [{ code: 10000 }], result: null });
+    }
+    const page = Math.max(1, Number(url.searchParams.get("page") ?? 1) || 1);
+    const perPage = Math.min(
+      100,
+      Math.max(1, Number(url.searchParams.get("per_page") ?? 20) || 20),
+    );
+    const result = state.providerKeys.slice((page - 1) * perPage, page * perPage).map((k) => ({
+      id: `cfg_${k.provider_slug}_${k.alias}`,
+      alias: k.alias,
+      default_config: k.alias === "default",
+      gateway_id: "gw",
+      modified_at: "2026-10-20T00:00:00Z",
+      provider_slug: k.provider_slug,
+      secret_id: "secret",
+      secret_preview: "sk-…FAKE",
+    }));
+    return sendJson(res, 200, { success: true, result });
+  }
+
   function api(url: URL, req: IncomingMessage, res: ServerResponse) {
     const fault = takeFault("api");
     if (fault) return faultResponse(res, fault);
@@ -496,6 +537,14 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
         const fault = takeFault("token");
         if (fault) return faultResponse(res, fault);
         return tokenEndpoint(body, req, res);
+      }
+      if (
+        req.method === "GET" &&
+        /^\/client\/v4\/accounts\/[^/]+\/ai-gateway\/gateways\/[^/]+\/provider_configs$/.test(
+          url.pathname,
+        )
+      ) {
+        return providerConfigs(url, req, res);
       }
       if (req.method === "GET") return api(url, req, res);
       return sendJson(res, 404, { message: "Not Found" });

@@ -42,6 +42,7 @@
 | 21 | PR の Ready 化とマージ（D9） | ○（偽 GitHub） | ○ | 小 | ○ | ○ | 検証用リポジトリで COMPLETED のタスクを作り、`task_pr_ready` / `task_pr_merge` を呼ぶ。ブランチ保護（必須レビューまたは必須チェック）で拒否されることも確かめる。App の権限（Pull requests / Contents の write）の確認を兼ねる |
 
 | 22 | モデルの選択・予算・consult（D10） | ○（偽の AgentDO・台本） | ○ | 小 | ○ | ○ | 実 Anthropic でキャッシュの効き（2 回目の `cache_read`）と単価を確かめる。OpenAI は BYOK の登録後（任意） |
+| 23 | プロバイダーキーで使えるモデルが決まる・Workers AI のモデル（D10b） | ○（偽の Cloudflare API・偽の AI バインディング・台本） | ○ | 小 | ○ | ○ | 実際の `provider_configs` の応答と、Workers AI の tool calling・usage を確かめる。OpenAI のキーが無い今は `gpt-6-*` が `available: false` |
 
 環境の準備が要る個別の項目（節をまたぐ）:
 
@@ -522,6 +523,27 @@ M6（点検）と M11（公開）の結果の記録。履歴の処理・push・�
 - [ ] **OpenAI（BYOK 登録後。任意）**: AI Gateway のプロバイダー キーに OpenAI をエイリアス `default` で登録し、OpenAI 側で利用上限を設定する。`AGENT_MODELS` に `openai/gpt-6-luna`（安いもの）を足し、gateway と agent に反映する。`models_list` に出る。`consult` を `model: "openai/gpt-6-luna"` で 2 回呼び、2 回目に自動キャッシュで `cache_read` が付くか（前置きは 1024 トークン以上）と、`cost_usd` が単価の桁かを見る。AI Gateway のログのプロバイダーが openai。`task_start` に `openai/gpt-6-luna` を指定した小さなタスクが完了する（`reasoning` が原因の 400 などが出ないか。`gpt-6-astra` は `reasoning` を省略する設定のため、出力が reasoning で切れないかも見る）。キーを登録していない OpenAI のモデルは 400 で失敗し、Claude には影響しない。対象リポジトリのコードが OpenAI にも送られることを、運用者が了承している
 
 ### D10 の結果
+
+| 実施者 | 日付 | 環境 | 結果 | 備考 |
+|---|---|---|---|---|
+| | | | | |
+
+## 23. プロバイダーキーで使えるモデルが決まる・Workers AI のモデル（D10b）
+
+AI Gateway の BYOK のキー（`provider_configs`）の有無で `models_list` の `available` が決まり、キーが無いプロバイダーのモデルを選べないことと、Workers AI のモデルが使えることの確認（design 15.8 の D10b）。自動テスト（`test:unit` の `models` / `provider-keys` / `model-availability` / agent の `model-access` / `guard-provider` / `agent-do` / `agent-do-consult`、`test:fake-github` の `provider-configs`、`test:e2e:gateway` の `models.e2e.test.ts`）は偽の Cloudflare API・偽の AI バインディング・台本付きモデルで済んでいる。ここでは実機で、実際の `provider_configs` の応答と Workers AI の動作を確かめる。
+
+前提: gateway に secret `CLOUDFLARE_API_TOKEN`（権限は Account / AI Gateway / Read だけ。`docs/deploy.md` の 5）と vars `CLOUDFLARE_ACCOUNT_ID` / `AI_GATEWAY_ID` を設定済み。gateway と agent の `AGENT_MODELS` に、Anthropic / OpenAI のモデルと `workers-ai/@cf/openai/gpt-oss-120b`（と `gpt-oss-20b`）を入れ、同じ値にしてある。AI Gateway には Anthropic のキーだけがあり、OpenAI のキーは登録していない（今の本番の状態）。確認ごとに課金される（小）。
+
+- [ ] `models_list`: Anthropic のモデルは `available: true`、`openai/gpt-6-*` は `available: false` と `unavailable_reason: "no_provider_key"`。`workers-ai/@cf/...` は `available: true`（provider は `workers-ai`）。`default: true` は `AGENT_MODEL`（sonnet）の 1 件
+- [ ] `task_start` / `consult` に `model: "openai/gpt-6-sol"` を指定すると `model_unavailable`（メッセージに `models_list` とキー登録の案内。トークンを含まない）。タスクの予約は残らない（`budget_status` の `reserved_usd` が 0）
+- [ ] **`gpt-oss-120b` で `consult`**: `model: "workers-ai/@cf/openai/gpt-oss-120b"` で答えが返り、`model` がそれ、`usage` と `cost_usd`（カタログの単価）が付く。AI Gateway のログで、Workers AI のモデルとして記録され、metadata に `userId` / `consultId` / `caller: "consult"` が付いている。400 にならない（`reasoning_effort: low` が受け付けられる）。`budget_status` の `spent_usd` が `cost_usd` の分だけ増える
+- [ ] **`gpt-oss-120b` でタスク（tool calling）**: `model: "workers-ai/@cf/openai/gpt-oss-120b"` の小さなタスクが完了する（子がファイルの読み書き・検証コマンド・`report_completion` をツール呼び出しで進められる。ツール呼び出しの引数が壊れる・同じ呼び出しを繰り返すなどが無いか、モデルの出力の質も見る）。`task_status` / `task_result` の `model` と `effort`（low）が合う。`usage.cost_usd` がカタログの単価の桁。Workers AI の usage が返らず費用が 0 になっていないか（`usage` のトークン数が 0 でないこと）を必ず見る
+- [ ] 他の Workers AI のモデル（`gpt-oss-20b`、`qwen3.8-27b`、`nemotron-3-120b-a12b`、`glm-4.7-flash`、`gemma-4-26b-a4b-it`）を `AGENT_MODELS` に入れたものは、`consult` が通る（`gemma` は effort が high。400 にならない）。通らないモデルは備考に書き、`AGENT_MODELS` から外す
+- [ ] 既定のモデル: `AGENT_MODEL` を gateway と agent の両方で未登録のキーのプロバイダーのモデル（例 `openai/gpt-6-sol`）にして `model` を省略すると、`gpt-oss-120b`（Anthropic のキーがあるなら sonnet）が使われ、`task_status` の `model` に出る。Anthropic のキーを AI Gateway から外すと（キャッシュの 5 分後）、`models_list` の Anthropic が `available: false` になり、`model` 省略の既定が `gpt-oss-120b` になる。戻したあと 5 分以内は反映されない（キャッシュ）ことを確かめ、戻す
+- [ ] API の失敗: `CLOUDFLARE_API_TOKEN` を一時的に無効な値にすると（直前のキャッシュがあるうちは影響が出ない。キャッシュが切れたあと）、判定できないので `models_list` の全モデルが `available: true`（従来どおり）。キーが無いプロバイダーのモデルでタスクを始めると、AI Gateway の 400 で失敗する（`consult` は `model_rejected`）。トークンを戻すと 1 分後に判定が戻る。**ログ・応答・エラーのどこにもトークンの値が出ていない**
+- [ ] 無料プランの運用者: 有料プラン専用のモデル（kimi-k2.7-code・glm-5.x・deepseek-v4）が許可リストに無く、`AGENT_MODELS` に書いても無視される（`agent_models_ignored`）。Workers AI の無料枠（1 日 1 万 Neuron）を超えたときの挙動（モデルの 4xx/429 か）を備考に書く
+
+### D10b の結果
 
 | 実施者 | 日付 | 環境 | 結果 | 備考 |
 |---|---|---|---|---|

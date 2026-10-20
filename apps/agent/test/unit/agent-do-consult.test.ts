@@ -217,6 +217,30 @@ describe("AgentDO.consult", () => {
     expect(await runInDurableObject(t.stub, (_i, state) => state.storage.getAlarm())).toBeNull();
   });
 
+  describe("usage が返らない成功（少なく数えない）", () => {
+    it("成功でトークンが 0 のときは、呼ぶ前の見積り（出力上限まで使った最悪の場合）で精算し、usageMissing を立てる。予約額は超えない", async () => {
+      const t = setup({ budgetUsd: 0.5 });
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      const r = asOk(await t.stub.consult(t.request));
+      expect(r.usageMissing).toBe(true);
+      const maxTokens = t.seen.maxTokens[0] ?? 0;
+      // scripted の単価は $1/100万トークン: 出力の上限分だけで maxTokens / 1e6 以上
+      expect(r.costUsd).toBeGreaterThanOrEqual(maxTokens / 1_000_000);
+      expect(r.costUsd).toBeLessThanOrEqual(0.5);
+      expect(r.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    });
+
+    it("usage が返るときは今までどおり実費（見積りに置き換えない。usageMissing なし）", async () => {
+      const t = setup();
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [
+        { text: "x", usage: { input: 1000, output: 200 } },
+      ]);
+      const r = asOk(await t.stub.consult(t.request));
+      expect(r.costUsd).toBeCloseTo(0.0012, 9);
+      expect(r).not.toHaveProperty("usageMissing");
+    });
+  });
+
   describe("思考レベル（モデルごとに固定）", () => {
     it("モデルの思考レベル（sonnet=high / haiku=low / gpt-6-sol=medium）を Pi の reasoning に渡す", async () => {
       const expected: [string, string][] = [
@@ -230,6 +254,14 @@ describe("AgentDO.consult", () => {
         asOk(await t.stub.consult(t.request));
         expect(t.seen.reasoning[0], model).toBe(level);
       }
+    });
+
+    it("D10b: Workers AI のモデルでも consult できる（scripted の経路）。思考レベルは gpt-oss-120b=low", async () => {
+      const t = setup({ model: "workers-ai/@cf/openai/gpt-oss-120b" });
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      const r = asOk(await t.stub.consult(t.request));
+      expect(r.model).toBe("workers-ai/@cf/openai/gpt-oss-120b");
+      expect(t.seen.reasoning[0]).toBe("low");
     });
 
     it("MODEL_EFFORTS の上書きが効く。off なら reasoning を渡さない", async () => {

@@ -251,6 +251,27 @@ describe("guardProvider の出力上限の二重化（payload）", () => {
     expect(seen).toEqual({ max_tokens: 100, max_output_tokens: 100, messages: [] });
   });
 
+  it("max_completion_tokens（Workers AI の一部のモデルの quirk が書き換える先）も上限へ下げる（D10b）", async () => {
+    let seen: unknown;
+    const inner = {
+      streamSimple: (
+        mm: Model<Api>,
+        _c: unknown,
+        o?: { onPayload?: (p: unknown, m: Model<Api>) => unknown },
+      ) => {
+        const out = createAssistantMessageEventStream();
+        void (async () => {
+          seen = await o?.onPayload?.({ max_completion_tokens: 9000, messages: [] }, mm);
+          out.end(message(mm));
+        })();
+        return out;
+      },
+    } as unknown as Provider;
+    const guarded = guardProvider(inner, async () => ({ maxTokens: 100, metadata: {} }));
+    await guarded.streamSimple(anthropicModel, context, {} as never).result();
+    expect(seen).toEqual({ max_completion_tokens: 100, messages: [] });
+  });
+
   it("上限以下なら変えない", async () => {
     const payload = { max_tokens: 50, messages: [] };
     let seen: unknown;

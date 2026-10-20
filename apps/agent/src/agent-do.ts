@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   type Api,
+  type AssistantMessage,
   createModels,
   type Model,
   normalizeContext,
@@ -12,9 +13,9 @@ import type { AuditFields } from "@rovo/audit";
 import { computeCostUsd, type Effort } from "@rovo/models";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
-import { createAI } from "agents/models/pi-ai";
 import { agentModels, aiGatewayRejection, defaultModel, modelEffort } from "./agent/config";
 import { getAgentTestOverrides } from "./agent/deps";
+import { createModelAccess, sessionModelRef } from "./agent/model-access";
 import {
   estimateCallCostUsd,
   estimateTokens,
@@ -224,9 +225,7 @@ export class AgentDO extends DurableObject<Env> {
       );
       return { provider, model: () => SCRIPTED_MODEL as Model<Api> };
     }
-    if (!env.AI) throw new Error("AI binding is not configured");
-    const ai = createAI({ binding: env.AI, id: env.AI_GATEWAY_ID || undefined });
-    return { provider: ai.provider, model: (id) => ai(id) as Model<Api> };
+    return createModelAccess(env);
   }
 
   private overrides() {
@@ -262,7 +261,12 @@ export class AgentDO extends DurableObject<Env> {
    * 失敗したモデル呼び出しの上流のステータスを覚える（4xx = リクエストの中身の問題かどうかを、終端の reason に反映する）。
    * 成功した呼び出しで消す。
    */
-  private noteModelResult(message: { stopReason: string } & Parameters<typeof upstreamStatus>[0]) {
+  private noteModelResult(
+    message: { stopReason: string; usage?: AssistantMessage["usage"] } & Parameters<
+      typeof upstreamStatus
+    >[0],
+  ) {
+    this.noteMissingUsage(message);
     try {
       this.store.setMeta(
         "last_model_status",
@@ -273,11 +277,38 @@ export class AgentDO extends DurableObject<Env> {
     }
   }
 
+  /**
+   * 成功した呼び出しなのに usage が 0（プロバイダーが返さなかった）なら、その呼び出しの見積額（preModelCall が
+   * inflight に残した上限側の額）を費用に積む（少なく数えない）。usage があるときは何もしない（実費のまま）。
+   * 積んだ額は meta の usage_missing_usd に足し、refreshUsage が Pi の実費に上乗せする。
+   */
+  private noteMissingUsage(message: { stopReason: string; usage?: AssistantMessage["usage"] }) {
+    try {
+      if (message.stopReason !== "stop" && message.stopReason !== "toolUse") return;
+      const u = message.usage;
+      if (!u || u.input + u.output + u.cacheRead + u.cacheWrite > 0 || (u.cost?.total ?? 0) > 0) {
+        return;
+      }
+      const inflight = this.store.meta<{ baseCostUsd: number; estimateUsd: number }>("inflight");
+      if (!inflight) return;
+      // 積むのと inflight を消すのは 1 つの tx で（間で落ちても二重に数えない）
+      this.store.tx(() => {
+        const prev = this.store.meta<number>("usage_missing_usd") ?? 0;
+        this.store.setMeta("usage_missing_usd", prev + inflight.estimateUsd);
+        // 積んだので、終端の確定で inflight の見積額をもう一度上乗せしない
+        this.store.setMeta("inflight", null);
+      });
+      console.error("usage_missing", "task");
+    } catch {
+      // 記録の失敗でモデル呼び出しの結果を失わない
+    }
+  }
+
   private initialModel() {
     const env = this.env as AgentEnv;
     return env.ENVIRONMENT === "test"
       ? { provider: SCRIPTED_PROVIDER_ID, id: SCRIPTED_MODEL_ID }
-      : { provider: "cloudflare", id: defaultModel(env) };
+      : sessionModelRef(defaultModel(env));
   }
 
   /**
@@ -289,7 +320,7 @@ export class AgentDO extends DurableObject<Env> {
     const env = this.env as AgentEnv;
     if (env.ENVIRONMENT === "test") return undefined;
     const id = this.modelId();
-    return id === defaultModel(env) ? undefined : { provider: "cloudflare", id };
+    return id === defaultModel(env) ? undefined : sessionModelRef(id);
   }
 
   private sandbox(): SandboxPort {
@@ -808,6 +839,20 @@ export class AgentDO extends DurableObject<Env> {
       };
     }
     const text = message.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+    // 成功なのに usage が返らない（トークンが 0）と、実費が 0 になり予約が全額戻ってしまう。少なく数えないよう、
+    // 呼ぶ前に計算した最悪の場合の見積り（入力の見積り + 渡した maxTokens を最悪の単価で）で精算する（予約額は超えない）
+    if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) {
+      console.error("usage_missing", "consult");
+      const worst = Math.min(req.budgetUsd, estimateCallCostUsd(price, inputTokens, maxTokens));
+      return {
+        ok: true,
+        text,
+        model: req.model,
+        usage,
+        costUsd: Math.max(costUsd, worst),
+        usageMissing: true,
+      };
+    }
     return { ok: true, text, model: req.model, usage, costUsd };
   }
 
@@ -1485,6 +1530,8 @@ export class AgentDO extends DurableObject<Env> {
         total.cacheWriteTokens += u.cacheWrite;
       }
     }
+    // usage が返らなかった成功の呼び出しの見積額（noteMissingUsage）を上乗せする
+    total.costUsd += this.store.meta<number>("usage_missing_usd") ?? 0;
     // 累計は単調増加。古い読み取りで巻き戻さない
     if (total.costUsd >= prev.costUsd && !sameUsage(prev, total)) {
       this.store.tx(() => {

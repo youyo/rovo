@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { agentModelsOf } from "../models";
+import { type ModelEnv, resolveModel } from "../models";
+import type { ProviderKeysDeps } from "../provider-keys";
 import { nextSteps, nextStepsAfterMerge, nextStepsAfterReady } from "./next-steps";
 import type { TaskStatus } from "./state";
 import type { ResultView, TaskDO, TaskEvent, TaskView } from "./task-do";
@@ -39,6 +40,8 @@ export type ErrorCode =
   | "upstream_unavailable"
   // consult でモデルがリクエストの中身を拒否した（4xx）。待っても再試行しても直らない
   | "model_rejected"
+  // 指定したモデルのプロバイダーのキーが AI Gateway に登録されていない（D10b）。models_list の available を見て選び直す
+  | "model_unavailable"
   | "invalid_cursor"
   | "invalid_input"
   // PR の Ready 化とマージ（D9）
@@ -192,8 +195,10 @@ export function checkStartInput(rawInput: unknown): ServiceResult<CheckedStartIn
 }
 
 export function createTaskService(
-  env: Pick<Env, "USER_DO" | "TASK_DO"> & { AGENT_MODEL?: string; AGENT_MODELS?: string },
+  env: Pick<Env, "USER_DO" | "TASK_DO"> & ModelEnv,
   overrides: Partial<TaskServiceDeps> = {},
+  /** プロバイダーキーの取得（Unit が fetch / 時計を差し替える） */
+  providerKeys?: ProviderKeysDeps,
 ) {
   const deps: TaskServiceDeps = {
     users: overrides.users ?? ((id) => env.USER_DO.getByName(String(id))),
@@ -214,13 +219,10 @@ export function createTaskService(
       const checked = checkStartInput(rawInput);
       if (!checked.ok) return checked;
       const { idempotency_key: key, input } = checked.value;
-      // 使えるモデルの外は、予約より前に拒否する（env の AGENT_MODELS。models_list で一覧を返す）
-      if (input.model !== undefined && !agentModelsOf(env).includes(input.model)) {
-        return fail(
-          "invalid_input",
-          `model: "${input.model}" is not available; call models_list for the models you can use`,
-        );
-      }
+      // 使えるモデルの外・キーが無いプロバイダーのモデルは、予約より前に拒否する。省略時はここで実際に使うモデルを決める
+      // （env の AGENT_MODELS と、AI Gateway に登録されたキー。models_list で一覧を返す）
+      const model = await resolveModel(env, input.model, providerKeys);
+      if (!model.ok) return fail(model.code, model.message);
       // 省略時はサーバーで生成する（再試行の重複排除は保証しない）。':' を含むので利用者のキーと衝突しない。
       const requestKey = key ?? `auto:${ulid()}`;
 
@@ -239,6 +241,7 @@ export function createTaskService(
 
       const created = await deps.tasks(reserved.task_id).ensureCreated({
         ...input,
+        model: model.model,
         task_id: reserved.task_id,
         owner_id: principal.githubUserId,
         owner_login: principal.login,

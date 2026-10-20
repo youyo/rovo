@@ -1,7 +1,8 @@
 import type { AuditFields } from "@rovo/audit";
 import type { AgentRpc, ConsultRequest, ConsultResult } from "./agent/contract";
 import { auditFromWorker } from "./audit-sink";
-import { agentModelsOf, defaultModelOf } from "./models";
+import { type ModelEnv, resolveModel } from "./models";
+import type { ProviderKeysDeps } from "./provider-keys";
 import type { ErrorCode, Principal, ServiceResult } from "./tasks/service";
 import { newConsultId } from "./tasks/ulid";
 import type { UserDO } from "./tasks/user-do";
@@ -33,10 +34,7 @@ export type ConsultDeps = {
   agent: (consultId: string) => ConsultAgent;
 };
 
-type ConsultEnv = Pick<Env, "USER_DO" | "AGENT_DO" | "ENVIRONMENT" | "OAUTH_KV"> & {
-  AGENT_MODEL?: string;
-  AGENT_MODELS?: string;
-};
+type ConsultEnv = Pick<Env, "USER_DO" | "AGENT_DO" | "ENVIRONMENT" | "OAUTH_KV"> & ModelEnv;
 
 /** AgentDO の応答を待つ上限。超えたら実費不明として予約額で精算する。 */
 export const CONSULT_TIMEOUT_MS = 120_000;
@@ -74,7 +72,12 @@ function isConsultResult(v: unknown): v is ConsultResult {
   return r.ok === false && finiteCost && typeof r.code === "string";
 }
 
-export function createConsultService(env: ConsultEnv, overrides: Partial<ConsultDeps> = {}) {
+export function createConsultService(
+  env: ConsultEnv,
+  overrides: Partial<ConsultDeps> = {},
+  /** プロバイダーキーの取得（Unit が fetch / 時計を差し替える） */
+  providerKeys?: ProviderKeysDeps,
+) {
   const deps: ConsultDeps = {
     users: overrides.users ?? ((id) => env.USER_DO.getByName(String(id))),
     agent:
@@ -99,13 +102,10 @@ export function createConsultService(env: ConsultEnv, overrides: Partial<Consult
         );
       }
       const input = parsed.data;
-      const model = input.model ?? defaultModelOf(env);
-      if (!agentModelsOf(env).includes(model)) {
-        return fail(
-          "invalid_input",
-          `model: "${model}" is not available; call models_list for the models you can use`,
-        );
-      }
+      // 使えるモデルの外・キーが無いプロバイダーのモデルは、予約より前に拒否する。省略時は実際に使うモデルを決める
+      const resolved = await resolveModel(env, input.model, providerKeys);
+      if (!resolved.ok) return fail(resolved.code, resolved.message);
+      const model = resolved.model;
 
       const users = deps.users(principal.githubUserId);
       const consultId = newConsultId();
@@ -169,7 +169,12 @@ export function createConsultService(env: ConsultEnv, overrides: Partial<Consult
       }
 
       await users.settleConsult(consultId, result.costUsd);
-      await auditFromWorker(env, "consult_finished", { ...audit, cost_usd: result.costUsd });
+      await auditFromWorker(env, "consult_finished", {
+        ...audit,
+        cost_usd: result.costUsd,
+        // 成功なのに usage が返らなかった（費用は呼ぶ前の見積りで精算した）
+        ...(result.ok && result.usageMissing ? { reason: "usage_missing" } : {}),
+      });
 
       if (!result.ok) {
         // モデルがリクエストの中身を拒否した（4xx）。待っても直らないので retry_after_seconds は付けない

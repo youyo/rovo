@@ -29,6 +29,7 @@ import {
 import { agentModelsOf, defaultModelOf, effortOf } from "../models";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
+import { addColumnIfMissing } from "./sql-schema";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import {
   buildTaskSummary,
@@ -82,6 +83,11 @@ const BACKOFF_MAX_MS = 60_000;
 const RETRY_AFTER_MAX_MS = 10 * 60 * 1000;
 /** 終端の PR 更新を諦めるまでの試行回数（諦めてもトークンの失効は行う）。 */
 const FINALIZE_MAX_ATTEMPTS = 6;
+/**
+ * task_result は、PR があるタスクの終了処理（PR 本文の更新・トークンの失効 = finalize_done）が済むまで not_ready を返す。
+ * 終了処理が恒久的に失敗しても待ち続けないよう、終端から数えてこの時間を過ぎたら従来どおり返す。
+ */
+const RESULT_FINALIZE_WAIT_MS = 30_000;
 /** R2 アーカイブを諦めるまでの試行回数（諦めたら archive_failed を監査ログに出して打ち切る）。FINALIZE_MAX_ATTEMPTS と同じ。 */
 export const ARCHIVE_MAX_ATTEMPTS = 6;
 /** R2 への 1 回の put を待つ上限。超えたら失敗として再試行に回す（advance を固めない）。 */
@@ -476,9 +482,14 @@ export class TaskDO extends DurableObject<Env> {
     )`);
     sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     // Phase 1 で作られた DO に、Phase 2 の列を足す。
-    this.addColumnIfMissing("task", "verification_commands", "TEXT NOT NULL DEFAULT '[]'");
-    this.addColumnIfMissing("events", "operation_id", "TEXT");
-    this.addColumnIfMissing("events", "agent_seq", "INTEGER");
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "task",
+      "verification_commands",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
+    addColumnIfMissing(this.ctx.storage.sql, "events", "operation_id", "TEXT");
+    addColumnIfMissing(this.ctx.storage.sql, "events", "agent_seq", "INTEGER");
     // AgentDO のイベントは (operation_id, agent_seq) で一意。取り込みの重複を DB でも防ぐ。
     sql.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS events_agent_seq ON events (operation_id, agent_seq) WHERE agent_seq IS NOT NULL",
@@ -496,14 +507,39 @@ export class TaskDO extends DurableObject<Env> {
       settled_seq INTEGER NOT NULL DEFAULT 0,
       finished INTEGER NOT NULL DEFAULT 0
     )`);
-    this.addColumnIfMissing("agent_link", "final_seq", "INTEGER");
+    addColumnIfMissing(this.ctx.storage.sql, "agent_link", "final_seq", "INTEGER");
     // Phase 6 M3: 要約（task_summary）のための累計と、出力済みの印
-    this.addColumnIfMissing("agent_link", "usage_public", "TEXT NOT NULL DEFAULT '{}'");
-    this.addColumnIfMissing("agent_link", "summary_logged", "INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "agent_link",
+      "usage_public",
+      "TEXT NOT NULL DEFAULT '{}'",
+    );
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "agent_link",
+      "summary_logged",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
     // Phase 6 M4: R2 アーカイブの状態（summary_logged と同じ agent_link に足す。finished / finalize_done とは独立）
-    this.addColumnIfMissing("agent_link", "archive_done", "INTEGER NOT NULL DEFAULT 0");
-    this.addColumnIfMissing("agent_link", "archive_attempts", "INTEGER NOT NULL DEFAULT 0");
-    this.addColumnIfMissing("agent_link", "archive_retry_at", "INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "agent_link",
+      "archive_done",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "agent_link",
+      "archive_attempts",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "agent_link",
+      "archive_retry_at",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
     // Phase 3: Draft PR・Installation Token・終端処理の進み具合（1 行）。Phase 2 で作られたタスクには無い。
     sql.exec(`CREATE TABLE IF NOT EXISTS github_link (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -526,16 +562,31 @@ export class TaskDO extends DurableObject<Env> {
       finalize_retry_at INTEGER NOT NULL DEFAULT 0,
       finalize_done INTEGER NOT NULL DEFAULT 0
     )`);
-    this.addColumnIfMissing("github_link", "revoke_attempts", "INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "revoke_attempts",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
     // D9: PR のマージの方針（task_start の merge_policy）と、task_pr_merge でマージ済みか
-    this.addColumnIfMissing("task", "merge_policy", "TEXT NOT NULL DEFAULT 'human_review'");
-    this.addColumnIfMissing("github_link", "pr_merged", "INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "task",
+      "merge_policy",
+      "TEXT NOT NULL DEFAULT 'human_review'",
+    );
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "pr_merged",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
     // D14: 依存関係のキャッシュの指定（TaskSpec.deps の JSON。"null" は lockfile なし・読めなかった。NULL は未取得で、spec に載せない）
-    this.addColumnIfMissing("github_link", "deps", "TEXT");
+    addColumnIfMissing(this.ctx.storage.sql, "github_link", "deps", "TEXT");
     // D10: 子のモデル（task_start の model。NULL は既定のモデル）
-    this.addColumnIfMissing("task", "model", "TEXT");
+    addColumnIfMissing(this.ctx.storage.sql, "task", "model", "TEXT");
     // D10: 子のモデルの思考レベル（開始時の値。NULL は現在の設定から求める）
-    this.addColumnIfMissing("task", "effort", "TEXT");
+    addColumnIfMissing(this.ctx.storage.sql, "task", "effort", "TEXT");
     // Phase 4: 子の質問と回答、親からの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
     sql.exec(`CREATE TABLE IF NOT EXISTS questions (
       question_id TEXT PRIMARY KEY,
@@ -593,15 +644,6 @@ export class TaskDO extends DurableObject<Env> {
       encEmpty: empty,
       encPresent: t.n - empty,
     };
-  }
-
-  private addColumnIfMissing(table: string, column: string, definition: string): void {
-    const sql = this.ctx.storage.sql;
-    const has = sql
-      .exec<{ name: string }>(`PRAGMA table_info(${table})`)
-      .toArray()
-      .some((c) => c.name === column);
-    if (!has) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   // --- 読み取りヘルパー ---
@@ -1211,12 +1253,23 @@ export class TaskDO extends DurableObject<Env> {
     });
   }
 
+  /**
+   * PR があるのに終了処理（finalize_done）が未了で、待つ上限（終端から RESULT_FINALIZE_WAIT_MS）の内か。
+   * 終端の updated_at は status を変えたときにしか動かない。
+   */
+  private finalizePending(row: TaskRow): boolean {
+    const gl = this.getGithub();
+    if (!gl || gl.pr_number === null || gl.finalize_done === 1) return false;
+    return this.now() - row.updated_at < RESULT_FINALIZE_WAIT_MS;
+  }
+
   /** 利用者に結果を返せる状態か（終端 + AgentDO の停止確認済み）を確かめて、結果を整形して返す。 */
   async result(ownerId: number): Promise<ResultOutcome> {
     const row = this.getRow();
     if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
     const status = this.statusOf(row);
     if (!isTerminal(status) || !this.isStopped()) return { ok: false, code: "not_ready" };
+    if (this.finalizePending(row)) return { ok: false, code: "not_ready" };
     try {
       return { ok: true, result: await this.composeResult(row, status) };
     } catch (e) {
@@ -2833,7 +2886,7 @@ function shapeResult(
         timed_out: r.timedOut,
         output: tailUtf8(r.output, MAX_RESULT_OUTPUT),
         // 古い agent の結果には durationMs が無いので、あるときだけ付ける
-        ...(typeof r.durationMs === "number" && Number.isFinite(r.durationMs)
+        ...(typeof r.durationMs === "number" && Number.isFinite(r.durationMs) && r.durationMs >= 0
           ? { duration_ms: r.durationMs }
           : {}),
       })),

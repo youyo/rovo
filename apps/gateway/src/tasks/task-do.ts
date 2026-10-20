@@ -11,6 +11,8 @@ import type {
   TaskSpec,
   UsageDto,
 } from "../agent/contract";
+import { indexBackoffMs } from "../directory/backoff";
+import { DIRECTORY_NAME, type TaskIndexSnapshot, type UpsertTaskResult } from "../directory/types";
 import {
   applyManagedBlock,
   decryptString,
@@ -107,6 +109,15 @@ const DRAFT_UNSUPPORTED_RE =
 const BOT_IDENTITY = { name: "rovo", email: "rovo@users.noreply.github.com" };
 /** 1 回の取り込みで読むページ数の上限（残りは次の alarm / wait で取り込む）。 */
 const MAX_PAGES_PER_SYNC = 20;
+/** Directory への 1 回の配送を待つ上限。超えたら失敗として再試行に回す（alarm を固めない） */
+const INDEX_TIMEOUT_MS = 5_000;
+/** 索引の snapshot の文字列の上限（packages/dashboard-contract の LIMITS と同じ。超えた値は送る前に切り詰める） */
+const INDEX_LIMITS = { title: 300, repository: 140, login: 39, model: 100, reason: 100, url: 300 };
+
+/** 文字列を n 文字（コードポイント単位）までに切り詰める。 */
+function clip(text: string, n: number): string {
+  return text.length <= n ? text : Array.from(text).slice(0, n).join("");
+}
 
 /** TaskDO.ensureCreated の入力。task_start の入力に、タスク ID と所有者・GitHub 側の ID を足したもの。 */
 export type EnsureCreatedInput = z.input<typeof taskInputSchema> & {
@@ -293,6 +304,12 @@ type LinkRow = {
   archive_attempts: number;
   /** この時刻（epoch ms）までは再試行しない */
   archive_retry_at: number;
+  /** ダッシュボードの索引の outbox（D10）。行を変えるたびに index_revision を上げ、alarm で配送して index_sent_revision を追いつかせる */
+  index_revision: number;
+  index_sent_revision: number;
+  /** 配送の連続失敗の回数と、この時刻（epoch ms）までは再試行しない */
+  index_attempts: number;
+  index_retry_at: number;
 };
 
 export type GetStatusResult = { ok: true; task: TaskView } | { ok: false; code: "not_found" };
@@ -549,6 +566,15 @@ export class TaskDO extends DurableObject<Env> {
       "archive_retry_at",
       "INTEGER NOT NULL DEFAULT 0",
     );
+    // ダッシュボードの索引の outbox（M3a）。既存のタスクは 0/0（= 配送するものが無い）で始まり、次に更新が来た時点で 1 になる。過去分の遡及はしない
+    for (const column of [
+      "index_revision",
+      "index_sent_revision",
+      "index_attempts",
+      "index_retry_at",
+    ]) {
+      addColumnIfMissing(this.ctx.storage.sql, "agent_link", column, "INTEGER NOT NULL DEFAULT 0");
+    }
     // Phase 3: Draft PR・Installation Token・終端処理の進み具合（1 行）。Phase 2 で作られたタスクには無い。
     sql.exec(`CREATE TABLE IF NOT EXISTS github_link (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -856,6 +882,7 @@ export class TaskDO extends DurableObject<Env> {
       to,
       at,
     );
+    this.bumpIndexRevision();
     this.appendEvent("status_changed", { status: to, from, ...extra }, at);
     // 回答待ちの起点（24 時間のバックストップの基準）。INPUT_REQUIRED に入ったときに記録し、出たら消す。
     if (to === "INPUT_REQUIRED") {
@@ -1004,6 +1031,7 @@ export class TaskDO extends DurableObject<Env> {
         `agent/task-${input.task_id}`,
       );
       this.appendEvent("created", { status: "CREATING" }, at);
+      this.bumpIndexRevision();
       const row = this.getRow();
       if (!row) throw new Error("task row missing after insert");
       return { ok: true, created: true, task: this.view(row) };
@@ -1060,6 +1088,7 @@ export class TaskDO extends DurableObject<Env> {
         "UPDATE task SET status = 'CANCELLED', updated_at = ? WHERE singleton = 1",
         at,
       );
+      this.bumpIndexRevision();
       this.appendEvent("cancelled", { status: "CANCELLED", from }, at);
       // CANCELLED の確定と同じトランザクションで、AgentDO へ cancel を配送する意図を記録する。
       this.ctx.storage.sql.exec(
@@ -1256,6 +1285,10 @@ export class TaskDO extends DurableObject<Env> {
   /** alarm は at-least-once で発火する。処理は冪等で、次の alarm は advance が明示的に設定し直す。 */
   override async alarm(): Promise<void> {
     await this.advance();
+    // 索引の配送は alarm の経路だけで行う（advance は task_start / task_wait / task_cancel からも呼ばれ、Directory を待たせない）。
+    // 配送が済むと dirty が消えるので、alarm を設定し直す（終端のタスクの alarm を消す）。
+    await this.deliverIndex();
+    await this.syncAlarm();
   }
 
   private withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -1396,13 +1429,23 @@ export class TaskDO extends DurableObject<Env> {
       this.emitAudit("pr_denied", { ...fields, reason: action.reason, merge_policy });
       return;
     }
-    if (action.kind === "ready") {
-      this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0");
-      if (action.changed !== false) this.emitAudit("pr_ready", { ...fields, merge_policy });
-    } else {
-      this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0, pr_merged = 1");
-      if (action.changed !== false) this.emitAudit("pr_merged", { ...fields, merge_policy });
+    // PR の状態の更新と revision の上昇は同じトランザクション
+    this.ctx.storage.transactionSync(() => {
+      if (action.kind === "ready") {
+        this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0");
+      } else {
+        this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0, pr_merged = 1");
+      }
+      this.bumpIndexRevision();
+    });
+    if (action.changed !== false) {
+      this.emitAudit(action.kind === "ready" ? "pr_ready" : "pr_merged", {
+        ...fields,
+        merge_policy,
+      });
     }
+    // 終端の後は alarm が消えている。未配送の索引を配送するために、alarm を戻す
+    await this.ensureAlarm();
   }
 
   /** task_result と R2 の result.json が共有する結果の組み立て。AgentDO の getResult が失敗・タイムアウトしたら throw する。 */
@@ -1805,13 +1848,18 @@ export class TaskDO extends DurableObject<Env> {
         }
         cursor = e.seq;
       }
+      const usagePublicJson = JSON.stringify(usagePublic);
       this.ctx.storage.sql.exec(
         "UPDATE agent_link SET ingest_cursor = ?, usage_seq = ?, usage_micro = ?, usage_public = ? WHERE singleton = 1",
         cursor,
         usageSeq,
         usageMicro,
-        JSON.stringify(usagePublic),
+        usagePublicJson,
       );
+      // 索引に出る usage の値が変わったときだけ上げる（何も変わらない取り込みで dirty にしない）
+      if (usageMicro !== link.usage_micro || usagePublicJson !== link.usage_public) {
+        this.bumpIndexRevision();
+      }
       return cursor > link.ingest_cursor;
     });
     if (this.latestSeq() !== before) this.notifyWaiters();
@@ -2091,6 +2139,7 @@ export class TaskDO extends DurableObject<Env> {
           pr.draft ? 1 : 0,
         );
         sql.exec("UPDATE task SET draft_pr_url = ? WHERE singleton = 1", pr.url);
+        this.bumpIndexRevision();
         const at = this.now();
         this.appendEvent(
           "draft_pr_created",
@@ -2733,7 +2782,151 @@ export class TaskDO extends DurableObject<Env> {
     return this.buildSummary(row, link);
   }
 
+  // ---- ダッシュボードの索引（docs/specs/dashboard.md D10 / M3a）----
+
+  /** Directory への配送の待ちの上限（ms）。テストで短くする。 */
+  protected indexTimeoutMs = INDEX_TIMEOUT_MS;
+
+  /** 再試行間隔のジッター用の乱数（[0, 1)）。テストで差し替える。 */
+  protected random: () => number = Math.random;
+
+  /** 索引のシングルトン。テストで差し替える。 */
+  protected directoryStub() {
+    return this.env.DIRECTORY_DO.getByName(DIRECTORY_NAME);
+  }
+
+  /**
+   * 索引に出る値を変える同期区間の中で呼ぶ（transactionSync の中。行の更新と同じトランザクションで revision を上げる）。
+   * 配送は alarm が最新の snapshot を 1 回送るので、usage のように頻繁な更新でも配送は alarm の周期にまとまる。
+   */
+  private bumpIndexRevision(): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE agent_link SET index_revision = index_revision + 1 WHERE singleton = 1",
+    );
+  }
+
+  /**
+   * 最新の snapshot を Directory へ配送する（alarm からだけ呼ぶ）。失敗してもタスクの本体を止めない（索引は派生データ）。
+   * snapshot と revision は await を挟まず同期で読み、成功したら送った revision まで sent を進める
+   * （送っている間に revision が上がっていても取りこぼさない）。失敗は指数バックオフで再試行する。
+   */
+  private async deliverIndex(): Promise<void> {
+    try {
+      if (this.env.DIRECTORY_DO === undefined) return;
+      const row = this.getRow();
+      const link = this.getLink();
+      if (!row || !link || link.index_revision <= link.index_sent_revision) return;
+      if (this.now() < link.index_retry_at) return;
+      const revision = link.index_revision;
+      const snapshot = this.buildIndexSnapshot(row, link);
+      try {
+        const call = this.directoryStub().upsertTask(
+          snapshot,
+          revision,
+        ) as unknown as Promise<UpsertTaskResult>;
+        const res = await this.withTimeout(call, this.indexTimeoutMs);
+        if (!res.ok) {
+          if (res.code === "invalid_input") {
+            // 恒久的な拒否（snapshot がスキーマに合わない）。再送しても通らないので、この revision は送信済みとして捨てる。
+            // ログにはコード（名前）だけを出す。次の更新（新しい revision）で、また送る
+            console.error("task_index_rejected", res.code);
+            this.ctx.storage.sql.exec(
+              "UPDATE agent_link SET index_sent_revision = MAX(index_sent_revision, ?), index_attempts = 0, index_retry_at = 0 WHERE singleton = 1",
+              revision,
+            );
+            return;
+          }
+          throw new Error(`rejected: ${res.code}`);
+        }
+      } catch (e) {
+        // エラーのメッセージにはデータが入りうるので、名前だけを記録する
+        console.error("task_index_deliver_error", e instanceof Error ? e.name : typeof e);
+        const attempts = link.index_attempts + 1;
+        const backoff = indexBackoffMs(attempts, this.random);
+        this.ctx.storage.sql.exec(
+          "UPDATE agent_link SET index_attempts = ?, index_retry_at = ? WHERE singleton = 1",
+          attempts,
+          this.now() + backoff,
+        );
+        return;
+      }
+      this.ctx.storage.sql.exec(
+        "UPDATE agent_link SET index_sent_revision = MAX(index_sent_revision, ?), index_attempts = 0, index_retry_at = 0 WHERE singleton = 1",
+        revision,
+      );
+    } catch (e) {
+      console.error("task_index_error", e instanceof Error ? e.name : typeof e);
+    }
+  }
+
+  /** 索引に入れる値（読むだけ）。入力（instructions など）・トークン・PR の本文は入れない。 */
+  private buildIndexSnapshot(row: TaskRow, link: LinkRow): TaskIndexSnapshot {
+    const gl = this.getGithub();
+    const status = this.statusOf(row);
+    const changes = this.ctx.storage.sql
+      .exec<{ type: string; payload: string; created_at: number }>(
+        "SELECT type, payload, created_at FROM events WHERE type IN ('status_changed', 'cancelled') ORDER BY seq",
+      )
+      .toArray()
+      .map((e) => ({
+        type: e.type,
+        at: e.created_at,
+        p: JSON.parse(e.payload) as { status?: unknown; reason?: unknown },
+      }));
+    const terminal = isTerminal(status);
+    const startedAt =
+      changes.find((c) => c.type === "status_changed" && c.p.status === "RUNNING")?.at ?? null;
+    const last = terminal ? changes.filter((c) => c.p.status === status).at(-1) : undefined;
+    const up = parseUsagePublic(link.usage_public);
+    const model = this.modelOf(row);
+    return {
+      task_id: row.id,
+      owner_id: row.owner_id,
+      owner_login: clip(row.owner_login, INDEX_LIMITS.login),
+      repository: clip(row.repository, INDEX_LIMITS.repository),
+      repository_id: row.repository_id,
+      title: clip(row.title, INDEX_LIMITS.title),
+      status,
+      model: clip(model, INDEX_LIMITS.model),
+      effort: this.effortOfRow(row),
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      started_at: startedAt,
+      // updated_at は状態が変わったときにしか動かない（changeStatus / cancel）ので、終端の updated_at が終了の時刻
+      ended_at: terminal ? row.updated_at : null,
+      cost_micro: link.usage_micro,
+      input_tokens: Math.floor(up.input_tokens ?? 0),
+      output_tokens: Math.floor(up.output_tokens ?? 0),
+      cache_read_tokens: Math.floor(up.cache_read_tokens ?? 0),
+      cache_write_tokens: Math.floor(up.cache_write_tokens ?? 0),
+      pr_number: gl?.pr_number ?? null,
+      // URL は切り詰めると壊れるので、上限を超えたら入れない
+      pr_url: gl?.pr_url != null && gl.pr_url.length <= INDEX_LIMITS.url ? gl.pr_url : null,
+      pr_draft: gl?.pr_draft === undefined || gl.pr_draft === null ? null : gl.pr_draft === 1,
+      pr_merged: gl?.pr_merged === 1,
+      reason: typeof last?.p.reason === "string" ? clip(last.p.reason, INDEX_LIMITS.reason) : null,
+      failure_phase:
+        status === "FAILED" && gl !== undefined && gl.setup_done === 0 ? "setup" : null,
+      // deps_cache は終端の結果（AgentDO の getResult）にしか無く、TaskDO が同期で持つ値ではない。詳細は TaskDO から読む（M7）
+      deps_cache: null,
+      sandbox_runtime_ms:
+        up.sandbox_runtime_ms !== undefined ? Math.floor(up.sandbox_runtime_ms) : null,
+    };
+  }
+
+  /** 未配送の索引があるか。Directory が未束縛の環境（migration の前など）では無いものとして扱う（alarm を回し続けない） */
+  private indexDirty(): boolean {
+    if (this.env.DIRECTORY_DO === undefined) return false;
+    const link = this.getLink();
+    return link !== undefined && link.index_revision > link.index_sent_revision;
+  }
+
   private needsAlarm(): boolean {
+    return this.indexDirty() || this.needsTaskAlarm();
+  }
+
+  /** 索引以外の仕事（start / cancel の再送、取り込み、精算、終了処理、アーカイブ）が残っているか。 */
+  private needsTaskAlarm(): boolean {
     const link = this.getLink();
     const row = this.getRow();
     if (!link || !row) return false;
@@ -2756,7 +2949,12 @@ export class TaskDO extends DurableObject<Env> {
     const row = this.getRow();
     const link = this.getLink();
     if (!row || !link) return ALARM_INTERVAL_MS;
+    // 索引だけが残っているときは、配送の再試行の間隔（バックオフ）に合わせる
+    if (this.indexDirty() && !this.needsTaskAlarm()) {
+      return Math.max(ALARM_INTERVAL_MS, link.index_retry_at - this.now());
+    }
     const idle =
+      !this.indexDirty() &&
       this.statusOf(row) === "INPUT_REQUIRED" &&
       link.start_state === "accepted" &&
       link.cancel_state === "none" &&

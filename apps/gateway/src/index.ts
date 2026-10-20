@@ -4,6 +4,7 @@ import { auditFromWorker } from "./audit-sink";
 import { handleDashboard, isDashboardPath } from "./dashboard/serve";
 
 // Durable Object クラスは Worker のエントリから export する（wrangler.jsonc の migrations と対応）。
+export { DirectoryDO } from "./directory/directory-do";
 export { TaskDO } from "./tasks/task-do";
 export { UserDO } from "./tasks/user-do";
 

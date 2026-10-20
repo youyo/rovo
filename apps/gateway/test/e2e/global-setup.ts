@@ -65,6 +65,12 @@ function writeE2eConfig(dir: string, opts: { logs: boolean }): string {
   const config = {
     ...base,
     main: join(GATEWAY_DIR, String(base.main)),
+    // assets.directory も設定の置き場所（一時ディレクトリ）からの相対にならないよう絶対パスにする。
+    // 中身は build:dashboard が作る（mise の test:e2e:gateway が依存している）
+    assets: {
+      ...(base.assets as Record<string, unknown>),
+      directory: join(GATEWAY_DIR, String((base.assets as { directory: string }).directory)),
+    },
     // logs: false は LOGS を外した構成（本番の wrangler.jsonc と同じく r2_buckets なし）
     ...(opts.logs ? { r2_buckets: [{ binding: "LOGS", bucket_name: "rovo-logs-e2e" }] } : {}),
   };

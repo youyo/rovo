@@ -48,6 +48,11 @@ description = "packages/models の Unit テスト（許可リスト・カタロ�
 dir = "packages/models"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
+[tasks."test:unit:dashboard"]
+description = "apps/dashboard（SPA）の Unit テスト（vitest + jsdom）。ビルドも workerd も使わない"
+dir = "apps/dashboard"
+run = "pnpm exec vitest run --config vitest.config.ts"
+
 [tasks."test:unit:gateway"]
 description = "gateway の Unit テスト（vitest + workerd）"
 dir = "apps/gateway"
@@ -88,8 +93,8 @@ description = "依存関係のキャッシュ（D14）のコンテナ内スク�
 run = "node --test scripts/deps-scripts.test.mjs"
 
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts"]
+description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
@@ -97,17 +102,20 @@ run = ["terraform -chdir=infra init -backend=false -input=false", "terraform -ch
 
 [tasks."test:e2e:gateway"]
 description = "gateway の E2E（wrangler dev で実 Worker と偽 GitHub を起動し、MCP SDK Client から通しで検証）"
+depends = ["build:dashboard"]
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 
 [tasks."test:e2e:gateway:nologs"]
 description = "gateway の E2E（LOGS = R2 を外した構成。archive_skipped で fail-open になることを検証）。dev registry の取り違えを避けるため test:e2e:gateway の後に直列で走らせる"
+depends = ["build:dashboard"]
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.e2e-nologs.config.ts"
 wait_for = ["test:e2e:gateway"]
 
 [tasks."test:e2e:gateway:userids"]
 description = "gateway の E2E（ALLOWED_USER_IDS だけの認可の構成。ALLOWED_ORG / ALLOWED_TEAM は空）。dev registry の取り違えを避けるため test:e2e:gateway と test:e2e:gateway:nologs の後に直列で走らせる"
+depends = ["build:dashboard"]
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.e2e-userids.config.ts"
 wait_for = ["test:e2e:gateway", "test:e2e:gateway:nologs"]
@@ -121,6 +129,7 @@ wait_for = ["test:unit:gateway", "test:unit:agent", "test:unit:web", "test:fake-
 
 [tasks."test:e2e:full"]
 description = "Gateway(MCP) → AgentDO → SandboxDO（実コンテナ）と、Web Research Service（apps/web。3つの Worker を同時に起動し、偽の Web / Clef / Web Search API を使う）の通しの E2E（Docker 必須）。Phase 3 のゴール（Draft PR・push・PR 本文の更新・トークンの失効）、Phase 4 の対話、Phase 5 の web_search / web_fetch の検証。test:e2e:docker と Docker コンテナの片付けが干渉しないよう、同時には走らせない"
+depends = ["build:dashboard"]
 dir = "apps/gateway"
 run = "pnpm exec vitest run --config vitest.e2e-full.config.ts"
 wait_for = ["test:e2e:docker"]
@@ -148,6 +157,11 @@ description = "packages/models の型検査"
 dir = "packages/models"
 run = "pnpm exec tsc -p tsconfig.json"
 
+[tasks."typecheck:dashboard"]
+description = "dashboard の型検査"
+dir = "apps/dashboard"
+run = "pnpm exec tsc -p tsconfig.json"
+
 [tasks."typecheck:gateway"]
 description = "gateway の型検査"
 dir = "apps/gateway"
@@ -165,7 +179,7 @@ run = "pnpm exec tsc -p tsconfig.json"
 
 [tasks.typecheck]
 description = "TypeScript の型検査（全アプリ）"
-depends = ["typecheck:audit", "typecheck:models", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
+depends = ["typecheck:audit", "typecheck:models", "typecheck:dashboard", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
 
 [tasks."lint:biome"]
 description = "Biome による lint / format チェック"
@@ -191,9 +205,20 @@ run = "terraform fmt -recursive infra"
 description = "infra/ の Terraform の構文と型の検証（init -backend=false のあと validate。資格情報は要らない）"
 run = ["terraform -chdir=infra init -backend=false -input=false", "terraform -chdir=infra validate"]
 
+[tasks."build:dashboard"]
+description = "dashboard（SPA）をビルドして apps/dashboard/dist に出す（gateway の assets.directory）。vite が成功時に dist を空にしてから書き出す（emptyOutDir）。scripts/deploy.sh の gateway のデプロイも同じコマンドを使う"
+dir = "apps/dashboard"
+run = "pnpm exec vite build"
+
+[tasks."test:dashboard:dist"]
+description = "dashboard のビルド成果物の検査（node:test。dist の HTML に <style / style= / 外部ホストが無いこと、/dashboard/ 配下を指していること、容量の上限）。build:dashboard を先に走らせる"
+depends = ["build:dashboard"]
+run = "node --test scripts/dashboard-dist.test.mjs"
+
 [tasks."build:gateway"]
-description = "gateway をバンドル（デプロイはしない）"
+description = "gateway をバンドル（デプロイはしない）。assets.directory（apps/dashboard/dist）が要るので build:dashboard が先"
 dir = "apps/gateway"
+depends = ["build:dashboard"]
 run = "pnpm exec wrangler deploy --dry-run --outdir dist"
 
 [tasks."build:agent"]
@@ -207,16 +232,18 @@ dir = "apps/web"
 run = "pnpm exec wrangler deploy --dry-run --outdir dist"
 
 [tasks.build]
-description = "3 つの Worker をバンドル（デプロイはしない。バンドルが通るかの確認）"
-depends = ["build:gateway", "build:agent", "build:web"]
+description = "dashboard をビルドし、3 つの Worker をバンドル（デプロイはしない。バンドルが通るかの確認）"
+depends = ["build:dashboard", "build:gateway", "build:agent", "build:web"]
 
 [tasks.dev]
-description = "wrangler dev でローカル起動（apps/gateway/.dev.vars を読む。.dev.vars.example 参照）。gateway 単体"
+description = "wrangler dev でローカル起動（apps/gateway/.dev.vars を読む。.dev.vars.example 参照）。gateway 単体。dashboard を先にビルドする"
 dir = "apps/gateway"
+depends = ["build:dashboard"]
 run = "pnpm exec wrangler dev"
 
 [tasks."dev:all"]
-description = "gateway・agent・web を同時にローカル起動（Docker 必須）。script_name 付きバインディングと service binding（WEB）は全部を同時に起動しないと解決できない"
+description = "gateway・agent・web を同時にローカル起動（Docker 必須）。script_name 付きバインディングと service binding（WEB）は全部を同時に起動しないと解決できない。dashboard を先にビルドする"
+depends = ["build:dashboard"]
 run = "node apps/gateway/node_modules/wrangler/bin/wrangler.js dev -c apps/gateway/wrangler.jsonc -c apps/agent/wrangler.jsonc -c apps/web/wrangler.jsonc"
 
 [tasks."test:fake-github"]

@@ -51,24 +51,31 @@ rovo を upstream として取り込み、自分の Cloudflare アカウント�
 
 ### 手順は 1 本
 
-人が作るトークンは Terraform 用の 1 つだけ。人が入力・用意する secret は 2 つ（GitHub App の Client secret と、秘密鍵の `.pem` のパス）。wrangler の設定には手で書く値が無い（秘密でない値は `rovo.config.json` の 1 か所）。
+人が作るトークンは Terraform 用の 1 つだけ。**人が手で扱う secret は 0**（D12b）。GitHub App の Client secret と秘密鍵はブラウザの「Create GitHub App」を押すだけで作られて gateway の secret に直接入り、Anthropic のキーは `mise run byok` の隠した入力で AI Gateway に入る。wrangler の設定には手で書く値が無い（秘密でない値は `rovo.config.json` の 1 か所）。
 
-| | 以前 | いま |
-|---|---|---|
-| 人が作る Cloudflare のトークン | 2（Terraform 用、gateway の読み取り用） | **1**（Terraform 用。gateway の読み取り用は Terraform が作る） |
-| 人が入力・用意する secret | 5（Client secret、秘密鍵〔PKCS#8 に手で変換〕、`TOKEN_ENC_KEY` ×2、`CLOUDFLARE_API_TOKEN`） | **2**（Client secret、`.pem` のパス）。鍵 ×2 は自動生成、`CLOUDFLARE_API_TOKEN` は Terraform の出力から、PKCS#8 への変換はスクリプト |
-| wrangler の設定に手で書く値 | 9 か所（gateway に 7: KV の id、`PUBLIC_BASE_URL`、`GITHUB_APP_ID`、`GITHUB_APP_CLIENT_ID`、`ALLOWED_USER_IDS`、`AI_GATEWAY_ID`、account id、agent と web に `AI_GATEWAY_ID` が 1 つずつ。ほかに重複する値が多数） | **0**（`deploy:config` が生成する） |
-| 手順 | 4 節の 7 手順 | `mise run setup` 1 本 + 画面の作業（GitHub App の作成、BYOK の登録） |
+| | 以前 | D12 | いま（D12b） |
+|---|---|---|---|
+| 人が作る Cloudflare のトークン | 2 | 1（Terraform 用） | **1**（Terraform 用） |
+| 人が手で扱う secret | 5 | 2（Client secret、`.pem` のパス） | **0**（GitHub App は manifest フローで作られ、Client secret・秘密鍵はディスクを通らずに gateway へ。Anthropic のキーは `mise run byok` の隠した入力） |
+| wrangler の設定に手で書く値 | 9 か所 | 0 | **0** |
+| 手順 | 7 手順 | `mise run setup` 1 本 + 画面の作業 | トークン 1 つ → `rovo.config.json` → `mise run setup`（ブラウザで Create GitHub App を押す）→ Install → `mise run byok` |
 
 ```bash
-# 1. 一度だけの準備
+# 1. Terraform 用のトークンを 1 つ作る（権限は infra/README.md）。wrangler login と Docker（agent のイメージのビルド）も用意する
 mise install                              # node / pnpm / terraform
-pnpm exec wrangler login                  # デプロイ用（OAuth）。Docker も動かしておく（agent のイメージのビルド）
-export CLOUDFLARE_API_TOKEN=...           # Terraform 用のトークン（権限は infra/README.md）。wrangler には渡されない
-cp rovo.config.example.json rovo.config.json   # 秘密でない値を埋める（下の表）
+pnpm exec wrangler login                  # デプロイ用（OAuth）
+export CLOUDFLARE_API_TOKEN=...           # Terraform 用のトークン。wrangler には渡されない。byok でも使う
 
-# 2. 実行（何度でも再実行できる）
-mise run setup                            # 前提の確認 → terraform → deploy:config → deploy:all → deploy:secrets
+# 2. rovo.config.json に publicBaseUrl と許可する利用者だけ書く（あとは既定）
+cp rovo.config.example.json rovo.config.json   # accountId / publicBaseUrl / allowed を埋める（下の表）
+
+# 3. 実行（何度でも再実行できる）。途中でブラウザが開く: GitHub で「Create GitHub App」を押す
+mise run setup                            # 前提の確認 → terraform → deploy:config → deploy:all → deploy:secrets → GitHub App の作成
+
+# 4. GitHub App を Install する（setup が Install のページを開く。対象の org / リポジトリに入れる）
+
+# 5. Anthropic のキーを AI Gateway に入れる（隠した入力。OpenAI を使うなら openai も）
+mise run byok -- anthropic
 ```
 
 `mise run setup` の流れ（`scripts/setup.sh`。既存のタスクの薄い組み合わせ）:
@@ -78,9 +85,40 @@ mise run setup                            # 前提の確認 → terraform → de
 3. **`deploy:config`**: `deploy.example/` の雛形に、`rovo.config.json` と Terraform の非秘密の出力（`kv_namespace_id` / `archive_bucket_name` / `ai_gateway_id`）を埋めて、`deploy/{gateway,agent,web}.wrangler.jsonc` を生成する。
 4. **`deploy:all`**: web → agent → gateway の順にデプロイする（3）。
 5. **`deploy:secrets`**: 入っていない secret だけを入れる（下の「secret」）。
-6. **画面の作業の案内**を表示する: GitHub App の作成画面に入れる値（Callback URL = `<PUBLIC_BASE_URL>/callback`、権限の表）と、BYOK の手順。
+6. **GitHub App の作成**（`githubApp` が空のとき。`--no-github-app` で飛ばせる）: 下の「GitHub App の自動作成」。
+7. **残りの作業の案内**を表示する: Install、ユーザートークンの期限の確認、`mise run byok` のコマンド（キーの入力が要るので自動では実行しない）。
 
-**GitHub App は `PUBLIC_BASE_URL` が決まってから作る**ので、初回は `githubApp` を空のまま進める（`deploy:config` が警告を出し、`setup` は GitHub App の secret を飛ばす）。GitHub App を作ったら、`rovo.config.json` の `githubApp.id` と `githubApp.clientId` に App ID と Client ID を入れ、`mise run setup -- --pem <ダウンロードした .pem>` を実行する。Terraform は差分が無く、`deploy:config` で `GITHUB_APP_ID` / `GITHUB_APP_CLIENT_ID` が入って再デプロイされ、Client secret（隠した入力）と秘密鍵が入る。
+**GitHub App は `PUBLIC_BASE_URL` が決まってから作る**ので、`setup` は `deploy:all` と最初の `deploy:secrets`（GitHub App の secret を除く）のあとに作る。`githubApp` が設定済みなら何もしない（既存の App を使う `--pem <.pem>` も従来どおり使える）。
+
+### GitHub App の自動作成（`mise run github-app`。`setup` からも呼ばれる）
+
+GitHub の公式の manifest フロー（[Registering a GitHub App from a manifest](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest)）で作る。
+
+| 手順 | 誰が | 内容 |
+|---|---|---|
+| 1 | スクリプト | `127.0.0.1` のランダムなポートに一時の HTTP サーバーを立て、ブラウザで手元のページを開く（開けなければ URL を表示）。ページは manifest と state（CSRF 用の乱数）を入れたフォームを GitHub（個人は `settings/apps/new`、org は `organizations/<org>/settings/apps/new`）へ POST する。org は `rovo.config.json` の `allowed.org` が既定で、`--org <名前>` / `--personal` で選べる |
+| 2 | **人（ブラウザ）** | GitHub の画面で **「Create GitHub App」を押す** |
+| 3 | スクリプト | GitHub が `http://127.0.0.1:<port>/callback?code=…&state=…` に戻す。state を照合し、`POST /app-manifests/{code}/conversions`（認証不要。応答 201 に `id` / `slug` / `client_id` / `client_secret` / `webhook_secret` / `pem`）を呼ぶ |
+| 4 | スクリプト | `client_secret` と `pem` を **ディスクに書かず**、`deploy.sh secrets --github-app-stdin`（標準入力の JSON）で gateway の `GITHUB_APP_CLIENT_SECRET` / `GITHUB_APP_PRIVATE_KEY`（pem は `openssl pkcs8` で PKCS#8 に変換）に入れる。`webhook_secret` は使わないので捨てる |
+| 5 | スクリプト | `id` と `client_id` を `rovo.config.json` の `githubApp` に書く（ほかの整形は保つ）→ `deploy:config --no-terraform` → gateway を再デプロイ（`GITHUB_APP_ID` / `GITHUB_APP_CLIENT_ID` を反映） |
+| 6 | **人（ブラウザ）** | 開いた Install のページ（`https://github.com/apps/<slug>/installations/new`）で、対象の org / リポジトリに入れる |
+| 7 | **人（ブラウザ）** | App の設定画面（Optional features）で **User-to-server token expiration**（「ユーザートークンに期限を付ける」）が有効なことを確かめる。manifest では指定できない（docs に記載が無い）。無効でも動く（6） |
+
+manifest の内容: `name` は `rovo-<namePrefix>-<乱数>`（GitHub 全体で一意。`--name` で指定）、`url` は `publicBaseUrl`、`callback_urls` は `<publicBaseUrl>/callback`、`request_oauth_on_install: false`、`public: false`、`hook_attributes: { url: publicBaseUrl, active: false }`（Webhook は使わない）、`default_permissions` は Contents: write / Pull requests: write / Metadata: read（`allowed.team` を使うときだけ Members: read を足す）、`default_events: []`、`setup_on_update: false`。
+
+- **何も書かずに止まる場合**: 待ち時間切れ（既定 15 分。manifest の code は 1 時間で失効する）、state の不一致、`code` が無い、conversions の失敗や応答の欠け。止まるときは `rovo.config.json` も secret も変えない。GitHub 側に App が作られていたら、GitHub の画面で削除してやり直す。
+- **secret の put に失敗した場合**: `rovo.config.json` を変えずに止まる（client secret と秘密鍵は保存していないので、その App は使えない。削除してやり直す）。
+- **作り直し**: `mise run github-app -- --recreate`（古い App は GitHub の画面で削除する。secret は新しい App のもので上書きされる）。`--no-deploy` は secret と設定の更新までで、再生成と再デプロイをしない。
+- **値の経路**: GitHub の応答 → `github-app.mjs` のメモリ → `deploy.sh` の標準入力（パイプ）→ `openssl`（標準入力）→ `wrangler secret put`（標準入力）。引数・env・ログ・ファイルには出ない。env の `CLOUDFLARE_API_TOKEN`（Terraform 用）は wrangler に渡さない。
+
+### BYOK を CLI で登録する（`mise run byok -- <anthropic|openai>`）
+
+AI Gateway にプロバイダーのキーを、エイリアス `default` で登録する（Cloudflare API の `POST /accounts/{accountId}/ai-gateway/gateways/{ai_gateway_id}/provider_configs`、body は `{ provider_slug, alias: "default", default_config: true, secret }`）。`accountId` は `rovo.config.json`、ゲートウェイの id は `deploy/infra.json`（Terraform の出力）、認証は env の `CLOUDFLARE_API_TOKEN`（Terraform 用）。
+
+- キーは**表示されない入力**（TTY の echo を切る）で受け取る。引数では受け取らない（プロセス一覧に見える）。TTY でなければ標準入力の 1 行を読む。値は引数・env・ログ・ファイルに出さず、API の `body` にだけ渡す（エラー表示でも伏せる）。
+- 既に同じプロバイダーの `default` のキーがあれば（list で確かめる）、上書き（`PUT .../provider_configs/{id}` = Rotate）するかを聞く。`--yes` で確認を省く。TTY でなければ、確認の答えは標準入力の先頭行、キーはその次の行。
+- 403（権限不足）のときは必要な権限を案内して止まる: Terraform 用トークンに **Account / AI Gateway / Edit**。BYOK のキーは Secrets Store に保存されるので、**Secrets Store の編集権限が別に要る可能性がある（未確認）**。
+- `setup` は最後にこのコマンドを案内するだけで、自動では実行しない（キーの入力が要るため）。
 
 ### `rovo.config.json`（下流が書く唯一の設定。秘密でない値だけ）
 
@@ -96,6 +134,7 @@ mise run setup                            # 前提の確認 → terraform → de
 | `allowed.org` / `.team` / `.userIds` | どちらか必須 | | `ALLOWED_ORG` / `ALLOWED_TEAM`（対）/ `ALLOWED_USER_IDS`（数値の ID の配列かカンマ区切り） |
 | `budget.monthlyUsd` / `.taskUsd` / `.consultUsd` | | 100 / 10 / 0.5 | `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` / `CONSULT_BUDGET_USD` |
 | `models.default` / `.list` / `.efforts` | | 雛形のとおり | `AGENT_MODEL` / `AGENT_MODELS`（配列かカンマ区切り）/ `MODEL_EFFORTS`（`{モデルの id: レベル}` か文字列）。**gateway と agent の同名の var に同じ値が入る** |
+| `sandbox.instance` | | `standard-2` | agent の `SANDBOX_INSTANCE` と、gateway の `SANDBOX_USD_PER_HOUR`（その大きさの上限側の単価を計算して入れる。`vars.gateway.SANDBOX_USD_PER_HOUR` を書けばそれを優先）。5 種類以外はエラー（11） |
 | `webBrowseEnabled` | | `false` | `WEB_BROWSE_ENABLED`。**3 つの Worker に同じ値が入る**（12） |
 | `vars.gateway` / `.agent` / `.web` | | `{}` | 雛形にあるほかの var（上限・単価・`SAFETY_*` など）の上書き。雛形に無い名前、専用の項目で設定する名前、secret は拒否する |
 
@@ -141,13 +180,15 @@ AI Gateway の ID・KV の id・アーカイブのバケット名は Terraform �
 
 > rovo の `apps/*/wrangler.jsonc` に本番の値を書かないこと。特に `r2_buckets` は下流の設定にだけ置く。
 
-確かめた範囲（2026-10-20）: `deploy.example/` の gateway と web を `wrangler deploy --dry-run -c <設定>`（`apps/<name>` で実行）でバンドルし、`main` が設定ファイルからの相対パスで解決されることを確かめた。agent も `--containers-rollout=none` で通った。コンテナのイメージのビルド（`dockerfile` の相対パスの解決）は、実際のデプロイでしか確かめられない。**【実機で確認して追記】** D12 の生成器を使った `setup` の通し（実アカウント）も未確認。**【実機で確認して追記】**
+確かめた範囲（2026-10-20）: `deploy.example/` の gateway と web を `wrangler deploy --dry-run -c <設定>`（`apps/<name>` で実行）でバンドルし、`main` が設定ファイルからの相対パスで解決されることを確かめた。agent も `--containers-rollout=none` で通った。コンテナのイメージのビルド（`dockerfile` の相対パスの解決）は、実際のデプロイでしか確かめられない。**【実機で確認して追記】** D12 の生成器を使った `setup` の通し（実アカウント）も未確認。**【実機で確認して追記】** D12b の manifest の受理（GitHub が manifest を受け付けるか、`redirect_url` が loopback で通るか）、User-to-server token expiration の既定、`byok` の権限（Secrets Store）と PUT（Rotate）の形も未確認。**【実機で確認して追記】**
 
 ### 個別のタスク
 
 | タスク | 内容 |
 |---|---|
-| `setup` | 上の流れを 1 本で行う。`-- --pem <path>` / `-- --yes` |
+| `setup` | 上の流れを 1 本で行う。`-- --yes` / `-- --no-github-app` / `-- --pem <既存の App の .pem>` |
+| `github-app` | GitHub App を manifest フローで作る（上の「GitHub App の自動作成」）。`-- --recreate` / `--org <名前>` / `--personal` / `--name <名前>` / `--no-deploy` |
+| `byok` | AI Gateway にプロバイダーのキーを登録する（上の「BYOK を CLI で登録する」）。`-- <anthropic\|openai> [--yes]` |
 | `deploy:config` / `deploy:config:check` | 設定の生成 / 差分の確認 |
 | `deploy:web` / `deploy:agent` / `deploy:gateway` | 1 つの Worker をデプロイする |
 | `deploy:all` | web → agent → gateway の順にデプロイする。3 つの設定のどれかが欠けていたら、何も実行しない。途中で失敗したら後続は実行しない |
@@ -161,7 +202,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 
 **`ROVO_DEPLOY_DIR` が未設定、またはディレクトリ・設定ファイルが無いときは、何もせずに失敗する。** upstream の `apps/*/wrangler.jsonc`（本番の値が無い）を誤ってデプロイしないため。**設定に `<...>` のプレースホルダが残っているときも、何も実行せずに失敗する**（コメント行は除く。`deploy.example/` をそのまま使えない）。失敗するときは、ファイル名と行番号を表示する。`all` と `secrets` は、対象の設定を全部確かめてから実行する。
 
-テスト: `mise run test:deploy`（`deploy.sh`。偽の `pnpm` / `openssl` / `terraform`）、`mise run test:deploy:config`（生成器。本番相当の架空の入力から手書き相当の設定が出ることを固定）、`mise run test:setup`（`setup.sh`。偽物だけ。PATH から本物を外す）。いずれも Cloudflare に触れない。
+テスト: `mise run test:github-app`（manifest フロー。偽の GitHub・偽のブラウザ・偽の `pnpm` / `openssl` / `open`）、`mise run test:byok`（偽の Cloudflare API）、`mise run test:deploy`（`deploy.sh`。偽の `pnpm` / `openssl` / `terraform`）、`mise run test:deploy:config`（生成器。本番相当の架空の入力から手書き相当の設定が出ることを固定）、`mise run test:setup`（`setup.sh`。偽物だけ。PATH から本物を外す）。いずれも Cloudflare に触れない。
 
 ### 手作業で行う場合（参考）
 
@@ -196,7 +237,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_FETCH_DAILY_LIMIT` | gateway | 任意 | `500` | 親の `web_fetch` の同上 |
 | `WEB_BROWSE_DAILY_LIMIT` | gateway | 任意 | `50` | 親の `web_browse` の同上 |
 | `WEB_BROWSE_ENABLED` | gateway / agent / web | 任意 | `"false"` | `"true"` のときだけ `web_browse` が有効。3 つの Worker で揃える（12） |
-| `SANDBOX_USD_PER_HOUR` | gateway | 任意 | `0.0073` | 推定費用の単価（11） |
+| `SANDBOX_USD_PER_HOUR` | gateway | 任意 | `0.1291`（`standard-2`） | 推定費用の単価（11）。`deploy:config` が `sandbox.instance` から計算する。書けばそれを優先する |
 | `WEB_USD_PER_1K_SEARCH` | gateway | 任意 | `0.25` | 同上 |
 | `WEB_USD_PER_1K_FETCH` | gateway | 任意 | `0` | 同上 |
 | `WEB_USD_PER_1K_BROWSE` | gateway | 任意 | `0.75` | 同上 |
@@ -205,6 +246,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_SEARCH_LIMIT_PER_TASK` | agent | 任意 | `50` | 子の `web_search` のタスクごとの回数の上限 |
 | `WEB_FETCH_LIMIT_PER_TASK` | agent | 任意 | `100` | 子の `web_fetch` の同上 |
 | `WEB_BROWSE_LIMIT_PER_TASK` | agent | 任意 | `20` | 子の `web_browse` の同上 |
+| `SANDBOX_INSTANCE` | agent | 任意 | `standard-2` | Sandbox コンテナの大きさ（`lite` / `standard-1` / `standard-2` / `standard-3` / `standard-4`）。不正な値は `standard-2` に戻る（警告のログ）。性能と上限の費用は 11。`rovo.config.json` の `sandbox.instance` で設定する |
 | `WEB_SEARCH_PROVIDER` | web | 任意 | `ceramic` | 検索プロバイダ（`ceramic` / `exa` / `linkup`）。変えたら単価も合わせる |
 | `SAFETY_BLOCK_THRESHOLD` | web | 任意 | `0.8` | Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block。**仮の値**で、受入で調整する |
 | `SAFETY_CAUTION_THRESHOLD` | web | 任意 | `0.4` | 同上。caution |
@@ -239,11 +281,11 @@ web に secret は無い（GitHub のトークンも Anthropic のキーも持�
 
 ## 6. GitHub App の作成
 
-GitHub の Settings > Developer settings > GitHub Apps で作る（OAuth App は使わない）。
+`mise run github-app`（`setup` からも呼ばれる。4）が manifest フローで自動で作る。下の設定は、その manifest の内容と同じ（手で作るときの参考。GitHub の Settings > Developer settings > GitHub Apps で作る。OAuth App は使わない）。
 
 - **Callback URL**: `<PUBLIC_BASE_URL>/callback`（ローカル開発用に `http://localhost:8787/callback` も追加できる）
 - **Request user authorization (OAuth) during installation**: 不要。**Webhook**: 無効でよい
-- **Expire user authorization tokens**: 有効にする（既定）。トークンは 8 時間で切れ、refresh token（約 6 か月）で自動更新される。無効にした場合も動く
+- **Expire user authorization tokens**: 有効にする（既定）。manifest では指定できない（docs に記載が無い）ので、自動作成のあと App の設定画面（Optional features）で確かめる。トークンは 8 時間で切れ、refresh token（約 6 か月）で自動更新される。無効にした場合も動く
 - **Repository permissions**: Metadata: Read-only / Contents: Read and write / Pull requests: Read and write
   - `task_pr_ready` / `task_pr_merge`（D9）は、**この権限のままで足りる**（追加は要らない）。これらは Installation Token ではなく、**利用者の GitHub のユーザートークン**で行うので、有効な権限は「App の権限」と「利用者本人の権限」の共通部分になる。Draft → Ready（GraphQL の `markPullRequestReadyForReview`）とマージ（`PUT .../pulls/{n}/merge`）には **Pull requests: write** と **Contents: write** が、`delete_branch`（`DELETE .../git/refs/heads/{branch}`）には **Contents: write** が要る。App の権限が read になっていると `forbidden` になる。利用者にそのリポジトリへの書き込み権限が無い場合も同じ。権限の表は GitHub の記述に基づくので、実機の受入（[acceptance.md](specs/acceptance.md) の 21 節）で確かめる
   - ブランチ保護（必須レビュー・必須チェック・ruleset）は GitHub が利用者のトークンに対して適用する。`merge_policy` が `agent_merge` でも、保護に拒否されたら `merge_blocked` になり、マージされない（組織としての強制は GitHub に任せる）
@@ -258,7 +300,7 @@ openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem | wrangler secret put GITH
 
 ## 7. AI Gateway の設定
 
-- AI Gateway を 1 つ作り、その ID を agent と web の `AI_GATEWAY_ID` に設定する（5）。`infra/` の Terraform が作る（認証あり、Require provider credentials あり、ログ収集あり、キャッシュとレート制限なし。`terraform output ai_gateway_id`）。BYOK はゲートウェイの認証が前提（認証が無いと、プロバイダー キーの画面で保存できない）。Anthropic の API キーは AI Gateway に保管する（BYOK）。**BYOK の登録は AI Gateway の画面で行い、Terraform には入れない。** Worker・Sandbox にはキーを置かない。
+- AI Gateway を 1 つ作り、その ID を agent と web の `AI_GATEWAY_ID` に設定する（5）。`infra/` の Terraform が作る（認証あり、Require provider credentials あり、ログ収集あり、キャッシュとレート制限なし。`terraform output ai_gateway_id`）。BYOK はゲートウェイの認証が前提（認証が無いと、プロバイダー キーの画面で保存できない）。Anthropic の API キーは AI Gateway に保管する（BYOK）。**BYOK の登録は `mise run byok -- anthropic`（4。隠した入力）か AI Gateway の画面で行い、Terraform には入れない。** Worker・Sandbox にはキーを置かない。
 - agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼ぶ。バインディングからの呼び出しは認証済みとして扱われるので、`cf-aig-authorization` と gateway token の secret は要らない。
 - Require provider credentials（`byok_only`）をオンにしている。BYOK のキーが無い・外れたときに、Claude の呼び出しが Unified Billing（Cloudflare のクレジット）へ流れず、400 で止まる（Anthropic Console の利用上限が効く経路だけを使う）。Workers AI（Clef-flash）は対象外で、課金にも影響しない。
   - Anthropic のキーは、エイリアスを **`default`** にして登録する。AI バインディングの経路では `default` のキーだけが使われ、別名のキーは参照されない（byok_only なので 400 になる）。
@@ -321,10 +363,24 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 
 | 変数 | 既定値 | 内容 |
 |---|---|---|
-| `SANDBOX_USD_PER_HOUR` | 0.0073 | Sandbox コンテナの 1 時間あたり。`lite`（1/16 vCPU、256 MiB、2 GB）で CPU を 100% 稼働とみなした値。`instance_type` を変えたら上書きする |
+| `SANDBOX_USD_PER_HOUR` | 0.1291 | Sandbox コンテナの 1 時間あたり。既定の大きさ `standard-2`（1 vCPU、6 GiB、12 GB）で CPU を 100% 稼働とみなした値。`deploy:config` を使うなら `sandbox.instance` から自動で計算される。`SANDBOX_INSTANCE` を手で変えたら、下の表の値に合わせるか上書きする |
 | `WEB_USD_PER_1K_SEARCH` | 0.25 | `web_search` 1,000 回あたり。既定のプロバイダ（ceramic）の値。`WEB_SEARCH_PROVIDER` を変えたら上書きする |
 | `WEB_USD_PER_1K_FETCH` | 0 | `web_fetch` 1,000 回あたり |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | `web_browse` 1,000 回あたり（1 回 30 秒を上限としたブラウザ時間） |
+
+### Sandbox の大きさ（`SANDBOX_INSTANCE`）
+
+`scheduling_policy: durable_object` では wrangler の `instance_type` が効かず、SandboxDO が `start()` に渡す `instance` が大きさを決める。以前は未指定で `lite`（256 MiB）になり、`npm ci` が遅く、メモリ不足で落ちることがあった。既定は `standard-2`。単価は CPU $0.000020 / vCPU 秒、メモリ $0.0000025 / GiB 秒、ディスク $0.00000007 / GB 秒を、CPU 100% 稼働として 1 時間分（上限側。月の無料枠は差し引かず、小数 4 桁に切り上げ）。表は `packages/models/src/sandbox.ts` が 1 か所で持つ。
+
+| `SANDBOX_INSTANCE` | vCPU | メモリ | ディスク | 1 時間あたりの上限（USD） | 向き不向き |
+|---|---|---|---|---|---|
+| `lite` | 1/16 | 256 MiB | 2 GB | 0.0073 | 軽いコマンドだけ。`npm ci` や依存の多いテストは遅く、メモリ不足で落ちうる |
+| `standard-1` | 1/2 | 4 GiB | 8 GB | 0.0741 | 小さなプロジェクトの `npm ci` / テスト |
+| `standard-2`（既定） | 1 | 6 GiB | 12 GB | 0.1291 | 一般的なプロジェクトのビルドとテスト |
+| `standard-3` | 2 | 8 GiB | 16 GB | 0.2201 | 並列のテスト、大きめのビルド |
+| `standard-4` | 4 | 12 GiB | 20 GB | 0.4011 | 重いビルド。費用も最大 |
+
+実際の費用は CPU の使用率とコンテナを動かした時間で決まり、この表は常に CPU 100% の上限。タスクは最長 2 時間なので、`standard-2` で 1 タスクの上限は約 $0.26。変えるのは `rovo.config.json` の `sandbox.instance`（`deploy:config` が agent の `SANDBOX_INSTANCE` と gateway の `SANDBOX_USD_PER_HOUR` に反映する）。Cloudflare の料金が変わったら `packages/models/src/sandbox.ts` の `SANDBOX_PRICE` を直す。コンテナが止まって作り直された理由（メモリ不足など）は、Workers の API が終了コードを返さないので記録できない。再起動が続くなら大きさを上げる。
 
 既定値の根拠（Cloudflare の公式料金表、取得日 2026-10-19）は `apps/gateway/wrangler.jsonc` のコメントと [phase6.md](specs/phase6.md) にある。料金改定で変わるので、下流で見直す。Web の回数は**子が使った分だけ**（親が MCP から使う分はタスクに紐付かない）。
 

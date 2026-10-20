@@ -75,9 +75,17 @@ run = "node --test scripts/deploy-config.test.mjs"
 description = "setup（scripts/setup.sh）の自己確認。terraform・pnpm・openssl・docker・mise をすべて偽物に差し替え、PATH から本物を外す。前提の欠け・順序・apply の失敗・GitHub App 未設定・秘密の値が出ないことを確かめる"
 run = "bash scripts/test-setup.sh"
 
+[tasks."test:github-app"]
+description = "github-app（GitHub App の manifest フロー scripts/github-app*.mjs）のテスト。偽の GitHub（conversions）・偽のブラウザ（callback を叩く）・偽の pnpm / openssl / open を使い、本物の GitHub・Cloudflare・wrangler には触れない。manifest の中身、state の照合、secret が標準入力で渡り値が出ないこと、時間切れ・不一致・失敗で何も書かないことを確かめる"
+run = "node --test scripts/github-app.test.mjs"
+
+[tasks."test:byok"]
+description = "byok（AI Gateway のプロバイダーキーの登録 scripts/byok.mjs）のテスト。偽の Cloudflare API をローカルに立てる。body・認証ヘッダ・上書きの確認・403 の案内・値が出ないことを確かめる"
+run = "node --test scripts/byok.test.mjs"
+
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup"]
+description = "Unit テスト（audit + models + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
@@ -243,8 +251,16 @@ run = [
 # upstream の apps/*/wrangler.jsonc（本番の値が無い）は決して渡さない。
 
 [tasks.setup]
-description = "初回のデプロイを 1 本で行う（前提の確認 → terraform init/apply → deploy:config → deploy:all → deploy:secrets → GitHub App と BYOK の案内）。何度でも再実行できる。使い方: mise run setup -- [--pem <GitHub App の .pem>] [--yes]"
+description = "初回のデプロイを 1 本で行う（前提の確認 → terraform init/apply → deploy:config → deploy:all → deploy:secrets → GitHub App の自動作成〔ブラウザで Create GitHub App を押す〕→ BYOK の案内）。何度でも再実行できる。使い方: mise run setup -- [--yes] [--no-github-app] [--pem <既存の GitHub App の .pem>]"
 run = "bash scripts/setup.sh"
+
+[tasks."github-app"]
+description = "GitHub App を manifest フロー（公式）で作る。ブラウザで手元のページが開き、GitHub で「Create GitHub App」を押すと、id / clientId を rovo.config.json に書き、client secret と秘密鍵は標準入力で gateway の secret に入れ（ディスクに書かない）、gateway を再デプロイして Install のページを開く。時間切れ・state の不一致・失敗は何も書かずに止まる。設定済みなら何もしない。使い方: mise run github-app -- [--recreate] [--org <名前> | --personal] [--name <App 名>] [--no-deploy]"
+run = "node scripts/github-app.mjs"
+
+[tasks.byok]
+description = "AI Gateway にプロバイダーのキー（BYOK、alias は default）を登録する。キーは表示されない入力で受け取り、引数・env・ログ・ファイルに出さない。既に default があれば上書きの確認をする。env の CLOUDFLARE_API_TOKEN（Terraform 用。AI Gateway の Edit）が要る。使い方: mise run byok -- <anthropic|openai> [--yes]"
+run = "node scripts/byok.mjs"
 
 [tasks."deploy:config"]
 description = "rovo.config.json（秘密でない値）と terraform の非秘密の出力（kv_namespace_id / archive_bucket_name / ai_gateway_id）から、deploy/ の wrangler 設定を生成する（生成物はコミットする）。terraform の資格情報が要る。オプション: --no-terraform（保存済みの deploy/infra.json から作り直す）/ --check（作り直した結果と既存を比べる。terraform 不要。下流の CI 用）"

@@ -47,14 +47,21 @@ describe("task_result の usage（依存関係のキャッシュ）", () => {
       cacheBuildMs: 60_000,
     });
     expect(usage).toMatchObject({ deps_cache: "built", cache_build_ms: 60_000 });
-  });
+    // 最初のテストは DO の起動が重く、全体を並列で走らせると 5 秒に迫るので、このテストだけ余裕を持たせる
+  }, 20_000);
 
-  it("hit / miss / disabled は deps_cache だけ（cache_build_ms は付けない）", async () => {
+  it("hit / miss / disabled は deps_cache と cache_build_ms: 0（集計しやすいよう常に出す）", async () => {
     for (const depsCache of ["hit", "miss", "disabled"]) {
       const usage = await resultWith({ runtimeMs: 1, restarts: 0, bootRetries: 0, depsCache });
       expect(usage.deps_cache).toBe(depsCache);
-      expect(usage).not.toHaveProperty("cache_build_ms");
+      expect(usage.cache_build_ms).toBe(0);
     }
+  });
+
+  it("sandbox_runtime_ms を返す（小数は切り捨て）。sandbox が無ければ付けない", async () => {
+    const usage = await resultWith({ runtimeMs: 90_500.9, depsCache: "hit" });
+    expect(usage.sandbox_runtime_ms).toBe(90_500);
+    expect(await resultWith(undefined)).not.toHaveProperty("sandbox_runtime_ms");
   });
 
   it("agent がカウンタを読めなかった（sandbox が無い）ときは、どちらも付けない", async () => {

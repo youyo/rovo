@@ -120,6 +120,17 @@ export async function directoryRow(taskId: string): Promise<Record<string, unkno
   return ((await res.json()) as { row: Record<string, unknown> | null }).row;
 }
 
+/** 索引（DirectoryDO）にある、ある利用者の consult の行（新しい順。/__test/directory/consults。ENVIRONMENT=test のときだけ）。 */
+export async function directoryConsults(ownerId: number): Promise<Record<string, unknown>[]> {
+  const res = await fetch(`${baseUrl}/__test/directory/consults`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ owner_id: ownerId }),
+  });
+  if (!res.ok) throw new Error(`/__test/directory/consults failed: ${res.status}`);
+  return ((await res.json()) as { rows: Record<string, unknown>[] }).rows;
+}
+
 export type TokenState = {
   finalizeDone: boolean;
   rows: number;

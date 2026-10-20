@@ -92,6 +92,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
   - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の予約、月額予算（タスクごとの予約・usage の冪等な精算・終了時の返却）。GitHub のトークンは DO の外へ返さない
   - `TaskDO`（タスクごと）: 状態とイベント。AgentDO への start / cancel の配送、イベントの取り込み、usage の精算を alarm で収束させる
 - `apps/agent`: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
+  - 依存関係のキャッシュ（D14）: ルート直下の lockfile（`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`）が同じなら、導入済みの `node_modules` を Containers のスナップショット（public beta）から復元して起動する。`DepsCacheDO`（鍵ごとに作成を 1 回にまとめる）と、SandboxDO の別インスタンス（作成）が行う。使えなくてもタスクは失敗せず今までどおり動く。結果は `task_result` の `usage.deps_cache`（`hit` / `miss` / `built` / `disabled`）と、作ったタスクの `cache_build_ms`。`rovo.config.json` の `depsCache.enabled` で無効にできる（docs/deploy.md の 17）
 
 ## 同意画面（confused deputy 対策）
 

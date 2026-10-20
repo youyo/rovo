@@ -206,3 +206,51 @@ describe("audit イベント（Phase 6 M3）", () => {
     }
   });
 });
+
+describe("usage の依存関係のキャッシュ（D14）", () => {
+  const base = { costUsd: 1 };
+
+  it("sandbox.depsCache と cacheBuildMs を deps_cache / cache_build_ms に写す", () => {
+    const p = payloadOf(
+      mapAgentEvent(
+        ev("usage", {
+          ...base,
+          sandbox: {
+            runtimeMs: 100,
+            restarts: 0,
+            bootRetries: 0,
+            depsCache: "built",
+            cacheBuildMs: 42_500.9,
+          },
+        }),
+      ),
+    );
+    expect(p).toMatchObject({ deps_cache: "built", cache_build_ms: 42_500 });
+  });
+
+  it("hit / miss / disabled はそのまま。cacheBuildMs が無い・0 のときは cache_build_ms を付けない", () => {
+    for (const depsCache of ["hit", "miss", "disabled"]) {
+      const p = payloadOf(
+        mapAgentEvent(ev("usage", { ...base, sandbox: { runtimeMs: 1, depsCache } })),
+      );
+      expect(p.deps_cache).toBe(depsCache);
+      expect(p).not.toHaveProperty("cache_build_ms");
+    }
+  });
+
+  it("表に無い値・壊れた値は公開しない（任意の文字列を流さない）", () => {
+    for (const depsCache of ["BUILT", "x".repeat(500), 1, null, {}, ["hit"]]) {
+      const p = payloadOf(
+        mapAgentEvent(
+          ev("usage", { ...base, sandbox: { runtimeMs: 1, depsCache, cacheBuildMs: -3 } }),
+        ),
+      );
+      expect(p).not.toHaveProperty("deps_cache");
+      expect(p).not.toHaveProperty("cache_build_ms");
+    }
+  });
+
+  it("sandbox が無い usage には deps_cache を付けない", () => {
+    expect(payloadOf(mapAgentEvent(ev("usage", base)))).not.toHaveProperty("deps_cache");
+  });
+});

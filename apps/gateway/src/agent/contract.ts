@@ -41,6 +41,23 @@ export interface TaskSpec {
   initialSha: string;
   /** Installation Access Token と期限（epoch ms）。ログに出さない */
   gitCredential: GitCredential;
+  /**
+   * 依存関係のキャッシュ（D14）の指定。base_sha 時点のルート直下の lockfile から gateway が作る。
+   * lockfile が無い・読めなかった（GitHub の API の失敗を含む）ときは null（キャッシュなし）。
+   */
+  deps?: DepsDto | null;
+}
+
+/** ルート直下の lockfile から作る、依存関係のキャッシュの指定（agent の DepsSpec と同じ形） */
+export interface DepsDto {
+  /** GitHub のリポジトリの数値 ID */
+  repositoryId: number;
+  /** pnpm-lock.yaml / package-lock.json / yarn.lock のいずれか（ルート直下だけ） */
+  lockfilePath: string;
+  /** base_sha 時点の lockfile の blob SHA */
+  blobSha: string;
+  /** "pnpm install --frozen-lockfile" / "npm ci" / "yarn install --frozen-lockfile" */
+  installCommand: string;
 }
 
 export interface GitCredential {
@@ -76,6 +93,7 @@ export interface UsageDto {
   /**
    * Sandbox のカウンタ（Phase 6 M2。agent が読めたときだけ付く）。公開用の形への写しは M3（agent-events.ts）。
    * runtimeMs: コンテナを動かした累計 ms / restarts: コンテナの作り直しの回数 / bootRetries: 起動の確認点で止まった・破棄された試行の回数
+   * depsCache / cacheBuildMs: 依存関係のキャッシュ（D14）の結果と、作ったときの所要時間
    */
   sandbox?: SandboxUsageDto;
 }
@@ -84,6 +102,10 @@ export interface SandboxUsageDto {
   runtimeMs: number;
   restarts: number;
   bootRetries: number;
+  /** 依存関係のキャッシュ（D14）の結果。起動を試みていなければ無い */
+  depsCache?: "hit" | "miss" | "built" | "disabled";
+  /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms。runtimeMs にも含む） */
+  cacheBuildMs?: number;
 }
 
 export interface WebUsageDto {

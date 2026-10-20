@@ -78,15 +78,35 @@ function webCounts(web: unknown): { web_search: number; web_fetch: number; web_b
  * sandbox が無い（agent が読めなかった）ときは何も付けない（0 回と区別する）。あるなら、欠けた・壊れた値は 0。
  * runtimeMs の小数は切り捨てる。回数（restarts / bootRetries）は整数以外を 0 にする。
  */
-function sandboxCounts(sb: unknown): Record<string, number> {
+function sandboxCounts(sb: unknown): Record<string, string | number> {
   if (typeof sb !== "object" || sb === null || Array.isArray(sb)) return {};
   const s = sb as Record<string, unknown>;
   const n = (v: unknown) =>
     typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  const cacheBuildMs = n(s.cacheBuildMs);
   return {
     sandbox_runtime_ms: n(s.runtimeMs),
     sandbox_restarts: count(s.restarts),
     sandbox_boot_retries: count(s.bootRetries),
+    ...depsCacheFields(s.depsCache, cacheBuildMs),
+  };
+}
+
+/** 依存関係のキャッシュ（D14）の結果。固定の 4 値だけを通す（任意の文字列を公開しない）。作っていなければ cache_build_ms は付けない */
+export const DEPS_CACHE_STATUSES = ["hit", "miss", "built", "disabled"] as const;
+export type DepsCacheStatusDto = (typeof DEPS_CACHE_STATUSES)[number];
+
+export function depsCacheStatus(v: unknown): DepsCacheStatusDto | undefined {
+  return typeof v === "string" && (DEPS_CACHE_STATUSES as readonly string[]).includes(v)
+    ? (v as DepsCacheStatusDto)
+    : undefined;
+}
+
+function depsCacheFields(status: unknown, buildMs: number): Record<string, string | number> {
+  const st = depsCacheStatus(status);
+  return {
+    ...(st !== undefined ? { deps_cache: st } : {}),
+    ...(buildMs > 0 ? { cache_build_ms: buildMs } : {}),
   };
 }
 

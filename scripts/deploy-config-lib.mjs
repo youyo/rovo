@@ -33,6 +33,8 @@ export const DEFAULTS = {
     efforts: "",
   },
   sandbox: { instance: DEFAULT_SANDBOX_INSTANCE },
+  // 依存関係のキャッシュ（D14。Containers のスナップショット）。public beta の機能なので、止められるようにしてある
+  depsCache: { enabled: true },
   webBrowseEnabled: false,
 };
 
@@ -49,6 +51,7 @@ const TOP_KEYS = [
   "budget",
   "models",
   "sandbox",
+  "depsCache",
   "webBrowseEnabled",
   "vars",
 ];
@@ -262,6 +265,13 @@ export function validateConfig(raw, templates = loadTemplates()) {
     );
   }
 
+  const dc = isObj(raw.depsCache) ? raw.depsCache : {};
+  if (raw.depsCache !== undefined && !isObj(raw.depsCache))
+    errors.push("depsCache: オブジェクトにする");
+  for (const k of Object.keys(dc)) if (k !== "enabled") errors.push(`depsCache.${k}: 未知のキー`);
+  const depsCacheEnabled = dc.enabled ?? DEFAULTS.depsCache.enabled;
+  if (typeof depsCacheEnabled !== "boolean") errors.push("depsCache.enabled: true / false にする");
+
   const web = raw.webBrowseEnabled ?? DEFAULTS.webBrowseEnabled;
   if (typeof web !== "boolean") errors.push("webBrowseEnabled: true / false にする");
 
@@ -310,6 +320,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
       budget: b,
       models: { default: modelDefault.trim(), list: modelList, efforts },
       sandbox: { instance: sandboxInstance },
+      depsCache: { enabled: depsCacheEnabled },
       webBrowseEnabled: web,
       vars,
     },
@@ -356,6 +367,7 @@ function placeholderValues(config, infra) {
     SANDBOX_INSTANCE: config.sandbox.instance,
     // 推定費用の単価は instance から決める（vars.gateway.SANDBOX_USD_PER_HOUR を書けば、renderOne の上書きがそれを優先する）
     SANDBOX_USD_PER_HOUR: String(sandboxUsdPerHour(config.sandbox.instance)),
+    DEPS_CACHE_ENABLED: String(config.depsCache.enabled),
     WEB_BROWSE_ENABLED: String(config.webBrowseEnabled),
   };
 }

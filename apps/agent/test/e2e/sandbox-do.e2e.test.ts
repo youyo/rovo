@@ -59,6 +59,132 @@ afterAll(async () => {
   if (persistDir) rmSync(persistDir, { recursive: true, force: true });
 });
 
+describe("依存関係のキャッシュ（D14）", () => {
+  const depsSpec = (task: string): WorkspaceSpec => ({
+    repository: "acme/deps",
+    baseSha: upstream.depsSha,
+    branch: `agent/task-${task}`,
+    initialSha: upstream.createTaskBranch("deps", task).initialSha,
+    deadlineAt: Date.now() + 3_600_000,
+    deps: {
+      repositoryId: 9001,
+      lockfilePath: "package-lock.json",
+      blobSha: upstream.depsLockBlobSha,
+      installCommand: "npm ci",
+    },
+  });
+
+  const metricsOf = (c: ReturnType<typeof sandboxClient>) =>
+    c.metrics() as Promise<{
+      runtimeMs: number;
+      restarts: number;
+      depsCache?: string;
+      cacheBuildMs?: number;
+    }>;
+  const registryTarballGets = () =>
+    upstream.requests.filter((r) => r.host === "registry.npmjs.org" && r.path.endsWith(".tgz"))
+      .length;
+
+  it("最初のタスクがキャッシュを作り（built）、同じ lockfile の次のタスクはそれで起動する（hit）。node_modules が戻り、npm の取得は走らない", async () => {
+    const a = client("deps-a");
+    await a.ensureReady(depsSpec("deps-a"));
+    const ma = await metricsOf(a);
+    expect(ma.depsCache).toBe("built");
+    expect(ma.cacheBuildMs ?? 0).toBeGreaterThan(0);
+    // 作ったタスクの Sandbox の時間に、作った時間が含まれる
+    expect(ma.runtimeMs).toBeGreaterThanOrEqual(ma.cacheBuildMs ?? 0);
+    expect(
+      (await a.exec(["test", "-f", "/workspace/node_modules/tiny-pkg/index.js"])).exitCode,
+    ).toBe(0);
+    expect((await a.exec(["git", "rev-parse", "HEAD"])).stdout.trim()).toBe(upstream.depsSha);
+    // 作成は 1 回: 偽 npm から tarball を取ったのはこの 1 回だけ
+    expect(registryTarballGets()).toBe(1);
+
+    const b = client("deps-b");
+    await b.ensureReady(depsSpec("deps-b"));
+    const mb = await metricsOf(b);
+    expect(mb.depsCache).toBe("hit");
+    expect(mb.cacheBuildMs).toBeUndefined();
+    expect(registryTarballGets()).toBe(1); // 2 つ目は取りに行かない
+    const run = await b.exec(["node", "-e", "console.log(require('/workspace/index.js'))"], {
+      cwd: "/workspace",
+    });
+    expect(run.stdout.trim()).toBe("tiny");
+    // 作業ツリーは clone したもの（作成用のコンテナの作業状態は入っていない）。node_modules は未追跡だが除外される
+    expect((await b.exec(["git", "rev-parse", "HEAD"])).stdout.trim()).toBe(upstream.depsSha);
+    // node_modules は .git/info/exclude で除外される: .gitignore が無いリポジトリでも git add -A に巻き込まれない
+    expect((await b.exec(["git", "status", "--porcelain"])).stdout.trim()).toBe("");
+    expect((await b.exec(["test", "-d", "/workspace/node_modules"])).exitCode).toBe(0);
+    expect((await b.exec(["git", "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim()).toBe(
+      "agent/task-deps-b",
+    );
+    // 復元したコンテナでも傍受の CA が効く（git の通信が通ったことで確認済み）。GitHub のトークンはどこにも書かれていない
+    const leak = await b.exec([
+      "bash",
+      "-c",
+      "grep -rIl --exclude-dir=proc --exclude-dir=sys 'ghs_e2e_installation_token' /root /opt /etc /workspace /home 2>/dev/null; true",
+    ]);
+    expect(leak.stdout.trim()).toBe("");
+    const env = await b.exec(["env"]);
+    expect(env.stdout).not.toContain("ghs_e2e_installation_token");
+  }, 280_000);
+
+  it("復元したコンテナが作り直されても（destroy → ensureReady）、node_modules は戻る", async () => {
+    const c = client("deps-restart");
+    const spec = depsSpec("deps-restart");
+    await c.ensureReady(spec);
+    expect((await metricsOf(c)).depsCache).toBe("hit");
+    await c.restart(spec);
+    const m = await metricsOf(c);
+    expect(m.restarts).toBe(1);
+    expect(m.depsCache).toBe("hit");
+    expect(
+      (await c.exec(["test", "-f", "/workspace/node_modules/tiny-pkg/index.js"])).exitCode,
+    ).toBe(0);
+    expect(registryTarballGets()).toBe(1);
+  }, 280_000);
+
+  it("lockfile の blob SHA が違えば別のキャッシュ（作り直す）", async () => {
+    const c = client("deps-other-key");
+    const spec = depsSpec("deps-other-key");
+    await c.ensureReady({
+      ...spec,
+      deps: { ...(spec.deps as object), blobSha: "b".repeat(40) } as never,
+    });
+    const m = await metricsOf(c);
+    expect(m.depsCache).toBe("built");
+    expect(registryTarballGets()).toBe(2); // 別の鍵なので、もう一度導入した
+  }, 280_000);
+
+  it("キャッシュを作れなくても（導入が失敗する）タスクは今までどおり動く: image から起動して clone まで済み、miss。直後の同じ鍵はクールダウンで作り直さない", async () => {
+    const spec = (task: string): WorkspaceSpec => ({
+      ...depsSpec(task),
+      // 偽 npm には pnpm の取得先が無く、このリポジトリに pnpm-lock.yaml も無いので、導入は失敗する
+      deps: {
+        repositoryId: 9002,
+        lockfilePath: "pnpm-lock.yaml",
+        blobSha: "c".repeat(40),
+        installCommand: "pnpm install --frozen-lockfile",
+      },
+    });
+    const a = client("deps-fail-a");
+    const t0 = Date.now();
+    await a.ensureReady(spec("deps-fail-a"));
+    const ma = await metricsOf(a);
+    expect(ma.depsCache).toBe("miss");
+    expect(ma.cacheBuildMs).toBeUndefined();
+    expect((await a.exec(["git", "rev-parse", "HEAD"])).stdout.trim()).toBe(upstream.depsSha);
+    expect((await a.exec(["test", "-d", "/workspace/node_modules"])).exitCode).not.toBe(0);
+    const firstMs = Date.now() - t0;
+
+    const b = client("deps-fail-b");
+    const t1 = Date.now();
+    await b.ensureReady(spec("deps-fail-b"));
+    expect((await metricsOf(b)).depsCache).toBe("miss");
+    expect(Date.now() - t1).toBeLessThan(firstMs); // クールダウン中は作成を試みない
+  }, 280_000);
+});
+
 describe("ensureReady", () => {
   it("ensureReady より前の exec / readFile / writeFile は拒否される", async () => {
     const c = client("pre");

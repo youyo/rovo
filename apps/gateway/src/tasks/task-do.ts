@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "@rovo/audit";
 import type { Effort } from "@rovo/models";
 import type { z } from "zod";
-import { count, mapAgentEvent } from "../agent/agent-events";
+import { count, depsCacheStatus, mapAgentEvent } from "../agent/agent-events";
 import type {
   AgentRpc,
   EventsPage,
@@ -14,6 +14,7 @@ import type {
 import {
   applyManagedBlock,
   decryptString,
+  detectDeps,
   encryptString,
   GitHubApiError,
   GitHubAppClient,
@@ -203,6 +204,10 @@ export type ResultView = {
     cache_write_tokens: number;
     /** 子が使った web の回数 */
     web: { search: number; fetch: number; browse: number };
+    /** 依存関係のキャッシュ（D14）の結果。agent がカウンタを読めたときだけ付く */
+    deps_cache?: "hit" | "miss" | "built" | "disabled";
+    /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms。Sandbox の時間の推定にも含まれる） */
+    cache_build_ms?: number;
   };
 };
 
@@ -344,6 +349,8 @@ type GithubRow = {
   revoke_attempts: number;
   /** task_pr_merge でマージ済み */
   pr_merged: number;
+  /** D14: TaskSpec.deps の JSON。"null" は lockfile なし（または読めなかった）。NULL は未取得（spec に載せない） */
+  deps: string | null;
 };
 
 type TokenRow = { id: number; enc: string; expires_at: number; revoked: number; kind: string };
@@ -509,6 +516,8 @@ export class TaskDO extends DurableObject<Env> {
     // D9: PR のマージの方針（task_start の merge_policy）と、task_pr_merge でマージ済みか
     this.addColumnIfMissing("task", "merge_policy", "TEXT NOT NULL DEFAULT 'human_review'");
     this.addColumnIfMissing("github_link", "pr_merged", "INTEGER NOT NULL DEFAULT 0");
+    // D14: 依存関係のキャッシュの指定（TaskSpec.deps の JSON。"null" は lockfile なし・読めなかった。NULL は未取得で、spec に載せない）
+    this.addColumnIfMissing("github_link", "deps", "TEXT");
     // D10: 子のモデル（task_start の model。NULL は既定のモデル）
     this.addColumnIfMissing("task", "model", "TEXT");
     // D10: 子のモデルの思考レベル（開始時の値。NULL は現在の設定から求める）
@@ -1867,13 +1876,15 @@ export class TaskDO extends DurableObject<Env> {
   /** start の taskSpec に入れる部分（branch・initialSha・最初のトークン）。再送でも同じ値になる。 */
   private async githubSpecPart(
     gl: GithubRow,
-  ): Promise<Pick<TaskSpec, "branch" | "initialSha" | "gitCredential">> {
+  ): Promise<Pick<TaskSpec, "branch" | "initialSha" | "gitCredential" | "deps">> {
     const start = this.tokenRows("kind = 'start'")[0];
     if (!start || gl.initial_sha === null) throw new Error("github setup is incomplete");
     return {
       branch: gl.branch,
       initialSha: gl.initial_sha,
       gitCredential: { token: await this.decryptToken(start), expiresAt: start.expires_at },
+      // 取得済みの値をそのまま送る（再送で変わらない）。未取得（この機能より前に始まったタスク）は載せない: 受理済みの spec と食い違わせない
+      ...(gl.deps !== null ? { deps: JSON.parse(gl.deps) as TaskSpec["deps"] } : {}),
     };
   }
 
@@ -1912,6 +1923,14 @@ export class TaskDO extends DurableObject<Env> {
       ? await this.decryptToken(existing)
       : (await this.issueToken(row, "start")).token;
     const api = this.repoApi(row, plain);
+
+    // 0. 依存関係のキャッシュの指定（D14）。base_sha 時点のルート直下の lockfile。読めなくても null で続ける（失敗しない）。
+    //    一度保存したら、start の再送でも同じ値を送る（AgentDO は spec の同一性で冪等を判定する）。
+    if (gl.deps === null) {
+      const deps = await detectDeps(api, row.repository_id ?? 0, row.base_sha);
+      sql.exec("UPDATE github_link SET deps = ?", JSON.stringify(deps));
+      gl = this.getGithub() as GithubRow;
+    }
 
     // 1. 決定的な初期コミット（author / committer の日時を created_at に固定）。SHA は ref を作る前に永続化する。
     if (gl.initial_sha === null) {
@@ -2693,6 +2712,21 @@ function shapeUsage(u: UsageDto): ResultView["usage"] {
       fetch: count(u.web?.fetch),
       browse: count(u.web?.browse),
     },
+    ...depsUsage(u.sandbox),
+  };
+}
+
+/** usage.sandbox の依存関係のキャッシュ（D14）の結果。sandbox が無い・値が表に無いときは何も付けない */
+function depsUsage(sb: UsageDto["sandbox"]): {
+  deps_cache?: "hit" | "miss" | "built" | "disabled";
+  cache_build_ms?: number;
+} {
+  const status = depsCacheStatus(sb?.depsCache);
+  const ms = sb?.cacheBuildMs;
+  const buildMs = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
+  return {
+    ...(status !== undefined ? { deps_cache: status } : {}),
+    ...(buildMs > 0 ? { cache_build_ms: buildMs } : {}),
   };
 }
 

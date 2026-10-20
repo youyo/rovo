@@ -18,6 +18,7 @@
     "efforts": {}
   },
   "sandbox": { "instance": "standard-2" },
+  "depsCache": { "enabled": true },
   "webBrowseEnabled": false,
   "vars": { "gateway": {}, "agent": {}, "web": {} }
 }

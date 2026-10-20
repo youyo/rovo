@@ -43,6 +43,7 @@
 
 | 22 | モデルの選択・予算・consult（D10） | ○（偽の AgentDO・台本） | ○ | 小 | ○ | ○ | 実 Anthropic でキャッシュの効き（2 回目の `cache_read`）と単価を確かめる。OpenAI は BYOK の登録後（任意） |
 | 23 | プロバイダーキーで使えるモデルが決まる・Workers AI のモデル（D10b） | ○（偽の Cloudflare API・偽の AI バインディング・台本） | ○ | 小 | ○ | ○ | 実際の `provider_configs` の応答と、Workers AI の tool calling・usage を確かめる。OpenAI のキーが無い今は `gpt-6-*` が `available: false` |
+| 24 | 依存関係のキャッシュ（D14） | ○（実コンテナの E2E でスナップショットの作成・復元まで。偽の npm・偽の git） | ○（本番のイメージ参照・スナップショットの有効化・時間の短縮） | ○ | ○ | ○ | 同じ lockfile で 2 回続けて実行し、2 回目が `hit` になり、導入の時間ぶん減ることを確かめる |
 
 環境の準備が要る個別の項目（節をまたぐ）:
 
@@ -544,6 +545,30 @@ AI Gateway の BYOK のキー（`provider_configs`）の有無で `models_list` 
 - [ ] 無料プランの運用者: 有料プラン専用のモデル（kimi-k2.7-code・glm-5.x・deepseek-v4）が許可リストに無く、`AGENT_MODELS` に書いても無視される（`agent_models_ignored`）。Workers AI の無料枠（1 日 1 万 Neuron）を超えたときの挙動（モデルの 4xx/429 か）を備考に書く
 
 ### D10b の結果
+
+| 実施者 | 日付 | 環境 | 結果 | 備考 |
+|---|---|---|---|---|
+| | | | | |
+
+## 24. 依存関係のキャッシュ（Containers のスナップショット。D14）
+
+ルート直下の lockfile が同じタスクで、導入済みの `node_modules` を Containers のスナップショットから復元できることの確認（design 15.8 の D14）。自動テスト（`test:unit` の agent の `deps-cache` / `deps-cache-do` / `sandbox-do-deps` / `agent-do-deps`、gateway の `deps-detect` / `task-deps` / `repo-api-tree` / `agent-events` / `task-deps-result`、`test:deps-scripts`、`test:deploy:config`）は偽の Containers で、鍵・状態遷移・復元の流れ・すべての fail-soft の経路を確かめている。`test:e2e:docker` / `test:e2e:full` は、ローカルの `wrangler dev`（Docker）がスナップショットに対応しているので、実コンテナで作成（`built`）→ 復元（`hit`）→ 作り直し後の復元 → 別の鍵 → 導入の失敗（`miss` → `cooldown`）まで通しで確かめている（偽の npm・偽の git）。ここ（実機）で確かめるのは、本番に固有の部分: digest 付きのイメージ参照、アカウントでのスナップショット（public beta）の有効化、github.com への `git fetch --depth 1 origin <sha>`、corepack の取得の許可、TTL、実際の時間の短縮。
+
+前提: 検証用のリポジトリに、ルート直下の `package-lock.json`（または `pnpm-lock.yaml`）があり、`npm ci` に十数秒以上かかる（x-mcp など）。agent の `DEPS_CACHE_ENABLED` が有効（既定）。Sandbox は `standard-2`。スナップショットが使えるアカウント（public beta）。確認ごとに課金される（小）。
+
+- [ ] **初回（作る）**: 新しい lockfile のブランチ（キャッシュの無い blob SHA）で小さなタスクを実行する。`task_result` の `usage.deps_cache` が `built`、`cache_build_ms` が付き、`sandbox_runtime_ms` に `cache_build_ms` が含まれる。タスクが完了する。子は `npm ci` を実行せずに検証コマンド（例 `npm test`）を通せる
+- [ ] **2 回目（hit）**: 同じ lockfile のままもう一度タスクを実行する。`usage.deps_cache` が `hit`、`cache_build_ms` が無い。`sandbox_runtime_ms` が、初回の導入の時間ぶん減る（x-mcp で 67 秒 → 20 秒未満が目安。実測を備考に書く）
+- [ ] **lockfile を変える（miss → built）**: lockfile を変えたブランチ（依存を 1 つ足すなど）で実行すると、別のキャッシュとして `built` になる（元のブランチは `hit` のまま）
+- [ ] **同時の初回**: 同じ lockfile の 2 つのタスクを続けて開始する（ユーザーごとの同時実行は 1 件までなので、別のユーザーか、直前のタスクの終了後にキャッシュを消した状態で）。作成は 1 回だけで、片方が `built`、もう片方が `hit`（待っただけ）になる
+- [ ] **作業状態が混ざらない**: `hit` のタスクの `/workspace` に、キャッシュを作ったタスクのファイルが無い（子が `git status` で未追跡のファイルが `node_modules` だけであること、`/opt/deps-cache` が空であること）。`git log` が作業ブランチのコミットだけ
+- [ ] **トークンが入らない**: キャッシュを作る間・復元後のコンテナで `env` と `~/.git-credentials`・`~/.npmrc` を見ても、GitHub のトークン（`ghs_`）が無い
+- [ ] **無効にする**: `depsCache.enabled` を `false` にして再デプロイすると、`usage.deps_cache` が `disabled` で、従来どおり子が `npm ci` する
+- [ ] **使えないとき（fail-soft）**: アカウントでスナップショットを使えない、または `DepsCacheDO` が失敗した状態（例: 一時的に lockfile を壊して `npm ci` を失敗させる）で、タスクは失敗せず `usage.deps_cache` が `miss` になり、ログに `deps_cache_miss: <理由>`（トークンや入力の文面が無い）が出る。60 秒以内に同じ lockfile でもう一度実行しても、作り直さず `miss`（`cooldown`）で動く
+- [ ] **イメージの更新**: agent を再デプロイしてイメージが変わると、鍵が変わり、最初のタスクは `built` になる（古いスナップショットは使われない）
+- [ ] **pnpm**: `pnpm-lock.yaml` のリポジトリで `built` → `hit`（corepack 経由の pnpm の取得が `registry.npmjs.org` だけで済み、外向きの拒否が出ない）。ワークスペースの各パッケージの `node_modules` も戻っている
+- [ ] 監査ログ・R2 のアーカイブ・`task_summary` に、トークンや入力の文面が増えていない（`deps_cache` は固定の 4 値）
+
+### D14 の結果
 
 | 実施者 | 日付 | 環境 | 結果 | 備考 |
 |---|---|---|---|---|

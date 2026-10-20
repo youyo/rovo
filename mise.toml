@@ -83,9 +83,13 @@ run = "node --test scripts/github-app.test.mjs"
 description = "byok（AI Gateway のプロバイダーキーの登録 scripts/byok.mjs）のテスト。偽の Cloudflare API をローカルに立てる。body・認証ヘッダ・上書きの確認・403 の案内・値が出ないことを確かめる"
 run = "node --test scripts/byok.test.mjs"
 
+[tasks."test:deps-scripts"]
+description = "依存関係のキャッシュ（D14）のコンテナ内スクリプト（apps/agent/src/deps-scripts.ts）のテスト。一時ディレクトリの中で本物の bash を動かし、node_modules の退避・復元・取り出しを確かめる。Docker も Cloudflare も使わない"
+run = "node --test scripts/deps-scripts.test.mjs"
+
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok"]
+description = "Unit テスト（audit + models + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"

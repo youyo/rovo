@@ -135,6 +135,7 @@ AI Gateway にプロバイダーのキーを、エイリアス `default` で登�
 | `budget.monthlyUsd` / `.taskUsd` / `.consultUsd` | | 100 / 10 / 0.5 | `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` / `CONSULT_BUDGET_USD` |
 | `models.default` / `.list` / `.efforts` | | 雛形のとおり | `AGENT_MODEL` / `AGENT_MODELS`（配列かカンマ区切り）/ `MODEL_EFFORTS`（`{モデルの id: レベル}` か文字列）。**gateway と agent の同名の var に同じ値が入る** |
 | `sandbox.instance` | | `standard-2` | agent の `SANDBOX_INSTANCE` と、gateway の `SANDBOX_USD_PER_HOUR`（その大きさの上限側の単価を計算して入れる。`vars.gateway.SANDBOX_USD_PER_HOUR` を書けばそれを優先）。5 種類以外はエラー（11） |
+| `depsCache.enabled` | | `true` | agent の `DEPS_CACHE_ENABLED`。依存関係のキャッシュ（Containers のスナップショット。public beta）を使うか。`false` で無効（17） |
 | `webBrowseEnabled` | | `false` | `WEB_BROWSE_ENABLED`。**3 つの Worker に同じ値が入る**（12） |
 | `vars.gateway` / `.agent` / `.web` | | `{}` | 雛形にあるほかの var（上限・単価・`SAFETY_*` など）の上書き。雛形に無い名前、専用の項目で設定する名前、secret は拒否する |
 
@@ -247,6 +248,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_FETCH_LIMIT_PER_TASK` | agent | 任意 | `100` | 子の `web_fetch` の同上 |
 | `WEB_BROWSE_LIMIT_PER_TASK` | agent | 任意 | `20` | 子の `web_browse` の同上 |
 | `SANDBOX_INSTANCE` | agent | 任意 | `standard-2` | Sandbox コンテナの大きさ（`lite` / `standard-1` / `standard-2` / `standard-3` / `standard-4`）。不正な値は `standard-2` に戻る（警告のログ）。性能と上限の費用は 11。`rovo.config.json` の `sandbox.instance` で設定する |
+| `DEPS_CACHE_ENABLED` | agent | 任意 | `true` | 依存関係のキャッシュ（17）を使うか。`false` / `0` / `off` で無効（`task_result` の `usage.deps_cache` は `disabled`）。それ以外・未設定は有効。スナップショットが使えなくても失敗はしない（image から普通に起動する）。`rovo.config.json` の `depsCache.enabled` で設定する |
 | `WEB_SEARCH_PROVIDER` | web | 任意 | `ceramic` | 検索プロバイダ（`ceramic` / `exa` / `linkup`）。変えたら単価も合わせる |
 | `SAFETY_BLOCK_THRESHOLD` | web | 任意 | `0.8` | Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block。**仮の値**で、受入で調整する |
 | `SAFETY_CAUTION_THRESHOLD` | web | 任意 | `0.4` | 同上。caution |
@@ -275,6 +277,7 @@ web に secret は無い（GitHub のトークンも Anthropic のキーも持�
 | `TASK_DO` / `USER_DO`（DO） | gateway | 必須 | 設定済み |
 | `AGENT_DO`（DO、`script_name: "rovo-agent"`） | gateway | 必須 | 設定済み。agent を先にデプロイする |
 | `SANDBOX_DO` / `AGENT_DO`（DO、コンテナ） | agent | 必須 | 設定済み。コンテナのイメージは `apps/agent/Dockerfile` |
+| `DEPS_CACHE_DO`（DO） | agent | 必須 | 設定済み。依存関係のキャッシュ（17）の状態を鍵ごとに持つ。**コンテナは持たない**（`containers` の項目は `SandboxDO` の 1 つのまま） |
 | `WEB`（service binding） | gateway / agent | 必須 | `rovo-web` の `WebResearch`。`props.caller` は gateway が `parent`、agent が `child` |
 | `AI`（Workers AI） | agent / web | 必須 | 設定済み |
 | `BROWSER`（Browser Run） | web | 宣言は常にある（使うのは `web_browse` が有効なときだけ） | `remote` の設定は下流で行う（12） |
@@ -407,6 +410,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 ## 14. 更新手順とロールバック
 
 - 更新: upstream を取り込み（4）、`mise run test`（または自分の CI）で確認する。`deploy.example/` が変わったら `mise run deploy:config -- --no-terraform` で `deploy/` を作り直してコミットし（`deploy:config:check` が差分を検出する）、`infra/` が変わったら `terraform apply`（または `mise run setup`）してから、web → agent → gateway の順に再デプロイする（`ROVO_DEPLOY_DIR=deploy mise run deploy:all`）。
+- 新しい Durable Object クラス `DepsCacheDO`（agent。依存関係のキャッシュ。17）: agent の設定は `exports`（`SandboxDO` / `AgentDO` と同じ書き方）でクラスを宣言していて、`migrations` の項目は無い。`deploy.example/` の雛形（`deploy:config` の生成物）には `durable_objects.bindings` の `DEPS_CACHE_DO` と `exports` の `DepsCacheDO` が入っているので、**再生成して（`deploy:config:check` が差分を示す）コミットし、agent を再デプロイする**。クラスの作成は初回のデプロイで 1 回だけ行われるはずだが、`exports` だけでの新しいクラスの追加が本番で通るかは**【実機で確認して追記】**。状態は鍵ごとのスナップショットの参照だけ（失っても、次のタスクが作り直すだけ）。
 - Durable Object のマイグレーション: gateway の `migrations`（`TaskDO` / `UserDO`）は upstream の `wrangler.jsonc` にある。下流の設定にも**同じ `migrations` を引き継ぐ**（`deploy.example/` の雛形に入っているので、`deploy:config` の生成物に入る）。クラス名の変更・削除は、保存済みのデータを失うので、upstream の更新で入った場合は内容を確認してから適用する。
 - 公開 API を変える更新（ツールの入出力）は、接続中のクライアントに影響する。upstream の変更を確認する。
 - ロールバック: Cloudflare の Worker のバージョン機能で前のバージョンに戻せるが、DO のマイグレーションと保存済みのデータは戻らない。**【実機で確認して追記】**（コンテナを含む agent のロールバック）
@@ -440,3 +444,16 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 | `web_browse` が tools/list に出ない | 3 つの Worker の `WEB_BROWSE_ENABLED` が揃っていない |
 | デプロイで service binding が解決できない | 順序の誤り（web → agent → gateway） |
 | アーカイブが作られない | `LOGS` が gateway に束ねられていない（監査ログに `archive_skipped`） |
+
+## 17. 依存関係のキャッシュ（Containers のスナップショット。D14）
+
+タスクの Sandbox は、毎回 `npm ci` などで依存関係を導入すると、Sandbox の時間の大半を使う（`standard-2` で x-mcp のタスクが約 67 秒）。そこで、リポジトリのルート直下の lockfile（`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`）が同じなら、導入済みの `node_modules` を **Containers のスナップショット**（public beta）として使い回す。設計は design.md の 15.8（D14）。
+
+- **効き方**: 最初のタスク（その lockfile の blob SHA で初めて）はキャッシュを作る（導入と同じ時間がかかる。`task_result` の `usage.deps_cache` が `built`、`cache_build_ms` に所要時間）。同じ lockfile の 2 回目以降は、導入済みの状態で起動する（`hit`）。lockfile を変えたブランチ・リポジトリごと・イメージの更新ごとに別のキャッシュになる。`miss` はキャッシュが使えず今までどおり動いた（ログに `deps_cache_miss: <理由>`）、`disabled` は対象外（lockfile が無い、ルート以外にしかない、`DEPS_CACHE_ENABLED=false`）。
+- **費用**: キャッシュを作るコンテナの時間は、作ったタスクの `sandbox_runtime_ms`（推定費用）に足される。スナップショットの保管の費用は Cloudflare の Containers の料金表を確認する（このリポジトリは単価を持たない）。スナップショットは 30 日で期限切れになる（復元で延長される）。一覧と削除の API は無いので、rovo は消さない。
+- **前提**: `scheduling_policy: durable_object`（agent の `containers` で設定済み）。スナップショットは beta の機能なので、アカウントで使えない・上限に達したときは、タスクは失敗せず `miss` になる（キャッシュなしで今までどおり動く）。
+- **無効にする**: `rovo.config.json` の `depsCache.enabled` を `false` にして `deploy:config` を再生成し、agent を再デプロイする（agent の var `DEPS_CACHE_ENABLED`）。
+- **安全性**: GitHub のトークンは、作成用のコンテナにもスナップショットにも入らない（外向きの転送時に Worker が付ける）。スナップショットにはリポジトリの作業状態が入らず（`node_modules` とパッケージマネージャのキャッシュだけ）、`repository_id` ごとに別なので他のリポジトリとは共有されない。作成用のコンテナが実行するのは、base_sha のコミット済みのコードだけ。
+- **pnpm / yarn**: Dockerfile には入っていないので corepack 経由で呼ぶ（取得先は `registry.npmjs.org`。外向きの許可に既にある）。yarn の berry（`yarn.lock` が `__metadata:` で始まる）は `--frozen-lockfile` を受け付けず、キャッシュの作成が失敗する（`miss`。60 秒のクールダウンの後に作り直す）。その場合は `depsCache.enabled` を `false` にするか、classic にする。
+- **対象外**: Python / PyPI、ルート以外の lockfile（モノレポの入れ子）、pnpm store のキャッシュ、スナップショットの削除。
+- **実機での確認**: acceptance.md の 24。

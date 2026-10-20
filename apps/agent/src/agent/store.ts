@@ -33,7 +33,9 @@ export function sameUsage(a: UsageDto, b: UsageDto): boolean {
     a.web.browse === b.web.browse &&
     a.sandbox?.runtimeMs === b.sandbox?.runtimeMs &&
     a.sandbox?.restarts === b.sandbox?.restarts &&
-    a.sandbox?.bootRetries === b.sandbox?.bootRetries
+    a.sandbox?.bootRetries === b.sandbox?.bootRetries &&
+    a.sandbox?.depsCache === b.sandbox?.depsCache &&
+    a.sandbox?.cacheBuildMs === b.sandbox?.cacheBuildMs
   );
 }
 

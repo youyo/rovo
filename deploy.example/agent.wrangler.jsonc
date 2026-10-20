@@ -24,12 +24,15 @@
   "durable_objects": {
     "bindings": [
       { "name": "SANDBOX_DO", "class_name": "SandboxDO" },
-      { "name": "AGENT_DO", "class_name": "AgentDO" }
+      { "name": "AGENT_DO", "class_name": "AgentDO" },
+      // 依存関係のキャッシュ（D14）の状態を鍵ごとに持つ。コンテナは持たない（作成は SandboxDO の別インスタンス）
+      { "name": "DEPS_CACHE_DO", "class_name": "DepsCacheDO" }
     ]
   },
   "exports": {
     "SandboxDO": { "type": "durable-object", "storage": "sqlite" },
-    "AgentDO": { "type": "durable-object", "storage": "sqlite" }
+    "AgentDO": { "type": "durable-object", "storage": "sqlite" },
+    "DepsCacheDO": { "type": "durable-object", "storage": "sqlite" }
   },
   "services": [
     {
@@ -56,6 +59,9 @@
     // Sandbox コンテナの大きさ（lite / standard-1 / standard-2 / standard-3 / standard-4）。rovo.config.json の sandbox.instance。
     // gateway の SANDBOX_USD_PER_HOUR（推定費用の単価）もこの大きさから計算して合わせる。docs/deploy.md の 5。
     "SANDBOX_INSTANCE": "<SANDBOX_INSTANCE>",
+    // 依存関係のキャッシュ（D14。Containers のスナップショット。public beta）を使うか。rovo.config.json の depsCache.enabled（既定 true）。
+    // 使えない・失敗してもタスクは今までどおり動く（fail-soft）。docs/deploy.md の 5。
+    "DEPS_CACHE_ENABLED": "<DEPS_CACHE_ENABLED>",
     "WEB_SEARCH_LIMIT_PER_TASK": "50",
     "WEB_FETCH_LIMIT_PER_TASK": "100",
     "WEB_BROWSE_LIMIT_PER_TASK": "20",

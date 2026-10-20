@@ -7,6 +7,23 @@ import type { GitCredential, SandboxMetrics } from "./agent/types";
 import { appendTestAudit, emitAudit, readTestAudit } from "./audit-adapter";
 import { PROCESS_SCRIPT } from "./container-scripts";
 import { decryptString, encryptString, importEncryptionKey } from "./crypto";
+import {
+  DEPS_BUILD_TIMEOUT_MS,
+  DEPS_CACHE_DIR,
+  DEPS_INSTALLS,
+  type DepsBuildRequest,
+  type DepsBuildResult,
+  type DepsCacheStatus,
+  type DepsEnsureRequest,
+  type DepsEnsureResult,
+  type DepsLockfile,
+  type DepsMissReason,
+  type DepsSpec,
+  depsCacheKey,
+  depsSnapshotName,
+  parseDepsSpec,
+} from "./deps-cache";
+import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./deps-scripts";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
 import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
@@ -61,7 +78,44 @@ const BOOT_POLL_MS = 500;
 const MAX_TASK_MS = 2 * 60 * 60_000;
 const MAX_INPUT_PAUSE_MS = 24 * 60 * 60_000;
 
+/** 依存関係のキャッシュの ensure（作成を待つことがある）を待つ上限。作成の時間切れ + 余裕 */
+const DEPS_ENSURE_WAIT_MS = DEPS_BUILD_TIMEOUT_MS + 60_000;
+/** 退避した node_modules を作業ツリーへ戻す（同じファイルシステム内の mv）のに許す時間 */
+const DEPS_RESTORE_TIMEOUT_MS = 2 * 60_000;
+const DEPS_STATUS_RANK: Record<DepsCacheStatus, number> = {
+  disabled: 0,
+  miss: 1,
+  hit: 2,
+  built: 3,
+};
+const DEPS_KEY = /^[0-9a-f]{64}$/;
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** キャッシュを作る途中の失敗。reason は固定コード（例外の文面は外へ出さない）。 */
+class DepsBuildError extends Error {
+  constructor(
+    readonly reason: DepsMissReason,
+    readonly detail = "",
+  ) {
+    super(reason);
+  }
+}
+
+/** promise を期限（絶対時刻）まで待つ。期限が来たら "timeout"（promise は放置する）。 */
+async function withDeadline<T>(promise: Promise<T>, until: number): Promise<T | "timeout"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), Math.max(0, until - Date.now()));
+  });
+  // 放置した promise の失敗を Unhandled にしない
+  promise.catch(() => {});
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 interface RawResult {
   exitCode: number;
@@ -97,6 +151,12 @@ const TERMINATED_RESULT: ExecResult = {
   terminated: true,
 };
 
+/** 起動の前に決める、依存関係のキャッシュの扱い */
+type DepsPlan =
+  | { kind: "disabled" }
+  | { kind: "miss"; reason: DepsMissReason }
+  | { kind: "snapshot"; key: string; snapshotId: string; built: boolean };
+
 export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   /** 起動の世代。boot ごとに増える。古い boot の結果が新しい状態を上書きしないようにする。 */
   private gen = 0;
@@ -111,6 +171,10 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   /** ready を待つ 1 回あたりの期限と、起動中の破棄の待ちの上限（ms）。テストで短くする。 */
   private bootAttemptMs = BOOT_ATTEMPT_MS;
   private bootDestroyMs = BOOT_DESTROY_MS;
+  /** 依存関係のキャッシュの ensure を待つ上限（ms）。テストで短くする。 */
+  private depsEnsureWaitMs = DEPS_ENSURE_WAIT_MS;
+  /** キャッシュを作る処理（builder として使われたとき）。同時の依頼は 1 つを共有する。 */
+  private depsBuilding?: Promise<DepsBuildResult>;
 
   // ---- 永続状態 ----
 
@@ -229,6 +293,32 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     this.ctx.storage.kv.put("boot_retries", this.num("boot_retries") + 1);
   }
 
+  /**
+   * キャッシュを作ったときの所要時間を、このタスクの Sandbox の時間として数える（少なく数えない）。
+   * 作ったコンテナは別のインスタンスなので、rt_total（実行時間の累計）に足す。
+   */
+  private recordCacheBuild(buildMs: number): void {
+    const kv = this.ctx.storage.kv;
+    const ms = Math.max(0, Math.floor(buildMs));
+    kv.put("cache_build_ms", this.num("cache_build_ms") + ms);
+    kv.put("rt_total", this.num("rt_total") + ms);
+    kv.put("deps_built", true);
+  }
+
+  /**
+   * 起動の結果として usage に出す値を残す。順位（disabled < miss < hit < built）が下がる更新はしない。
+   * 最初に作った（built）タスクが、コンテナの作り直しで hit になっても built のまま。
+   */
+  private recordDepsStatus(status: DepsCacheStatus): void {
+    const kv = this.ctx.storage.kv;
+    const next: DepsCacheStatus =
+      status === "hit" && kv.get<boolean>("deps_built") === true ? "built" : status;
+    const prev = kv.get<DepsCacheStatus>("deps_cache");
+    if (prev === undefined || DEPS_STATUS_RANK[next] >= DEPS_STATUS_RANK[prev]) {
+      kv.put("deps_cache", next);
+    }
+  }
+
   /** AgentDO が usage イベントに載せる値。読み取りだけで書き込まない。 */
   async metrics(): Promise<SandboxMetrics> {
     const since = this.ctx.storage.kv.get<number>("rt_since");
@@ -239,10 +329,14 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         : Math.max(since, this.num("rt_seen"));
       open = Math.max(0, end - since);
     }
+    const depsCache = this.ctx.storage.kv.get<DepsCacheStatus>("deps_cache");
+    const cacheBuildMs = this.num("cache_build_ms");
     return {
       runtimeMs: this.num("rt_total") + open,
       restarts: Math.max(0, this.num("starts") - 1),
       bootRetries: this.num("boot_retries"),
+      ...(depsCache !== undefined ? { depsCache } : {}),
+      ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
     };
   }
 
@@ -615,13 +709,27 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     let started = false;
     const trace: string[] = [];
     let ready = false;
-    for (let attempt = 1; attempt <= BOOT_MAX_ATTEMPTS && !ready; attempt++) {
+    // 依存関係のキャッシュ（D14）。コンテナを新しく起動するときだけ、スナップショットからの復元を試みる。
+    // どこで失敗しても image からの普通の起動に戻る（fail-soft）。復元に失敗した試行は、通常の試行の回数に数えない。
+    let deps: DepsPlan = container.running ? { kind: "disabled" } : await this.planDeps(g, spec);
+    let restoring: Extract<DepsPlan, { kind: "snapshot" }> | undefined =
+      deps.kind === "snapshot" ? deps : undefined;
+    let attemptLimit = BOOT_MAX_ATTEMPTS;
+    /** 復元を諦めて image に戻す（理由をログに残し、スナップショットを無効にする） */
+    const abandonRestore = (reason: DepsMissReason) => {
+      if (!restoring) return;
+      this.logDepsMiss(reason);
+      this.invalidateDeps(restoring);
+      deps = { kind: "miss", reason };
+      restoring = undefined;
+      attemptLimit += 1;
+    };
+    for (let attempt = 1; attempt <= attemptLimit && !ready; attempt++) {
       const attemptStart = Date.now();
       // この試行の期限（破棄の時間は含めない）
       const until = attemptStart + this.bootAttemptMs;
       if (!container.running) {
         this.ctx.storage.kv.delete("baseline");
-        this.recordStart();
         // scheduling_policy=durable_object では wrangler の instance_type は効かず、start() の instance が大きさを決める
         // （指定しないと lite = 1/16 vCPU・256 MiB で、npm ci が遅くメモリ不足で落ちる）。不正な値は既定に戻す（D13）。
         const { instance, ignored } = resolveSandboxInstance(this.env.SANDBOX_INSTANCE);
@@ -630,15 +738,29 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
             `[sandbox-boot] SANDBOX_INSTANCE=${JSON.stringify(ignored.slice(0, 40))} is not supported; using ${instance}`,
           );
         }
-        container.start({
-          image: container.images.workspace,
-          enableInternet: false,
-          instance,
-          env: BASE_ENV,
-        });
+        if (restoring) {
+          // 復元: image とは同時に渡せない。スナップショットは作ったイメージの版に結び付く
+          try {
+            container.start({
+              containerSnapshot: { id: restoring.snapshotId },
+              enableInternet: false,
+              instance,
+              env: BASE_ENV,
+            });
+          } catch {
+            abandonRestore("restore_failed");
+            continue;
+          }
+        } else {
+          container.start({
+            image: container.images.workspace,
+            enableInternet: false,
+            instance,
+            env: BASE_ENV,
+          });
+        }
+        this.recordStart();
         started = true;
-        // D14（依存関係のキャッシュ）の調査: イメージの参照が digest か tag か。秘密は含まない
-        console.log(`[sandbox-boot] image=${JSON.stringify(container.images.workspace)}`);
       }
       // DO だけが再起動してコンテナが生きている場合も、傍受は登録し直す（同じ宛先の再登録はハンドラを置き換える）。
       // リポジトリは永続化した spec から導く（未設定のまま登録することはない）。
@@ -699,9 +821,23 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         lap("probe", t1);
       }
       trace.push(
-        `#${attempt} ${ready ? "ready" : `stalled-at-${stage}`} ${stageEnds.join(" ")} probes=${probes}${lastError ? ` last="${lastError}"` : ""}`,
+        `#${attempt} ${ready ? "ready" : `stalled-at-${stage}`}${restoring ? " snapshot" : ""} ${stageEnds.join(" ")} probes=${probes}${lastError ? ` last="${lastError}"` : ""}`,
       );
+      if (ready && restoring) {
+        // 復元したコンテナで、HTTPS 傍受の CA 証明書が読めること（無ければ git / npm が失敗する）。無ければ image から起動し直す
+        const cert = await this.rawExec(["test", "-r", CA_CERT], { timeoutMs: 10_000, cwd: "/" });
+        this.assertBootCurrent(g);
+        if (cert.exitCode !== 0) {
+          abandonRestore("cert_missing");
+          ready = false;
+          await this.destroyContainer(this.bootDestroyMs);
+          this.assertBootCurrent(g);
+          continue;
+        }
+      }
       if (ready) break;
+      // 復元したコンテナが ready にならなかった: スナップショットが原因かもしれないので、image に戻す
+      abandonRestore("restore_failed");
       this.recordBootRetry();
       // 起動が止まった: 破棄して停止を確かめ、最初からやり直す。破棄の時間は待ちの期限に数えない
       await this.destroyContainer(this.bootDestroyMs);
@@ -727,8 +863,107 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     }
     await this.prepareWorkspace(spec);
     this.assertBootCurrent(g);
+    this.recordDepsStatus(await this.finishDeps(deps, restoring));
     await this.armAlarm();
     return started;
+  }
+
+  // ---- 依存関係のキャッシュ（D14。docs/specs/design.md 15.8）----
+
+  /** キャッシュを使うか。DEPS_CACHE_ENABLED が "false" / "0" / "off" のときだけ無効（既定は有効）。 */
+  private depsCacheEnabled(): boolean {
+    const v = (this.env as unknown as { DEPS_CACHE_ENABLED?: unknown }).DEPS_CACHE_ENABLED;
+    if (typeof v !== "string") return true;
+    return !["false", "0", "off"].includes(v.trim().toLowerCase());
+  }
+
+  /** 鍵ごとの DepsCacheDO。テストで差し替える。 */
+  private depsCacheStub(key: string): {
+    ensure(req: DepsEnsureRequest): Promise<DepsEnsureResult>;
+    invalidate(snapshotId: string): Promise<void>;
+  } {
+    return this.env.DEPS_CACHE_DO.getByName(key) as unknown as {
+      ensure(req: DepsEnsureRequest): Promise<DepsEnsureResult>;
+      invalidate(snapshotId: string): Promise<void>;
+    };
+  }
+
+  /** キャッシュを使えなかった理由を固定コードでログに残す（入力や例外の文面は出さない）。 */
+  private logDepsMiss(reason: DepsMissReason): void {
+    console.warn(`[sandbox-boot] deps_cache_miss: ${reason}`);
+  }
+
+  /** 復元に失敗したスナップショットを DepsCacheDO に知らせる（待ちの後に作り直される）。失敗は握りつぶす。 */
+  private invalidateDeps(plan: { key: string; snapshotId: string }): void {
+    void Promise.resolve()
+      .then(() => this.depsCacheStub(plan.key).invalidate(plan.snapshotId))
+      .catch(() => undefined);
+  }
+
+  /**
+   * 起動の前に、依存関係のスナップショットを用意する（無ければ DepsCacheDO が作る。最初のタスクは作るのを待つ）。
+   * 例外は投げない（terminate・期限・世代の変化による boot の中断だけは、そのまま伝える）。
+   */
+  private async planDeps(g: number, spec: WorkspaceSpec): Promise<DepsPlan> {
+    if (!this.depsCacheEnabled() || spec.deps === undefined || spec.deps === null) {
+      return { kind: "disabled" };
+    }
+    const deps = parseDepsSpec(spec.deps);
+    if (!deps) return this.depsMiss("invalid_deps");
+    let key: string;
+    try {
+      key = await depsCacheKey(deps, String(this.container().images?.workspace ?? ""));
+    } catch {
+      return this.depsMiss("ensure_failed");
+    }
+    const request: DepsEnsureRequest = {
+      key,
+      deps,
+      repository: spec.repository,
+      baseSha: spec.baseSha,
+      branch: spec.branch,
+      taskId: this.ctx.id.name ?? "",
+    };
+    // RPC の失敗は値にして raceUntil に渡す（raceUntil が投げるのは、boot の中断のときだけにする）
+    const call: Promise<DepsEnsureResult> = Promise.resolve()
+      .then(() => this.depsCacheStub(key).ensure(request))
+      .catch((): DepsEnsureResult => ({ ok: false, reason: "ensure_failed" }));
+    const raced = await this.raceUntil(g, Date.now() + this.depsEnsureWaitMs, call);
+    if (raced.timedOut) return this.depsMiss("ensure_timeout");
+    const result = raced.value;
+    if (!result || typeof result !== "object" || !("ok" in result)) {
+      return this.depsMiss("ensure_failed");
+    }
+    if (!result.ok) return this.depsMiss(result.reason);
+    if (result.built) this.recordCacheBuild(result.buildMs);
+    // 運用の手がかり（鍵はハッシュで秘密ではない。イメージの参照は出さない）
+    console.log(`[sandbox-boot] deps_cache key=${key.slice(0, 16)} built=${result.built}`);
+    return { kind: "snapshot", key, snapshotId: result.snapshotId, built: result.built };
+  }
+
+  private depsMiss(reason: DepsMissReason): DepsPlan {
+    this.logDepsMiss(reason);
+    return { kind: "miss", reason };
+  }
+
+  /**
+   * 作業ツリーを clone した後に、スナップショットから起動していたら node_modules を戻す。usage に出す結果を返す。
+   * 戻すのに失敗してもタスクは続ける（miss。子は自分で導入する）。
+   */
+  private async finishDeps(
+    deps: DepsPlan,
+    restoring: Extract<DepsPlan, { kind: "snapshot" }> | undefined,
+  ): Promise<DepsCacheStatus> {
+    if (!restoring) return deps.kind === "disabled" ? "disabled" : "miss";
+    const r = await this.rawExec(
+      ["bash", "-c", DEPS_RESTORE_SCRIPT, "rovo-deps-restore", WORKSPACE, DEPS_CACHE_DIR],
+      { timeoutMs: DEPS_RESTORE_TIMEOUT_MS, cwd: "/" },
+    );
+    if (r.exitCode !== 0) {
+      this.logDepsMiss("move_failed");
+      return "miss";
+    }
+    return restoring.built ? "built" : "hit";
   }
 
   /**
@@ -828,6 +1063,161 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       "git switch -c",
     );
     await verifyBase();
+  }
+
+  // ---- 依存関係のキャッシュを作る（DepsCacheDO から呼ばれる。名前が deps-<鍵> のインスタンスで動く）----
+
+  /**
+   * 依存関係のスナップショットを作る。タスクのコンテナは使わず、このインスタンス自身のコンテナ（タスクのコンテナと
+   * 同じクラス・同じイメージ。スナップショットはイメージに結び付くため）を使う。
+   *
+   * 手順: image で起動 → 傍受を登録 → base_sha を --depth 1 で取り出す → 導入 → node_modules を
+   * /opt/deps-cache へ移す → /workspace を空にする → snapshotContainer → 破棄。
+   * スナップショットにはリポジトリの作業状態が入らない（node_modules とパッケージマネージャのキャッシュだけ）。
+   * GitHub の資格はコンテナに入れない（外向きの転送時に OutboundGateway が、依頼したタスクの資格で付ける）。
+   * 例外は投げない。失敗は固定コードで返す。同時の依頼は 1 つの処理を共有する。
+   */
+  buildDepsSnapshot(req: DepsBuildRequest): Promise<DepsBuildResult> {
+    this.depsBuilding ??= this.runDepsBuild(req).finally(() => {
+      this.depsBuilding = undefined;
+    });
+    return this.depsBuilding;
+  }
+
+  private async runDepsBuild(req: DepsBuildRequest): Promise<DepsBuildResult> {
+    const started = Date.now();
+    const deps: DepsSpec | null = parseDepsSpec(req?.deps);
+    let repo: { owner: string; name: string };
+    try {
+      repo = parseRepository(req.repository);
+    } catch {
+      return { ok: false, reason: "invalid_deps" };
+    }
+    if (
+      !deps ||
+      typeof req.key !== "string" ||
+      !DEPS_KEY.test(req.key) ||
+      typeof req.baseSha !== "string" ||
+      !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(req.baseSha) ||
+      typeof req.branch !== "string" ||
+      !/^[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$/.test(req.branch) ||
+      typeof req.taskId !== "string" ||
+      !/^[A-Za-z0-9_-]+$/.test(req.taskId)
+    ) {
+      return { ok: false, reason: "invalid_deps" };
+    }
+    const container = this.maybeContainer();
+    if (!container || typeof container.snapshotContainer !== "function") {
+      // スナップショットに対応しないランタイム（ローカルの wrangler dev など）。起動する前に分かるので、時間を使わない
+      return { ok: false, reason: "snapshot_unsupported" };
+    }
+    const timeoutMs = Math.min(
+      DEPS_BUILD_TIMEOUT_MS,
+      Math.max(1_000, Number.isFinite(req.timeoutMs) ? req.timeoutMs : DEPS_BUILD_TIMEOUT_MS),
+    );
+    const until = started + timeoutMs;
+    const install = [...DEPS_INSTALLS[deps.lockfilePath as DepsLockfile].argv];
+    /** 1 つの段階を、全体の期限の残りの時間で実行する。失敗・時間切れは DepsBuildError */
+    const step = async (what: string, argv: string[], cwd = "/") => {
+      const remaining = until - Date.now();
+      if (remaining <= 0) throw new DepsBuildError("build_timeout", what);
+      const r = await this.rawExec(argv, { timeoutMs: remaining, cwd });
+      if (r.exitCode !== 0) {
+        throw new DepsBuildError(
+          Date.now() >= until ? "build_timeout" : "build_failed",
+          `${what} exit=${r.exitCode} ${maskSecrets((r.stderr || r.stdout).trim()).slice(-300)}`,
+        );
+      }
+    };
+    try {
+      if (container.running) await this.destroyContainer(this.bootDestroyMs);
+      const { instance } = resolveSandboxInstance(this.env.SANDBOX_INSTANCE);
+      container.start({
+        image: container.images.workspace,
+        enableInternet: false,
+        instance,
+        env: BASE_ENV,
+      });
+      await container.setInactivityTimeout(timeoutMs + 60_000);
+      // 傍受と許可リストはタスクのコンテナと同じ（github.com は対象リポジトリの git だけ、レジストリは GET だけ）
+      const gateway = this.ctx.exports.OutboundGateway({
+        props: { repo, task: req.branch, taskId: req.taskId },
+      });
+      const intercepted = await withDeadline(
+        Promise.all([
+          container.interceptOutboundHttps("*", gateway),
+          container.interceptAllOutboundHttp(gateway),
+        ]),
+        Math.min(until, Date.now() + this.bootAttemptMs),
+      );
+      if (intercepted === "timeout") throw new DepsBuildError("build_failed", "intercept");
+      // exec が応答するまで待つ
+      const readyUntil = Math.min(until, Date.now() + this.bootAttemptMs);
+      let ready = false;
+      while (!ready && Date.now() < readyUntil) {
+        const r = await withDeadline(
+          container
+            .exec(["true"])
+            .then((p) => p.exitCode)
+            .catch(() => -1),
+          readyUntil,
+        );
+        if (r === 0) ready = true;
+        else await sleep(BOOT_POLL_MS);
+      }
+      if (!ready) throw new DepsBuildError("build_failed", "container did not become ready");
+      await step("fetch", [
+        "bash",
+        "-c",
+        DEPS_FETCH_SCRIPT,
+        "rovo-deps-fetch",
+        WORKSPACE,
+        `https://github.com/${req.repository}.git`,
+        req.baseSha,
+      ]);
+      await step("install", install, WORKSPACE);
+      await step("stash", [
+        "bash",
+        "-c",
+        DEPS_STASH_SCRIPT,
+        "rovo-deps-stash",
+        WORKSPACE,
+        DEPS_CACHE_DIR,
+      ]);
+      // リポジトリの作業状態をスナップショットに入れない
+      await step("wipe", ["find", WORKSPACE, "-mindepth", "1", "-delete"]);
+      let snapshot: Awaited<ReturnType<NonNullable<Container["snapshotContainer"]>>> | "timeout";
+      try {
+        snapshot = await withDeadline(
+          container.snapshotContainer({ name: depsSnapshotName(req.key) }),
+          until,
+        );
+      } catch (e) {
+        throw new DepsBuildError(
+          "snapshot_failed",
+          e instanceof Error ? e.message.slice(0, 200) : "",
+        );
+      }
+      if (snapshot === "timeout") throw new DepsBuildError("build_timeout", "snapshot");
+      if (typeof snapshot?.id !== "string" || snapshot.id === "") {
+        throw new DepsBuildError("snapshot_failed", "no snapshot id");
+      }
+      return {
+        ok: true,
+        snapshotId: snapshot.id,
+        size: typeof snapshot.size === "number" ? snapshot.size : 0,
+        buildMs: Date.now() - started,
+      };
+    } catch (e) {
+      const reason: DepsMissReason = e instanceof DepsBuildError ? e.reason : "build_failed";
+      console.warn(
+        `[deps-build] failed: ${reason}${e instanceof DepsBuildError && e.detail ? ` (${e.detail})` : ""}`,
+      );
+      return { ok: false, reason };
+    } finally {
+      // 成功・失敗にかかわらず、作成用のコンテナは残さない
+      await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
+    }
   }
 
   // ---- 内部の実行 ----

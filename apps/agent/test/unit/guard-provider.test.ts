@@ -82,6 +82,26 @@ describe("guardProvider の thinking 補正", () => {
     });
   }
 
+  it("sonnet は rovo の id（接頭辞つき）で来ても置き換える", async () => {
+    const m = { ...anthropicModel, id: "anthropic/claude-sonnet-5-5" } as unknown as Model<Api>;
+    const seen = await run(m, { messages: [], thinking: { type: "disabled" } }, "streamSimple");
+    expect(seen.thinking).toEqual({ type: "between_tools" });
+  });
+
+  it("haiku は between_tools を 400 で拒否するので、disabled のまま送る", async () => {
+    for (const id of ["claude-haiku-5-5", "anthropic/claude-haiku-5-5"]) {
+      const m = { ...anthropicModel, id } as unknown as Model<Api>;
+      const payload = { messages: [], thinking: { type: "disabled" } };
+      expect(await run(m, payload, "streamSimple")).toEqual(payload);
+    }
+  });
+
+  it("表に無い Anthropic のモデルは置き換えない（Pi の disabled のまま）", async () => {
+    const m = { ...anthropicModel, id: "claude-unknown-9" } as unknown as Model<Api>;
+    const payload = { messages: [], thinking: { type: "disabled" } };
+    expect(await run(m, payload, "streamSimple")).toEqual(payload);
+  });
+
   it("thinking が disabled 以外なら変えない", async () => {
     const payload = { messages: [], thinking: { type: "adaptive", display: "summarized" } };
     expect(await run(anthropicModel, payload, "streamSimple")).toEqual(payload);

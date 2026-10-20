@@ -6,6 +6,7 @@ import {
   MODEL_CATALOG_IDS,
   modelInfo,
   parseAgentModels,
+  thinkingOffFor,
 } from "../src";
 
 describe("許可リストとカタログ", () => {
@@ -148,5 +149,23 @@ describe("parseAgentModels（AGENT_MODELS の解釈）", () => {
       "anthropic/claude-haiku-5-5",
     ]);
     expect(parseAgentModels(undefined, "anthropic/bogus").models).toEqual([]);
+  });
+});
+
+describe("thinkingOffFor（思考をオフにするときの値）", () => {
+  it("sonnet は between_tools、haiku は disabled、opus は暫定で between_tools", () => {
+    expect(thinkingOffFor("anthropic/claude-sonnet-5-5")).toBe("between_tools");
+    expect(thinkingOffFor("anthropic/claude-haiku-5-5")).toBe("disabled");
+    expect(thinkingOffFor("anthropic/claude-opus-5-5")).toBe("between_tools");
+  });
+  it("カタログの id（プロバイダー接頭辞なし）でも引ける", () => {
+    expect(thinkingOffFor("claude-sonnet-5-5")).toBe("between_tools");
+    expect(thinkingOffFor("claude-haiku-5-5")).toBe("disabled");
+  });
+  it("fable・OpenAI・表に無いモデルは undefined（置き換えない）", () => {
+    expect(thinkingOffFor("anthropic/claude-fable-5-1")).toBeUndefined();
+    expect(thinkingOffFor("openai/gpt-6-sol")).toBeUndefined();
+    expect(thinkingOffFor("claude-unknown-9")).toBeUndefined();
+    expect(thinkingOffFor("toString")).toBeUndefined();
   });
 });

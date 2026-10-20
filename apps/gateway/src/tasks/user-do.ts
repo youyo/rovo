@@ -371,6 +371,9 @@ export class UserDO extends DurableObject<Env> {
   private async dashboardAllowed(
     githubUserId: number,
   ): Promise<"allowed" | "denied" | "unavailable"> {
+    // 呼び出し側の約束は「Cookie の uid で DO を選ぶ」。DO 自身の名前（= uid）が分かるときは、不一致を拒否して二重に守る
+    const owner = this.ctx.id.name;
+    if (owner !== undefined && owner !== String(githubUserId)) return "denied";
     const rules = loadAllowRules(this.env);
     if (!rules) return "denied";
     if (isUserIdAllowed(rules, githubUserId)) return "allowed";
@@ -417,6 +420,8 @@ export class UserDO extends DurableObject<Env> {
   private dropVisible(): void {
     this.visibleCache = null;
     this.visibleGen++;
+    // 破棄より前に始まった取得には、以降の呼び出しを束ねない
+    this.visibleInflight.clear();
   }
 
   private async fetchVisible(epoch: number, startedAt: number): Promise<VisibleResult> {
@@ -428,7 +433,11 @@ export class UserDO extends DurableObject<Env> {
       );
       // 取得中に再ログイン・破棄（別の呼び出しの失敗など）があったら、結果は返すがキャッシュしない
       if (gen === this.visibleGen && epoch === this.loginEpoch) {
-        this.visibleCache = { ids, at: startedAt, epoch };
+        // 並行する取得のうち、後で終わった古い取得が新しい結果を上書きしない（開始が既存以上のときだけ書く）
+        const cur = this.visibleCache;
+        if (!cur || cur.epoch !== epoch || startedAt >= cur.at) {
+          this.visibleCache = { ids, at: startedAt, epoch };
+        }
       }
       return { ok: true, ids };
     } catch (e) {

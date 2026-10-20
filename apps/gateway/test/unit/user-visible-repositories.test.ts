@@ -320,3 +320,72 @@ describe("visibleRepositoryIds: キャッシュ（D6）", () => {
     expect(tables.filter((n) => /visible|repositor/i.test(n))).toEqual([]);
   });
 });
+
+/** 最初の「repositories」の応答だけを、取得したあとで delayMs 遅らせる（遅い古い取得を作る）。 */
+async function delayFirstRepositories(
+  stub: Awaited<ReturnType<typeof setup>>["stub"],
+  gh: FakeGitHubFetch,
+  delayMs: number,
+) {
+  const orig = gh.fetch;
+  let delayed = false;
+  gh.fetch = async (input, init) => {
+    const res = await orig(input, init);
+    const path = new URL(new Request(input, init).url).pathname;
+    if (!delayed && path.endsWith("/repositories")) {
+      delayed = true;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return res;
+  };
+  await runInDurableObject(stub, (i) => {
+    (i as unknown as { githubFetch: typeof fetch }).githubFetch = gh.fetch;
+  });
+}
+
+describe("visibleRepositoryIds: 並行する取得の競合", () => {
+  it("遅い古い取得が、先に終わった新しい fresh の結果をキャッシュで上書きしない", async () => {
+    const c = clock();
+    const { uid, gh, stub } = await setup({ clock: c });
+    await delayFirstRepositories(stub, gh, 300);
+    const slow = stub.visibleRepositoryIds(uid); // 古い集合 [4242] を取るが、終わるのが遅い
+    await new Promise((r) => setTimeout(r, 50));
+    gh.repos = [repo(9)];
+    c.advance(1 * SEC);
+    expect(await stub.visibleRepositoryIds(uid, { fresh: true })).toEqual({ ok: true, ids: [9] });
+    expect(await slow).toEqual({ ok: true, ids: [4242] }); // 呼び出し元には、その時点の結果を返してよい
+    // キャッシュは新しい方（[9]）のまま
+    expect(await stub.visibleRepositoryIds(uid)).toEqual({ ok: true, ids: [9] });
+  });
+
+  it("許可ルールで拒否したあと、拒否の前に始まった取得には束ねられない", async () => {
+    const { uid, gh, stub } = await setup();
+    await delayFirstRepositories(stub, gh, 300);
+    const slow = stub.visibleRepositoryIds(uid); // 拒否の前に始まる（古い集合 [4242]）
+    await new Promise((r) => setTimeout(r, 50));
+    gh.repos = [repo(9)];
+    await patchEnv(stub, { ALLOWED_ORG: "", ALLOWED_TEAM: "", ALLOWED_USER_IDS: "" });
+    expect(await stub.visibleRepositoryIds(uid)).toEqual({ ok: false, code: "unauthenticated" });
+    await patchEnv(stub, { ALLOWED_ORG: "acme", ALLOWED_TEAM: "core" });
+    // 復帰直後の通常の呼び出しは、拒否前の取得（[4242]）に束ねられず、自分で取り直す
+    expect(await stub.visibleRepositoryIds(uid)).toEqual({ ok: true, ids: [9] });
+    await slow;
+    expect(await stub.visibleRepositoryIds(uid)).toEqual({ ok: true, ids: [9] });
+  });
+});
+
+describe("visibleRepositoryIds: uid の照合", () => {
+  it("この DO の持ち主と違う uid で呼ぶと、許可ルールに通る id でも拒否する", async () => {
+    const { uid, stub } = await setup();
+    await patchEnv(stub, {
+      ALLOWED_ORG: "",
+      ALLOWED_TEAM: "",
+      ALLOWED_USER_IDS: `${uid},${uid + 1}`,
+    });
+    expect(await stub.visibleRepositoryIds(uid + 1)).toEqual({
+      ok: false,
+      code: "unauthenticated",
+    });
+    expect(await stub.visibleRepositoryIds(uid)).toMatchObject({ ok: true });
+  });
+});

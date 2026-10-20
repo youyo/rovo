@@ -61,10 +61,11 @@ import {
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
 import type { ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createSandboxTools } from "./tools";
 import { createToolContext } from "./tools/context";
 import type { PushResult, SandboxToolsFactory } from "./tools/types";
-import { wrapUntrusted } from "./tools/untrusted";
+import { stripUntrustedMarkers, wrapUntrusted } from "./tools/untrusted";
 import {
   formatWebBrowse,
   formatWebError,
@@ -171,14 +172,15 @@ const BG: any = Object.freeze({
   toString: () => "[Context rovo agent background]",
 });
 
+/** 末尾 n 文字（書記素単位。サロゲートペアや結合文字の途中で切らない）。親に返す文字列なので ANSI も除く。 */
 function tail(text: string, n = OUTPUT_TAIL): string {
-  return text.length > n ? `...${text.slice(text.length - n)}` : text;
+  return tailChars(stripAnsi(text), n);
 }
 
 function summarizeArgs(args: unknown): string {
   // マスク → 切り詰めの順（切り詰めで秘密のパターンが途中で切れて素通りしないように）
-  const s = maskSecrets(typeof args === "string" ? args : JSON.stringify(args ?? {}));
-  return s.length > 200 ? `${s.slice(0, 200)}...` : s;
+  const s = maskSecrets(stripAnsi(typeof args === "string" ? args : JSON.stringify(args ?? {})));
+  return headChars(s, 200);
 }
 
 /**
@@ -189,7 +191,10 @@ function summarizeArgs(args: unknown): string {
 function maskEventStrings(data: unknown): unknown {
   if (typeof data !== "object" || data === null || Array.isArray(data)) return data;
   return Object.fromEntries(
-    Object.entries(data).map(([k, v]) => [k, typeof v === "string" ? maskSecrets(v) : v]),
+    Object.entries(data).map(([k, v]) => [
+      k,
+      typeof v === "string" ? maskSecrets(stripAnsi(stripUntrustedMarkers(v))) : v,
+    ]),
   );
 }
 
@@ -1930,7 +1935,8 @@ export class AgentDO extends DurableObject<Env> {
             ? result.isError
               ? "web tool error"
               : "web result (omitted)"
-            : tail(maskSecrets(result.text), 200),
+            : // 囲み → ANSI → マスク → 切り詰めの順（切り詰めで秘密のパターンが途中で切れて素通りしないように）
+              tail(maskSecrets(stripAnsi(stripUntrustedMarkers(result.text))), 200),
         });
       },
       afterTools: async () => {

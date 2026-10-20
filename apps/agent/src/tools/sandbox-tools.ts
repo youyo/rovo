@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { maskSecrets } from "../redact";
 import type { ExecResult, SandboxPort } from "../sandbox-port";
+import { stripAnsi } from "../text-util";
 import { resolveWorkspacePath } from "../workspace-path";
 import type { PushResult, ToolContext } from "./types";
 import { wrapUntrusted } from "./untrusted";
@@ -334,8 +335,9 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         }
         if (r.truncated)
           parts.push(`output truncated to the last ${BASH_MAX_OUTPUT_BYTES} bytes per stream`);
-        if (r.stdout) parts.push(`--- stdout ---\n${r.stdout}`);
-        if (r.stderr) parts.push(`--- stderr ---\n${r.stderr}`);
+        // 色などの ANSI エスケープはモデルに意味がなくトークンを食うだけなので、コマンドの出力から除く
+        if (r.stdout) parts.push(`--- stdout ---\n${stripAnsi(r.stdout)}`);
+        if (r.stderr) parts.push(`--- stderr ---\n${stripAnsi(r.stderr)}`);
         const text = parts.join("\n");
         return r.exitCode === 0 && !r.timedOut ? ok("bash", text) : fail("bash", text);
       },

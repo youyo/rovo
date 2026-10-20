@@ -86,3 +86,51 @@ export type SummarizeResult =
       models: { model: string; cost_micro: number }[];
     }
   | { ok: false; code: "invalid_input" | "too_many_repo_ids" };
+
+/**
+ * consult の索引（DirectoryDO の consult_index。D9 / M3b）に入れる 1 件の写し。
+ * 「誰が・いつ・どのモデルで・いくら」だけを持つ。質問・system・応答の本文は入れない（strict なので余計な項目は弾かれる）。
+ * 対象のリポジトリが無いので、権限の判定には使わない。時刻は epoch ms、費用は micro USD（整数）。
+ */
+export const ConsultIndexSnapshotSchema = z.strictObject({
+  consult_id: z.string().regex(/^consult-[0-9A-HJKMNP-TV-Z]{26}$/),
+  owner_id: z.number().int(),
+  owner_login: z.string().max(200),
+  at: z.number().int(),
+  model: z.string().min(1).max(200),
+  cost_micro: z.number().int().min(0),
+  /** 実費が分からず予約額（や見積もり）で閉じた consult */
+  estimated: z.boolean(),
+});
+export type ConsultIndexSnapshot = z.infer<typeof ConsultIndexSnapshotSchema>;
+
+export type ConsultIndexRow = ConsultIndexSnapshot & { revision: number };
+
+export type UpsertConsultResult = UpsertTaskResult;
+
+/** consult の一覧の件数の上限 */
+export const MAX_CONSULT_LIMIT = 2_000;
+
+export type ListConsultsQuery = {
+  /** [from, to)（epoch ms） */
+  from: number;
+  to: number;
+  /** 指定したら、その所有者の consult だけ（「自分」への絞り込み） */
+  ownerId?: number;
+  limit: number;
+};
+
+export type ListConsultsResult =
+  | { ok: true; rows: ConsultIndexRow[] }
+  | { ok: false; code: "invalid_input" };
+
+export type SummarizeConsultsResult =
+  | {
+      ok: true;
+      count: number;
+      /** 全員分の合計。estimated_micro は、そのうち見積もりで閉じた分（内数） */
+      cost_micro: number;
+      estimated_micro: number;
+      models: { model: string; cost_micro: number }[];
+    }
+  | { ok: false; code: "invalid_input" };

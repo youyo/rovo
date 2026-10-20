@@ -186,6 +186,29 @@ describe("consult: 予約と精算", () => {
     expect(during).toMatchObject({ reserved_usd: 0.5, remaining_usd: 99.5 });
   });
 
+  it("予約に、決まったモデルと所有者を渡す（索引用。M3b）。入力の本文は渡さない", async () => {
+    const calls: unknown[][] = [];
+    const svc = createConsultService(env, {
+      users: () =>
+        ({
+          reserveConsult: (...a: unknown[]) => {
+            calls.push(a);
+            return { ok: true as const, reserved_usd: 0.5 };
+          },
+          settleConsult: () => ({ ok: true as const, applied: true }),
+        }) as never,
+      agent: fakeAgent().agent,
+    });
+    const p = principal();
+    const r = await svc.consult(p, input({ system: "SECRET-SYSTEM" }));
+    expect(r.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]).toBe(r.ok ? r.value.model : "");
+    expect(calls[0]?.[2]).toEqual({ id: p.githubUserId, login: "alice" });
+    expect(JSON.stringify(calls)).not.toContain("SECRET-SYSTEM");
+    expect(JSON.stringify(calls)).not.toContain("design the cache");
+  });
+
   it("月の枠が足りなければ budget_exceeded で、AgentDO は呼ばない", async () => {
     const fx = fakeAgent();
     const svc = createConsultService(env, { agent: fx.agent });

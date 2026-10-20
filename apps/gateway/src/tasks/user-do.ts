@@ -6,6 +6,12 @@ import {
   SESSION_IDLE_MS,
   SESSION_TOUCH_MS,
 } from "../dashboard/session";
+import { indexBackoffMs } from "../directory/backoff";
+import {
+  type ConsultIndexSnapshot,
+  DIRECTORY_NAME,
+  type UpsertConsultResult,
+} from "../directory/types";
 import {
   CredentialManager,
   type CredentialState,
@@ -64,6 +70,18 @@ export type ReserveResult =
 /** 精算されないまま残った consult の予約を、予約額で閉じるまでの時間。 */
 export const CONSULT_STALE_AFTER_MS = 30 * 60 * 1000;
 
+/** consult の索引（Directory）への配送の周期（ms）。TaskDO の alarm と同じ */
+export const CONSULT_INDEX_ALARM_INTERVAL_MS = 10_000;
+/** Directory への 1 回の呼び出しの待ちの上限（ms） */
+const CONSULT_INDEX_TIMEOUT_MS = 10_000;
+/** 1 回の alarm で送る件数の上限（残りは次の alarm で） */
+const CONSULT_INDEX_BATCH = 50;
+/** 配送済みの consult_log の行を残す期間。過ぎたら消す（Directory が正本。UserDO を太らせない） */
+const CONSULT_LOG_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** reserveConsult に渡す所有者（索引の「誰が」。質問の本文は渡さない） */
+export type ConsultOwner = { id: number; login: string };
+
 export type ConsultReserveResult =
   | { ok: true; reserved_usd: number }
   | { ok: false; code: "budget_exceeded" | "invalid_input" };
@@ -92,6 +110,42 @@ export type BudgetStatus = {
 
 export type SettleResult = { ok: true; applied: boolean } | { ok: false };
 export type FinishResult = { ok: true; released: boolean };
+
+type ConsultLogRow = {
+  consult_id: string;
+  owner_id: number;
+  owner_login: string;
+  at: number;
+  model: string;
+  cost_micro: number;
+  estimated: number;
+  revision: number;
+};
+
+/** 索引に送る値。Directory のスキーマの上限に合わせて送る前に切り詰める（長すぎて恒久的に拒否されないように） */
+function consultSnapshot(row: ConsultLogRow): ConsultIndexSnapshot {
+  return {
+    consult_id: row.consult_id,
+    owner_id: row.owner_id,
+    owner_login: row.owner_login.slice(0, 200),
+    at: row.at,
+    model: row.model.slice(0, 200),
+    cost_micro: row.cost_micro,
+    estimated: row.estimated === 1,
+  };
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timeout")), ms);
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
 
 /** 開始時刻の月（UTC, "YYYY-MM"）。月またぎのタスクは開始した月に計上する。 */
 function monthOf(ms: number): string {
@@ -179,6 +233,10 @@ export class UserDO extends DurableObject<Env> {
   private loginEpoch = 0;
   /** 進行中の所属確認。キーは「世代:githubUserId」。同じキーの呼び出しだけが共有する。 */
   private memberInflight = new Map<string, Promise<MemberResult | typeof STALE>>();
+  /** 再試行間隔のジッター用の乱数（[0, 1)）。テストで差し替える。 */
+  protected random: () => number = Math.random;
+  /** 索引の配送を始める alarm が要るか（同期区間の中で立て、区間の後に requestConsultAlarm が消す） */
+  private consultAlarmWanted = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -208,6 +266,33 @@ export class UserDO extends DurableObject<Env> {
       closed INTEGER NOT NULL DEFAULT 0
     )`);
     sql.exec("CREATE INDEX IF NOT EXISTS task_budget_month ON task_budget (month)");
+    // consult の索引の outbox（D9 / M3b）。モデル名・所有者・時刻・費用だけを持ち、質問・応答の本文は持たない。
+    // settled=1 になる同期区間で revision を上げて index_dirty=1 にし、alarm が Directory へ配送して index_dirty=0 にする。
+    // 行が無い consult（デプロイ前の予約・モデルを渡さなかった呼び出し）は索引に入れない（過去分はバックフィルしない）。
+    sql.exec(`CREATE TABLE IF NOT EXISTS consult_log (
+      consult_id TEXT PRIMARY KEY,
+      owner_id INTEGER NOT NULL,
+      owner_login TEXT NOT NULL,
+      at INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      cost_micro INTEGER NOT NULL DEFAULT 0,
+      estimated INTEGER NOT NULL DEFAULT 0,
+      settled INTEGER NOT NULL DEFAULT 0,
+      revision INTEGER NOT NULL DEFAULT 0,
+      index_dirty INTEGER NOT NULL DEFAULT 0
+    )`);
+    sql.exec(
+      "CREATE INDEX IF NOT EXISTS consult_log_dirty ON consult_log (index_dirty) WHERE index_dirty = 1",
+    );
+    // 配送の失敗の記録（バックオフ）。1 行だけ
+    sql.exec(`CREATE TABLE IF NOT EXISTS consult_outbox (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      attempts INTEGER NOT NULL,
+      retry_at INTEGER NOT NULL
+    )`);
+    sql.exec(
+      "INSERT OR IGNORE INTO consult_outbox (singleton, attempts, retry_at) VALUES (1, 0, 0)",
+    );
     // settled が実費ではなく見積もり（予約額など）で確定した行は 1。列の追加前の行は 0（見積もりではない扱い）。
     addColumnIfMissing(sql, "task_budget", "settled_estimated", "INTEGER NOT NULL DEFAULT 0");
     // 親（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
@@ -469,6 +554,7 @@ export class UserDO extends DurableObject<Env> {
     for (let attempt = 0; attempt < MAX_RECONCILE_ATTEMPTS; attempt++) {
       // 同期区間: 判定と記録を await なしで一度に行う（割り込まれない）。
       const step = this.ctx.storage.transactionSync(() => this.decide(requestKey, fingerprint));
+      this.requestConsultAlarm(); // decide が古い consult を閉じたとき、その索引を配送する
       if (step.kind === "done") return step.result;
 
       // 枠が埋まっている。枠を持つタスクを TaskDO に照合する（ここで他の呼び出しが割り込みうる）。
@@ -664,10 +750,10 @@ export class UserDO extends DurableObject<Env> {
    * 精算されないまま CONSULT_STALE_AFTER_MS を過ぎた consult の予約は、予約額で閉じる（実費が分からないので、
    * 予約より少なく数えない側に倒す）。
    */
-  reserveConsult(consultId: string): ConsultReserveResult {
+  reserveConsult(consultId: string, model?: string, owner?: ConsultOwner): ConsultReserveResult {
     if (!isConsultId(consultId)) return { ok: false, code: "invalid_input" };
     const reservedUsd = consultBudgetUsd(this.env);
-    return this.ctx.storage.transactionSync((): ConsultReserveResult => {
+    const result = this.ctx.storage.transactionSync((): ConsultReserveResult => {
       const sql = this.ctx.storage.sql;
       const at = this.now();
       this.closeStaleConsults(at);
@@ -689,8 +775,22 @@ export class UserDO extends DurableObject<Env> {
         month,
         reservedMicro,
       );
+      // 索引用の行（モデルと所有者が分かるときだけ。予約と同じ同期区間で作る）
+      if (typeof model === "string" && model !== "" && owner && Number.isSafeInteger(owner.id)) {
+        sql.exec(
+          `INSERT OR IGNORE INTO consult_log (consult_id, owner_id, owner_login, at, model)
+           VALUES (?, ?, ?, ?, ?)`,
+          consultId,
+          owner.id,
+          String(owner.login),
+          at,
+          model,
+        );
+      }
       return { ok: true, reserved_usd: reservedMicro / MICRO };
     });
+    this.requestConsultAlarm();
+    return result;
   }
 
   /** 同期区間内で呼ぶ。古い consult の予約を、予約額（以上）で閉じる。 */
@@ -708,6 +808,7 @@ export class UserDO extends DurableObject<Env> {
         "UPDATE task_budget SET settled_micro = MAX(settled_micro, reserved_micro), settled_estimated = 1, closed = 1 WHERE task_id = ?",
         task_id,
       );
+      this.markConsultSettled(task_id);
     }
   }
 
@@ -726,7 +827,7 @@ export class UserDO extends DurableObject<Env> {
         .toArray();
       return known.length > 0 ? { ok: true, applied: false } : { ok: false };
     }
-    return this.ctx.storage.transactionSync((): SettleResult => {
+    const result = this.ctx.storage.transactionSync((): SettleResult => {
       const sql = this.ctx.storage.sql;
       const row = sql
         .exec<{ reserved_micro: number; closed: number }>(
@@ -743,8 +844,135 @@ export class UserDO extends DurableObject<Env> {
         costUsd === null || estimated ? 1 : 0,
         consultId,
       );
+      // 索引の行を同じ同期区間で確定する（精算と索引が食い違わない）
+      this.markConsultSettled(consultId);
       return { ok: true, applied: true };
     });
+    this.requestConsultAlarm();
+    return result;
+  }
+
+  // ---- consult の索引（outbox と alarm。D9 / M3b）----
+
+  /**
+   * 同期区間の中で呼ぶ。task_budget で確定した consult の値を consult_log に写し、revision を上げて dirty にする。
+   * consult_log に行が無い consult（デプロイ前の予約など）は何もしない。
+   */
+  private markConsultSettled(consultId: string): void {
+    const cursor = this.ctx.storage.sql.exec(
+      `UPDATE consult_log SET
+         cost_micro = (SELECT settled_micro FROM task_budget WHERE task_id = consult_log.consult_id),
+         estimated = (SELECT settled_estimated FROM task_budget WHERE task_id = consult_log.consult_id),
+         settled = 1, revision = revision + 1, index_dirty = 1
+       WHERE consult_id = ? AND settled = 0`,
+      consultId,
+    );
+    if (cursor.rowsWritten > 0) this.consultAlarmWanted = true;
+  }
+
+  /**
+   * 未配送の consult があるとき、alarm が無ければ設定する（同期メソッドから呼ぶので待たない。失敗しても consult は止めない）。
+   * 既に alarm があれば動かさない（連続した consult で alarm が後ろへ押されない）。
+   */
+  private requestConsultAlarm(): void {
+    if (!this.consultAlarmWanted) return;
+    this.consultAlarmWanted = false;
+    if (this.env.DIRECTORY_DO === undefined) return;
+    this.ctx.waitUntil(
+      this.ctx.storage
+        .getAlarm()
+        .then((current) =>
+          current === null
+            ? this.ctx.storage.setAlarm(Date.now() + CONSULT_INDEX_ALARM_INTERVAL_MS)
+            : undefined,
+        )
+        .catch((e) => {
+          console.error("consult_index_alarm_error", e instanceof Error ? e.name : typeof e);
+        }),
+    );
+  }
+
+  /**
+   * alarm: dirty な consult を Directory へ配送する。失敗しても例外にしない（索引は派生データ。consult 本体は止めない）。
+   * 失敗したら指数バックオフ（TaskDO と同じ INDEX_BACKOFF）で再設定し、復旧したら追いつく。
+   * 恒久的な拒否（invalid_input）はその行を送信済みとして捨てる。
+   */
+  override async alarm(): Promise<void> {
+    try {
+      await this.deliverConsultIndex();
+    } catch (e) {
+      console.error("consult_index_error", e instanceof Error ? e.name : typeof e);
+    }
+    try {
+      await this.syncConsultAlarm();
+    } catch (e) {
+      console.error("consult_index_alarm_error", e instanceof Error ? e.name : typeof e);
+    }
+  }
+
+  private async deliverConsultIndex(): Promise<void> {
+    if (this.env.DIRECTORY_DO === undefined) return;
+    const sql = this.ctx.storage.sql;
+    const at = this.now();
+    // 配送済みの古い行を掃除する（Directory が正本）
+    sql.exec(
+      "DELETE FROM consult_log WHERE settled = 1 AND index_dirty = 0 AND at < ?",
+      at - CONSULT_LOG_RETENTION_MS,
+    );
+    const outbox = sql
+      .exec<{ attempts: number; retry_at: number }>(
+        "SELECT attempts, retry_at FROM consult_outbox WHERE singleton = 1",
+      )
+      .one();
+    if (at < outbox.retry_at) return;
+    const dirty = sql
+      .exec<ConsultLogRow>(
+        "SELECT * FROM consult_log WHERE index_dirty = 1 ORDER BY at, consult_id LIMIT ?",
+        CONSULT_INDEX_BATCH,
+      )
+      .toArray();
+    for (const row of dirty) {
+      try {
+        const snapshot = consultSnapshot(row);
+        const call = this.env.DIRECTORY_DO.getByName(DIRECTORY_NAME).upsertConsult(
+          snapshot,
+          row.revision,
+        ) as unknown as Promise<UpsertConsultResult>;
+        const res = await withTimeout(call, CONSULT_INDEX_TIMEOUT_MS);
+        if (!res.ok && res.code !== "invalid_input") throw new Error(`rejected: ${res.code}`);
+        if (!res.ok) console.error("consult_index_rejected", res.code);
+        // 成功、または恒久的な拒否（捨てる）。送っている間に revision が進んでいなければ dirty を外す
+        sql.exec(
+          "UPDATE consult_log SET index_dirty = 0 WHERE consult_id = ? AND revision = ?",
+          row.consult_id,
+          row.revision,
+        );
+        sql.exec("UPDATE consult_outbox SET attempts = 0, retry_at = 0 WHERE singleton = 1");
+      } catch (e) {
+        // エラーのメッセージにはデータが入りうるので、名前だけを記録する
+        console.error("consult_index_deliver_error", e instanceof Error ? e.name : typeof e);
+        const attempts = outbox.attempts + 1;
+        sql.exec(
+          "UPDATE consult_outbox SET attempts = ?, retry_at = ? WHERE singleton = 1",
+          attempts,
+          this.now() + indexBackoffMs(attempts, this.random),
+        );
+        return; // 残りは次の alarm（バックオフの後）に
+      }
+    }
+  }
+
+  /** 未配送が残っていれば次の alarm を（バックオフを考えて）設定し、無ければ何もしない（alarm は消費済み） */
+  private async syncConsultAlarm(): Promise<void> {
+    if (this.env.DIRECTORY_DO === undefined) return;
+    const sql = this.ctx.storage.sql;
+    const left = sql.exec("SELECT 1 FROM consult_log WHERE index_dirty = 1 LIMIT 1").toArray();
+    if (left.length === 0) return;
+    const { retry_at } = sql
+      .exec<{ retry_at: number }>("SELECT retry_at FROM consult_outbox WHERE singleton = 1")
+      .one();
+    const wait = Math.max(CONSULT_INDEX_ALARM_INTERVAL_MS, retry_at - this.now());
+    await this.ctx.storage.setAlarm(Date.now() + wait);
   }
 
   // ---- GitHub 連携 ----

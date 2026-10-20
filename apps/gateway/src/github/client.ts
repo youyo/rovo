@@ -21,6 +21,14 @@ export class GitHubError extends Error {
   }
 }
 
+/** 閲覧者の見えるリポジトリの集合が上限を超えた（ダッシュボードは fail closed で 503 にする）。 */
+export class VisibleSetTooLargeError extends Error {
+  constructor() {
+    super("visible repository set is too large");
+    this.name = "VisibleSetTooLargeError";
+  }
+}
+
 export interface TokenSet {
   accessToken: string;
   refreshToken: string | null;
@@ -200,6 +208,39 @@ export class GitHubClient {
       }
     }
     throw denied();
+  }
+
+  /**
+   * 閲覧者のユーザートークンで見える repository id の集合（ダッシュボードの認可。docs/specs/dashboard.md D5）。
+   * `GET /user/installations` の全ページ → 各 installation の `/repositories` の全ページを辿る。
+   * fail closed: どこか 1 回でも失敗したら例外を投げ、部分的な集合は返さない。形が想定外の項目（id が整数でない）も失敗。
+   * 重複を除いた件数が maxIds を超えたら VisibleSetTooLargeError。戻り値は昇順。
+   */
+  async listVisibleRepositoryIds(accessToken: string, maxIds: number): Promise<number[]> {
+    const ids = new Set<number>();
+    for await (const inst of this.paginate(
+      accessToken,
+      `/user/installations?per_page=${PER_PAGE}`,
+      "installations",
+    )) {
+      const installationId = (inst as { id?: unknown } | null)?.id;
+      if (typeof installationId !== "number" || !Number.isSafeInteger(installationId)) {
+        throw new GitHubError("upstream_unavailable", "unexpected installation entry");
+      }
+      for await (const item of this.paginate(
+        accessToken,
+        `/user/installations/${installationId}/repositories?per_page=${PER_PAGE}`,
+        "repositories",
+      )) {
+        const id = (item as { id?: unknown } | null)?.id;
+        if (typeof id !== "number" || !Number.isSafeInteger(id)) {
+          throw new GitHubError("upstream_unavailable", "unexpected repository entry");
+        }
+        ids.add(id);
+        if (ids.size > maxIds) throw new VisibleSetTooLargeError();
+      }
+    }
+    return [...ids].sort((a, b) => a - b);
   }
 
   // ---- PR の操作（利用者のトークン。D9）----

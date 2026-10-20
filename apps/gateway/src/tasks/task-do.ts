@@ -340,6 +340,11 @@ export type WaitResult =
     }
   | { ok: false; code: "not_found" | "invalid_cursor" | "invalid_input" };
 
+/** dashboardRead の結果。view は索引の snapshot と同じ形（入力・トークン・PR の本文を含まない）。 */
+export type DashboardReadResult =
+  | { ok: true; view: TaskIndexSnapshot }
+  | { ok: false; code: "not_found" };
+
 type TaskRow = {
   id: string;
   owner_id: number;
@@ -1071,6 +1076,20 @@ export class TaskDO extends DurableObject<Env> {
     const row = this.getRow();
     if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
     return { ok: true, task: this.view(row) };
+  }
+
+  /**
+   * ダッシュボード用の読み取り専用の view（docs/specs/dashboard.md D5）。所有者を問わない（権限の判定は呼び出し側 =
+   * gateway が、閲覧者の見える repository id の集合で行う。判定に通るまで応答に出さない）。
+   * **TaskDO の今の repository_id** を含めて 1 回で返す（索引を権限の根拠にしない）。repository_id は INSERT 後に変わらない。
+   * 入力の指示文・受け入れ条件・トークン・PR の本文は含めない。repository_id が NULL・タスクが無いときは、区別なく not_found。
+   * 何も書かない（索引の revision も alarm も動かさない）。
+   */
+  async dashboardRead(): Promise<DashboardReadResult> {
+    const row = this.getRow();
+    const link = this.getLink();
+    if (!row || !link || row.repository_id === null) return { ok: false, code: "not_found" };
+    return { ok: true, view: this.buildIndexSnapshot(row, link) };
   }
 
   /** CANCELLED に確定する。終端状態なら何もせず成功（イベントは追加しない）。 */

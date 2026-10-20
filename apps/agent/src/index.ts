@@ -1,9 +1,10 @@
 import { AgentDO } from "./agent-do";
+import { DepsCacheDO } from "./deps-cache-do";
 import { OutboundGateway } from "./outbound-gateway";
 import { SandboxDO } from "./sandbox-do";
 import { handleTestRoute } from "./test-routes";
 
-export { AgentDO, OutboundGateway, SandboxDO };
+export { AgentDO, DepsCacheDO, OutboundGateway, SandboxDO };
 
 export default {
   async fetch(request, env): Promise<Response> {

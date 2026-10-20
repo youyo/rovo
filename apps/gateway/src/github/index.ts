@@ -3,5 +3,6 @@ export * from "./client";
 export * from "./config";
 export * from "./credentials";
 export * from "./crypto";
+export * from "./deps";
 export * from "./pr-body";
 export * from "./repo-api";

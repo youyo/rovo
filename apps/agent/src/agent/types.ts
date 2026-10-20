@@ -1,3 +1,5 @@
+import type { DepsSpec } from "../deps-cache";
+
 /** AgentDO の公開 RPC の型（戻り値は DTO。Pi の EntryRecord は返さない）。 */
 
 export type Phase =
@@ -69,6 +71,11 @@ export interface TaskSpec {
   budgetUsd: number;
   /** epoch ms。開始から 2 時間を超える値は 2 時間に丸める。 */
   deadlineAt: number;
+  /**
+   * 依存関係のキャッシュ（D14）の指定。gateway が base_sha 時点のルート直下の lockfile から作る。
+   * lockfile が無い・読めなかったときは null（キャッシュなし）。形が不正・表に無い導入コマンドは SandboxDO が無視する。
+   */
+  deps?: DepsSpec | null;
 }
 
 export type StartResult =
@@ -162,6 +169,13 @@ export interface SandboxMetrics {
   restarts: number;
   /** 起動の確認点で止まった・破棄された試行の回数 */
   bootRetries: number;
+  /**
+   * 依存関係のキャッシュ（D14）の結果。hit: キャッシュから起動 / miss: 使えず今までどおり / built: 作って使った / disabled: 対象外。
+   * 起動を一度も試みていなければ無い。
+   */
+  depsCache?: "hit" | "miss" | "built" | "disabled";
+  /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms）。runtimeMs（Sandbox の時間）にも含む */
+  cacheBuildMs?: number;
 }
 
 export interface WebUsage {

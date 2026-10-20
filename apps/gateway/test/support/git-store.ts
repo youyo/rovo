@@ -101,5 +101,26 @@ export function gitRepoStore(dir: string): RepoStore {
       }
     },
   };
-  return { commits, refs };
+  const tree: RepoStore["tree"] = (sha) => {
+    if (!SHA.test(sha)) return undefined;
+    try {
+      // `<mode> <type> <sha>\t<path>` の行（再帰しない）
+      return git(dir, ["ls-tree", sha])
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          const m = /^(\d+) (\w+) ([0-9a-f]+)\t(.*)$/.exec(line);
+          if (!m) throw new Error(`unparsable ls-tree line: ${line}`);
+          return {
+            mode: m[1] as string,
+            type: m[2] as string,
+            sha: m[3] as string,
+            path: m[4] as string,
+          };
+        });
+    } catch {
+      return undefined;
+    }
+  };
+  return { commits, refs, tree };
 }

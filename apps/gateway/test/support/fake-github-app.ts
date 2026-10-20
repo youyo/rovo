@@ -20,6 +20,8 @@ export interface RefStore {
 export interface RepoStore {
   commits: CommitStore;
   refs: RefStore;
+  /** tree の直下の項目（実 git の保存先のとき）。無ければ undefined。seedRootFiles で置いた tree が優先される */
+  tree?(sha: string): { path: string; mode: string; type: string; sha: string }[] | undefined;
 }
 
 export interface FakeAppOptions {
@@ -77,6 +79,9 @@ interface FakeRepoRec {
   refs: RefStore;
   pulls: FakePull[];
   missing: Set<string>;
+  /** tree の SHA -> 直下の項目（blob）。seedRootFiles が置く。置いていない tree は、保存先が読めればそれ、読めなければ空（lockfile なし） */
+  trees: Map<string, { path: string; sha: string }[]>;
+  readTree?: RepoStore["tree"];
   /** ブランチ保護の再現: 設定するとマージを 405 とこのメッセージで拒否する */
   mergeBlock: string | undefined;
   /** このリポジトリで許可していないマージ方法（405） */
@@ -235,9 +240,28 @@ export class FakeGitHubApp {
       refs: store?.refs ?? new Map(),
       pulls: [],
       missing: new Set(),
+      trees: new Map(),
+      ...(store?.tree ? { readTree: store.tree.bind(store) } : {}),
       mergeBlock: undefined,
       disallowedMethods: new Set(),
     });
+  }
+
+  /**
+   * コミットの tree の直下のファイル（名前 -> blob の SHA）を置く（置き直すと上書き）。
+   * 依存関係のキャッシュ（D14）が、ルート直下の lockfile を GET /git/trees/:sha で読むのに使う。
+   */
+  async seedRootFiles(
+    fullName: string,
+    commitSha: string,
+    files: Record<string, string>,
+  ): Promise<void> {
+    const repo = this.mustRepo(fullName);
+    const c = await this.ensureCommit(repo, commitSha);
+    repo.trees.set(
+      c.tree,
+      Object.entries(files).map(([path, sha]) => ({ path, sha })),
+    );
   }
 
   /** このコミットは存在しない（base_sha_not_found の再現）。 */
@@ -658,6 +682,16 @@ export class FakeGitHubApp {
         parents: c.parents.map((p) => ({ sha: p })),
         message: c.message,
       });
+    }
+
+    const treeGet = method === "GET" ? match(/^\/git\/trees\/([^/]+)$/) : null;
+    if (treeGet) {
+      const sha = decodeURIComponent(treeGet[1] as string);
+      const seeded = repo.trees.get(sha);
+      const entries = seeded
+        ? seeded.map((e) => ({ path: e.path, mode: "100644", type: "blob", sha: e.sha }))
+        : (repo.readTree?.(sha) ?? []);
+      return res(200, { sha, truncated: false, tree: entries });
     }
 
     if (method === "POST" && rest === "/git/commits") {

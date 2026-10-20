@@ -18,12 +18,15 @@
   "durable_objects": {
     "bindings": [
       { "name": "SANDBOX_DO", "class_name": "SandboxDO" },
-      { "name": "AGENT_DO", "class_name": "AgentDO" }
+      { "name": "AGENT_DO", "class_name": "AgentDO" },
+      // 依存関係のキャッシュ（D14）の状態を鍵ごとに持つ。コンテナは持たない（作成は SandboxDO の別インスタンス）
+      { "name": "DEPS_CACHE_DO", "class_name": "DepsCacheDO" }
     ]
   },
   "exports": {
     "SandboxDO": { "type": "durable-object", "storage": "sqlite" },
-    "AgentDO": { "type": "durable-object", "storage": "sqlite" }
+    "AgentDO": { "type": "durable-object", "storage": "sqlite" },
+    "DepsCacheDO": { "type": "durable-object", "storage": "sqlite" }
   },
   "services": [
     // apps/web（Web Research Service）。子の web_search / web_fetch が使う。caller は props で "child" に固定する。
@@ -56,6 +59,9 @@
     // wrangler の instance_type は効かず、SandboxDO が start() の instance に渡す。既定は standard-2（1 vCPU、6 GiB、12 GB）。
     // 不正な値は standard-2 に戻す（警告のログだけ）。単価（gateway の SANDBOX_USD_PER_HOUR）は大きさに合わせる。docs/deploy.md の 5。
     "SANDBOX_INSTANCE": "standard-2",
+    // 依存関係のキャッシュ（D14。Containers のスナップショット）を使うか。"false" / "0" / "off" で無効にする（既定は有効）。
+    // スナップショットは public beta で、使えない・失敗してもタスクは今までどおり動く（fail-soft）。docs/deploy.md の 5。
+    "DEPS_CACHE_ENABLED": "true",
     // ENVIRONMENT=test のときだけ有効。許可した外向き通信の転送先（偽サーバー）。空なら実ネットワークへ出る。
     "TEST_UPSTREAM": "",
     // 子の web_search / web_fetch / web_browse の回数の上限（タスクごと）

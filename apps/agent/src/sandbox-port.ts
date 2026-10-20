@@ -1,4 +1,5 @@
 import type { GitCredential, SandboxMetrics } from "./agent/types";
+import type { DepsSpec } from "./deps-cache";
 
 export interface ExecOptions {
   cwd?: string;
@@ -31,6 +32,11 @@ export interface WorkspaceSpec {
   initialSha: string;
   /** epoch ms。超えたら SandboxDO は自分でコンテナを止める。 */
   deadlineAt: number;
+  /**
+   * 依存関係のキャッシュ（D14）の指定。gateway が base_sha 時点のルート直下の lockfile から作る。
+   * 無い・null ならキャッシュを使わない。ensureReady の同一性（conflict）の判定には含めない。
+   */
+  deps?: DepsSpec | null;
 }
 
 /** AgentDO から見た Sandbox。Unit では fake に差し替え、E2E では SandboxDO（実コンテナ）を使う。 */

@@ -169,6 +169,39 @@ describe("sandbox.instance（D13）", () => {
   });
 });
 
+describe("depsCache.enabled（D14）", () => {
+  const gen = (patch) =>
+    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
+  it("既定は有効。agent の DEPS_CACHE_ENABLED に反映される", () => {
+    assert.equal(parseJsonc(gen({}).agent).vars.DEPS_CACHE_ENABLED, "true");
+    assert.equal(parseJsonc(gen({ depsCache: {} }).agent).vars.DEPS_CACHE_ENABLED, "true");
+  });
+  it("false で無効にできる", () => {
+    const o = gen({ depsCache: { enabled: false } });
+    assert.equal(parseJsonc(o.agent).vars.DEPS_CACHE_ENABLED, "false");
+  });
+  it("agent の設定は DepsCacheDO（コンテナを持たない）を DO のバインディングと exports に持つ", () => {
+    const a = parseJsonc(gen({}).agent);
+    assert.ok(
+      a.durable_objects.bindings.some(
+        (b) => b.name === "DEPS_CACHE_DO" && b.class_name === "DepsCacheDO",
+      ),
+    );
+    assert.deepEqual(a.exports.DepsCacheDO, { type: "durable-object", storage: "sqlite" });
+    // コンテナは SandboxDO のものだけ（スナップショットは作ったイメージに結び付くので、同じクラスで作る）
+    assert.deepEqual(
+      a.containers.map((c) => c.class_name),
+      ["SandboxDO"],
+    );
+  });
+  it("型の誤り・未知のキーはエラー", () => {
+    const bad = (depsCache) => validateConfig({ ...productionLike(), depsCache }).errors;
+    assert.ok(bad({ enabled: "yes" }).some((e) => e.includes("depsCache.enabled")));
+    assert.ok(bad({ enable: true }).some((e) => e.includes("depsCache.enable")));
+    assert.ok(bad(true).some((e) => e.includes("depsCache")));
+  });
+});
+
 describe("入力の検証", () => {
   const bad = (patch) => validateConfig({ ...productionLike(), ...patch }).errors;
   it("accountId が 32 桁の 16 進数でない", () => {

@@ -450,6 +450,8 @@ export class AgentDO extends DurableObject<Env> {
       branch: spec.branch,
       initialSha: spec.initialSha,
       deadlineAt: this.deadlineAt(),
+      // 依存関係のキャッシュ（D14）。gateway が lockfile から作った指定（無ければ null）。検証と実行は SandboxDO が行う
+      deps: spec.deps ?? null,
     };
   }
 
@@ -909,6 +911,19 @@ export class AgentDO extends DurableObject<Env> {
     await this.lifecycle.jobs.push({ id: "tick", fn: "tick", time: Date.now() + TICK_MS });
   }
 
+  /**
+   * Sandbox の準備が済んだ時点の、依存関係のキャッシュの結果（hit / built など）を覚える。子のシステムプロンプトに
+   * 「依存関係は導入済み」と書くかの判断に使う。読めない・失敗のときは覚えない（書かない側に倒す）。
+   */
+  private async noteDepsCache(): Promise<void> {
+    try {
+      const m = await this.sandbox().metrics?.();
+      if (m?.depsCache) this.store.setMeta("deps_cache", m.depsCache);
+    } catch {
+      // 診断の読み取りの失敗で、タスクを止めない
+    }
+  }
+
   private launch(): Promise<void> {
     this.launching ??= this.doLaunch().finally(() => {
       this.launching = undefined;
@@ -935,6 +950,7 @@ export class AgentDO extends DurableObject<Env> {
         throw e;
       }
       if (this.store.meta("tombstone") || isTerminal(this.store.phase())) return;
+      await this.noteDepsCache();
       await this.overrides().beforeSubmit?.();
       const change = this.sessionModelChange();
       if (change) await this.harness.session().setModel(change);
@@ -1580,13 +1596,22 @@ export class AgentDO extends DurableObject<Env> {
       return prev;
     }
     if (!m) return prev;
+    // 依存関係のキャッシュ（D14）。結果は起動のたびに SandboxDO が順位つきで更新する（下がらない）。作った時間は増えるだけ
+    const depsCache = m.depsCache ?? prev?.depsCache;
+    const cacheBuildMs = Math.max(prev?.cacheBuildMs ?? 0, finiteCount(m.cacheBuildMs));
     const next: SandboxMetrics = {
       runtimeMs: Math.max(prev?.runtimeMs ?? 0, finiteCount(m.runtimeMs)),
       restarts: Math.max(prev?.restarts ?? 0, finiteCount(m.restarts)),
       bootRetries: Math.max(prev?.bootRetries ?? 0, finiteCount(m.bootRetries)),
+      ...(depsCache !== undefined ? { depsCache } : {}),
+      ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
     };
     if (!prev) return next;
-    const counters = next.restarts !== prev.restarts || next.bootRetries !== prev.bootRetries;
+    const counters =
+      next.restarts !== prev.restarts ||
+      next.bootRetries !== prev.bootRetries ||
+      next.depsCache !== prev.depsCache ||
+      next.cacheBuildMs !== prev.cacheBuildMs;
     return final || counters ? next : prev;
   }
 
@@ -1705,6 +1730,12 @@ export class AgentDO extends DurableObject<Env> {
     };
   }
 
+  /** 依存関係のキャッシュで node_modules が戻っているか（hit / built）。miss / disabled / 不明は false。 */
+  private depsInstalled(): boolean {
+    const v = this.store.meta<string>("deps_cache");
+    return v === "hit" || v === "built";
+  }
+
   private promptSections(): { key: string; text: string | undefined }[] {
     const spec = this.spec();
     if (!spec) return [{ key: "role", text: "You are a test agent. Use the tools you are given." }];
@@ -1738,6 +1769,12 @@ export class AgentDO extends DurableObject<Env> {
       {
         key: "ask_parent",
         text: `You may ask the parent a question with ask_parent, but only when you cannot decide yourself and a wrong guess would be costly: the specification contradicts itself; the acceptance criteria are unclear; the task needs a design change beyond its stated scope; a change is destructive or irreversible; a decision has a serious security impact; or a budget or permission limit blocks the work. Do not ask about trivial implementation choices: decide, and mention the decision in your summary. Commit your work with git_commit (a WIP commit is fine) before asking; ask_parent refuses while there are uncommitted changes. Ask one question at a time. The question and context together must be at most ${QUESTION_MAX_CHARS} characters, with at most ${QUESTION_MAX_OPTIONS} options of at most ${QUESTION_OPTION_MAX_CHARS} characters each. After you ask, stop: the task resumes with the parent's answer as a new user message (an authenticated instruction from the parent, not file content).`,
+      },
+      {
+        key: "dependencies",
+        text: this.depsInstalled()
+          ? "Dependencies are already installed: node_modules was restored from the lockfile at the base commit (the package manager is also available through corepack, e.g. `corepack pnpm ...`). You do not need to run npm ci / pnpm install / yarn install. Run an install again only if you change the lockfile or the dependencies in package.json. Build outputs (dist and similar) are not included, so run the build if a task needs them."
+          : undefined,
       },
       {
         key: "no_push",

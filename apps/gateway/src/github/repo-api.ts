@@ -100,6 +100,33 @@ export class GitHubRepoApi {
     return { sha: b.sha, treeSha: b.tree.sha };
   }
 
+  /**
+   * tree の直下の項目（再帰しない）。依存関係のキャッシュ（D14）が、ルート直下の lockfile の blob SHA を読むのに使う。
+   * truncated は GitHub が一覧を切り詰めたか（直下だけなら、ほぼ起きない）。形の違う項目は読み飛ばす。
+   */
+  async getTree(treeSha: string): Promise<{
+    truncated: boolean;
+    entries: { path: string; mode: string; type: string; sha: string }[];
+  }> {
+    const what = "get tree";
+    const { json } = await this.call(what, "GET", this.repoPath(`/git/trees/${enc(treeSha)}`));
+    const b = json as { tree?: unknown; truncated?: unknown } | null;
+    if (!Array.isArray(b?.tree)) return this.bad(what);
+    const entries: { path: string; mode: string; type: string; sha: string }[] = [];
+    for (const raw of b.tree as unknown[]) {
+      const e = raw as { path?: unknown; mode?: unknown; type?: unknown; sha?: unknown } | null;
+      if (
+        typeof e?.path === "string" &&
+        typeof e.mode === "string" &&
+        typeof e.type === "string" &&
+        typeof e.sha === "string"
+      ) {
+        entries.push({ path: e.path, mode: e.mode, type: e.type, sha: e.sha });
+      }
+    }
+    return { truncated: b.truncated === true, entries };
+  }
+
   async createCommit(args: {
     message: string;
     treeSha: string;

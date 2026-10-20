@@ -23,12 +23,15 @@
   "durable_objects": {
     "bindings": [
       { "name": "SANDBOX_DO", "class_name": "SandboxDO" },
-      { "name": "AGENT_DO", "class_name": "AgentDO" }
+      { "name": "AGENT_DO", "class_name": "AgentDO" },
+      // 依存関係のキャッシュ（D14）の状態を鍵ごとに持つ。コンテナは持たない（作成は SandboxDO の別インスタンス）
+      { "name": "DEPS_CACHE_DO", "class_name": "DepsCacheDO" }
     ]
   },
   "exports": {
     "SandboxDO": { "type": "durable-object", "storage": "sqlite" },
-    "AgentDO": { "type": "durable-object", "storage": "sqlite" }
+    "AgentDO": { "type": "durable-object", "storage": "sqlite" },
+    "DepsCacheDO": { "type": "durable-object", "storage": "sqlite" }
   },
   "services": [
     {
@@ -53,6 +56,7 @@
     // 空なら upstream の既定（haiku=low, sonnet=high, opus=medium, fable=low, luna=low, sol=medium, astra=low）。思考のトークンは出力として課金される。gateway の同名の var と同じ値にする。
     "MODEL_EFFORTS": "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off",
     "SANDBOX_INSTANCE": "standard-1",
+    "DEPS_CACHE_ENABLED": "true",
     "WEB_SEARCH_LIMIT_PER_TASK": "50",
     "WEB_FETCH_LIMIT_PER_TASK": "100",
     "WEB_BROWSE_LIMIT_PER_TASK": "20",

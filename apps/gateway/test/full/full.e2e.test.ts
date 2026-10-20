@@ -608,6 +608,14 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     expect(r.patch).toContain("-exports.add = (a, b) => a - b;");
     expect(r.patch).toContain("+exports.add = (a, b) => a + b;");
 
+    // 依存関係のキャッシュ（D14）: calc はルート直下に package-lock.json があり、最初のタスクがキャッシュを作る。
+    // 作った時間は Sandbox の時間に含まれる（task_result の usage に deps_cache と cache_build_ms が出る）
+    const usageA = r.usage as { deps_cache?: string; cache_build_ms?: number };
+    expect(usageA.deps_cache).toBe("built");
+    expect(usageA.cache_build_ms).toBeGreaterThan(0);
+    // calc には .gitignore が無いが、復元した node_modules は commit に巻き込まれない
+    expect(r.patch).not.toContain("node_modules");
+
     // 偽 git の作業ブランチが検証済みの SHA に揃っている。履歴の根元は TaskDO が API で作った初期コミット
     expect(upstream.refSha("calc", refOf(taskId))).toBe(v.commit_sha);
     const commit = app().commit(REPO.fullName, v.commit_sha as string);
@@ -677,6 +685,10 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     expect(r.patch).toContain("+exports.add = (a, b) => a + b;");
     expect(upstream.refSha("calc", refOf(taskId))).toBe(v.commit_sha);
     expect(r.pr).toMatchObject({ head_sha: v.commit_sha, head_matches_verified: true });
+    // 依存関係のキャッシュ（D14）: a が作ったキャッシュで起動する（作り直さない）
+    const usageB = r.usage as { deps_cache?: string; cache_build_ms?: number };
+    expect(usageB.deps_cache).toBe("hit");
+    expect(usageB).not.toHaveProperty("cache_build_ms");
   });
 
   it("c. 実行中に task_cancel → CANCELLED。PR は閉じずに残って本文が更新され、トークンは失効する", async () => {

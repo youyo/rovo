@@ -15,6 +15,12 @@ export interface FakeUpstream {
   helloSha: string;
   /** 偽 GitHub の acme/calc（main）の先頭コミット SHA。add() にバグがある純 JS の小さなリポジトリ（npm test が失敗する） */
   calcSha: string;
+  /**
+   * 偽 GitHub の acme/deps（main）の先頭コミット SHA。ルート直下に package-lock.json があり、偽 npm の tiny-pkg 1 つに依存する
+   * （依存関係のキャッシュ D14 の E2E 用）。package-lock.json の blob SHA は depsLockBlobSha
+   */
+  depsSha: string;
+  depsLockBlobSha: string;
   /** 受け取った（= 許可されて上流まで届いた）リクエスト */
   requests: {
     host: string;
@@ -53,7 +59,7 @@ export interface FakeUpstream {
   stop(): Promise<void>;
 }
 
-export type FakeRepoName = "hello" | "calc";
+export type FakeRepoName = "hello" | "calc" | "deps";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, {
@@ -85,9 +91,13 @@ function buildRepo(root: string, name: string, files: Record<string, string>): s
   return git(work, "rev-parse", "HEAD").toString().trim();
 }
 
-/** E2E 用の小さな純 JS リポジトリ。add() が a - b になっていて、`npm test`（node --test）が失敗する。 */
+/**
+ * E2E 用の小さな純 JS リポジトリ。add() が a - b になっていて、`npm test`（node --test）が失敗する。
+ * 依存関係のキャッシュ（D14）の通しの E2E のため、偽 npm の tiny-pkg 1 つに依存し、ルート直下に package-lock.json を持つ
+ * （package-lock.json は tarball の integrity が決まってから足す）。
+ */
 const CALC_FILES: Record<string, string> = {
-  "package.json": `${JSON.stringify({ name: "calc", version: "1.0.0", scripts: { test: "node --test" } }, null, 2)}\n`,
+  "package.json": `${JSON.stringify({ name: "calc", version: "1.0.0", scripts: { test: "node --test" }, dependencies: { "tiny-pkg": "1.0.0" } }, null, 2)}\n`,
   "calc.js": "exports.add = (a, b) => a - b;\n",
   "calc.test.js": [
     'const test = require("node:test");',
@@ -97,6 +107,34 @@ const CALC_FILES: Record<string, string> = {
     "",
   ].join("\n"),
 };
+
+/** 依存関係のキャッシュ（D14）の E2E 用。偽 npm の tiny-pkg 1 つに依存する（npm ci がネットワークの偽サーバーだけで通る） */
+function lockFileFor(name: string, integrity: string): string {
+  const lock = {
+    name,
+    version: "1.0.0",
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      "": { name, version: "1.0.0", dependencies: { "tiny-pkg": "1.0.0" } },
+      "node_modules/tiny-pkg": {
+        version: "1.0.0",
+        resolved: "https://registry.npmjs.org/tiny-pkg/-/tiny-pkg-1.0.0.tgz",
+        integrity,
+      },
+    },
+  };
+  return `${JSON.stringify(lock, null, 2)}\n`;
+}
+
+function depsRepoFiles(integrity: string): Record<string, string> {
+  const pkg = { name: "deps-demo", version: "1.0.0", dependencies: { "tiny-pkg": "1.0.0" } };
+  return {
+    "package.json": `${JSON.stringify(pkg, null, 2)}\n`,
+    "package-lock.json": lockFileFor("deps-demo", integrity),
+    "index.js": "module.exports = require('tiny-pkg');\n",
+  };
+}
 
 function buildTarball(root: string): { file: Buffer; integrity: string; shasum: string } {
   const dir = join(root, "pkg", "package");
@@ -167,8 +205,18 @@ function gitBackend(
 export async function startFakeUpstream(): Promise<FakeUpstream> {
   const root = mkdtempSync(join(tmpdir(), "rovo-upstream-"));
   const helloSha = buildRepo(root, "hello", { "README.md": "hello from fake github\n" });
-  const calcSha = buildRepo(root, "calc", CALC_FILES);
   const tar = buildTarball(root);
+  const calcSha = buildRepo(root, "calc", {
+    ...CALC_FILES,
+    "package-lock.json": lockFileFor("calc", tar.integrity),
+  });
+  const depsFiles = depsRepoFiles(tar.integrity);
+  const depsSha = buildRepo(root, "deps", depsFiles);
+  const depsLockBlobSha = execFileSync("git", ["hash-object", "--stdin"], {
+    input: depsFiles["package-lock.json"],
+  })
+    .toString()
+    .trim();
   const requests: FakeUpstream["requests"] = [];
   const state: {
     expectedToken: string | undefined;
@@ -247,6 +295,8 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
     url: `http://127.0.0.1:${port}`,
     helloSha,
     calcSha,
+    depsSha,
+    depsLockBlobSha,
     requests,
     get expectedToken() {
       return state.expectedToken;
@@ -263,7 +313,7 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
     repoDir: (repo) => bareOf(root, repo),
     createTaskBranch(repo, taskId, opts = {}) {
       const bare = bareOf(root, repo);
-      const base = repo === "hello" ? helloSha : calcSha;
+      const base = repo === "hello" ? helloSha : repo === "deps" ? depsSha : calcSha;
       const branch = `agent/task-${taskId}`;
       let initialSha = base;
       if (opts.initialCommit) {

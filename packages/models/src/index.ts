@@ -28,6 +28,33 @@ export const MODEL_CATALOG_IDS: Readonly<Record<string, string>> = {
   "openai/gpt-6-astra": "gpt-6-astra",
 };
 
+/** 思考をオフにするときに Anthropic へ送る thinking.type の値。 */
+export type ThinkingOff = "between_tools" | "disabled";
+
+/**
+ * モデルごとの「思考をオフにするときの値」（rovo の id → 値）。Pi は一律 disabled を送るが、
+ * モデルによって受け付ける値が違う（本番の AI Gateway のログで確認）:
+ * - sonnet-5-5: disabled を 400 で拒否し between_tools を要求する
+ * - haiku-5-5: between_tools を 400 で拒否する（"thinking.type.between_tools" is not supported）ので disabled のまま
+ * - opus-5-5: 未確認。暫定で between_tools（受入で確かめる）
+ * - fable-5-1: カタログの thinkingLevelMap.off が null で Pi が disabled を送らないので対象外（載せない）
+ * OpenAI は対象外。表に無いモデルは置き換えない（Pi の値のまま）。
+ */
+export const THINKING_OFF: Readonly<Record<string, ThinkingOff>> = {
+  "anthropic/claude-sonnet-5-5": "between_tools",
+  "anthropic/claude-haiku-5-5": "disabled",
+  "anthropic/claude-opus-5-5": "between_tools", // 未確認（暫定）
+};
+
+/** rovo の id またはカタログの id から、思考オフの値を引く。表に無ければ undefined（置き換えない）。 */
+export function thinkingOffFor(modelId: string): ThinkingOff | undefined {
+  const rovoId = Object.hasOwn(MODEL_CATALOG_IDS, modelId)
+    ? modelId
+    : Object.keys(MODEL_CATALOG_IDS).find((k) => MODEL_CATALOG_IDS[k] === modelId);
+  if (rovoId === undefined || !Object.hasOwn(THINKING_OFF, rovoId)) return undefined;
+  return THINKING_OFF[rovoId];
+}
+
 export const ALLOWED_MODEL_IDS: readonly string[] = Object.keys(MODEL_CATALOG_IDS);
 
 /** 入力トークンがしきい値を超える呼び出しに適用する上位の単価（キャッシュの単価まで持つ）。 */

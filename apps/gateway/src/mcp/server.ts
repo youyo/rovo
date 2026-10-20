@@ -149,7 +149,7 @@ const START_DESCRIPTION = [
   'merge_policy（"human_review" | "agent_merge"、既定 human_review）は、完了後の PR の扱いを決める。終端になったら task_result で差分をレビューし、問題が無ければ task_pr_ready で Ready にする。human_review はそこで人のレビューを待つ（task_pr_merge は使えない）。agent_merge は、Ready にしたあと task_pr_merge でマージまでできる。最終的な強制は GitHub のブランチ保護（操作は利用者の GitHub トークンで行われる）。merge_policy は task_status・task_result にも返る。',
   'verification_commands（任意）は {argv: string[], cwd?: リポジトリ内の相対パス, timeout_seconds?} の配列（最大 10 件）。完了の申告後に Sandbox で実行され、全部が終了コード 0 なら COMPLETED になる。指定しない場合はモデルの申告だけで完了し、結果は「未検証」と記される。argv はシェルを通さずそのまま実行される。シェルの機能（パイプ・&&・リダイレクト・環境変数の展開）を使うなら、["sh", "-c", "npm ci && npm test"] のように sh -c で包む。',
   'model（任意）は子のモデルの id（"anthropic/claude-haiku-5-5" など）。models_list で使えるモデルと単価を確かめて、タスクの難しさで選ぶ。省略は既定のモデル。使えないモデルは invalid_input。task_status・task_result に返る。',
-  "1 タスクにつき $10 を月額の枠から予約する。枠が足りなければ budget_exceeded で拒否される。",
+  "1 タスクにつき TASK_BUDGET_USD（budget_status の task_budget_usd）を月額の枠から予約する。枠が足りなければ budget_exceeded で拒否される。",
   "idempotency_key（1〜128 文字の [A-Za-z0-9_-]）を渡すと、同じキー・同じ入力の再試行で同じ task_id が返る。",
   "省略した場合は再試行の重複排除を保証しない（応答が失われて再送すると別タスクになりうる）。",
   "利用者ごとに同時に実行できるタスクは 1 件まで。対象リポジトリは GitHub App が導入済みで、利用者に push 権限が必要。",

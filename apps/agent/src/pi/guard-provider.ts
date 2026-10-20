@@ -8,6 +8,7 @@ import {
   type StreamOptions,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { thinkingOffFor } from "@rovo/models";
 
 /** モデル呼び出しの直前に呼ばれる。block を返すと、モデルを呼ばずにエラー応答にする。 */
 export type CallGuard = (
@@ -29,9 +30,10 @@ const isAnthropicModel = (model: Model<Api>): boolean =>
   model.api === "anthropic-messages" || /claude/i.test(model.id);
 
 /**
- * Pi 1.3.0 は思考を使わないとき（reasoning 未指定）に thinking: {type:"disabled"} を送るが、
- * claude-sonnet-5-5 はこれを 400 で拒否し、"between_tools" を要求する。送る直前に置き換える。
- * Anthropic のモデルで thinking.type が "disabled" のときだけ変え、それ以外の payload は触らない。
+ * Pi 1.3.0 は思考を使わないとき（reasoning 未指定）に thinking: {type:"disabled"} を送る。
+ * sonnet-5-5 はこれを 400 で拒否し "between_tools" を要求するが、haiku-5-5 は逆に between_tools を拒否する。
+ * そのため @rovo/models の THINKING_OFF（モデルごとの表）に載っているモデルだけ、表の値へ置き換える。
+ * 表に無いモデル（fable・未知のモデル）、disabled 以外の payload は触らない。
  */
 export function fixAnthropicThinking(model: Model<Api>, payload: unknown): unknown {
   if (!isAnthropicModel(model) || typeof payload !== "object" || payload === null) return payload;
@@ -39,7 +41,9 @@ export function fixAnthropicThinking(model: Model<Api>, payload: unknown): unkno
   if (typeof thinking !== "object" || thinking === null || thinking.type !== "disabled") {
     return payload;
   }
-  return { ...payload, thinking: { type: "between_tools" } };
+  const off = thinkingOffFor(model.id);
+  if (off === undefined || off === "disabled") return payload;
+  return { ...payload, thinking: { type: off } };
 }
 
 /** 呼び出し側の onPayload を先に実行し、その結果（なければ元の payload）に補正を掛ける。 */

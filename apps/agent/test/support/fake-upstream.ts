@@ -21,6 +21,11 @@ export interface FakeUpstream {
    */
   depsSha: string;
   depsLockBlobSha: string;
+  /**
+   * 偽 GitHub の acme/pnpm（main）の先頭コミット SHA。packageManager が pnpm@${BAKED_PNPM_VERSION}、pnpm-lock.yaml があり、
+   * 偽 npm の tiny-pkg 1 つに依存する（pnpm の本体の取得と pnpm install の E2E 用）。
+   */
+  pnpmSha: string;
   /** 受け取った（= 許可されて上流まで届いた）リクエスト */
   requests: {
     host: string;
@@ -59,7 +64,7 @@ export interface FakeUpstream {
   stop(): Promise<void>;
 }
 
-export type FakeRepoName = "hello" | "calc" | "deps";
+export type FakeRepoName = "hello" | "calc" | "deps" | "pnpm";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, {
@@ -134,6 +139,120 @@ function depsRepoFiles(integrity: string): Record<string, string> {
     "package-lock.json": lockFileFor("deps-demo", integrity),
     "index.js": "module.exports = require('tiny-pkg');\n",
   };
+}
+
+/** Dockerfile の ARG PNPM_VERSION と同じ版（イメージに焼き込んである pnpm）。Dockerfile から読んで合わせる。 */
+export const BAKED_PNPM_VERSION = readFileSync(
+  new URL("../../Dockerfile", import.meta.url),
+  "utf8",
+).match(/^ARG PNPM_VERSION=(\S+)$/m)?.[1] as string;
+export const BAKED_YARN_VERSION = readFileSync(
+  new URL("../../Dockerfile", import.meta.url),
+  "utf8",
+).match(/^ARG YARN_VERSION=(\S+)$/m)?.[1] as string;
+
+/** イメージに焼き込んでいない版の pnpm を、偽 npm が配る（実行時に用意するスクリプトの E2E 用）。 */
+export const FAKE_PNPM_VERSION = "99.1.0";
+const FAKE_PNPM_NATIVE_PACKAGE = "@pnpm/exe.e2e";
+const FAKE_PNPM_NATIVE_TARBALL = `/${FAKE_PNPM_NATIVE_PACKAGE}/-/exe.e2e-${FAKE_PNPM_VERSION}.tgz`;
+
+/** pnpm の lockfile（tiny-pkg 1 つ）。frozen-lockfile で通る最小の形。 */
+function pnpmLockFile(integrity: string): string {
+  return [
+    "lockfileVersion: '9.0'",
+    "",
+    "settings:",
+    "  autoInstallPeers: true",
+    "  excludeLinksFromLockfile: false",
+    "",
+    "importers:",
+    "",
+    "  .:",
+    "    dependencies:",
+    "      tiny-pkg:",
+    "        specifier: 1.0.0",
+    "        version: 1.0.0",
+    "",
+    "packages:",
+    "",
+    "  tiny-pkg@1.0.0:",
+    `    resolution: {integrity: ${integrity}}`,
+    "",
+    "snapshots:",
+    "",
+    "  tiny-pkg@1.0.0: {}",
+    "",
+  ].join("\n");
+}
+
+function pnpmRepoFiles(integrity: string): Record<string, string> {
+  const pkg = {
+    name: "pnpm-demo",
+    version: "1.0.0",
+    packageManager: `pnpm@${BAKED_PNPM_VERSION}`,
+    dependencies: { "tiny-pkg": "1.0.0" },
+  };
+  return {
+    "package.json": `${JSON.stringify(pkg, null, 2)}\n`,
+    "pnpm-lock.yaml": pnpmLockFile(integrity),
+    "index.js": "module.exports = require('tiny-pkg');\n",
+  };
+}
+
+/** 偽の npm パッケージの tarball（package/ の下にファイルを置く）と、レジストリが返す dist の情報。 */
+function buildPackage(
+  root: string,
+  name: string,
+  version: string,
+  files: Record<string, { content: string; mode?: number }>,
+): { file: Buffer; integrity: string; shasum: string } {
+  const base = join(root, "fakepkg", `${name.replace(/\W/g, "_")}-${version}`);
+  const dir = join(base, "package");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name, version }));
+  for (const [rel, f] of Object.entries(files)) {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    writeFileSync(join(dir, rel), f.content, { mode: f.mode ?? 0o644 });
+  }
+  const tgz = `${base}.tgz`;
+  execFileSync("tar", ["-czf", tgz, "-C", base, "package"]);
+  const file = readFileSync(tgz);
+  return {
+    file,
+    integrity: `sha512-${createHash("sha512").update(file).digest("base64")}`,
+    shasum: createHash("sha1").update(file).digest("hex"),
+  };
+}
+
+/** 偽の pnpm（wrapper と native バイナリ）。pnpm 11 以降の wrapper と同じ作り（bin/pnpm.mjs が pnpm-native を起動する）。 */
+function buildFakePnpm(root: string) {
+  const wrapper = buildPackage(root, "pnpm", FAKE_PNPM_VERSION, {
+    "bin/pnpm.mjs": {
+      content: [
+        'import { spawnSync } from "node:child_process";',
+        'import { fileURLToPath } from "node:url";',
+        'const native = fileURLToPath(new URL("../pnpm-native", import.meta.url));',
+        'const r = spawnSync(native, process.argv.slice(2), { stdio: "inherit" });',
+        "process.exitCode = r.status ?? 1;",
+        "",
+      ].join("\n"),
+    },
+    "native-binary.mjs": {
+      content: [
+        `export const getBinCandidates = () => ["${FAKE_PNPM_NATIVE_PACKAGE}/pnpm"];`,
+        "export const splitBinSpecifier = (s) => {",
+        '  const i = s.lastIndexOf("/");',
+        "  return { packageName: s.slice(0, i), binFile: s.slice(i + 1) };",
+        "};",
+        "export const resolveInstalledBinary = () => null;",
+        "",
+      ].join("\n"),
+    },
+  });
+  const native = buildPackage(root, FAKE_PNPM_NATIVE_PACKAGE, FAKE_PNPM_VERSION, {
+    pnpm: { content: `#!/bin/sh\necho "fake-pnpm ${FAKE_PNPM_VERSION}"\n`, mode: 0o755 },
+  });
+  return { wrapper, native };
 }
 
 function buildTarball(root: string): { file: Buffer; integrity: string; shasum: string } {
@@ -217,6 +336,8 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
   })
     .toString()
     .trim();
+  const pnpmSha = buildRepo(root, "pnpm", pnpmRepoFiles(tar.integrity));
+  const fakePnpm = buildFakePnpm(root);
   const requests: FakeUpstream["requests"] = [];
   const state: {
     expectedToken: string | undefined;
@@ -279,6 +400,35 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
           res.setHeader("content-type", "application/octet-stream");
           return void res.end(tar.file);
         }
+        // 偽の pnpm（wrapper と native バイナリ）。npm の packument と tarball の形で返す
+        if (path === `/pnpm/-/pnpm-${FAKE_PNPM_VERSION}.tgz`) {
+          res.setHeader("content-type", "application/octet-stream");
+          return void res.end(fakePnpm.wrapper.file);
+        }
+        if (path.toLowerCase() === `/${FAKE_PNPM_NATIVE_PACKAGE.replace("/", "%2f")}`) {
+          res.setHeader("content-type", "application/json");
+          return void res.end(
+            JSON.stringify({
+              name: FAKE_PNPM_NATIVE_PACKAGE,
+              "dist-tags": { latest: FAKE_PNPM_VERSION },
+              versions: {
+                [FAKE_PNPM_VERSION]: {
+                  name: FAKE_PNPM_NATIVE_PACKAGE,
+                  version: FAKE_PNPM_VERSION,
+                  dist: {
+                    tarball: `https://registry.npmjs.org${FAKE_PNPM_NATIVE_TARBALL}`,
+                    integrity: fakePnpm.native.integrity,
+                    shasum: fakePnpm.native.shasum,
+                  },
+                },
+              },
+            }),
+          );
+        }
+        if (path === FAKE_PNPM_NATIVE_TARBALL) {
+          res.setHeader("content-type", "application/octet-stream");
+          return void res.end(fakePnpm.native.file);
+        }
         if (path === "/redirect-me") {
           res.writeHead(302, { location: "https://example.com/secret" });
           return void res.end();
@@ -297,6 +447,7 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
     calcSha,
     depsSha,
     depsLockBlobSha,
+    pnpmSha,
     requests,
     get expectedToken() {
       return state.expectedToken;
@@ -313,7 +464,14 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
     repoDir: (repo) => bareOf(root, repo),
     createTaskBranch(repo, taskId, opts = {}) {
       const bare = bareOf(root, repo);
-      const base = repo === "hello" ? helloSha : repo === "deps" ? depsSha : calcSha;
+      const base =
+        repo === "hello"
+          ? helloSha
+          : repo === "deps"
+            ? depsSha
+            : repo === "pnpm"
+              ? pnpmSha
+              : calcSha;
       const branch = `agent/task-${taskId}`;
       let initialSha = base;
       if (opts.initialCommit) {

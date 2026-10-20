@@ -1832,6 +1832,9 @@ export class AgentDO extends DurableObject<Env> {
     if (!m) return prev;
     // 依存関係のキャッシュ（D14）。結果は起動のたびに SandboxDO が順位つきで更新する（下がらない）。作った時間は増えるだけ
     const depsCache = m.depsCache ?? prev?.depsCache;
+    // miss の理由は miss のときだけ（SandboxDO が最後の理由を持つ。読めなければ前回の値）
+    const depsMissReason =
+      depsCache === "miss" ? (m.depsMissReason ?? prev?.depsMissReason) : undefined;
     const cacheBuildMs = Math.max(prev?.cacheBuildMs ?? 0, finiteCount(m.cacheBuildMs));
     // 実際に起動した大きさ（起動のたびに同じ値。最後に読めたものを残す）
     const instance = typeof m.instance === "string" ? m.instance : prev?.instance;
@@ -1840,6 +1843,7 @@ export class AgentDO extends DurableObject<Env> {
       restarts: Math.max(prev?.restarts ?? 0, finiteCount(m.restarts)),
       bootRetries: Math.max(prev?.bootRetries ?? 0, finiteCount(m.bootRetries)),
       ...(depsCache !== undefined ? { depsCache } : {}),
+      ...(depsMissReason !== undefined ? { depsMissReason } : {}),
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
       ...(instance !== undefined ? { instance } : {}),
     };
@@ -1848,6 +1852,7 @@ export class AgentDO extends DurableObject<Env> {
       next.restarts !== prev.restarts ||
       next.bootRetries !== prev.bootRetries ||
       next.depsCache !== prev.depsCache ||
+      next.depsMissReason !== prev.depsMissReason ||
       next.cacheBuildMs !== prev.cacheBuildMs ||
       next.instance !== prev.instance;
     return final || counters ? next : prev;

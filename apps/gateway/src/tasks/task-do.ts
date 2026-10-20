@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "@rovo/audit";
 import type { Effort } from "@rovo/models";
 import type { z } from "zod";
-import { count, depsCacheStatus, mapAgentEvent } from "../agent/agent-events";
+import { count, depsCacheStatus, depsMissReason, mapAgentEvent } from "../agent/agent-events";
 import type {
   AgentRpc,
   EventsPage,
@@ -227,6 +227,8 @@ export type ResultView = {
     web: { search: number; fetch: number; browse: number };
     /** 依存関係のキャッシュ（D14）の結果。agent がカウンタを読めたときだけ付く */
     deps_cache?: "hit" | "miss" | "built" | "disabled";
+    /** deps_cache が "miss" のときだけ付く: キャッシュを使えなかった理由の固定コード（ensure_failed / ensure_timeout / build_failed / build_timeout / cooldown / snapshot_unsupported / snapshot_failed / restore_failed / cert_missing / move_failed / invalid_deps） */
+    deps_cache_miss_reason?: string;
     /** deps_cache が付くときは常に付く: キャッシュを作るのにかかった時間（ms。作っていなければ 0。Sandbox の時間の推定にも含まれる） */
     cache_build_ms?: number;
     /** Sandbox を動かした累計の時間（ms。task_summary の sandbox_runtime_ms と同じもの）。agent がカウンタを読めたときだけ付く */
@@ -2865,13 +2867,17 @@ function sandboxInstanceUsage(sb: UsageDto["sandbox"]): { sandbox_instance?: str
 /** usage.sandbox の依存関係のキャッシュ（D14）の結果。sandbox が無い・値が表に無いときは何も付けない */
 function depsUsage(sb: UsageDto["sandbox"]): {
   deps_cache?: "hit" | "miss" | "built" | "disabled";
+  deps_cache_miss_reason?: string;
   cache_build_ms?: number;
 } {
   const status = depsCacheStatus(sb?.depsCache);
+  const reason = depsMissReason(sb?.depsCache, sb?.depsMissReason);
   const ms = sb?.cacheBuildMs;
   const buildMs = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
   return {
     ...(status !== undefined ? { deps_cache: status } : {}),
+    // 使えなかった理由は miss のときだけ（ログにしか出ていなかった固定コード）
+    ...(reason !== undefined ? { deps_cache_miss_reason: reason } : {}),
     // deps_cache が出るときは cache_build_ms も常に出す（作っていなければ 0）
     ...(status !== undefined ? { cache_build_ms: buildMs } : {}),
   };

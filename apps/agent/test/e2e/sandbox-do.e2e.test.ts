@@ -204,12 +204,14 @@ describe("イメージに入っている道具（子が自分で入れなくて�
   it("pnpm（corepack の shim）と python3 が PATH にあり、動く。corepack はダウンロードの確認で止まらない設定", async () => {
     const c = client("tools");
     await c.ensureReady(specFor("tools"));
-    // pnpm の本体は packageManager に従って corepack が取りに行く。イメージには shim だけ入れる
+    // pnpm / yarn の本体は、イメージのビルド時に COREPACK_HOME へ入れてある（実行時に取りに行かない。sandbox-pm.e2e.test.ts）
     const pnpm = await c.exec(["sh", "-c", "command -v pnpm"]);
     expect(pnpm.exitCode).toBe(0);
     expect((await c.exec(["corepack", "--version"])).exitCode).toBe(0);
     const prompt = await c.exec(["sh", "-c", 'printf %s "$COREPACK_ENABLE_DOWNLOAD_PROMPT"']);
     expect(prompt.stdout).toBe("0");
+    const home = await c.exec(["sh", "-c", 'printf %s "$COREPACK_HOME"']);
+    expect(home.stdout).toBe("/opt/corepack");
     const py = await c.exec(["python3", "-c", "print(6 * 7)"]);
     expect(py.exitCode).toBe(0);
     expect(py.stdout.trim()).toBe("42");

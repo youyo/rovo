@@ -12,11 +12,16 @@
     "bindings": [
       { "name": "TASK_DO", "class_name": "TaskDO" },
       { "name": "USER_DO", "class_name": "UserDO" },
+      // ダッシュボードの索引（シングルトン。TaskDO が outbox で配送する。docs/specs/dashboard.md D10）
+      { "name": "DIRECTORY_DO", "class_name": "DirectoryDO" },
       // apps/agent の AgentDO（別 Worker）。ローカルでは両方を同時に wrangler dev で起動すること（片方だけだと本番の DO を叩く）。
       { "name": "AGENT_DO", "class_name": "AgentDO", "script_name": "rovo-agent" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["DirectoryDO"] }
+  ],
   "services": [
     // apps/web（Web Research Service）の WebResearch エントリポイント。呼び出し元の種別は props で固定する
     // （web は RPC の引数ではなく ctx.props から caller を取る）。デプロイは web → agent → gateway の順。

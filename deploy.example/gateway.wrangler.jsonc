@@ -26,10 +26,15 @@
     "bindings": [
       { "name": "TASK_DO", "class_name": "TaskDO" },
       { "name": "USER_DO", "class_name": "UserDO" },
+      // ダッシュボードの索引（シングルトン。TaskDO が outbox で配送する。docs/specs/dashboard.md D10）
+      { "name": "DIRECTORY_DO", "class_name": "DirectoryDO" },
       { "name": "AGENT_DO", "class_name": "AgentDO", "script_name": "<AGENT_WORKER_NAME>" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["DirectoryDO"] }
+  ],
   "services": [
     {
       "binding": "WEB",

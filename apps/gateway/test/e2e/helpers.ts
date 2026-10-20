@@ -109,6 +109,17 @@ export async function archivedObjects(
   return (await res.json()) as { bound: boolean; objects: ArchivedObject[] };
 }
 
+/** 索引（DirectoryDO）の 1 タスクの行。無ければ null（ENVIRONMENT=test のときだけある /__test/directory/task）。 */
+export async function directoryRow(taskId: string): Promise<Record<string, unknown> | null> {
+  const res = await fetch(`${baseUrl}/__test/directory/task`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  if (!res.ok) throw new Error(`/__test/directory/task failed: ${res.status}`);
+  return ((await res.json()) as { row: Record<string, unknown> | null }).row;
+}
+
 export type TokenState = {
   finalizeDone: boolean;
   rows: number;

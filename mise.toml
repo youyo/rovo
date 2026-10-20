@@ -53,6 +53,11 @@ description = "apps/dashboard（SPA）の Unit テスト（vitest + jsdom）。�
 dir = "apps/dashboard"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
+[tasks."test:unit:dashboard-contract"]
+description = "packages/dashboard-contract の Unit テスト（ダッシュボードの DTO の zod スキーマと fixtures。見えないタスクの情報が入らない形・文字列の上限・URL の scheme を固定する。vitest。workerd は使わない）"
+dir = "packages/dashboard-contract"
+run = "pnpm exec vitest run --config vitest.config.ts"
+
 [tasks."test:unit:gateway"]
 description = "gateway の Unit テスト（vitest + workerd）"
 dir = "apps/gateway"
@@ -93,8 +98,8 @@ description = "依存関係のキャッシュ（D14）のコンテナ内スク�
 run = "node --test scripts/deps-scripts.test.mjs"
 
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts"]
+description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
@@ -162,6 +167,11 @@ description = "dashboard の型検査"
 dir = "apps/dashboard"
 run = "pnpm exec tsc -p tsconfig.json"
 
+[tasks."typecheck:dashboard-contract"]
+description = "packages/dashboard-contract の型検査"
+dir = "packages/dashboard-contract"
+run = "pnpm exec tsc -p tsconfig.json"
+
 [tasks."typecheck:gateway"]
 description = "gateway の型検査"
 dir = "apps/gateway"
@@ -179,7 +189,7 @@ run = "pnpm exec tsc -p tsconfig.json"
 
 [tasks.typecheck]
 description = "TypeScript の型検査（全アプリ）"
-depends = ["typecheck:audit", "typecheck:models", "typecheck:dashboard", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
+depends = ["typecheck:audit", "typecheck:models", "typecheck:dashboard", "typecheck:dashboard-contract", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
 
 [tasks."lint:biome"]
 description = "Biome による lint / format チェック"

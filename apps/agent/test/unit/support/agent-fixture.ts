@@ -37,6 +37,12 @@ export const call = (name: string, args: Record<string, unknown> = {}): ScriptSt
   toolCall: { name, arguments: args },
 });
 
+/**
+ * Sandbox を使うツール（write_note）を 1 回呼ぶ台本の 1 ターン。Sandbox は最初に使うときに起動する（lazy boot）ので、
+ * 「起動済みの Sandbox」を前提にするテスト（期限の延長・未 commit の確認など）は、台本の先頭にこれを置く。
+ */
+export const boot = (): ScriptStep => call("write_note", { text: "boot" });
+
 /** ask_parent を呼ぶ台本の 1 ターン */
 export const ask = (question: string, options?: string[]): ScriptStep => ({
   toolCall: { name: "ask_parent", arguments: options ? { question, options } : { question } },
@@ -70,6 +76,8 @@ export interface Fixture {
     toolResults: string[][];
     /** モデル呼び出しごとに Pi へ渡った思考レベル（options.reasoning。思考オフは undefined） */
     reasoning: (string | undefined)[];
+    /** モデル呼び出しごとの system プロンプト（Pi が組み立てたもの） */
+    systemTexts: string[];
     maxTokens: (number | undefined)[];
   };
   /** ask_parent の本体に入る直前（未回答の質問を記録する前）を止める */
@@ -138,6 +146,7 @@ export function newFixture(
     userTexts: [] as string[][],
     toolResults: [] as string[][],
     reasoning: [] as (string | undefined)[],
+    systemTexts: [] as string[],
     maxTokens: [] as (number | undefined)[],
   };
   const patch = { value: "From abc\n--- a\n+++ b\n" };
@@ -274,6 +283,7 @@ export function newFixture(
     finalizeWaitMs: opts.finalizeWaitMs,
     usageReadWaitMs: opts.usageReadWaitMs,
     pushRetryDelayMs: opts.pushRetryDelayMs ?? 0,
+    setupRetryDelayMs: 0,
     web: opts.web,
     webLimits: opts.webLimits,
     webBrowseEnabled: opts.webBrowse,
@@ -295,6 +305,7 @@ export function newFixture(
       modelCalls.userTexts.push(ctx?.userTexts ?? []);
       modelCalls.toolResults.push(ctx?.toolResults ?? []);
       modelCalls.reasoning.push(ctx?.reasoning);
+      modelCalls.systemTexts.push(ctx?.systemText ?? "");
       modelCalls.maxTokens.push(ctx?.maxTokens);
     },
   });

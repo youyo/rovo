@@ -72,11 +72,20 @@ function userTexts(context: TranscriptContext): string[] {
   );
 }
 
-/** 先頭の system メッセージの本文（テストの観測用。無ければ undefined） */
+/**
+ * system メッセージの本文（テストの観測用）。Pi の prompt section は system メッセージの sections（key → 本文）に入る
+ * （内容が変わった section だけが後ろに足される）。content と sections の本文を、出てきた順に改行でつなぐ。無ければ undefined。
+ */
 function systemText(context: TranscriptContext): string | undefined {
-  const first = context.messages[0];
-  if (first?.role !== "system") return undefined;
-  return textOf(first.content as Parameters<typeof textOf>[0]);
+  const texts = context.messages.flatMap((m) => {
+    if (m.role !== "system") return [];
+    const sections = (m as { sections?: Record<string, string | null> }).sections;
+    return [
+      textOf(m.content as Parameters<typeof textOf>[0]),
+      ...Object.values(sections ?? {}).filter((v): v is string => typeof v === "string"),
+    ].filter((t) => t !== "");
+  });
+  return texts.length > 0 ? texts.join("\n") : undefined;
 }
 
 /** transcript のツール結果の本文（テストの観測用。ツールの結果がモデルに届いたことの確認） */

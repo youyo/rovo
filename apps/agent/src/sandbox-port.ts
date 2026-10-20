@@ -37,6 +37,12 @@ export interface WorkspaceSpec {
    * 無い・null ならキャッシュを使わない。ensureReady の同一性（conflict）の判定には含めない。
    */
   deps?: DepsSpec | null;
+  /**
+   * コンテナの大きさ（task_start の sandbox_instance。standard-1〜4）。**あれば利用者が明示した**ので、このタスクの間はずっとこの大きさで
+   * 起動する（env の SANDBOX_INSTANCE より優先）。無ければ env の既定。ensureReady の同一性（conflict）の判定には含めない。
+   * 依存関係のキャッシュを作るコンテナ（deps-<key>）には使わない（常に既定のまま）。
+   */
+  instance?: string;
 }
 
 /** AgentDO から見た Sandbox。Unit では fake に差し替え、E2E では SandboxDO（実コンテナ）を使う。 */

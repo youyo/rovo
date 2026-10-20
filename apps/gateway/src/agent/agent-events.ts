@@ -1,4 +1,5 @@
 import { SANDBOX_OPS } from "@rovo/audit";
+import { sandboxInstanceName } from "../sandbox-instance";
 import type { TaskStatus } from "../tasks/state";
 import type { AgentEventDto, AgentPhase } from "./contract";
 
@@ -84,11 +85,14 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
   const n = (v: unknown) =>
     typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
   const cacheBuildMs = n(s.cacheBuildMs);
+  const instance = sandboxInstanceName(s.instance);
   return {
     sandbox_runtime_ms: n(s.runtimeMs),
     sandbox_restarts: count(s.restarts),
     sandbox_boot_retries: count(s.bootRetries),
     ...depsCacheFields(s.depsCache, cacheBuildMs),
+    // 実際に起動した大きさ。表にある名前だけ（任意の文字列を公開しない）。起動していなければ付けない
+    ...(instance !== undefined ? { sandbox_instance: instance } : {}),
   };
 }
 

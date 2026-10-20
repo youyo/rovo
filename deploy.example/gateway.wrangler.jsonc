@@ -67,6 +67,8 @@
     "WEB_BROWSE_DAILY_LIMIT": "50",
     // web_browse を MCP のツールとして公開するか。雛形の既定は無効。有効にする手順は docs/deploy.md の 12。web / agent の同名の var も合わせる。
     "WEB_BROWSE_ENABLED": "<WEB_BROWSE_ENABLED>",
+    // task_start で sandbox_instance を省略したときの Sandbox の大きさ（sandbox_instances_list の default）。rovo.config.json の sandbox.instance から入り、agent の同名の var と同じ値になる。
+    "SANDBOX_INSTANCE": "<SANDBOX_INSTANCE>",
     // 推定費用の単価（docs/deploy.md の 11）。Sandbox は rovo.config.json の sandbox.instance（agent の SANDBOX_INSTANCE と同じ）から
     // 計算した 1 時間あたりの上限側の値。vars.gateway.SANDBOX_USD_PER_HOUR を書けばそれを優先する。
     "SANDBOX_USD_PER_HOUR": "<SANDBOX_USD_PER_HOUR>",

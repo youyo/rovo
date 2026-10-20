@@ -70,6 +70,18 @@ describe("task service: start", () => {
     expect(r).toMatchObject({ ok: false, error: { code: "concurrency_limit" } });
   });
 
+  it("concurrency_limit のメッセージに、実行時の上限の数と budget_status への案内を入れる", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    await svc.start(p, { ...startInput });
+    const r = await svc.start(p, { ...startInput, title: "second" });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    // Unit の MAX_CONCURRENT_TASKS は 1（vitest.config.ts）
+    expect(r.error.message).toContain("limit (1)");
+    expect(r.error.message).toContain("budget_status");
+  });
+
   it("idempotency_key 省略の2回の start は別タスク扱い（2回目は concurrency_limit）", async () => {
     const svc = createTaskService(env);
     const p = principal();

@@ -60,6 +60,9 @@
     // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する）。不正な値・0 以下は 0.5。
     // max_output_tokens もこの額に収まるよう絞られる。
     "CONSULT_BUDGET_USD": "0.5",
+    // 利用者ごとに同時に実行できるタスクの上限（1 以上の整数。不正な値・未設定は 2）。月額の枠とは別に、両方を満たすときだけ task_start が通る。
+    // 上限に達すると concurrency_limit。値は budget_status の concurrency_limit で見える。
+    "MAX_CONCURRENT_TASKS": "2",
     // AI Gateway の ID（agent の同名の var と同じ値にする）と Cloudflare の account id。secret の CLOUDFLARE_API_TOKEN（Account / AI Gateway / Read だけ）と
     // 合わせて、Gateway に BYOK 登録されたプロバイダーキー（List provider keys）を読み、キーが無いプロバイダーのモデルを選べなくする（D10b）。
     // どれかが空なら判定せず、従来どおり AGENT_MODELS だけで決める。account id は公開しない値なので、デプロイ時に実値へ置き換える（deploy.example 参照）。

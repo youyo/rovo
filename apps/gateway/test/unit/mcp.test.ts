@@ -1656,6 +1656,8 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       task_budget_usd: 10,
       consult_budget_usd: 0.5,
       max_concurrent_tasks: 10,
+      // 同時に実行できるタスクの上限（設定値。Unit の vitest.config.ts は 1。未設定の既定は 2 で user-concurrency.test.ts が見る）
+      concurrency_limit: 1,
     });
     expect(before.period).toEqual({
       start: expect.stringMatching(/^\d{4}-\d{2}-01T00:00:00\.000Z$/),
@@ -1811,6 +1813,28 @@ describe("D10: AI への伝え方（instructions と説明）", () => {
     // 思考レベル（effort）はモデルごとに決まっていて、考える量が多いほど出力トークン＝費用が増える
     expect(text).toContain("思考レベルはモデルごとに決まっている（effort）");
     expect(text).toContain("考える量が多いほど出力トークン＝費用が増える");
+    await client.close();
+  });
+
+  it("同時に実行できる数の数値は書かず、budget_status の concurrency_limit を見るよう案内する", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const text = client.getInstructions() ?? "";
+    const { tools } = await client.listTools();
+    const start = tools.find((t) => t.name === "task_start")?.description ?? "";
+    const status = tools.find((t) => t.name === "budget_status")?.description ?? "";
+    for (const [name, doc] of [
+      ["instructions", text],
+      ["task_start", start],
+      ["budget_status", status],
+    ] as const) {
+      expect(doc, name).toContain("concurrency_limit");
+      // 「1 件まで」「2 件まで」など、同時実行数の数値を断定する書き方をしない
+      expect(doc, name).not.toMatch(/同時に実行できる[^。]*?\d+\s*件/);
+      expect(doc, name).not.toMatch(/同時実行は\s*\d+\s*件/);
+      expect(doc, name).not.toMatch(/上限は\s*\d+\s*件/);
+    }
+    expect(status).toContain("concurrency_limit と max_concurrent_tasks の小さいほう");
     await client.close();
   });
 

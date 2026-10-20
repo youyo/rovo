@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { type ModelEnv, resolveModel } from "../models";
 import type { ProviderKeysDeps } from "../provider-keys";
+import { maxConcurrentTasks } from "./budget";
 import { nextSteps, nextStepsAfterMerge, nextStepsAfterReady } from "./next-steps";
 import type { TaskStatus } from "./state";
 import type { ResultView, TaskDO, TaskEvent, TaskView } from "./task-do";
@@ -218,7 +219,7 @@ export function checkStartInput(rawInput: unknown): ServiceResult<CheckedStartIn
 }
 
 export function createTaskService(
-  env: Pick<Env, "USER_DO" | "TASK_DO"> & ModelEnv,
+  env: Pick<Env, "USER_DO" | "TASK_DO"> & ModelEnv & { MAX_CONCURRENT_TASKS?: string },
   overrides: Partial<TaskServiceDeps> = {},
   /** プロバイダーキーの取得（Unit が fetch / 時計を差し替える） */
   providerKeys?: ProviderKeysDeps,
@@ -258,7 +259,10 @@ export function createTaskService(
           case "budget_exceeded":
             return fail("budget_exceeded", "the monthly budget is insufficient for a new task");
           default:
-            return fail("concurrency_limit", "another task is already running for this user");
+            return fail(
+              "concurrency_limit",
+              `the concurrent task limit (${maxConcurrentTasks(env)}) has been reached for this user; wait for a running task to finish or cancel one (budget_status shows concurrency_limit)`,
+            );
         }
       }
 

@@ -49,7 +49,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 | `task_pr_ready` | COMPLETED のタスクの Draft PR を Ready for review にする（冪等）。`{task_id}` だけを受け、対象の PR はタスクの記録から決まる。利用者本人の GitHub トークンで行う |
 | `task_pr_merge` | PR をマージする。`{task_id, merge_method?: squash \| merge \| rebase, delete_branch?}`。`merge_policy` が `agent_merge`、`head_matches_verified` が true、PR が Ready のときだけ。検証済みの head の sha を GitHub に渡し、ブランチ保護に拒否されたら `merge_blocked`（GitHub の理由つき）。利用者本人の GitHub トークンで行う |
 | `models_list` | 使えるモデルの一覧と単価を返す（入力なし）。`{models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort, available, unavailable_reason?}]}`。単価は USD / 100 万トークン。`task_start` の `model` と `consult` の `model` に使える（D10）。`available` は AI Gateway にそのプロバイダーのキー（BYOK）が登録されているか（キーが無い Anthropic / OpenAI のモデルは `false`・`no_provider_key`。Workers AI は常に `true`）（D10b） |
-| `budget_status` | 自分の予算の状況を返す（入力なし）。`{monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, period}`。rovo の月の枠だけで、Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する）（D10） |
+| `budget_status` | 自分の予算の状況を返す（入力なし）。`{monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, concurrency_limit, period}`。`concurrency_limit` は利用者ごとに同時に実行できるタスクの上限（設定値）で、実際に同時に実行できる数は `concurrency_limit` と `max_concurrent_tasks`（残りの予算 ÷ タスクの予約額）の小さいほう。rovo の月の枠だけで、Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する）（D10） |
 | `consult` | セカンドオピニオン（設計の相談役）。`{model?, system?, messages: [{role: user \| assistant, content}], max_output_tokens?}` を 1 回で完結して答える（会話は保存しない。コードは書かせず、Sandbox も使わない）。応答は `{text, model, usage: {input, output, cache_read, cache_write}, cost_usd}`。Anthropic のモデルでは system と最後の user より前にプロンプトキャッシュを付けるので、同じ前置きを送ると 2 回目以降は安くなる。呼ぶ前に `CONSULT_BUDGET_USD`（既定 $0.5）を月の枠から予約し、実費で精算する（D10） |
 | `web_search` | Web Search API の結果（url・title・description）を返す。詳細は下の「Web Research Service」 |
 | `web_fetch` | 公開ページを取得して Markdown で返す（JS は実行しない） |
@@ -62,7 +62,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 - モデルの選択と予算（D10）: `models_list` で使えるモデルと単価を見て、`task_start` の `model` をタスクの難しさで選ぶ。使えるモデルは env の `AGENT_MODELS`（gateway と agent に同じ値。未設定なら `AGENT_MODEL` だけ）で決まり、単価は pi-ai のカタログ由来（許可リスト: `packages/models`）。OpenAI のモデルは AI Gateway に OpenAI のキーを BYOK 登録すると使える（対象リポジトリのコードが OpenAI にも送られる。利用上限は OpenAI 側で設定する。`docs/deploy.md`）。`budget_status` で月の残りを確かめられる。思考レベル（effort）はタスクごとではなくモデルごとに固定で（初期値: haiku=low、sonnet=high、opus=medium、fable=low、gpt-6-luna=low、gpt-6-sol=medium、gpt-6-astra=low、Workers AI は gpt-oss・qwen・nemotron・glm-4.7-flash=low、gemma=high）、`models_list` と `task_status` / `task_result` に出る。思考のトークンは出力として課金されるので、レベルが高いほど費用が増える。env の `MODEL_EFFORTS` で上書きできる。`consult` でモデルがリクエストを拒否した（4xx）ときは、再試行を促さない `model_rejected` を返す。
 - プロバイダーキーと Workers AI（D10b）: gateway が AI Gateway の BYOK のキー（Cloudflare API の List provider keys。secret `CLOUDFLARE_API_TOKEN` は Account / AI Gateway / Read だけの読み取り専用、vars `CLOUDFLARE_ACCOUNT_ID` / `AI_GATEWAY_ID`）を読み、alias が `default` のキーが無いプロバイダーのモデルを `available: false` にして、`task_start` / `consult` は `model_unavailable` で拒否する（結果は 5 分キャッシュ。API が失敗したら直前のキャッシュ、無ければ従来どおり `AGENT_MODELS` だけで決める）。キーが無くても使える Workers AI のモデル（無料プランで使えるものだけ: `workers-ai/@cf/openai/gpt-oss-120b`・`gpt-oss-20b`、`qwen/qwen3.8-27b`、`nvidia/nemotron-3-120b-a12b`、`zai-org/glm-4.7-flash`、`google/gemma-4-26b-a4b-it`。Workers AI は顧客データを学習に使わない）を `AGENT_MODELS` に入れると、キーが無いときの代わりになる。`model` を省略したときは `AGENT_MODEL` が available ならそれ、なければ Anthropic → `gpt-oss-120b` → 他の Workers AI → OpenAI の順で選ぶ。無料枠は 1 日 1 万 Neuron（`docs/deploy.md` の 7）。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
-- 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
+- 利用者ごとに同時に実行できるタスクの数には上限がある（設定値 `MAX_CONCURRENT_TASKS`。値は `budget_status` の `concurrency_limit` で見る）。上限に達していると `task_start` は `concurrency_limit` で断られる。タスクの停止を確認できるまで、そのタスクの枠は空かない。
 - 1 タスクにつき既定で $10（env `TASK_BUDGET_USD`。0 以下・不正な値は 10）を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。子エージェントの予算の上限（`budgetUsd`）にも同じ値を渡す。足りなければ `budget_exceeded`。月額の枠を 10 未満にするときは `TASK_BUDGET_USD` も下げる（受入試験で数ドルに抑えたいとき）。
 
 ### Web Research Service（`web_search` / `web_fetch` / `web_browse`）
@@ -89,7 +89,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 - `apps/gateway`: Cloudflare Worker。Hono でルーティングし、`@cloudflare/workers-oauth-provider` で全体を包む。
   - `/mcp`（要 OAuth）: `agents/mcp/server` の `createMcpHandler` + `@modelcontextprotocol/server`。リクエストごとに McpServer を作り、ユーザー情報は共有しない
   - `/authorize`（同意画面）→ GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
-  - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の予約、月額予算（タスクごとの予約・usage の冪等な精算・終了時の返却）。GitHub のトークンは DO の外へ返さない
+  - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の枠（タスクごとに 1 行。上限は `MAX_CONCURRENT_TASKS`）、月額予算（タスクごとの予約・usage の冪等な精算・終了時の返却）。GitHub のトークンは DO の外へ返さない
   - `TaskDO`（タスクごと）: 状態とイベント。AgentDO への start / cancel の配送、イベントの取り込み、usage の精算を alarm で収束させる
 - `apps/agent`: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
   - 依存関係のキャッシュ（D14）: ルート直下の lockfile（`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`）が同じなら、導入済みの `node_modules` を Containers のスナップショット（public beta）から復元して起動する。`DepsCacheDO`（鍵ごとに作成を 1 回にまとめる）と、SandboxDO の別インスタンス（作成）が行う。使えなくてもタスクは失敗せず今までどおり動く。結果は `task_result` の `usage.deps_cache`（`hit` / `miss` / `built` / `disabled`）と、作ったタスクの `cache_build_ms`。`rovo.config.json` の `depsCache.enabled` で無効にできる（docs/deploy.md の 17）
@@ -165,6 +165,7 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `MODEL_EFFORTS`（変数） | モデルごとの思考レベルの上書き（`<モデルの id>=<off\|minimal\|low\|medium\|high\|xhigh\|max>` のカンマ区切り。空なら既定）。agent の同名の変数と同じ値にする |
 | `AI_GATEWAY_ID` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`（Secret） | AI Gateway の BYOK のキーを読んで、キーが無いプロバイダーのモデルを選べなくする（D10b）。どれかが空なら判定せず `AGENT_MODELS` だけで決める。account id は公開しない値。トークンは Account / AI Gateway / Read だけ |
 | `CONSULT_BUDGET_USD` | `consult` 1 回に月額の枠から予約する額（USD。既定 0.5。実費で精算する。0 以下・不正な値は 0.5）（D10） |
+| `MAX_CONCURRENT_TASKS` | 利用者ごとに同時に実行できるタスクの上限（1 以上の整数。既定 2。不正な値・未設定は 2）。上限に達すると `task_start` は `concurrency_limit`。月額の枠とは別で、両方を満たすときだけ始められる。値は `budget_status` の `concurrency_limit` で見える |
 | `PR_SHOW_COST` | `true` のときだけ、費用を PR 本文に載せる（既定は載せない。公開リポジトリでは誰でも見られるため） |
 
 ### Secret（`wrangler secret put <NAME>`、ローカルは `.dev.vars`）

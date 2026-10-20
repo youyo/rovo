@@ -22,6 +22,9 @@ GITHUB_APP_PRIVATE_KEY=
 # consult（セカンドオピニオン）1 回に予約する予算（USD。既定 0.5。0 以下・不正な値は 0.5）
 # CONSULT_BUDGET_USD=0.5
 
+# 利用者ごとに同時に実行できるタスクの上限（1 以上の整数。既定 2。不正な値は 2）。budget_status の concurrency_limit で見える
+# MAX_CONCURRENT_TASKS=2
+
 # 既定のモデルと、task_start / consult の model に選べるモデル（カンマ区切り。空なら AGENT_MODEL だけ）。
 # agent の同名の var と同じ値にする。
 # AGENT_MODEL=anthropic/claude-sonnet-5-5

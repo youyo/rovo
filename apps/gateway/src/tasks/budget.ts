@@ -24,3 +24,18 @@ export function consultBudgetUsd(env: { CONSULT_BUDGET_USD?: string }): number {
   const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_CONSULT_BUDGET_USD;
 }
+
+/**
+ * 利用者ごとに同時に実行できるタスクの上限。env の MAX_CONCURRENT_TASKS（既定 2）。
+ * UserDO の reserve が、動いている予約の件数がこの値に達していたら concurrency_limit で断る。
+ * 予算（task_budget）の予約とは別の仕組みで、両方を満たすときだけタスクを始められる。
+ * 未設定・1 以上の整数でない値（0・負・小数・数でない）は既定に戻す。
+ */
+export const DEFAULT_MAX_CONCURRENT_TASKS = 2;
+
+export function maxConcurrentTasks(env: { MAX_CONCURRENT_TASKS?: string }): number {
+  const raw = env.MAX_CONCURRENT_TASKS;
+  if (typeof raw !== "string" || !/^\d+$/.test(raw.trim())) return DEFAULT_MAX_CONCURRENT_TASKS;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) && n >= 1 ? n : DEFAULT_MAX_CONCURRENT_TASKS;
+}

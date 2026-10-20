@@ -30,11 +30,13 @@ function sql<T>(stub: UserStub, query: string, ...bindings: unknown[]): Promise<
   );
 }
 
-type Reservation = { active_task_id: string | null; reserved_at: number; version: number };
-async function reservation(stub: UserStub): Promise<Reservation> {
-  const [r] = await sql<Reservation>(stub, "SELECT * FROM reservation");
-  if (!r) throw new Error("no reservation row");
-  return r;
+/** 同時実行の枠を持っているタスク（予約の古い順）。 */
+async function slots(stub: UserStub): Promise<string[]> {
+  const rows = await sql<{ task_id: string }>(
+    stub,
+    "SELECT task_id FROM reservation_slot ORDER BY reserved_at, task_id",
+  );
+  return rows.map((r) => r.task_id);
 }
 
 async function reserveOk(stub: UserStub, key: string, fp = FP) {
@@ -55,15 +57,13 @@ async function create(userId: number, taskId: string) {
 }
 
 describe("UserDO.reserve", () => {
-  it("新規: task_id(ULID)を発行し、requests と reservation に記録する", async () => {
+  it("新規: task_id(ULID)を発行し、requests と reservation_slot に記録する", async () => {
     const uid = newUserId();
     const stub = userStub(uid);
     const r = await reserveOk(stub, "key-1");
     expect(r.task_id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
     expect(r.reused).toBe(false);
-    const res = await reservation(stub);
-    expect(res.active_task_id).toBe(r.task_id);
-    expect(res.version).toBeGreaterThan(0);
+    expect(await slots(stub)).toEqual([r.task_id]);
     expect(await sql(stub, "SELECT request_key, task_id, fingerprint FROM requests")).toEqual([
       { request_key: "key-1", task_id: r.task_id, fingerprint: FP },
     ]);
@@ -72,10 +72,10 @@ describe("UserDO.reserve", () => {
   it("再試行: 同じキー・同じ fingerprint なら同じ task_id を返し、状態を変えない", async () => {
     const stub = userStub(newUserId());
     const a = await reserveOk(stub, "key-1");
-    const before = await reservation(stub);
+    const before = await slots(stub);
     const b = await reserveOk(stub, "key-1");
     expect(b).toMatchObject({ task_id: a.task_id, reused: true });
-    expect(await reservation(stub)).toEqual(before);
+    expect(await slots(stub)).toEqual(before);
     expect(await sql(stub, "SELECT * FROM requests")).toHaveLength(1);
   });
 
@@ -85,7 +85,7 @@ describe("UserDO.reserve", () => {
     await release(stub, a.task_id);
     const b = await reserveOk(stub, "key-1");
     expect(b).toMatchObject({ task_id: a.task_id, reused: true });
-    expect((await reservation(stub)).active_task_id).toBeNull();
+    expect(await slots(stub)).toEqual([]);
   });
 
   it("同じキーで fingerprint が違えば conflict", async () => {
@@ -98,7 +98,7 @@ describe("UserDO.reserve", () => {
     const stub = userStub(newUserId());
     const a = await reserveOk(stub, "key-1");
     expect(await stub.reserve("key-2", FP2)).toEqual({ ok: false, code: "concurrency_limit" });
-    expect((await reservation(stub)).active_task_id).toBe(a.task_id);
+    expect(await slots(stub)).toEqual([a.task_id]);
     expect(await sql(stub, "SELECT * FROM requests")).toHaveLength(1);
   });
 
@@ -149,22 +149,19 @@ describe("finishTask による枠の解放", () => {
   it("予約先が同じ task_id のときだけ解放する（compare-and-clear）", async () => {
     const stub = userStub(newUserId());
     const a = await reserveOk(stub, "key-1");
-    const v = (await reservation(stub)).version;
     expect(await release(stub, "01ARZ3NDEKTSV4RRFFQ69G5FAV")).toEqual({ released: false });
-    expect(await reservation(stub)).toMatchObject({ active_task_id: a.task_id, version: v });
+    expect(await slots(stub)).toEqual([a.task_id]);
     expect(await release(stub, a.task_id)).toEqual({ released: true });
-    const after = await reservation(stub);
-    expect(after.active_task_id).toBeNull();
-    expect(after.version).toBeGreaterThan(v);
+    expect(await slots(stub)).toEqual([]);
   });
 
   it("冪等: 2回目は released=false で状態を変えない", async () => {
     const stub = userStub(newUserId());
     const a = await reserveOk(stub, "key-1");
     await release(stub, a.task_id);
-    const before = await reservation(stub);
+    const before = await slots(stub);
     expect(await release(stub, a.task_id)).toEqual({ released: false });
-    expect(await reservation(stub)).toEqual(before);
+    expect(await slots(stub)).toEqual(before);
   });
 
   it("解放後は新しいキーで reserve できる", async () => {
@@ -186,7 +183,7 @@ describe("UserDO.reserve の照合による回収", () => {
     await taskStub(a.task_id).advance(); // AgentDO の停止を確認する（これが済むまで枠は解放されない）
     const b = await reserveOk(stub, "key-2", FP2);
     expect(b.task_id).not.toBe(a.task_id);
-    expect((await reservation(stub)).active_task_id).toBe(b.task_id);
+    expect(await slots(stub)).toEqual([b.task_id]);
   });
 
   it("未作成で10分未満なら回収せず concurrency_limit（tombstone も作らない）", async () => {
@@ -216,7 +213,7 @@ describe("UserDO.reserve の照合による回収", () => {
     await create(uid, a.task_id);
     clock.advance(30 * MIN);
     expect(await stub.reserve("key-2", FP2)).toEqual({ ok: false, code: "concurrency_limit" });
-    expect((await reservation(stub)).active_task_id).toBe(a.task_id);
+    expect(await slots(stub)).toEqual([a.task_id]);
   });
 
   it("回収後に古いキーで再試行すると同じ task_id が返り、その ensureCreated は expired", async () => {
@@ -267,7 +264,7 @@ describe("UserDO.reserve の照合による回収", () => {
       "SELECT task_id FROM requests WHERE request_key = 'key-other'",
     );
     expect(other).toHaveLength(1);
-    expect((await reservation(stub)).active_task_id).toBe(other[0]?.task_id);
+    expect(await slots(stub)).toEqual([other[0]?.task_id]);
     expect(await sql(stub, "SELECT * FROM requests WHERE request_key = 'key-new'")).toHaveLength(0);
   });
 
@@ -323,12 +320,12 @@ describe("UserDO.reserve の照合による回収", () => {
     await taskStub(a.task_id).cancel(uid);
     await taskStub(a.task_id).advance(); // 停止は確認できたが、finishTask は届かない
     expect(await taskStub(a.task_id).inspect()).toMatchObject({ stopped: true });
-    expect((await reservation(stub)).active_task_id).toBe(a.task_id);
+    expect(await slots(stub)).toEqual([a.task_id]);
     expect(await stub.reserve("key-2", FP2)).toMatchObject({
       ok: false,
       code: "concurrency_limit",
     });
-    expect((await reservation(stub)).active_task_id).toBe(a.task_id);
+    expect(await slots(stub)).toEqual([a.task_id]);
     await runInDurableObject(taskStub(a.task_id), (i) => {
       (i as unknown as { __down: boolean }).__down = false;
     });

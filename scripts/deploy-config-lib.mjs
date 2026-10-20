@@ -21,6 +21,8 @@ export const DEFAULTS = {
   namePrefix: "rovo",
   workerNames: { gateway: "rovo-gateway", agent: "rovo-agent", web: "rovo-web" },
   budget: { monthlyUsd: 100, taskUsd: 10, consultUsd: 0.5 },
+  // 利用者ごとに同時に実行できるタスクの上限（gateway の MAX_CONCURRENT_TASKS）。OSS の既定は 2
+  concurrency: { maxTasks: 2 },
   models: {
     default: "anthropic/claude-sonnet-5-5",
     list: [
@@ -49,6 +51,7 @@ const TOP_KEYS = [
   "githubApp",
   "allowed",
   "budget",
+  "concurrency",
   "models",
   "sandbox",
   "depsCache",
@@ -231,6 +234,15 @@ export function validateConfig(raw, templates = loadTemplates()) {
       errors.push(`budget.${k}: 正の数にする`);
   }
 
+  const cc = isObj(raw.concurrency) ? raw.concurrency : {};
+  if (raw.concurrency !== undefined && !isObj(raw.concurrency))
+    errors.push("concurrency: オブジェクトにする");
+  for (const k of Object.keys(cc))
+    if (k !== "maxTasks") errors.push(`concurrency.${k}: 未知のキー（maxTasks）`);
+  const maxTasks = Object.hasOwn(cc, "maxTasks") ? cc.maxTasks : DEFAULTS.concurrency.maxTasks;
+  if (!Number.isInteger(maxTasks) || maxTasks < 1)
+    errors.push("concurrency.maxTasks: 1 以上の整数にする");
+
   const m = isObj(raw.models) ? raw.models : {};
   if (raw.models !== undefined && !isObj(raw.models)) errors.push("models: オブジェクトにする");
   for (const k of Object.keys(m))
@@ -318,6 +330,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
       githubApp: { id: githubAppId, clientId: githubClientId },
       allowed: { org, team, userIds },
       budget: b,
+      concurrency: { maxTasks },
       models: { default: modelDefault.trim(), list: modelList, efforts },
       sandbox: { instance: sandboxInstance },
       depsCache: { enabled: depsCacheEnabled },
@@ -361,6 +374,7 @@ function placeholderValues(config, infra) {
     MONTHLY_BUDGET_USD: config.budget.monthlyUsd,
     TASK_BUDGET_USD: config.budget.taskUsd,
     CONSULT_BUDGET_USD: config.budget.consultUsd,
+    MAX_CONCURRENT_TASKS: String(config.concurrency.maxTasks),
     AGENT_MODEL: config.models.default,
     AGENT_MODELS: config.models.list.join(","),
     MODEL_EFFORTS: config.models.efforts,

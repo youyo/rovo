@@ -82,6 +82,8 @@ beforeAll(async () => {
       GITHUB_APP_CLIENT_SECRET: github.clientSecret,
       ALLOWED_ORG: ORG,
       ALLOWED_TEAM: TEAM,
+      // 既存のシナリオは「同時実行は 1 件で埋まる」前提で書かれている（wrangler.jsonc の既定は 2）
+      MAX_CONCURRENT_TASKS: "1",
       TOKEN_ENC_KEY: Buffer.alloc(32, 7).toString("base64"),
       GITHUB_APP_ID: "424242",
       GITHUB_APP_PRIVATE_KEY: appKeys.privatePem

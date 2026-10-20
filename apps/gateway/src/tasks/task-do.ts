@@ -11,6 +11,7 @@ import type {
   TaskSpec,
   UsageDto,
 } from "../agent/contract";
+import { indexBackoffMs } from "../directory/backoff";
 import { DIRECTORY_NAME, type TaskIndexSnapshot, type UpsertTaskResult } from "../directory/types";
 import {
   applyManagedBlock,
@@ -110,9 +111,13 @@ const BOT_IDENTITY = { name: "rovo", email: "rovo@users.noreply.github.com" };
 const MAX_PAGES_PER_SYNC = 20;
 /** Directory への 1 回の配送を待つ上限。超えたら失敗として再試行に回す（alarm を固めない） */
 const INDEX_TIMEOUT_MS = 5_000;
-/** Directory への配送が続けて失敗したときの再試行間隔: 10s から倍々で、上限 5 分。打ち切らない（復旧したら追いつく） */
-const INDEX_BACKOFF_BASE_MS = 10_000;
-const INDEX_BACKOFF_MAX_MS = 5 * 60_000;
+/** 索引の snapshot の文字列の上限（packages/dashboard-contract の LIMITS と同じ。超えた値は送る前に切り詰める） */
+const INDEX_LIMITS = { title: 300, repository: 140, login: 39, model: 100, reason: 100, url: 300 };
+
+/** 文字列を n 文字（コードポイント単位）までに切り詰める。 */
+function clip(text: string, n: number): string {
+  return text.length <= n ? text : Array.from(text).slice(0, n).join("");
+}
 
 /** TaskDO.ensureCreated の入力。task_start の入力に、タスク ID と所有者・GitHub 側の ID を足したもの。 */
 export type EnsureCreatedInput = z.input<typeof taskInputSchema> & {
@@ -2780,6 +2785,9 @@ export class TaskDO extends DurableObject<Env> {
   /** Directory への配送の待ちの上限（ms）。テストで短くする。 */
   protected indexTimeoutMs = INDEX_TIMEOUT_MS;
 
+  /** 再試行間隔のジッター用の乱数（[0, 1)）。テストで差し替える。 */
+  protected random: () => number = Math.random;
+
   /** 索引のシングルトン。テストで差し替える。 */
   protected directoryStub() {
     return this.env.DIRECTORY_DO.getByName(DIRECTORY_NAME);
@@ -2815,12 +2823,24 @@ export class TaskDO extends DurableObject<Env> {
           revision,
         ) as unknown as Promise<UpsertTaskResult>;
         const res = await this.withTimeout(call, this.indexTimeoutMs);
-        if (!res.ok) throw new Error(`rejected: ${res.code}`);
+        if (!res.ok) {
+          if (res.code === "invalid_input") {
+            // 恒久的な拒否（snapshot がスキーマに合わない）。再送しても通らないので、この revision は送信済みとして捨てる。
+            // ログにはコード（名前）だけを出す。次の更新（新しい revision）で、また送る
+            console.error("task_index_rejected", res.code);
+            this.ctx.storage.sql.exec(
+              "UPDATE agent_link SET index_sent_revision = MAX(index_sent_revision, ?), index_attempts = 0, index_retry_at = 0 WHERE singleton = 1",
+              revision,
+            );
+            return;
+          }
+          throw new Error(`rejected: ${res.code}`);
+        }
       } catch (e) {
         // エラーのメッセージにはデータが入りうるので、名前だけを記録する
         console.error("task_index_deliver_error", e instanceof Error ? e.name : typeof e);
         const attempts = link.index_attempts + 1;
-        const backoff = Math.min(INDEX_BACKOFF_MAX_MS, INDEX_BACKOFF_BASE_MS * 2 ** (attempts - 1));
+        const backoff = indexBackoffMs(attempts, this.random);
         this.ctx.storage.sql.exec(
           "UPDATE agent_link SET index_attempts = ?, index_retry_at = ? WHERE singleton = 1",
           attempts,
@@ -2860,12 +2880,12 @@ export class TaskDO extends DurableObject<Env> {
     return {
       task_id: row.id,
       owner_id: row.owner_id,
-      owner_login: row.owner_login.slice(0, 200),
-      repository: row.repository,
+      owner_login: clip(row.owner_login, INDEX_LIMITS.login),
+      repository: clip(row.repository, INDEX_LIMITS.repository),
       repository_id: row.repository_id,
-      title: row.title,
+      title: clip(row.title, INDEX_LIMITS.title),
       status,
-      model,
+      model: clip(model, INDEX_LIMITS.model),
       effort: this.effortOfRow(row),
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -2878,10 +2898,11 @@ export class TaskDO extends DurableObject<Env> {
       cache_read_tokens: Math.floor(up.cache_read_tokens ?? 0),
       cache_write_tokens: Math.floor(up.cache_write_tokens ?? 0),
       pr_number: gl?.pr_number ?? null,
-      pr_url: gl?.pr_url ?? null,
+      // URL は切り詰めると壊れるので、上限を超えたら入れない
+      pr_url: gl?.pr_url != null && gl.pr_url.length <= INDEX_LIMITS.url ? gl.pr_url : null,
       pr_draft: gl?.pr_draft === undefined || gl.pr_draft === null ? null : gl.pr_draft === 1,
       pr_merged: gl?.pr_merged === 1,
-      reason: typeof last?.p.reason === "string" ? last.p.reason.slice(0, 200) : null,
+      reason: typeof last?.p.reason === "string" ? clip(last.p.reason, INDEX_LIMITS.reason) : null,
       failure_phase:
         status === "FAILED" && gl !== undefined && gl.setup_done === 0 ? "setup" : null,
       // deps_cache は終端の結果（AgentDO の getResult）にしか無く、TaskDO が同期で持つ値ではない。詳細は TaskDO から読む（M7）

@@ -12,6 +12,7 @@ import {
   report,
   waitForPhase,
   waitForTerminal,
+  waitUntil,
 } from "./support/agent-fixture";
 
 afterEach(() => clearAgentTestOverrides());
@@ -180,6 +181,41 @@ describe("lazy boot: Sandbox は必要になるまで起動しない", () => {
     expect(fx.sandbox.files.size).toBe(0);
     // 失敗はモデルに返さない: 最初の 1 回のあと、モデルは呼ばれない
     expect(fx.modelCalls.count).toBe(1);
+  });
+
+  it("終端になった後に来た起動の要求は、ensureReady を呼ばず、失敗として数えない", async () => {
+    const fx = newFixture("lazy-after-terminal", [call("gate"), report()], { cancelWaitMs: 300 });
+    await fx.stub.start(noVerify("lazy-after-terminal"));
+    await fx.gate.waitEntered();
+    await fx.stub.cancel();
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+    await expect(runInDO(fx.stub, (inst) => inst.ensureSandboxReady())).rejects.toThrow(
+      /terminal|stopped|ended/i,
+    );
+    expect(fx.sandbox.readySpecs).toHaveLength(0);
+    expect(await runInDO(fx.stub, (inst) => inst.store.meta("setup_attempts"))).toBeUndefined();
+  });
+
+  it("再試行の待ちの最中に cancel が来たら、それ以上再試行せずに終わる", async () => {
+    const fx = newFixture("lazy-cancel-in-wait", [call("write_note", { text: "1" }), report()], {
+      cancelWaitMs: 300,
+    });
+    let attempts = 0;
+    fx.sandbox.ensureReady = async () => {
+      attempts += 1;
+      throw new Error("boot failed");
+    };
+    await runInDO(fx.stub, (inst) => {
+      const orig = inst.overrides.bind(inst);
+      inst.overrides = () => ({ ...orig(), setupRetryDelayMs: 1500 });
+    });
+    await fx.stub.start(noVerify("lazy-cancel-in-wait"));
+    await waitUntil(() => attempts === 1);
+    await fx.stub.cancel();
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(attempts).toBe(1);
   });
 
   it("起動を試みて失敗したタスクは、report_completion の近道（起動せずに完了）で成功にならない", async () => {

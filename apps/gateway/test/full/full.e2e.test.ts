@@ -690,7 +690,7 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     // 依存関係のキャッシュ（D14）: a が作ったキャッシュで起動する（作り直さない）
     const usageB = r.usage as { deps_cache?: string; cache_build_ms?: number };
     expect(usageB.deps_cache).toBe("hit");
-    expect(usageB).not.toHaveProperty("cache_build_ms");
+    expect(usageB.cache_build_ms).toBe(0);
   });
 
   it("c. 実行中に task_cancel → CANCELLED。PR は閉じずに残って本文が更新され、トークンは失効する", async () => {

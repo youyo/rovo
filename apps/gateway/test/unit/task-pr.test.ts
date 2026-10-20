@@ -184,6 +184,36 @@ describe("prContext: 条件の判定", () => {
     expect(await t.stub.prContext(OWNER, "ready")).toMatchObject({ ok: true });
   });
 
+  it("merge: task_result の warnings が 1 件でもあれば conflict（warnings_present）。ready は通る", async () => {
+    const t = await createTask({ merge_policy: "agent_merge" });
+    await t.stub.advance();
+    const head = app().branch(REPO, t.branch) as string;
+    await t.agent.setProgram({
+      result: completedResult(head, { warnings: ["test config changed: vitest.config.ts"] }),
+    });
+    await t.agent.setPhase("completed");
+    await t.stub.advance();
+    // head は検証済みと一致している（warnings だけが理由で拒否される）
+    expect((await gl(t.stub)).head_matches).toBe(1);
+    const r = await t.stub.prContext(OWNER, "merge");
+    expect(r).toMatchObject({ ok: false, code: "conflict" });
+    expect((r as { message: string }).message).toContain("warnings");
+    expect((await audits(t.stub)).find((a) => a.event === "pr_denied")).toMatchObject({
+      kind: "merge",
+      reason: "warnings_present",
+      merge_policy: "agent_merge",
+    });
+    expect(await t.stub.prContext(OWNER, "ready")).toMatchObject({ ok: true });
+  });
+
+  it("merge: GitHub 側で足された warnings（github_link.warnings）でも拒否する", async () => {
+    const { stub } = await runToCompleted({ merge_policy: "agent_merge" });
+    await runInDurableObject(stub, (_i, s) => {
+      s.storage.sql.exec("UPDATE github_link SET warnings = ?", JSON.stringify(["from github"]));
+    });
+    expect(await stub.prContext(OWNER, "merge")).toMatchObject({ ok: false, code: "conflict" });
+  });
+
   it("merge: head をまだ読めていない（終端の処理が終わっていない）なら not_ready", async () => {
     const { stub } = await runToCompleted({ merge_policy: "agent_merge" });
     await runInDurableObject(stub, (_i, s) => {

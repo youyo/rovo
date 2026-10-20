@@ -457,6 +457,27 @@ describe("完了判定", () => {
     expect(r2.warnings.join("\n")).not.toContain("test/a.test.ts");
   });
 
+  it.each([
+    ["name-status の取得失敗", "--name-status", { exitCode: 128, stderr: "fatal" }],
+    ["テスト差分の取得失敗", "-U0", { exitCode: 128, stderr: "fatal" }],
+    ["テスト差分が 2MiB 超（truncated）", "-U0", { stdout: "x", truncated: true }],
+  ])("%s のとき判定できていない警告を出す", async (_name, flag, res) => {
+    const fx = newFixture("verify-undecidable", [report()]);
+    fx.nameStatus.value = "M\ttest/a.test.ts";
+    const orig = fx.sandbox.exec.bind(fx.sandbox);
+    fx.sandbox.exec = async (argv, options) => {
+      if (argv.includes(flag)) {
+        fx.sandbox.calls.push({ argv, options: options ?? {} });
+        return { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false, ...res };
+      }
+      return orig(argv, options);
+    };
+    await fx.stub.start(makeSpec("verify-undecidable"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const r = done(await fx.stub.getResult());
+    expect(r.warnings.join("\n")).toContain("判定できていません");
+  });
+
   it("未 commit の変更があれば検証せずモデルに commit を促す", async () => {
     const fx = newFixture("verify-dirty", [report("1"), report("2")]);
     let n = 0;

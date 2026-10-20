@@ -171,7 +171,9 @@ export function newFixture(
   const pushCalls: string[][] = [];
 
   const sandbox = new FakeSandbox(async (argv) => {
-    const [a0, a1] = argv;
+    // `git -c k=v <sub> ...` の -c を読み飛ばしてサブコマンドを見る
+    const gitArgs = argv[0] === "git" && argv[1] === "-c" ? ["git", ...argv.slice(3)] : argv;
+    const [a0, a1] = gitArgs;
     if (a0 === "git" && a1 === "rev-parse") return { stdout: `${revParse.shift() ?? "c0ffee"}\n` };
     if (a0 === "git" && (a1 === "status" || a1 === "switch")) {
       const g = execState[a1];

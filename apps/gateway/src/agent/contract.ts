@@ -58,6 +58,12 @@ export interface DepsDto {
   blobSha: string;
   /** "pnpm install --frozen-lockfile" / "npm ci" / "yarn install --frozen-lockfile" */
   installCommand: string;
+  /** base_sha 時点のルートの package.json の blob SHA */
+  packageJsonSha: string;
+  /** ルートの pnpm-workspace.yaml の blob SHA（無ければ null） */
+  workspaceSha: string | null;
+  /** 入れ子の package.json の「パスと blob SHA の一覧」の sha256（無ければ null） */
+  manifestsSha: string | null;
 }
 
 export interface GitCredential {

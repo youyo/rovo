@@ -71,6 +71,9 @@ describe("依存関係のキャッシュ（D14）", () => {
       lockfilePath: "package-lock.json",
       blobSha: upstream.depsLockBlobSha,
       installCommand: "npm ci",
+      packageJsonSha: "d".repeat(40),
+      workspaceSha: null,
+      manifestsSha: null,
     },
   });
 
@@ -127,6 +130,15 @@ describe("依存関係のキャッシュ（D14）", () => {
     expect(leak.stdout.trim()).toBe("");
     const env = await b.exec(["env"]);
     expect(env.stdout).not.toContain("ghs_e2e_installation_token");
+
+    // 検証コマンドが入れ直しの npm ci を呼んでも、スナップショットに残った npm のキャッシュ（~/.npm）が使われ、
+    // registry から tarball を取り直さない（node_modules は消えて、キャッシュから戻る）
+    const ci = await b.exec(["npm", "ci"], { cwd: "/workspace" });
+    expect(ci.exitCode).toBe(0);
+    expect(registryTarballGets()).toBe(1);
+    expect(
+      (await b.exec(["test", "-f", "/workspace/node_modules/tiny-pkg/index.js"])).exitCode,
+    ).toBe(0);
   }, 280_000);
 
   it("復元したコンテナが作り直されても（destroy → ensureReady）、node_modules は戻る", async () => {
@@ -165,6 +177,9 @@ describe("依存関係のキャッシュ（D14）", () => {
         lockfilePath: "pnpm-lock.yaml",
         blobSha: "c".repeat(40),
         installCommand: "pnpm install --frozen-lockfile",
+        packageJsonSha: "d".repeat(40),
+        workspaceSha: null,
+        manifestsSha: null,
       },
     });
     const a = client("deps-fail-a");
@@ -183,6 +198,22 @@ describe("依存関係のキャッシュ（D14）", () => {
     expect((await metricsOf(b)).depsCache).toBe("miss");
     expect(Date.now() - t1).toBeLessThan(firstMs); // クールダウン中は作成を試みない
   }, 280_000);
+});
+
+describe("イメージに入っている道具（子が自分で入れなくても使える）", () => {
+  it("pnpm（corepack の shim）と python3 が PATH にあり、動く。corepack はダウンロードの確認で止まらない設定", async () => {
+    const c = client("tools");
+    await c.ensureReady(specFor("tools"));
+    // pnpm の本体は packageManager に従って corepack が取りに行く。イメージには shim だけ入れる
+    const pnpm = await c.exec(["sh", "-c", "command -v pnpm"]);
+    expect(pnpm.exitCode).toBe(0);
+    expect((await c.exec(["corepack", "--version"])).exitCode).toBe(0);
+    const prompt = await c.exec(["sh", "-c", 'printf %s "$COREPACK_ENABLE_DOWNLOAD_PROMPT"']);
+    expect(prompt.stdout).toBe("0");
+    const py = await c.exec(["python3", "-c", "print(6 * 7)"]);
+    expect(py.exitCode).toBe(0);
+    expect(py.stdout.trim()).toBe("42");
+  }, 120_000);
 });
 
 describe("ensureReady", () => {

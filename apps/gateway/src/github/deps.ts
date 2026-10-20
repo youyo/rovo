@@ -1,7 +1,9 @@
 import type { DepsDto } from "../agent/contract";
 
 // 依存関係のキャッシュ（D14）の指定を、base_sha 時点のルート直下の lockfile から作る。
-// v1 はルート直下だけ（モノレポの入れ子の lockfile は対象外）。優先順位は pnpm → npm → yarn。
+// lockfile はルート直下だけ（モノレポの入れ子の lockfile は対象外）。優先順位は pnpm → npm → yarn。
+// 鍵には lockfile に加えて、ルートの package.json・pnpm-workspace.yaml・入れ子の package.json（workspace の各パッケージ）の
+// blob SHA も入れる（同じ lockfile でも scripts が違うブランチの node_modules を共有しないため）。
 // 導入のコマンドの表は agent の deps-cache.ts（DEPS_INSTALLS）と同じ。agent は表にあるものだけを受け付ける。
 
 const LOCKFILES = [
@@ -10,19 +12,36 @@ const LOCKFILES = [
   { path: "yarn.lock", command: "yarn install --frozen-lockfile" },
 ] as const;
 
+/** 再帰 tree の取得に許す時間（ms）。超えたらキャッシュなしで続ける（タスクの開始を遅らせない） */
+export const DEPS_DETECT_TIMEOUT_MS = 10_000;
+
 const BLOB_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /** detectDeps が使う GitHub API の部分（GitHubRepoApi の一部。テストで差し替える） */
 export interface DepsApi {
   getCommit(sha: string): Promise<{ sha: string; treeSha: string }>;
-  getTree(treeSha: string): Promise<{
+  getTree(
+    treeSha: string,
+    opts?: { recursive?: boolean; signal?: AbortSignal },
+  ): Promise<{
     truncated: boolean;
     entries: { path: string; mode: string; type: string; sha: string }[];
   }>;
 }
 
+/** 通常のファイル（100644 / 100755）の blob だけ。ディレクトリ・シンボリックリンク・サブモジュールは対象外 */
+function isRegularBlob(e: { mode: string; type: string; sha: string }): boolean {
+  return e.type === "blob" && (e.mode === "100644" || e.mode === "100755") && BLOB_SHA.test(e.sha);
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /**
- * ルート直下の lockfile から TaskSpec.deps を作る。lockfile が無ければ null。
+ * ルート直下の lockfile から TaskSpec.deps を作る。lockfile またはルートの package.json が無ければ null。
+ * tree は再帰で読み、切り詰められた（truncated）ときも null（一部の package.json を読めていない鍵は作らない）。
  * 読めなかった（GitHub の API のエラーなど）ときも例外にせず null を返す: キャッシュは最適化なので、
  * 失敗でタスクの開始を止めない。
  */
@@ -30,27 +49,50 @@ export async function detectDeps(
   api: DepsApi,
   repositoryId: number,
   baseSha: string,
+  timeoutMs: number = DEPS_DETECT_TIMEOUT_MS,
 ): Promise<DepsDto | null> {
   if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) return null;
+  const signal = AbortSignal.timeout(timeoutMs);
+  // API が signal を見ない実装でも期限で戻れるよう、期限切れで reject する Promise と競わせる
+  const expired = new Promise<never>((_, reject) => {
+    signal.addEventListener("abort", () => reject(new Error("deps detect timeout")), {
+      once: true,
+    });
+  });
+  expired.catch(() => {});
   try {
-    const commit = await api.getCommit(baseSha);
-    const tree = await api.getTree(commit.treeSha);
+    const commit = await Promise.race([api.getCommit(baseSha), expired]);
+    const tree = await Promise.race([
+      api.getTree(commit.treeSha, { recursive: true, signal }),
+      expired,
+    ]);
+    if (tree.truncated) return null;
+    const rootFile = (name: string) =>
+      tree.entries.find((e) => e.path === name && isRegularBlob(e))?.sha ?? null;
     for (const lock of LOCKFILES) {
-      const entry = tree.entries.find((e) => e.path === lock.path);
-      // 通常のファイル（100644 / 100755）の blob だけ。ディレクトリ・シンボリックリンク・サブモジュールは対象外
-      if (
-        entry &&
-        entry.type === "blob" &&
-        (entry.mode === "100644" || entry.mode === "100755") &&
-        BLOB_SHA.test(entry.sha)
-      ) {
-        return {
-          repositoryId,
-          lockfilePath: lock.path,
-          blobSha: entry.sha,
-          installCommand: lock.command,
-        };
-      }
+      const lockSha = rootFile(lock.path);
+      if (!lockSha) continue;
+      const packageJsonSha = rootFile("package.json");
+      if (!packageJsonSha) return null;
+      // workspace の各パッケージの package.json（node_modules の中は除く）。パスで並べて、パスと SHA の一覧を hash する
+      const nested = tree.entries
+        .filter(
+          (e) =>
+            isRegularBlob(e) &&
+            e.path.endsWith("/package.json") &&
+            !e.path.split("/").includes("node_modules"),
+        )
+        .map((e) => [e.path, e.sha] as const)
+        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      return {
+        repositoryId,
+        lockfilePath: lock.path,
+        blobSha: lockSha,
+        installCommand: lock.command,
+        packageJsonSha,
+        workspaceSha: rootFile("pnpm-workspace.yaml"),
+        manifestsSha: nested.length > 0 ? await sha256Hex(JSON.stringify(nested)) : null,
+      };
     }
     return null;
   } catch {

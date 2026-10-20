@@ -31,6 +31,9 @@ const deps = {
   lockfilePath: "package-lock.json",
   blobSha: SHA,
   installCommand: "npm ci",
+  packageJsonSha: "d".repeat(40),
+  workspaceSha: null,
+  manifestsSha: null,
 };
 const NO_DEPS = Symbol("no deps");
 const spec = (withDeps: unknown = deps) => ({
@@ -277,6 +280,19 @@ describe("SandboxDO: 依存関係のキャッシュからの復元", () => {
       );
       expect(cache.ensureCalls).toHaveLength(0);
       expect(fake.startCalls[0]).toMatchObject({ image: IMAGE });
+      expect((await inst.metrics()).depsCache).toBe("miss");
+      expect(lines.join("\n")).toContain("deps_cache_miss: invalid_deps");
+    });
+  });
+
+  it("旧形式（v1。packageJsonSha が無い）の deps は invalid_deps で miss（image から起動、ensure は呼ばない）", async () => {
+    await runInDO(sandboxStub("deps-v1-shape"), async (inst) => {
+      const { fake, cache } = setup(inst);
+      const { packageJsonSha: _p, workspaceSha: _w, manifestsSha: _m, ...v1 } = deps;
+      const { lines } = await capturingWarn(() => inst.ensureReady(spec(v1)));
+      expect(cache.ensureCalls).toHaveLength(0);
+      expect(fake.startCalls[0]).toMatchObject({ image: IMAGE });
+      expect(fake.startCalls[0]).not.toHaveProperty("containerSnapshot");
       expect((await inst.metrics()).depsCache).toBe("miss");
       expect(lines.join("\n")).toContain("deps_cache_miss: invalid_deps");
     });

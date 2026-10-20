@@ -47,7 +47,7 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 
 - **R2 のライフサイクル**: アーカイブ 90 日、監査 365 日で削除（変数 `archive_retention_days` / `audit_retention_days`。1 以上の整数）。対象はバケット全体（prefix なし）。Cloudflare の API は秒で受けるので、日数 × 86400 を渡している。
 - **AI Gateway**: 認証なし（agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼ぶ）、ログ収集あり（`ai_gateway_collect_logs`。誰がいくら使ったかの集計に使う）、キャッシュなし（TTL 0。モデルの応答を使い回さない）、レート制限なし（0 = 無効）。費用の上限は Gateway 側ではなく、gateway の `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` が担う。費用の上限を Gateway 側にも持ちたい場合は、AI Gateway の画面で spend limits を足す。
-- **Logpush のフィールド**: `Event`, `EventTimestampMs`, `Outcome`, `Exceptions`, `Logs`, `ScriptName`（監査行は `Logs` に入る）。時刻は RFC 3339。宛先のパスは `workers_trace_events/{DATE}/`。
+- **Logpush のフィールド**: `Event`, `EventTimestampMs`, `Exceptions`, `Logs`, `Outcome`, `ScriptName`（監査行は `Logs` に入る。API がアルファベット順に並べ替えるので、その順で書く）。時刻は RFC 3339。宛先のパスは `workers_trace_events/{DATE}/`。
 - **Worker の名前**: `worker_names`（既定 `rovo-gateway` / `rovo-agent` / `rovo-web`）。各 wrangler 設定の `name` と一致させる。名前を変えたときは、この変数も変える（合わないと、そのログは送られない）。
 
 ## Cloudflare のドキュメントで確かめたこと
@@ -72,7 +72,14 @@ mise run lint          # terraform fmt -check を含む
 - `destination_conf` は Logpush 用トークンの id と値に依存し、plan の段階では決まらない。そのテストだけ `mock_provider` に対する `apply` で確かめる（実アカウントには触れない）。
 - provider の mock は「オブジェクトのリストの属性」に値を入れられず（Terraform 1.15.8 で確認）、権限グループの検索（`data.cloudflare_api_token_permission_groups_list`）を差し替えられない。そのため、テストでは変数 `r2_item_write_permission_group_id` に ID を渡して検索を省く。**名前による検索そのものは plan のテストで確かめていない。**
 
+## 実アカウントで確かめたこと（2026-10-20 の初回 apply）
+
+- 権限グループ「Workers R2 Storage Bucket Item Write」は名前で見つかった（`r2_item_write_permission_group_id` の指定は要らなかった）。
+- R2 を宛先にした Logpush のジョブは、ownership challenge なしで作れた。Logpush 用トークンの権限（監査用バケットへの書き込みだけ）と filter も受け付けられた。
+- **初回の apply で、Logpush のジョブの作成が `error validating destination: ... status=401 Unauthorized` で失敗することがある。** Logpush 用トークンを作った直後で、まだ使えない状態のため。もう一度 `terraform plan` → `apply` すると通る（作り直しは要らない）。
+- **wrangler は、バインディングに指定した R2 バケットが無いと、デプロイのときに自動で作る。** Terraform より先に `deploy:*` を実行していると、apply がバケットの作成で `409 ... already exists, and you own it` になる。空のバケットなら `terraform import cloudflare_r2_bucket.archive '<ACCOUNT_ID>/<接頭辞>-archive/default'`（監査用は `.audit` と `-audit`）で取り込む。
+- Logpush の `field_names` は、API がアルファベット順に並べ替えて返す。順序を変えると、plan のたびに差分が出る（`infra/tests` の `logpush_field_names_are_sorted` が確かめる）。
+
 ## 確かめていないこと
 
-- `terraform apply` と、実アカウントに対する `terraform plan` は実行していない。Logpush ジョブの作成が実際に通るか（ownership challenge の要否、トークンの権限の足り具合、filter の受理）は、初回の apply で確かめる。
 - Logpush の ScriptName の値が、Worker の名前（wrangler 設定の `name`）と一致することは、実際のログで確かめる（deploy.md の 10 と acceptance.md の 16 節）。

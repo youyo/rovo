@@ -32,6 +32,16 @@ run "logpush_filter_has_three_script_names" {
   }
 }
 
+run "logpush_field_names_are_sorted" {
+  command = plan
+
+  # API はフィールドをアルファベット順に並べ替えて返す。順序が違うと plan のたびに差分が出る
+  assert {
+    condition     = cloudflare_logpush_job.audit.output_options.field_names == sort(cloudflare_logpush_job.audit.output_options.field_names)
+    error_message = "Logpush の field_names がアルファベット順になっていない（API の並びと合わず、毎回差分が出る）"
+  }
+}
+
 run "logpush_filter_follows_worker_names" {
   command = plan
 

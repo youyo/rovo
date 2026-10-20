@@ -135,7 +135,7 @@ resource "cloudflare_logpush_job" "audit" {
   })
 
   output_options = {
-    field_names      = ["Event", "EventTimestampMs", "Outcome", "Exceptions", "Logs", "ScriptName"]
+    field_names      = ["Event", "EventTimestampMs", "Exceptions", "Logs", "Outcome", "ScriptName"] # API の並び（アルファベット順）に合わせる
     timestamp_format = "rfc3339"
   }
 }

@@ -213,6 +213,8 @@ export interface VerificationCommandResult {
   exitCode: number;
   timedOut: boolean;
   output: string;
+  /** コマンド 1 本の開始から終了（タイムアウトを含む）までの ms。古い agent の結果には無い */
+  durationMs?: number;
 }
 
 export interface VerificationSummary {

@@ -1399,6 +1399,15 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
     await client.close();
   });
 
+  it("task_result の説明に verification.results の duration_ms を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const r = tools.find((t) => t.name === "task_result");
+    expect(r?.description).toContain("duration_ms");
+    await client.close();
+  });
+
   it("task_pr_ready / task_pr_merge: 入力は task_id（と merge_method / delete_branch）だけ。リポジトリ・PR 番号・sha は受け取らない", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);

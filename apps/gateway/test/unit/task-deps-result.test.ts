@@ -47,8 +47,7 @@ describe("task_result の usage（依存関係のキャッシュ）", () => {
       cacheBuildMs: 60_000,
     });
     expect(usage).toMatchObject({ deps_cache: "built", cache_build_ms: 60_000 });
-    // 最初のテストは DO の起動が重く、全体を並列で走らせると 5 秒に迫るので、このテストだけ余裕を持たせる
-  }, 20_000);
+  });
 
   it("hit / miss / disabled は deps_cache と cache_build_ms: 0（集計しやすいよう常に出す）", async () => {
     for (const depsCache of ["hit", "miss", "disabled"]) {

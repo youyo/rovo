@@ -1,0 +1,19 @@
+name: architecture
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch:
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # mode: diff reads the pull request's head commit (a parent of the merge commit)
+      - uses: sketio-app/action@6f3889147007cc25b935f37194569b2080dfdcf9 # v1.10.0
+        with:
+          mode: ${{ github.event_name == 'pull_request' && 'diff' || 'sync' }}
+          api-url: https://arch.sketio.app

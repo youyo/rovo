@@ -199,6 +199,8 @@ export async function startGateway(project: TestProject, options: SetupOptions =
       GITHUB_APP_CLIENT_SECRET: github.clientSecret,
       ALLOWED_ORG,
       ALLOWED_TEAM,
+      // 既存の E2E は「同時実行は 1 件で埋まる」前提（tools.e2e.test.ts）。wrangler.jsonc の既定は 2
+      MAX_CONCURRENT_TASKS: "1",
       // D10: タスクと consult に選べるモデル（models_list の対象。既定は AGENT_MODEL の sonnet）
       AGENT_MODELS:
         "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,openai/gpt-6-sol,workers-ai/@cf/openai/gpt-oss-120b",

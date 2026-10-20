@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  DEFAULTS,
   generateAll,
   parseJsonc,
   stripJsonc,
@@ -46,6 +47,7 @@ const productionLike = () => ({
     efforts: { "anthropic/claude-sonnet-5-5": "medium", "anthropic/claude-haiku-5-5": "off" },
   },
   sandbox: { instance: "standard-1" },
+  concurrency: { maxTasks: 3 },
   webBrowseEnabled: true,
   vars: { gateway: { WEB_SEARCH_DAILY_LIMIT: "300" } },
 });
@@ -124,6 +126,7 @@ describe("既定値", () => {
     assert.equal(g.vars.MONTHLY_BUDGET_USD, "100");
     assert.equal(g.vars.TASK_BUDGET_USD, "10");
     assert.equal(g.vars.CONSULT_BUDGET_USD, "0.5");
+    assert.equal(g.vars.MAX_CONCURRENT_TASKS, "2");
     assert.equal(g.vars.WEB_BROWSE_ENABLED, "false");
     assert.equal(g.vars.ALLOWED_ORG, "");
     assert.equal(g.vars.ALLOWED_USER_IDS, "42");
@@ -166,6 +169,42 @@ describe("sandbox.instance（D13）", () => {
     assert.ok(bad({ instance: 2 }).some((e) => e.includes("sandbox.instance")));
     assert.ok(bad({ instanse: "lite" }).some((e) => e.includes("sandbox.instanse")));
     assert.ok(bad("lite").some((e) => e.includes("sandbox")));
+  });
+});
+
+describe("concurrency.maxTasks（利用者ごとの同時実行数）", () => {
+  const gen = (patch) =>
+    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
+  it("gateway の MAX_CONCURRENT_TASKS に反映される", () => {
+    assert.equal(parseJsonc(gen({}).gateway).vars.MAX_CONCURRENT_TASKS, "3");
+    assert.equal(
+      parseJsonc(gen({ concurrency: { maxTasks: 10 } }).gateway).vars.MAX_CONCURRENT_TASKS,
+      "10",
+    );
+  });
+  it("省略（concurrency 自体・maxTasks）は既定の 2", () => {
+    assert.equal(DEFAULTS.concurrency.maxTasks, 2);
+    assert.equal(
+      parseJsonc(gen({ concurrency: undefined }).gateway).vars.MAX_CONCURRENT_TASKS,
+      "2",
+    );
+    assert.equal(parseJsonc(gen({ concurrency: {} }).gateway).vars.MAX_CONCURRENT_TASKS, "2");
+  });
+  it("agent と web には出さない（UserDO だけが使う）", () => {
+    const o = gen({});
+    assert.equal(parseJsonc(o.agent).vars.MAX_CONCURRENT_TASKS, undefined);
+    assert.equal(parseJsonc(o.web).vars.MAX_CONCURRENT_TASKS, undefined);
+  });
+  it("1 以上の整数以外・未知のキー・オブジェクトでない値はエラー", () => {
+    const bad = (concurrency) => validateConfig({ ...productionLike(), concurrency }).errors;
+    for (const v of [0, -1, 1.5, "3", true, null, Number.NaN]) {
+      assert.ok(
+        bad({ maxTasks: v }).some((e) => e.includes("concurrency.maxTasks")),
+        String(v),
+      );
+    }
+    assert.ok(bad({ maxTask: 3 }).some((e) => e.includes("concurrency.maxTask")));
+    assert.ok(bad(3).some((e) => e.includes("concurrency")));
   });
 });
 

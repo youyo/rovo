@@ -57,6 +57,7 @@ describe("UserDO.budgetStatus（budget_status）", () => {
       task_budget_usd: 10,
       consult_budget_usd: 0.5,
       max_concurrent_tasks: 10,
+      concurrency_limit: 1, // Unit の vitest.config.ts の MAX_CONCURRENT_TASKS
       period: { start: "2026-01-01T00:00:00.000Z", end: "2026-02-01T00:00:00.000Z" },
     });
   });
@@ -126,8 +127,8 @@ describe("UserDO.reserveConsult / settleConsult", () => {
     if (!task.ok) throw new Error("reserve failed");
     const id = newConsultId();
     expect(await stub.reserveConsult(id)).toEqual({ ok: true, reserved_usd: 0.5 });
-    expect(await sql(stub, "SELECT active_task_id FROM reservation")).toEqual([
-      { active_task_id: task.task_id },
+    expect(await sql(stub, "SELECT task_id FROM reservation_slot")).toEqual([
+      { task_id: task.task_id },
     ]);
     expect(
       await sql(

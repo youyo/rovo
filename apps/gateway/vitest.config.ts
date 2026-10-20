@@ -26,6 +26,8 @@ export default defineConfig({
         durableObjects: { AGENT_DO: { className: "FakeAgentDO", useSQLite: true } },
         // Secret / 設定値のテスト用ダミー（実在の値ではない）
         bindings: {
+          // 既存の Unit は「同時実行は 1 件で埋まる」前提で書かれている。既定（2）や設定値の動きは user-concurrency.test.ts で見る
+          MAX_CONCURRENT_TASKS: "1",
           // D10: タスクごとに選べるモデル（Unit 用。wrangler.jsonc の既定は空 = AGENT_MODEL だけ）
           AGENT_MODELS:
             "anthropic/claude-sonnet-5-5,anthropic/claude-haiku-5-5,openai/gpt-6-sol,workers-ai/@cf/openai/gpt-oss-120b,workers-ai/@cf/openai/gpt-oss-20b",

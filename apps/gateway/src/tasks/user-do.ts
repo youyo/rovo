@@ -12,7 +12,7 @@ import {
   type TokenSet,
   type UserPull,
 } from "../github";
-import { consultBudgetUsd, taskBudgetUsd } from "./budget";
+import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
 import type { TaskDO } from "./task-do";
 import { isConsultId, ulid, ulidTime } from "./ulid";
 
@@ -75,8 +75,10 @@ export type BudgetStatus = {
   remaining_usd: number;
   task_budget_usd: number;
   consult_budget_usd: number;
-  /** 残りの月額予算で、タスクの予約額（task_budget_usd）を何件分予約できるかの見積もり。同時実行の上限ではない（上限は 1 件） */
+  /** 残りの月額予算で、タスクの予約額（task_budget_usd）を何件分予約できるかの見積もり。同時実行の上限ではない（上限は concurrency_limit） */
   max_concurrent_tasks: number;
+  /** 利用者ごとに同時に実行できるタスクの上限（設定値 MAX_CONCURRENT_TASKS。既定 2）。実際に同時に実行できる数は、これと max_concurrent_tasks の小さいほう */
+  concurrency_limit: number;
   /** 今月（UTC）。end は翌月の頭（含まない） */
   period: { start: string; end: string };
 };
@@ -89,7 +91,8 @@ function monthOf(ms: number): string {
   return new Date(ms).toISOString().slice(0, 7);
 }
 
-type ReservationRow = { active_task_id: string | null; reserved_at: number; version: number };
+/** 同時実行の枠を持っているタスク。1 タスクにつき 1 行。 */
+type SlotRow = { task_id: string; reserved_at: number };
 type RequestRow = { task_id: string; fingerprint: string };
 
 /**
@@ -180,12 +183,13 @@ export class UserDO extends DurableObject<Env> {
       created_at INTEGER NOT NULL
     )`);
     sql.exec("CREATE INDEX IF NOT EXISTS requests_created_at ON requests (created_at)");
-    sql.exec(`CREATE TABLE IF NOT EXISTS reservation (
-      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-      active_task_id TEXT,
-      reserved_at INTEGER NOT NULL,
-      version INTEGER NOT NULL
+    // 同時実行の枠。タスクごとに 1 行（上限は MAX_CONCURRENT_TASKS）。task_id は ULID で一意なので、
+    // 照合の await をまたいで枠が入れ替わっても、task_id を指定した解放が他のタスクの枠を消すことはない。
+    sql.exec(`CREATE TABLE IF NOT EXISTS reservation_slot (
+      task_id TEXT PRIMARY KEY,
+      reserved_at INTEGER NOT NULL
     )`);
+    this.migrateLegacyReservation();
     // タスクごとの予算。reserved は開始時に予約した額、settled は取り込んだ usage の累計（実費）。
     // closed の後は予約を数えず、実費だけが月の枠を使う。単位はマイクロドル（整数）。
     sql.exec(`CREATE TABLE IF NOT EXISTS task_budget (
@@ -232,10 +236,32 @@ export class UserDO extends DurableObject<Env> {
       updated_at INTEGER
     )`);
     sql.exec("INSERT OR IGNORE INTO github_credential (singleton, generation) VALUES (1, 0)");
-    sql.exec(
-      "INSERT OR IGNORE INTO reservation (singleton, active_task_id, reserved_at, version) VALUES (1, NULL, 0, 0)",
-    );
   }
+
+  /**
+   * 旧スキーマ（reservation: singleton の 1 行だけで、同時実行は 1 件）の DO を移行する。
+   * 予約が入っていれば reservation_slot に移し（失わない）、旧テーブルを消す。冪等（旧テーブルが無ければ何もしない）。
+   * 移行した予約は、これまでどおり finishTask の解放と reserve の照合による回収の対象になる。
+   */
+  private migrateLegacyReservation(): void {
+    const sql = this.ctx.storage.sql;
+    const legacy = sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reservation'",
+      )
+      .toArray();
+    if (legacy.length === 0) return;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        `INSERT OR IGNORE INTO reservation_slot (task_id, reserved_at)
+         SELECT active_task_id, reserved_at FROM reservation WHERE active_task_id IS NOT NULL`,
+      );
+      sql.exec("DROP TABLE reservation");
+    });
+  }
+
+  /** 同時に実行できるタスクの上限。env の MAX_CONCURRENT_TASKS（既定 2）。テストで差し替える。 */
+  concurrencyLimit: () => number = () => maxConcurrentTasks(this.env);
 
   /** 月額の費用上限（USD）。env の MONTHLY_BUDGET_USD（既定 100）。不正な値は既定に戻す。テストで差し替える。 */
   monthlyLimitUsd: () => number = () => {
@@ -289,21 +315,30 @@ export class UserDO extends DurableObject<Env> {
     return this.env.TASK_DO.getByName(taskId);
   }
 
-  private reservationRow(): ReservationRow {
+  /** 枠を持っているタスク（予約の古い順）。 */
+  private slotRows(): SlotRow[] {
     return this.ctx.storage.sql
-      .exec<ReservationRow>("SELECT active_task_id, reserved_at, version FROM reservation")
-      .one();
+      .exec<SlotRow>(
+        "SELECT task_id, reserved_at FROM reservation_slot ORDER BY reserved_at, task_id",
+      )
+      .toArray();
   }
 
-  /** 予約を空にする。version が expected と一致するときだけ。同期区間内で呼ぶこと。 */
-  private clearIfUnchanged(taskId: string, version: number): boolean {
-    const cur = this.reservationRow();
-    if (cur.active_task_id !== taskId || cur.version !== version) return false;
-    this.ctx.storage.sql.exec(
-      "UPDATE reservation SET active_task_id = NULL, version = version + 1 WHERE singleton = 1",
-    );
+  private slotCount(): number {
+    return this.ctx.storage.sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM reservation_slot")
+      .one().n;
+  }
+
+  /** そのタスクの枠を解放する。枠を持っていたときだけ true。同期区間内で呼ぶこと。 */
+  private clearSlot(taskId: string): boolean {
+    const sql = this.ctx.storage.sql;
+    const had = sql
+      .exec("DELETE FROM reservation_slot WHERE task_id = ? RETURNING task_id", taskId)
+      .toArray();
+    if (had.length === 0) return false;
     // 枠を手放したタスクは、予約額をもう数えない（実費だけが残る）。
-    this.ctx.storage.sql.exec("UPDATE task_budget SET closed = 1 WHERE task_id = ?", taskId);
+    sql.exec("UPDATE task_budget SET closed = 1 WHERE task_id = ?", taskId);
     return true;
   }
 
@@ -351,8 +386,9 @@ export class UserDO extends DurableObject<Env> {
 
   /**
    * 新規 / 再試行 / conflict / concurrency_limit を判定して task_id を返す。
-   * 予約が埋まっていれば TaskDO に照合し、終端または回収可能なら解放して再判定する。
-   * 照合（await）はトランザクションの外で行い、反映時に task_id と version を再検証する。
+   * 枠が上限まで埋まっていれば、枠を持つタスクを TaskDO に照合し、回収できるもの（終端でなく一度も作られなかった予約）を
+   * 解放して再判定する。照合（await）はトランザクションの外で行い、解放は task_id を指定して行う
+   * （入れ替わった別のタスクの枠は消えない）。
    */
   async reserve(requestKey: string, fingerprint: string): Promise<ReserveResult> {
     for (let attempt = 0; attempt < MAX_RECONCILE_ATTEMPTS; attempt++) {
@@ -360,19 +396,28 @@ export class UserDO extends DurableObject<Env> {
       const step = this.ctx.storage.transactionSync(() => this.decide(requestKey, fingerprint));
       if (step.kind === "done") return step.result;
 
-      // 予約が埋まっている。TaskDO に照合する（ここで他の呼び出しが割り込みうる）。
-      const { taskId, version, reservedAt } = step;
-      if (await this.shouldRelease(taskId, reservedAt)) {
-        // 反映時に task_id と version が変わっていなければ解放する。変わっていたら何もせず再判定。
-        this.ctx.storage.transactionSync(() => this.clearIfUnchanged(taskId, version));
+      // 枠が埋まっている。枠を持つタスクを TaskDO に照合する（ここで他の呼び出しが割り込みうる）。
+      const verdicts = await Promise.all(
+        step.slots.map(async (slot) => ({
+          slot,
+          release: await this.shouldRelease(slot.task_id, slot.reserved_at),
+        })),
+      );
+      const releasable = verdicts.filter((v) => v.release).map((v) => v.slot.task_id);
+      if (releasable.length > 0) {
+        // 解放は task_id で行う。照合中に finishTask で先に解放されていれば何も起きない。
+        this.ctx.storage.transactionSync(() => {
+          for (const taskId of releasable) this.clearSlot(taskId);
+        });
         continue;
       }
-      // 解放できない。予約が同じまま（task_id も version も不変）なら本当に埋まっている。
-      // 照合中に入れ替わっていたら、新しい予約を照合し直す。
-      const cur = this.reservationRow();
-      if (cur.active_task_id === taskId && cur.version === version) {
-        return { ok: false, code: "concurrency_limit" };
-      }
+      // 解放できるものは無い。枠の顔ぶれが照合の前と同じなら、本当に埋まっている。
+      // 照合中に入れ替わっていた（finishTask で空いた、同じキーの reserve が割り込んだ、など）ら、判定をやり直す。
+      const before = step.slots.map((r) => r.task_id).join(",");
+      const now = this.slotRows()
+        .map((r) => r.task_id)
+        .join(",");
+      if (before === now) return { ok: false, code: "concurrency_limit" };
     }
     return { ok: false, code: "concurrency_limit" };
   }
@@ -384,9 +429,7 @@ export class UserDO extends DurableObject<Env> {
   private decide(
     requestKey: string,
     fingerprint: string,
-  ):
-    | { kind: "done"; result: ReserveResult }
-    | { kind: "occupied"; taskId: string; version: number; reservedAt: number } {
+  ): { kind: "done"; result: ReserveResult } | { kind: "occupied"; slots: SlotRow[] } {
     const sql = this.ctx.storage.sql;
     const at = this.now();
     sql.exec("DELETE FROM requests WHERE created_at < ?", at - REQUEST_RETENTION_MS);
@@ -404,14 +447,8 @@ export class UserDO extends DurableObject<Env> {
       return { kind: "done", result: { ok: true, task_id: existing.task_id, reused: true } };
     }
 
-    const res = this.reservationRow();
-    if (res.active_task_id !== null) {
-      return {
-        kind: "occupied",
-        taskId: res.active_task_id,
-        version: res.version,
-        reservedAt: res.reserved_at,
-      };
+    if (this.slotCount() >= this.concurrencyLimit()) {
+      return { kind: "occupied", slots: this.slotRows() };
     }
 
     // 同時実行の枠が空いていても、月額の枠が足りなければ始めない（request_key は消費しない）。
@@ -437,11 +474,7 @@ export class UserDO extends DurableObject<Env> {
       fingerprint,
       at,
     );
-    sql.exec(
-      "UPDATE reservation SET active_task_id = ?, reserved_at = ?, version = version + 1 WHERE singleton = 1",
-      taskId,
-      at,
-    );
+    sql.exec("INSERT INTO reservation_slot (task_id, reserved_at) VALUES (?, ?)", taskId, at);
     return { kind: "done", result: { ok: true, task_id: taskId, reused: false } };
   }
 
@@ -517,9 +550,7 @@ export class UserDO extends DurableObject<Env> {
     const released = this.ctx.storage.transactionSync(() => {
       this.applySettle(taskId, usageSeq, costMicroUsd);
       this.ctx.storage.sql.exec("UPDATE task_budget SET closed = 1 WHERE task_id = ?", taskId);
-      const cur = this.reservationRow();
-      if (cur.active_task_id !== taskId) return false;
-      return this.clearIfUnchanged(taskId, cur.version);
+      return this.clearSlot(taskId);
     });
     return { ok: true, released };
   }
@@ -547,6 +578,7 @@ export class UserDO extends DurableObject<Env> {
       task_budget_usd: taskMicro / MICRO,
       consult_budget_usd: consultBudgetUsd(this.env),
       max_concurrent_tasks: taskMicro > 0 ? Math.floor(remaining / taskMicro) : 0,
+      concurrency_limit: this.concurrencyLimit(),
       period: { start: new Date(start).toISOString(), end: new Date(end).toISOString() },
     };
   }

@@ -492,10 +492,10 @@ describe("TaskDO: usage の精算と終了時の返却", () => {
     await agent.setPhase("completed");
     await stub.advance();
     expect(await budgetRow(user, id)).toMatchObject({ settled_micro: 3_500_000, closed: 1 });
-    const res = await runInDurableObject(user, (_i, s) =>
-      s.storage.sql.exec("SELECT active_task_id FROM reservation").one(),
+    const held = await runInDurableObject(user, (_i, s) =>
+      s.storage.sql.exec<{ task_id: string }>("SELECT task_id FROM reservation_slot").toArray(),
     );
-    expect(res.active_task_id).toBeNull();
+    expect(held).toEqual([]);
     expect(await alarmOf(stub)).toBeNull();
   });
 
@@ -505,10 +505,10 @@ describe("TaskDO: usage の精算と終了時の返却", () => {
     await agent.setProgram({ cancel: ["not_stopped", "not_stopped"] });
     expect(await stub.cancel(uid)).toMatchObject({ ok: true, status: "CANCELLED" });
     await stub.advance();
-    const res = await runInDurableObject(user, (_i, s) =>
-      s.storage.sql.exec("SELECT active_task_id FROM reservation").one(),
+    const held = await runInDurableObject(user, (_i, s) =>
+      s.storage.sql.exec<{ task_id: string }>("SELECT task_id FROM reservation_slot").toArray(),
     );
-    expect(res.active_task_id).toBe(id);
+    expect(held).toEqual([{ task_id: id }]);
     expect(await budgetRow(user, id)).toMatchObject({ closed: 0 });
   });
 
@@ -583,10 +583,10 @@ describe("TaskDO: 最終取り込みは finalSeq まで", () => {
     await stub.cancel(uid);
     await stub.advance();
     expect(await budget(user, id)).toEqual([{ settled_micro: 1_000_000, closed: 0 }]);
-    const res = await runInDurableObject(user, (_i, s) =>
-      s.storage.sql.exec("SELECT active_task_id FROM reservation").one(),
+    const held = await runInDurableObject(user, (_i, s) =>
+      s.storage.sql.exec<{ task_id: string }>("SELECT task_id FROM reservation_slot").toArray(),
     );
-    expect(res.active_task_id).toBe(id);
+    expect(held).toEqual([{ task_id: id }]);
     expect(await alarmOf(stub)).not.toBeNull();
 
     await agent.setProgram({});

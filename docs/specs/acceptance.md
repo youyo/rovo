@@ -559,7 +559,7 @@ AI Gateway の BYOK のキー（`provider_configs`）の有無で `models_list` 
 - [ ] **初回（作る）**: 新しい lockfile のブランチ（キャッシュの無い blob SHA）で小さなタスクを実行する。`task_result` の `usage.deps_cache` が `built`、`cache_build_ms` が付き、`sandbox_runtime_ms` に `cache_build_ms` が含まれる。タスクが完了する。子は `npm ci` を実行せずに検証コマンド（例 `npm test`）を通せる
 - [ ] **2 回目（hit）**: 同じ lockfile のままもう一度タスクを実行する。`usage.deps_cache` が `hit`、`cache_build_ms` が無い。`sandbox_runtime_ms` が、初回の導入の時間ぶん減る（x-mcp で 67 秒 → 20 秒未満が目安。実測を備考に書く）
 - [ ] **lockfile を変える（miss → built）**: lockfile を変えたブランチ（依存を 1 つ足すなど）で実行すると、別のキャッシュとして `built` になる（元のブランチは `hit` のまま）
-- [ ] **同時の初回**: 同じ lockfile の 2 つのタスクを続けて開始する（ユーザーごとの同時実行は 1 件までなので、別のユーザーか、直前のタスクの終了後にキャッシュを消した状態で）。作成は 1 回だけで、片方が `built`、もう片方が `hit`（待っただけ）になる
+- [ ] **同時の初回**: 同じ lockfile の 2 つのタスクを続けて開始する（同時実行の上限が 1 のとき、または同じ利用者の枠が埋まっているときは、別のユーザーか、直前のタスクの終了後にキャッシュを消した状態で。上限が 2 以上なら続けて開始できる）。作成は 1 回だけで、片方が `built`、もう片方が `hit`（待っただけ）になる
 - [ ] **作業状態が混ざらない**: `hit` のタスクの `/workspace` に、キャッシュを作ったタスクのファイルが無い（子が `git status` で未追跡のファイルが `node_modules` だけであること、`/opt/deps-cache` が空であること）。`git log` が作業ブランチのコミットだけ
 - [ ] **トークンが入らない**: キャッシュを作る間・復元後のコンテナで `env` と `~/.git-credentials`・`~/.npmrc` を見ても、GitHub のトークン（`ghs_`）が無い
 - [ ] **無効にする**: `depsCache.enabled` を `false` にして再デプロイすると、`usage.deps_cache` が `disabled` で、従来どおり子が `npm ci` する

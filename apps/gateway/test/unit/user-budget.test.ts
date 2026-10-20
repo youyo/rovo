@@ -67,9 +67,7 @@ describe("UserDO: 月額枠の予約", () => {
     expect(await reserve(stub, "k1")).toEqual({ ok: false, code: "budget_exceeded" });
     expect(await sql(stub, "SELECT * FROM requests")).toEqual([]);
     expect(await sql(stub, "SELECT * FROM task_budget")).toEqual([]);
-    expect(await sql(stub, "SELECT active_task_id FROM reservation")).toEqual([
-      { active_task_id: null },
-    ]);
+    expect(await sql(stub, "SELECT task_id FROM reservation_slot")).toEqual([]);
   });
 
   it("ちょうど足りるなら通る", async () => {
@@ -233,9 +231,7 @@ describe("UserDO.finishTask", () => {
     expect(await sql(stub, "SELECT settled_micro, closed FROM task_budget")).toEqual([
       { settled_micro: 3 * MICRO, closed: 1 },
     ]);
-    expect(await sql(stub, "SELECT active_task_id FROM reservation")).toEqual([
-      { active_task_id: null },
-    ]);
+    expect(await sql(stub, "SELECT task_id FROM reservation_slot")).toEqual([]);
     // 3 使用済み + 10 予約 <= 15 なので次を始められる
     expect((await reserve(stub, "k2")).ok).toBe(true);
   });
@@ -259,9 +255,7 @@ describe("UserDO.finishTask", () => {
     await stub.finishTask(a, 0, 0);
     const b = await reserveOk(stub, "k2");
     expect(await stub.finishTask(a, 0, 0)).toEqual({ ok: true, released: false });
-    expect(await sql(stub, "SELECT active_task_id FROM reservation")).toEqual([
-      { active_task_id: b },
-    ]);
+    expect(await sql(stub, "SELECT task_id FROM reservation_slot")).toEqual([{ task_id: b }]);
   });
 });
 
@@ -341,9 +335,7 @@ describe("UserDO: 予算の返却は最終精算(finishTask)だけが行う", ()
 
     // B: 停止が確認できていても、A の予算と枠は戻らない
     expect(await reserve(user, "k2")).toMatchObject({ ok: false, code: "concurrency_limit" });
-    expect(await sql(user, "SELECT active_task_id FROM reservation")).toEqual([
-      { active_task_id: a.id },
-    ]);
+    expect(await sql(user, "SELECT task_id FROM reservation_slot")).toEqual([{ task_id: a.id }]);
     expect(
       await sql(user, "SELECT reserved_micro, settled_micro, closed FROM task_budget"),
     ).toEqual([{ reserved_micro: 10 * MICRO, settled_micro: 0, closed: 0 }]);
@@ -354,9 +346,7 @@ describe("UserDO: 予算の返却は最終精算(finishTask)だけが行う", ()
     expect(await sql(user, "SELECT settled_micro, closed FROM task_budget")).toEqual([
       { settled_micro: 9 * MICRO, closed: 1 },
     ]);
-    expect(await sql(user, "SELECT active_task_id FROM reservation")).toEqual([
-      { active_task_id: null },
-    ]);
+    expect(await sql(user, "SELECT task_id FROM reservation_slot")).toEqual([]);
     // 9 使用済み + 10 > 15: 二重に予算を渡さない
     expect(await reserve(user, "k2")).toMatchObject({ ok: false, code: "budget_exceeded" });
   });

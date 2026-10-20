@@ -5,6 +5,7 @@ import {
   auditRecords,
   bodyOf,
   completedResult,
+  directoryConsults,
   finishAgent,
   installApp,
   login,
@@ -266,6 +267,62 @@ describe("D10: budget_status と consult の予約・精算", () => {
       expect(records[1]?.cost_usd).toBeCloseTo(first.cost_usd as number, 9);
       expect(JSON.stringify(records)).not.toContain("architect");
       await waitForAudit((r) => r.event === "consult_finished" && r.userId === user.id);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("索引: consult の精算の後、UserDO の alarm で Directory にモデル・費用つきの行が出る（本文は入らない）。budget_status は変わらない", async () => {
+    const { user, client } = await memberClient("consult-index");
+    try {
+      const q1 = `consult index first ${user.id} SECRET-QUESTION`;
+      const q2 = `consult index second ${user.id}`;
+      await setConsultScript(q1, {
+        text: "SECRET-ANSWER",
+        usage: { input: 20_000, output: 1_000, cacheRead: 0, cacheWrite: 0 },
+      });
+      await setConsultScript(q2, {
+        text: "ok",
+        usage: { input: 5_000, output: 1_000, cacheRead: 0, cacheWrite: 0 },
+      });
+      const first = bodyOf(
+        await client.callTool({
+          name: "consult",
+          arguments: { system: "SECRET-SYSTEM", messages: [{ role: "user", content: q1 }] },
+        }),
+      );
+      const second = bodyOf(
+        await client.callTool({
+          name: "consult",
+          arguments: {
+            model: "anthropic/claude-haiku-5-5",
+            messages: [{ role: "user", content: q2 }],
+          },
+        }),
+      );
+      // alarm は 10 秒間隔。行が出るまで待つ
+      const deadline = Date.now() + 60_000;
+      let rows = await directoryConsults(user.id);
+      while (rows.length < 2 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 500));
+        rows = await directoryConsults(user.id);
+      }
+      expect(rows).toHaveLength(2);
+      const byModel = new Map(rows.map((r) => [r.model, r]));
+      expect(byModel.get("anthropic/claude-sonnet-5-5")).toMatchObject({
+        owner_id: user.id,
+        owner_login: user.login,
+        cost_micro: Math.round((first.cost_usd as number) * 1_000_000),
+        estimated: false,
+      });
+      expect(byModel.get("anthropic/claude-haiku-5-5")).toMatchObject({
+        cost_micro: Math.round((second.cost_usd as number) * 1_000_000),
+      });
+      expect(JSON.stringify(rows)).not.toContain("SECRET");
+      const spent = (first.cost_usd as number) + (second.cost_usd as number);
+      const after = bodyOf(await client.callTool({ name: "budget_status", arguments: {} }));
+      expect(after.spent_usd).toBeCloseTo(spent, 6);
+      expect(after.reserved_usd).toBe(0);
     } finally {
       await client.close();
     }

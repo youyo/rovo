@@ -25,7 +25,7 @@ import {
 } from "./agent/pricing";
 import { AgentStore, type SteerRow, sameUsage, ZERO_USAGE } from "./agent/store";
 import { decideTerminal, type StopIntent, type TerminalRequest } from "./agent/terminal";
-import { detectTestTampering } from "./agent/test-patterns";
+import { detectTestTampering, modifiedTestFiles } from "./agent/test-patterns";
 import {
   type CancelResult,
   type ConsultRequest,
@@ -1604,9 +1604,27 @@ export class AgentDO extends DurableObject<Env> {
         return undefined;
       }
     };
+    const nameStatus = names.exitCode === 0 ? names.stdout : "";
+    // base に既にあったテストファイルの差分だけを取り、弱体化（行の削除・skip・タイムアウト）を見る
+    let testDiff = "";
+    const changedTests = modifiedTestFiles(nameStatus);
+    if (changedTests.length > 0) {
+      const td = await sb.exec(
+        ["git", "diff", "--no-renames", "-U0", range, "--", ...changedTests],
+        { cwd, maxOutputBytes: 2 * 1024 * 1024 },
+      );
+      if (td.exitCode === 0 && !td.truncated) {
+        testDiff = td.stdout;
+      } else {
+        warnings.push(
+          "既存のテストファイルの差分を読めなかったため、テストの弱体化を判定できていません",
+        );
+      }
+    }
     warnings.push(
       ...detectTestTampering({
-        nameStatus: names.exitCode === 0 ? names.stdout : "",
+        nameStatus,
+        testDiff,
         baseScripts: await readScripts(spec.baseSha),
         headScripts: await readScripts(tip),
       }),

@@ -63,6 +63,9 @@
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
     // 選べるモデル（カンマ区切り。task_start の model と consult の model。models_list に出る）。
     // 空なら AGENT_MODEL だけ（fail-closed）。許可リスト（packages/models）に無い id は無視する。agent の同名の var と同じ値にする。
-    "AGENT_MODELS": ""
+    "AGENT_MODELS": "",
+    // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。models_list の effort と task_status / task_result に出る）。
+    // 空なら packages/models の EFFORTS。不正な項目は無視して初期値にする。agent の同名の var と同じ値にする。
+    "MODEL_EFFORTS": ""
   }
 }

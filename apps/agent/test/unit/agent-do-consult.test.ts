@@ -19,17 +19,26 @@ type Observed = {
   maxTokens: (number | undefined)[];
   metadata: (Record<string, unknown> | undefined)[];
   systemTexts: (string | undefined)[];
+  reasoning: (string | undefined)[];
 };
 
-function setup(over: Partial<ConsultRequest> = {}) {
+function setup(over: Partial<ConsultRequest> = {}, modelEfforts?: string) {
   const name = newName();
-  const seen: Observed = { userTexts: [], maxTokens: [], metadata: [], systemTexts: [] };
+  const seen: Observed = {
+    userTexts: [],
+    maxTokens: [],
+    metadata: [],
+    systemTexts: [],
+    reasoning: [],
+  };
   setAgentTestOverrides(name, {
+    ...(modelEfforts !== undefined ? { modelEfforts } : {}),
     onModelCall: (ctx) => {
       seen.userTexts.push(ctx?.userTexts ?? []);
       seen.maxTokens.push(ctx?.maxTokens);
       seen.metadata.push(ctx?.metadata);
       seen.systemTexts.push(ctx?.systemText);
+      seen.reasoning.push(ctx?.reasoning);
     },
   });
   const stub = env.AGENT_DO.getByName(name);
@@ -206,5 +215,92 @@ describe("AgentDO.consult", () => {
     expect(tables).toEqual([]);
     // alarm も残さない（Lifecycle が予約していると、データの無い DO が起きてしまう）
     expect(await runInDurableObject(t.stub, (_i, state) => state.storage.getAlarm())).toBeNull();
+  });
+
+  describe("思考レベル（モデルごとに固定）", () => {
+    it("モデルの思考レベル（sonnet=high / haiku=low / gpt-6-sol=medium）を Pi の reasoning に渡す", async () => {
+      const expected: [string, string][] = [
+        ["anthropic/claude-sonnet-5-5", "high"],
+        ["anthropic/claude-haiku-5-5", "low"],
+        ["openai/gpt-6-sol", "medium"],
+      ];
+      for (const [model, level] of expected) {
+        const t = setup({ model });
+        await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+        asOk(await t.stub.consult(t.request));
+        expect(t.seen.reasoning[0], model).toBe(level);
+      }
+    });
+
+    it("MODEL_EFFORTS の上書きが効く。off なら reasoning を渡さない", async () => {
+      const t = setup({}, "anthropic/claude-sonnet-5-5=medium");
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      asOk(await t.stub.consult(t.request));
+      expect(t.seen.reasoning[0]).toBe("medium");
+
+      const off = setup({}, "anthropic/claude-sonnet-5-5=off");
+      await off.stub.setScript(off.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      asOk(await off.stub.consult(off.request));
+      expect(off.seen.reasoning[0]).toBeUndefined();
+    });
+
+    it("不正な MODEL_EFFORTS（モデルが受け付けない値）は無視して初期値のまま", async () => {
+      const t = setup({}, "anthropic/claude-sonnet-5-5=turbo");
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      asOk(await t.stub.consult(t.request));
+      expect(t.seen.reasoning[0]).toBe("high");
+    });
+
+    it("思考を含めても、モデルに渡す出力の上限（maxTokens）は予約額から計算した上限を超えない", async () => {
+      const t = setup({ budgetUsd: 0.005 }, "anthropic/claude-sonnet-5-5=max");
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      asOk(await t.stub.consult(t.request));
+      expect(t.seen.reasoning[0]).toBe("max");
+      const cap = t.seen.maxTokens[0] ?? 0;
+      expect(cap).toBeGreaterThan(3000);
+      expect(cap).toBeLessThan(4000);
+    });
+  });
+
+  describe("モデルの 4xx と 5xx の区別", () => {
+    it("リクエストの中身の問題（400 など）は model_rejected（再試行しても直らない）。費用は実費", async () => {
+      for (const status of [400, 401, 403, 404, 422]) {
+        const t = setup();
+        await t.stub.setScript(t.request.messages[0]?.content ?? "", [
+          { error: "invalid_request_error", status, usage: { input: 10, output: 0 } },
+        ]);
+        const r = await t.stub.consult(t.request);
+        expect(r, String(status)).toMatchObject({
+          ok: false,
+          code: "model_rejected",
+          costUsd: expect.any(Number),
+        });
+        // 内部のエラー文は返さない
+        expect(JSON.stringify(r)).not.toContain("invalid_request_error");
+      }
+    });
+
+    it("usage が無い 4xx は費用 0（HTTP 4xx はリクエストが生成の前に拒否された応答なので課金されない。ストリームの途中の失敗とは違う）", async () => {
+      const t = setup({ budgetUsd: 0.5 });
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ error: "bad", status: 400 }]);
+      expect(await t.stub.consult(t.request)).toMatchObject({
+        ok: false,
+        code: "model_rejected",
+        costUsd: 0,
+      });
+    });
+
+    it("5xx・429（レート制限）・408（タイムアウト）・status なしは今までどおり model_error（再試行してよい）", async () => {
+      for (const status of [500, 502, 503, 529, 429, 408, undefined]) {
+        const t = setup();
+        await t.stub.setScript(t.request.messages[0]?.content ?? "", [
+          { error: "upstream", ...(status !== undefined ? { status } : {}) },
+        ]);
+        expect(await t.stub.consult(t.request), String(status)).toMatchObject({
+          ok: false,
+          code: "model_error",
+        });
+      }
+    });
   });
 });

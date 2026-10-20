@@ -62,7 +62,14 @@ export interface Fixture {
   verifyResults: Partial<ExecResult>[];
   verifyCalls: string[][];
   /** toolResults: モデル呼び出しごとに、そのとき transcript に載っていたツール結果の本文 */
-  modelCalls: { count: number; userTexts: string[][]; toolResults: string[][] };
+  modelCalls: {
+    count: number;
+    userTexts: string[][];
+    toolResults: string[][];
+    /** モデル呼び出しごとに Pi へ渡った思考レベル（options.reasoning。思考オフは undefined） */
+    reasoning: (string | undefined)[];
+    maxTokens: (number | undefined)[];
+  };
   /** ask_parent の本体に入る直前（未回答の質問を記録する前）を止める */
   askGate: ExecGate;
   /** answer() が Pi へ回答を submit する直前を止める。throwOnce を立てると 1 回だけ例外にする */
@@ -105,6 +112,8 @@ export function newFixture(
   opts: {
     maxOutputTokens?: number;
     modelId?: string;
+    /** env の MODEL_EFFORTS の代わり（モデルごとの思考レベルの上書き） */
+    modelEfforts?: string;
     cancelWaitMs?: number;
     finalizeWaitMs?: number;
     usageReadWaitMs?: number;
@@ -120,7 +129,13 @@ export function newFixture(
   const clock = { now: T0 };
   const verifyResults: Partial<ExecResult>[] = [];
   const verifyCalls: string[][] = [];
-  const modelCalls = { count: 0, userTexts: [] as string[][], toolResults: [] as string[][] };
+  const modelCalls = {
+    count: 0,
+    userTexts: [] as string[][],
+    toolResults: [] as string[][],
+    reasoning: [] as (string | undefined)[],
+    maxTokens: [] as (number | undefined)[],
+  };
   const patch = { value: "From abc\n--- a\n+++ b\n" };
   const nameStatus = { value: "" };
   // DO の中と外で Promise を共有すると I/O の所有者が混ざるので、フラグのポーリングにする
@@ -236,6 +251,7 @@ export function newFixture(
     now: () => clock.now,
     maxOutputTokens: opts.maxOutputTokens,
     modelId: opts.modelId,
+    ...(opts.modelEfforts !== undefined ? { modelEfforts: opts.modelEfforts } : {}),
     cancelWaitMs: opts.cancelWaitMs,
     finalizeWaitMs: opts.finalizeWaitMs,
     usageReadWaitMs: opts.usageReadWaitMs,
@@ -260,6 +276,8 @@ export function newFixture(
       modelCalls.count += 1;
       modelCalls.userTexts.push(ctx?.userTexts ?? []);
       modelCalls.toolResults.push(ctx?.toolResults ?? []);
+      modelCalls.reasoning.push(ctx?.reasoning);
+      modelCalls.maxTokens.push(ctx?.maxTokens);
     },
   });
   return {

@@ -51,6 +51,8 @@
     // （task_start の model と consult の model。models_list に出る）。空なら AGENT_MODEL だけ。agent の同名の var と同じ値にする。
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
     "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5",
+    // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。models_list の effort と task_status / task_result に出る）。空なら upstream の既定。agent の同名の var と同じ値にする。
+    "MODEL_EFFORTS": "",
     "WEB_SEARCH_DAILY_LIMIT": "200",
     "WEB_FETCH_DAILY_LIMIT": "500",
     "WEB_BROWSE_DAILY_LIMIT": "50",

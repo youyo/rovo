@@ -5,14 +5,15 @@ import {
   type Model,
   normalizeContext,
   type Provider,
+  type ThinkingLevel,
 } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { AuditFields } from "@rovo/audit";
-import { computeCostUsd } from "@rovo/models";
+import { computeCostUsd, type Effort } from "@rovo/models";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
-import { agentModels, aiGatewayRejection, defaultModel } from "./agent/config";
+import { agentModels, aiGatewayRejection, defaultModel, modelEffort } from "./agent/config";
 import { getAgentTestOverrides } from "./agent/deps";
 import {
   estimateCallCostUsd,
@@ -44,7 +45,12 @@ import {
 import { emitAudit, readTestAudit } from "./audit-adapter";
 import { applyConsultCacheControl } from "./pi/consult-cache";
 import { type AgentPiHooks, createAgentExtension } from "./pi/extension";
-import { guardProvider } from "./pi/guard-provider";
+import {
+  type CallVerdict,
+  guardProvider,
+  isRequestRejection,
+  upstreamStatus,
+} from "./pi/guard-provider";
 import {
   createScriptedProvider,
   SCRIPTED_MODEL,
@@ -170,7 +176,11 @@ export class AgentDO extends DurableObject<Env> {
     harness: async ({ storage, context }) => {
       const models = createModels();
       const { provider } = this.modelAccess();
-      models.setProvider(guardProvider(provider, (_model, context) => this.preModelCall(context)));
+      models.setProvider(
+        guardProvider(provider, (_model, context) => this.preModelCall(context), {
+          onResult: (message) => this.noteModelResult(message),
+        }),
+      );
       const registry = createRegistry();
       // ツールは start より前に作られる。期限は永続化した deadlineAt を呼び出し時に読む。
       const sandboxTools = this.sandboxToolsFactory()(
@@ -235,6 +245,32 @@ export class AgentDO extends DurableObject<Env> {
     }
     // タスクごとのモデル（spec.model。start の validate で AGENT_MODELS の中だと確かめ済み）。無ければ既定
     return requested ?? defaultModel(env);
+  }
+
+  /** モデルの思考レベル（MODEL_EFFORTS で上書きした最終の値）。rovo の id で引く（test の fake モデルの id ではない）。 */
+  private effortOf(rovoModelId: string): Effort | undefined {
+    return modelEffort(this.env as AgentEnv, rovoModelId, this.overrides().modelEfforts);
+  }
+
+  /** Pi に渡す思考レベル（options.reasoning）。off・不明は undefined（渡さない = 思考オフ）。 */
+  private reasoningOf(rovoModelId: string): ThinkingLevel | undefined {
+    const effort = this.effortOf(rovoModelId);
+    return effort === undefined || effort === "off" ? undefined : effort;
+  }
+
+  /**
+   * 失敗したモデル呼び出しの上流のステータスを覚える（4xx = リクエストの中身の問題かどうかを、終端の reason に反映する）。
+   * 成功した呼び出しで消す。
+   */
+  private noteModelResult(message: { stopReason: string } & Parameters<typeof upstreamStatus>[0]) {
+    try {
+      this.store.setMeta(
+        "last_model_status",
+        message.stopReason === "error" ? (upstreamStatus(message) ?? null) : null,
+      );
+    } catch {
+      // 記録の失敗でモデル呼び出しの結果を失わない
+    }
   }
 
   private initialModel() {
@@ -726,9 +762,13 @@ export class AgentDO extends DurableObject<Env> {
     });
 
     // guardProvider が thinking の補正と、maxTokens の上限・metadata の付与を行う
+    // 思考レベルはモデルごとに固定（req.model の effort。off なら渡さない）。思考のトークンは出力として課金され、
+    // maxTokens（予約額から計算した上限）の中に収まる
+    const reasoning = this.reasoningOf(req.model);
     const guarded = guardProvider(access.provider, async () => ({
       maxTokens,
       metadata: { userId: req.userId, consultId: req.consultId, caller: "consult" },
+      ...(reasoning !== undefined ? { reasoning } : {}),
     }));
     const stream = guarded.streamSimple(model, context, {
       maxTokens,
@@ -746,6 +786,18 @@ export class AgentDO extends DurableObject<Env> {
     const costUsd = Math.max(computeCostUsd(price, usage), finiteCount(message.usage?.cost?.total));
     if (message.stopReason === "error" || message.stopReason === "aborted") {
       console.error("consult_model_error", message.stopReason);
+      // 4xx（リクエストの中身の問題。待っても直らない）は別のコードで返す。HTTP の 4xx は生成の前に拒否された応答なので課金されない
+      // （usage が無くても予約額では精算しない）。5xx・429・408・ステータスなし（ストリームの途中の失敗など）は従来どおり
+      const status = message.stopReason === "error" ? upstreamStatus(message) : undefined;
+      if (isRequestRejection(status)) {
+        console.error("consult_model_rejected", status);
+        return {
+          ok: false,
+          code: "model_rejected",
+          message: "the model rejected the request",
+          costUsd,
+        };
+      }
       // usage が返らない失敗（ストリームの途中で切れた等）は課金の有無が分からないので、予約額で精算させる
       const reported = usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0;
       return {
@@ -1112,7 +1164,14 @@ export class AgentDO extends DurableObject<Env> {
       // 停止の意図があれば、確定のトランザクションがそれを優先する
       if (this.stopIntents().length === 0 && status === "unanswered") {
         this.emit("error", { message: `model run ended: ${reason ?? "unknown"}` });
-        await this.finalize({ phase: "failed", reason: `model_error: ${reason ?? "unknown"}` });
+        // 最後のモデル呼び出しが 4xx（リクエストの中身の問題）なら、待っても直らないので別の reason にする
+        const rejected = isRequestRejection(
+          this.store.meta<number | null>("last_model_status") ?? undefined,
+        );
+        await this.finalize({
+          phase: "failed",
+          reason: `${rejected ? "model_rejected" : "model_error"}: ${reason ?? "unknown"}`,
+        });
       } else {
         await this.finalize({ phase: "failed", reason: "no_completion_report" });
       }
@@ -1467,9 +1526,7 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /** モデル呼び出しの直前。期限と予算を確かめ、払えなければ呼ばせない。 */
-  private async preModelCall(
-    context: unknown,
-  ): Promise<{ block: string } | { maxTokens: number; metadata: Record<string, unknown> }> {
+  private async preModelCall(context: unknown): Promise<CallVerdict> {
     const spec = this.spec();
     const maxTokens = this.overrides().maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     if (!spec) return { maxTokens, metadata: {} }; // タスクとして開始する前（M1 スパイク）
@@ -1496,7 +1553,13 @@ export class AgentDO extends DurableObject<Env> {
     }
     // 呼び出し前の見積額を「進行中」として永続化する（abort を待ち切れずに確定するとき、これを計上する）
     this.store.setMeta("inflight", { baseCostUsd: spent.costUsd, estimateUsd: estimate });
-    return { maxTokens, metadata: { userId: spec.userId, taskId: spec.taskId } };
+    // 思考レベルはモデルごとに固定。思考のトークンは出力として課金され、maxTokens の中に収まる（上の estimate が上限）
+    const reasoning = this.reasoningOf(spec.model ?? defaultModel(this.env as AgentEnv));
+    return {
+      maxTokens,
+      metadata: { userId: spec.userId, taskId: spec.taskId },
+      ...(reasoning !== undefined ? { reasoning } : {}),
+    };
   }
 
   // ---- Pi に差し込む振る舞い ----

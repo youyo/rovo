@@ -48,6 +48,9 @@
     // 選べるモデル（カンマ区切り。task_start の model と consult の model）。空なら AGENT_MODEL だけ。gateway の同名の var と同じ値にする。
     // OpenAI のモデル（openai/gpt-6-sol など）を足すには、AI Gateway に OpenAI のプロバイダー キーを登録しておく（docs/deploy.md）。
     "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5",
+    // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。例 "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off"）。
+    // 空なら upstream の既定（haiku=low, sonnet=high, opus=medium, fable=low, luna=low, sol=medium, astra=low）。思考のトークンは出力として課金される。gateway の同名の var と同じ値にする。
+    "MODEL_EFFORTS": "",
     "WEB_SEARCH_LIMIT_PER_TASK": "50",
     "WEB_FETCH_LIMIT_PER_TASK": "100",
     "WEB_BROWSE_LIMIT_PER_TASK": "20",

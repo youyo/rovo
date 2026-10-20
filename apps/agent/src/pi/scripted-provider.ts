@@ -24,6 +24,8 @@ export interface ScriptStep {
    * （入出力 $1/100万、cacheRead $0.1/100万、cacheWrite $1.25/100万。apps/agent の TEST_MODEL_PRICES と同じ）。
    */
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** error と一緒に使う。上流の HTTP ステータス（AI Gateway の失敗の diagnostics.details.status と同じ形で報告する） */
+  status?: number;
   /** モデルの呼び出しの失敗を再現する（stopReason: error。usage があればそれまでの消費として報告する） */
   error?: string;
   /** 応答を返すまでの待ち（ms）。呼び出しの途中で cancel されるケースの再現用。abort しても応答は返る（usage が後から増える）。 */
@@ -109,12 +111,19 @@ export function createScriptedProvider(
     maxTokens?: number;
     metadata?: Record<string, unknown>;
     systemText?: string;
+    /** 呼び出し側が渡した思考レベル（options.reasoning。思考オフなら undefined） */
+    reasoning?: string;
   }) => void,
 ): Provider {
   const stream = (
     _model: Model<string>,
     context: TranscriptContext,
-    options?: { signal?: AbortSignal; maxTokens?: number; metadata?: Record<string, unknown> },
+    options?: {
+      signal?: AbortSignal;
+      maxTokens?: number;
+      metadata?: Record<string, unknown>;
+      reasoning?: string;
+    },
   ) => {
     const out = createAssistantMessageEventStream();
     onCall?.({
@@ -123,6 +132,7 @@ export function createScriptedProvider(
       maxTokens: options?.maxTokens,
       metadata: options?.metadata,
       systemText: systemText(context),
+      reasoning: options?.reasoning,
     });
     const turn = context.messages.filter((m) => m.role === "assistant").length;
     const step = getScript(userText(context))[turn] ?? { text: "script exhausted" };
@@ -176,6 +186,18 @@ export function createScriptedProvider(
           content: [],
           stopReason: "error",
           errorMessage: step.error,
+          ...(step.status !== undefined
+            ? {
+                diagnostics: [
+                  {
+                    type: "cloudflare-error",
+                    timestamp: Date.now(),
+                    error: { name: "CloudflareAIError", message: step.error },
+                    details: { status: step.status },
+                  },
+                ],
+              }
+            : {}),
         };
         out.push({ type: "error", reason: "error", error: failed });
         out.end(failed);

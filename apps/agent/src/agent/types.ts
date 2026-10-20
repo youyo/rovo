@@ -109,7 +109,9 @@ export type ConsultErrorCode =
   | "unknown_model"
   | "input_too_large"
   | "invalid_request"
-  | "model_error";
+  | "model_error"
+  /** モデルがリクエストの中身を拒否した（4xx。待っても再試行しても直らない）。model_error は再試行してよい失敗 */
+  | "model_rejected";
 
 export type ConsultResult =
   | { ok: true; text: string; model: string; usage: ConsultUsage; costUsd: number }

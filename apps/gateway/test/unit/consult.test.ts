@@ -211,6 +211,34 @@ describe("consult: 予約と精算", () => {
     });
   });
 
+  it("AgentDO がモデルの 4xx を返したら model_rejected（retry_after_seconds なし）。5xx の model_error は従来どおり upstream_unavailable", async () => {
+    const fx = fakeAgent([
+      { ok: false, code: "model_rejected", message: "the model rejected the request", costUsd: 0 },
+    ]);
+    const svc = createConsultService(env, { agent: fx.agent });
+    const p = principal();
+    const r = await svc.consult(p, input());
+    expect(r).toMatchObject({ ok: false, error: { code: "model_rejected" } });
+    if (r.ok) throw new Error("expected failure");
+    // 待っても直らないので、再試行を促さない
+    expect(r.error.retry_after_seconds).toBeUndefined();
+    expect(r.error.message).not.toMatch(/retry later/);
+    // かかった費用（0）で精算し、予約は閉じる
+    expect(await userStub(p.githubUserId).budgetStatus()).toMatchObject({
+      spent_usd: 0,
+      reserved_usd: 0,
+    });
+    // model_error は再試行を促す
+    const fx2 = fakeAgent([
+      { ok: false, code: "model_error", message: "the model call failed", costUsd: 0 },
+    ]);
+    const r2 = await createConsultService(env, { agent: fx2.agent }).consult(principal(), input());
+    expect(r2).toMatchObject({
+      ok: false,
+      error: { code: "upstream_unavailable", retry_after_seconds: 30 },
+    });
+  });
+
   it("AgentDO が入力の大きさ・モデルを拒否したら invalid_input。費用は 0 で精算する", async () => {
     for (const code of ["input_too_large", "unknown_model", "invalid_request"] as const) {
       const fx = fakeAgent([{ ok: false, code, message: "m", costUsd: 0 }]);

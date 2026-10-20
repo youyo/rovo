@@ -37,6 +37,8 @@ export type ErrorCode =
   | "budget_exceeded"
   | "not_ready"
   | "upstream_unavailable"
+  // consult でモデルがリクエストの中身を拒否した（4xx）。待っても再試行しても直らない
+  | "model_rejected"
   | "invalid_cursor"
   | "invalid_input"
   // PR の Ready 化とマージ（D9）

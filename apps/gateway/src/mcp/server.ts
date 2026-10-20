@@ -35,6 +35,8 @@ export type ToolErrorCode =
   | "reauth_required"
   | "upstream_unavailable"
   | "invalid_input"
+  // consult でモデルがリクエストの中身を拒否した（4xx。例: 400 invalid_request_error）。retry_after_seconds は付かない。入力か model を変える
+  | "model_rejected"
   // PR の Ready 化とマージ（D9）: GitHub が操作を拒否した（ブランチ保護など / 検証後にブランチが動いた / その他）
   | "merge_blocked"
   | "head_moved"
@@ -104,7 +106,7 @@ export const SERVER_INSTRUCTIONS = [
   "6. そのあとは merge_policy による。human_review: 人のレビューを待つ。マージは人が行い、task_pr_merge は使えない（forbidden）。agent_merge: task_pr_merge でマージできる（PR が Ready で、head_matches_verified が true のときだけ。merge_method と delete_branch を選べる）。ブランチ保護（必須レビュー・必須チェックなど）に拒否されたら merge_blocked と GitHub の理由が返る。回避しようとせず、人に任せるか報告する。",
   "7. レビューで問題が見つかったとき: task_steer は実行中のタスク専用で、COMPLETED には使えない。Ready にせず、新しいタスクで修正を頼む。task_start の base_ref にこの PR のブランチ agent/task-<task_id>、base_sha に task_result の pr.head_sha を指定すると、この PR に積む形で続けられる。PR 自体が不要なら GitHub 上で閉じる。FAILED / CANCELLED / BUDGET_EXCEEDED のタスクに task_pr_ready / task_pr_merge は使えない。",
   "task_pr_ready と task_pr_merge は、あなた（利用者）本人の GitHub の権限で行われる。操作できるのは task_id に結びついた PR だけで、任意の PR は操作できない。",
-  "8. モデルと予算: models_list で、task_start の model と consult の model に使えるモデルと単価（USD / 100 万トークン。キャッシュの読み書きと、入力が大きいときの上位の単価も）を確かめ、タスクの難しさで model を選ぶ（小さな修正・機械的な変更は安いモデル、設計を伴う変更や難しいデバッグは強いモデル。省略は既定のモデル）。budget_status で今月の残り（remaining_usd）と、タスクの予約額（task_budget_usd）・consult の予約額（consult_budget_usd）を確かめてから、task_start や consult を使う。Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する）。",
+  "8. モデルと予算: models_list で、task_start の model と consult の model に使えるモデルと単価（USD / 100 万トークン。キャッシュの読み書きと、入力が大きいときの上位の単価も）を確かめ、タスクの難しさで model を選ぶ（小さな修正・機械的な変更は安いモデル、設計を伴う変更や難しいデバッグは強いモデル。省略は既定のモデル）。budget_status で今月の残り（remaining_usd）と、タスクの予約額（task_budget_usd）・consult の予約額（consult_budget_usd）を確かめてから、task_start や consult を使う。Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する）。思考レベルはモデルごとに決まっている（effort）。models_list の各モデルに出て、タスクごとには変えられない。考える量が多いほど出力トークン＝費用が増える（思考のトークンは出力として課金される）ので、費用を抑えたいときは effort の低いモデルを選ぶ。",
   "9. consult（セカンドオピニオン）: 設計の相談や、レビューの意見が欲しいときに、モデルへ 1 回質問できる。コードは書かせない（リポジトリも Sandbox も使わない）ので、必要な文脈は system と messages に自分で入れる。rovo は会話を保存しない。続けて聞くときは毎回、履歴のすべてを messages に渡す。前置き（system と、最後の user メッセージより前の部分）を毎回同じにすると、Anthropic のモデルではプロンプトキャッシュが効いて、2 回目以降は安くなる（応答の usage.cache_read で分かる。短い前置きはキャッシュされない）。consult の答えは助言で、事実確認（コードや API の挙動）は自分で行う。呼ぶたびに consult_budget_usd を月の枠から予約し、実費で精算する。",
 ].join("\n");
 
@@ -122,8 +124,8 @@ const PR_MERGE_DESCRIPTION = [
 ].join("\n");
 
 const MODELS_LIST_DESCRIPTION = [
-  "使えるモデルの一覧と単価を返す。入力は無い。応答は {models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default}]}。",
-  "id は task_start の model と consult の model に使える。単価は USD / 100 万トークン。tiers は、入力（input + キャッシュの読み書き）が input_tokens_above を超える呼び出しに、全体へ適用される上位の単価（無ければ空）。default: true が、model を省略したときのモデル。",
+  "使えるモデルの一覧と単価を返す。入力は無い。応答は {models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort}]}。",
+  "id は task_start の model と consult の model に使える。単価は USD / 100 万トークン。tiers は、入力（input + キャッシュの読み書き）が input_tokens_above を超える呼び出しに、全体へ適用される上位の単価（無ければ空）。default: true が、model を省略したときのモデル。effort はそのモデルの思考レベル（off / minimal / low / medium / high / xhigh / max）で、思考レベルはモデルごとに決まっている（タスクごとには変えられない）。考える量が多いほど出力トークン＝費用が増える（思考のトークンは出力として課金される）。",
   "タスクの難しさと予算に合わせて選ぶ。budget_status で残りを確かめられる。",
 ].join("\n");
 
@@ -138,7 +140,7 @@ const CONSULT_DESCRIPTION = [
   '入力は {model?, system?, messages: [{role: "user" | "assistant", content}], max_output_tokens?}。messages は 1〜100 件で、最初と最後は user（最後の user が質問）。model は models_list の id（省略は既定のモデル）。応答は {text, model, usage: {input, output, cache_read, cache_write}, cost_usd}。',
   "rovo は会話を保存しない（1 回で完結する）。続けて聞くときは、履歴のすべてを毎回 messages に渡す。",
   "プロンプトキャッシュ: Anthropic のモデルでは、system と、最後の user メッセージより前の部分にキャッシュを付ける。呼び出し元が同じ前置き（system と、それまでの履歴）を送れば、2 回目以降はキャッシュから読まれて安くなる（usage.cache_read に出る。短い前置きはキャッシュされない）。OpenAI のモデルは自動でキャッシュされる。",
-  "費用: 呼ぶ前に CONSULT_BUDGET_USD（既定 $0.5。budget_status の consult_budget_usd）を月の枠から予約し、終わったら実費で精算する。月の枠が足りなければ budget_exceeded。max_output_tokens は予約額に収まるよう上限が掛かる。入力が大きく予約額に収まらないときは invalid_input。モデルの呼び出しに失敗したら upstream_unavailable（かかった費用は精算される）。",
+  "費用: 呼ぶ前に CONSULT_BUDGET_USD（既定 $0.5。budget_status の consult_budget_usd）を月の枠から予約し、終わったら実費で精算する。月の枠が足りなければ budget_exceeded。max_output_tokens は予約額に収まるよう上限が掛かる。入力が大きく予約額に収まらないときは invalid_input。モデルの呼び出しが 5xx・タイムアウトなどで失敗したら upstream_unavailable（retry_after_seconds 後に再試行できる。かかった費用は精算される）。モデルがリクエストの中身を拒否した（4xx。例 invalid_request_error）ときは model_rejected で、待っても直らないので再試行しない（入力か model を変える）。思考レベル（effort）はモデルごとに決まっていて、考える量が多いほど出力トークン＝費用が増える（max_output_tokens の中に思考が含まれる）。",
   "答えはモデルの出力で、助言として扱う。事実確認（コードや API の挙動）は自分で行う。",
 ].join("\n");
 
@@ -510,7 +512,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "task_status",
     {
-      description: `タスクの現在の状態を返す。{task_id, status, repository, title, draft_pr_url, merge_policy, model, created_at, updated_at, latest_cursor, pending_question}。model は子のモデル（task_start の model。省略時は既定）。draft_pr_url は Draft PR の作成後に入る。pending_question は子の未回答の質問 {question_id, message, options} で、無ければ null（INPUT_REQUIRED のときは task_answer で答える）。${QUESTION_NOTICE} 自分のタスクだけ参照できる。`,
+      description: `タスクの現在の状態を返す。{task_id, status, repository, title, draft_pr_url, merge_policy, model, effort, created_at, updated_at, latest_cursor, pending_question}。model は子のモデル（task_start の model。省略時は既定）、effort はそのモデルの思考レベル（モデルごとに決まっている。考える量が多いほど出力トークン＝費用が増える）。draft_pr_url は Draft PR の作成後に入る。pending_question は子の未回答の質問 {question_id, message, options} で、無ければ null（INPUT_REQUIRED のときは task_answer で答える）。${QUESTION_NOTICE} 自分のタスクだけ参照できる。`,
       inputSchema: publishedSchema(taskIdSchema),
     },
     async (args) =>
@@ -542,7 +544,7 @@ export function createRovoServer(env: Env): McpServer {
     "task_result",
     {
       description:
-        "終端になったタスクの成果を返す。{task_id, status, summary, verification: {commands, results, verified, attempts, commit_sha?}, warnings, merge_policy, model, pr: {number, url, draft, merged, head_sha, head_matches_verified} | null, patch | diffstat, patch_too_large, usage, next_steps}。pr は PR の情報で、draft は Draft か（task_pr_ready で false になる）、merged は task_pr_merge でマージ済みか、head_sha は終端で GitHub から読んだ PR の head（読めるまでは null）、head_matches_verified は検証済みの commit と一致するか（head が動いていれば false で、warnings にも出る。false のとき task_pr_merge は使えない）。merge_policy は task_start で指定した値（human_review | agent_merge）。next_steps は、status・merge_policy・PR の draft 状態・head_matches_verified に応じた次の一手（差分をレビューして task_pr_ready / task_pr_merge を使うか、人のレビューを待つか、新しいタスクを始めるか）の案内文で、これに従う。verified が false のときは検証コマンドを通っていない（未指定、またはモデルの申告のみ）。warnings にテスト設定の変更などが記される。タスクが終端でない、またはエージェントの停止を確認できていない間は not_ready エラーを返す。終端になった直後も、エージェントの停止を確認するまで数秒は not_ready が返るので、task_wait で終端を待つか、数秒待ってから呼び直す。自分のタスクだけ参照できる。",
+        "終端になったタスクの成果を返す。{task_id, status, summary, verification: {commands, results, verified, attempts, commit_sha?}, warnings, merge_policy, model, effort, pr: {number, url, draft, merged, head_sha, head_matches_verified} | null, patch | diffstat, patch_too_large, usage, next_steps}。pr は PR の情報で、draft は Draft か（task_pr_ready で false になる）、merged は task_pr_merge でマージ済みか、head_sha は終端で GitHub から読んだ PR の head（読めるまでは null）、head_matches_verified は検証済みの commit と一致するか（head が動いていれば false で、warnings にも出る。false のとき task_pr_merge は使えない）。merge_policy は task_start で指定した値（human_review | agent_merge）。model は子のモデル、effort はそのモデルの思考レベル（タスクの開始時の値）。next_steps は、status・merge_policy・PR の draft 状態・head_matches_verified に応じた次の一手（差分をレビューして task_pr_ready / task_pr_merge を使うか、人のレビューを待つか、新しいタスクを始めるか）の案内文で、これに従う。verified が false のときは検証コマンドを通っていない（未指定、またはモデルの申告のみ）。warnings にテスト設定の変更などが記される。タスクが終端でない、またはエージェントの停止を確認できていない間は not_ready エラーを返す。終端になった直後も、エージェントの停止を確認するまで数秒は not_ready が返るので、task_wait で終端を待つか、数秒待ってから呼び直す。自分のタスクだけ参照できる。",
       inputSchema: publishedSchema(taskIdSchema),
     },
     async (args) =>

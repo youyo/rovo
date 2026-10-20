@@ -1,4 +1,4 @@
-import { DEFAULT_MODEL, parseAgentModels } from "@rovo/models";
+import { DEFAULT_MODEL, type Effort, parseAgentModels, resolveEfforts } from "@rovo/models";
 
 /** 既定のモデル（env の AGENT_MODEL。空なら DEFAULT_MODEL）。 */
 export function defaultModel(env: { AGENT_MODEL?: string }): string {
@@ -25,4 +25,18 @@ export function aiGatewayRejection(env: {
 }): string | undefined {
   if (env.ENVIRONMENT === "test") return undefined;
   return env.AI_GATEWAY_ID ? undefined : "ai_gateway_not_configured";
+}
+
+/**
+ * モデルの思考レベル（env の MODEL_EFFORTS で初期値を上書きした最終の値）。許可リストに無いモデルは undefined。
+ * 不正な項目は無視して初期値にする（起動はエラーにしない）。
+ */
+export function modelEffort(
+  env: { MODEL_EFFORTS?: string },
+  modelId: string,
+  override?: string,
+): Effort | undefined {
+  const { efforts, ignored } = resolveEfforts(override ?? env.MODEL_EFFORTS);
+  if (ignored.length > 0) console.error("model_efforts_ignored", ignored.length);
+  return Object.hasOwn(efforts, modelId) ? efforts[modelId] : undefined;
 }

@@ -59,7 +59,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 
 - Phase 3（M1: Gateway 側）: `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。成果は patch としても `task_result` で返る。
 - PR のレビューと Ready 化・マージ（D9）: rovo 自身は PR を Ready にもマージにもしない（Draft のまま返す）。呼び出し元の AI が `task_result` の差分をレビューし、問題が無ければ `task_pr_ready` で Ready にする。そのあとは `task_start` の `merge_policy` による: `human_review`（既定）は人のレビューを待ち（`task_pr_merge` は `forbidden`）、`agent_merge` は `task_pr_merge` でマージまでできる。ポリシーはデプロイ全体の env ではなくタスクごとの入力で、組織としての強制は GitHub のブランチ保護に任せる（操作は利用者本人の GitHub トークンで行うため、保護に拒否されたら `merge_blocked`）。使い方の流れは MCP の `instructions` と `task_result` の `next_steps` にも書かれる。
-- モデルの選択と予算（D10）: `models_list` で使えるモデルと単価を見て、`task_start` の `model` をタスクの難しさで選ぶ。使えるモデルは env の `AGENT_MODELS`（gateway と agent に同じ値。未設定なら `AGENT_MODEL` だけ）で決まり、単価は pi-ai のカタログ由来（許可リスト: `packages/models`）。OpenAI のモデルは AI Gateway に OpenAI のキーを BYOK 登録すると使える（対象リポジトリのコードが OpenAI にも送られる。利用上限は OpenAI 側で設定する。`docs/deploy.md`）。`budget_status` で月の残りを確かめられる。
+- モデルの選択と予算（D10）: `models_list` で使えるモデルと単価を見て、`task_start` の `model` をタスクの難しさで選ぶ。使えるモデルは env の `AGENT_MODELS`（gateway と agent に同じ値。未設定なら `AGENT_MODEL` だけ）で決まり、単価は pi-ai のカタログ由来（許可リスト: `packages/models`）。OpenAI のモデルは AI Gateway に OpenAI のキーを BYOK 登録すると使える（対象リポジトリのコードが OpenAI にも送られる。利用上限は OpenAI 側で設定する。`docs/deploy.md`）。`budget_status` で月の残りを確かめられる。思考レベル（effort）はタスクごとではなくモデルごとに固定で（初期値: haiku=low、sonnet=high、opus=medium、fable=low、gpt-6-luna=low、gpt-6-sol=medium、gpt-6-astra=low）、`models_list` と `task_status` / `task_result` に出る。思考のトークンは出力として課金されるので、レベルが高いほど費用が増える。env の `MODEL_EFFORTS` で上書きできる。`consult` でモデルがリクエストを拒否した（4xx）ときは、再試行を促さない `model_rejected` を返す。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
 - 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
 - 1 タスクにつき既定で $10（env `TASK_BUDGET_USD`。0 以下・不正な値は 10）を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。子エージェントの予算の上限（`budgetUsd`）にも同じ値を渡す。足りなければ `budget_exceeded`。月額の枠を 10 未満にするときは `TASK_BUDGET_USD` も下げる（受入試験で数ドルに抑えたいとき）。
@@ -158,6 +158,7 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `GITHUB_APP_ID` | GitHub App の App ID（秘密ではない）。Installation Access Token の発行（JWT の `iss`）に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる（fail closed） |
 | `DRAFT_PR_FALLBACK` | Draft PR を作れないリポジトリ（Free プランの private リポジトリなど）での扱い。`fail`（既定。タスクを `draft_pr_unsupported` で FAILED にする）/ `ready`（`[WIP]` を付けた通常の PR を作り、本文冒頭に注記し、警告 `draft_pr_unavailable` を付ける）。**不正な値は `fail` として扱う**。判定は Draft に関する 422 のときだけ |
 | `AGENT_MODEL` / `AGENT_MODELS` | 既定のモデルと、`task_start` / `consult` の `model` に選べるモデル（カンマ区切り。空なら `AGENT_MODEL` だけ）。agent の同名の変数と同じ値にする（D10） |
+| `MODEL_EFFORTS`（変数） | モデルごとの思考レベルの上書き（`<モデルの id>=<off\|minimal\|low\|medium\|high\|xhigh\|max>` のカンマ区切り。空なら既定）。agent の同名の変数と同じ値にする |
 | `CONSULT_BUDGET_USD` | `consult` 1 回に月額の枠から予約する額（USD。既定 0.5。実費で精算する。0 以下・不正な値は 0.5）（D10） |
 | `PR_SHOW_COST` | `true` のときだけ、費用を PR 本文に載せる（既定は載せない。公開リポジトリでは誰でも見られるため） |
 
@@ -177,6 +178,7 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `AI_GATEWAY_ID`（変数） | AI Gateway の ID。空だと `start` が `ai_gateway_not_configured` で拒否される |
 | `AGENT_MODEL`（変数） | 既定のモデル（既定 `anthropic/claude-sonnet-5-5`。許可リスト `packages/models` にあるものだけ） |
 | `AGENT_MODELS`（変数） | `task_start` の `model` と `consult` の `model` に使えるモデル（カンマ区切り。空なら `AGENT_MODEL` だけ）。gateway の同名の変数と同じ値にする |
+| `MODEL_EFFORTS`（変数） | モデルごとの思考レベルの上書き（空なら既定）。gateway の同名の変数と同じ値にする。実際に Pi へ渡すのはこの値 |
 | `ENVIRONMENT`（変数） | `production`（既定）。E2E だけ `test` |
 
 | `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` / `WEB_BROWSE_LIMIT_PER_TASK`（変数） | 子の `web_search` / `web_fetch` / `web_browse` のタスクごとの回数の上限（既定 50 / 100 / 20）。0 以上の整数のみ。不正な値は既定に戻る |
@@ -287,7 +289,7 @@ mise run dev
 ## エラー
 
 ツールのエラーは `isError: true` で、本文は `{"code", "message", "retry_after_seconds"?}` の JSON。`code` は
-`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded`（月額の枠が足りず `task_start` を拒否。待っても空かない）/ `quota_exceeded`（web の1日の上限）/ `not_ready`（`task_result` の対象がまだ終端でない）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。`task_pr_ready` / `task_pr_merge` では、GitHub の拒否を表す `merge_blocked`（ブランチ保護など。メッセージに GitHub の理由）/ `head_moved`（検証後にブランチが動いた）/ `github_rejected` も返る。
+`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded`（月額の枠が足りず `task_start` を拒否。待っても空かない）/ `quota_exceeded`（web の1日の上限）/ `not_ready`（`task_result` の対象がまだ終端でない）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。`consult` では、モデルがリクエストの中身を拒否した（4xx）ときの `model_rejected`（待っても直らない。`retry_after_seconds` なし）も返る。`task_pr_ready` / `task_pr_merge` では、GitHub の拒否を表す `merge_blocked`（ブランチ保護など。メッセージに GitHub の理由）/ `head_moved`（検証後にブランチが動いた）/ `github_rejected` も返る。
 `reauth_required` は GitHub 資格を回復できないとき（MCP のトークンが有効でも）で、再ログインが必要。`internal` は想定外の失敗で、詳細は応答に含めない。
 
 ## セキュリティ

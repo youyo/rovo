@@ -150,6 +150,8 @@ export async function setConsultScript(
   step: {
     text?: string;
     usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+    /** 失敗を返す（model_rejected = モデルの 4xx、model_error = 5xx など）。費用は 0 */
+    fail?: { code: "model_rejected" | "model_error" };
   },
 ): Promise<void> {
   const res = await fetch(`${baseUrl}/__test/agent/set-script`, {

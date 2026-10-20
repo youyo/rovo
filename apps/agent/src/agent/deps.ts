@@ -20,6 +20,8 @@ export interface AgentTestOverrides {
   /** 台本付き fake モデルの台本 */
   script?: ScriptStep[];
   modelId?: string;
+  /** env の MODEL_EFFORTS の代わり（test では wrangler.jsonc の値を使わず、テストごとに上書きする） */
+  modelEfforts?: string;
   maxOutputTokens?: number;
   /** cancel が abort / stop の完了を待つ上限（ms） */
   cancelWaitMs?: number;
@@ -50,6 +52,7 @@ export interface AgentTestOverrides {
     maxTokens?: number;
     metadata?: Record<string, unknown>;
     systemText?: string;
+    reasoning?: string;
   }) => void;
 }
 

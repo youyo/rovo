@@ -12,6 +12,9 @@ const LOCKFILES = [
   { path: "yarn.lock", command: "yarn install --frozen-lockfile" },
 ] as const;
 
+/** 再帰 tree の取得に許す時間（ms）。超えたらキャッシュなしで続ける（タスクの開始を遅らせない） */
+export const DEPS_DETECT_TIMEOUT_MS = 10_000;
+
 const BLOB_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /** detectDeps が使う GitHub API の部分（GitHubRepoApi の一部。テストで差し替える） */
@@ -19,7 +22,7 @@ export interface DepsApi {
   getCommit(sha: string): Promise<{ sha: string; treeSha: string }>;
   getTree(
     treeSha: string,
-    opts?: { recursive?: boolean },
+    opts?: { recursive?: boolean; signal?: AbortSignal },
   ): Promise<{
     truncated: boolean;
     entries: { path: string; mode: string; type: string; sha: string }[];
@@ -46,11 +49,23 @@ export async function detectDeps(
   api: DepsApi,
   repositoryId: number,
   baseSha: string,
+  timeoutMs: number = DEPS_DETECT_TIMEOUT_MS,
 ): Promise<DepsDto | null> {
   if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) return null;
+  const signal = AbortSignal.timeout(timeoutMs);
+  // API が signal を見ない実装でも期限で戻れるよう、期限切れで reject する Promise と競わせる
+  const expired = new Promise<never>((_, reject) => {
+    signal.addEventListener("abort", () => reject(new Error("deps detect timeout")), {
+      once: true,
+    });
+  });
+  expired.catch(() => {});
   try {
-    const commit = await api.getCommit(baseSha);
-    const tree = await api.getTree(commit.treeSha, { recursive: true });
+    const commit = await Promise.race([api.getCommit(baseSha), expired]);
+    const tree = await Promise.race([
+      api.getTree(commit.treeSha, { recursive: true, signal }),
+      expired,
+    ]);
     if (tree.truncated) return null;
     const rootFile = (name: string) =>
       tree.entries.find((e) => e.path === name && isRegularBlob(e))?.sha ?? null;

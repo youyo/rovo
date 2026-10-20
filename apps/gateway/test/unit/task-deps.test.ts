@@ -47,6 +47,21 @@ describe("TaskSpec.deps", () => {
     });
   });
 
+  it("入れ子の package.json（workspace の各パッケージ）があれば manifestsSha が非 null で、pnpm-workspace.yaml は workspaceSha に載る", async () => {
+    await app().seedRootFiles(REPO, BASE, {
+      "pnpm-lock.yaml": BLOB,
+      "package.json": "e".repeat(40),
+      "pnpm-workspace.yaml": "d".repeat(40),
+      "packages/a/package.json": "1".repeat(40),
+    });
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    expect(await statusOf(stub)).toBe("RUNNING");
+    const deps = (await agent.calls()).specs[0]?.deps;
+    expect(deps?.workspaceSha).toBe("d".repeat(40));
+    expect(deps?.manifestsSha).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("lockfile が無ければ deps: null（キャッシュなし）", async () => {
     await app().seedRootFiles(REPO, BASE, { "package.json": "e".repeat(40) });
     const { stub, agent } = await createTask();

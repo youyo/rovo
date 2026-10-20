@@ -56,6 +56,22 @@ describe("GitHubRepoApi.getTree（D14: ルート直下の lockfile の blob SHA 
     expect(new URL(calls[0]?.url ?? "").search).toBe("?recursive=1");
   });
 
+  it("signal を渡すと fetch に伝わる（既定では付けない）", async () => {
+    const { a, calls } = api({
+      [`GET /repos/acme/widgets/git/trees/${TREE}`]: [
+        () => json({ tree: [] }),
+        () => json({ tree: [] }),
+      ],
+    });
+    await a.getTree(TREE);
+    const ctl = new AbortController();
+    ctl.abort();
+    await a.getTree(TREE, { signal: ctl.signal });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.signal.aborted).toBe(false);
+    expect(calls[1]?.signal.aborted).toBe(true);
+  });
+
   it("形が違う項目は読み飛ばす。tree が配列でなければ unexpected response", async () => {
     const { a } = api({
       [`GET /repos/acme/widgets/git/trees/${TREE}`]: [

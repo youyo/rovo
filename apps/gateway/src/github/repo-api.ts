@@ -60,6 +60,7 @@ export class GitHubRepoApi {
     url: string,
     body?: unknown,
     accept: readonly number[] = [],
+    signal?: AbortSignal,
   ): Promise<{ status: number; json: unknown }> {
     let res: Response;
     try {
@@ -73,6 +74,7 @@ export class GitHubRepoApi {
           ...(body !== undefined ? { "content-type": "application/json" } : {}),
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        ...(signal ? { signal } : {}),
       });
     } catch {
       throw new GitHubApiError({ status: 0, what });
@@ -108,7 +110,7 @@ export class GitHubRepoApi {
    */
   async getTree(
     treeSha: string,
-    opts: { recursive?: boolean } = {},
+    opts: { recursive?: boolean; signal?: AbortSignal } = {},
   ): Promise<{
     truncated: boolean;
     entries: { path: string; mode: string; type: string; sha: string }[];
@@ -118,6 +120,9 @@ export class GitHubRepoApi {
       what,
       "GET",
       this.repoPath(`/git/trees/${enc(treeSha)}${opts.recursive ? "?recursive=1" : ""}`),
+      undefined,
+      [],
+      opts.signal,
     );
     const b = json as { tree?: unknown; truncated?: unknown } | null;
     if (!Array.isArray(b?.tree)) return this.bad(what);

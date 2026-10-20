@@ -1051,6 +1051,8 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 
 - タスク単位の上限（初期値 $10 / Task）に加え、ユーザー単位の月額上限を設ける。
 - 同時に実行できるタスクは、ユーザーごとに1つまでとする。
+- **子のモデル呼び出し前の判定**（`AgentDO.preModelCall`）: 入力は、直前の呼び出しでプロバイダーが返した実測（input + cacheRead + cacheWrite）に、前回以降に context へ足された分をバイト数（トークン数の上限）で足す。実測が無い初回は context 全体のバイト数。単価は入力・出力とも最大値のまま（少なく数えない）。出力は即 block せず、残額に収まる `maxTokens`（`maxOutputTokensWithin`）まで絞って呼ぶ。収まる出力が 1,024 トークンを割るときだけ `budget_exceeded` で止める。
+- **予算超過で止まったときの結果**: 作業ブランチへ push 済みの SHA（チェックポイントの push を含む）を `pushedSha` に、patch・diffstat を（Sandbox を破棄する前に取れれば）結果に残す。summary が空なら停止理由と最後に push した commit を固定文で入れる。PR の `head_sha` は記録するが、検証した commit が無いので `head_matches_verified` は false。cancel・期限・回答待ちの期限は Sandbox を直ちに破棄するので、patch は残さない（`pushedSha` と summary は同じ）。
 
 ### 15.5 Web 取得結果の安全性評価
 

@@ -29,6 +29,8 @@ export interface AgentTestOverrides {
   finalizeWaitMs?: number;
   /** 費用の読み取り（pi.usage）を待つ上限（ms）。既定 2000 */
   usageReadWaitMs?: number;
+  /** 停止（予算・期限など）の確定で patch の取得を待つ上限（ms）。テスト用 */
+  stopPatchWaitMs?: number;
   /** 完了時の push の再試行の間隔（ms）。既定 2000 */
   pushRetryDelayMs?: number;
   /** refreshUsage が Pi の usage を読む直前に待つ（読み取りが遅れて戻るケースの再現用） */

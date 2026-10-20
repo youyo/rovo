@@ -7,7 +7,7 @@ import {
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { guardProvider } from "../../src/pi/guard-provider";
+import { capOutputTokens, guardProvider } from "../../src/pi/guard-provider";
 
 const message = (model: Model<Api>): AssistantMessage => ({
   role: "assistant",
@@ -292,5 +292,34 @@ describe("guardProvider の出力上限の二重化（payload）", () => {
     const guarded = guardProvider(inner, async () => ({ maxTokens: 100, metadata: {} }));
     await guarded.streamSimple(anthropicModel, context, {} as never).result();
     expect(seen).toEqual(payload);
+  });
+});
+
+describe("capOutputTokens: budget 方式の thinking", () => {
+  it("max_tokens を下げたとき、budget_tokens が max_tokens 未満になるよう下げる", () => {
+    const out = capOutputTokens(
+      { max_tokens: 16_000, thinking: { type: "enabled", budget_tokens: 8_000 } },
+      6_000,
+    ) as { max_tokens: number; thinking: { type: string; budget_tokens?: number } };
+    expect(out.max_tokens).toBe(6_000);
+    expect(out.thinking.type).toBe("enabled");
+    expect(out.thinking.budget_tokens).toBeLessThan(6_000);
+    expect(out.thinking.budget_tokens).toBeGreaterThanOrEqual(1_024);
+  });
+
+  it("下げた budget が最小（1,024）を割るなら、thinking を無効にする", () => {
+    const out = capOutputTokens(
+      { max_tokens: 16_000, thinking: { type: "enabled", budget_tokens: 8_000 } },
+      1_500,
+    ) as { max_tokens: number; thinking: { type: string; budget_tokens?: number } };
+    expect(out.max_tokens).toBe(1_500);
+    expect(out.thinking).toEqual({ type: "disabled" });
+  });
+
+  it("budget が max_tokens 未満のままなら触らない。thinking が無い payload も触らない", () => {
+    const a = { max_tokens: 4_000, thinking: { type: "enabled", budget_tokens: 2_000 } };
+    expect(capOutputTokens(a, 6_000)).toBe(a);
+    const b = { max_tokens: 16_000 };
+    expect(capOutputTokens(b, 6_000)).toEqual({ max_tokens: 6_000 });
   });
 });

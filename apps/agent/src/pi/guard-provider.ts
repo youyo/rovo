@@ -101,8 +101,26 @@ export function capOutputTokens(payload: unknown, maxTokens: number): unknown {
       out[key] = maxTokens;
     }
   }
+  // budget 方式の thinking は budget_tokens < max_tokens でないと 400 になる（費用ではなく model_error になる）。
+  // max_tokens を絞ったら budget も合わせて下げる。Anthropic の最小（1,024）を割るなら思考を無効にする
+  const thinking = (out ?? p).thinking as { type?: unknown; budget_tokens?: unknown } | undefined;
+  const max = (out ?? p).max_tokens;
+  if (
+    out !== undefined &&
+    typeof max === "number" &&
+    thinking?.type === "enabled" &&
+    typeof thinking.budget_tokens === "number" &&
+    thinking.budget_tokens >= max
+  ) {
+    const budget = Math.floor(max / 2);
+    out.thinking =
+      budget >= MIN_THINKING_BUDGET ? { ...thinking, budget_tokens: budget } : { type: "disabled" };
+  }
   return out ?? payload;
 }
+
+/** Anthropic の budget 方式の thinking の budget_tokens の最小値 */
+const MIN_THINKING_BUDGET = 1_024;
 
 /** 呼び出し側の onPayload を先に実行し、その結果（なければ元の payload）に補正と出力上限を掛ける。 */
 function withPayloadFixes<O extends StreamOptions>(options: O | undefined, maxTokens: number): O {

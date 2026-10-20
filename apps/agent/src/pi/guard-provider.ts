@@ -25,6 +25,35 @@ const ZERO_USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
+const isAnthropicModel = (model: Model<Api>): boolean =>
+  model.api === "anthropic-messages" || /claude/i.test(model.id);
+
+/**
+ * Pi 1.3.0 は思考を使わないとき（reasoning 未指定）に thinking: {type:"disabled"} を送るが、
+ * claude-sonnet-5-5 はこれを 400 で拒否し、"between_tools" を要求する。送る直前に置き換える。
+ * Anthropic のモデルで thinking.type が "disabled" のときだけ変え、それ以外の payload は触らない。
+ */
+export function fixAnthropicThinking(model: Model<Api>, payload: unknown): unknown {
+  if (!isAnthropicModel(model) || typeof payload !== "object" || payload === null) return payload;
+  const thinking = (payload as { thinking?: { type?: unknown } }).thinking;
+  if (typeof thinking !== "object" || thinking === null || thinking.type !== "disabled") {
+    return payload;
+  }
+  return { ...payload, thinking: { type: "between_tools" } };
+}
+
+/** 呼び出し側の onPayload を先に実行し、その結果（なければ元の payload）に補正を掛ける。 */
+function withThinkingFix<O extends StreamOptions>(options: O | undefined): O {
+  const original = options?.onPayload;
+  return {
+    ...options,
+    onPayload: async (payload: unknown, model: Model<Api>) => {
+      const replaced = await original?.(payload, model);
+      return fixAnthropicThinking(model, replaced === undefined ? payload : replaced);
+    },
+  } as O;
+}
+
 /** 「モデル呼び出し前」のフック。provider を包み、guard が拒否したら上流を呼ばない。 */
 export function guardProvider(inner: Provider, guard: CallGuard): Provider {
   const wrap =
@@ -57,7 +86,7 @@ export function guardProvider(inner: Provider, guard: CallGuard): Provider {
             return;
           }
           const upstream = call(model, context, {
-            ...options,
+            ...withThinkingFix(options),
             maxTokens: Math.min(options?.maxTokens ?? verdict.maxTokens, verdict.maxTokens),
             metadata: { ...options?.metadata, ...verdict.metadata },
           } as O);

@@ -52,6 +52,10 @@
     // モデルが受け付けない値・不正な書式は無視して初期値にする（起動はエラーにしない）。思考のトークンは出力として課金される。gateway の同名の var と同じ値にする。
     // 例: "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off"
     "MODEL_EFFORTS": "",
+    // Sandbox コンテナの大きさ（lite / standard-1 / standard-2 / standard-3 / standard-4）。scheduling_policy が durable_object のとき、
+    // wrangler の instance_type は効かず、SandboxDO が start() の instance に渡す。既定は standard-2（1 vCPU、6 GiB、12 GB）。
+    // 不正な値は standard-2 に戻す（警告のログだけ）。単価（gateway の SANDBOX_USD_PER_HOUR）は大きさに合わせる。docs/deploy.md の 5。
+    "SANDBOX_INSTANCE": "standard-2",
     // ENVIRONMENT=test のときだけ有効。許可した外向き通信の転送先（偽サーバー）。空なら実ネットワークへ出る。
     "TEST_UPSTREAM": "",
     // 子の web_search / web_fetch / web_browse の回数の上限（タスクごと）

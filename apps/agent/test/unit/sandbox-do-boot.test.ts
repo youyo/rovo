@@ -18,7 +18,9 @@ class FakeContainer {
   ) {
     this.running = initiallyRunning;
   }
-  start() {
+  startOptions: unknown[] = [];
+  start(options?: unknown) {
+    this.startOptions.push(options);
     this.startCalls += 1;
     this.running = true;
   }
@@ -252,5 +254,47 @@ describe("起動が止まったコンテナの扱い", () => {
       expect(fake.startCalls).toBe(1);
       expect(fake.running).toBe(false);
     });
+  });
+});
+
+describe("Sandbox のインスタンス（D13）", () => {
+  const bootWith = async (name: string, instanceVar: string | undefined) => {
+    const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName(name);
+    let options: { instance?: unknown; enableInternet?: unknown } | undefined;
+    let warned = "";
+    await runInDO(stub, async (inst: Inst) => {
+      const fake = new FakeContainer(false, 10);
+      fake.scripted = true;
+      inst.maybeContainer = () => fake;
+      if (instanceVar !== undefined) inst.env = { ...inst.env, SANDBOX_INSTANCE: instanceVar };
+      const warn = console.warn;
+      console.warn = (...a: unknown[]) => {
+        warned += a.join(" ");
+      };
+      try {
+        await inst.ensureReady(spec());
+      } finally {
+        console.warn = warn;
+      }
+      options = fake.startOptions[0] as typeof options;
+    });
+    return { options, warned };
+  };
+
+  it("start() に instance を渡す（SANDBOX_INSTANCE の値）。enableInternet は false のまま", async () => {
+    const { options } = await bootWith("inst-std4", "standard-4");
+    expect(options?.instance).toBe("standard-4");
+    expect(options?.enableInternet).toBe(false);
+  });
+
+  it("未設定なら standard-2（lite の 256 MiB では足りない）", async () => {
+    const { options } = await bootWith("inst-default", "");
+    expect(options?.instance).toBe("standard-2");
+  });
+
+  it("不正な値は standard-2 に戻して起動する（エラーにしない）。無視した値は警告に残す", async () => {
+    const { options, warned } = await bootWith("inst-bad", "huge");
+    expect(options?.instance).toBe("standard-2");
+    expect(warned).toContain("huge");
   });
 });

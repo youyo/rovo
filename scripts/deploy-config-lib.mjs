@@ -5,6 +5,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+// Sandbox の大きさと単価の表は packages/models が 1 か所で持つ（依存のないファイルを Node の型除去で読む）
+import {
+  DEFAULT_SANDBOX_INSTANCE,
+  SANDBOX_INSTANCES,
+  sandboxUsdPerHour,
+} from "../packages/models/src/sandbox.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -26,6 +32,7 @@ export const DEFAULTS = {
     ],
     efforts: "",
   },
+  sandbox: { instance: DEFAULT_SANDBOX_INSTANCE },
   webBrowseEnabled: false,
 };
 
@@ -41,6 +48,7 @@ const TOP_KEYS = [
   "allowed",
   "budget",
   "models",
+  "sandbox",
   "webBrowseEnabled",
   "vars",
 ];
@@ -244,6 +252,16 @@ export function validateConfig(raw, templates = loadTemplates()) {
       "models.efforts: `<モデルの id>=<レベル>` のカンマ区切り（空白なし）か、{モデルの id: レベル} にする",
     );
 
+  const sb = isObj(raw.sandbox) ? raw.sandbox : {};
+  if (raw.sandbox !== undefined && !isObj(raw.sandbox)) errors.push("sandbox: オブジェクトにする");
+  for (const k of Object.keys(sb)) if (k !== "instance") errors.push(`sandbox.${k}: 未知のキー`);
+  const sandboxInstance = sb.instance ?? DEFAULT_SANDBOX_INSTANCE;
+  if (!isStr(sandboxInstance) || !Object.hasOwn(SANDBOX_INSTANCES, sandboxInstance)) {
+    errors.push(
+      `sandbox.instance: ${Object.keys(SANDBOX_INSTANCES).join(" / ")} のどれかにする（既定 ${DEFAULT_SANDBOX_INSTANCE}）`,
+    );
+  }
+
   const web = raw.webBrowseEnabled ?? DEFAULTS.webBrowseEnabled;
   if (typeof web !== "boolean") errors.push("webBrowseEnabled: true / false にする");
 
@@ -262,6 +280,8 @@ export function validateConfig(raw, templates = loadTemplates()) {
         continue;
       }
       const allowed = literalVarKeys(templates[app]);
+      // 値は instance から計算するが、明示すればそれを優先する（料金改定・割引の反映）
+      if (app === "gateway") allowed.add("SANDBOX_USD_PER_HOUR");
       for (const [k, v] of Object.entries(kv)) {
         if (!allowed.has(k)) {
           errors.push(
@@ -289,6 +309,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
       allowed: { org, team, userIds },
       budget: b,
       models: { default: modelDefault.trim(), list: modelList, efforts },
+      sandbox: { instance: sandboxInstance },
       webBrowseEnabled: web,
       vars,
     },
@@ -332,6 +353,9 @@ function placeholderValues(config, infra) {
     AGENT_MODEL: config.models.default,
     AGENT_MODELS: config.models.list.join(","),
     MODEL_EFFORTS: config.models.efforts,
+    SANDBOX_INSTANCE: config.sandbox.instance,
+    // 推定費用の単価は instance から決める（vars.gateway.SANDBOX_USD_PER_HOUR を書けば、renderOne の上書きがそれを優先する）
+    SANDBOX_USD_PER_HOUR: String(sandboxUsdPerHour(config.sandbox.instance)),
     WEB_BROWSE_ENABLED: String(config.webBrowseEnabled),
   };
 }

@@ -45,6 +45,7 @@ const productionLike = () => ({
     ],
     efforts: { "anthropic/claude-sonnet-5-5": "medium", "anthropic/claude-haiku-5-5": "off" },
   },
+  sandbox: { instance: "standard-1" },
   webBrowseEnabled: true,
   vars: { gateway: { WEB_SEARCH_DAILY_LIMIT: "300" } },
 });
@@ -131,10 +132,40 @@ describe("既定値", () => {
     assert.equal(g.vars.GITHUB_APP_ID, "");
     assert.match(g.vars.AGENT_MODELS, /workers-ai\/@cf\/openai\/gpt-oss-120b/);
   });
+  it("Sandbox の大きさの既定は standard-2 で、gateway の単価も standard-2 の値になる（D13）", () => {
+    assert.equal(parseJsonc(out.agent).vars.SANDBOX_INSTANCE, "standard-2");
+    assert.equal(parseJsonc(out.gateway).vars.SANDBOX_USD_PER_HOUR, "0.1291");
+  });
   it("GitHub App が未設定でも生成できる（警告は CLI が出す）", () => {
     const r = validateConfig(minimal);
     assert.deepEqual(r.errors, []);
     assert.equal(r.githubAppConfigured, false);
+  });
+});
+
+describe("sandbox.instance（D13）", () => {
+  const gen = (patch) =>
+    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
+  it("agent の SANDBOX_INSTANCE と gateway の SANDBOX_USD_PER_HOUR（instance から計算）に反映される", () => {
+    const o = gen({ sandbox: { instance: "standard-4" } });
+    assert.equal(parseJsonc(o.agent).vars.SANDBOX_INSTANCE, "standard-4");
+    assert.equal(parseJsonc(o.gateway).vars.SANDBOX_USD_PER_HOUR, "0.4011");
+    const l = gen({ sandbox: { instance: "lite" } });
+    assert.equal(parseJsonc(l.gateway).vars.SANDBOX_USD_PER_HOUR, "0.0073");
+  });
+  it("vars.gateway.SANDBOX_USD_PER_HOUR を書けばそれを優先する（上書きできる）", () => {
+    const o = gen({
+      sandbox: { instance: "standard-4" },
+      vars: { gateway: { SANDBOX_USD_PER_HOUR: "0.5" } },
+    });
+    assert.equal(parseJsonc(o.gateway).vars.SANDBOX_USD_PER_HOUR, "0.5");
+  });
+  it("名前付きの 5 種類以外・型の誤り・未知のキーはエラー", () => {
+    const bad = (sandbox) => validateConfig({ ...productionLike(), sandbox }).errors;
+    assert.ok(bad({ instance: "basic" }).some((e) => e.includes("sandbox.instance")));
+    assert.ok(bad({ instance: 2 }).some((e) => e.includes("sandbox.instance")));
+    assert.ok(bad({ instanse: "lite" }).some((e) => e.includes("sandbox.instanse")));
+    assert.ok(bad("lite").some((e) => e.includes("sandbox")));
   });
 });
 

@@ -134,7 +134,7 @@ apps/gateway (既存 Worker)
 
 ## SandboxDO
 
-- `ctx.container.start({enableInternet: false})`。インスタンスタイプは `standard-1`。
+- `ctx.container.start({enableInternet: false})`。インスタンスタイプは当初 `standard-1` としたが、`start()` に指定しておらず `lite` で動いていた。D13（design.md の 15.8）で `SANDBOX_INSTANCE`（既定 `standard-2`）を渡すようにした。
 - `ensureRunning()`
   - すべての操作の前に必ず通す。
   - コンテナが止まっていたら起動し、`/workspace` が空なら `git clone` → `git checkout <base_sha>` → 作業ブランチ `agent/task-<id>` を作る。

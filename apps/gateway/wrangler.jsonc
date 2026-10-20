@@ -46,9 +46,10 @@
     // 有効にする前に、docs/specs/acceptance.md の「web_browse（有効化前のゲート）」を満たすこと。apps/web と apps/agent の同名の var も合わせる。
     "WEB_BROWSE_ENABLED": "false",
     // 要約（task_summary / summary.json）の「推定」金額の単価（USD）。Cloudflare の公式料金表（取得日 2026-10-19）の既定値で、
-    // 料金改定や instance_type の変更に合わせて下流が上書きする。タスクの予算（$10）には含めない。出典は docs/specs/phase6.md。
-    // Sandbox: Containers の lite を CPU 100% 稼働で 1 時間（月の無料枠は差し引かない上限側の推定）
-    "SANDBOX_USD_PER_HOUR": "0.0073",
+    // 料金改定や agent の SANDBOX_INSTANCE の変更に合わせて下流が上書きする（deploy:config は sandbox.instance から計算する）。タスクの予算（$10）には含めない。出典は docs/specs/phase6.md。
+    // Sandbox: Containers の standard-2（既定の SANDBOX_INSTANCE。1 vCPU・6 GiB・12 GB）を CPU 100% 稼働で 1 時間（月の無料枠は差し引かない上限側の推定）。
+    // 未設定・不正なら packages/models が決める standard-2 の値。agent の SANDBOX_INSTANCE を変えたら、packages/models の sandboxUsdPerHour と同じ値にする
+    "SANDBOX_USD_PER_HOUR": "0.1291",
     // Web（子が使った分）: 1,000 回あたり。search は Web Search API の ceramic、browse は Browser Run 30 秒/回の上限側の推定
     "WEB_USD_PER_1K_SEARCH": "0.25",
     "WEB_USD_PER_1K_FETCH": "0",

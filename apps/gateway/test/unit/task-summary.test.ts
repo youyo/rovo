@@ -1,3 +1,4 @@
+import { DEFAULT_SANDBOX_INSTANCE, sandboxUsdPerHour } from "@rovo/models";
 import { describe, expect, it } from "vitest";
 import {
   buildTaskSummary,
@@ -145,6 +146,11 @@ describe("buildTaskSummary", () => {
 });
 
 describe("parsePrices（単価。vars の既定値を下流が上書きできる）", () => {
+  it("Sandbox の既定の単価は、既定のインスタンス（standard-2）の上限側の単価（packages/models が 1 か所で決める）", () => {
+    expect(DEFAULT_PRICES.sandboxUsdPerHour).toBe(0.1291);
+    expect(DEFAULT_PRICES.sandboxUsdPerHour).toBe(sandboxUsdPerHour(DEFAULT_SANDBOX_INSTANCE));
+  });
+
   it("未設定・不正な値は既定値、正しい値は上書きになる。0 は許す（無料）", () => {
     expect(parsePrices({})).toEqual(DEFAULT_PRICES);
     expect(

@@ -704,9 +704,14 @@ describe("セッションの確認（GET /dashboard/api/me）とログアウト"
 
   async function loggedIn(env: Env, user = newGithubUser()) {
     const { state, cookie } = await beginLogin(env);
-    const res = await callback(env, githubFetch(user), cb(state), cookie);
+    const upstream = githubFetch(user);
+    const res = await callback(env, upstream, cb(state), cookie);
     const session = sessionCookieOf(res);
     expect(session).not.toBe("");
+    // /me は使うたびに許可ルールを確かめ直す（UserDO が GitHub を呼ぶ）。偽の GitHub を UserDO に差し込む
+    await runInDurableObject(userStub(user.userId), (i) => {
+      (i as unknown as { githubFetch: typeof fetch }).githubFetch = upstream.fetch;
+    });
     return { user, session };
   }
 
@@ -821,6 +826,56 @@ describe("セッションの確認（GET /dashboard/api/me）とログアウト"
     const second = await loggedIn(env, first.user);
     expect((await me(env, { ...SAME, cookie: first.session })).status).toBe(401);
     expect((await me(env, { ...SAME, cookie: second.session })).status).toBe(200);
+  });
+
+  it("許可ルールから外れた利用者は、セッションが生きていても /me が 401（使うたびに確かめ直す）", async () => {
+    const { env } = makeEnv();
+    const { user, session } = await loggedIn(env);
+    expect((await me(env, { ...SAME, cookie: session })).status).toBe(200);
+    // ルールの変更（user ID のルールだけにして、本人を外す）
+    await runInDurableObject(userStub(user.userId), (i) => {
+      const o = i as unknown as { env: Record<string, unknown> };
+      o.env = {
+        ...o.env,
+        ALLOWED_ORG: "",
+        ALLOWED_TEAM: "",
+        ALLOWED_USER_IDS: String(user.userId + 1),
+      };
+    });
+    const res = await me(env, { ...SAME, cookie: session });
+    expect(res.status).toBe(401);
+    expect(await res.text()).toBe(JSON.stringify({ error: "unauthorized" }));
+    // 許可ルールが不正・未設定になっても同じ
+    await runInDurableObject(userStub(user.userId), (i) => {
+      const o = i as unknown as { env: Record<string, unknown> };
+      o.env = { ...o.env, ALLOWED_ORG: "", ALLOWED_TEAM: "", ALLOWED_USER_IDS: "" };
+    });
+    expect((await me(env, { ...SAME, cookie: session })).status).toBe(401);
+  });
+
+  it("team から外れた利用者は（キャッシュが切れたあと）/me が 401。GitHub の障害で確かめられないときは 503（通さない）", async () => {
+    const { env } = makeEnv();
+    const { user, session } = await loggedIn(env);
+    let t = Date.now();
+    await runInDurableObject(userStub(user.userId), (i) => {
+      (i as unknown as { now: () => number }).now = () => t;
+    });
+    expect((await me(env, { ...SAME, cookie: session })).status).toBe(200);
+    // キャッシュ（5 分）が切れたあと、GitHub が 500 を返す
+    t += 6 * 60_000;
+    const down = routerFetch({ "GET /user": () => json({ message: "x" }, { status: 500 }) });
+    await runInDurableObject(userStub(user.userId), (i) => {
+      (i as unknown as { githubFetch: typeof fetch }).githubFetch = down.fetch;
+    });
+    const res = await me(env, { ...SAME, cookie: session });
+    expect(res.status).toBe(503);
+    expect(await res.text()).not.toContain(user.login);
+    // 復旧したが team から外れている
+    const gone = githubFetch({ ...user, team: "none" });
+    await runInDurableObject(userStub(user.userId), (i) => {
+      (i as unknown as { githubFetch: typeof fetch }).githubFetch = gone.fetch;
+    });
+    expect((await me(env, { ...SAME, cookie: session })).status).toBe(401);
   });
 
   it("MCP の再ログイン（saveCredential）ではダッシュボードのセッションは落ちない", async () => {

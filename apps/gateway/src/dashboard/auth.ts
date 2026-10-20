@@ -231,6 +231,14 @@ export async function finishDashboardLogin(
   return new Response(null, { status: 302, headers });
 }
 
+/** 許可ルールを確かめられない障害（GitHub の障害など）。呼び出し側は 503 にする（401 にするとセッションの失効と区別できない）。 */
+export class DashboardUnavailableError extends Error {
+  constructor() {
+    super("dashboard authorization is temporarily unavailable");
+    this.name = "DashboardUnavailableError";
+  }
+}
+
 export interface DashboardSession {
   uid: number;
   sid: string;
@@ -239,18 +247,24 @@ export interface DashboardSession {
 
 /**
  * セッションの検証（認証のミドルウェア）。Cookie の復号・期限 → UserDO の記録（失効・無操作・世代）の順に確かめる。
- * 失敗の理由は区別しない（呼び出し側は一律 401）。UserDO を引けない障害は例外のまま投げる。
+ * 失敗の理由は区別しない（呼び出し側は一律 401）。UserDO を引けない障害・許可ルールを確かめられない障害は例外
+ * （DashboardUnavailableError など）のまま投げ、呼び出し側が 503 にする。許可ルールはセッションを使うたびに確かめ直す（M5a）。
  */
 export async function requireSession(request: Request, env: Env): Promise<DashboardSession | null> {
   const value = readCookie(request.headers.get("cookie"), SESSION_COOKIE);
   if (value === null) return null;
   const claims = await openSession(env.TOKEN_ENC_KEY, value, Date.now());
   if (claims === null) return null;
-  const checked = await env.USER_DO.getByName(String(claims.uid)).checkDashboardSession(
+  // セッションの記録に加え、使うたびに今の許可ルールを確かめ直す（外れた利用者は、セッションが生きていても通さない）
+  const checked = await env.USER_DO.getByName(String(claims.uid)).authorizeDashboardSession(
+    claims.uid,
     claims.sid,
     claims.ver,
   );
-  return checked.ok ? { uid: claims.uid, sid: claims.sid, login: checked.login } : null;
+  if (checked.ok) return { uid: claims.uid, sid: claims.sid, login: checked.login };
+  // GitHub に確かめられない障害は 401 にしない（通さず、呼び出し側が 503 にする。セッションは消えない）
+  if (checked.kind === "unavailable") throw new DashboardUnavailableError();
+  return null;
 }
 
 const UNAUTHORIZED = () => jsonResponse(401, { error: "unauthorized" });

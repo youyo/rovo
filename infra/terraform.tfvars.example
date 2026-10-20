@@ -22,6 +22,9 @@ account_id = "<YOUR_ACCOUNT_ID>"
 # AI Gateway のログ収集
 # ai_gateway_collect_logs = true
 
+# AI Gateway のログ分類（User Insights のタスクとモデルの分析）。プロンプトと応答を Cloudflare が分類する。collect_logs が必要
+# ai_gateway_log_classification = false
+
 # Logpush のジョブを有効にするか
 # logpush_enabled = true
 

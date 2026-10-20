@@ -79,6 +79,7 @@ resource "cloudflare_ai_gateway" "this" {
   authentication             = true
   byok_only                  = true
   collect_logs               = var.ai_gateway_collect_logs
+  log_classification         = var.ai_gateway_log_classification
   cache_ttl                  = 0
   cache_invalidate_on_update = false
   rate_limiting_interval     = 0

@@ -46,7 +46,7 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 ## 既定の設定と理由
 
 - **R2 のライフサイクル**: アーカイブ 90 日、監査 365 日で削除（変数 `archive_retention_days` / `audit_retention_days`。1 以上の整数）。対象はバケット全体（prefix なし）。Cloudflare の API は秒で受けるので、日数 × 86400 を渡している。
-- **AI Gateway**: 認証あり（BYOK の前提。agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼び、バインディングからの呼び出しは認証済みとして扱われるので、gateway token は要らない）、Require provider credentials（`byok_only`。BYOK のキーが無いときに Unified Billing〔Cloudflare のクレジット〕へ流さず、400 で止める）、ログ収集あり（`ai_gateway_collect_logs`。誰がいくら使ったかの集計に使う）、キャッシュなし（TTL 0。モデルの応答を使い回さない）、レート制限なし（0 = 無効）。費用の上限は Gateway 側ではなく、gateway の `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` が担う。費用の上限を Gateway 側にも持ちたい場合は、AI Gateway の画面で spend limits を足す。
+- **AI Gateway**: 認証あり（BYOK の前提。agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼び、バインディングからの呼び出しは認証済みとして扱われるので、gateway token は要らない）、Require provider credentials（`byok_only`。BYOK のキーが無いときに Unified Billing〔Cloudflare のクレジット〕へ流さず、400 で止める）、ログ収集あり（`ai_gateway_collect_logs`。誰がいくら使ったかの集計に使う）、ログ分類なし（`ai_gateway_log_classification`。有効にすると User Insights のタスクとモデルの分析が出るが、Cloudflare が保存されたプロンプトと応答〔対象リポジトリのコードを含む〕を分類する。ログ収集が前提。Beta。User Insights は追加費用なしとされているが、ログ分類個別の料金は明記されていない）、キャッシュなし（TTL 0。モデルの応答を使い回さない）、レート制限なし（0 = 無効）。費用の上限は Gateway 側ではなく、gateway の `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` が担う。費用の上限を Gateway 側にも持ちたい場合は、AI Gateway の画面で spend limits を足す。
 - **Logpush のフィールド**: `Event`, `EventTimestampMs`, `Exceptions`, `Logs`, `Outcome`, `ScriptName`（監査行は `Logs` に入る。API がアルファベット順に並べ替えるので、その順で書く）。時刻は RFC 3339。宛先のパスは `workers_trace_events/{DATE}/`。
 - **Worker の名前**: `worker_names`（既定 `rovo-gateway` / `rovo-agent` / `rovo-web`）。各 wrangler 設定の `name` と一致させる。名前を変えたときは、この変数も変える（合わないと、そのログは送られない）。
 

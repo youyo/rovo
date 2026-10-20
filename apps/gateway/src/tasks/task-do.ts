@@ -2748,7 +2748,8 @@ function sandboxRuntimeUsage(sb: UsageDto["sandbox"]): { sandbox_runtime_ms?: nu
   if (typeof sb !== "object" || sb === null) return {};
   const ms = sb.runtimeMs;
   return {
-    sandbox_runtime_ms: typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0,
+    sandbox_runtime_ms:
+      typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0,
   };
 }
 

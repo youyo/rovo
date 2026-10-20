@@ -22,6 +22,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +31,10 @@ import { pathToFileURL } from "node:url";
 const MANAGERS = new Set(["pnpm", "yarn"]);
 /** 完全に決まった版だけ（範囲・タグ・シェルに渡る文字は受け付けない） */
 const VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+/** corepack の packageManager のハッシュ固定。<アルゴリズム>.<hex> だけ受け付ける */
+const HASH = /^sha(1|224|256|384|512)\.[0-9a-f]+$/;
+/** 異常終了で残った一時ディレクトリとみなす古さ（動いている別の実行のものは消さない） */
+const STALE_MS = 10 * 60_000;
 const ATTEMPTS = 3;
 const RETRY_MS = Number(process.env.ROVO_PM_PREPARE_RETRY_MS ?? "1000");
 
@@ -50,9 +55,14 @@ function parseSpec(raw) {
   const at = raw.indexOf("@");
   if (at <= 0) return null;
   const name = raw.slice(0, at);
-  const version = raw.slice(at + 1).split("+")[0];
+  const parts = raw.slice(at + 1).split("+");
+  const version = parts[0];
   if (!MANAGERS.has(name) || !VERSION.test(version)) return null;
-  return { name, version };
+  // ハッシュ固定（+sha512.<hex>）。形が違うもの・複数の + は、何もしない（従来どおり corepack に任せる）
+  if (parts.length > 2) return null;
+  const hash = parts[1];
+  if (hash !== undefined && !HASH.test(hash)) return null;
+  return { name, version, hash };
 }
 
 function specFromArg(arg) {
@@ -94,6 +104,37 @@ try {
   process.exit(1);
 }
 
+/** キャッシュ済みの wrapper があるか。ハッシュ固定があるときは、キャッシュ時のハッシュが同じものだけ */
+function hasWrapper(dir, hash) {
+  const meta = join(dir, ".corepack");
+  if (!existsSync(meta)) return false;
+  if (!hash) return true;
+  try {
+    return JSON.parse(readFileSync(meta, "utf8")).hash === hash;
+  } catch {
+    return false;
+  }
+}
+
+/** 異常終了(SIGKILL など)で残った古い一時ディレクトリを消す。スナップショットに入れない */
+function sweepStale(dir) {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (!n.startsWith(".pm-prepare-")) continue;
+    try {
+      const p = join(dir, n);
+      if (Date.now() - statSync(p).mtimeMs > STALE_MS) rmSync(p, { recursive: true, force: true });
+    } catch {
+      // 掃除の失敗で用意を止めない
+    }
+  }
+}
+
 async function prepare(spec) {
   if (!spec) return;
 
@@ -101,13 +142,11 @@ async function prepare(spec) {
   const dir = join(home, "v1", spec.name, spec.version);
 
   // 1) wrapper（小さい JS）を corepack のキャッシュへ。有効化（lastKnownGood の更新）はしない
-  if (!existsSync(join(dir, ".corepack"))) {
-    const r = attempt("corepack", [
-      "install",
-      "-g",
-      "--cache-only",
-      `${spec.name}@${spec.version}`,
-    ]);
+  sweepStale(dir);
+  if (!hasWrapper(dir, spec.hash)) {
+    // ハッシュ固定があれば、ハッシュ込みの完全な spec を渡して corepack に検証させる(一致しなければ置かれない)
+    const full = `${spec.name}@${spec.version}${spec.hash ? `+${spec.hash}` : ""}`;
+    const r = attempt("corepack", ["install", "-g", "--cache-only", full]);
     if (!r.ok) fail("corepack_failed", r.out);
   }
 

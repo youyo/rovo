@@ -66,6 +66,8 @@ const CLONE_TIMEOUT_MS = 5 * 60_000;
 /** pnpm / yarn の本体を用意するスクリプト（Dockerfile が置く）と、その期限。 */
 const PM_PREPARE_SCRIPT = "/usr/local/lib/rovo/pm-prepare.mjs";
 const PM_PREPARE_TIMEOUT_MS = 3 * 60_000;
+/** 残り時間がこれ未満なら、用意しない(間に合わない) */
+const PM_PREPARE_MIN_MS = 10_000;
 /**
  * コンテナが ready になる（exec が応答する）までの 1 回あたりの期限。
  * 正常な起動は E2E の実測で ensureReady 全体が 0.9 秒前後（最大 0.92 秒、clone を含む）。その約 25 倍を見る。
@@ -885,7 +887,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     await this.prepareWorkspace(spec);
     this.assertBootCurrent(g);
     this.recordDepsStatus(await this.finishDeps(deps, restoring));
-    await this.preparePackageManager();
+    // 起動をタスクの期限の先までブロックしない(足りなければ諦める。corepack が従来どおり自分で取る)
+    await this.preparePackageManager(spec.deadlineAt);
     await this.armAlarm();
     return started;
   }
@@ -977,7 +980,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
    */
   private async preparePackageManager(until = Number.POSITIVE_INFINITY): Promise<void> {
     const timeoutMs = Math.min(PM_PREPARE_TIMEOUT_MS, until - Date.now());
-    if (timeoutMs <= 0) return;
+    if (timeoutMs < PM_PREPARE_MIN_MS) return;
     const r = await this.rawExec(["node", PM_PREPARE_SCRIPT, WORKSPACE], {
       timeoutMs,
       cwd: "/",

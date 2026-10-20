@@ -389,7 +389,7 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
 | GitHub App の callback URL を更新する API の有無 | **M4** | GitHub Docs。案 B を取るので影響は小さい（記録のため） |
 | localhost で Chromium が `Secure` / `__Host-` の Cookie を受け付けるか | **M4**（M6b の前提） | `wrangler dev` に対する実機の確認。だめなら E2E だけ `ENVIRONMENT=test` で接頭辞を外す |
 | `repository_id` が INSERT 後に変わらないこと（UPDATE が無い） | **M5a** | `grep` と Unit |
-| DO の SQLite の容量の上限（Directory の保持） | **M3a** | ドキュメント |
+| DO の SQLite の容量の上限（Directory の保持） | **M3a**（確認済み: 10 GB） | ドキュメント |
 | 見本の 3 書体のライセンスとサブセット化 | **M6b** | フォントの同梱の前にライセンスを確認 |
 | Cloudflare の権限名（Analytics の Read）と各 API の要求権限 | **M9** | Cloudflare のドキュメント。Terraform の `plan` で見つかること |
 | `sandbox_instance`・子の出力の整形が main に入っているか | **M7** | main の状態の確認 |
@@ -570,7 +570,7 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
 決まっていない設計の判断は無い（D1〜D18 は確定）。実装の中で確かめる事項は「未確認の事項を、どの M の最初に確かめるか」の表にある。残っているのは次のとおり。
 
 - Cloudflare の「開くリンク」にアカウント ID を含めてよいか（D13。推奨は許容: ダッシュボードにログインできる人はデプロイ側と同じ組織。ただし公開リポジトリのコード・ログには出さない）。M9 の最初に確かめる。
-- Directory の行の保持期間・容量（D10。年単位で増える。掃除は後回しだが、いつ入れるかの基準が要る）。M3a で容量の上限を確かめてから決める。
+- Directory の行の保持期間・容量（D10。年単位で増える。掃除は後回しだが、いつ入れるかの基準が要る）。**M3a で確認済み**: SQLite の DO は 1 つあたり 10 GB（Cloudflare Docs「SQLite in Durable Objects GA」2025-04-07）。1 件 1 KB 未満の見積もりで約 1,000 万件、1 日 1,000 件でも 27 年分なので、掃除は入れない（`DirectoryDO` の先頭コメントにも記録）。年間の件数が 100 万を超える規模になったら見直す。
 - SSE への移行の時期（ポーリングの負荷が問題になったとき）。
 
 ## 気づいた矛盾・提案

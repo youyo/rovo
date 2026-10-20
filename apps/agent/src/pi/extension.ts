@@ -47,6 +47,7 @@ const SECTION_KEYS = [
   "constraints",
   "verification",
   "procedure",
+  "testing",
   "untrusted_data",
   "web",
   "ask_parent",

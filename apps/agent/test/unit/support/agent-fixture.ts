@@ -37,6 +37,12 @@ export const call = (name: string, args: Record<string, unknown> = {}): ScriptSt
   toolCall: { name, arguments: args },
 });
 
+/**
+ * Sandbox を使うツール（write_note）を 1 回呼ぶ台本の 1 ターン。Sandbox は最初に使うときに起動する（lazy boot）ので、
+ * 「起動済みの Sandbox」を前提にするテスト（期限の延長・未 commit の確認など）は、台本の先頭にこれを置く。
+ */
+export const boot = (): ScriptStep => call("write_note", { text: "boot" });
+
 /** ask_parent を呼ぶ台本の 1 ターン */
 export const ask = (question: string, options?: string[]): ScriptStep => ({
   toolCall: { name: "ask_parent", arguments: options ? { question, options } : { question } },

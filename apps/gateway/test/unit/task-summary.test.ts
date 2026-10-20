@@ -206,3 +206,32 @@ describe("summaryMetrics（監査ログの task_summary 用。数値だけ）", 
     expect(m).not.toHaveProperty("verification_passed");
   });
 });
+
+describe("Sandbox の大きさごとの単価（sandbox_usd_estimate）", () => {
+  const withInstance = (instance: string | undefined, runtimeMs = 3_600_000) =>
+    input({
+      usage: {
+        ...input().usage,
+        sandbox: { runtimeMs, restarts: 0, bootRetries: 0, ...(instance ? { instance } : {}) },
+      } as SummaryInput["usage"],
+    });
+
+  it("使った大きさの単価（sandboxUsdPerHour）で計算し、summary に大きさと使った単価を残す", () => {
+    for (const name of ["standard-1", "standard-3", "standard-4"] as const) {
+      const s = buildTaskSummary(withInstance(name));
+      expect(s.sandbox_usd_estimate, name).toBeCloseTo(sandboxUsdPerHour(name), 9);
+      expect(s.unit_prices.sandbox_usd_per_hour, name).toBe(sandboxUsdPerHour(name));
+      expect(s.sandbox, name).toMatchObject({ instance: name });
+    }
+  });
+
+  it("大きさが分からない（未報告・表に無い名前）ときは、従来どおり prices の単価", () => {
+    const prices = { ...DEFAULT_PRICES, sandboxUsdPerHour: 3.6 };
+    for (const instance of [undefined, "unknown-9"]) {
+      const s = buildTaskSummary({ ...withInstance(instance), prices });
+      expect(s.sandbox_usd_estimate).toBeCloseTo(3.6, 9);
+      expect(s.unit_prices.sandbox_usd_per_hour).toBe(3.6);
+      expect(s.sandbox).not.toHaveProperty("instance");
+    }
+  });
+});

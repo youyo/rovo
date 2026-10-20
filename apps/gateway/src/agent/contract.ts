@@ -33,6 +33,11 @@ export interface TaskSpec {
   constraints?: string[];
   /** 子のモデル（D10。"anthropic/claude-haiku-5-5" など）。省略は AgentDO の env の AGENT_MODEL */
   model?: string;
+  /**
+   * 子の Sandbox の大きさ（task_start の sandbox_instance。standard-1〜4）。**ある = 利用者が明示した**ので、そのタスクの間はずっとその大きさ
+   * （後段の自動の昇格もしない）。省略は agent の env の既定（SANDBOX_INSTANCE）で、省略したときはこの項目自体を付けない（spec の同一性を変えない）。
+   */
+  sandboxInstance?: string;
   budgetUsd: number;
   deadlineAt: number;
   /** 作業ブランチ名（agent/task-<id>）。TaskDO が AgentDO.start より前に作っている */
@@ -112,6 +117,8 @@ export interface SandboxUsageDto {
   depsCache?: "hit" | "miss" | "built" | "disabled";
   /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms。runtimeMs にも含む） */
   cacheBuildMs?: number;
+  /** 実際にコンテナを起動した大きさ（standard-2 など）。一度も起動していなければ無い（Sandbox が必要になるまで起動しない） */
+  instance?: string;
 }
 
 export interface WebUsageDto {

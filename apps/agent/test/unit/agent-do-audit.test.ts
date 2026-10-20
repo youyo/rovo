@@ -5,6 +5,7 @@ import type { SandboxMetrics } from "../../src/agent/types";
 import {
   allEvents,
   ask,
+  boot,
   call,
   done,
   makeSpec,
@@ -220,7 +221,7 @@ describe("agent の監査: Sandbox の特権操作（events に audit として�
   });
 
   it("ask_parent の質問で期限を延ばし（extend_deadline）、回答で正確な値へ戻す（set_deadline）", async () => {
-    const fx = newFixture("au-deadline", [ask("Q?"), report()]);
+    const fx = newFixture("au-deadline", [boot(), ask("Q?"), report()]);
     await fx.stub.start(makeSpec("au-deadline"));
     await waitForPhase(fx, "input_required");
     await waitUntil(() => fx.sandbox.extended.length === 1);
@@ -233,7 +234,7 @@ describe("agent の監査: Sandbox の特権操作（events に audit として�
   });
 
   it("Sandbox が拒否・失敗した期限の操作は events に積まない（受理された分だけ。再試行で増えない）", async () => {
-    const fx = newFixture("au-deadline-fail", [ask("Q?"), ask("Q?"), report()]);
+    const fx = newFixture("au-deadline-fail", [boot(), ask("Q?"), ask("Q?"), report()]);
     fx.sandbox.extendError = new Error("sandbox gone"); // 1 回目の延長だけ失敗する
     await fx.stub.start(makeSpec("au-deadline-fail"));
     await waitForPhase(fx, "input_required");

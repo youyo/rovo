@@ -4,6 +4,7 @@ import { clearAgentTestOverrides } from "../../src/agent/deps";
 import type { SandboxMetrics } from "../../src/agent/types";
 import {
   allEvents,
+  boot,
   call,
   done,
   makeSpec,
@@ -120,7 +121,7 @@ describe("usage の sandbox に depsCache / cacheBuildMs を載せる", () => {
 describe("子のシステムプロンプト", () => {
   it("hit / built: 依存関係は導入済みで、npm ci は不要。lockfile を変えたときだけ入れ直すと書く", async () => {
     for (const status of ["hit", "built"] as const) {
-      const fx = newFixture(`deps-prompt-${status}`, [call("gate")]);
+      const fx = newFixture(`deps-prompt-${status}`, [boot(), call("gate")]);
       fx.sandbox.metricsValue = { ...base, depsCache: status };
       await fx.stub.start(makeSpec(`deps-prompt-${status}`, { deps }));
       await fx.gate.waitEntered();

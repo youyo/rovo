@@ -258,10 +258,16 @@ describe("起動が止まったコンテナの扱い", () => {
 });
 
 describe("Sandbox のインスタンス（D13）", () => {
-  const bootWith = async (name: string, instanceVar: string | undefined) => {
+  const bootWith = async (
+    name: string,
+    instanceVar: string | undefined,
+    specOver: Record<string, unknown> = {},
+  ) => {
     const stub = (env.SANDBOX_DO as DurableObjectNamespace).getByName(name);
     let options: { instance?: unknown; enableInternet?: unknown } | undefined;
     let warned = "";
+    let metrics: { instance?: string } | undefined;
+    let metricsBefore: { instance?: string } | undefined;
     await runInDO(stub, async (inst: Inst) => {
       const fake = new FakeContainer(false, 10);
       fake.scripted = true;
@@ -272,13 +278,15 @@ describe("Sandbox のインスタンス（D13）", () => {
         warned += a.join(" ");
       };
       try {
-        await inst.ensureReady(spec());
+        metricsBefore = await inst.metrics();
+        await inst.ensureReady({ ...spec(), ...specOver });
       } finally {
         console.warn = warn;
       }
       options = fake.startOptions[0] as typeof options;
+      metrics = await inst.metrics();
     });
-    return { options, warned };
+    return { options, warned, metrics, metricsBefore };
   };
 
   it("start() に instance を渡す（SANDBOX_INSTANCE の値）。enableInternet は false のまま", async () => {
@@ -296,5 +304,35 @@ describe("Sandbox のインスタンス（D13）", () => {
     const { options, warned } = await bootWith("inst-bad", "huge");
     expect(options?.instance).toBe("standard-2");
     expect(warned).toContain("huge");
+  });
+
+  it("WorkspaceSpec.instance（タスクが明示した大きさ）は env の SANDBOX_INSTANCE より優先する", async () => {
+    const { options } = await bootWith("inst-explicit", "standard-4", { instance: "standard-1" });
+    expect(options?.instance).toBe("standard-1");
+    // 明示があれば env の値は見ない（不正な env でも警告を出さない）
+    const bad = await bootWith("inst-explicit-bad-env", "huge", { instance: "standard-3" });
+    expect(bad.options?.instance).toBe("standard-3");
+    expect(bad.warned).not.toContain("huge");
+  });
+
+  it("WorkspaceSpec.instance が無ければ env の既定のまま", async () => {
+    const { options } = await bootWith("inst-env-only", "standard-3", {});
+    expect(options?.instance).toBe("standard-3");
+  });
+
+  it("lite や未知の値の WorkspaceSpec.instance は拒否する（タスクが選べるのは standard-1〜4）", async () => {
+    for (const [i, bad] of ["lite", "huge", 2].entries()) {
+      await expect(bootWith(`inst-bad-spec-${i}`, "", { instance: bad })).rejects.toThrow(
+        /invalid instance/,
+      );
+    }
+  });
+
+  it("metrics().instance は、実際に start() に渡した大きさ。起動する前は無い", async () => {
+    const a = await bootWith("inst-metrics-explicit", "standard-4", { instance: "standard-1" });
+    expect(a.metricsBefore).not.toHaveProperty("instance");
+    expect(a.metrics?.instance).toBe("standard-1");
+    const b = await bootWith("inst-metrics-default", "");
+    expect(b.metrics?.instance).toBe("standard-2");
   });
 });

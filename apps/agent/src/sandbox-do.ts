@@ -637,6 +637,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           env: BASE_ENV,
         });
         started = true;
+        // D14（依存関係のキャッシュ）の調査: イメージの参照が digest か tag か。秘密は含まない
+        console.log(`[sandbox-boot] image=${JSON.stringify(container.images.workspace)}`);
       }
       // DO だけが再起動してコンテナが生きている場合も、傍受は登録し直す（同じ宛先の再登録はハンドラを置き換える）。
       // リポジトリは永続化した spec から導く（未設定のまま登録することはない）。

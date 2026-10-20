@@ -355,6 +355,17 @@ describe("bash", () => {
     expect(r.text).toMatch(/exit code: 0/i);
   });
 
+  it("出力の ANSI エスケープ（色など）はモデルに返す前に除く", async () => {
+    const { run } = setup(() => ({
+      stdout: "\u001b[32mPASS\u001b[0m a\n",
+      stderr: "\u001b[31mWARN\u001b[0m b\n",
+    }));
+    const r = await run("bash", { command: "x" });
+    expect(r.text).toContain("PASS a");
+    expect(r.text).toContain("WARN b");
+    expect(r.text).not.toContain("\u001b");
+  });
+
   it("timeout_seconds を使い、上限 30 分を超えるものは拒否する", async () => {
     const { sandbox, run } = setup();
     await run("bash", { command: "x", timeout_seconds: 30 });

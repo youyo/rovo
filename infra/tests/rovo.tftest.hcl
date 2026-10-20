@@ -298,3 +298,37 @@ run "reject_bad_permission_group_id" {
   }
   expect_failures = [var.r2_item_write_permission_group_id]
 }
+
+run "log_classification_default_off" {
+  command = plan
+
+  # プロンプトと応答（対象リポジトリのコードを含む）を Cloudflare が分類するので、既定は無効
+  assert {
+    condition     = cloudflare_ai_gateway.this.log_classification == false
+    error_message = "ログ分類が既定で無効になっていない"
+  }
+}
+
+run "log_classification_can_be_enabled" {
+  command = plan
+
+  variables {
+    ai_gateway_log_classification = true
+  }
+
+  assert {
+    condition     = cloudflare_ai_gateway.this.log_classification == true
+    error_message = "ai_gateway_log_classification が反映されていない"
+  }
+}
+
+run "log_classification_requires_collect_logs" {
+  command = plan
+
+  variables {
+    ai_gateway_collect_logs       = false
+    ai_gateway_log_classification = true
+  }
+
+  expect_failures = [var.ai_gateway_log_classification]
+}

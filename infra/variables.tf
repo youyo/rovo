@@ -71,6 +71,17 @@ variable "ai_gateway_collect_logs" {
   default     = true
 }
 
+variable "ai_gateway_log_classification" {
+  description = "AI Gateway のログ分類（User Insights のタスクとモデルの分析）。Cloudflare が保存されたプロンプトと応答（対象リポジトリのコードを含む）を分類するので、既定は無効。ai_gateway_collect_logs が true のときだけ有効にできる。"
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.ai_gateway_log_classification || var.ai_gateway_collect_logs
+    error_message = "ai_gateway_log_classification を true にするには ai_gateway_collect_logs も true にする。"
+  }
+}
+
 variable "logpush_enabled" {
   description = "Logpush のジョブを有効にするか。"
   type        = bool

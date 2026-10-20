@@ -5,6 +5,7 @@ import { handleDashboard, isDashboardPath } from "../../src/dashboard/serve";
 const TASK_ID = "01JZ0000000000000000000000";
 const INDEX_HTML = "<!doctype html><title>rovo ダッシュボード</title><div id=root></div>";
 const BASE = "https://rovo.example.test";
+const SAME_ORIGIN = { "sec-fetch-site": "same-origin" };
 
 /** 偽の ASSETS。dist 直下（/ と /assets/...）にあるファイルだけを返し、無いものは 404（not_found_handling なし相当）。 */
 function fakeAssets(extra: Record<string, string> = {}) {
@@ -163,7 +164,7 @@ describe("/dashboard/assets/*", () => {
 
 describe("/dashboard/api/*", () => {
   it("未知の API は JSON の 404（HTML ではない）。nosniff・no-store・CORS なし", async () => {
-    const { response, requested } = await call("/dashboard/api/x");
+    const { response, requested } = await call("/dashboard/api/x", { headers: SAME_ORIGIN });
     expect(response.status).toBe(404);
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.json()).toEqual({ error: "not_found" });
@@ -180,7 +181,7 @@ describe("/dashboard/api/*", () => {
       ["/dashboard/api/x", "POST"],
       ["/dashboard/api/x", "OPTIONS"],
     ] as const) {
-      const { response } = await call(path, { method });
+      const { response } = await call(path, { method, headers: SAME_ORIGIN });
       expect(response.status, `${method} ${path}`).toBe(404);
       expect(response.headers.get("content-type")).toBe("application/json");
       expect(response.headers.get("access-control-allow-origin")).toBeNull();
@@ -199,11 +200,23 @@ describe("/dashboard/api/*", () => {
       expect(response.status, site).toBe(404);
     }
   });
+
+  // M1 で M4 に残した決定: ナビゲーション以外の API でヘッダが無い呼び出しは拒否する（ルートの有無を漏らさないよう 404 より前）
+  it("Sec-Fetch-Site が無い API 呼び出しは 403（存在しないパスでも 404 にならない）", async () => {
+    for (const path of ["/dashboard/api/x", "/dashboard/api/me", "/dashboard/api"]) {
+      const { response } = await call(path);
+      expect(response.status, path).toBe(403);
+      expect(await response.json()).toEqual({ error: "forbidden" });
+      expect(response.headers.get("access-control-allow-origin")).toBeNull();
+    }
+  });
 });
 
 describe("Worker 全体の振り分け（実 Worker。ASSETS には触れない経路）", () => {
   it("/dashboard/api/x は Worker が JSON 404 で返す", async () => {
-    const res = await SELF.fetch(`${env.PUBLIC_BASE_URL}/dashboard/api/x`);
+    const res = await SELF.fetch(`${env.PUBLIC_BASE_URL}/dashboard/api/x`, {
+      headers: SAME_ORIGIN,
+    });
     expect(res.status).toBe(404);
     expect(res.headers.get("content-type")).toBe("application/json");
     expect(await res.json()).toEqual({ error: "not_found" });

@@ -1,0 +1,61 @@
+{
+  // 下流の agent の設定の雛形。deploy/ にコピーして <...> を実値に置き換える（ROVO_DEPLOY_DIR=deploy）。
+  // `main` と `dockerfile` は、この設定ファイルからの相対パス（deploy/ に置けば ../apps/agent/... で upstream を指す）。
+  // 内容は apps/agent/wrangler.jsonc と docs/deploy.md の 5 に揃えてある。
+  "name": "acme-agent",
+  "main": "../apps/agent/src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "compatibility_flags": ["nodejs_compat"],
+  // gateway からは DO バインディングで呼ぶので workers.dev では公開しない
+  "workers_dev": false,
+  // 監査ログを Logpush（infra/ の Terraform が作るジョブ）に流す
+  "logpush": true,
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "containers": [
+    {
+      "class_name": "SandboxDO",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "workspace": { "dockerfile": "../apps/agent/Dockerfile" }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "SANDBOX_DO", "class_name": "SandboxDO" },
+      { "name": "AGENT_DO", "class_name": "AgentDO" }
+    ]
+  },
+  "exports": {
+    "SandboxDO": { "type": "durable-object", "storage": "sqlite" },
+    "AgentDO": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "services": [
+    {
+      "binding": "WEB",
+      "service": "acme-web",
+      "entrypoint": "WebResearch",
+      "props": { "caller": "child" }
+    }
+  ],
+  "ai": { "binding": "AI" },
+  "vars": {
+    "ENVIRONMENT": "production",
+    // terraform output ai_gateway_id の値
+    "AI_GATEWAY_ID": "acme-gateway",
+    // 既定のモデル（task_start の model を省略したとき）
+    "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
+    // 選べるモデル（カンマ区切り。task_start の model と consult の model）。空なら AGENT_MODEL だけ。gateway の同名の var と同じ値にする。
+    // OpenAI のモデル（openai/gpt-6-sol など）を足すには、AI Gateway に OpenAI のプロバイダー キーを登録しておく（docs/deploy.md）。
+    // Workers AI のモデル（workers-ai/@cf/...。キー不要。無料プランでも使えるものだけ）は gateway が決めたモデルを agent が再検証するので、gateway と同じ値にする。
+    "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,workers-ai/@cf/openai/gpt-oss-120b",
+    // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。例 "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off"）。
+    // 空なら upstream の既定（haiku=low, sonnet=high, opus=medium, fable=low, luna=low, sol=medium, astra=low）。思考のトークンは出力として課金される。gateway の同名の var と同じ値にする。
+    "MODEL_EFFORTS": "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off",
+    "WEB_SEARCH_LIMIT_PER_TASK": "50",
+    "WEB_FETCH_LIMIT_PER_TASK": "100",
+    "WEB_BROWSE_LIMIT_PER_TASK": "20",
+    // gateway / web の同名の var と揃える
+    "WEB_BROWSE_ENABLED": "true"
+  }
+}

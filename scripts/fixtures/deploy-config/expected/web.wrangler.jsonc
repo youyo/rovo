@@ -1,0 +1,27 @@
+{
+  // 下流の web の設定の雛形。deploy/ にコピーして <...> を実値に置き換える（ROVO_DEPLOY_DIR=deploy）。
+  // `main` は、この設定ファイルからの相対パス（deploy/ に置けば ../apps/web/... で upstream を指す）。
+  // 内容は apps/web/wrangler.jsonc と docs/deploy.md の 5 に揃えてある。
+  "name": "acme-web",
+  "main": "../apps/web/src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "compatibility_flags": ["nodejs_compat"],
+  // gateway / agent からは service binding で呼ぶ。公開のルートは持たない
+  "workers_dev": false,
+  // 監査ログを Logpush（infra/ の Terraform が作るジョブ）に流す
+  "logpush": true,
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "ai": { "binding": "AI" },
+  // Browser Run（web_browse が使う）。remote の設定は docs/deploy.md の 12 を見て、web_browse を有効にするときに足す。
+  "browser": { "binding": "BROWSER" },
+  "vars": {
+    "ENVIRONMENT": "production",
+    // terraform output ai_gateway_id の値（空だと websearch も AI.run も呼ばない）
+    "AI_GATEWAY_ID": "acme-gateway",
+    "WEB_SEARCH_PROVIDER": "ceramic",
+    "SAFETY_BLOCK_THRESHOLD": "0.8",
+    "SAFETY_CAUTION_THRESHOLD": "0.4",
+    // 雛形の既定は無効。有効にする手順は docs/deploy.md の 12。gateway / agent の同名の var も合わせる。
+    "WEB_BROWSE_ENABLED": "true"
+  }
+}

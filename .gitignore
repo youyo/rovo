@@ -4,6 +4,8 @@ node_modules/
 mise.local.toml
 # Claude Code の project スコープの MCP 設定（デプロイ先の URL が入るので、各自の手元にだけ置く）
 .mcp.json
+# Codex の手元の設定（MCP の接続先など、デプロイ先の URL が入る）
+.codex/
 dist/
 *.log
 .DS_Store

@@ -1,6 +1,6 @@
 # infra: rovo の Cloudflare リソース（Terraform）
 
-rovo を自分のアカウントにデプロイするときに必要な Cloudflare のリソースを作る。誰が clone しても、変数を渡せば使える。全体の手順は [docs/deploy.md](../docs/deploy.md) の 4（手順の順番）。
+rovo を自分のアカウントにデプロイするときに必要な Cloudflare のリソースを作る。誰が clone しても、変数を渡せば使える。全体の手順は [docs/deploy.md](../docs/deploy.md) の 4。**通常は `mise run setup` が `terraform init` / `apply` を行う**（変数は `rovo.config.json` から渡すので、tfvars は要らない）。このファイルは Terraform を単独で使うとき、と中身の説明。
 
 ## 作るもの
 
@@ -11,30 +11,32 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 | KV namespace `<name_prefix>-oauth` | gateway の OAuth の状態 | gateway の `kv_namespaces`（`OAUTH_KV`） |
 | AI Gateway `<name_prefix>-gateway` | agent と web の Claude / Web Search 呼び出し（deploy.md の 7） | agent と web の `AI_GATEWAY_ID` |
 | API トークン（Logpush 用） | 権限は「Workers R2 Storage Bucket Item Write」だけ。対象は監査用バケットだけ | Logpush の宛先の資格情報 |
+| API トークン（gateway の読み取り用） | 権限は「AI Gateway Read」だけ。対象はこのアカウントだけ（`com.cloudflare.api.account.<account_id>`）。名前は `<name_prefix>-gateway-ai-gateway-read` | gateway の secret `CLOUDFLARE_API_TOKEN`（sensitive の output `gateway_cloudflare_api_token`。`mise run deploy:secrets` が流し込む） |
 | Logpush ジョブ | データセット `workers_trace_events` を監査用バケットへ送る。**filter で `ScriptName` を rovo の 3 つの Worker だけに絞る** | 各 Worker に `"logpush": true` |
 
 作らないもの: MCP Server Portal と Access の登録（別のインフラの管理側）、Anthropic の API キー（AI Gateway の画面で BYOK として登録する。Terraform に入れない）、Worker 本体（`mise run deploy:*`）、Worker の secret（`mise run deploy:secrets`）。
 
 ## 使い方
 
-1. 認証は env の `CLOUDFLARE_API_TOKEN` から読む（provider の設定は `provider "cloudflare" {}` だけ）。このトークンには、R2・Workers KV・AI Gateway の編集、Logs の編集（Logpush）、API トークンの編集（Logpush 用トークンを作るため）の権限が要る。
+1. 認証は env の `CLOUDFLARE_API_TOKEN` から読む（provider の設定は `provider "cloudflare" {}` だけ）。このトークンには、R2・Workers KV・AI Gateway の編集、Logs の編集（Logpush）、API トークンの編集（Logpush 用と gateway の読み取り用のトークンを作るため）の権限が要る。**人が作る Cloudflare のトークンはこれだけ**（デプロイは `wrangler login`）。
 2. `terraform.tfvars.example` をコピーして、`account_id` などを書く。
 3. **state の置き場所（backend）を決める。** この `infra/` には `backend` ブロックが無い。`infra/backend.tf` を足して決める（例: S3 互換の R2、Terraform Cloud）。決めないと state はローカルの `terraform.tfstate` に置かれる。
 4. `terraform init` → `terraform plan` → `terraform apply`（`infra/` で実行）。
-5. `terraform output` の値を、下流の wrangler 設定（`deploy.example/` の雛形）に書き写す。
+5. `terraform output` の非秘密の値は、`mise run deploy:config` が読んで下流の wrangler 設定を生成する（手で書き写さない。docs/deploy.md の 4）。
 
-| output | 書き写す先 |
+| output | 使われ方 |
 |---|---|
-| `kv_namespace_id` | gateway の `kv_namespaces[].id` |
-| `archive_bucket_name` | gateway の `r2_buckets[].bucket_name` |
-| `ai_gateway_id` | agent と web の `vars.AI_GATEWAY_ID` |
+| `kv_namespace_id` | gateway の `kv_namespaces[].id`（`deploy:config` が書く） |
+| `archive_bucket_name` | gateway の `r2_buckets[].bucket_name`（同上） |
+| `ai_gateway_id` | gateway・agent・web の `vars.AI_GATEWAY_ID`（同上） |
 | `audit_bucket_name` | wrangler 設定には書かない（Logpush の宛先。確認用） |
+| `gateway_cloudflare_api_token`（**sensitive**） | gateway の secret `CLOUDFLARE_API_TOKEN`。`deploy:secrets` だけが `terraform output -raw` で読む。`deploy:config` は読まない（`terraform output -json` は sensitive の値も出すので使わない） |
 
 6. AI Gateway の画面で、Anthropic の API キーを BYOK として登録する。
 
 ## state は非公開の場所に置く
 
-**Logpush の宛先（`destination_conf`）には、R2 の S3 互換の鍵が含まれる。** access-key-id は Logpush 用トークンの id、secret-access-key はそのトークンの値の SHA-256。トークンの値（`cloudflare_api_token.logpush.value`）とあわせて、**state に平文で残る**。state は非公開の場所に置き、リポジトリにコミットしない。upstream の `.gitignore` は `infra/.terraform/` と `infra/*.tfstate*` を除外している。
+**gateway の読み取り用トークンの値（`cloudflare_api_token.ai_gateway_read.value`）も、state に平文で残る**（Logpush 用トークンと同じ扱い）。**Logpush の宛先（`destination_conf`）には、R2 の S3 互換の鍵が含まれる。** access-key-id は Logpush 用トークンの id、secret-access-key はそのトークンの値の SHA-256。トークンの値（`cloudflare_api_token.logpush.value`）とあわせて、**state に平文で残る**。state は非公開の場所に置き、リポジトリにコミットしない。upstream の `.gitignore` は `infra/.terraform/` と `infra/*.tfstate*` を除外している。
 
 ## 下流のファイルの置き方
 
@@ -48,6 +50,7 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 - **R2 のライフサイクル**: アーカイブ 90 日、監査 365 日で削除（変数 `archive_retention_days` / `audit_retention_days`。1 以上の整数）。対象はバケット全体（prefix なし）。Cloudflare の API は秒で受けるので、日数 × 86400 を渡している。
 - **AI Gateway**: 認証あり（BYOK の前提。agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼び、バインディングからの呼び出しは認証済みとして扱われるので、gateway token は要らない）、Require provider credentials（`byok_only`。BYOK のキーが無いときに Unified Billing〔Cloudflare のクレジット〕へ流さず、400 で止める）、ログ収集あり（`ai_gateway_collect_logs`。誰がいくら使ったかの集計に使う）、ログ分類なし（`ai_gateway_log_classification`。有効にすると User Insights のタスクとモデルの分析が出るが、Cloudflare が保存されたプロンプトと応答〔対象リポジトリのコードを含む〕を分類する。ログ収集が前提。Beta。User Insights は追加費用なしとされているが、ログ分類個別の料金は明記されていない）、キャッシュなし（TTL 0。モデルの応答を使い回さない）、レート制限なし（0 = 無効）。費用の上限は Gateway 側ではなく、gateway の `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` が担う。費用の上限を Gateway 側にも持ちたい場合は、AI Gateway の画面で spend limits を足す。
 - **Logpush のフィールド**: `Event`, `EventTimestampMs`, `Exceptions`, `Logs`, `Outcome`, `ScriptName`（監査行は `Logs` に入る。API がアルファベット順に並べ替えるので、その順で書く）。時刻は RFC 3339。宛先のパスは `workers_trace_events/{DATE}/`。
+- **gateway の読み取り用トークン**: 権限は「AI Gateway Read」（scope は `com.cloudflare.api.account`）だけ。権限グループは名前の完全一致で検索する（見つからなければ plan で止まる）。名前が変わったときは `ai_gateway_read_permission_group_id` で ID を指定する。resources はアカウント単位 `com.cloudflare.api.account.<account_id>` = `*`（実アカウントの権限グループの scope に合わせた形）。TTL は付けない（期限切れで BYOK の判定が黙って止まるのを避ける。ローテーションは `terraform apply -replace=cloudflare_api_token.ai_gateway_read` のあと `mise run deploy:secrets -- --rotate cloudflare-token`）。
 - **Worker の名前**: `worker_names`（既定 `rovo-gateway` / `rovo-agent` / `rovo-web`）。各 wrangler 設定の `name` と一致させる。名前を変えたときは、この変数も変える（合わないと、そのログは送られない）。
 
 ## Cloudflare のドキュメントで確かめたこと
@@ -67,10 +70,10 @@ mise run infra:validate
 mise run lint          # terraform fmt -check を含む
 ```
 
-`infra/tests/rovo.tftest.hcl` が、Logpush の filter に 3 つの `ScriptName` が入ること、宛先が監査用バケットであること、ライフサイクルの日数が変数どおりであること、バケットが 2 つで別名であること、トークンの対象が監査用バケットだけであること、不正な変数（日数 0 など）が validation で拒否されることを確かめる。
+`infra/tests/rovo.tftest.hcl` が、gateway 用トークンの権限が AI Gateway Read だけでアカウント単位であること、output が値と一致すること、Logpush の filter に 3 つの `ScriptName` が入ること、宛先が監査用バケットであること、ライフサイクルの日数が変数どおりであること、バケットが 2 つで別名であること、トークンの対象が監査用バケットだけであること、不正な変数（日数 0 など）が validation で拒否されることを確かめる。
 
 - `destination_conf` は Logpush 用トークンの id と値に依存し、plan の段階では決まらない。そのテストだけ `mock_provider` に対する `apply` で確かめる（実アカウントには触れない）。
-- provider の mock は「オブジェクトのリストの属性」に値を入れられず（Terraform 1.15.8 で確認）、権限グループの検索（`data.cloudflare_api_token_permission_groups_list`）を差し替えられない。そのため、テストでは変数 `r2_item_write_permission_group_id` に ID を渡して検索を省く。**名前による検索そのものは plan のテストで確かめていない。**
+- provider の mock は「オブジェクトのリストの属性」に値を入れられず（Terraform 1.15.8 で確認）、権限グループの検索（`data.cloudflare_api_token_permission_groups_list`）を差し替えられない。そのため、テストでは変数 `r2_item_write_permission_group_id` と `ai_gateway_read_permission_group_id` に ID を渡して検索を省く。**名前による検索そのものは plan のテストで確かめていない。**
 
 ## 実アカウントで確かめたこと（2026-10-20 の初回 apply）
 
@@ -83,3 +86,4 @@ mise run lint          # terraform fmt -check を含む
 ## 確かめていないこと
 
 - Logpush の ScriptName の値が、Worker の名前（wrangler 設定の `name`）と一致することは、実際のログで確かめる（deploy.md の 10 と acceptance.md の 16 節）。
+- gateway 用トークン（`cloudflare_api_token.ai_gateway_read`）を実アカウントで `apply` したこと。権限グループ「AI Gateway Read」が名前で見つかることは確かめてあるが（scope は `com.cloudflare.api.account`）、Terraform 用トークンがこの権限を持つトークンを作れるか（トークンの作成には、付与する権限を自分も持っている必要があるかもしれない）は未確認。**【実機で確認して追記】**

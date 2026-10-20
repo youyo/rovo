@@ -98,3 +98,14 @@ variable "r2_item_write_permission_group_id" {
     error_message = "r2_item_write_permission_group_id は 32 桁の小文字の 16 進数にしてください。"
   }
 }
+
+variable "ai_gateway_read_permission_group_id" {
+  description = "API トークンの権限グループ「AI Gateway Read」（scope は com.cloudflare.api.account）の ID。通常は指定しない（null なら名前で検索する）。名前が変わって検索できないときだけ、API の permission_groups 一覧の ID を指定する。"
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.ai_gateway_read_permission_group_id == null || can(regex("^[0-9a-f]{32}$", var.ai_gateway_read_permission_group_id))
+    error_message = "ai_gateway_read_permission_group_id は 32 桁の小文字の 16 進数にしてください。"
+  }
+}

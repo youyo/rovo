@@ -456,6 +456,10 @@ export function createTaskService(
             next_steps: nextSteps({
               task_id: taskId,
               status: r.result.status,
+              ...(r.result.reason !== undefined ? { reason: r.result.reason } : {}),
+              ...(r.result.failure_phase !== undefined
+                ? { failure_phase: r.result.failure_phase }
+                : {}),
               merge_policy: r.result.merge_policy,
               verification: r.result.verification,
               pr: r.result.pr,

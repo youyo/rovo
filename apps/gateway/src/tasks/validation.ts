@@ -82,7 +82,13 @@ export const taskInputSchema = z.object({
   // GitHub の上限: owner は 39 文字、リポジトリ名は 100 文字
   repository: z.string().regex(/^[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name 形式"),
   base_ref: z.string().min(1).max(255),
-  base_sha: z.string().regex(/^[0-9a-fA-F]{7,40}$/, "7〜40桁の16進"),
+  // 短縮形は準備の段階（GitHub の commit 取得）で使えず FAILED になるので、入力の段階で 40 桁だけに絞る
+  base_sha: z
+    .string()
+    .regex(
+      /^[0-9a-fA-F]{40}$/,
+      "base_sha must be a full 40-digit commit SHA (hex); abbreviated SHAs are not supported",
+    ),
   title: z.string().min(1).max(MAX_TITLE),
   instructions: z.string().min(1).max(MAX_INSTRUCTIONS),
   acceptance_criteria: stringList.default([]),

@@ -204,7 +204,7 @@ describe("git_token の暗号文の削除（finalize_done の後）", () => {
   });
 
   it("PR を作る前に FAILED になったタスクでも空になる", async () => {
-    app().markMissing(REPO, "0123456789abcdef");
+    app().markMissing(REPO, "0123456789abcdef0123456789abcdef01234567");
     const t = await createTask();
     await t.stub.advance();
     await pump(t.stub, 3);

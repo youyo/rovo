@@ -85,6 +85,7 @@ export interface Fixture {
   gate: { waitEntered: () => Promise<void>; release: () => void };
   patch: { value: string };
   nameStatus: { value: string };
+  testDiff: { value: string };
   /** git format-patch を止めておく（finalize の patch 取得中に別の出来事を起こすため） */
   patchGate: { hold: () => void; waitEntered: () => Promise<void>; release: () => void };
   /** git status / git switch の exec を止めておく（report_completion が sandbox RPC を await 中に別の出来事を起こすため） */
@@ -141,6 +142,7 @@ export function newFixture(
   };
   const patch = { value: "From abc\n--- a\n+++ b\n" };
   const nameStatus = { value: "" };
+  const testDiff = { value: "" };
   // DO の中と外で Promise を共有すると I/O の所有者が混ざるので、フラグのポーリングにする
   const gateState = { entered: false, released: false };
   const patchState = { held: false, entered: false };
@@ -169,7 +171,9 @@ export function newFixture(
   const pushCalls: string[][] = [];
 
   const sandbox = new FakeSandbox(async (argv) => {
-    const [a0, a1] = argv;
+    // `git -c k=v <sub> ...` の -c を読み飛ばしてサブコマンドを見る
+    const gitArgs = argv[0] === "git" && argv[1] === "-c" ? ["git", ...argv.slice(3)] : argv;
+    const [a0, a1] = gitArgs;
     if (a0 === "git" && a1 === "rev-parse") return { stdout: `${revParse.shift() ?? "c0ffee"}\n` };
     if (a0 === "git" && (a1 === "status" || a1 === "switch")) {
       const g = execState[a1];
@@ -207,6 +211,7 @@ export function newFixture(
     if (a0 === "git" && a1 === "diff" && argv.includes("--name-status")) {
       return { stdout: nameStatus.value };
     }
+    if (a0 === "git" && a1 === "diff" && argv.includes("-U0")) return { stdout: testDiff.value };
     if (a0 === "git" && a1 === "diff") return { stdout: " a.txt | 1 +\n" };
     if (a0 === "git" && a1 === "show") return { exitCode: 128, stderr: "fatal" };
     verifyCalls.push(argv);
@@ -312,6 +317,7 @@ export function newFixture(
     },
     patch,
     nameStatus,
+    testDiff,
     revParse,
     statusResults,
     remote,

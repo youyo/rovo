@@ -25,7 +25,7 @@ import {
 } from "./agent/pricing";
 import { AgentStore, type SteerRow, sameUsage, ZERO_USAGE } from "./agent/store";
 import { decideTerminal, type StopIntent, type TerminalRequest } from "./agent/terminal";
-import { detectTestTampering } from "./agent/test-patterns";
+import { detectTestTampering, modifiedTestFiles, nameStatusFromZ } from "./agent/test-patterns";
 import {
   type CancelResult,
   type ConsultRequest,
@@ -1593,7 +1593,11 @@ export class AgentDO extends DurableObject<Env> {
     const cwd = WORKSPACE_ROOT;
     const warnings: string[] = [];
 
-    const names = await sb.exec(["git", "diff", "--name-status", "--no-renames", range], { cwd });
+    // パスは日本語などもそのまま（引用符なし）、NUL 区切りで読む
+    const names = await sb.exec(
+      ["git", "-c", "core.quotepath=false", "diff", "--name-status", "-z", "--no-renames", range],
+      { cwd },
+    );
     const readScripts = async (rev: string): Promise<Record<string, string> | undefined> => {
       const r = await sb.exec(["git", "show", `${rev}:package.json`], { cwd });
       if (r.exitCode !== 0) return undefined;
@@ -1604,9 +1608,42 @@ export class AgentDO extends DurableObject<Env> {
         return undefined;
       }
     };
+    let nameStatus = "";
+    if (names.exitCode === 0 && !names.truncated) {
+      nameStatus = nameStatusFromZ(names.stdout);
+    } else {
+      warnings.push("変更ファイルの一覧を読めなかったため、テストの改ざんを判定できていません");
+    }
+    // base に既にあったテストファイルの差分だけを取り、弱体化（行の削除・skip・タイムアウト）を見る
+    let testDiff = "";
+    const changedTests = modifiedTestFiles(nameStatus);
+    if (changedTests.length > 0) {
+      const td = await sb.exec(
+        [
+          "git",
+          "-c",
+          "core.quotepath=false",
+          "diff",
+          "--no-renames",
+          "-U0",
+          range,
+          "--",
+          ...changedTests,
+        ],
+        { cwd, maxOutputBytes: 2 * 1024 * 1024 },
+      );
+      if (td.exitCode === 0 && !td.truncated) {
+        testDiff = td.stdout;
+      } else {
+        warnings.push(
+          "既存のテストファイルの差分を読めなかったため、テストの弱体化を判定できていません",
+        );
+      }
+    }
     warnings.push(
       ...detectTestTampering({
-        nameStatus: names.exitCode === 0 ? names.stdout : "",
+        nameStatus,
+        testDiff,
         baseScripts: await readScripts(spec.baseSha),
         headScripts: await readScripts(tip),
       }),

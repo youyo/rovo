@@ -115,7 +115,11 @@ describe("service.prReady", () => {
   it("入力の他の項目（repository・PR 番号など）は無視され、タスクの記録の PR だけを操作する", async () => {
     const w = await world();
     // 別の PR（人の PR）を用意する。呼び出し元が指定しても操作されない
-    const sha = await app().addCommit(REPO, "0123456789abcdef", "human work");
+    const sha = await app().addCommit(
+      REPO,
+      "0123456789abcdef0123456789abcdef01234567",
+      "human work",
+    );
     app().setBranch(REPO, "feature/human", sha);
     const humanPr = app().seedPull(REPO, { head: "feature/human", base: "main", draft: true });
     const r = await w.service.prReady(w.principal, {
@@ -306,7 +310,11 @@ describe("service.prMerge", () => {
 
   it("入力の他の項目（repository・PR 番号・sha）は無視される: 呼び出し元は対象の PR も sha も選べない", async () => {
     const w = await readyWorld();
-    const sha = await app().addCommit(REPO, "0123456789abcdef", "human work");
+    const sha = await app().addCommit(
+      REPO,
+      "0123456789abcdef0123456789abcdef01234567",
+      "human work",
+    );
     app().setBranch(REPO, "feature/human", sha);
     const humanPr = app().seedPull(REPO, { head: "feature/human", base: "main", draft: false });
     const r = await w.service.prMerge(w.principal, {

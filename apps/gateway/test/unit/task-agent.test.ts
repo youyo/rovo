@@ -45,7 +45,7 @@ describe("TaskDO: start の配送", () => {
     expect(spec).toMatchObject({
       userId: String(OWNER),
       repository: "acme/widgets",
-      baseSha: "0123456789abcdef",
+      baseSha: "0123456789abcdef0123456789abcdef01234567",
       instructions: "Implement OAuth authentication.",
       acceptanceCriteria: ["tests pass"],
       constraints: ["do not merge"],

@@ -14,7 +14,7 @@ import {
 const base = {
   repository: "Owner/Repo",
   base_ref: "main",
-  base_sha: "0123456",
+  base_sha: "0123456789abcdef0123456789abcdef01234567",
   title: "t",
   instructions: "i",
   acceptance_criteria: ["a"],
@@ -108,6 +108,9 @@ describe("taskInputSchema", () => {
     ["base_sha が 6 桁", { base_sha: "012345" }],
     ["base_sha が 41 桁", { base_sha: "a".repeat(41) }],
     ["base_sha が 16 進でない", { base_sha: "ghijklm" }],
+    ["base_sha が 7 桁（短縮形）", { base_sha: "a".repeat(7) }],
+    ["base_sha が 39 桁", { base_sha: "a".repeat(39) }],
+    ["base_sha が 40 桁の 16 進でない", { base_sha: `${"a".repeat(39)}g` }],
     ["title が空", { title: "" }],
     ["instructions が空", { instructions: "" }],
     ["base_ref が空", { base_ref: "" }],
@@ -129,9 +132,17 @@ describe("taskInputSchema", () => {
     expect(exceedsInputLimit(parsed)).toBe(true);
     expect(exceedsInputLimit(taskInputSchema.parse(base))).toBe(false);
   });
-  it("base_sha は 7 桁と 40 桁の境界を受け付ける", () => {
-    expect(taskInputSchema.safeParse({ ...base, base_sha: "a".repeat(7) }).success).toBe(true);
+  it("base_sha は 40 桁の 16 進だけを受け付ける（大文字も可）", () => {
+    expect(taskInputSchema.safeParse({ ...base, base_sha: "a".repeat(40) }).success).toBe(true);
     expect(taskInputSchema.safeParse({ ...base, base_sha: "A".repeat(40) }).success).toBe(true);
+  });
+  it.each([7, 39])("base_sha が %i 桁なら、40 桁の SHA を求めるメッセージで拒否する", (n) => {
+    const r = taskInputSchema.safeParse({ ...base, base_sha: "a".repeat(n) });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    const issue = r.error.issues.find((i) => i.path[0] === "base_sha");
+    expect(issue?.message).toContain("40-digit commit SHA");
+    expect(issue?.message).toContain("abbreviated");
   });
 });
 
@@ -158,7 +169,7 @@ describe("computeFingerprint", () => {
   it("repository と base_sha の大文字小文字は正規化する", async () => {
     const a = await computeFingerprint(parse(base));
     const b = await computeFingerprint(
-      parse({ ...base, repository: "owner/repo", base_sha: "0123456".toUpperCase() }),
+      parse({ ...base, repository: "owner/repo", base_sha: base.base_sha.toUpperCase() }),
     );
     expect(b).toBe(a);
   });
@@ -174,7 +185,7 @@ describe("computeFingerprint", () => {
   it.each([
     ["repository", { repository: "owner/other" }],
     ["base_ref", { base_ref: "develop" }],
-    ["base_sha", { base_sha: "0123457" }],
+    ["base_sha", { base_sha: "0123456789abcdef0123456789abcdef01234568" }],
     ["title", { title: "t2" }],
     ["instructions", { instructions: "i2" }],
     ["acceptance_criteria", { acceptance_criteria: ["a", "b"] }],
@@ -314,7 +325,7 @@ describe("merge_policy（D9）", () => {
     );
     expect(withCmdMerge).not.toBe(withCmd);
     // 従来の fingerprint（v1 形式）が変わらない: 保存済みのタスクの再試行（同じ idempotency_key）が conflict にならない
-    const v1 = JSON.stringify(["v1", "owner/repo", "main", "0123456", "t", "i", ["a"], ["c"]]);
+    const v1 = JSON.stringify(["v1", "owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]]);
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v1));
     const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
     expect(implicit).toBe(hex);
@@ -348,13 +359,24 @@ describe("model（D10）", () => {
       return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
     };
     expect(implicit).toBe(
-      await sha(["v1", "owner/repo", "main", "0123456", "t", "i", ["a"], ["c"]]),
+      await sha(["v1", "owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]]),
     );
     const merge = await computeFingerprint(
       taskInputSchema.parse({ ...base, merge_policy: "agent_merge" }),
     );
     expect(merge).toBe(
-      await sha(["v3", "owner/repo", "main", "0123456", "t", "i", ["a"], ["c"], [], "agent_merge"]),
+      await sha([
+        "v3",
+        "owner/repo",
+        "main",
+        base.base_sha,
+        "t",
+        "i",
+        ["a"],
+        ["c"],
+        [],
+        "agent_merge",
+      ]),
     );
     // model と merge_policy の組み合わせも別のタスク
     const both = await computeFingerprint(

@@ -142,7 +142,30 @@ function wrapOptionsJson(raw: unknown): string {
   return JSON.stringify(list.map(wrapUntrustedQuestion));
 }
 
+/**
+ * 子が書いた自由文の項目（イベントの種類 → 項目名）。囲みの対象。
+ * 固定コード（status・code・sha・件数・call_id・name）は囲まない。
+ */
+const FREE_TEXT_FIELDS: Record<string, readonly string[]> = {
+  tool_start: ["summary"],
+  tool_end: ["summary"],
+  agent_error: ["message"],
+  push_failed: ["message"],
+  completion_report: ["summary"],
+};
+
+function wrapFreeText(e: TaskEvent, fields: readonly string[]): TaskEvent {
+  const payload: Record<string, string | number | boolean | null> = { ...e.payload };
+  for (const f of fields) {
+    const v = payload[f];
+    if (typeof v === "string" && v !== "") payload[f] = wrapUntrustedQuestion(v);
+  }
+  return { ...e, payload };
+}
+
 function wrapEvent(e: TaskEvent): TaskEvent {
+  const free = FREE_TEXT_FIELDS[e.type];
+  if (free !== undefined) return wrapFreeText(e, free);
   if (e.type !== "question" || typeof e.payload.message !== "string") return e;
   const payload: Record<string, string | number | boolean | null> = {
     ...e.payload,
@@ -416,6 +439,16 @@ export function createTaskService(
           value: {
             task_id: taskId,
             ...r.result,
+            // 子が書いた summary は非信頼データとして囲む（question と同じ囲み）
+            summary: r.result.summary === "" ? "" : wrapUntrustedQuestion(r.result.summary),
+            // 検証コマンドの出力も、子が書いたコードの実行結果なので囲む（argv・exit_code などの固定値は囲まない）
+            verification: {
+              ...r.result.verification,
+              results: r.result.verification.results.map((res) => ({
+                ...res,
+                output: res.output === "" ? "" : wrapUntrustedQuestion(res.output),
+              })),
+            },
             next_steps: nextSteps({
               task_id: taskId,
               status: r.result.status,

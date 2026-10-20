@@ -157,8 +157,21 @@ function tail(text: string, n = OUTPUT_TAIL): string {
 }
 
 function summarizeArgs(args: unknown): string {
-  const s = typeof args === "string" ? args : JSON.stringify(args ?? {});
+  // マスク → 切り詰めの順（切り詰めで秘密のパターンが途中で切れて素通りしないように）
+  const s = maskSecrets(typeof args === "string" ? args : JSON.stringify(args ?? {}));
   return s.length > 200 ? `${s.slice(0, 200)}...` : s;
+}
+
+/**
+ * イベントの「トップレベルの」文字列項目（子が書いた文や例外文）の秘密をマスクする。最後の砦で、切り詰める側は先に
+ * マスクしておく。入れ子のオブジェクト・配列の中は見ない（イベントは平らな形にする）。emit() を通らない経路
+ * （question・phase の reason）は積む側でマスクする。
+ */
+function maskEventStrings(data: unknown): unknown {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return data;
+  return Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [k, typeof v === "string" ? maskSecrets(v) : v]),
+  );
 }
 
 export class AgentDO extends DurableObject<Env> {
@@ -444,7 +457,7 @@ export class AgentDO extends DurableObject<Env> {
   private emit(type: string, data: unknown): void {
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
-      this.store.appendEvent(type, data);
+      this.store.appendEvent(type, maskEventStrings(data));
     });
   }
 
@@ -1387,7 +1400,12 @@ export class AgentDO extends DurableObject<Env> {
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
       // 古い指示をそのまま採用せず、確定の時点の意図と要求から決める
-      const decision = decideTerminal(this.stopIntents(), this.requests);
+      const decided = decideTerminal(this.stopIntents(), this.requests);
+      // reason には上流のエラー文などが入りうる（phase イベントは emit() を通らない）ので、積む前にマスクする
+      const decision = {
+        ...decided,
+        ...(decided.reason !== undefined ? { reason: maskSecrets(decided.reason) } : {}),
+      };
       const keepPatch = decision.phase === "completed" || this.stopIntents().length === 0;
       const verification = this.store.meta<VerificationSummary>("verification");
       if (decision.phase === "completed" && !verification?.verified) {
@@ -1642,7 +1660,7 @@ export class AgentDO extends DurableObject<Env> {
             ? result.isError
               ? "web tool error"
               : "web result (omitted)"
-            : tail(result.text, 200),
+            : tail(maskSecrets(result.text), 200),
         });
       },
       afterTools: async () => {
@@ -1909,17 +1927,20 @@ export class AgentDO extends DurableObject<Env> {
 
     const seq = (this.store.meta<number>("question_seq") ?? 0) + 1;
     const questionId = `q-${seq}`;
+    // 質問は親に流れる子の自由文。emit() を通らないので、積む前にここでマスクする（meta とイベントの両方）
+    const safeMessage = maskSecrets(message);
+    const safeOptions = options.map((o) => maskSecrets(o));
     this.store.tx(() => {
       this.store.setMeta("question_seq", seq);
       this.store.setMeta("questions", {
         ...this.questions(),
-        [questionId]: { message, options, answered: false },
+        [questionId]: { message: safeMessage, options: safeOptions, answered: false },
       });
       this.store.setMeta("paused_at", this.now());
       this.store.appendEvent("question", {
         question_id: questionId,
-        message,
-        options: JSON.stringify(options),
+        message: safeMessage,
+        options: JSON.stringify(safeOptions),
       });
       this.store.setPhase("input_required");
     });
@@ -1944,8 +1965,9 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   private async reportCompletion(
-    summary: string,
+    rawSummary: string,
   ): Promise<{ text: string; isError: boolean; terminate: boolean }> {
+    const summary = maskSecrets(rawSummary);
     const spec = this.spec();
     if (!spec || isTerminal(this.store.phase()) || this.stopIntents().length > 0) {
       return { text: "The task has already ended.", isError: true, terminate: true };
@@ -2150,7 +2172,7 @@ export class AgentDO extends DurableObject<Env> {
   /** git_commit のたびの push の結果（best-effort）をイベントにする。 */
   private async onCheckpointPush(r: PushResult): Promise<void> {
     if (r.ok) this.emit("pushed", { sha: r.sha });
-    else this.emit("push_failed", { sha: r.sha, message: tail(r.error, 500) });
+    else this.emit("push_failed", { sha: r.sha, message: tail(maskSecrets(r.error), 500) });
   }
 
   /**
@@ -2220,7 +2242,7 @@ export class AgentDO extends DurableObject<Env> {
       else
         this.emit("push_failed", {
           sha,
-          message: tail(result.error ?? "unknown", 500),
+          message: tail(maskSecrets(result.error ?? "unknown"), 500),
           final: true,
         });
     });

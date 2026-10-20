@@ -376,7 +376,10 @@ describe("task_start の追加入力と task_result", () => {
     expect(body(done)).toMatchObject({
       task_id: taskId,
       status: "COMPLETED",
-      summary: "fake summary",
+      // 子が書いた summary は非信頼データとして囲んで返す（意図した仕様変更）
+      summary: expect.stringMatching(
+        /^<<<UNTRUSTED_CHILD_QUESTION[^\n]*\nfake summary\n<<<END_UNTRUSTED_CHILD_QUESTION>>>$/,
+      ),
       verification: { verified: false },
       patch_too_large: false,
       // Draft PR の情報。偽の AgentDO は push していない（pushedSha なし）ので、head は比べず記録もしない（null）
@@ -1824,6 +1827,43 @@ describe("D10: AI への伝え方（instructions と説明）", () => {
     expect(result?.description).toContain("task_wait");
     expect(result?.description).toContain("呼び直");
     expect(client.getInstructions()).toContain("数秒");
+    await client.close();
+  });
+
+  it("子の自由文（質問に限らない）が囲まれて返ることを、task_result・task_wait・task_status の説明に書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const desc = (n: string) => tools.find((t) => t.name === n)?.description ?? "";
+    for (const name of ["task_result", "task_wait", "task_status"]) {
+      expect(desc(name), name).toContain("<<<UNTRUSTED_CHILD_QUESTION");
+      expect(desc(name), name).toContain("質問に限らない");
+    }
+    expect(desc("task_result")).toContain("summary");
+    expect(desc("task_result")).toMatch(/verification.*output|output.*verification/);
+    expect(desc("task_wait")).toContain("completion_report");
+    await client.close();
+  });
+
+  it("タスクは長くかかるので、task_wait のループはバックグラウンドに任せ、途中の確認は task_status か Draft PR で行うと書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const ins = client.getInstructions() ?? "";
+    expect(ins).toContain("数分〜数十分");
+    expect(ins).toContain("バックグラウンド");
+    expect(ins).toContain("会話を止めない");
+    expect(ins).toMatch(/task_status.*Draft PR|Draft PR.*task_status/);
+    const wait = tools.find((t) => t.name === "task_wait");
+    expect(wait?.description).toContain("long polling");
+    expect(wait?.description).toContain("繰り返し");
+    expect(wait?.description).toContain("バックグラウンド");
+    expect(wait?.description).toContain("会話を止めない");
+    expect(wait?.description).toContain("task_status");
+    expect(wait?.description).toContain("既定 30、上限 60");
+    const start = tools.find((t) => t.name === "task_start");
+    expect(start?.description).toContain("数分〜数十分");
+    expect(start?.description).toContain("task_wait の説明");
     await client.close();
   });
 });

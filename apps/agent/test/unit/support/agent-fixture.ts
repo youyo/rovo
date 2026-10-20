@@ -222,6 +222,15 @@ export function newFixture(
       },
     }),
     defineTool({
+      name: "echo",
+      description: "return the text as the tool output",
+      parameters: Type.Object({ text: Type.String() }),
+      replay: "safe",
+      async execute(args) {
+        return { output: [{ type: "text", text: args.text }] };
+      },
+    }),
+    defineTool({
       name: "gate",
       description: "block until released",
       parameters: Type.Object({}),

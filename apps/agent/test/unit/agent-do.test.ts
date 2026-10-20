@@ -247,8 +247,9 @@ describe("終端停止は terminate を使う", () => {
     await waitUntil(() => failing.sandbox.terminateCount >= 1);
     expect(failing.sandbox.stopCount).toBe(0);
 
+    // 入力の見積もりだけで予算を使い切る（出力を絞っても収まらない）
     const budget = newFixture("term-budget", [report()], { maxOutputTokens: 1_000_000 });
-    await budget.stub.start(makeSpec("term-budget", { budgetUsd: 0.5 }));
+    await budget.stub.start(makeSpec("term-budget", { budgetUsd: 0.001 }));
     expect(await waitForTerminal(budget)).toBe("budget_exceeded");
     await waitUntil(() => budget.sandbox.terminateCount >= 1);
     expect(budget.sandbox.stopCount).toBe(0);
@@ -466,10 +467,10 @@ describe("getResult", () => {
 });
 
 describe("予算", () => {
-  it("次の呼び出しの見積もりが残予算を超えるなら、モデルを呼ばずに budget_exceeded", async () => {
+  it("次の呼び出しの入力の見積もりだけで残予算を使い切るなら、モデルを呼ばずに budget_exceeded", async () => {
     const fx = newFixture("budget-first", [report()], { maxOutputTokens: 1_000_000 });
-    // 見積もり: 出力上限 1M トークン × $1/M = $1 > 予算 $0.5
-    await fx.stub.start(makeSpec("budget-first", { budgetUsd: 0.5 }));
+    // 入力の見積もり（バイト数 + 余裕で 1,000 トークン以上）が $1/M で $0.001 を超える。出力を絞っても収まらない
+    await fx.stub.start(makeSpec("budget-first", { budgetUsd: 0.001 }));
     expect(await waitForTerminal(fx)).toBe("budget_exceeded");
     expect(fx.modelCalls.count).toBe(0);
     expect(done(await fx.stub.getResult()).status).toBe("budget_exceeded");
@@ -513,13 +514,21 @@ describe("usage が返らない成功の呼び出し（少なく数えない）"
   it("積んだ見積額で予算の判定が働く（usage が返らないモデルでも予算を超えて走り続けない）", async () => {
     const fx = newFixture(
       "usage-missing-budget",
-      [call("write_note", { text: "a" }), call("write_note", { text: "b" }), report()],
+      [
+        call("write_note", { text: "a" }),
+        call("write_note", { text: "b" }),
+        call("write_note", { text: "c" }),
+        call("write_note", { text: "d" }),
+        report(),
+      ],
       { maxOutputTokens: 200_000 },
     );
-    // 1 回 $0.2 以上。予算 $0.5 では 3 回目の前に 0.4 + 0.2 > 0.5 で止まる
+    // 1 回 $0.2 以上。3 回目は残額に合わせて出力を絞って呼ぶ（その見積額も積む）。4 回目は残りが下限を割って止まる
     await fx.stub.start(makeSpec("usage-missing-budget", { budgetUsd: 0.5 }));
     expect(await waitForTerminal(fx)).toBe("budget_exceeded");
-    expect(fx.modelCalls.count).toBe(2);
+    expect(fx.modelCalls.count).toBe(3);
+    expect(fx.modelCalls.maxTokens[2] ?? 0).toBeLessThan(200_000);
+    expect(done(await fx.stub.getResult()).usage.costUsd).toBeLessThanOrEqual(0.5);
   });
 });
 

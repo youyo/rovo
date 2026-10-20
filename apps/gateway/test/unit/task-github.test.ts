@@ -886,6 +886,40 @@ describe("終端: PR の更新とトークンの失効", () => {
     });
   });
 
+  it("budget_exceeded でも pushedSha があれば head_sha を記録する。検証していない commit なので head_matches_verified は false", async () => {
+    const t = await createTask();
+    await t.stub.advance();
+    const head = app().branch(REPO, t.branch) as string;
+    await t.agent.setProgram({
+      // チェックポイントの push だけが済んでいる（検証は走っていない）
+      result: {
+        status: "budget_exceeded",
+        reason: "budget_exceeded",
+        summary: "budget_exceeded で停止しました。",
+        verification: { commands: [], results: [], verified: false, attempts: 0 },
+        warnings: [],
+        patchTooLarge: false,
+        pushedSha: head,
+        usage: {
+          costUsd: 0.64,
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          web: { search: 0, fetch: 0, browse: 0 },
+        },
+      } as ResultDto,
+    });
+    await t.agent.setPhase("budget_exceeded");
+    await t.stub.advance();
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.pr).toMatchObject({ head_sha: head, head_matches_verified: false });
+    // 検証済みの commit が無いので、「検証後に head が動いた」という誤解を招く警告は出さない
+    expect(r.result.warnings.join("\n")).not.toMatch(/head_moved_after_verification/);
+    expect(await gl(t.stub)).toMatchObject({ head_sha: head, head_matches: 0, finalize_done: 1 });
+  });
+
   it("pushedSha と検証済みの commit_sha が食い違えば、head が pushedSha と同じでも不一致として警告する", async () => {
     const { stub, branch } = await runToCompleted({}, false);
     const r = await stub.result(OWNER);

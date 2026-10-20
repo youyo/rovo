@@ -351,11 +351,27 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     await waitForPhase(fx, "cancelled");
     expect(fx.pushCalls).toHaveLength(0);
   });
+
+  it("キャンセルでは patch を取らない（予算・期限の停止と違い、結果に残さない）", async () => {
+    const fx = newFixture("sync-cancel-patch", [call("gate")], {
+      pushRetryDelayMs: 0,
+      cancelWaitMs: 200,
+    });
+    await fx.stub.start(makeSpec("sync-cancel-patch"));
+    await fx.gate.waitEntered();
+    await fx.stub.cancel();
+    fx.gate.release();
+    await waitForPhase(fx, "cancelled");
+    expect(fx.sandbox.calls.some((c) => c.argv[1] === "format-patch")).toBe(false);
+    const r = done(await fx.stub.getResult());
+    expect(r.patch).toBeUndefined();
+    expect(r.diffstat).toBeUndefined();
+  });
 });
 
 describe("git_commit のたびの push（本番のツール配線）", () => {
   const SHA = "c".repeat(40);
-  function prodSandbox(push: () => { exitCode?: number; stderr?: string }) {
+  function prodSandbox(push: () => { exitCode?: number; stderr?: string }, onPatch?: () => void) {
     const pushes: string[][] = [];
     const sandbox = new FakeSandbox((argv) => {
       const [a, b] = argv;
@@ -368,7 +384,10 @@ describe("git_commit のたびの push（本番のツール配線）", () => {
         return push();
       }
       if (b === "ls-remote") return { stdout: `${SHA}\t${argv[3]}\n` };
-      if (b === "format-patch") return { stdout: "PATCH" };
+      if (b === "format-patch") {
+        onPatch?.();
+        return { stdout: "PATCH" };
+      }
       return {};
     });
     return { sandbox, pushes };
@@ -396,6 +415,38 @@ describe("git_commit のたびの push（本番のツール配線）", () => {
     const events = await allEvents(asFx(stub));
     const pushed = events.filter((e) => e.type === "pushed" && e.data.final !== true);
     expect(pushed.map((e) => e.data.sha)).toEqual([SHA, SHA]);
+  });
+
+  it("push 済みで budget_exceeded になっても、pushedSha・停止理由つきの summary・patch を返す。patch は Sandbox を止める前に取る", async () => {
+    let terminatedAtPatch: number | undefined;
+    let sb: FakeSandbox | undefined;
+    const made = prodSandbox(
+      () => ({}),
+      () => {
+        terminatedAtPatch = sb?.terminateCount;
+      },
+    );
+    sb = made.sandbox;
+    setAgentTestOverrides("ck-budget", {
+      sandbox: made.sandbox,
+      // 1 回目の commit で予算をほぼ使い切る（実測の出力 999,999 トークン = 約 $1）。2 回目の前に止まる
+      script: [{ ...call("git_commit", { message: "one" }), usage: { output: 999_999 } }, report()],
+    });
+    const stub = env.AGENT_DO.getByName("ck-budget");
+    await stub.start(
+      makeSpec("ck-budget", {
+        verificationCommands: [],
+        budgetUsd: 1.0,
+        deadlineAt: Date.now() + 3_600_000,
+      }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("budget_exceeded");
+    const r = done(await stub.getResult());
+    expect(r.pushedSha).toBe(SHA);
+    expect(r.summary).toContain("budget_exceeded");
+    expect(r.summary).toContain(SHA);
+    expect(r.patch).toBe("PATCH");
+    expect(terminatedAtPatch).toBe(0);
   });
 
   it("push が失敗しても git_commit は失敗にならず、タスクは続く。push_failed イベントが出る", async () => {

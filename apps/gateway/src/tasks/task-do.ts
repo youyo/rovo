@@ -2347,12 +2347,17 @@ export class TaskDO extends DurableObject<Env> {
     // （警告は AgentDO の push_failed だけ）。pushedSha と検証済みの commit_sha が食い違うときは、
     // push したコミットが検証したものと違うので、PR の head が pushedSha と同じでも不一致として扱う。
     const verified = view.verification.commit_sha;
+    // 完了以外（予算超過・期限など）で検証した commit が無いまま push 済みの SHA がある（チェックポイントの push）。
+    // 検証していない commit なので head_matches_verified は false（head_sha は記録する）
+    const neverVerified = status !== "COMPLETED" && verified === undefined;
     const matches =
       pushed === undefined
         ? null
-        : pull.headSha === pushed && (verified === undefined || verified === pushed);
+        : !neverVerified &&
+          pull.headSha === pushed &&
+          (verified === undefined || verified === pushed);
     const own = JSON.parse(gl.warnings) as string[];
-    if (matches === false) {
+    if (matches === false && !neverVerified) {
       const w = `head_moved_after_verification: the PR head ${pull.headSha} differs from the verified commit ${verified ?? pushed}`;
       if (!own.includes(w)) own.push(w);
     }

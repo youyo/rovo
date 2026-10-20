@@ -85,6 +85,8 @@ const MAX_YIELD_NUDGES = 2;
 const MAX_SETUP_ATTEMPTS = 3;
 const PATCH_LIMIT = 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_000;
+/** 残額に収まる出力がこれを割るなら、モデルを呼ばずに budget_exceeded にする（応答が途中で切れるだけで費用が無駄になる） */
+const MIN_OUTPUT_TOKENS = 1_024;
 /** consult（D10）: 出力の既定の上限と、これ未満しか出せないなら呼ばない下限（入力が予約額をほぼ使い切っている） */
 const CONSULT_DEFAULT_OUTPUT_TOKENS = 8192;
 const CONSULT_MIN_OUTPUT_TOKENS = 64;
@@ -93,6 +95,8 @@ const DEFAULT_CANCEL_WAIT_MS = 20_000;
 /** 停止の意図による確定が、Pi の abort（idle）を待つ上限。deadline を超えては待たない。 */
 const DEFAULT_FINALIZE_WAIT_MS = 60_000;
 const USAGE_READ_WAIT_MS = 2_000;
+/** 停止（予算・期限など）の確定で、patch の取得を待つ上限。超えたら patch なしで終端を確定する */
+const STOP_PATCH_WAIT_MS = 20_000;
 const TICK_MS = 30_000;
 const OUTPUT_TAIL = 4000;
 /** 回答待ちの累計の上限（設計 7.3）。超えたら failed(input_timeout) */
@@ -121,6 +125,19 @@ interface StoredQuestion {
 
 /** 永続化する spec。Installation Token は含めない（SandboxDO に暗号化して預ける）。 */
 type StoredSpec = Omit<TaskSpec, "gitCredential">;
+/** 停止の意図の時点で Sandbox を破棄するもの。予算超過だけは、patch を取ってから破棄する。 */
+const sandboxDestroyedBy = (intents: readonly StopIntent[]): boolean =>
+  intents.some((i) => i !== "budget_exceeded");
+
+/** 直前のモデル呼び出しの実測。次の呼び出しの入力の見積もりの基準にする。 */
+interface CallBasis {
+  /** 実測したモデルの id（モデルが変わるとトークナイザーが違うので、基準を捨てる） */
+  model: string;
+  /** プロバイダーが返した入力のトークン数（input + cacheRead + cacheWrite） */
+  inputTokens: number;
+  /** その呼び出しのときの context のバイト数 */
+  contextBytes: number;
+}
 interface BranchSync {
   pushedSha?: string;
   error?: string;
@@ -280,11 +297,35 @@ export class AgentDO extends DurableObject<Env> {
     >[0],
   ) {
     this.noteMissingUsage(message);
+    this.noteCallBasis(message);
     try {
       this.store.setMeta(
         "last_model_status",
         message.stopReason === "error" ? (upstreamStatus(message) ?? null) : null,
       );
+    } catch {
+      // 記録の失敗でモデル呼び出しの結果を失わない
+    }
+  }
+
+  /**
+   * 成功した呼び出しの実測の入力を、次の呼び出しの見積もりの基準として残す。usage が無い（0）ときは残さない
+   * （前の基準のまま。基準が無ければバイト数の見積もり）。
+   */
+  private noteCallBasis(message: { stopReason: string; usage?: AssistantMessage["usage"] }) {
+    try {
+      if (message.stopReason !== "stop" && message.stopReason !== "toolUse") return;
+      const u = message.usage;
+      if (!u) return;
+      const input = finiteCount(u.input) + finiteCount(u.cacheRead) + finiteCount(u.cacheWrite);
+      if (input + finiteCount(u.output) <= 0) return;
+      const contextBytes = this.store.meta<number>("inflight_context_bytes");
+      if (contextBytes === undefined || contextBytes === null) return;
+      this.store.setMeta("last_call_basis", {
+        inputTokens: input,
+        contextBytes,
+        model: this.modelId(),
+      } satisfies CallBasis);
     } catch {
       // 記録の失敗でモデル呼び出しの結果を失わない
     }
@@ -1365,6 +1406,15 @@ export class AgentDO extends DurableObject<Env> {
   private requestStop(reason: "deadline" | "input_timeout" | "budget_exceeded"): void {
     if (isTerminal(this.store.phase()) || this.stopIntents().includes(reason)) return;
     this.recordIntent(reason);
+    if (reason === "budget_exceeded") {
+      // 予算の超過はモデル呼び出しの前に見つかる（実行中のツールは無い）ので、Sandbox は生きたまま patch を取ってから止める。
+      // Sandbox の破棄は確定の後（取得に失敗・タイムアウトしても止める）
+      const abort = this.abortRun();
+      void this.finalize(undefined, abort)
+        .catch(() => undefined)
+        .finally(() => void this.beginStop("finished", false).sandbox.catch(() => undefined));
+      return;
+    }
     const { abort } = this.beginStop(reason === "deadline" ? "deadline" : "finished");
     void this.finalize(undefined, abort).catch(() => undefined);
   }
@@ -1391,11 +1441,30 @@ export class AgentDO extends DurableObject<Env> {
     let patch: string | undefined;
     let diffstat: string | undefined;
     let patchTooLarge = false;
-    // 停止の意図があれば Sandbox はもう壊れている（または壊れる）ので、patch は取らない
+    // 予算超過の停止でも、Sandbox が生きているので patch と diffstat を残す（requestStop は破棄を確定の後に回す）。
+    // 取得は時間を区切り、失敗しても終端の確定は進める。cancel・期限・回答待ちの期限は、停止の時点で Sandbox を
+    // 破棄するので（破棄済みの Sandbox から取った patch は信用できない）、従来どおり取らない・残さない
+    const intents = this.stopIntents();
     const patchRequest = [...this.requests].reverse().find((r) => !r.skipPatch);
-    if (spec && patchRequest && this.stopIntents().length === 0) {
+    const stopped = intents.length > 0;
+    const wantsPatch =
+      patchRequest !== undefined || (stopped && !this.requests.some((r) => r.skipPatch));
+    if (spec && wantsPatch && !sandboxDestroyedBy(intents)) {
       try {
-        const cap = await this.capturePatch(spec, patchRequest.sha);
+        const capturing = this.capturePatch(spec, patchRequest?.sha);
+        let cap: Awaited<typeof capturing> | undefined;
+        if (stopped) {
+          const timedOutCapture = await this.raceTimeout(
+            capturing.then((c) => {
+              cap = c;
+            }),
+            this.overrides().stopPatchWaitMs ?? STOP_PATCH_WAIT_MS,
+          );
+          if (timedOutCapture || !cap)
+            throw new Error("timed out or failed while the task was stopping");
+        } else {
+          cap = await capturing;
+        }
         patch = cap.patch;
         diffstat = cap.diffstat;
         patchTooLarge = cap.tooLarge;
@@ -1431,24 +1500,36 @@ export class AgentDO extends DurableObject<Env> {
         ...decided,
         ...(decided.reason !== undefined ? { reason: maskSecrets(decided.reason) } : {}),
       };
-      const keepPatch = decision.phase === "completed" || this.stopIntents().length === 0;
+      // 予算超過の停止は patch を残す。cancel・期限・回答待ちの期限（Sandbox を破棄した）は残さない
+      const keepPatch = !sandboxDestroyedBy(this.stopIntents());
       const verification = this.store.meta<VerificationSummary>("verification");
       if (decision.phase === "completed" && !verification?.verified) {
         warnings.push("検証コマンドが指定されていないため未検証です（モデルの申告のみ）");
       }
       if (keepPatch && patch !== undefined) this.store.savePatch(patch);
-      // 完了のときだけ、作業ブランチの同期の結果を結果に反映する
-      const sync =
-        decision.phase === "completed" ? this.store.meta<BranchSync>("branch_sync") : undefined;
-      if (sync && !sync.pushedSha) {
+      // 作業ブランチの push の結果（チェックポイントの push または完了時の同期）。完了以外の終端でも pushedSha を返す
+      // （PR の head を記録できる。検証した commit かどうかは verification.commitSha との一致で別に判断される）。
+      // push 失敗の警告は完了のときだけ（途中で止まったタスクには、そもそも同期を試みていない）
+      const sync = this.store.meta<BranchSync>("branch_sync");
+      if (decision.phase === "completed" && sync && !sync.pushedSha) {
         warnings.push(
           `push_failed: 作業ブランチを検証済みの SHA に揃えられませんでした（${sync.error ?? "unknown"}）。patch は結果に残っています`,
         );
       }
+      // 完了以外で report_completion が呼ばれていないとき、固定の文で止まった理由と最後の push を伝える
+      const summary =
+        this.store.meta<string>("last_summary") ||
+        (decision.phase === "completed"
+          ? ""
+          : `${decision.reason ?? decision.phase} で停止しました。${
+              sync?.pushedSha
+                ? `最後に push した commit は ${sync.pushedSha} です。`
+                : "push された commit はありません。"
+            }`);
       this.store.setMeta("result", {
         ...(sync?.pushedSha ? { pushedSha: sync.pushedSha } : {}),
         reason: decision.reason,
-        summary: this.store.meta<string>("last_summary") ?? "",
+        summary,
         warnings,
         patchTooLarge: keepPatch ? patchTooLarge : false,
         diffstat: keepPatch ? diffstat : undefined,
@@ -1641,21 +1722,33 @@ export class AgentDO extends DurableObject<Env> {
     const price = priceFor(this.modelId(), (this.env as AgentEnv).ENVIRONMENT === "test");
     if (!price) return { block: "unknown_model" };
     const spent = await this.refreshUsage();
-    const estimate = estimateCallCostUsd(
-      price,
-      estimateTokens(JSON.stringify(context)) + REQUEST_OVERHEAD_TOKENS,
-      maxTokens,
-    );
-    if (spent.costUsd + estimate > spec.budgetUsd) {
+    // 入力の見積もり: 直前の呼び出しでプロバイダーが返した実測の入力に、前回以降に増えた分（バイト数 = 上限）を足す。
+    // 実測が無い初回は、コンテキスト全体のバイト数（トークン数の上限）。どちらも実際を下回らない。
+    const contextBytes = estimateTokens(JSON.stringify(context));
+    const basis = this.store.meta<CallBasis>("last_call_basis");
+    // 基準を使うのは、同じモデルで context が前回より縮んでいないときだけ（縮んだ後に伸びた場合の増分は、
+    // 前回との差では測れない。モデルが違えばトークナイザーも違う）。それ以外は全量をバイト数で見積もる
+    const inputTokens =
+      (basis && basis.model === this.modelId() && contextBytes >= basis.contextBytes
+        ? basis.inputTokens + (contextBytes - basis.contextBytes)
+        : contextBytes) + REQUEST_OVERHEAD_TOKENS;
+    // 出力は残額に収まる量まで絞る。下限（収まる出力が少なすぎて、まともに応答できない）を割るときだけ止める
+    const fits = maxOutputTokensWithin(price, inputTokens, spec.budgetUsd - spent.costUsd);
+    const allowed = Math.min(maxTokens, fits);
+    if (allowed < Math.min(maxTokens, MIN_OUTPUT_TOKENS)) {
       this.requestStop("budget_exceeded");
       return { block: "budget_exceeded" };
     }
+    const estimate = estimateCallCostUsd(price, inputTokens, allowed);
+    // モデル呼び出しは 1 つずつ直列（Pi の run は 1 本、toolExecution: sequential）なので、
+    // preModelCall と noteModelResult の間で inflight_context_bytes が取り違えられることはない
+    this.store.setMeta("inflight_context_bytes", contextBytes);
     // 呼び出し前の見積額を「進行中」として永続化する（abort を待ち切れずに確定するとき、これを計上する）
     this.store.setMeta("inflight", { baseCostUsd: spent.costUsd, estimateUsd: estimate });
     // 思考レベルはモデルごとに固定。思考のトークンは出力として課金され、maxTokens の中に収まる（上の estimate が上限）
     const reasoning = this.reasoningOf(spec.model ?? defaultModel(this.env as AgentEnv));
     return {
-      maxTokens,
+      maxTokens: allowed,
       metadata: { userId: spec.userId, taskId: spec.taskId },
       ...(reasoning !== undefined ? { reasoning } : {}),
     };
@@ -2217,8 +2310,12 @@ export class AgentDO extends DurableObject<Env> {
 
   /** git_commit のたびの push の結果（best-effort）をイベントにする。 */
   private async onCheckpointPush(r: PushResult): Promise<void> {
-    if (r.ok) this.emit("pushed", { sha: r.sha });
-    else this.emit("push_failed", { sha: r.sha, message: tail(maskSecrets(r.error), 500) });
+    if (r.ok) {
+      this.emit("pushed", { sha: r.sha });
+      // 完了せずに止まったときも、最後に push できた SHA を結果に返せるよう残す（PR の head の記録に使う）
+      if (SHA_RE.test(r.sha))
+        this.store.setMeta("branch_sync", { pushedSha: r.sha } satisfies BranchSync);
+    } else this.emit("push_failed", { sha: r.sha, message: tail(maskSecrets(r.error), 500) });
   }
 
   /**

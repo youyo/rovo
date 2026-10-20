@@ -2,6 +2,7 @@ import type { AuditRecord } from "@rovo/audit";
 import type { Hono } from "hono";
 import type { AgentRpc, TaskSpec } from "./agent/contract";
 import { readWorkerAudit } from "./audit-sink";
+import { DIRECTORY_NAME } from "./directory/types";
 import { resetProviderKeysCache } from "./provider-keys";
 
 /**
@@ -118,6 +119,14 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     const id = await taskIdOf(c.req);
     if (!id) return c.json({ error: "task_id is required" }, 400);
     return c.json(await c.env.TASK_DO.getByName(id).testDeliveryStates());
+  });
+
+  // 索引（DirectoryDO）の 1 タスクの行。無ければ row: null
+  app.post("/__test/directory/task", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const id = await taskIdOf(c.req);
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    return c.json({ row: await c.env.DIRECTORY_DO.getByName(DIRECTORY_NAME).testGetTask(id) });
   });
 
   // git_token の暗号文が空になったか（finalize_done の後）。暗号文そのものは返さず、件数と真偽だけを返す

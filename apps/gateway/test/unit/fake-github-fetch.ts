@@ -23,6 +23,16 @@ export class FakeGitHubFetch {
    * PR の Ready 化・マージのテスト用。user.login の人が、リポジトリに push できるものとして扱う。
    */
   app: FakeGitHubApp | undefined = undefined;
+  /**
+   * 複数の installation とページ分けを試すときに指定する（未指定なら repos を持つ installation 77 の 1 つ）。
+   * pageSize を超える件数は Link ヘッダ（rel="next"）で次のページに分ける。
+   */
+  installations:
+    | { id: number; repos: { id: number; full_name: string; push: boolean }[] }[]
+    | null = null;
+  pageSize = 100;
+  /** パス（クエリなし）+ ページ番号 → 返すステータス。"/user/installations/77/repositories#2" のように指定 */
+  pathFaults = new Map<string, number>();
   apiFault: number | null = null;
   tokenFault: number | null = null;
   calls: { method: string; path: string }[] = [];
@@ -87,18 +97,40 @@ export class FakeGitHubFetch {
       if (this.team === "none") return json({ message: "Not Found" }, 404);
       return json({ state: this.team });
     }
+    const page = Number(url.searchParams.get("page") ?? "1");
+    const fault =
+      this.pathFaults.get(`${url.pathname}#${page}`) ?? this.pathFaults.get(url.pathname);
+    if (fault) return json({ message: "fault" }, fault);
+    const insts = this.installations ?? [{ id: 77, repos: this.repos }];
+    const paged = <T>(key: string, items: T[], total: number) => {
+      const start = (page - 1) * this.pageSize;
+      const slice = items.slice(start, start + this.pageSize);
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (start + this.pageSize < items.length) {
+        headers.link = `<${url.origin}${url.pathname}?per_page=${this.pageSize}&page=${page + 1}>; rel="next"`;
+      }
+      return new Response(JSON.stringify({ total_count: total, [key]: slice }), { headers });
+    };
     if (url.pathname === "/user/installations") {
-      return json({ total_count: 1, installations: [{ id: 77 }] });
+      return paged(
+        "installations",
+        insts.map((i) => ({ id: i.id })),
+        insts.length,
+      );
     }
-    if (url.pathname === "/user/installations/77/repositories") {
-      return json({
-        total_count: this.repos.length,
-        repositories: this.repos.map((r) => ({
+    const m = /^\/user\/installations\/(\d+)\/repositories$/.exec(url.pathname);
+    if (m) {
+      const inst = insts.find((i) => i.id === Number(m[1]));
+      if (!inst) return json({ message: "Not Found" }, 404);
+      return paged(
+        "repositories",
+        inst.repos.map((r) => ({
           id: r.id,
           full_name: r.full_name,
           permissions: { push: r.push },
         })),
-      });
+        inst.repos.length,
+      );
     }
     return json({ message: "Not Found" }, 404);
   };

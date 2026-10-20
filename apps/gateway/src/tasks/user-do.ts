@@ -17,6 +17,7 @@ import {
   type StoredCredential,
   type TokenSet,
   type UserPull,
+  VisibleSetTooLargeError,
 } from "../github";
 import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
 import { addColumnIfMissing } from "./sql-schema";
@@ -29,6 +30,10 @@ export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const RESERVATION_RECLAIM_AFTER_MS = 10 * 60 * 1000;
 /** team 所属の再検証結果をキャッシュする時間。team から外れてから使えなくなるまでの遅れの上限。 */
 export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
+/** 閲覧者の見えるリポジトリの集合のキャッシュ時間（D6。権限の取り消しが一覧に反映されるまでの遅れの上限）。 */
+export const VISIBLE_CACHE_TTL_MS = 30 * 1000;
+/** 見えるリポジトリの集合の上限（D5）。超えたら部分的な集合を使わず fail closed にする。 */
+export const MAX_VISIBLE_REPOSITORIES = 10_000;
 /** web の1日あたりの回数の既定値（ユーザーごと・UTC）。env の WEB_SEARCH_DAILY_LIMIT / WEB_FETCH_DAILY_LIMIT で変える。 */
 export const DEFAULT_WEB_SEARCH_DAILY_LIMIT = 200;
 export const DEFAULT_WEB_FETCH_DAILY_LIMIT = 500;
@@ -112,6 +117,21 @@ export type AuthzFailure = {
   message: string;
 };
 export type MemberResult = { ok: true } | AuthzFailure;
+/**
+ * 閲覧者の見える repository id の集合（ダッシュボードの認可）。失敗の code:
+ * - unauthenticated: 許可ルールを満たさない・資格が無い / 失効（401 相当。再ログインが必要）
+ * - denied: GitHub が列挙を拒否した（403。見えるものは無いとして扱う）
+ * - unavailable: GitHub の障害・タイムアウト・列挙の途中の失敗・想定外の応答（503 相当）
+ * - too_large: 集合が上限を超えた（503 相当）
+ * どの失敗でも中身（部分的な集合）は返さない。
+ */
+export type VisibleResult =
+  | { ok: true; ids: number[] }
+  | { ok: false; code: "unauthenticated" | "denied" | "unavailable" | "too_large" };
+/** セッション + 許可ルールの確かめ直しの結果。unavailable は GitHub に確かめられない（通さない。セッションは消さない）。 */
+export type DashboardAuthResult =
+  | { ok: true; login: string }
+  | { ok: false; kind: "unauthenticated" | "unavailable" };
 export type StartAuthzResult =
   | { ok: true; repositoryId: number; installationId: number }
   | AuthzFailure;
@@ -179,6 +199,14 @@ export class UserDO extends DurableObject<Env> {
   private loginEpoch = 0;
   /** 進行中の所属確認。キーは「世代:githubUserId」。同じキーの呼び出しだけが共有する。 */
   private memberInflight = new Map<string, Promise<MemberResult | typeof STALE>>();
+  /** 見えるリポジトリの集合の上限。テストで変える。 */
+  maxVisibleRepositories = MAX_VISIBLE_REPOSITORIES;
+  /** 閲覧者の見えるリポジトリの集合のキャッシュ（メモリのみ。DO の退避で消え、権限をディスクに残さない）。 */
+  private visibleCache: { ids: number[]; at: number; epoch: number } | null = null;
+  /** キャッシュを破棄するたびに進める。破棄の前に始まった取得の結果で、破棄したキャッシュを復活させない。 */
+  private visibleGen = 0;
+  /** 進行中の集合の取得。キーは世代（loginEpoch）。最新のものを 1 本だけ持ち、fresh でない呼び出しは束ねる。 */
+  private visibleInflight = new Map<number, Promise<VisibleResult>>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -315,6 +343,115 @@ export class UserDO extends DurableObject<Env> {
       sql.exec("UPDATE dashboard_session SET last_seen = ? WHERE sid = ?", now, sid);
     }
     return { ok: true, login: row.login };
+  }
+
+  /**
+   * セッションの検証 + 許可ルールの確かめ直し（M5a。セッションを使うたびに呼ぶ）。
+   * セッションの記録（checkDashboardSession）に加え、**今の許可ルール**を満たすかを毎回確かめる。ルールから外れた利用者は、
+   * セッションが生きていても通さない（記録は消さない: ルールが戻れば使える）。GitHub に確かめられないとき（障害）は
+   * unavailable で通さない。githubUserId は Cookie の uid（この DO の名前と同じ）。
+   */
+  async authorizeDashboardSession(
+    githubUserId: number,
+    sid: string,
+    version: number,
+  ): Promise<DashboardAuthResult> {
+    const session = await this.checkDashboardSession(sid, version);
+    if (!session.ok) return { ok: false, kind: "unauthenticated" };
+    const allowed = await this.dashboardAllowed(githubUserId);
+    if (allowed === "allowed") return { ok: true, login: session.login };
+    return { ok: false, kind: allowed === "denied" ? "unauthenticated" : "unavailable" };
+  }
+
+  /**
+   * 今の許可ルールを満たすか。ルールは毎回読み直す（不正・不足は denied = fail closed）。
+   * user ID のルールは GitHub を呼ばずに判定し、team のルールだけ ensureMember（5 分キャッシュ）で確かめる。
+   * user ID のルールだけの構成で ID が外れたときは、team のキャッシュが残っていても通さない。
+   */
+  private async dashboardAllowed(
+    githubUserId: number,
+  ): Promise<"allowed" | "denied" | "unavailable"> {
+    // 呼び出し側の約束は「Cookie の uid で DO を選ぶ」。DO 自身の名前（= uid）が分かるときは、不一致を拒否して二重に守る
+    const owner = this.ctx.id.name;
+    if (owner !== undefined && owner !== String(githubUserId)) return "denied";
+    const rules = loadAllowRules(this.env);
+    if (!rules) return "denied";
+    if (isUserIdAllowed(rules, githubUserId)) return "allowed";
+    if (!rules.team) return "denied";
+    const member = await this.ensureMember(githubUserId);
+    if (member.ok) return "allowed";
+    return member.code === "forbidden" || member.code === "reauth_required"
+      ? "denied"
+      : "unavailable";
+  }
+
+  /**
+   * 閲覧者のユーザートークンで見える repository id の集合を返す（D5・D6。トークンは戻り値に出さない）。
+   * 一覧は 30 秒のキャッシュを使う。fresh: true（詳細を開いた最初）はキャッシュを使わず必ず GitHub で取り直す。
+   * 失敗したときはキャッシュを破棄し、古い集合を使わない。許可ルールは毎回確かめる（キャッシュより先）。
+   */
+  async visibleRepositoryIds(
+    githubUserId: number,
+    opts: { fresh?: boolean } = {},
+  ): Promise<VisibleResult> {
+    const allowed = await this.dashboardAllowed(githubUserId);
+    if (allowed !== "allowed") {
+      this.dropVisible();
+      return { ok: false, code: allowed === "denied" ? "unauthenticated" : "unavailable" };
+    }
+    const epoch = this.loginEpoch;
+    const now = this.now();
+    if (!opts.fresh) {
+      const c = this.visibleCache;
+      if (c && c.epoch === epoch && now - c.at >= 0 && now - c.at < VISIBLE_CACHE_TTL_MS) {
+        return { ok: true, ids: [...c.ids] };
+      }
+      const running = this.visibleInflight.get(epoch);
+      if (running) return running;
+    }
+    const created: Promise<VisibleResult> = this.fetchVisible(epoch, now).finally(() => {
+      // 自分が登録したものだけを消す
+      if (this.visibleInflight.get(epoch) === created) this.visibleInflight.delete(epoch);
+    });
+    this.visibleInflight.set(epoch, created);
+    return created;
+  }
+
+  private dropVisible(): void {
+    this.visibleCache = null;
+    this.visibleGen++;
+    // 破棄より前に始まった取得には、以降の呼び出しを束ねない
+    this.visibleInflight.clear();
+  }
+
+  private async fetchVisible(epoch: number, startedAt: number): Promise<VisibleResult> {
+    const gen = this.visibleGen;
+    try {
+      const { client, credentials } = this.github();
+      const ids = await credentials.withToken((tok) =>
+        client.listVisibleRepositoryIds(tok, this.maxVisibleRepositories),
+      );
+      // 取得中に再ログイン・破棄（別の呼び出しの失敗など）があったら、結果は返すがキャッシュしない
+      if (gen === this.visibleGen && epoch === this.loginEpoch) {
+        // 並行する取得のうち、後で終わった古い取得が新しい結果を上書きしない（開始が既存以上のときだけ書く）
+        const cur = this.visibleCache;
+        if (!cur || cur.epoch !== epoch || startedAt >= cur.at) {
+          this.visibleCache = { ids, at: startedAt, epoch };
+        }
+      }
+      return { ok: true, ids };
+    } catch (e) {
+      this.dropVisible();
+      if (e instanceof VisibleSetTooLargeError) return { ok: false, code: "too_large" };
+      if (e instanceof GitHubError) {
+        if (e.code === "reauth_required") return { ok: false, code: "unauthenticated" };
+        if (e.code === "forbidden") return { ok: false, code: "denied" };
+        return { ok: false, code: "unavailable" };
+      }
+      // メッセージにトークン等が入りうるので、エラー名だけを記録する
+      console.error("user_do_visible_error", e instanceof Error ? e.name : typeof e);
+      return { ok: false, code: "unavailable" };
+    }
   }
 
   /** ログアウト。sid の記録を消す（冪等）。GitHub の資格には触れない（MCP と共用のため）。 */
@@ -835,6 +972,8 @@ export class UserDO extends DurableObject<Env> {
     // 保存の完了後に世代を進める。旧資格で進行中の確認は、結果を捨てて新しい資格でやり直される。
     this.loginEpoch++;
     this.memberInflight.clear();
+    this.visibleInflight.clear();
+    this.dropVisible();
     this.ctx.storage.sql.exec("DELETE FROM membership_cache");
   }
 

@@ -206,8 +206,10 @@ export type ResultView = {
     web: { search: number; fetch: number; browse: number };
     /** 依存関係のキャッシュ（D14）の結果。agent がカウンタを読めたときだけ付く */
     deps_cache?: "hit" | "miss" | "built" | "disabled";
-    /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms。Sandbox の時間の推定にも含まれる） */
+    /** deps_cache が付くときは常に付く: キャッシュを作るのにかかった時間（ms。作っていなければ 0。Sandbox の時間の推定にも含まれる） */
     cache_build_ms?: number;
+    /** Sandbox を動かした累計の時間（ms。task_summary の sandbox_runtime_ms と同じもの）。agent がカウンタを読めたときだけ付く */
+    sandbox_runtime_ms?: number;
   };
 };
 
@@ -1271,6 +1273,25 @@ export class TaskDO extends DurableObject<Env> {
           "conflict",
           "head_not_verified",
           "the pull request head does not match the verified commit (head_matches_verified is false); review the changes and merge by hand",
+        );
+      }
+      // task_result の warnings（テストの設定の変更など）が 1 件でもあれば自動マージしない。人がレビューしてマージする
+      let warnings: string[];
+      try {
+        warnings = (await this.composeResult(row, status)).warnings;
+      } catch (e) {
+        console.error("task_do_pr_context_error", e instanceof Error ? e.name : typeof e);
+        return deny(
+          "not_ready",
+          "result_unavailable",
+          "the task result could not be read to check warnings; retry shortly",
+        );
+      }
+      if (warnings.length > 0) {
+        return deny(
+          "conflict",
+          "warnings_present",
+          "the task result has warnings, so the pull request is not merged automatically; review the warnings and the changes, then merge by hand",
         );
       }
     }
@@ -2717,7 +2738,18 @@ function shapeUsage(u: UsageDto): ResultView["usage"] {
       fetch: count(u.web?.fetch),
       browse: count(u.web?.browse),
     },
+    ...sandboxRuntimeUsage(u.sandbox),
     ...depsUsage(u.sandbox),
+  };
+}
+
+/** usage.sandbox の runtimeMs（task_summary の sandbox_runtime_ms と同じ値の写し方: 小数は切り捨て、壊れた値は 0）。sandbox が無ければ付けない */
+function sandboxRuntimeUsage(sb: UsageDto["sandbox"]): { sandbox_runtime_ms?: number } {
+  if (typeof sb !== "object" || sb === null) return {};
+  const ms = sb.runtimeMs;
+  return {
+    sandbox_runtime_ms:
+      typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0,
   };
 }
 
@@ -2731,7 +2763,8 @@ function depsUsage(sb: UsageDto["sandbox"]): {
   const buildMs = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
   return {
     ...(status !== undefined ? { deps_cache: status } : {}),
-    ...(buildMs > 0 ? { cache_build_ms: buildMs } : {}),
+    // deps_cache が出るときは cache_build_ms も常に出す（作っていなければ 0）
+    ...(status !== undefined ? { cache_build_ms: buildMs } : {}),
   };
 }
 

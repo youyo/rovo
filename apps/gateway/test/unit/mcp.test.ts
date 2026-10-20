@@ -1857,6 +1857,20 @@ describe("D10: AI への伝え方（instructions と説明）", () => {
     await client.close();
   });
 
+  it("task_start の説明に、依存は起動時に導入済みで verification_commands で npm ci などの入れ直しは不要と書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const start = tools.find((t) => t.name === "task_start");
+    expect(start?.description).toContain("依存は起動時に導入済み");
+    expect(start?.description).toContain("npm ci");
+    expect(start?.description).toContain("入れ直し");
+    expect(start?.description).toContain("テストのコマンドだけ");
+    // 例に「npm ci &&」を書くと、入れ直しを勧めることになる
+    expect(start?.description).not.toContain("npm ci && ");
+    await client.close();
+  });
+
   it("task_result の説明と instructions に、終端の直後は数秒 not_ready が返るので task_wait か少し待って呼び直すと書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);

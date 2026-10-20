@@ -31,6 +31,9 @@ const deps = {
   lockfilePath: "package-lock.json",
   blobSha: SHA,
   installCommand: "npm ci",
+  packageJsonSha: "d".repeat(40),
+  workspaceSha: null,
+  manifestsSha: null,
 };
 const NO_DEPS = Symbol("no deps");
 const spec = (withDeps: unknown = deps) => ({

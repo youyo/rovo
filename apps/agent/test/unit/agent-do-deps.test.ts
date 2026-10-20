@@ -28,6 +28,9 @@ const deps = {
   lockfilePath: "pnpm-lock.yaml",
   blobSha: "a".repeat(40),
   installCommand: "pnpm install --frozen-lockfile",
+  packageJsonSha: "d".repeat(40),
+  workspaceSha: null,
+  manifestsSha: null,
 };
 const base: SandboxMetrics = { runtimeMs: 5_000, restarts: 0, bootRetries: 0 };
 

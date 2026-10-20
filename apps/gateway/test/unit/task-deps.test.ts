@@ -41,6 +41,9 @@ describe("TaskSpec.deps", () => {
       lockfilePath: "package-lock.json",
       blobSha: BLOB,
       installCommand: "npm ci",
+      packageJsonSha: "e".repeat(40),
+      workspaceSha: null,
+      manifestsSha: null,
     });
   });
 
@@ -53,7 +56,10 @@ describe("TaskSpec.deps", () => {
   });
 
   it("tree を読めなくても（GitHub の API のエラー）、タスクは失敗せず deps: null で始まる", async () => {
-    await app().seedRootFiles(REPO, BASE, { "pnpm-lock.yaml": BLOB });
+    await app().seedRootFiles(REPO, BASE, {
+      "pnpm-lock.yaml": BLOB,
+      "package.json": "e".repeat(40),
+    });
     app().setFault({ pattern: "^GET /repos/.*/git/trees/", status: 502 });
     try {
       const { stub, agent } = await createTask();
@@ -66,12 +72,15 @@ describe("TaskSpec.deps", () => {
   });
 
   it("start の再送でも同じ deps を送る（API が後から読めるようになっても spec は変わらない）", async () => {
-    await app().seedRootFiles(REPO, BASE, { "yarn.lock": BLOB });
+    await app().seedRootFiles(REPO, BASE, { "yarn.lock": BLOB, "package.json": "e".repeat(40) });
     const { stub, agent } = await createTask();
     await agent.setProgram({ start: ["lose"] });
     await stub.advance();
     // 再送の前に lockfile が変わった（base_sha は同じでも API の答えが変わりうる状況）としても、保存済みの値を使う
-    await app().seedRootFiles(REPO, BASE, { "pnpm-lock.yaml": "f".repeat(40) });
+    await app().seedRootFiles(REPO, BASE, {
+      "pnpm-lock.yaml": "f".repeat(40),
+      "package.json": "e".repeat(40),
+    });
     await runDurableObjectAlarm(stub);
     const { specs } = await agent.calls();
     expect(specs).toHaveLength(2);
@@ -80,7 +89,10 @@ describe("TaskSpec.deps", () => {
   });
 
   it("GitHub の資格はコンテナ向けの spec 以外に増えない: deps に token は含まれない", async () => {
-    await app().seedRootFiles(REPO, BASE, { "package-lock.json": BLOB });
+    await app().seedRootFiles(REPO, BASE, {
+      "package-lock.json": BLOB,
+      "package.json": "e".repeat(40),
+    });
     const { stub, agent } = await createTask();
     await stub.advance();
     const deps = (await agent.calls()).specs[0]?.deps;

@@ -37,6 +37,10 @@ export const AUDIT_EVENTS = [
   "archive_completed",
   // web（M5）
   "web_blocked",
+  // gateway（D9）: 呼び出し元の AI による PR の Ready 化とマージ（利用者の GitHub トークンで行う）
+  "pr_ready",
+  "pr_merged",
+  "pr_denied",
 ] as const;
 
 export type AuditEventName = (typeof AUDIT_EVENTS)[number];
@@ -65,6 +69,8 @@ export type AuditFields = {
   prefix?: string;
   /** archive_completed だけ: 書き込んだ 3 オブジェクトの合計サイズ（バイト） */
   bytes?: number;
+  /** pr_ready / pr_merged / pr_denied だけ: タスクの merge_policy（MERGE_POLICIES のどれか） */
+  merge_policy?: string;
 };
 
 /** 出力される 1 件。キーの順序は固定。 */
@@ -98,6 +104,8 @@ export const TASK_SUMMARY_METRICS = [
   "verification_passed",
   "agent_errors",
 ] as const;
+/** task_start の merge_policy（固定）。 */
+export const MERGE_POLICIES = ["human_review", "agent_merge"] as const;
 /** 外向き通信の宛先の分類（固定）。 */
 export const OUTBOUND_DESTS = ["github", "registry", "other"] as const;
 
@@ -110,15 +118,21 @@ const CALLERS: ReadonlySet<unknown> = new Set(["parent", "child", "system"]);
 const EVENT_SET: ReadonlySet<string> = new Set(AUDIT_EVENTS);
 const SANDBOX_OP_SET: ReadonlySet<unknown> = new Set(SANDBOX_OPS);
 const OUTBOUND_DEST_SET: ReadonlySet<unknown> = new Set(OUTBOUND_DESTS);
+const MERGE_POLICY_SET: ReadonlySet<unknown> = new Set(MERGE_POLICIES);
 
 /** イベント固有のフィールド。ここに無いイベントは共通のものだけ通す。 */
 const EVENT_FIELDS: Readonly<
-  Partial<Record<AuditEventName, readonly ("op" | "dest" | "metrics" | "prefix" | "bytes")[]>>
+  Partial<
+    Record<AuditEventName, readonly ("op" | "dest" | "metrics" | "prefix" | "bytes" | "policy")[]>
+  >
 > = {
   sandbox_privileged_op: ["op"],
   outbound_denied: ["dest"],
   task_summary: ["metrics"],
   archive_completed: ["prefix", "bytes"],
+  pr_ready: ["policy"],
+  pr_merged: ["policy"],
+  pr_denied: ["policy"],
 };
 
 /** R2 のキーの接頭辞。キーの全体や任意の文字列は通さない。 */
@@ -223,6 +237,10 @@ export function buildAudit(
     );
   }
   if (extra.includes("metrics")) put("metrics", safeMetrics(own("metrics")));
+  if (extra.includes("policy")) {
+    const policy = own("merge_policy");
+    put("merge_policy", MERGE_POLICY_SET.has(policy) ? policy : undefined);
+  }
   return record as AuditRecord;
 }
 

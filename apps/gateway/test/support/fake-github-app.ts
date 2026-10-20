@@ -52,6 +52,21 @@ export interface FakePull {
   state: "open" | "closed";
   head: string;
   base: string;
+  /** マージ済みか（PUT .../merge で true になり、state は closed になる） */
+  merged: boolean;
+  /** マージで受け取った merge_method（確認用） */
+  mergeMethod?: string;
+  /** マージ API に渡された sha（確認用） */
+  mergeSha?: string;
+  /** マージした時点の head。マージ後にブランチを消しても、PR の head.sha として残る（GitHub と同じ） */
+  headAtMerge?: string;
+}
+
+/** 利用者のトークン（GitHub App のユーザーアクセストークン）で呼んだ人。 */
+export interface FakeUser {
+  login: string;
+  /** そのリポジトリを見られる・書けるか（Installation のリポジトリに push 権限があるか） */
+  canPush(fullName: string): boolean;
 }
 
 interface FakeRepoRec {
@@ -62,6 +77,10 @@ interface FakeRepoRec {
   refs: RefStore;
   pulls: FakePull[];
   missing: Set<string>;
+  /** ブランチ保護の再現: 設定するとマージを 405 とこのメッセージで拒否する */
+  mergeBlock: string | undefined;
+  /** このリポジトリで許可していないマージ方法（405） */
+  disallowedMethods: Set<string>;
 }
 
 interface TokenRec {
@@ -77,7 +96,7 @@ export interface FakeAppRequest {
   method: string;
   path: string;
   query: Record<string, string>;
-  auth: "jwt" | "token" | "none";
+  auth: "jwt" | "token" | "user" | "none";
   body: unknown;
 }
 
@@ -154,6 +173,8 @@ export class FakeGitHubApp {
   private faults: Fault[] = [];
   private log: FakeAppRequest[] = [];
   private tokenSeq = 0;
+  /** 利用者のトークンで呼んだときの App の権限（Installation Token の permissions と同じ形）。 */
+  private userPermissions: Record<string, string> = { contents: "write", pull_requests: "write" };
 
   constructor(opts: FakeAppOptions) {
     this.appId = String(opts.appId);
@@ -172,6 +193,22 @@ export class FakeGitHubApp {
     this.log = [];
     this.draftUnsupported = false;
     this.beforeHandle = undefined;
+    this.userPermissions = { contents: "write", pull_requests: "write" };
+  }
+
+  /** 利用者のトークンで呼んだときの App の権限を変える（Pull requests: write が無い App の再現など）。 */
+  setUserPermissions(permissions: Record<string, string>): void {
+    this.userPermissions = { ...permissions };
+  }
+
+  /** ブランチ保護の再現。message を渡すとそのリポジトリのマージを 405 で拒否する。null で解除。 */
+  setMergeBlock(fullName: string, message: string | null): void {
+    this.mustRepo(fullName).mergeBlock = message ?? undefined;
+  }
+
+  /** そのマージ方法（squash / merge / rebase）を許可しない。 */
+  disallowMergeMethod(fullName: string, method: string): void {
+    this.mustRepo(fullName).disallowedMethods.add(method);
   }
 
   /**
@@ -198,6 +235,8 @@ export class FakeGitHubApp {
       refs: store?.refs ?? new Map(),
       pulls: [],
       missing: new Set(),
+      mergeBlock: undefined,
+      disallowedMethods: new Set(),
     });
   }
 
@@ -249,6 +288,7 @@ export class FakeGitHubApp {
       state: "open",
       head: args.head,
       base: args.base,
+      merged: false,
     };
     repo.pulls.push(p);
     return p.number;
@@ -398,11 +438,15 @@ export class FakeGitHubApp {
 
   // ---- ハンドラ ----
 
-  /** この偽物が扱うパスなら Response、そうでなければ null。 */
-  async handle(req: Request): Promise<Response | null> {
+  /**
+   * この偽物が扱うパスなら Response、そうでなければ null。
+   * user を渡すと、利用者のトークン（GitHub App のユーザーアクセストークン）での呼び出しとして扱う
+   * （トークンの検証は呼び出し側。Installation Token の検証はしない）。
+   */
+  async handle(req: Request, user?: FakeUser): Promise<Response | null> {
     const url = new URL(req.url);
     const path = url.pathname;
-    if (!/^\/(app\/|repos\/|installation\/)/.test(path)) return null;
+    if (!/^\/(app\/|repos\/|installation\/|graphql$)/.test(path)) return null;
     const auth = req.headers.get("authorization") ?? "";
     let body: unknown = null;
     if (req.method !== "GET" && req.method !== "DELETE") {
@@ -418,7 +462,7 @@ export class FakeGitHubApp {
       method: req.method,
       path,
       query: Object.fromEntries(url.searchParams),
-      auth: auth === "" ? "none" : isJwtRoute ? "jwt" : "token",
+      auth: auth === "" ? "none" : isJwtRoute ? "jwt" : user ? "user" : "token",
       body,
     });
 
@@ -432,6 +476,7 @@ export class FakeGitHubApp {
     }
 
     if (isJwtRoute) return this.appRoute(req, path, auth, body);
+    if (user) return this.userRoute(req.method, path, url, body, user);
     const rec = this.tokenFrom(auth);
     if (!rec) return fail(401, "Bad credentials");
     if (req.method === "DELETE" && path === "/installation/token") {
@@ -493,17 +538,85 @@ export class FakeGitHubApp {
     });
   }
 
+  private nodeId(repo: FakeRepoRec, p: FakePull): string {
+    return `PR_fake_${repo.id}_${p.number}`;
+  }
+
   private pullJson(repo: FakeRepoRec, p: FakePull) {
     return {
       number: p.number,
+      node_id: this.nodeId(repo, p),
       html_url: `https://github.test/${repo.fullName}/pull/${p.number}`,
       title: p.title,
       body: p.body,
       draft: p.draft,
       state: p.state,
-      head: { ref: p.head, sha: repo.refs.get(`refs/heads/${p.head}`) ?? null },
-      base: { ref: p.base },
+      merged: p.merged,
+      head: {
+        ref: p.head,
+        sha: repo.refs.get(`refs/heads/${p.head}`) ?? p.headAtMerge ?? null,
+        repo: { full_name: repo.fullName },
+      },
+      base: { ref: p.base, repo: { full_name: repo.fullName } },
     };
+  }
+
+  /** 利用者のトークンでの /repos/... と /graphql。リポジトリを見られない利用者には 404（存在を隠す）。 */
+  private async userRoute(
+    method: string,
+    path: string,
+    url: URL,
+    body: unknown,
+    user: FakeUser,
+  ): Promise<Response> {
+    if (path === "/graphql") {
+      return method === "POST" ? this.graphql(body, user) : fail(404, "Not Found");
+    }
+    const m = /^\/repos\/([^/]+)\/([^/]+)(\/.*)$/.exec(path);
+    if (!m) return fail(404, "Not Found");
+    const owner = decodeURIComponent(m[1] as string);
+    const name = decodeURIComponent(m[2] as string);
+    const repo = this.repos.get(`${owner}/${name}`.toLowerCase());
+    if (!repo || !user.canPush(repo.fullName)) return fail(404, "Not Found");
+    const rec: TokenRec = {
+      token: "user",
+      installationId: repo.installationId,
+      repoIds: [repo.id],
+      permissions: this.userPermissions,
+      expiresAt: Number.POSITIVE_INFINITY,
+      revoked: false,
+    };
+    return this.repoRoute(method, m[3] as string, url, rec, repo, body);
+  }
+
+  /** markPullRequestReadyForReview だけを扱う GraphQL。エラーは GitHub と同じく HTTP 200 の errors で返す。 */
+  private graphql(body: unknown, user: FakeUser): Response {
+    const b = (body ?? {}) as { query?: unknown; variables?: { id?: unknown } };
+    if (typeof b.query !== "string") return fail(400, "Problems parsing JSON");
+    const errors = (type: string, message: string) =>
+      res(200, { data: null, errors: [{ type, message }] });
+    if (!/markPullRequestReadyForReview/.test(b.query)) {
+      return errors("UNSUPPORTED", "fake github: unsupported GraphQL operation");
+    }
+    const id = b.variables?.id;
+    for (const repo of this.repos.values()) {
+      for (const p of repo.pulls) {
+        if (this.nodeId(repo, p) !== id || !user.canPush(repo.fullName)) continue;
+        if (this.userPermissions.pull_requests !== "write") {
+          return errors("FORBIDDEN", "Resource not accessible by integration");
+        }
+        if (!p.draft) return errors("UNPROCESSABLE", "Pull request is not a draft");
+        p.draft = false;
+        return res(200, {
+          data: {
+            markPullRequestReadyForReview: {
+              pullRequest: { id: this.nodeId(repo, p), isDraft: false },
+            },
+          },
+        });
+      }
+    }
+    return errors("NOT_FOUND", `Could not resolve to a node with the global id of '${String(id)}'`);
   }
 
   private resolve(repo: FakeRepoRec, nameOrSha: string): string {
@@ -648,9 +761,52 @@ export class FakeGitHubApp {
         state: "open",
         head,
         base,
+        merged: false,
       };
       repo.pulls.push(p);
       return res(201, this.pullJson(repo, p));
+    }
+
+    const mergeOne = method === "PUT" ? match(/^\/pulls\/(\d+)\/merge$/) : null;
+    if (mergeOne) {
+      const p = repo.pulls.find((x) => x.number === Number(mergeOne[1]));
+      if (!p) return fail(404, "Not Found");
+      if (!can("pull_requests") || !can("contents")) {
+        return fail(403, "Resource not accessible by integration");
+      }
+      const how = b.merge_method === undefined ? "merge" : String(b.merge_method);
+      if (!["merge", "squash", "rebase"].includes(how)) {
+        return fail(422, "Validation Failed");
+      }
+      if (p.merged || p.state !== "open") return fail(405, "Pull Request is not mergeable");
+      if (p.draft) return fail(405, "Pull Request is still a draft");
+      if (repo.mergeBlock !== undefined) return fail(405, repo.mergeBlock);
+      if (repo.disallowedMethods.has(how)) {
+        return fail(405, `${how} merges are not allowed on this repository.`);
+      }
+      const head = repo.refs.get(`refs/heads/${p.head}`) ?? null;
+      if (typeof b.sha === "string" && b.sha !== head) {
+        return fail(409, "Head branch was modified. Review and try the merge again.");
+      }
+      p.merged = true;
+      p.state = "closed";
+      p.mergeMethod = how;
+      if (head !== null) p.headAtMerge = head;
+      if (typeof b.sha === "string") p.mergeSha = b.sha;
+      return res(200, {
+        sha: head,
+        merged: true,
+        message: "Pull Request successfully merged",
+      });
+    }
+
+    const refDelete = method === "DELETE" ? match(/^\/git\/refs\/(heads\/.+)$/) : null;
+    if (refDelete) {
+      if (!can("contents")) return fail(403, "Resource not accessible by integration");
+      const ref = `refs/${decodeURIComponent(refDelete[1] as string)}`;
+      if (!repo.refs.has(ref)) return fail(422, "Reference does not exist");
+      repo.refs.delete(ref);
+      return new Response(null, { status: 204 });
     }
 
     const pullOne = match(/^\/pulls\/(\d+)$/);

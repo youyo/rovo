@@ -123,3 +123,77 @@ export async function tokenState(taskId: string): Promise<TokenState> {
   if (!res.ok) throw new Error(`/__test/task/token-state failed: ${res.status}`);
   return (await res.json()) as TokenState;
 }
+
+/** 偽の子エージェントを終端にする（ENVIRONMENT=test のときだけある /__test/agent/finish）。 */
+export async function finishAgent(
+  taskId: string,
+  phase: "completed" | "failed",
+  result?: unknown,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/__test/agent/finish`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId, phase, ...(result !== undefined ? { result } : {}) }),
+  });
+  if (!res.ok) throw new Error(`/__test/agent/finish failed: ${res.status}`);
+}
+
+/** COMPLETED の結果（検証済みの commit = push した commit = sha）。 */
+export function completedResult(sha: string) {
+  return {
+    status: "completed",
+    summary: "implemented",
+    verification: {
+      commands: [{ argv: ["npm", "test"] }],
+      results: [{ argv: ["npm", "test"], exitCode: 0, timedOut: false, output: "ok" }],
+      verified: true,
+      attempts: 1,
+      commitSha: sha,
+    },
+    warnings: [],
+    patchTooLarge: false,
+    pushedSha: sha,
+    usage: {
+      costUsd: 0.5,
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      web: { search: 0, fetch: 0, browse: 0 },
+    },
+  };
+}
+
+/** task_result が返せる（終端 + 停止確認済み + 終端の PR 更新が済んで head を読めた）まで待つ。 */
+export async function waitForResult(
+  client: Client,
+  taskId: string,
+  opts: { timeoutMs?: number; needHead?: boolean } = {},
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 90_000);
+  for (;;) {
+    const r = await client.callTool({ name: "task_result", arguments: { task_id: taskId } });
+    const body = bodyOf(r);
+    const pr = body.pr as { head_sha: string | null } | null | undefined;
+    if (!r.isError && (opts.needHead === false || pr == null || pr.head_sha !== null)) return body;
+    if (Date.now() > deadline)
+      throw new Error(`task_result が揃いませんでした: ${JSON.stringify(body)}`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+}
+
+export type FakePullView = {
+  number: number;
+  draft: boolean;
+  state: string;
+  merged: boolean;
+  head: string;
+  mergeMethod?: string;
+  mergeSha?: string;
+};
+
+/** 偽 GitHub 上の acme/widgets の PR（ブランチ名で探す）。 */
+export async function pullOf(branch: string): Promise<FakePullView | undefined> {
+  const pulls = await admin.app<FakePullView[]>("pulls", "acme/widgets");
+  return pulls.find((p) => p.head === branch);
+}

@@ -170,6 +170,8 @@ GitHub の Settings > Developer settings > GitHub Apps で作る（OAuth App は
 - **Request user authorization (OAuth) during installation**: 不要。**Webhook**: 無効でよい
 - **Expire user authorization tokens**: 有効にする（既定）。トークンは 8 時間で切れ、refresh token（約 6 か月）で自動更新される。無効にした場合も動く
 - **Repository permissions**: Metadata: Read-only / Contents: Read and write / Pull requests: Read and write
+  - `task_pr_ready` / `task_pr_merge`（D9）は、**この権限のままで足りる**（追加は要らない）。これらは Installation Token ではなく、**利用者の GitHub のユーザートークン**で行うので、有効な権限は「App の権限」と「利用者本人の権限」の共通部分になる。Draft → Ready（GraphQL の `markPullRequestReadyForReview`）とマージ（`PUT .../pulls/{n}/merge`）には **Pull requests: write** と **Contents: write** が、`delete_branch`（`DELETE .../git/refs/heads/{branch}`）には **Contents: write** が要る。App の権限が read になっていると `forbidden` になる。利用者にそのリポジトリへの書き込み権限が無い場合も同じ。権限の表は GitHub の記述に基づくので、実機の受入（[acceptance.md](specs/acceptance.md) の 21 節）で確かめる
+  - ブランチ保護（必須レビュー・必須チェック・ruleset）は GitHub が利用者のトークンに対して適用する。`merge_policy` が `agent_merge` でも、保護に拒否されたら `merge_blocked` になり、マージされない（組織としての強制は GitHub に任せる）
 - **Organization permissions**: Members: Read-only（team 所属の確認に使う。`ALLOWED_USER_IDS` だけで認可する個人利用では使わない）
 - App を対象の org / リポジトリに **Install** する。個人アカウントのリポジトリでも、`task_start` の Installation と push 権限の確認はそのまま動く（`ALLOWED_USER_IDS` で認可した利用者は、org の Members 権限を使わない）。`task_start` は、利用者のトークンで見える Installation に対象リポジトリが含まれ、利用者に push 権限があるときだけ成功する（公開リポジトリでも App が未導入なら `forbidden`）
 
@@ -263,7 +265,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 
 1. 3 つの Worker が、web → agent → gateway の順にデプロイできた。
 2. `<PUBLIC_BASE_URL>/mcp` が、認証なしで 401 を返す（protected resource metadata が参照できる）。
-3. Portal 経由で Claude Code から接続し、同意画面 → GitHub のログイン → ツールの一覧（`task_start` / `task_status` / `task_wait` / `task_result` / `task_cancel` / `task_answer` / `task_steer` / `web_search` / `web_fetch`。`web_browse` は有効にした場合だけ）が出る。
+3. Portal 経由で Claude Code から接続し、同意画面 → GitHub のログイン → ツールの一覧（`task_start` / `task_status` / `task_wait` / `task_result` / `task_cancel` / `task_answer` / `task_steer` / `task_pr_ready` / `task_pr_merge` / `web_search` / `web_fetch`。`web_browse` は有効にした場合だけ）が出る。
 4. 許可した team のメンバーで `task_start` → Draft PR ができ、`task_result` が返る。
 
 詳しい受入は [acceptance.md](specs/acceptance.md)。実機での確認の結果: **【実機で確認して追記】**
@@ -297,6 +299,8 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 | `task_start` が `github_app_not_configured` で FAILED | `GITHUB_APP_ID` または `GITHUB_APP_PRIVATE_KEY` が未設定 |
 | `task_start` が `ai_gateway_not_configured` で拒否される | agent の `AI_GATEWAY_ID` が空 |
 | `task_start` が `forbidden` | App が対象リポジトリに未導入、または push 権限が無い |
+| `task_pr_ready` / `task_pr_merge` が `forbidden` | `task_pr_merge` は `merge_policy` が `human_review` のタスク。または App の権限が Pull requests / Contents の write でない、利用者に書き込み権限が無い（メッセージに GitHub の理由が入る） |
+| `task_pr_merge` が `merge_blocked` | ブランチ保護（必須レビュー・必須チェック・ruleset）に拒否された。メッセージの GitHub の理由を満たしてから再実行する |
 | `task_start` が `draft_pr_unsupported` で FAILED | Draft PR を作れないリポジトリ。`DRAFT_PR_FALLBACK=ready` にするか、リポジトリを変える |
 | `web_search` / `web_fetch` が `internal`（`web research service is not available`） | 原因の候補は、web の `AI_GATEWAY_ID` が空（web 内部の名前は `misconfigured`。ツールの応答には出ない）。ほかに web 機能の無効・未実装も同じ応答になる |
 | `web_browse` が tools/list に出ない | 3 つの Worker の `WEB_BROWSE_ENABLED` が揃っていない |

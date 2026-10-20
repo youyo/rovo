@@ -25,7 +25,7 @@ Web 検索・Web ページ取得は Coding Sandbox から分離した専用環�
 - 子エージェントは非同期で実行する。
 - 親は子の実行中もユーザーとの会話や調査を継続できる構成を目指す。
 - 子は必要な場合のみ親へ質問する。
-- GitHub Draft PR はタスク開始時に作成する。
+- GitHub Draft PR はタスク開始時に作成する。完了しても Draft のまま返す。呼び出し元の AI がレビューし、問題が無ければ Ready にする。人のレビューが要るかは組織のポリシー次第で、`merge_policy`（`task_start` の入力）で選ぶ。要らない（`agent_merge`）なら、呼び出し元の AI がマージまでできる（15.8 の D9）。
 - 障害発生時は可能な範囲で途中状態から自動復旧する。
 - 親のセッションが終了してもクラウド側の処理は継続する。
 - Web 調査は独立した Web Research Service に集約する。
@@ -208,7 +208,9 @@ Claude Code と Cowork に同じ Remote MCP Server を提供する。
 | `task_answer` | 子の質問への回答 |
 | `task_steer` | 追加指示 |
 | `task_cancel` | キャンセル |
-| `task_result` | 最終結果取得 |
+| `task_result` | 最終結果取得（`next_steps` で次の一手を案内する） |
+| `task_pr_ready` | Draft PR を Ready for review にする（D9） |
+| `task_pr_merge` | PR をマージする。`merge_policy` が `agent_merge` のとき（D9） |
 
 ### 4.3 task_start
 
@@ -496,7 +498,7 @@ PR本文には以下を含める。
 - テスト結果
 - 未解決事項
 
-PRは子エージェントによってマージしない。
+PRは子エージェントによってマージしない。マージできるのは親（呼び出し元の AI）だけで、`merge_policy` が `agent_merge` のタスクに限る（D9）。
 
 ### 6.6 作業ブランチ
 
@@ -1002,7 +1004,7 @@ GitHub認証にはGitHub Appを使用し、ローカルのGitHub認証情報を�
 
 Sandbox障害が発生した場合は、保存されたチェックポイントから可能な範囲で自動復旧する。
 
-実装完了後はDraft PRと検証結果を親に返し、最終的なレビュー・マージ判断は親エージェントとユーザーが行う。
+実装完了後はDraft PRと検証結果を親に返す。親エージェントが差分をレビューし、問題が無ければ `task_pr_ready` で Ready にする。そのあとは `merge_policy`（`task_start` の入力。既定 `human_review`）による: `human_review` は人のレビューを待ち（マージは人が行う）、`agent_merge` は親エージェントが `task_pr_merge` でマージまでできる。組織としての強制は GitHub のブランチ保護に任せる（D9）。
 
 ---
 
@@ -1126,6 +1128,16 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - **読み替え**: 8・12・13・14 章の Jev は Clef に読み替える（実装は 15.5 の Clef-flash）。本文は直さない。
 - **TaskDO のデータ（D1）**: R2 は引き続きコピーで、正は TaskDO のまま。`git_token` の暗号文（`enc` 列）だけを、`finalize_done = 1`（トークンの失効の後）に空にする。行と id は残す（`cred_delivered_id` の参照と、`credential_*` の件数の突き合わせを保つため）。`events` / `questions` / `steers` は消さない。本文の保持期限が要件になった時に、別の Phase で決める。
 - **個人での利用の認可（D8、2026-10-20 決定。phase7.md の D7 は Jev の読み替え）**: GitHub の個人アカウントには team が無いので、数値の user ID の許可リスト `ALLOWED_USER_IDS` でも認可できるようにする。login は改名でき、空いた名前を他人が取れるので使わない。org/team のルールと ID のルールは OR（どちらかを満たせば許可）。少なくとも 1 つが完全に設定されている必要がある。`ALLOWED_ORG` と `ALLOWED_TEAM` は対で、片方だけの設定は不正（ID のルールに切り替えない。fail closed）。`ALLOWED_USER_IDS` は 1 つでも不正な要素（数字以外・0・重複・空要素）があれば全体が不正で、読み飛ばさない。ID の判定は `GET /user` で取得した `id` で行い、トークンの持ち主の確認（不一致は拒否）は省略しない。ID で通らず、org/team の対が設定されているときだけ team を確認する。拒否の応答と監査（`authz_denied` / `not_team_member`）は team に無い場合と同じ。キャッシュ（TTL 5 分）の振る舞いは変えない。解析と判定は `apps/gateway/src/auth/allowlist.ts` に置く。
+- **呼び出し元の AI による PR の Ready 化とマージ（D9、2026-10-20 決定）**: 従来は「rovo は PR を Draft のまま返し、レビューとマージは親とユーザーが行う」だった。これを「呼び出し元の AI（親）が差分をレビューし、問題が無ければ Ready にする。人のレビューが要るかは組織のポリシー次第なので、要らなければマージまでできる」に変える。
+  - **ポリシーは `task_start` の入力 `merge_policy`（`"human_review"` | `"agent_merge"`、既定 `human_review`）で、TaskDO に保存する**（`task_status`・`task_result` にも返す）。デプロイ全体の env（`PR_MERGE_POLICY` など）にはしない: 組織で使うときは各個人が選べるようにする。fingerprint は既定なら従来の値のまま（保存済みの冪等キーを壊さない）、`agent_merge` のときだけ別のタスクになる。
+  - **MCP ツールは 2 つ。入力はどちらも `task_id` が中心で、リポジトリ・PR 番号・sha は呼び出し元から受け取らない**（任意の PR を操作する道具にしない。対象は TaskDO の記録: `github_link` の `pr_number` とブランチから取る）。`task_pr_ready {task_id}`: Draft PR を Ready for review にする。条件は、タスクの所有者であること・status が COMPLETED であること。冪等（すでに Ready なら成功）。`merge_policy` が `human_review` でも使える。`task_pr_merge {task_id, merge_method?: squash|merge|rebase（既定 squash）, delete_branch?: boolean（既定 false）}`: 上の条件に加えて、`merge_policy` が `agent_merge`（`human_review` は `forbidden`）、`task_result` の `head_matches_verified` が true、PR が Ready（Draft のままなら `conflict` で `task_pr_ready` を先に呼ぶよう返す）。GitHub のマージ API に、検証済みの head の sha（`github_link.head_sha`）を `sha` として渡し、検証後にブランチが動いていればマージしない（`head_moved`）。冪等（マージ済みなら成功）。`delete_branch` の削除に失敗してもマージは成功として返し、`warnings` に残す。
+  - **操作は利用者の GitHub のユーザートークンで行う**（UserDO の `github_credential`、`CredentialManager.withToken`。401 なら 1 回 refresh する既存の流儀）。Installation Token は使わない。理由: Installation Token は D1 で終端の処理の後に消える。App の権限で操作すると、利用者のブランチ保護の扱い（バイパスの許可など）と監査の主体が利用者本人とずれる。トークンは UserDO の中だけで使い、RPC の戻り値には出さない。**組織としての強制は GitHub に任せる**: ブランチ保護（必須レビュー・必須チェック・ruleset）に拒否されたら、GitHub のメッセージを付けて `merge_blocked` で返す。回避しようとしない。
+  - **GitHub の API**: Draft → Ready は REST に無く、GraphQL の `markPullRequestReadyForReview(input:{pullRequestId})`。node_id は保存せず、その場で `GET /repos/{o}/{r}/pulls/{n}` から読む（このとき PR が TaskDO の記録のブランチ・リポジトリと一致することも確かめる）。マージは `PUT /repos/{o}/{r}/pulls/{n}/merge`（`sha`、`merge_method`）。ブランチの削除は `DELETE /repos/{o}/{r}/git/refs/heads/{branch}`（記録の作業ブランチだけ）。
+  - **エラーコードの追加**: `merge_blocked`（GitHub が 405 / 422 でマージを拒否: ブランチ保護など）、`head_moved`（409、または検証済みの sha と PR の head が違う）、`github_rejected`（その他の GitHub の拒否）。権限の不足は `forbidden`、トークンの失効は `reauth_required`、一時的な障害は `upstream_unavailable`。
+  - **監査**: `pr_ready` / `pr_merged` / `pr_denied`（`taskId`・`userId`・`merge_policy`、`pr_denied` は `kind`（ready | merge）と固定の `reason`）。冪等な再実行（すでに Ready・マージ済み）では出さない。
+  - **AI への伝え方**: MCP の initialize の応答の `instructions` に、使い方の全体の流れ（task_start → task_wait / task_status → task_result → 差分のレビュー → task_pr_ready → `agent_merge` なら task_pr_merge、`human_review` なら人のレビューを待つ）を書く。`task_result` の応答に `next_steps`（status・`merge_policy`・PR の draft 状態・`head_matches_verified` から決まる案内文）と `merge_policy`、`pr.draft`・`pr.merged` を足す。レビューで問題が見つかったときは、`task_steer`（実行中専用）ではなく新しいタスクで頼む: `base_ref` に PR のブランチ `agent/task-<id>`、`base_sha` に `pr.head_sha` を指定すると、その PR に積む形で続けられる。ポリシーを説明文だけに頼らない: 条件の検査は TaskDO と GitHub がサーバー側で行う。子エージェントの system prompt の `<no_push>` 節には「Draft PR は gateway が作る（子は作らない）」と書き、子の summary が「PR を作っていない」と誤解させないようにする。
+  - **退けた案**: rovo が完了時に自動で Ready にする（親のレビューを挟むため）。呼び出し元の `gh` を使わせる（`gh` の無い環境で使えず、ポリシーを強制できないため）。デプロイ全体の `PR_MERGE_POLICY`（組織の中でも個人が選べるようにしたいため）。
+  - GitHub App の権限は変えない（Pull requests: Read and write、Contents: Read and write のまま足りる。`docs/deploy.md`）。受入は `acceptance.md` の 21 節。
 - **履歴の公開（D2）**: author / committer のメールは、そのまま公開する（書き換えない）。`Claude-Session` トレーラーは `git filter-repo` でメッセージ中の当該行だけを消す（`Co-Authored-By` は残す）。実行は公開の直前に、ユーザーと一緒に行う。書き換えの後、全履歴で `claude.ai/code/session_` が 0 件であることを確かめる。Phase 7 で今後作るコミットには `Claude-Session` 行を付けない。
 - **デプロイ用のタスク（D3）**: 16 の例（upstream に置くデプロイの mise タスク）は採らない。upstream の `mise.toml` には `deploy:*` を置かない。下流が、新しいファイル（`mise-tasks/` のファイルタスク、または `MISE_ENV` で読まれる `mise.<env>.toml`）を足してタスクを持つ。手順は `docs/deploy.md`。デプロイの順序は web → agent → gateway。
   - **2026-10-20 に見直した（D3 の撤回）。理由は、誰でも clone して、自分の値を渡せばデプロイできるようにするため。** upstream が `deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` / `deploy:secrets`（`scripts/deploy.sh`）と、Cloudflare のリソースを作る Terraform（`infra/`）を持つ。下流は `ROVO_DEPLOY_DIR` の wrangler 設定（雛形は `deploy.example/`）、tfvars、backend を新しいファイルとして足すだけで、upstream のファイルは書き換えない。`ROVO_DEPLOY_DIR` が未設定、または設定ファイルが無いときは何もせずに失敗する（upstream の `apps/*/wrangler.jsonc` を誤ってデプロイしないため）。上の「採らない」「置かない」は、この見直しの前の決定。MCP Server Portal と Access の登録は引き続き範囲外。

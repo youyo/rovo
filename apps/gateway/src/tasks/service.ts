@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { nextSteps, nextStepsAfterMerge, nextStepsAfterReady } from "./next-steps";
 import type { TaskStatus } from "./state";
 import type { ResultView, TaskDO, TaskEvent, TaskView } from "./task-do";
 import { isTaskId, ulid } from "./ulid";
@@ -9,6 +10,10 @@ import {
   computeFingerprint,
   exceedsInputLimit,
   isValidIdempotencyKey,
+  type MergeMethod,
+  type MergePolicy,
+  prMergeInputSchema,
+  prReadyInputSchema,
   type SteerInput,
   steerInputSchema,
   type TaskInput,
@@ -32,7 +37,14 @@ export type ErrorCode =
   | "not_ready"
   | "upstream_unavailable"
   | "invalid_cursor"
-  | "invalid_input";
+  | "invalid_input"
+  // PR の Ready 化とマージ（D9）
+  | "forbidden"
+  | "reauth_required"
+  | "merge_blocked"
+  | "head_moved"
+  | "github_rejected"
+  | "internal";
 
 export type ServiceError = { code: ErrorCode; message: string; retry_after_seconds?: number };
 export type ServiceResult<T> = { ok: true; value: T } | { ok: false; error: ServiceError };
@@ -52,7 +64,7 @@ export type StartValue = {
 };
 
 export const START_NOTE =
-  "Phase 3: 作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントが Sandbox で編集・テスト・commit・push します。draft_pr_url は作成前なので null です。PR の URL は task_status・task_result・イベント draft_pr_created で返ります。成果は終端になってから task_result で取得できます（PR はマージされず Draft のままです）。";
+  "Phase 3: 作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントが Sandbox で編集・テスト・commit・push します。draft_pr_url は作成前なので null です。PR の URL は task_status・task_result・イベント draft_pr_created で返ります。成果は終端になってから task_result で取得できます（rovo は PR を Ready にもマージにもしません。PR は Draft のまま返り、あなたが差分をレビューして問題が無ければ task_pr_ready で Ready にします。merge_policy が agent_merge なら task_pr_merge でマージもできます。次の一手は task_result の next_steps に書かれます）。";
 
 export type StatusValue = Omit<TaskView, "owner_id">;
 export type WaitValue = {
@@ -65,7 +77,36 @@ export type WaitValue = {
 export type AnswerValue = { task_id: string; question_id: string; status: TaskStatus };
 export type SteerValue = { task_id: string; steer_id: string; status: TaskStatus };
 export type CancelValue = { task_id: string; status: TaskStatus };
-export type ResultValue = { task_id: string } & ResultView;
+/** task_result の応答。next_steps は呼び出し元の AI への案内（状態から決まる文）。 */
+export type ResultValue = { task_id: string } & ResultView & { next_steps: string };
+export type PrReadyValue = {
+  task_id: string;
+  pr_number: number;
+  pr_url: string;
+  draft: false;
+  /** false は、すでに Ready だった（冪等な再実行） */
+  changed: boolean;
+  merge_policy: MergePolicy;
+  next_steps: string;
+};
+export type PrMergeValue = {
+  task_id: string;
+  pr_number: number;
+  pr_url: string;
+  merged: true;
+  /** true は、すでにマージ済みだった（冪等な再実行） */
+  already_merged: boolean;
+  merge_method: MergeMethod;
+  merge_sha: string | null;
+  /** delete_branch を求めなかったときは null。消せなかったときは false（マージは成功。warnings に理由） */
+  branch_deleted: boolean | null;
+  warnings: string[];
+  merge_policy: MergePolicy;
+  next_steps: string;
+};
+
+/** 一時的な障害のとき、クライアントに示す待ち時間。 */
+const UPSTREAM_RETRY_AFTER_SECONDS = 30;
 
 /**
  * 子の質問文を囲むマーカー。子はリポジトリの内容（非信頼）を読んで質問を作るので、
@@ -356,7 +397,22 @@ export function createTaskService(
     async result(principal: Principal, taskId: string): Promise<ServiceResult<ResultValue>> {
       if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
       const r = await deps.tasks(taskId).result(principal.githubUserId);
-      if (r.ok) return { ok: true, value: { task_id: taskId, ...r.result } };
+      if (r.ok) {
+        return {
+          ok: true,
+          value: {
+            task_id: taskId,
+            ...r.result,
+            next_steps: nextSteps({
+              task_id: taskId,
+              status: r.result.status,
+              merge_policy: r.result.merge_policy,
+              verification: r.result.verification,
+              pr: r.result.pr,
+            }),
+          },
+        };
+      }
       switch (r.code) {
         case "not_ready":
           return fail("not_ready", "the task has not finished yet");
@@ -366,7 +422,110 @@ export function createTaskService(
           return fail("not_found", NOT_FOUND);
       }
     },
+
+    /**
+     * Draft PR を Ready for review にする（task_pr_ready）。条件（所有者・COMPLETED）は TaskDO、GitHub の操作は UserDO
+     * （利用者のユーザートークン。Installation Token は使わない）。対象の PR は TaskDO の記録から取る。冪等。
+     */
+    async prReady(principal: Principal, rawInput: unknown): Promise<ServiceResult<PrReadyValue>> {
+      const parsed = prReadyInputSchema.safeParse(rawInput);
+      if (!parsed.success) return invalidInput(parsed.error);
+      const taskId = parsed.data.task_id;
+      if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
+      const task = deps.tasks(taskId);
+      const ctx = await task.prContext(principal.githubUserId, "ready");
+      if (!ctx.ok) return fail(ctx.code, ctx.message);
+      const r = await deps
+        .users(principal.githubUserId)
+        .prReady({ repository: ctx.repository, number: ctx.number, branch: ctx.branch });
+      if (!r.ok) return prFailure(task, principal, "ready", r);
+      await task.recordPrAction(principal.githubUserId, {
+        kind: "ready",
+        outcome: "done",
+        changed: !r.already_ready,
+      });
+      return {
+        ok: true,
+        value: {
+          task_id: taskId,
+          pr_number: ctx.number,
+          pr_url: ctx.pr_url,
+          draft: false,
+          changed: !r.already_ready,
+          merge_policy: ctx.merge_policy,
+          next_steps: nextStepsAfterReady(ctx.merge_policy),
+        },
+      };
+    },
+
+    /**
+     * PR をマージする（task_pr_merge）。条件（所有者・COMPLETED・merge_policy が agent_merge・head が検証済み）は TaskDO、
+     * Ready であることの確認とマージは UserDO（利用者のユーザートークン）。検証済みの head の sha を GitHub に渡す。
+     */
+    async prMerge(principal: Principal, rawInput: unknown): Promise<ServiceResult<PrMergeValue>> {
+      const parsed = prMergeInputSchema.safeParse(rawInput);
+      if (!parsed.success) return invalidInput(parsed.error);
+      const { task_id: taskId, merge_method: method, delete_branch: deleteBranch } = parsed.data;
+      if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
+      const task = deps.tasks(taskId);
+      const ctx = await task.prContext(principal.githubUserId, "merge");
+      if (!ctx.ok) return fail(ctx.code, ctx.message);
+      if (ctx.head_sha === null) {
+        return fail("conflict", "the verified head of the pull request is unknown");
+      }
+      const r = await deps
+        .users(principal.githubUserId)
+        .prMerge(
+          { repository: ctx.repository, number: ctx.number, branch: ctx.branch },
+          { expectedSha: ctx.head_sha, method, deleteBranch },
+        );
+      if (!r.ok) return prFailure(task, principal, "merge", r);
+      await task.recordPrAction(principal.githubUserId, {
+        kind: "merge",
+        outcome: "done",
+        changed: !r.already_merged,
+      });
+      return {
+        ok: true,
+        value: {
+          task_id: taskId,
+          pr_number: ctx.number,
+          pr_url: ctx.pr_url,
+          merged: true,
+          already_merged: r.already_merged,
+          merge_method: method,
+          merge_sha: r.merge_sha,
+          branch_deleted: r.branch_deleted,
+          warnings: r.warnings,
+          merge_policy: ctx.merge_policy,
+          next_steps: nextStepsAfterMerge({ branch_deleted: r.branch_deleted }),
+        },
+      };
+    },
   };
+}
+
+/**
+ * UserDO の PR 操作の失敗を ServiceResult にする。GitHub が拒否したもの（forbidden / merge_blocked / head_moved など）は
+ * pr_denied として TaskDO に監査させる。一時的な障害と内部エラーは拒否ではないので監査しない。
+ */
+async function prFailure(
+  task: DurableObjectStub<TaskDO>,
+  principal: Principal,
+  kind: "ready" | "merge",
+  f: { code: ErrorCode; message: string; reason: string },
+): Promise<ServiceResult<never>> {
+  if (f.code === "upstream_unavailable") {
+    return fail(f.code, f.message, { retry_after_seconds: UPSTREAM_RETRY_AFTER_SECONDS });
+  }
+  if (f.code !== "internal") {
+    await task.recordPrAction(principal.githubUserId, {
+      kind,
+      outcome: "denied",
+      reason: f.reason,
+    });
+  }
+  return fail(f.code, f.code === "internal" ? "internal error" : f.message);
 }
 
 export type TaskService = ReturnType<typeof createTaskService>;

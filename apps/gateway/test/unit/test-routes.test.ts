@@ -122,6 +122,7 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
       "/__test/agent/model-calls",
       "/__test/agent/model-tool-results",
       "/__test/agent/diagnostics",
+      "/__test/agent/finish",
       "/__test/task/deliveries",
     ]) {
       for (const environment of ["production", "", undefined]) {
@@ -152,6 +153,7 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
       "/__test/agent/model-calls",
       "/__test/agent/model-tool-results",
       "/__test/agent/diagnostics",
+      "/__test/agent/finish",
       "/__test/task/deliveries",
     ]) {
       expect((await app.request(path, post({}), withEnv("test"))).status, path).toBe(400);
@@ -159,6 +161,40 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
         400,
       );
     }
+  });
+
+  it("test の finish は、偽の子エージェントを終端にする（phase と結果）。不正な phase は 400", async () => {
+    const app = createDefaultApp();
+    const bad = await app.request(
+      "/__test/agent/finish",
+      post({ task_id: "finish-bad", phase: "running" }),
+      withEnv("test"),
+    );
+    expect(bad.status).toBe(400);
+    const result = {
+      status: "completed",
+      summary: "from finish",
+      verification: { commands: [], results: [], verified: false, attempts: 0 },
+      warnings: [],
+      patchTooLarge: false,
+      usage: {
+        costUsd: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    };
+    const ok = await app.request(
+      "/__test/agent/finish",
+      post({ task_id: "finish-task", phase: "completed", result }),
+      withEnv("test"),
+    );
+    expect(ok.status).toBe(200);
+    const agent = env.AGENT_DO.getByName("finish-task") as unknown as {
+      getResult(): Promise<{ status: string; summary?: string }>;
+    };
+    expect(await agent.getResult()).toMatchObject({ status: "completed", summary: "from finish" });
   });
 
   it("test の diagnostics は AgentDO の testDiagnostics の結果をそのまま返す（失敗した collect の診断用）", async () => {

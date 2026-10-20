@@ -79,6 +79,31 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json(await agent.testDiagnostics());
   });
 
+  // 子エージェント（E2E の偽 AgentDO）を終端にする。phase は completed / failed、result は getResult の戻り値（ResultDto）。
+  // PR の Ready 化・マージ（D9）の通しの E2E が、COMPLETED / FAILED のタスクを作るために使う
+  app.post("/__test/agent/finish", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const body = (await c.req.json().catch(() => ({}))) as {
+      task_id?: unknown;
+      phase?: unknown;
+      result?: unknown;
+    };
+    const id =
+      typeof body.task_id === "string" && TASK_ID_RE.test(body.task_id) ? body.task_id : undefined;
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    if (body.phase !== "completed" && body.phase !== "failed") {
+      return c.json({ error: "phase must be completed or failed" }, 400);
+    }
+    if (body.result !== undefined && (typeof body.result !== "object" || body.result === null)) {
+      return c.json({ error: "result must be an object" }, 400);
+    }
+    const agent = c.env.AGENT_DO.getByName(id) as unknown as {
+      testFinish(phase: "completed" | "failed", result?: unknown): Promise<void>;
+    };
+    await agent.testFinish(body.phase, body.result);
+    return c.json({ ok: true });
+  });
+
   // TaskDO の回答・steer の配送状態（pending / delivered / skipped）
   app.post("/__test/task/deliveries", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();

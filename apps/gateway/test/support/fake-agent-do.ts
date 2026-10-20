@@ -116,6 +116,12 @@ export class FakeAgentDO extends DurableObject {
     return { fake: true, task: this.ctx.id.name };
   }
 
+  /** E2E 用: 終端にする（/__test/agent/finish）。結果を渡せば getResult がそれを返す。 */
+  testFinish(phase: "completed" | "failed", result?: ResultDto): void {
+    if (result !== undefined) this.program = { ...this.program, result };
+    this.setPhase(phase);
+  }
+
   setProgram(p: FakeProgram): void {
     this.program = {
       ...p,

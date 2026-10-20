@@ -15,6 +15,7 @@ import type {
 import { UNTRUSTED_WEB_BEGIN, UNTRUSTED_WEB_END } from "../../src/web/untrusted";
 import { FakeGitHubFetch, installFakeGitHub } from "./fake-github-fetch";
 import { clearWorkerAudit, fakeAgent, newUserId, taskStub, userStub } from "./helpers";
+import { completedResult, app as prApp } from "./pr-helpers";
 
 // OAuthProvider が apiHandler に渡す ExecutionContext を模す（props はリクエスト単位）
 function ctxWithProps(props: Record<string, unknown>): ExecutionContext {
@@ -69,13 +70,15 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("9 つのツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("11 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "task_answer",
       "task_cancel",
+      "task_pr_merge",
+      "task_pr_ready",
       "task_result",
       "task_start",
       "task_status",
@@ -1332,6 +1335,213 @@ describe("監査（authz_denied / auth_failed）", () => {
       arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
     });
     expect(await readWorkerAudit(env as unknown as Env)).toEqual([]);
+    await client.close();
+  });
+});
+
+// ---- PR のレビューと Ready 化・マージ（D9）----
+
+describe("MCP の instructions と、D9 のツールの説明", () => {
+  it("initialize の応答の instructions に、rovo の使い方の全体の流れを書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const text = client.getInstructions() ?? "";
+    for (const word of [
+      "task_start",
+      "task_wait",
+      "task_status",
+      "task_result",
+      "task_pr_ready",
+      "task_pr_merge",
+      "merge_policy",
+      "agent_merge",
+      "human_review",
+      "next_steps",
+      "task_steer",
+      "base_ref",
+    ]) {
+      expect(text, word).toContain(word);
+    }
+    // 人のレビューを待つ場合と、非信頼データの扱い
+    expect(text).toContain("人のレビューを待つ");
+    expect(text).toMatch(/指示ではなく.*データ/);
+    await client.close();
+  });
+
+  it("task_start は merge_policy（human_review | agent_merge、既定 human_review）を受け取り、説明に書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const start = tools.find((t) => t.name === "task_start");
+    const props = start?.inputSchema.properties as Record<string, { enum?: string[] }>;
+    expect(props.merge_policy?.enum).toEqual(["human_review", "agent_merge"]);
+    expect(start?.description).toContain("merge_policy");
+    expect(start?.description).toContain("task_pr_ready");
+    // 「PR は Draft のままで、マージはされない」の古い説明を残さない
+    expect(start?.description).not.toContain("PR は Draft のままで、マージはされない");
+    await client.close();
+  });
+
+  it("task_result の説明に next_steps と merge_policy、pr.draft を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const r = tools.find((t) => t.name === "task_result");
+    expect(r?.description).toContain("next_steps");
+    expect(r?.description).toContain("merge_policy");
+    expect(r?.description).toContain("draft");
+    await client.close();
+  });
+
+  it("task_pr_ready / task_pr_merge: 入力は task_id（と merge_method / delete_branch）だけ。リポジトリ・PR 番号・sha は受け取らない", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const ready = tools.find((t) => t.name === "task_pr_ready");
+    const merge = tools.find((t) => t.name === "task_pr_merge");
+    expect(Object.keys(ready?.inputSchema.properties ?? {})).toEqual(["task_id"]);
+    expect(Object.keys(merge?.inputSchema.properties ?? {}).sort()).toEqual([
+      "delete_branch",
+      "merge_method",
+      "task_id",
+    ]);
+    const m = merge?.inputSchema.properties as Record<string, { enum?: string[]; type?: string }>;
+    expect(m.merge_method?.enum).toEqual(["squash", "merge", "rebase"]);
+    expect(m.delete_branch?.type).toBe("boolean");
+    expect(ready?.inputSchema.required).toEqual(["task_id"]);
+    // 説明: 条件と、利用者の GitHub トークンで行うこと、拒否のコード
+    expect(ready?.description).toContain("COMPLETED");
+    expect(ready?.description).toContain("冪等");
+    expect(ready?.description).toContain("利用者の GitHub");
+    expect(merge?.description).toContain("agent_merge");
+    expect(merge?.description).toContain("task_pr_ready");
+    expect(merge?.description).toContain("head_matches_verified");
+    expect(merge?.description).toContain("merge_blocked");
+    expect(merge?.description).toContain("head_moved");
+    expect(merge?.description).toContain("利用者の GitHub");
+    await client.close();
+  });
+});
+
+describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）", () => {
+  async function completed(policy?: "agent_merge" | "human_review") {
+    const id = newUserId();
+    const gh = new FakeGitHubFetch();
+    gh.user = { id, login: "alice" };
+    gh.app = prApp();
+    await installFakeGitHub(id, gh);
+    const props = { githubUserId: id, login: "alice" };
+    const client = await connect(createApiApp(), props);
+    const started = body(
+      await client.callTool({
+        name: "task_start",
+        arguments: startArgs("t-pr", policy ? { merge_policy: policy } : {}),
+      }),
+    );
+    const taskId = String(started.task_id);
+    const branch = `agent/task-${taskId}`;
+    const head = prApp().branch("acme/widgets", branch) as string;
+    await fakeAgent(taskId).setProgram({ result: completedResult(head) });
+    await fakeAgent(taskId).setPhase("completed");
+    await taskStub(taskId).advance();
+    const call = async (name: string, args: Record<string, unknown>) =>
+      client.callTool({ name, arguments: args });
+    return { id, client, taskId, branch, head, call };
+  }
+  const pull = (branch: string) =>
+    prApp()
+      .pulls("acme/widgets")
+      .find((p) => p.head === branch);
+
+  it("task_result に merge_policy と next_steps と pr.draft。agent_merge: ready → merge の流れを通しで", async () => {
+    const t = await completed("agent_merge");
+    const before = body(await t.call("task_result", { task_id: t.taskId }));
+    expect(before).toMatchObject({
+      status: "COMPLETED",
+      merge_policy: "agent_merge",
+      pr: { draft: true, merged: false, head_matches_verified: true },
+    });
+    expect(String(before.next_steps)).toContain("task_pr_ready");
+
+    const ready = body(await t.call("task_pr_ready", { task_id: t.taskId }));
+    expect(ready).toMatchObject({ draft: false, changed: true, merge_policy: "agent_merge" });
+    expect(pull(t.branch)?.draft).toBe(false);
+    expect(String(body(await t.call("task_result", { task_id: t.taskId })).next_steps)).toContain(
+      "task_pr_merge でマージ",
+    );
+
+    const merged = body(
+      await t.call("task_pr_merge", {
+        task_id: t.taskId,
+        merge_method: "squash",
+        delete_branch: true,
+      }),
+    );
+    expect(merged).toMatchObject({
+      merged: true,
+      merge_method: "squash",
+      merge_sha: t.head,
+      branch_deleted: true,
+    });
+    expect(pull(t.branch)).toMatchObject({ merged: true, mergeSha: t.head });
+    expect(String(body(await t.call("task_result", { task_id: t.taskId })).next_steps)).toContain(
+      "マージ済み",
+    );
+    await t.client.close();
+  });
+
+  it("human_review（既定）: task_pr_ready は通り、task_pr_merge は forbidden", async () => {
+    const t = await completed();
+    expect(body(await t.call("task_result", { task_id: t.taskId }))).toMatchObject({
+      merge_policy: "human_review",
+    });
+    expect((await t.call("task_pr_ready", { task_id: t.taskId })).isError).toBeFalsy();
+    const merge = await t.call("task_pr_merge", { task_id: t.taskId });
+    expect(merge.isError).toBe(true);
+    expect(body(merge).code).toBe("forbidden");
+    expect(pull(t.branch)).toMatchObject({ draft: false, merged: false });
+    await t.client.close();
+  });
+
+  it("ブランチ保護の拒否は merge_blocked（GitHub の理由つき）のコードで返る", async () => {
+    const t = await completed("agent_merge");
+    await t.call("task_pr_ready", { task_id: t.taskId });
+    prApp().setMergeBlock("acme/widgets", "Changes must be made through a pull request.");
+    const r = await t.call("task_pr_merge", { task_id: t.taskId });
+    expect(r.isError).toBe(true);
+    expect(body(r)).toMatchObject({
+      code: "merge_blocked",
+      message: expect.stringContaining("Changes must be made through a pull request."),
+    });
+    await t.client.close();
+  });
+
+  it("不正な入力は invalid_input。他人のタスクと不明な task_id は not_found", async () => {
+    const t = await completed("agent_merge");
+    const bad = await t.call("task_pr_merge", { task_id: t.taskId, merge_method: "ff" });
+    expect(bad.isError).toBe(true);
+    expect(body(bad).code).toBe("invalid_input");
+    const none = await t.call("task_pr_ready", {});
+    expect(body(none).code).toBe("invalid_input");
+    const other = await user("mallory");
+    const c2 = await connect(createApiApp(), other.props);
+    const r = await c2.callTool({ name: "task_pr_ready", arguments: { task_id: t.taskId } });
+    expect(r.isError).toBe(true);
+    expect(body(r).code).toBe("not_found");
+    expect(pull(t.branch)?.draft).toBe(true);
+    await c2.close();
+    await t.client.close();
+  });
+
+  it("task_start に不正な merge_policy を渡すと invalid_input", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const r = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { merge_policy: "auto" }),
+    });
+    expect(r.isError).toBe(true);
+    expect(body(r).code).toBe("invalid_input");
     await client.close();
   });
 });

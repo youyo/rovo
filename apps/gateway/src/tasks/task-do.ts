@@ -39,11 +39,13 @@ import { isTaskId, ulid } from "./ulid";
 import type { UserDO } from "./user-do";
 import {
   computeFingerprint,
+  DEFAULT_MERGE_POLICY,
   isValidIdempotencyKey,
   MAX_ANSWER_LENGTH,
   MAX_CONCURRENT_WAITERS,
   MAX_EVENTS_PER_WAIT,
   MAX_STEER_LENGTH,
+  type MergePolicy,
   parseCursor,
   parseTimeoutSeconds,
   taskInputSchema,
@@ -113,6 +115,8 @@ export type TaskView = {
   repository: string;
   title: string;
   draft_pr_url: string | null;
+  /** PR のマージの方針（task_start で指定。既定 human_review） */
+  merge_policy: MergePolicy;
   created_at: string;
   updated_at: string;
   /** 最後のイベントの seq（不透明な cursor 文字列）。 */
@@ -163,10 +167,16 @@ export type ResultView = {
     commit_sha?: string;
   };
   warnings: string[];
+  /** タスクの merge_policy（task_start で指定。task_pr_merge が使えるかを決める） */
+  merge_policy: MergePolicy;
   /** Draft PR の情報。PR が無い（作成前に失敗した、Phase 2 のタスク）なら null */
   pr: {
     number: number;
     url: string;
+    /** Draft か。task_pr_ready の成功で false になる（GitHub 上で人が Ready にした場合は、task_pr_ready を呼ぶと反映される） */
+    draft: boolean | null;
+    /** task_pr_merge でマージ済みか */
+    merged: boolean;
     /** GitHub から読んだ PR の head。まだ読めていなければ null */
     head_sha: string | null;
     /** head が検証済みの SHA と一致するか。比較できない（未読・検証済みの SHA なし）なら null */
@@ -185,6 +195,33 @@ export type ResultView = {
     web: { search: number; fetch: number; browse: number };
   };
 };
+
+/** 結果の組み立て途中の形（merge_policy は GitHub 側の情報と一緒に足す）。 */
+type ResultCore = Omit<ResultView, "merge_policy">;
+
+/** task_pr_ready / task_pr_merge の入口で TaskDO が返す、対象と判定の結果。 */
+export type PrContextResult =
+  | {
+      ok: true;
+      repository: string;
+      number: number;
+      pr_url: string;
+      branch: string;
+      merge_policy: MergePolicy;
+      /** 検証済みの head の sha（終端で GitHub から読んだ値）。まだ読めていなければ null */
+      head_sha: string | null;
+    }
+  | {
+      ok: false;
+      code: "not_found" | "not_ready" | "conflict" | "forbidden";
+      message: string;
+    };
+
+/** UserDO での GitHub 操作の結果を TaskDO に記録する（状態の更新と監査）。 */
+export type PrAction =
+  /** changed: false は、すでにその状態だった（冪等な再実行）。状態は合わせるが、pr_ready / pr_merged は監査しない */
+  | { kind: "ready" | "merge"; outcome: "done"; changed?: boolean }
+  | { kind: "ready" | "merge"; outcome: "denied"; reason: string };
 
 export type ResultOutcome =
   | { ok: true; result: ResultView }
@@ -261,6 +298,7 @@ type TaskRow = {
   fingerprint: string;
   status: string;
   draft_pr_url: string | null;
+  merge_policy: string;
   created_at: number;
   updated_at: number;
 };
@@ -290,6 +328,8 @@ type GithubRow = {
   finalize_retry_at: number;
   finalize_done: number;
   revoke_attempts: number;
+  /** task_pr_merge でマージ済み */
+  pr_merged: number;
 };
 
 type TokenRow = { id: number; enc: string; expires_at: number; revoked: number; kind: string };
@@ -302,6 +342,11 @@ class SetupFailure extends Error {
     this.name = "SetupFailure";
     this.reason = reason;
   }
+}
+
+/** 行の merge_policy（未知の値は、より慎重な human_review に倒す）。 */
+function policyOf(row: Pick<TaskRow, "merge_policy">): MergePolicy {
+  return row.merge_policy === "agent_merge" ? "agent_merge" : DEFAULT_MERGE_POLICY;
 }
 
 /** 上限による終了の reason（監査の固定コード）。上限でなければ undefined。 */
@@ -447,6 +492,9 @@ export class TaskDO extends DurableObject<Env> {
       finalize_done INTEGER NOT NULL DEFAULT 0
     )`);
     this.addColumnIfMissing("github_link", "revoke_attempts", "INTEGER NOT NULL DEFAULT 0");
+    // D9: PR のマージの方針（task_start の merge_policy）と、task_pr_merge でマージ済みか
+    this.addColumnIfMissing("task", "merge_policy", "TEXT NOT NULL DEFAULT 'human_review'");
+    this.addColumnIfMissing("github_link", "pr_merged", "INTEGER NOT NULL DEFAULT 0");
     // Phase 4: 子の質問と回答、親からの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
     sql.exec(`CREATE TABLE IF NOT EXISTS questions (
       question_id TEXT PRIMARY KEY,
@@ -570,6 +618,7 @@ export class TaskDO extends DurableObject<Env> {
       repository: row.repository,
       title: row.title,
       draft_pr_url: row.draft_pr_url,
+      merge_policy: policyOf(row),
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString(),
       latest_cursor: String(this.latestSeq()),
@@ -783,8 +832,8 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO task (singleton, id, owner_id, owner_login, repository, repository_id,
            installation_id, base_ref, base_sha, title, instructions, acceptance_criteria,
-           constraints, verification_commands, fingerprint, status, draft_pr_url, created_at, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
+           constraints, verification_commands, fingerprint, merge_policy, status, draft_pr_url, created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
         input.task_id,
         input.owner_id,
         input.owner_login,
@@ -799,6 +848,7 @@ export class TaskDO extends DurableObject<Env> {
         JSON.stringify(data.constraints),
         JSON.stringify(data.verification_commands),
         fingerprint,
+        data.merge_policy,
         at,
         at,
       );
@@ -1112,6 +1162,99 @@ export class TaskDO extends DurableObject<Env> {
     }
   }
 
+  /**
+   * task_pr_ready / task_pr_merge の入口。所有者・状態・merge_policy・検証済みの head を確かめ、
+   * 操作の対象（リポジトリ・PR 番号・ブランチ）を返す。対象はこの DO の記録だけから作る（呼び出し元の入力は使わない）。
+   * 拒否は pr_denied として監査する（所有者でない場合は authz_denied のまま not_found）。
+   */
+  async prContext(ownerId: number, op: "ready" | "merge"): Promise<PrContextResult> {
+    const row = this.getRow();
+    if (!row || this.notOwner(row, ownerId)) {
+      return { ok: false, code: "not_found", message: "task not found" };
+    }
+    const policy = policyOf(row);
+    const deny = (
+      code: "not_ready" | "conflict" | "forbidden",
+      reason: string,
+      message: string,
+    ): PrContextResult => {
+      this.emitAudit("pr_denied", {
+        userId: ownerId,
+        caller: "parent",
+        kind: op,
+        reason,
+        merge_policy: policy,
+      });
+      return { ok: false, code, message };
+    };
+    const status = this.statusOf(row);
+    if (!isTerminal(status) || !this.isStopped()) {
+      return deny("not_ready", "task_not_finished", "the task has not finished yet");
+    }
+    if (status !== "COMPLETED") {
+      return deny(
+        "conflict",
+        "not_completed",
+        `only a COMPLETED task can be used (status: ${status}); read task_result and start a new task if needed`,
+      );
+    }
+    const gl = this.getGithub();
+    if (!gl || gl.pr_number === null || gl.pr_url === null) {
+      return deny("conflict", "no_pr", "this task has no pull request");
+    }
+    if (op === "merge") {
+      if (policy !== "agent_merge") {
+        return deny(
+          "forbidden",
+          "policy_human_review",
+          "this task's merge_policy is human_review: a human reviews and merges the pull request (task_pr_ready is allowed)",
+        );
+      }
+      if (gl.head_matches === null) {
+        return deny(
+          "not_ready",
+          "head_not_read",
+          "the pull request head has not been verified yet; retry shortly",
+        );
+      }
+      if (gl.head_matches !== 1 || gl.head_sha === null) {
+        return deny(
+          "conflict",
+          "head_not_verified",
+          "the pull request head does not match the verified commit (head_matches_verified is false); review the changes and merge by hand",
+        );
+      }
+    }
+    return {
+      ok: true,
+      repository: row.repository,
+      number: gl.pr_number,
+      pr_url: gl.pr_url,
+      branch: gl.branch,
+      merge_policy: policy,
+      head_sha: gl.head_sha,
+    };
+  }
+
+  /** UserDO での操作の結果を記録する: 成功なら PR の状態を更新して pr_ready / pr_merged、拒否なら pr_denied を監査する。 */
+  async recordPrAction(ownerId: number, action: PrAction): Promise<void> {
+    const row = this.getRow();
+    if (!row || this.notOwner(row, ownerId)) return;
+    const fields = { userId: ownerId, caller: "parent" as const, kind: action.kind };
+    const merge_policy = policyOf(row);
+    if (action.outcome === "denied") {
+      this.emitAudit("pr_denied", { ...fields, reason: action.reason, merge_policy });
+      return;
+    }
+    if (action.kind === "ready") {
+      this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0");
+      if (action.changed !== false) this.emitAudit("pr_ready", { ...fields, merge_policy });
+    } else {
+      this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0, pr_merged = 1");
+      if (action.changed !== false) this.emitAudit("pr_merged", { ...fields, merge_policy });
+    }
+  }
+
   /** task_result と R2 の result.json が共有する結果の組み立て。AgentDO の getResult が失敗・タイムアウトしたら throw する。 */
   private async composeResult(row: TaskRow, status: TaskStatus): Promise<ResultView> {
     const dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
@@ -1121,18 +1264,23 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /** GitHub 側の情報（Draft PR・終端で読んだ head・警告）を結果に足す。 */
-  private withGithub(view: ResultView): ResultView {
+  private withGithub(view: ResultCore): ResultView {
     const gl = this.getGithub();
-    if (!gl) return { ...view, pr: null };
+    const row = this.getRow();
+    const merge_policy = row ? policyOf(row) : DEFAULT_MERGE_POLICY;
+    if (!gl) return { ...view, merge_policy, pr: null };
     const extra = (JSON.parse(gl.warnings) as string[]).filter((w) => !view.warnings.includes(w));
     return {
       ...view,
+      merge_policy,
       warnings: [...view.warnings, ...extra],
       pr:
         gl.pr_number !== null && gl.pr_url !== null
           ? {
               number: gl.pr_number,
               url: gl.pr_url,
+              draft: gl.pr_draft === null ? null : gl.pr_draft === 1,
+              merged: gl.pr_merged === 1,
               head_sha: gl.head_sha,
               head_matches_verified: gl.head_matches === null ? null : gl.head_matches === 1,
             }
@@ -1141,7 +1289,7 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /** AgentDO に結果が無い（start より先に cancel した、start が rejected など）終端タスクの結果。 */
-  private synthesizeResult(row: TaskRow, status: TaskStatus): ResultView {
+  private synthesizeResult(row: TaskRow, status: TaskStatus): ResultCore {
     const link = this.getLink();
     const spec = link ? (JSON.parse(link.spec) as BaseSpec) : undefined;
     return {
@@ -2520,7 +2668,7 @@ const MAX_RESULT_OUTPUT = 16 * 1024;
 function shapeResult(
   status: TaskStatus,
   dto: Exclude<ResultDto, { status: "not_ready" }>,
-): ResultView {
+): ResultCore {
   const v = dto.verification;
   return {
     status,

@@ -32,19 +32,21 @@ packages/audit  (監査ログの共通ライブラリ。3 つの Worker が使�
 | `apps/web` | Web Research Service（状態を持たない別 Worker） |
 | `packages/audit` | 監査イベントを 1 行の構造化 JSON で出す `audit()` |
 
-## 提供するツール（Phase 6 まで実装済み）
+## 提供するツール（Phase 6 まで実装済み。D9 で PR のツールを追加）
 
 GitHub App のユーザー認可でログインし、`/mcp` から次のツールを使える。
 
 | ツール | 内容 |
 |---|---|
-| `task_start` | タスクを作り、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, note}`。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される |
+| `task_start` | タスクを作り、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, note}`。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される。`merge_policy`（任意。`human_review`（既定）| `agent_merge`）で、完了後の PR の扱いを選ぶ |
 | `task_status` | 状態を返す |
 | `task_wait` | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling）。待機中に子エージェントのイベントを取り込む |
-| `task_result` | 終端になったタスクの成果（要約・検証結果・patch・費用）を返す。終端でなければ `not_ready` |
+| `task_result` | 終端になったタスクの成果（要約・検証結果・patch・費用・`merge_policy`・PR の `draft` / `merged`）を返す。終端でなければ `not_ready`。応答の `next_steps` が、状態に応じた次の一手（差分のレビュー → `task_pr_ready` → `task_pr_merge`、または人のレビュー待ち）を案内する |
 | `task_cancel` | キャンセルする（終端状態でも冪等）。子エージェントの停止を確認するまで Gateway が再送する |
 | `task_answer` | 子エージェントの質問（`INPUT_REQUIRED`）に答える |
 | `task_steer` | 実行中の子エージェントに追加の指示を送る |
+| `task_pr_ready` | COMPLETED のタスクの Draft PR を Ready for review にする（冪等）。`{task_id}` だけを受け、対象の PR はタスクの記録から決まる。利用者本人の GitHub トークンで行う |
+| `task_pr_merge` | PR をマージする。`{task_id, merge_method?: squash \| merge \| rebase, delete_branch?}`。`merge_policy` が `agent_merge`、`head_matches_verified` が true、PR が Ready のときだけ。検証済みの head の sha を GitHub に渡し、ブランチ保護に拒否されたら `merge_blocked`（GitHub の理由つき）。利用者本人の GitHub トークンで行う |
 | `web_search` | Web Search API の結果（url・title・description）を返す。詳細は下の「Web Research Service」 |
 | `web_fetch` | 公開ページを取得して Markdown で返す（JS は実行しない） |
 | `web_browse` | **実験的・既定で無効。** JS を描画した後のページを取得する |
@@ -52,6 +54,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 **制約（ツールの応答にも明記している）**
 
 - Phase 3（M1: Gateway 側）: `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。成果は patch としても `task_result` で返る。
+- PR のレビューと Ready 化・マージ（D9）: rovo 自身は PR を Ready にもマージにもしない（Draft のまま返す）。呼び出し元の AI が `task_result` の差分をレビューし、問題が無ければ `task_pr_ready` で Ready にする。そのあとは `task_start` の `merge_policy` による: `human_review`（既定）は人のレビューを待ち（`task_pr_merge` は `forbidden`）、`agent_merge` は `task_pr_merge` でマージまでできる。ポリシーはデプロイ全体の env ではなくタスクごとの入力で、組織としての強制は GitHub のブランチ保護に任せる（操作は利用者本人の GitHub トークンで行うため、保護に拒否されたら `merge_blocked`）。使い方の流れは MCP の `instructions` と `task_result` の `next_steps` にも書かれる。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
 - 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
 - 1 タスクにつき既定で $10（env `TASK_BUDGET_USD`。0 以下・不正な値は 10）を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。子エージェントの予算の上限（`budgetUsd`）にも同じ値を渡す。足りなければ `budget_exceeded`。月額の枠を 10 未満にするときは `TASK_BUDGET_USD` も下げる（受入試験で数ドルに抑えたいとき）。
@@ -276,7 +279,7 @@ mise run dev
 ## エラー
 
 ツールのエラーは `isError: true` で、本文は `{"code", "message", "retry_after_seconds"?}` の JSON。`code` は
-`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded`（月額の枠が足りず `task_start` を拒否。待っても空かない）/ `quota_exceeded`（web の1日の上限）/ `not_ready`（`task_result` の対象がまだ終端でない）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。
+`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded`（月額の枠が足りず `task_start` を拒否。待っても空かない）/ `quota_exceeded`（web の1日の上限）/ `not_ready`（`task_result` の対象がまだ終端でない）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。`task_pr_ready` / `task_pr_merge` では、GitHub の拒否を表す `merge_blocked`（ブランチ保護など。メッセージに GitHub の理由）/ `head_moved`（検証後にブランチが動いた）/ `github_rejected` も返る。
 `reauth_required` は GitHub 資格を回復できないとき（MCP のトークンが有効でも）で、再ログインが必要。`internal` は想定外の失敗で、詳細は応答に含めない。
 
 ## セキュリティ

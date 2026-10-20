@@ -394,3 +394,41 @@ describe("audit(): 既定の出力先は console.log（globalThis 経由。Node 
     expect(seen).toEqual(['{"audit":true,"event":"auth_failed","ts":5,"reason":"x"}']);
   });
 });
+
+describe("PR の操作（pr_ready / pr_merged / pr_denied）", () => {
+  it("3 つのイベント名が閉じた一覧にある", () => {
+    for (const e of ["pr_ready", "pr_merged", "pr_denied"]) expect(AUDIT_EVENTS).toContain(e);
+  });
+
+  it("merge_policy は固定の 2 値だけを通し、他は落とす（このイベントだけ）", () => {
+    const base = { userId: 5, taskId: "T1", caller: "parent" };
+    for (const policy of ["human_review", "agent_merge"]) {
+      expect(run("pr_merged", { ...base, merge_policy: policy }).record).toMatchObject({
+        event: "pr_merged",
+        userId: 5,
+        taskId: "T1",
+        caller: "parent",
+        merge_policy: policy,
+      });
+    }
+    for (const bad of ["squash", "AGENT_MERGE", "agent_merge ", 1, null, {}, "ghs_abc"]) {
+      expect(run("pr_ready", { ...base, merge_policy: bad }).record).not.toHaveProperty(
+        "merge_policy",
+      );
+    }
+    // 他のイベントでは通さない
+    expect(run("task_cancelled", { merge_policy: "agent_merge" }).record).not.toHaveProperty(
+      "merge_policy",
+    );
+  });
+
+  it("pr_denied の理由（reason）は固定のコードの形だけ、種別（kind）は ready / merge の形を通す", () => {
+    const ok = run("pr_denied", { kind: "merge", reason: "policy_human_review" }).record;
+    expect(ok).toMatchObject({ kind: "merge", reason: "policy_human_review" });
+    const bad = run("pr_denied", {
+      kind: "merge",
+      reason: "Required status check ci is expected.",
+    }).record;
+    expect(bad).not.toHaveProperty("reason");
+  });
+});

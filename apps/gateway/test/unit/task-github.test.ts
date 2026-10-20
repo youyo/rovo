@@ -647,6 +647,9 @@ describe("終端: PR の更新とトークンの失効", () => {
     expect(r.result.pr).toEqual({
       number: num,
       url: `https://github.test/${REPO}/pull/${num}`,
+      // 作成直後の Draft PR（task_pr_ready / task_pr_merge で変わる。D9）
+      draft: true,
+      merged: false,
       head_sha: head,
       head_matches_verified: true,
     });

@@ -1,6 +1,7 @@
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { createApiApp, createDefaultApp } from "./app";
 import { auditFromWorker } from "./audit-sink";
+import { handleDashboard, isDashboardPath } from "./dashboard/serve";
 
 // Durable Object クラスは Worker のエントリから export する（wrangler.jsonc の migrations と対応）。
 export { TaskDO } from "./tasks/task-do";
@@ -64,6 +65,9 @@ async function auditAuthFailure(request: Request, response: Response, env: Env):
 
 export default {
   async fetch(request, env, ctx) {
+    // assets は run_worker_first なので、すべてが先にここへ来る。/dashboard と配下だけをダッシュボードが取り、
+    // それ以外（/mcp・/authorize・/.well-known/...）は今までどおり OAuthProvider に渡す。
+    if (isDashboardPath(new URL(request.url).pathname)) return handleDashboard(request, env);
     const response = await getProvider(env).fetch(request, env, ctx);
     await auditAuthFailure(request, response, env);
     return response;

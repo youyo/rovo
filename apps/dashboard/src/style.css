@@ -1,0 +1,15 @@
+/* system フォントのみ（フォントの同梱は M6b）。外部ホストは参照しない。 */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.shell {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}

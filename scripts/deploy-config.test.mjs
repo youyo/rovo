@@ -87,6 +87,16 @@ describe("回帰: 本番相当の入力から手書き相当の設定が出る",
       assert.deepEqual(parseJsonc(out[n]), expected(n));
     });
   }
+  it("gateway だけに assets（dashboard の dist。Worker 優先）が出る。agent / web には出ない", () => {
+    const g = parseJsonc(out.gateway);
+    assert.deepEqual(g.assets, {
+      directory: "../apps/dashboard/dist",
+      binding: "ASSETS",
+      run_worker_first: true,
+    });
+    assert.equal(parseJsonc(out.agent).assets, undefined);
+    assert.equal(parseJsonc(out.web).assets, undefined);
+  });
   it("生成物に <...> のプレースホルダが残らない（コメント行を除く）", () => {
     for (const n of ["gateway", "agent", "web"]) {
       const bad = out[n]

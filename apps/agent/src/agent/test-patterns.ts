@@ -25,6 +25,20 @@ const TIMEOUT_LINE = new RegExp(
   ].join("|"),
 );
 
+/**
+ * `git diff --name-status -z` の出力（`M\0path\0D\0path\0`）を `M\tpath\nD\tpath` 形式に直す。
+ * NUL を含まない（すでに行形式の）入力はそのまま返す。パス中のタブ・改行は `?` に置き換える。
+ */
+export function nameStatusFromZ(raw: string): string {
+  if (!raw.includes("\0")) return raw;
+  const tokens = raw.split("\0");
+  const lines: string[] = [];
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    lines.push(`${tokens[i]}\t${(tokens[i + 1] ?? "").replace(/[\t\n]/g, "?")}`);
+  }
+  return lines.join("\n");
+}
+
 /** 変更されたテストファイル（追加・削除を除く）のパス。弱体化の判定に使う差分の取得対象。 */
 export function modifiedTestFiles(nameStatus: string): string[] {
   const out: string[] = [];
@@ -42,6 +56,8 @@ function detectWeakening(testDiff: string): string[] {
   let skip = false;
   let removed = false;
   let timeout = false;
+  // diff --git から最初の @@ までがヘッダー部。--- / +++ はここでだけ読み飛ばす
+  let inHeader = false;
   const flush = () => {
     if (!path) return;
     if (removed) warnings.push(`既存のテストの行が削除または書き換えられています: ${path}`);
@@ -51,18 +67,28 @@ function detectWeakening(testDiff: string): string[] {
   for (const line of testDiff.split("\n")) {
     if (line.startsWith("diff --git ")) {
       flush();
+      inHeader = true;
+      skip = removed = timeout = false;
+      if (line.includes('"')) {
+        // 引用符つきのパスは読めない（本来は core.quotepath=false で出ない）
+        path = undefined;
+        warnings.push(`差分のパスを読めないため、テストの弱体化を判定できていません: ${line}`);
+        continue;
+      }
       const m = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
       path = m?.[2] && TEST_FILE.test(m[2]) ? m[2] : undefined;
-      skip = removed = timeout = false;
       continue;
     }
     if (!path) continue;
-    if (line.startsWith("new file mode") || line.startsWith("deleted file mode")) {
-      // 新規追加は対象外、削除は別の警告で拾う
-      path = undefined;
+    if (inHeader) {
+      if (line.startsWith("@@")) {
+        inHeader = false;
+      } else if (line.startsWith("new file mode") || line.startsWith("deleted file mode")) {
+        // 新規追加は対象外、削除は別の警告で拾う
+        path = undefined;
+      }
       continue;
     }
-    if (line.startsWith("--- ") || line.startsWith("+++ ")) continue;
     if (line.startsWith("-")) removed = true;
     else if (line.startsWith("+")) {
       if (SKIP_LINE.test(line)) skip = true;
@@ -88,6 +114,10 @@ export function detectTestTampering(input: TamperingInput): string[] {
   for (const line of input.nameStatus.split("\n")) {
     const [status, path] = line.split("\t");
     if (!status || !path) continue;
+    if (path.startsWith('"')) {
+      warnings.push(`変更されたパスを読めないため、テストの改ざんを判定できていません: ${path}`);
+      continue;
+    }
     if (status.startsWith("D") && TEST_FILE.test(path)) {
       warnings.push(`テストファイルが削除されています: ${path}`);
     } else if (!status.startsWith("A") && TEST_CONFIG.test(path)) {

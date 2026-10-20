@@ -221,6 +221,30 @@ describe("API", () => {
     expect((await get("/user/installations/999/repositories", t)).status).toBe(404);
   });
 
+  it("visibleTo を持つリポジトリは、そのユーザーの repositories にだけ出る（無ければ全員に見える）", async () => {
+    await admin("users", { id: 1, login: "alice" });
+    await admin("users", { id: 2, login: "bob" });
+    await admin("installations", {
+      id: 100,
+      repositories: [
+        { id: 1, fullName: "acme/open", push: true },
+        { id: 2, fullName: "acme/private", push: true, visibleTo: ["alice"] },
+      ],
+    });
+    const ta = String((await login("alice")).access_token);
+    const tb = String((await login("bob")).access_token);
+    const ids = async (t: string) => {
+      const body = (await (await get("/user/installations/100/repositories", t)).json()) as {
+        total_count: number;
+        repositories: { id: number }[];
+      };
+      expect(body.total_count).toBe(body.repositories.length);
+      return body.repositories.map((r) => r.id);
+    };
+    expect(await ids(ta)).toEqual([1, 2]);
+    expect(await ids(tb)).toEqual([1]);
+  });
+
   it("repositories は per_page / page と Link ヘッダでページ送りできる", async () => {
     await admin("users", { id: 1, login: "alice" });
     await admin("installations", {

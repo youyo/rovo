@@ -345,6 +345,16 @@ export type DashboardReadResult =
   | { ok: true; view: TaskIndexSnapshot }
   | { ok: false; code: "not_found" };
 
+/** dashboardDetail の結果。view に加え、詳細の画面に要る設定（入力・トークンは含まない）。 */
+export type DashboardDetailResult =
+  | {
+      ok: true;
+      view: TaskIndexSnapshot;
+      merge_policy: MergePolicy;
+      sandbox_instance: string | null;
+    }
+  | { ok: false; code: "not_found" };
+
 type TaskRow = {
   id: string;
   owner_id: number;
@@ -1090,6 +1100,23 @@ export class TaskDO extends DurableObject<Env> {
     const link = this.getLink();
     if (!row || !link || row.repository_id === null) return { ok: false, code: "not_found" };
     return { ok: true, view: this.buildIndexSnapshot(row, link) };
+  }
+
+  /**
+   * 詳細の画面用（docs/specs/dashboard.md M5b）。dashboardRead の view に、設定（merge_policy・sandbox_instance）を足す。
+   * 所有者を問わず返すので、**gateway が閲覧者の集合で照合するまで応答に出してはならない**（dashboard/api.ts の readAuthorizedTask だけが呼ぶ）。
+   * repository_id が NULL・タスクが無いときは区別なく not_found。何も書かない。
+   */
+  async dashboardDetail(): Promise<DashboardDetailResult> {
+    const row = this.getRow();
+    const link = this.getLink();
+    if (!row || !link || row.repository_id === null) return { ok: false, code: "not_found" };
+    return {
+      ok: true,
+      view: this.buildIndexSnapshot(row, link),
+      merge_policy: policyOf(row),
+      sandbox_instance: row.sandbox_instance ?? null,
+    };
   }
 
   /** CANCELLED に確定する。終端状態なら何もせず成功（イベントは追加しない）。 */

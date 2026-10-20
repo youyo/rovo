@@ -10,6 +10,7 @@ import {
   type TaskIndexSnapshot,
   TaskIndexSnapshotSchema,
   type UpsertTaskResult,
+  type VisibleModelsResult,
 } from "./types";
 
 /** TaskIndexRow の列（task_index の列と同じ名前。pr_draft / pr_merged は 0/1 で持つ） */
@@ -243,6 +244,30 @@ export class DirectoryDO extends DurableObject<Env> {
       hidden: { count: all.n - visible.n, cost_micro: all.c - visible.c },
       models,
     };
+  }
+
+  /**
+   * 見える（repoIds に repository_id がある）タスクが使ったモデルの名前の一覧（created_at が [from, to)）。
+   * モデル別の費用の表で、見えないタスクだけが使うモデルの名前を出さないために使う（M5b）。名前だけで、費用は返さない。
+   */
+  visibleModels(query: SummarizeQuery): VisibleModelsResult {
+    const bad = this.checkIds(query?.repoIds);
+    if (bad) return bad;
+    if (!Number.isSafeInteger(query.from) || !Number.isSafeInteger(query.to)) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const models = this.ctx.storage.sql
+      .exec<{ model: string }>(
+        `SELECT DISTINCT model FROM task_index
+         WHERE created_at >= ? AND created_at < ? AND repository_id IN (SELECT value FROM json_each(?))
+         ORDER BY model`,
+        query.from,
+        query.to,
+        JSON.stringify(query.repoIds),
+      )
+      .toArray()
+      .map((m) => m.model);
+    return { ok: true, models };
   }
 
   /** テスト専用: 1 タスクの行（revision つき）。ENVIRONMENT=test のときだけ。 */

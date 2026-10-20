@@ -796,6 +796,15 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
+   * ダッシュボードの予算の表示用（M5b）。budgetStatus に、いま同時実行の枠を持つタスクの数を足す。
+   * BudgetStatus の型は MCP の budget_status と共用なので広げず、別のメソッドにする。許可ルールの確認は呼び出し側
+   * （requireSession → authorizeDashboardSession）が済ませている。
+   */
+  dashboardBudget(): BudgetStatus & { running_slots: number } {
+    return { ...this.budgetStatus(), running_slots: this.slotCount() };
+  }
+
+  /**
    * consult の予約。同時実行の枠は使わず、月の枠から CONSULT_BUDGET_USD を予約する（task_budget に consult の行を足す）。
    * 足りなければ budget_exceeded。同じ consultId の再送は冪等。
    * 精算されないまま CONSULT_STALE_AFTER_MS を過ぎた consult の予約は、予約額で閉じる（実費が分からないので、

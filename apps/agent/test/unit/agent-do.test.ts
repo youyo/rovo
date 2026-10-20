@@ -428,6 +428,35 @@ describe("完了判定", () => {
     expect(r.warnings.join("\n")).toContain("test/a.test.ts");
   });
 
+  it("既存テストの書き換えは warnings に記され、テストの追加だけなら記されない", async () => {
+    const fx = newFixture("verify-weaken", [report()]);
+    fx.nameStatus.value = "M\ttest/a.test.ts";
+    fx.testDiff.value = [
+      "diff --git a/test/a.test.ts b/test/a.test.ts",
+      "--- a/test/a.test.ts",
+      "+++ b/test/a.test.ts",
+      "@@ -1 +1 @@",
+      "-expect(x).not.toHaveProperty('a');",
+      "+expect(x).toBe(0);",
+    ].join("\n");
+    await fx.stub.start(makeSpec("verify-weaken"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const r = done(await fx.stub.getResult());
+    expect(r.warnings.join("\n")).toContain("削除または書き換え");
+
+    const fx2 = newFixture("verify-add-only", [report()]);
+    fx2.nameStatus.value = "M\ttest/a.test.ts";
+    fx2.testDiff.value = [
+      "diff --git a/test/a.test.ts b/test/a.test.ts",
+      "@@ -1 +2 @@",
+      "+it('new', () => {});",
+    ].join("\n");
+    await fx2.stub.start(makeSpec("verify-add-only"));
+    expect(await waitForTerminal(fx2)).toBe("completed");
+    const r2 = done(await fx2.stub.getResult());
+    expect(r2.warnings.join("\n")).not.toContain("test/a.test.ts");
+  });
+
   it("未 commit の変更があれば検証せずモデルに commit を促す", async () => {
     const fx = newFixture("verify-dirty", [report("1"), report("2")]);
     let n = 0;

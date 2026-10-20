@@ -182,8 +182,11 @@ wrangler secret put GITHUB_APP_PRIVATE_KEY -c <YOUR_GATEWAY_CONFIG> < app.pkcs8.
 
 ## 7. AI Gateway の設定
 
-- AI Gateway を 1 つ作り、その ID を agent と web の `AI_GATEWAY_ID` に設定する（5）。`infra/` の Terraform が作る（認証なし、ログ収集あり、キャッシュとレート制限なし。`terraform output ai_gateway_id`）。Anthropic の API キーは AI Gateway に保管する（BYOK）。**BYOK の登録は AI Gateway の画面で行い、Terraform には入れない。** Worker・Sandbox にはキーを置かない。
-- AI Gateway の認証（`cf-aig-authorization`）は使わない。agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼ぶ（gateway token の secret は無い）。
+- AI Gateway を 1 つ作り、その ID を agent と web の `AI_GATEWAY_ID` に設定する（5）。`infra/` の Terraform が作る（認証あり、Require provider credentials あり、ログ収集あり、キャッシュとレート制限なし。`terraform output ai_gateway_id`）。BYOK はゲートウェイの認証が前提（認証が無いと、プロバイダー キーの画面で保存できない）。Anthropic の API キーは AI Gateway に保管する（BYOK）。**BYOK の登録は AI Gateway の画面で行い、Terraform には入れない。** Worker・Sandbox にはキーを置かない。
+- agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼ぶ。バインディングからの呼び出しは認証済みとして扱われるので、`cf-aig-authorization` と gateway token の secret は要らない。
+- Require provider credentials（`byok_only`）をオンにしている。BYOK のキーが無い・外れたときに、Claude の呼び出しが Unified Billing（Cloudflare のクレジット）へ流れず、400 で止まる（Anthropic Console の利用上限が効く経路だけを使う）。Workers AI（Clef-flash）は対象外で、課金にも影響しない。
+  - Anthropic のキーは、エイリアスを **`default`** にして登録する。AI バインディングの経路では `default` のキーだけが使われ、別名のキーは参照されない（byok_only なので 400 になる）。
+  - **Web Search API（`env.AI.websearch()`。既定のプロバイダは Ceramic.ai）は、Unified Billing のクレジットで課金される（15.6）。byok_only で 400 になるかは未確認。** `web_search` が 400 で失敗したら、Ceramic.ai などのキーを BYOK で登録するか、byok_only を外す（外すと、Anthropic のキーが無いときに Claude の呼び出しもクレジットで支払われる。上限は読み込んだクレジットの額と `MONTHLY_BUDGET_USD`）。**【実機で確認して追記】**
 - 経路:
   - agent: `AI` バインディングが AI Gateway 経由で Claude を呼ぶ（子エージェントのモデル呼び出しは AI Gateway 経由だけ）。
   - web: `env.AI.websearch()`（Web Search API）と、安全性の評価（`env.AI.run` による Clef-flash）。どちらも AI Gateway を通る。

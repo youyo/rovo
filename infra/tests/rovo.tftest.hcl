@@ -136,12 +136,18 @@ run "lifecycle_follows_variables" {
   }
 }
 
-run "ai_gateway_without_auth" {
+run "ai_gateway_auth_and_byok_only" {
   command = plan
 
+  # BYOK はゲートウェイの認証が前提。AI バインディングからの呼び出しは認証済みとして扱われる
   assert {
-    condition     = cloudflare_ai_gateway.this.authentication == false
-    error_message = "AI Gateway に認証が付いている（不要）"
+    condition     = cloudflare_ai_gateway.this.authentication == true
+    error_message = "AI Gateway の認証が無効（BYOK のキーを保存できない）"
+  }
+  # BYOK のキーが無いときに Unified Billing（Cloudflare のクレジット）へ流れないようにする
+  assert {
+    condition     = cloudflare_ai_gateway.this.byok_only == true
+    error_message = "AI Gateway の byok_only が無効（キーが無いと Unified Billing に流れる）"
   }
   assert {
     condition     = cloudflare_ai_gateway.this.collect_logs == true

@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { ResultDto } from "../../src/agent/contract";
 import { MANAGED_BEGIN, MANAGED_END } from "../../src/github/pr-body";
+import { createTaskService } from "../../src/tasks/service";
 import { getFakeApp, type UnitGitHubEnv } from "../support/unit-github";
 import { fakeAgent, newTaskId, sampleInput, taskStub } from "./helpers";
 
@@ -377,10 +378,51 @@ describe("Draft の判定と既存 PR の再利用", () => {
 
 describe("GitHub のエラー分類と backoff", () => {
   it("base_sha が無ければ FAILED（base_sha_not_found）", async () => {
-    app().markMissing(REPO, "0123456789abcdef");
+    app().markMissing(REPO, "0123456789abcdef0123456789abcdef01234567");
     const { stub } = await createTask();
     await stub.advance();
     expect(await failReason(stub)).toBe("base_sha_not_found");
+  });
+
+  it("準備の段階の失敗（base_sha_not_found）は、task_result の reason と failure_phase に出て、next_steps が 40 桁の SHA を確かめるよう案内する", async () => {
+    app().markMissing(REPO, "0123456789abcdef0123456789abcdef01234567");
+    const { id, stub } = await createTask();
+    await stub.advance();
+    const r = await stub.result(OWNER);
+    if (!r.ok) throw new Error(`result failed: ${r.code}`);
+    expect(r.result).toMatchObject({
+      status: "FAILED",
+      reason: "base_sha_not_found",
+      failure_phase: "setup",
+      pr: null,
+    });
+    // 既存の warnings は残す
+    expect(r.result.warnings).toEqual([`${id}: the agent produced no result`]);
+
+    const v = await createTaskService(env).result({ githubUserId: OWNER, login: "alice" }, id);
+    if (!v.ok) throw new Error("service result failed");
+    expect(v.value.reason).toBe("base_sha_not_found");
+    expect(v.value.next_steps).toContain("base_sha_not_found");
+    expect(v.value.next_steps).toContain("40 桁");
+    expect(v.value.next_steps).toContain("git ls-remote");
+    expect(v.value.next_steps).toContain("task_start");
+  });
+
+  it("base_sha_not_found 以外の準備の失敗は、reason を出して汎用の案内になる", async () => {
+    app().setFault({ pattern: "^POST /repos/.*/git/commits$", status: 403, count: 1 });
+    const { id, stub } = await createTask();
+    await stub.advance();
+    const r = await stub.result(OWNER);
+    if (!r.ok) throw new Error(`result failed: ${r.code}`);
+    expect(r.result).toMatchObject({
+      status: "FAILED",
+      reason: "github_forbidden",
+      failure_phase: "setup",
+    });
+    const v = await createTaskService(env).result({ githubUserId: OWNER, login: "alice" }, id);
+    if (!v.ok) throw new Error("service result failed");
+    expect(v.value.next_steps).toContain("github_forbidden");
+    expect(v.value.next_steps).not.toContain("git ls-remote");
   });
 
   it("403（権限不足）は FAILED（github_forbidden）、404（見えない）は FAILED（github_not_found）", async () => {
@@ -498,7 +540,7 @@ describe("GitHub のエラー分類と backoff", () => {
   });
 
   it("FAILED になった後、発行済みのトークンは失効する", async () => {
-    app().markMissing(REPO, "0123456789abcdef");
+    app().markMissing(REPO, "0123456789abcdef0123456789abcdef01234567");
     const { stub } = await createTask();
     await stub.advance();
     const toks = app().tokenList();
@@ -976,7 +1018,7 @@ describe("終端: PR の更新とトークンの失効", () => {
     );
 
     it("PR を作る前に FAILED になったタスクでも、pr_update_failed ではなく token_revoke_failed になる", async () => {
-      app().markMissing(REPO, "0123456789abcdef");
+      app().markMissing(REPO, "0123456789abcdef0123456789abcdef01234567");
       app().setFault({ pattern: "^DELETE /installation/token$", status: 500 });
       const { stub } = await createTask();
       await stub.advance();

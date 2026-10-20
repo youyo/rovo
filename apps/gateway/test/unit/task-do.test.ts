@@ -45,7 +45,7 @@ describe("TaskDO.ensureCreated", () => {
       repository_id: 4242,
       installation_id: 77,
       base_ref: "main",
-      base_sha: "0123456789abcdef",
+      base_sha: "0123456789abcdef0123456789abcdef01234567",
     });
     expect(JSON.parse(row?.acceptance_criteria as string)).toEqual(["tests pass"]);
     expect(JSON.parse(row?.constraints as string)).toEqual(["do not merge"]);

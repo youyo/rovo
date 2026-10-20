@@ -196,7 +196,7 @@ describe("ログイン（本物のフロー: DCR -> /authorize -> 偽 GitHub -> 
         arguments: {
           repository: "acme/widgets",
           base_ref: "main",
-          base_sha: "0123456789abcdef",
+          base_sha: "0123456789abcdef0123456789abcdef01234567",
           title: "t",
           instructions: "i",
         },

@@ -445,18 +445,30 @@ export class AgentDO extends DurableObject<Env> {
     return this.booting;
   }
 
+  /** 終端、cancel、停止の意図（期限・予算など）のいずれかがあるか */
+  private sandboxStopped(): boolean {
+    return (
+      Boolean(this.store.meta("tombstone")) ||
+      isTerminal(this.store.phase()) ||
+      this.stopIntents().length > 0
+    );
+  }
+
   private async bootSandbox(): Promise<void> {
     const spec = this.spec();
     if (!spec) throw new Error("sandbox is not ready: the task has not started");
     // 失敗はモデルに返さず、rovo の側で MAX_SETUP_ATTEMPTS 回まで再試行する（呼び出したツールはその間待つ）。
     // 試行の回数は永続化する（DO が再起動しても数え直さない）。尽きたらモデルを介さずに sandbox_setup_failed で終える
     for (;;) {
+      // 終端・停止の後に来た起動の要求は、SandboxDO を呼ばず、失敗として数えずにすぐ終える
+      if (this.sandboxStopped())
+        throw new Error("sandbox boot skipped: the task has ended or is stopping");
       try {
         await this.sandbox().ensureReady(this.workspaceSpec(spec));
         break;
       } catch (e) {
-        // cancel などで終端停止された後の失敗は、準備の失敗として数えない
-        if (this.store.meta("tombstone") || isTerminal(this.store.phase())) throw e;
+        // cancel などで終端・停止した後の失敗は、準備の失敗として数えない
+        if (this.sandboxStopped()) throw e;
         const attempts = (this.store.meta<number>("setup_attempts") ?? 0) + 1;
         this.store.setMeta("setup_attempts", attempts);
         if (attempts >= MAX_SETUP_ATTEMPTS) {
@@ -467,7 +479,6 @@ export class AgentDO extends DurableObject<Env> {
         await new Promise((r) =>
           setTimeout(r, this.overrides().setupRetryDelayMs ?? SETUP_RETRY_DELAY_MS),
         );
-        if (this.store.meta("tombstone") || isTerminal(this.store.phase())) throw e;
       }
     }
     this.store.setMeta("sandbox_booted", true);

@@ -61,6 +61,8 @@ export interface Fixture {
   /** 検証コマンド（npm test）の結果を順に返す。尽きたら成功 */
   verifyResults: Partial<ExecResult>[];
   verifyCalls: string[][];
+  /** 検証コマンドを 1 本実行するごとに、時計（clock）を進める ms。先頭から順に使い、尽きたら進めない（durationMs の確認用） */
+  verifyAdvanceMs: number[];
   /** toolResults: モデル呼び出しごとに、そのとき transcript に載っていたツール結果の本文 */
   modelCalls: {
     count: number;
@@ -129,6 +131,7 @@ export function newFixture(
   const clock = { now: T0 };
   const verifyResults: Partial<ExecResult>[] = [];
   const verifyCalls: string[][] = [];
+  const verifyAdvanceMs: number[] = [];
   const modelCalls = {
     count: 0,
     userTexts: [] as string[][],
@@ -207,6 +210,7 @@ export function newFixture(
     if (a0 === "git" && a1 === "diff") return { stdout: " a.txt | 1 +\n" };
     if (a0 === "git" && a1 === "show") return { exitCode: 128, stderr: "fatal" };
     verifyCalls.push(argv);
+    clock.now += verifyAdvanceMs.shift() ?? 0;
     return verifyResults.shift() ?? {};
   });
 
@@ -296,6 +300,7 @@ export function newFixture(
     clock,
     verifyResults,
     verifyCalls,
+    verifyAdvanceMs,
     modelCalls,
     gate: {
       waitEntered: async () => {

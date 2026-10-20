@@ -168,7 +168,14 @@ export type ResultView = {
   summary: string;
   verification: {
     commands: { argv: string[]; cwd?: string; timeout_seconds?: number }[];
-    results: { argv: string[]; exit_code: number; timed_out: boolean; output: string }[];
+    results: {
+      argv: string[];
+      exit_code: number;
+      timed_out: boolean;
+      output: string;
+      /** コマンド 1 本の所要時間（ms。タイムアウトを含む）。古い agent の結果には無い */
+      duration_ms?: number;
+    }[];
     verified: boolean;
     attempts: number;
     commit_sha?: string;
@@ -2797,6 +2804,10 @@ function shapeResult(
         exit_code: r.exitCode,
         timed_out: r.timedOut,
         output: tailUtf8(r.output, MAX_RESULT_OUTPUT),
+        // 古い agent の結果には durationMs が無いので、あるときだけ付ける
+        ...(typeof r.durationMs === "number" && Number.isFinite(r.durationMs)
+          ? { duration_ms: r.durationMs }
+          : {}),
       })),
       verified: v.verified,
       attempts: v.attempts,

@@ -1,0 +1,41 @@
+import { z } from "zod";
+import { VisibleTaskDtoSchema } from "./overview";
+import { countSchema, isoTimeSchema, LIMITS, singleLineText, untrustedText } from "./primitives";
+
+/** 準備 → 実行 → 検証 → 完了の帯 */
+export const PHASES = ["prepare", "run", "verify", "done"] as const;
+
+/** 「いまは X を実行中」の X の種類 */
+export const NOW_KINDS = ["command", "edit", "commit", "web", "tool", "waiting"] as const;
+
+/** 設定の欄。`sandbox_instance` は表にある名前だけ（standard-2 など） */
+export const SettingsDtoSchema = z.strictObject({
+  merge_policy: z.enum(["human_review", "agent_merge"]),
+  deps_cache: z.enum(["hit", "miss", "built", "disabled"]).optional(),
+  cache_build_ms: countSchema.optional(),
+  sandbox_runtime_ms: countSchema.optional(),
+  sandbox_instance: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{0,31}$/)
+    .optional(),
+});
+export type SettingsDto = z.infer<typeof SettingsDtoSchema>;
+
+/**
+ * `GET /dashboard/api/tasks/:id`。閲覧権限があるタスクだけで、権限が無いときは `ErrorDto`（404）。
+ * `instructions` の全文・トークン・暗号文は持たない。
+ */
+export const TaskDetailDtoSchema = z.strictObject({
+  generated_at: isoTimeSchema,
+  task: VisibleTaskDtoSchema,
+  phase: z.enum(PHASES),
+  /** 最新の command / edit などから作る一言。無ければ null（画面は「待機中」等） */
+  now: z.strictObject({ kind: z.enum(NOW_KINDS), text: singleLineText(LIMITS.nowText) }).nullable(),
+  settings: SettingsDtoSchema,
+  /** 出力の末尾。`redacted` は常に true（秘密を常に伏せている旨を表示する） */
+  output: z.strictObject({
+    tail: untrustedText(LIMITS.outputTail).nullable(),
+    redacted: z.literal(true),
+  }),
+});
+export type TaskDetailDto = z.infer<typeof TaskDetailDtoSchema>;

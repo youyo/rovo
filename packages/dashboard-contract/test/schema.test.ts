@@ -1,0 +1,372 @@
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+import {
+  cloudflareSummaryFixture,
+  overviewFixture,
+  taskDetailRunningFixture,
+  taskEventsFixture,
+} from "../src/fixtures";
+import {
+  CloudflareSummaryDtoSchema,
+  ErrorDtoSchema,
+  HiddenTasksDtoSchema,
+  LIMITS,
+  OverviewDtoSchema,
+  prUrlSchema,
+  TaskDetailDtoSchema,
+  TaskEventDtoSchema,
+  TaskEventsPageDtoSchema,
+  VisibleTaskDtoSchema,
+} from "../src/index";
+
+const clone = <T>(v: T): T => structuredClone(v);
+const at = "2026-10-21T01:02:03Z";
+const ok = (s: z.ZodType, v: unknown) => s.safeParse(v).success;
+
+describe("見えないタスクの漏れを防ぐ形", () => {
+  it("hidden_tasks のキーは count と cost_usd だけ", () => {
+    expect(Object.keys(HiddenTasksDtoSchema.shape).sort()).toEqual(["cost_usd", "count"]);
+  });
+  it("hidden_tasks に個別の情報を足すと弾かれる", () => {
+    const base = { count: 1, cost_usd: 1.5 };
+    expect(ok(HiddenTasksDtoSchema, base)).toBe(true);
+    for (const extra of [
+      { task_id: "01K8ZF00000000000000000001" },
+      { owner_login: "someone" },
+      { repository: "example-org/x" },
+      { pr_url: "https://github.com/example-org/x/pull/1" },
+      { model: "m" },
+      { title: "t" },
+      { tasks: [] },
+      { items: [{ title: "t" }] },
+    ]) {
+      expect(ok(HiddenTasksDtoSchema, { ...base, ...extra }), JSON.stringify(extra)).toBe(false);
+    }
+  });
+  it("overview の month に hidden の個別の行を足すと弾かれる", () => {
+    const o = clone(overviewFixture) as Record<string, unknown>;
+    (o.month as Record<string, unknown>).hidden_list = [{ title: "x" }];
+    expect(ok(OverviewDtoSchema, o)).toBe(false);
+  });
+  it("overview の最上位に未知のキーがあると弾かれる", () => {
+    expect(ok(OverviewDtoSchema, { ...clone(overviewFixture), hidden_tasks: [] })).toBe(false);
+  });
+  it("tasks の行は一部だけの『伏せた行』を許さない（個別の行は全項目が必須）", () => {
+    const row = clone(overviewFixture.tasks[0]) as Record<string, unknown>;
+    for (const key of ["task_id", "owner_login", "repository", "title", "model", "status"]) {
+      const r = clone(row);
+      delete r[key];
+      expect(ok(VisibleTaskDtoSchema, r), `${key} なし`).toBe(false);
+    }
+    expect(ok(VisibleTaskDtoSchema, { task_id: row.task_id, status: "RUNNING" })).toBe(false);
+  });
+  it("カウントと金額は負・小数の件数を許さない", () => {
+    expect(ok(HiddenTasksDtoSchema, { count: -1, cost_usd: 0 })).toBe(false);
+    expect(ok(HiddenTasksDtoSchema, { count: 1.5, cost_usd: 0 })).toBe(false);
+    expect(ok(HiddenTasksDtoSchema, { count: 1, cost_usd: -1 })).toBe(false);
+  });
+});
+
+describe("秘密になりうる項目がスキーマに無い", () => {
+  // `input_tokens` のような数の項目は許し、`token` / `access_token` / `git_token` のような名前を禁じる
+  const FORBIDDEN =
+    /(^|_)(token|secret|password|passwd|credential|authorization|cookie|instructions|enc|api_?key|private_?key)($|_)/i;
+  const names = (schema: z.ZodType): string[] => {
+    const out: string[] = [];
+    const walk = (n: unknown): void => {
+      if (Array.isArray(n)) {
+        for (const x of n) walk(x);
+      } else if (n && typeof n === "object") {
+        for (const [k, v] of Object.entries(n)) {
+          if (k === "properties" && v && typeof v === "object") out.push(...Object.keys(v));
+          walk(v);
+        }
+      }
+    };
+    walk(z.toJSONSchema(schema, { unrepresentable: "any", io: "output" }));
+    return out;
+  };
+  it("検査自体が働く（token を持つスキーマを検出する）", () => {
+    const keys = names(z.strictObject({ a: z.strictObject({ git_token: z.string() }) }));
+    expect(keys.filter((k) => FORBIDDEN.test(k))).toEqual(["git_token"]);
+    expect(FORBIDDEN.test("input_tokens")).toBe(false);
+    expect(FORBIDDEN.test("enc")).toBe(true);
+    expect(FORBIDDEN.test("instructions")).toBe(true);
+  });
+  const schemas = {
+    OverviewDto: OverviewDtoSchema,
+    TaskDetailDto: TaskDetailDtoSchema,
+    TaskEventsPageDto: TaskEventsPageDtoSchema,
+    CloudflareSummaryDto: CloudflareSummaryDtoSchema,
+    ErrorDto: ErrorDtoSchema,
+  };
+  for (const [name, schema] of Object.entries(schemas)) {
+    it(`${name} は禁止項目（token / secret / instructions / enc など）を持たない`, () => {
+      const keys = names(schema);
+      expect(keys.length).toBeGreaterThan(0);
+      expect(keys.filter((k) => FORBIDDEN.test(k))).toEqual([]);
+    });
+  }
+});
+
+describe("文字列の上限と形式", () => {
+  const row = overviewFixture.tasks[0] as z.input<typeof VisibleTaskDtoSchema>;
+  it("task_id は ULID だけ", () => {
+    expect(ok(VisibleTaskDtoSchema, { ...row, task_id: "not-a-ulid" })).toBe(false);
+    expect(ok(VisibleTaskDtoSchema, { ...row, task_id: row.task_id.toLowerCase() })).toBe(false);
+    expect(ok(VisibleTaskDtoSchema, { ...row, task_id: `${row.task_id}0` })).toBe(false);
+  });
+  it("時刻は UTC の ISO だけ（オフセット・日付だけ・数値は不可）", () => {
+    for (const bad of ["2026-10-21", "2026-10-21T01:02:03+09:00", "yesterday", 1760000000000]) {
+      expect(ok(VisibleTaskDtoSchema, { ...row, created_at: bad }), String(bad)).toBe(false);
+    }
+  });
+  it("title・repository・owner_login・model の上限", () => {
+    expect(ok(VisibleTaskDtoSchema, { ...row, title: "あ".repeat(LIMITS.title) })).toBe(true);
+    expect(ok(VisibleTaskDtoSchema, { ...row, title: "あ".repeat(LIMITS.title + 1) })).toBe(false);
+    expect(ok(VisibleTaskDtoSchema, { ...row, repository: "no-slash" })).toBe(false);
+    expect(ok(VisibleTaskDtoSchema, { ...row, repository: "a/b/c" })).toBe(false);
+    expect(ok(VisibleTaskDtoSchema, { ...row, owner_login: "a".repeat(40) })).toBe(false);
+    expect(ok(VisibleTaskDtoSchema, { ...row, owner_login: "bad login" })).toBe(false);
+    expect(ok(VisibleTaskDtoSchema, { ...row, model: "m".repeat(101) })).toBe(false);
+  });
+  it("status は 9 状態だけ", () => {
+    expect(ok(VisibleTaskDtoSchema, { ...row, status: "UNKNOWN" })).toBe(false);
+  });
+  it("費用は負・NaN・Infinity を許さない", () => {
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(ok(VisibleTaskDtoSchema, { ...row, cost: { ...row.cost, cost_usd: bad } })).toBe(
+        false,
+      );
+    }
+  });
+  it("配列の件数に上限がある", () => {
+    const o = clone(overviewFixture);
+    o.tasks = Array.from({ length: LIMITS.overviewTasks + 1 }, () => o.tasks[0] as never);
+    expect(ok(OverviewDtoSchema, o)).toBe(false);
+  });
+});
+
+describe("URL の scheme と形", () => {
+  it("PR の URL は https://github.com/<owner>/<repo>/pull/<n> に厳密に一致するものだけ", () => {
+    expect(ok(prUrlSchema, "https://github.com/example-org/web-app/pull/12")).toBe(true);
+    for (const bad of [
+      "javascript:alert(1)",
+      "data:text/html,<script>alert(1)</script>",
+      "http://github.com/example-org/web-app/pull/12",
+      "https://github.com.evil.com/example-org/web-app/pull/12",
+      "https://evil.com/github.com/example-org/web-app/pull/12",
+      "https://github.com/example-org/web-app/pull/12?x=1",
+      "https://github.com/example-org/web-app/pull/12#frag",
+      "https://github.com/example-org/web-app/pull/12/files",
+      "https://github.com/example-org/web-app/issues/12",
+      "https://user@github.com/example-org/web-app/pull/12",
+      "https://github.com/example-org/web-app/pull/0",
+      " https://github.com/example-org/web-app/pull/12",
+      `https://github.com/example-org/web-app/pull/12${"0".repeat(300)}`,
+    ]) {
+      expect(ok(prUrlSchema, bad), bad).toBe(false);
+    }
+  });
+  it("タスクの pr.url に危険な scheme は入らない", () => {
+    const row = clone(overviewFixture.tasks[0]) as Record<string, unknown>;
+    row.pr = { number: 1, url: "javascript:alert(1)", draft: true, merged: false };
+    expect(ok(VisibleTaskDtoSchema, row)).toBe(false);
+  });
+  it("Cloudflare の開くリンクは https://dash.cloudflare.com/ 配下だけ", () => {
+    const s = clone(cloudflareSummaryFixture) as Record<string, unknown>;
+    for (const bad of [
+      "javascript:alert(1)",
+      "http://dash.cloudflare.com/x",
+      "https://evil.com/",
+      "https://dash.cloudflare.com.evil.com/",
+    ]) {
+      expect(ok(CloudflareSummaryDtoSchema, { ...s, open_url: bad }), bad).toBe(false);
+    }
+    expect(
+      ok(CloudflareSummaryDtoSchema, {
+        ...s,
+        open_url: "https://dash.cloudflare.com/example/workers",
+      }),
+    ).toBe(true);
+    expect(ok(CloudflareSummaryDtoSchema, { ...s, open_url: null })).toBe(true);
+  });
+});
+
+describe("構造化イベント（D14）は非信頼データとして上限と形式を持つ", () => {
+  const base = { seq: 1, at };
+  const cmd = {
+    ...base,
+    type: "command",
+    command: "pnpm test",
+    cwd: "apps/gateway",
+    exit_code: 0,
+    duration_ms: 1200,
+    output_tail: "ok",
+  };
+  it("command: 長さの上限", () => {
+    expect(ok(TaskEventDtoSchema, cmd)).toBe(true);
+    expect(ok(TaskEventDtoSchema, { ...cmd, command: "x".repeat(LIMITS.command) })).toBe(true);
+    expect(ok(TaskEventDtoSchema, { ...cmd, command: "x".repeat(LIMITS.command + 1) })).toBe(false);
+    expect(ok(TaskEventDtoSchema, { ...cmd, output_tail: "x".repeat(LIMITS.outputTail + 1) })).toBe(
+      false,
+    );
+    expect(ok(TaskEventDtoSchema, { ...cmd, cwd: "/etc" })).toBe(false);
+    expect(ok(TaskEventDtoSchema, { ...cmd, cwd: "../x" })).toBe(false);
+  });
+  const edit = { ...base, type: "edit", path: "src/a.ts", op: "modify", added: 3, removed: 1 };
+  it("edit: パスは相対・.. なし・制御文字なし・上限", () => {
+    expect(ok(TaskEventDtoSchema, edit)).toBe(true);
+    for (const bad of [
+      "/etc/passwd",
+      "../x",
+      "a/../../x",
+      "a/..",
+      "a\u0000b",
+      "a\nb",
+      "C:\\x",
+      "x".repeat(LIMITS.path + 1),
+      "",
+    ]) {
+      expect(ok(TaskEventDtoSchema, { ...edit, path: bad }), JSON.stringify(bad)).toBe(false);
+    }
+    expect(ok(TaskEventDtoSchema, { ...edit, op: "rename" })).toBe(false);
+    expect(ok(TaskEventDtoSchema, { ...edit, diff: "+++ b" })).toBe(false);
+  });
+  const commit = { ...base, type: "commit", message: "fix: 直す", sha: "a".repeat(40), files: 2 };
+  it("commit: 1 行目だけ・上限・40 桁の sha", () => {
+    expect(ok(TaskEventDtoSchema, commit)).toBe(true);
+    expect(ok(TaskEventDtoSchema, { ...commit, message: "a\nb" })).toBe(false);
+    expect(
+      ok(TaskEventDtoSchema, { ...commit, message: "x".repeat(LIMITS.commitMessage + 1) }),
+    ).toBe(false);
+    expect(ok(TaskEventDtoSchema, { ...commit, sha: "abc" })).toBe(false);
+    expect(ok(TaskEventDtoSchema, { ...commit, sha: "G".repeat(40) })).toBe(false);
+  });
+  const web = { ...base, type: "web", kind: "fetch", host: "registry.npmjs.org" };
+  it("web: host だけ（URL のパス・クエリ・scheme を持てない）", () => {
+    expect(ok(TaskEventDtoSchema, web)).toBe(true);
+    for (const bad of [
+      "https://example.com",
+      "example.com/path",
+      "example.com?q=1",
+      "user@example.com",
+      "javascript:alert(1)",
+      "a b",
+    ]) {
+      expect(ok(TaskEventDtoSchema, { ...web, host: bad }), bad).toBe(false);
+    }
+    expect(ok(TaskEventDtoSchema, { ...web, kind: "download" })).toBe(false);
+  });
+  it("tool_start / tool_end / 状態 / usage / 未知の型の縮退", () => {
+    expect(
+      ok(TaskEventDtoSchema, {
+        ...base,
+        type: "tool_start",
+        call_id: "c1",
+        name: "bash",
+        summary: "ls",
+      }),
+    ).toBe(true);
+    expect(
+      ok(TaskEventDtoSchema, {
+        ...base,
+        type: "tool_start",
+        call_id: "c1",
+        name: "bash",
+        summary: "x".repeat(LIMITS.summary + 1),
+      }),
+    ).toBe(false);
+    expect(
+      ok(TaskEventDtoSchema, {
+        ...base,
+        type: "tool_end",
+        call_id: "c1",
+        is_error: false,
+        summary: "ok",
+      }),
+    ).toBe(true);
+    expect(
+      ok(TaskEventDtoSchema, { ...base, type: "status_changed", from: "RUNNING", to: "VERIFYING" }),
+    ).toBe(true);
+    expect(ok(TaskEventDtoSchema, { ...base, type: "status_changed", to: "BOGUS" })).toBe(false);
+    expect(
+      ok(TaskEventDtoSchema, {
+        ...base,
+        type: "usage",
+        cost_usd: 0.5,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+      }),
+    ).toBe(true);
+    expect(
+      ok(TaskEventDtoSchema, { ...base, type: "agent_event", agent_type: "future_thing" }),
+    ).toBe(true);
+    // 型名以外（中身）は通さない
+    expect(
+      ok(TaskEventDtoSchema, { ...base, type: "agent_event", agent_type: "x", payload: { a: 1 } }),
+    ).toBe(false);
+  });
+  it("定義にない type は弾かれる", () => {
+    expect(ok(TaskEventDtoSchema, { ...base, type: "raw_dump", data: "x" })).toBe(false);
+  });
+  it("seq は 1 以上の整数、ページは 200 件まで", () => {
+    expect(ok(TaskEventDtoSchema, { ...cmd, seq: 0 })).toBe(false);
+    expect(ok(TaskEventDtoSchema, { ...cmd, seq: 1.5 })).toBe(false);
+    const page = clone(taskEventsFixture);
+    page.events = Array.from({ length: LIMITS.eventsPerPage + 1 }, (_, i) => ({
+      ...cmd,
+      seq: i + 1,
+    })) as never;
+    expect(ok(TaskEventsPageDtoSchema, page)).toBe(false);
+  });
+});
+
+describe("詳細・Cloudflare・エラー", () => {
+  it("詳細は『秘密を伏せている』が常に true", () => {
+    expect(taskDetailRunningFixture.output.redacted).toBe(true);
+    const d = clone(taskDetailRunningFixture) as Record<string, unknown>;
+    (d.output as Record<string, unknown>).redacted = false;
+    expect(ok(TaskDetailDtoSchema, d)).toBe(false);
+  });
+  it("詳細に instructions / token / enc を足すと弾かれる", () => {
+    for (const k of ["instructions", "token", "enc", "git_token"]) {
+      expect(ok(TaskDetailDtoSchema, { ...clone(taskDetailRunningFixture), [k]: "x" }), k).toBe(
+        false,
+      );
+    }
+  });
+  it("出力の末尾は上限つき", () => {
+    const d = clone(taskDetailRunningFixture) as Record<string, unknown>;
+    d.output = { tail: "x".repeat(LIMITS.outputTail + 1), redacted: true };
+    expect(ok(TaskDetailDtoSchema, d)).toBe(false);
+  });
+  it("Cloudflare の項目は {ok:true,value} か {ok:false,reason} だけ", () => {
+    const s = clone(cloudflareSummaryFixture) as Record<string, unknown>;
+    expect(ok(CloudflareSummaryDtoSchema, { ...s, credit_balance: { ok: false } })).toBe(false);
+    expect(
+      ok(CloudflareSummaryDtoSchema, {
+        ...s,
+        credit_balance: { ok: false, reason: "free text with prompt" },
+      }),
+    ).toBe(false);
+    expect(
+      ok(CloudflareSummaryDtoSchema, {
+        ...s,
+        credit_balance: { ok: true, value: { balance_usd: 1, prompt: "x" } },
+      }),
+    ).toBe(false);
+    expect(
+      ok(CloudflareSummaryDtoSchema, { ...s, credit_balance: { ok: true, reason: "forbidden" } }),
+    ).toBe(false);
+  });
+  it("エラーの本文に理由を出せない（コードだけ）", () => {
+    expect(ok(ErrorDtoSchema, { error: "not_found" })).toBe(true);
+    expect(
+      ok(ErrorDtoSchema, { error: "not_found", message: "task X exists but you cannot see it" }),
+    ).toBe(false);
+    expect(ok(ErrorDtoSchema, { error: "forbidden_repo_name" })).toBe(false);
+  });
+});

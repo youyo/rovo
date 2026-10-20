@@ -122,9 +122,14 @@ export type ConsultResult =
       costUsd: number;
       /** 成功なのにプロバイダーが usage を返さなかった（トークンが 0）。costUsd は呼ぶ前の最悪の場合の見積り */
       usageMissing?: true;
+      /** costUsd が実費ではなく見積もり（最悪の場合の見積り）。budget_status の estimated_usd に数える */
+      costEstimated?: true;
     }
-  /** 失敗。costUsd はそれまでにかかった実費（モデルを呼ぶ前の失敗は 0） */
-  | { ok: false; code: ConsultErrorCode; message: string; costUsd: number };
+  /**
+   * 失敗。costUsd はそれまでにかかった実費（モデルを呼ぶ前の失敗は 0）。
+   * 実費が分からず予約額を返したときは costEstimated を立てる
+   */
+  | { ok: false; code: ConsultErrorCode; message: string; costUsd: number; costEstimated?: true };
 
 /** answer / steer の結果。ignored は「停止・終端のため何もしなかった」（Gateway は成功として扱う）。 */
 export interface DeliveryResult {

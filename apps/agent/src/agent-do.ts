@@ -708,7 +708,13 @@ export class AgentDO extends DurableObject<Env> {
       console.error("consult_error", e instanceof Error ? e.name : typeof e);
       // 予期しない例外では、モデルを呼んだかどうかも実費も分からないので、予約額で精算させる（少なく数えない）
       const budget = Number.isFinite(req.budgetUsd) && req.budgetUsd > 0 ? req.budgetUsd : 0;
-      return { ok: false, code: "model_error", message: "the model call failed", costUsd: budget };
+      return {
+        ok: false,
+        code: "model_error",
+        message: "the model call failed",
+        costUsd: budget,
+        costEstimated: true,
+      };
     } finally {
       // consult のインスタンスは使い捨て。タスクの DO（fingerprint がある）は消さない
       if (name !== undefined && CONSULT_NAME_RE.test(name)) {
@@ -849,6 +855,8 @@ export class AgentDO extends DurableObject<Env> {
         code: "model_error",
         message: "the model call failed",
         costUsd: reported ? costUsd : req.budgetUsd,
+        // usage が無いときの costUsd は予約額（実費ではない）
+        ...(reported ? {} : { costEstimated: true as const }),
       };
     }
     const text = message.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
@@ -864,6 +872,7 @@ export class AgentDO extends DurableObject<Env> {
         usage,
         costUsd: Math.max(costUsd, worst),
         usageMissing: true,
+        costEstimated: true,
       };
     }
     return { ok: true, text, model: req.model, usage, costUsd };

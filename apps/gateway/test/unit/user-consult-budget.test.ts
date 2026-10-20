@@ -51,6 +51,7 @@ describe("UserDO.budgetStatus（budget_status）", () => {
     expect(await stub.budgetStatus()).toEqual({
       monthly_budget_usd: 100,
       spent_usd: 0,
+      estimated_usd: 0,
       reserved_usd: 0,
       remaining_usd: 100,
       task_budget_usd: 10,
@@ -251,5 +252,110 @@ describe("UserDO.reserveConsult / settleConsult", () => {
     expect(
       await sql(stub, "SELECT settled_micro, closed FROM task_budget WHERE task_id = ?", stale),
     ).toEqual([{ settled_micro: 0.5 * MICRO, closed: 1 }]);
+  });
+});
+
+describe("見積もりで確定した分（estimated_usd。spent_usd の内数）", () => {
+  const settledEstimated = (stub: UserStub, id: string) =>
+    sql(stub, "SELECT settled_estimated FROM task_budget WHERE task_id = ?", id);
+
+  it("実費が分かる精算は estimated_usd に入らない", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub);
+    const id = newConsultId();
+    await stub.reserveConsult(id);
+    await stub.settleConsult(id, 0.0123);
+    expect(await settledEstimated(stub, id)).toEqual([{ settled_estimated: 0 }]);
+    expect(await stub.budgetStatus()).toMatchObject({ spent_usd: 0.0123, estimated_usd: 0 });
+  });
+
+  it("settleConsult(null)（実費が分からない）は予約額で確定し、estimated_usd と spent_usd の両方に入る", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub);
+    const id = newConsultId();
+    await stub.reserveConsult(id);
+    await stub.settleConsult(id, null);
+    expect(await settledEstimated(stub, id)).toEqual([{ settled_estimated: 1 }]);
+    expect(await stub.budgetStatus()).toMatchObject({ spent_usd: 0.5, estimated_usd: 0.5 });
+  });
+
+  it("agent が見積もりと申告した精算（estimated=true）は、その額で確定して estimated_usd に入る", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub);
+    const id = newConsultId();
+    await stub.reserveConsult(id);
+    await stub.settleConsult(id, 0.4, true);
+    expect(await stub.budgetStatus()).toMatchObject({ spent_usd: 0.4, estimated_usd: 0.4 });
+  });
+
+  it("estimated_usd は見積もりの行だけの合計。実費の行は含めず、spent_usd は両方の合計", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub);
+    const a = newConsultId();
+    const b = newConsultId();
+    const c = newConsultId();
+    for (const id of [a, b, c]) await stub.reserveConsult(id);
+    await stub.settleConsult(a, null);
+    await stub.settleConsult(b, 0.01);
+    await stub.settleConsult(c, 0.2, true);
+    const task = await stub.reserve("k1", FP);
+    if (!task.ok) throw new Error("reserve failed");
+    await stub.settleUsage(task.task_id, 1, 3 * MICRO);
+    expect(await stub.budgetStatus()).toMatchObject({
+      spent_usd: 0.5 + 0.01 + 0.2 + 3,
+      estimated_usd: 0.7,
+    });
+  });
+
+  it("精算済みの行は再送で見積もりの印が変わらない（実費の精算を後から見積もりにしない）", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub);
+    const id = newConsultId();
+    await stub.reserveConsult(id);
+    await stub.settleConsult(id, 0.1);
+    expect(await stub.settleConsult(id, null)).toEqual({ ok: true, applied: false });
+    expect(await settledEstimated(stub, id)).toEqual([{ settled_estimated: 0 }]);
+  });
+
+  it("30 分たって予約額で閉じた consult は見積もりになる", async () => {
+    const stub = userStub(newUserId());
+    const clock = await setup(stub);
+    const stale = newConsultId(Date.UTC(2026, 0, 15, 12));
+    await stub.reserveConsult(stale);
+    clock.advance(31 * MIN);
+    await stub.reserveConsult(newConsultId(Date.UTC(2026, 0, 15, 12, 31)));
+    expect(await settledEstimated(stub, stale)).toEqual([{ settled_estimated: 1 }]);
+    expect(await stub.budgetStatus()).toMatchObject({ spent_usd: 0.5, estimated_usd: 0.5 });
+  });
+
+  it("列の追加前の task_budget の行は、見積もりではない扱い（0）になる", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub);
+    await runInDurableObject(stub, (instance, state) => {
+      const s = state.storage.sql;
+      s.exec("DROP TABLE task_budget");
+      // 列の追加前のスキーマ
+      s.exec(`CREATE TABLE task_budget (
+        task_id TEXT PRIMARY KEY,
+        month TEXT NOT NULL,
+        reserved_micro INTEGER NOT NULL,
+        settled_micro INTEGER NOT NULL DEFAULT 0,
+        settled_seq INTEGER NOT NULL DEFAULT 0,
+        closed INTEGER NOT NULL DEFAULT 0
+      )`);
+      s.exec(
+        "INSERT INTO task_budget (task_id, month, reserved_micro, settled_micro, closed) VALUES (?, '2026-01', ?, ?, 1)",
+        "consult-legacy",
+        0.5 * MICRO,
+        0.5 * MICRO,
+      );
+      // コンストラクタを同じストレージでもう一度走らせる（再起動での移行）
+      const Ctor = instance.constructor as new (ctx: unknown, env: unknown) => unknown;
+      new Ctor(state, (instance as unknown as { env: unknown }).env);
+    });
+    expect(await sql(stub, "SELECT settled_estimated FROM task_budget")).toEqual([
+      { settled_estimated: 0 },
+    ]);
+    expect(await stub.budgetStatus()).toMatchObject({ spent_usd: 0.5, estimated_usd: 0 });
   });
 });

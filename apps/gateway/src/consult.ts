@@ -168,7 +168,8 @@ export function createConsultService(
           : fail("internal", "internal error");
       }
 
-      await users.settleConsult(consultId, result.costUsd);
+      // agent が costUsd を見積もり（予約額・最悪の見積り）と申告したときは、その印も渡す
+      await users.settleConsult(consultId, result.costUsd, result.costEstimated === true);
       await auditFromWorker(env, "consult_finished", {
         ...audit,
         cost_usd: result.costUsd,

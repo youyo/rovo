@@ -2,6 +2,8 @@ node_modules/
 .wrangler/
 .dev.vars
 mise.local.toml
+# Claude Code の project スコープの MCP 設定（デプロイ先の URL が入るので、各自の手元にだけ置く）
+.mcp.json
 dist/
 *.log
 .DS_Store

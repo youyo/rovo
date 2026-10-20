@@ -8,7 +8,7 @@ import { fakeAgent, newTaskId, newUserId, sampleInput, taskStub } from "./helper
 const input = {
   repository: "acme/widgets",
   base_ref: "main",
-  base_sha: "0123456789abcdef",
+  base_sha: "0123456789abcdef0123456789abcdef01234567",
   title: "t",
   instructions: "do it",
 };

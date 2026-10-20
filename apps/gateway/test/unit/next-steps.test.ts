@@ -30,6 +30,39 @@ function input(over: Partial<In> = {}, pr: Partial<NonNullable<ResultView["pr"]>
   };
 }
 
+describe("nextSteps: 準備の段階の失敗", () => {
+  it("base_sha_not_found: 40 桁の SHA を git ls-remote などで確かめて task_start し直すよう案内する", () => {
+    const t = nextSteps(
+      input({ status: "FAILED", reason: "base_sha_not_found", failure_phase: "setup" }, null),
+    );
+    expect(t).toContain("base_sha_not_found");
+    expect(t).toContain("40 桁");
+    expect(t).toContain("git ls-remote");
+    expect(t).toContain("task_start");
+    expect(t).not.toContain("summary と warnings で原因を確かめ");
+  });
+
+  it("reason だけでも base_sha_not_found なら同じ案内になる", () => {
+    const t = nextSteps(input({ status: "FAILED", reason: "base_sha_not_found" }, null));
+    expect(t).toContain("git ls-remote");
+  });
+
+  it("その他の準備の失敗: reason を示す汎用の案内（git ls-remote は出さない）", () => {
+    const t = nextSteps(
+      input({ status: "FAILED", reason: "branch_conflict", failure_phase: "setup" }, null),
+    );
+    expect(t).toContain("branch_conflict");
+    expect(t).toContain("task_start");
+    expect(t).not.toContain("git ls-remote");
+    expect(t).not.toContain("summary と warnings で原因を確かめ");
+  });
+
+  it("準備の段階でない FAILED は、従来どおりの案内", () => {
+    const t = nextSteps(input({ status: "FAILED", reason: "deadline" }, null));
+    expect(t).toContain("summary と warnings で原因を確かめ");
+  });
+});
+
 describe("nextSteps", () => {
   it("COMPLETED・Draft・human_review: レビュー → task_pr_ready → 人のレビューを待つ。task_pr_merge は使えない", () => {
     const t = nextSteps(input());

@@ -43,7 +43,7 @@ export function bodyOf(r: ToolResult): Record<string, unknown> {
 export const startArgs = (title: string, extra: Record<string, unknown> = {}) => ({
   repository: "acme/widgets",
   base_ref: "main",
-  base_sha: "0123456789abcdef",
+  base_sha: "0123456789abcdef0123456789abcdef01234567",
   title,
   instructions: "do it",
   ...extra,

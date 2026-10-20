@@ -17,7 +17,7 @@ async function setup() {
   gh.user = { id, login: "alice" };
   gh.app = app();
   const stub = await installFakeGitHub(id, gh);
-  const sha = await app().addCommit(REPO, "0123456789abcdef", "work");
+  const sha = await app().addCommit(REPO, "0123456789abcdef0123456789abcdef01234567", "work");
   app().setBranch(REPO, BRANCH, sha);
   const number = app().seedPull(REPO, { head: BRANCH, base: "main", draft: true });
   const target = { repository: REPO, number, branch: BRANCH };
@@ -45,7 +45,7 @@ describe("UserDO.prReady", () => {
     app().reset();
     app().seedRepo(UNIT_REPO);
     // 別の Ready な PR を用意する
-    const sha = await app().addCommit(REPO, "0123456789abcdef", "w2");
+    const sha = await app().addCommit(REPO, "0123456789abcdef0123456789abcdef01234567", "w2");
     app().setBranch(REPO, "agent/task-OTHER", sha);
     const n = app().seedPull(REPO, { head: "agent/task-OTHER", base: "main", draft: false });
     const r = await stub.prReady({ repository: REPO, number: n, branch: "agent/task-OTHER" });

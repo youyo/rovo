@@ -9,7 +9,7 @@ import { fakeAgent, newTaskId, sampleInput, taskStub } from "./helpers";
 
 const OWNER = 702;
 const REPO = "acme/widgets";
-const BASE = "0123456789abcdef"; // sampleInput の base_sha（偽 GitHub が 40 桁に解決する）
+const BASE = "0123456789abcdef0123456789abcdef01234567"; // sampleInput の base_sha（40 桁）
 const BLOB = "d".repeat(40);
 const app = () => getFakeApp(env as unknown as UnitGitHubEnv);
 

@@ -37,7 +37,7 @@ export function sampleInput(
     installation_id: 77,
     repository: "acme/widgets",
     base_ref: "main",
-    base_sha: "0123456789abcdef",
+    base_sha: "0123456789abcdef0123456789abcdef01234567",
     title: "Implement authentication",
     instructions: "Implement OAuth authentication.",
     acceptance_criteria: ["tests pass"],

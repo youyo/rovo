@@ -83,6 +83,8 @@ const MAX_DEADLINE_MS = 2 * 60 * 60 * 1000;
 const MAX_VERIFY_ATTEMPTS = 4; // 最初の 1 回 + 修正 3 回
 const MAX_YIELD_NUDGES = 2;
 const MAX_SETUP_ATTEMPTS = 3;
+/** Sandbox の起動を再試行するまでの待ち（ms）。呼び出したツールはこの間待つ */
+const SETUP_RETRY_DELAY_MS = 5_000;
 const PATCH_LIMIT = 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_000;
 /** 残額に収まる出力がこれを割るなら、モデルを呼ばずに budget_exceeded にする（応答が途中で切れるだけで費用が無駄になる） */
@@ -432,8 +434,8 @@ export class AgentDO extends DurableObject<Env> {
 
   /**
    * Sandbox を起動する（冪等。同時の呼び出しは 1 つを共有する）。コンテナの起動・依存キャッシュの復元・ブランチの clone は
-   * SandboxDO.ensureReady がまとめて行う。失敗は数え、MAX_SETUP_ATTEMPTS 回に達したらタスクを sandbox_setup_failed で終える。
-   * 失敗は呼び出し元（ツール）に投げ直す。モデルが再試行すると、また起動を試みる。
+   * SandboxDO.ensureReady がまとめて行う。失敗は rovo の側で MAX_SETUP_ATTEMPTS 回まで再試行し（ツールは待つ）、
+   * 尽きたらモデルを介さずにタスクを sandbox_setup_failed で終える（呼び出し元には例外を投げる）。
    */
   private ensureSandboxReady(): Promise<void> {
     if (this.store.meta("sandbox_booted") === true) return Promise.resolve();
@@ -446,18 +448,27 @@ export class AgentDO extends DurableObject<Env> {
   private async bootSandbox(): Promise<void> {
     const spec = this.spec();
     if (!spec) throw new Error("sandbox is not ready: the task has not started");
-    try {
-      await this.sandbox().ensureReady(this.workspaceSpec(spec));
-    } catch (e) {
-      // cancel などで終端停止された後の失敗は、準備の失敗として数えない
-      if (this.store.meta("tombstone") || isTerminal(this.store.phase())) throw e;
-      const attempts = (this.store.meta<number>("setup_attempts") ?? 0) + 1;
-      this.store.setMeta("setup_attempts", attempts);
-      if (attempts >= MAX_SETUP_ATTEMPTS) {
-        this.emit("error", { message: `sandbox setup failed: ${String(e)}` });
-        await this.finalize({ phase: "failed", reason: "sandbox_setup_failed", skipPatch: true });
+    // 失敗はモデルに返さず、rovo の側で MAX_SETUP_ATTEMPTS 回まで再試行する（呼び出したツールはその間待つ）。
+    // 試行の回数は永続化する（DO が再起動しても数え直さない）。尽きたらモデルを介さずに sandbox_setup_failed で終える
+    for (;;) {
+      try {
+        await this.sandbox().ensureReady(this.workspaceSpec(spec));
+        break;
+      } catch (e) {
+        // cancel などで終端停止された後の失敗は、準備の失敗として数えない
+        if (this.store.meta("tombstone") || isTerminal(this.store.phase())) throw e;
+        const attempts = (this.store.meta<number>("setup_attempts") ?? 0) + 1;
+        this.store.setMeta("setup_attempts", attempts);
+        if (attempts >= MAX_SETUP_ATTEMPTS) {
+          this.emit("error", { message: `sandbox setup failed: ${String(e)}` });
+          await this.finalize({ phase: "failed", reason: "sandbox_setup_failed", skipPatch: true });
+          throw e;
+        }
+        await new Promise((r) =>
+          setTimeout(r, this.overrides().setupRetryDelayMs ?? SETUP_RETRY_DELAY_MS),
+        );
+        if (this.store.meta("tombstone") || isTerminal(this.store.phase())) throw e;
       }
-      throw e;
     }
     this.store.setMeta("sandbox_booted", true);
     await this.noteDepsCache();
@@ -2001,7 +2012,9 @@ export class AgentDO extends DurableObject<Env> {
         key: "dependencies",
         text: this.depsInstalled()
           ? "Dependencies are already installed: node_modules was restored from the lockfile at the base commit (the package manager is also available through corepack, e.g. `corepack pnpm ...`). You do not need to run npm ci / pnpm install / yarn install. Run an install again only if you change the lockfile or the dependencies in package.json. Build outputs (dist and similar) are not included, so run the build if a task needs them."
-          : undefined,
+          : spec.deps && !this.sandboxBooted()
+            ? "Dependencies are installed before your first command: when the sandbox starts, node_modules is restored from the lockfile at the base commit if a cache is available (this is fast), so you usually do not need to run npm ci / pnpm install / yarn install. If node_modules is missing, install once. Build outputs (dist and similar) are not included, so run the build if a task needs them."
+            : undefined,
       },
       {
         key: "no_push",
@@ -2290,7 +2303,11 @@ export class AgentDO extends DurableObject<Env> {
 
     // Sandbox を一度も起動していない（ファイルにも git にも触れていない）うえ、検証コマンドも無ければ、確かめるものが無い。
     // 作業ブランチは出発点（initialSha）のままで、リモートも同じなので、Sandbox を起動せずに完了とする
-    if (commands.length === 0 && !this.sandboxBooted()) {
+    if (
+      commands.length === 0 &&
+      !this.sandboxBooted() &&
+      (this.store.meta<number>("setup_attempts") ?? 0) === 0
+    ) {
       this.store.setMeta("verification", {
         commands,
         results: [],

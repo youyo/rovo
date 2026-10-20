@@ -554,7 +554,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "task_status",
     {
-      description: `タスクの現在の状態を返す。{task_id, status, repository, title, draft_pr_url, merge_policy, model, effort, sandbox_instance, created_at, updated_at, latest_cursor, pending_question}。model は子のモデル（task_start の model。省略時は既定）、effort はそのモデルの思考レベル（モデルごとに決まっている。考える量が多いほど出力トークン＝費用が増える）。sandbox_instance は task_start で指定した Sandbox の大きさ（省略したタスクは null = 既定。実際に起動した大きさは task_result の usage.sandbox_instance）。draft_pr_url は Draft PR の作成後に入る。pending_question は子の未回答の質問 {question_id, message, options} で、無ければ null（INPUT_REQUIRED のときは task_answer で答える）。${QUESTION_NOTICE} 自分のタスクだけ参照できる。`,
+      description: `タスクの現在の状態を返す。{task_id, status, repository, title, draft_pr_url, merge_policy, model, effort, sandbox_instance, created_at, updated_at, latest_cursor, pending_question}。model は子のモデル（task_start の model。省略時は既定）、effort はそのモデルの思考レベル（モデルごとに決まっている。考える量が多いほど出力トークン＝費用が増える）。sandbox_instance は task_start で指定した Sandbox の大きさ（省略したタスクは null = 既定。task_status は指定した値で、実際に起動した大きさは task_result の usage.sandbox_instance だけに出る）。draft_pr_url は Draft PR の作成後に入る。pending_question は子の未回答の質問 {question_id, message, options} で、無ければ null（INPUT_REQUIRED のときは task_answer で答える）。${QUESTION_NOTICE} 自分のタスクだけ参照できる。`,
       inputSchema: publishedSchema(taskIdSchema),
     },
     async (args) =>

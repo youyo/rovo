@@ -114,6 +114,36 @@ resource "cloudflare_api_token" "logpush" {
   }]
 }
 
+# ---- gateway の読み取り用トークン（D10b / D12） --------------------------------
+
+# gateway が AI Gateway のプロバイダーキー（BYOK）の一覧を読むための secret（CLOUDFLARE_API_TOKEN）。
+# 権限は「AI Gateway Read」だけ。対象はこのアカウントだけ。値は sensitive の output にして、
+# `mise run deploy:secrets` が `terraform output -raw` で wrangler secret put に流す（画面にも引数にも出さない）。
+data "cloudflare_api_token_permission_groups_list" "ai_gateway_read" {
+  count = var.ai_gateway_read_permission_group_id == null ? 1 : 0
+  name  = "AI Gateway Read"
+}
+
+locals {
+  # 名前の完全一致で選ぶ。見つからなければ plan で止まる（添字が範囲外）。
+  ai_gateway_read_permission_group_id = coalesce(
+    var.ai_gateway_read_permission_group_id,
+    try([for g in data.cloudflare_api_token_permission_groups_list.ai_gateway_read[0].result : g.id if g.name == "AI Gateway Read"][0], null),
+  )
+}
+
+resource "cloudflare_api_token" "ai_gateway_read" {
+  name = "${var.name_prefix}-gateway-ai-gateway-read"
+
+  policies = [{
+    effect            = "allow"
+    permission_groups = [{ id = local.ai_gateway_read_permission_group_id }]
+    resources = jsonencode({
+      "com.cloudflare.api.account.${var.account_id}" = "*"
+    })
+  }]
+}
+
 # R2 を宛先にした Logpush の資格情報は、API トークンから作る S3 互換の鍵:
 # access-key-id はトークンの id、secret-access-key はトークンの値の SHA-256。
 resource "cloudflare_logpush_job" "audit" {

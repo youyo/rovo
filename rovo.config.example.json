@@ -1,0 +1,22 @@
+{
+  "accountId": "<YOUR_ACCOUNT_ID>",
+  "namePrefix": "rovo",
+  "workerNames": { "gateway": "rovo-gateway", "agent": "rovo-agent", "web": "rovo-web" },
+  "publicBaseUrl": "https://<YOUR_GATEWAY_HOST>",
+  "githubApp": { "id": "", "clientId": "" },
+  "allowed": { "org": "", "team": "", "userIds": ["<YOUR_GITHUB_USER_ID>"] },
+  "budget": { "monthlyUsd": 100, "taskUsd": 10, "consultUsd": 0.5 },
+  "models": {
+    "default": "anthropic/claude-sonnet-5-5",
+    "list": [
+      "anthropic/claude-haiku-5-5",
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-opus-5-5",
+      "workers-ai/@cf/openai/gpt-oss-120b",
+      "workers-ai/@cf/openai/gpt-oss-20b"
+    ],
+    "efforts": {}
+  },
+  "webBrowseEnabled": false,
+  "vars": { "gateway": {}, "agent": {}, "web": {} }
+}

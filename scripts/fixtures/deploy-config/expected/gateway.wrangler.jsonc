@@ -1,0 +1,73 @@
+{
+  // 下流の gateway の設定の雛形。deploy/ にコピーして <...> を実値に置き換える（ROVO_DEPLOY_DIR=deploy）。
+  // `main` などのパスは、この設定ファイルからの相対パス（deploy/ に置けば ../apps/... で upstream を指す）。
+  // 内容は apps/gateway/wrangler.jsonc と docs/deploy.md の 5 に揃えてある。upstream が変わったら差分を取り込む。
+  "name": "acme-gateway",
+  "main": "../apps/gateway/src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "compatibility_flags": ["nodejs_compat"],
+  // 監査ログを Logpush（infra/ の Terraform が作るジョブ）に流す。ScriptName で絞るので、name を変えたら worker_names も合わせる。
+  "logpush": true,
+  // Workers Logs の head sampling を 100% にする（docs/deploy.md の 10）。
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  // terraform output kv_namespace_id の値
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "kv-namespace-id-example" }],
+  // アーカイブ（docs/deploy.md の 9）。gateway にだけ置く。terraform output archive_bucket_name の値
+  // （infra/ の name_prefix の既定なら rovo-archive。wrangler がバケット名の形を検証するので、プレースホルダも有効な名前にしてある）。
+  "r2_buckets": [{ "binding": "LOGS", "bucket_name": "acme-archive" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TASK_DO", "class_name": "TaskDO" },
+      { "name": "USER_DO", "class_name": "UserDO" },
+      { "name": "AGENT_DO", "class_name": "AgentDO", "script_name": "acme-agent" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] }],
+  "services": [
+    {
+      "binding": "WEB",
+      "service": "acme-web",
+      "entrypoint": "WebResearch",
+      "props": { "caller": "parent" }
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    // 公開 URL（OAuth の issuer / resource の元。GitHub のコールバックは <PUBLIC_BASE_URL>/callback）
+    "PUBLIC_BASE_URL": "https://rovo.example.com",
+    "GITHUB_APP_ID": "123456",
+    "GITHUB_APP_CLIENT_ID": "Iv1.exampleclientid",
+    // 認可: org/team（対で設定）か ALLOWED_USER_IDS（カンマ区切りの GitHub の数値 ID。gh api user --jq .id）の少なくとも 1 つ。
+    // 個人で使うなら ALLOWED_USER_IDS だけを設定し、ALLOWED_ORG / ALLOWED_TEAM は空にする。
+    "ALLOWED_ORG": "",
+    "ALLOWED_TEAM": "",
+    "ALLOWED_USER_IDS": "1001,1002",
+    // 予算（USD）。月額の枠から 1 タスクにつき TASK_BUDGET_USD を予約する。月額を 10 未満にするときは TASK_BUDGET_USD も下げる。
+    "MONTHLY_BUDGET_USD": "50",
+    "TASK_BUDGET_USD": "5",
+    // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する。既定 0.5）。max_output_tokens もこの額に収まるよう絞られる。
+    "CONSULT_BUDGET_USD": "0.25",
+    // 使えるモデル。AGENT_MODEL は既定（task_start の model を省略したとき）、AGENT_MODELS はカンマ区切りの選べるモデル
+    // （task_start の model と consult の model。models_list に出る）。空なら AGENT_MODEL だけ。agent の同名の var と同じ値にする。
+    "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
+    // Workers AI のモデル（workers-ai/@cf/...。キー不要。無料プランでも使えるものだけ）を入れておくと、Anthropic / OpenAI のキーが無いときの代わりになる。
+    "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,workers-ai/@cf/openai/gpt-oss-120b",
+    // AI Gateway に BYOK 登録されたプロバイダーキーを読んで、キーが無いプロバイダーのモデルを選べなくする（D10b）。
+    // AI_GATEWAY_ID は agent と同じ値（terraform output ai_gateway_id）、CLOUDFLARE_ACCOUNT_ID は Cloudflare の account id（公開しない値）。
+    // secret の CLOUDFLARE_API_TOKEN（権限は Account / AI Gateway / Read だけ）と合わせて設定する。どれかが空なら判定せず AGENT_MODELS だけで決める。
+    "AI_GATEWAY_ID": "acme-gateway",
+    "CLOUDFLARE_ACCOUNT_ID": "@ACCOUNT_ID@",
+    // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。models_list の effort と task_status / task_result に出る）。空なら upstream の既定。agent の同名の var と同じ値にする。
+    "MODEL_EFFORTS": "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off",
+    "WEB_SEARCH_DAILY_LIMIT": "300",
+    "WEB_FETCH_DAILY_LIMIT": "500",
+    "WEB_BROWSE_DAILY_LIMIT": "50",
+    // web_browse を MCP のツールとして公開するか。雛形の既定は無効。有効にする手順は docs/deploy.md の 12。web / agent の同名の var も合わせる。
+    "WEB_BROWSE_ENABLED": "true",
+    // 推定費用の単価（docs/deploy.md の 11）
+    "SANDBOX_USD_PER_HOUR": "0.0073",
+    "WEB_USD_PER_1K_SEARCH": "0.25",
+    "WEB_USD_PER_1K_FETCH": "0",
+    "WEB_USD_PER_1K_BROWSE": "0.75"
+  }
+}

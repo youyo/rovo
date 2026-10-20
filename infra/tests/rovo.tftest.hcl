@@ -9,6 +9,8 @@ variables {
   # provider の mock は「オブジェクトのリストの属性」に値を入れられず、権限グループの検索結果（data）を差し替えられない。
   # そのため ID を直接渡し、検索（data）は count = 0 で省く。検索のほうは plan で確かめられない（README に書く）。
   r2_item_write_permission_group_id = "fedcba9876543210${"fedcba9876543210"}"
+  # 同上（「AI Gateway Read」の権限グループ）
+  ai_gateway_read_permission_group_id = "0011223344556677${"8899aabbccddeeff"}"
 }
 
 run "logpush_filter_has_three_script_names" {
@@ -172,6 +174,58 @@ run "token_is_scoped_to_audit_bucket" {
   }
 }
 
+# gateway の読み取り用トークン（D10b の CLOUDFLARE_API_TOKEN。D12 で Terraform が作る）。権限は AI Gateway の読み取りだけ。
+run "gateway_read_token_is_read_only_and_account_scoped" {
+  command = plan
+
+  assert {
+    condition     = length(cloudflare_api_token.ai_gateway_read.policies) == 1
+    error_message = "gateway 用トークンのポリシーが 1 つではない"
+  }
+  assert {
+    condition     = [for g in cloudflare_api_token.ai_gateway_read.policies[0].permission_groups : g.id] == [var.ai_gateway_read_permission_group_id]
+    error_message = "gateway 用トークンの権限が「AI Gateway Read」だけになっていない"
+  }
+  assert {
+    condition     = jsondecode(cloudflare_api_token.ai_gateway_read.policies[0].resources) == { "com.cloudflare.api.account.${var.account_id}" = "*" }
+    error_message = "gateway 用トークンの対象がこのアカウントだけになっていない"
+  }
+  assert {
+    condition     = cloudflare_api_token.ai_gateway_read.policies[0].effect == "allow"
+    error_message = "gateway 用トークンのポリシーが allow ではない"
+  }
+  assert {
+    condition     = cloudflare_api_token.ai_gateway_read.name == "rovo-gateway-ai-gateway-read"
+    error_message = "gateway 用トークンの名前が接頭辞から決まっていない"
+  }
+}
+
+run "gateway_read_token_name_follows_prefix" {
+  command = plan
+
+  variables {
+    name_prefix = "acme"
+  }
+
+  assert {
+    condition     = cloudflare_api_token.ai_gateway_read.name == "acme-gateway-ai-gateway-read"
+    error_message = "name_prefix がトークンの名前に反映されていない"
+  }
+}
+
+run "gateway_read_token_is_distinct_from_logpush_token" {
+  command = plan
+
+  assert {
+    condition     = cloudflare_api_token.ai_gateway_read.name != cloudflare_api_token.logpush.name
+    error_message = "Logpush 用と gateway 用のトークンが同じ名前"
+  }
+  assert {
+    condition     = [for g in cloudflare_api_token.ai_gateway_read.policies[0].permission_groups : g.id] != [for g in cloudflare_api_token.logpush.policies[0].permission_groups : g.id]
+    error_message = "Logpush 用と gateway 用のトークンの権限が同じ（権限を共有しない）"
+  }
+}
+
 # destination_conf は token の id / value に依存し、apply まで決まらない。mock への apply で確かめる。
 run "logpush_destination_is_audit_bucket" {
   command = apply
@@ -216,6 +270,11 @@ run "outputs" {
   assert {
     condition     = output.ai_gateway_id == "rovo-gateway"
     error_message = "ai_gateway_id の output が違う"
+  }
+  # sensitive の output は、そのままでは比較できない（nonsensitive で外して比べる。テストの中だけ）
+  assert {
+    condition     = nonsensitive(output.gateway_cloudflare_api_token) == nonsensitive(cloudflare_api_token.ai_gateway_read.value)
+    error_message = "gateway_cloudflare_api_token の output が gateway 用トークンの値ではない"
   }
 }
 
@@ -289,6 +348,16 @@ run "reject_bad_account_id" {
     account_id = "not-an-account-id"
   }
   expect_failures = [var.account_id]
+}
+
+run "reject_bad_ai_gateway_read_permission_group_id" {
+  command = plan
+
+  variables {
+    ai_gateway_read_permission_group_id = "not-hex"
+  }
+
+  expect_failures = [var.ai_gateway_read_permission_group_id]
 }
 
 run "reject_bad_permission_group_id" {

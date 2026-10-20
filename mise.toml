@@ -64,12 +64,20 @@ dir = "apps/web"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
 [tasks."test:deploy"]
-description = "デプロイスクリプト（scripts/deploy.sh）の自己確認。pnpm を偽物に差し替えるので wrangler も Cloudflare も呼ばない。ROVO_DEPLOY_DIR が未設定・設定ファイルが無いときに失敗し、wrangler を呼ばないことを確かめる"
+description = "デプロイスクリプト（scripts/deploy.sh）の自己確認。pnpm・openssl・terraform を偽物に差し替えるので wrangler も Cloudflare も呼ばない。ROVO_DEPLOY_DIR が未設定・設定ファイルが無いときに失敗し、wrangler を呼ばないこと、secrets が無いものだけを標準入力で入れることを確かめる"
 run = "bash scripts/test-deploy.sh"
 
+[tasks."test:deploy:config"]
+description = "deploy:config（設定の生成器 scripts/deploy-config*.mjs）のテスト。本番相当の架空の入力から手書き相当の wrangler 設定が出ること、--check、sensitive の出力を読まないことを固定する。偽の terraform を使い、実アカウントには触れない"
+run = "node --test scripts/deploy-config.test.mjs"
+
+[tasks."test:setup"]
+description = "setup（scripts/setup.sh）の自己確認。terraform・pnpm・openssl・docker・mise をすべて偽物に差し替え、PATH から本物を外す。前提の欠け・順序・apply の失敗・GitHub App 未設定・秘密の値が出ないことを確かめる"
+run = "bash scripts/test-setup.sh"
+
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + gateway + agent + web + デプロイスクリプト）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy"]
+description = "Unit テスト（audit + models + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
@@ -228,9 +236,23 @@ run = [
   "pnpm audit",
 ]
 
-# ---- デプロイ（下流の wrangler 設定を ROVO_DEPLOY_DIR で指定する。docs/deploy.md の 4） ----
-# ROVO_DEPLOY_DIR が未設定、または設定ファイル（<dir>/{gateway,agent,web}.wrangler.jsonc）が無ければ、何もせずに失敗する。
-# upstream の apps/*/wrangler.jsonc（本番の値が無い）は決して渡さない。雛形は deploy.example/。
+# ---- デプロイ（docs/deploy.md の quickstart） ----
+# 初回は `mise run setup` 1 本（前提の確認 → terraform → deploy:config → deploy:all → deploy:secrets → GitHub App と BYOK の案内）。
+# 下流の設定は rovo.config.json（秘密でない値だけ）。deploy:config が deploy.example/ の雛形と terraform の出力から deploy/ を生成する（コミットする）。
+# deploy:* は ROVO_DEPLOY_DIR（wrangler 設定のディレクトリ）を使う。未設定、または設定ファイル（<dir>/{gateway,agent,web}.wrangler.jsonc）が無ければ、何もせずに失敗する。
+# upstream の apps/*/wrangler.jsonc（本番の値が無い）は決して渡さない。
+
+[tasks.setup]
+description = "初回のデプロイを 1 本で行う（前提の確認 → terraform init/apply → deploy:config → deploy:all → deploy:secrets → GitHub App と BYOK の案内）。何度でも再実行できる。使い方: mise run setup -- [--pem <GitHub App の .pem>] [--yes]"
+run = "bash scripts/setup.sh"
+
+[tasks."deploy:config"]
+description = "rovo.config.json（秘密でない値）と terraform の非秘密の出力（kv_namespace_id / archive_bucket_name / ai_gateway_id）から、deploy/ の wrangler 設定を生成する（生成物はコミットする）。terraform の資格情報が要る。オプション: --no-terraform（保存済みの deploy/infra.json から作り直す）/ --check（作り直した結果と既存を比べる。terraform 不要。下流の CI 用）"
+run = "node scripts/deploy-config.mjs generate"
+
+[tasks."deploy:config:check"]
+description = "deploy:config --check の別名。terraform も Cloudflare の資格情報も要らず、deploy/ の生成物が rovo.config.json と deploy.example/ から作り直した結果と一致するかを確かめる（下流の CI 用）"
+run = "node scripts/deploy-config.mjs generate --check"
 
 [tasks."deploy:web"]
 description = "web をデプロイする（ROVO_DEPLOY_DIR/web.wrangler.jsonc。未設定なら失敗する）"
@@ -249,5 +271,5 @@ description = "web → agent → gateway の順にデプロイする（設定が
 run = "bash scripts/deploy.sh all"
 
 [tasks."deploy:secrets"]
-description = "secret を wrangler secret put で対話的に入れる（gateway: GITHUB_APP_CLIENT_SECRET / GITHUB_APP_PRIVATE_KEY / TOKEN_ENC_KEY、agent: TOKEN_ENC_KEY）。値は引数・env に載せない"
+description = "入っていない secret だけを wrangler secret put で入れる。人が入力するのは GITHUB_APP_CLIENT_SECRET（隠した入力）だけ。GITHUB_APP_PRIVATE_KEY は --pem の .pem を PKCS#8 に変換、CLOUDFLARE_API_TOKEN は terraform output -raw、TOKEN_ENC_KEY は gateway と agent で別々に自動生成。既存の secret は上書きしない（入れ直すなら --rotate <名前>）。値は引数・env・ログに載せない。使い方: mise run deploy:secrets -- [--pem <path>] [--skip-github-app] [--rotate <名前>]"
 run = "bash scripts/deploy.sh secrets"

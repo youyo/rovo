@@ -1,8 +1,9 @@
 {
-  // 下流の agent の設定の雛形。deploy/ にコピーして <...> を実値に置き換える（ROVO_DEPLOY_DIR=deploy）。
-  // `main` と `dockerfile` は、この設定ファイルからの相対パス（deploy/ に置けば ../apps/agent/... で upstream を指す）。
-  // 内容は apps/agent/wrangler.jsonc と docs/deploy.md の 5 に揃えてある。
-  "name": "rovo-agent",
+  // agent の設定の雛形。`mise run deploy:config` が <...> を rovo.config.json と terraform の出力で埋めて、deploy/agent.wrangler.jsonc を生成する。
+  // 手で埋めない（<...> が 1 つでも残ると deploy:* は失敗する）。値の意味は docs/deploy.md の 5。
+  // `main` と `dockerfile` は、この設定ファイルからの相対パス（ROVO_DEPLOY_DIR=deploy なら ../apps/agent/... で upstream を指す）。
+  // 内容は apps/agent/wrangler.jsonc に揃えてある。upstream が変わったらこの雛形も合わせる。
+  "name": "<AGENT_WORKER_NAME>",
   "main": "../apps/agent/src/index.ts",
   "compatibility_date": "2026-10-12",
   "compatibility_flags": ["nodejs_compat"],
@@ -33,7 +34,7 @@
   "services": [
     {
       "binding": "WEB",
-      "service": "rovo-web",
+      "service": "<WEB_WORKER_NAME>",
       "entrypoint": "WebResearch",
       "props": { "caller": "child" }
     }
@@ -44,18 +45,18 @@
     // terraform output ai_gateway_id の値
     "AI_GATEWAY_ID": "<AI_GATEWAY_ID>",
     // 既定のモデル（task_start の model を省略したとき）
-    "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
+    "AGENT_MODEL": "<AGENT_MODEL>",
     // 選べるモデル（カンマ区切り。task_start の model と consult の model）。空なら AGENT_MODEL だけ。gateway の同名の var と同じ値にする。
     // OpenAI のモデル（openai/gpt-6-sol など）を足すには、AI Gateway に OpenAI のプロバイダー キーを登録しておく（docs/deploy.md）。
     // Workers AI のモデル（workers-ai/@cf/...。キー不要。無料プランでも使えるものだけ）は gateway が決めたモデルを agent が再検証するので、gateway と同じ値にする。
-    "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5,workers-ai/@cf/openai/gpt-oss-120b,workers-ai/@cf/openai/gpt-oss-20b",
+    "AGENT_MODELS": "<AGENT_MODELS>",
     // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。例 "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off"）。
     // 空なら upstream の既定（haiku=low, sonnet=high, opus=medium, fable=low, luna=low, sol=medium, astra=low）。思考のトークンは出力として課金される。gateway の同名の var と同じ値にする。
-    "MODEL_EFFORTS": "",
+    "MODEL_EFFORTS": "<MODEL_EFFORTS>",
     "WEB_SEARCH_LIMIT_PER_TASK": "50",
     "WEB_FETCH_LIMIT_PER_TASK": "100",
     "WEB_BROWSE_LIMIT_PER_TASK": "20",
     // gateway / web の同名の var と揃える
-    "WEB_BROWSE_ENABLED": "false"
+    "WEB_BROWSE_ENABLED": "<WEB_BROWSE_ENABLED>"
   }
 }

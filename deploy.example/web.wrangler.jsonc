@@ -1,8 +1,9 @@
 {
-  // 下流の web の設定の雛形。deploy/ にコピーして <...> を実値に置き換える（ROVO_DEPLOY_DIR=deploy）。
-  // `main` は、この設定ファイルからの相対パス（deploy/ に置けば ../apps/web/... で upstream を指す）。
-  // 内容は apps/web/wrangler.jsonc と docs/deploy.md の 5 に揃えてある。
-  "name": "rovo-web",
+  // web の設定の雛形。`mise run deploy:config` が <...> を rovo.config.json と terraform の出力で埋めて、deploy/web.wrangler.jsonc を生成する。
+  // 手で埋めない（<...> が 1 つでも残ると deploy:* は失敗する）。値の意味は docs/deploy.md の 5。
+  // `main` は、この設定ファイルからの相対パス（ROVO_DEPLOY_DIR=deploy なら ../apps/web/... で upstream を指す）。
+  // 内容は apps/web/wrangler.jsonc に揃えてある。upstream が変わったらこの雛形も合わせる。
+  "name": "<WEB_WORKER_NAME>",
   "main": "../apps/web/src/index.ts",
   "compatibility_date": "2026-10-12",
   "compatibility_flags": ["nodejs_compat"],
@@ -12,7 +13,7 @@
   "logpush": true,
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "ai": { "binding": "AI" },
-  // Browser Run（web_browse が使う）。remote の設定は docs/deploy.md の 12 を見て、web_browse を有効にするときに足す。
+  // Browser Run（web_browse が使う）。宣言は常にあるが、コードが使うのは WEB_BROWSE_ENABLED が "true" のときだけ。remote の設定は docs/deploy.md の 12 を見て、web_browse を有効にするときに足す。
   "browser": { "binding": "BROWSER" },
   "vars": {
     "ENVIRONMENT": "production",
@@ -22,6 +23,6 @@
     "SAFETY_BLOCK_THRESHOLD": "0.8",
     "SAFETY_CAUTION_THRESHOLD": "0.4",
     // 雛形の既定は無効。有効にする手順は docs/deploy.md の 12。gateway / agent の同名の var も合わせる。
-    "WEB_BROWSE_ENABLED": "false"
+    "WEB_BROWSE_ENABLED": "<WEB_BROWSE_ENABLED>"
   }
 }

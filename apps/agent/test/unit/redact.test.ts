@@ -10,8 +10,8 @@ describe("maskSecrets", () => {
     ["ghr_" + "e".repeat(36)],
     ["github_pat_" + "11ABCDEFG0_" + "x".repeat(50)],
     ["sk-ant-api03-" + "a1b2c3d4".repeat(6)],
-    ["AKIAIOSFODNN7EXAMPLE"],
-    ["ASIAIOSFODNN7EXAMPLE"],
+    [`${"AKIA"}IOSFODNN7EXAMPLE`],
+    [`${"ASIA"}IOSFODNN7EXAMPLE`],
   ])("資格情報らしき文字列 %s をマスクする", (secret) => {
     const out = maskSecrets(`before ${secret} after`);
     expect(out).not.toContain(secret);

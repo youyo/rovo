@@ -67,6 +67,11 @@ export interface TaskSpec {
    * env の AGENT_MODELS に無いモデルは start を拒否する（unknown_model）。
    */
   model?: string;
+  /**
+   * 子の Sandbox の大きさ（task_start の sandbox_instance。standard-1〜4）。**ある = 利用者が明示した**ので、このタスクの間はずっと
+   * この大きさで起動する（後段の自動の昇格もしない）。省略は env の SANDBOX_INSTANCE の既定。standard-1〜4 以外は start を拒否する。
+   */
+  sandboxInstance?: string;
   /** このタスクに使える上限（USD） */
   budgetUsd: number;
   /** epoch ms。開始から 2 時間を超える値は 2 時間に丸める。 */
@@ -181,6 +186,8 @@ export interface SandboxMetrics {
   depsCache?: "hit" | "miss" | "built" | "disabled";
   /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms）。runtimeMs（Sandbox の時間）にも含む */
   cacheBuildMs?: number;
+  /** 実際にコンテナを start() した大きさ。一度も起動していなければ無い（Sandbox が必要になるまで起動しない） */
+  instance?: string;
 }
 
 export interface WebUsage {

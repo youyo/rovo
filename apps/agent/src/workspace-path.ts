@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { isSelectableSandboxInstance } from "@rovo/models";
 import type { WorkspaceSpec } from "./sandbox-port";
 
 /**
@@ -68,6 +69,12 @@ export function validateWorkspaceSpec(spec: WorkspaceSpec): WorkspaceSpec {
   }
   if (typeof spec.deadlineAt !== "number" || !Number.isFinite(spec.deadlineAt)) {
     throw new Error("invalid deadlineAt");
+  }
+  // タスクが選べる大きさは standard-1〜4 だけ（lite はメモリ不足で落ちた実績がある）。表に無い値は起動前に拒否する
+  if (spec.instance !== undefined && !isSelectableSandboxInstance(spec.instance)) {
+    throw new Error(
+      "invalid instance: expected one of standard-1 / standard-2 / standard-3 / standard-4",
+    );
   }
   return spec;
 }

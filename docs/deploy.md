@@ -240,7 +240,8 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_FETCH_DAILY_LIMIT` | gateway | 任意 | `500` | 親の `web_fetch` の同上 |
 | `WEB_BROWSE_DAILY_LIMIT` | gateway | 任意 | `50` | 親の `web_browse` の同上 |
 | `WEB_BROWSE_ENABLED` | gateway / agent / web | 任意 | `"false"` | `"true"` のときだけ `web_browse` が有効。3 つの Worker で揃える（12） |
-| `SANDBOX_USD_PER_HOUR` | gateway | 任意 | `0.1291`（`standard-2`） | 推定費用の単価（11）。`deploy:config` が `sandbox.instance` から計算する。書けばそれを優先する |
+| `SANDBOX_INSTANCE` | gateway | 任意 | `standard-2` | `sandbox_instances_list` の `default`（`task_start` で `sandbox_instance` を省略したときの大きさ）。agent の同名の var と同じ値にする。`deploy:config` が `sandbox.instance` から両方に入れる。単価の計算には使わない |
+| `SANDBOX_USD_PER_HOUR` | gateway | 任意 | `0.1291`（`standard-2`） | 推定費用の単価（11）。`deploy:config` が `sandbox.instance` から計算する。agent が使った大きさを報告したタスクは、その大きさの単価（表の値）で計算するので、この値は大きさが分からないタスク（Sandbox を起動しなかった・古い agent）にだけ効く |
 | `WEB_USD_PER_1K_SEARCH` | gateway | 任意 | `0.25` | 同上 |
 | `WEB_USD_PER_1K_FETCH` | gateway | 任意 | `0` | 同上 |
 | `WEB_USD_PER_1K_BROWSE` | gateway | 任意 | `0.75` | 同上 |
@@ -384,6 +385,10 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 | `standard-2`（既定） | 1 | 6 GiB | 12 GB | 0.1291 | 一般的なプロジェクトのビルドとテスト |
 | `standard-3` | 2 | 8 GiB | 16 GB | 0.2201 | 並列のテスト、大きめのビルド |
 | `standard-4` | 4 | 12 GiB | 20 GB | 0.4011 | 重いビルド。費用も最大 |
+
+**タスクごとの大きさ**: `rovo.config.json` の `sandbox.instance` は既定で、`task_start` の `sandbox_instance`（`standard-1` / `standard-2` / `standard-3` / `standard-4`。`lite` は選べない）でタスクごとに変えられる。呼び出し元の AI は `sandbox_instances_list` で選べる大きさと単価を確かめて選ぶ（重いテストを流すタスクだけ大きくする）。指定したタスクは、その間ずっとその大きさで動く（動いているコンテナの大きさは変えられない）。依存キャッシュを作るコンテナの大きさは、指定に依らず既定のまま。`task_result` の `usage.sandbox_instance` に実際に起動した大きさが出て、`task_summary` の `sandbox_usd_estimate` もその大きさの単価で計算される。
+
+**Sandbox は必要になるまで起動しない**: 子が最初に Sandbox を使うツール（ファイルの読み書き・コマンドの実行・git）を呼んだときに起動する。`web_search` / `web_fetch` だけで進むタスク（検証コマンドも無い）は起動せず、`sandbox_runtime_ms` は 0 で、`usage.sandbox_instance` も付かない。起動の失敗は 3 回で `sandbox_setup_failed`。この変更でデプロイ手順・secret は増えない（gateway に `SANDBOX_INSTANCE` の var が増えるが、`deploy:config` が入れる。手書きの設定を使っているなら 11 の表のとおり足す）。
 
 実際の費用は CPU の使用率とコンテナを動かした時間で決まり、この表は常に CPU 100% の上限。タスクは最長 2 時間なので、`standard-2` で 1 タスクの上限は約 $0.26。変えるのは `rovo.config.json` の `sandbox.instance`（`deploy:config` が agent の `SANDBOX_INSTANCE` と gateway の `SANDBOX_USD_PER_HOUR` に反映する）。Cloudflare の料金が変わったら `packages/models/src/sandbox.ts` の `SANDBOX_PRICE` を直す。コンテナが止まって作り直された理由（メモリ不足など）は、Workers の API が終了コードを返さないので記録できない。再起動が続くなら大きさを上げる。
 

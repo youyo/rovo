@@ -1,3 +1,4 @@
+import { SELECTABLE_SANDBOX_INSTANCES } from "@rovo/models";
 import { z } from "zod";
 
 export const DEFAULT_WAIT_SECONDS = 30;
@@ -100,6 +101,11 @@ export const taskInputSchema = z.object({
   merge_policy: z.enum(MERGE_POLICIES).default(DEFAULT_MERGE_POLICY),
   /** 子のモデル（D10）。省略は env の AGENT_MODEL。env の AGENT_MODELS の中だけ（照合は service と TaskDO が env で行う） */
   model: z.string().min(1).max(MAX_MODEL_LENGTH).optional(),
+  /**
+   * 子の Sandbox の大きさ。standard-1〜4 だけ（lite は選べない。packages/models の SELECTABLE_SANDBOX_INSTANCES が出どころ）。
+   * 省略は agent の env の既定（SANDBOX_INSTANCE）。指定したらそのタスクの間はずっとその大きさ。
+   */
+  sandbox_instance: z.enum(SELECTABLE_SANDBOX_INSTANCES).optional(),
 });
 
 /** 入力全体（JSON）の上限。項目ごとの上限だけでは合計が大きくなりうるため。 */
@@ -119,6 +125,7 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * verification_commands は argv / cwd / timeout_seconds を順序込みで含める（検証の入力が違えば別のタスク）。
  * merge_policy は既定（human_review）なら含めない（保存済みの値と一致させる）。agent_merge のときだけ v3 として足す。
  * model は未指定なら含めない（従来の v1 / v2 / v3 のまま）。指定があれば v4 として merge_policy と一緒に末尾へ足す。
+ * sandbox_instance も未指定なら含めない（v1〜v4 のまま）。指定があれば v5 として、model（無ければ null）の後ろへ足す。
  */
 export async function computeFingerprint(input: TaskInput): Promise<string> {
   const fields: unknown[] = [
@@ -137,13 +144,15 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
     c.timeout_seconds ?? null,
   ]);
   const canonical = JSON.stringify(
-    input.model !== undefined
-      ? ["v4", ...fields, commands, input.merge_policy, input.model]
-      : input.merge_policy === "agent_merge"
-        ? ["v3", ...fields, commands, input.merge_policy]
-        : commands.length === 0
-          ? ["v1", ...fields]
-          : ["v2", ...fields, commands],
+    input.sandbox_instance !== undefined
+      ? ["v5", ...fields, commands, input.merge_policy, input.model ?? null, input.sandbox_instance]
+      : input.model !== undefined
+        ? ["v4", ...fields, commands, input.merge_policy, input.model]
+        : input.merge_policy === "agent_merge"
+          ? ["v3", ...fields, commands, input.merge_policy]
+          : commands.length === 0
+            ? ["v1", ...fields]
+            : ["v2", ...fields, commands],
   );
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");

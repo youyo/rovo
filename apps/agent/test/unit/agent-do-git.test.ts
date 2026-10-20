@@ -4,6 +4,7 @@ import { clearAgentTestOverrides, setAgentTestOverrides } from "../../src/agent/
 import { FakeSandbox } from "../support/fake-sandbox";
 import {
   allEvents,
+  boot,
   call,
   done,
   type Fixture,
@@ -232,7 +233,7 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
   });
 
   it("検証コマンドが無い完了でも同期する", async () => {
-    const fx = newFixture("sync-noverify", [report()], { pushRetryDelayMs: 0 });
+    const fx = newFixture("sync-noverify", [boot(), report()], { pushRetryDelayMs: 0 });
     await fx.stub.start(makeSpec("sync-noverify", { verificationCommands: [] }));
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.pushCalls).toHaveLength(1);

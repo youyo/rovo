@@ -6,7 +6,8 @@
  * Sandbox と Web の金額は単価をかけた「推定」で、Claude の金額（AI Gateway の usage に基づく）とは別に持つ。
  */
 
-import { DEFAULT_SANDBOX_INSTANCE, sandboxUsdPerHour } from "@rovo/models";
+import { DEFAULT_SANDBOX_INSTANCE, type SandboxInstance, sandboxUsdPerHour } from "@rovo/models";
+import { sandboxInstanceName } from "../sandbox-instance";
 
 /**
  * 単価（USD）。vars で上書きできる。既定値は Cloudflare の公式料金表（取得日 2026-10-19）から取った。出典は phase6.md。
@@ -76,7 +77,13 @@ export type SummaryInput = {
     /** 子が使った分だけ */
     web: { search: number; fetch: number; browse: number };
     /** agent が読めなかったタスクは null */
-    sandbox: { runtimeMs: number; restarts: number; bootRetries: number } | null;
+    sandbox: {
+      runtimeMs: number;
+      restarts: number;
+      bootRetries: number;
+      /** agent が報告した、実際に起動した大きさ。分かれば、その単価（sandboxUsdPerHour）で推定する */
+      instance?: SandboxInstance;
+    } | null;
   };
   questions: number;
   /** 検証イベントから。一度も無ければ attempts 0・passed null */
@@ -104,7 +111,14 @@ export type TaskSummary = {
     cache_read_tokens: number;
     cache_write_tokens: number;
   };
-  sandbox: { observed: boolean; runtime_ms: number; restarts: number; boot_retries: number };
+  sandbox: {
+    observed: boolean;
+    runtime_ms: number;
+    restarts: number;
+    boot_retries: number;
+    /** 実際に起動した大きさ。報告が無い（起動しなかった・古い agent）ときは無い */
+    instance?: SandboxInstance;
+  };
   /** 推定。単価（unit_prices）をかけた値で、タスクの予算には含めない */
   sandbox_usd_estimate: number;
   web: { search: number; fetch: number; browse: number };
@@ -144,7 +158,13 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
     fetch: Math.floor(nn(i.usage.web.fetch)),
     browse: Math.floor(nn(i.usage.web.browse)),
   };
-  const p = i.prices;
+  // 使った大きさが分かればその単価、分からなければ従来の単価（vars の SANDBOX_USD_PER_HOUR か既定）
+  const instance = sandboxInstanceName(sb?.instance);
+  const p = {
+    ...i.prices,
+    sandboxUsdPerHour:
+      instance !== undefined ? sandboxUsdPerHour(instance) : i.prices.sandboxUsdPerHour,
+  };
   return {
     version: 1,
     task_id: i.taskId,
@@ -169,6 +189,7 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
       runtime_ms: runtimeMs,
       restarts: Math.floor(nn(sb?.restarts ?? 0)),
       boot_retries: Math.floor(nn(sb?.bootRetries ?? 0)),
+      ...(instance !== undefined ? { instance } : {}),
     },
     sandbox_usd_estimate: usd((runtimeMs / 3_600_000) * p.sandboxUsdPerHour),
     web,
@@ -239,7 +260,10 @@ export const USAGE_PUBLIC_KEYS = [
   "sandbox_boot_retries",
 ] as const;
 
-export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], number>>;
+export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], number>> & {
+  /** 実際に起動した大きさ（表にある名前だけ。数値ではないので単調増加の対象外で、最後に報告された値を覚える） */
+  sandbox_instance?: SandboxInstance;
+};
 
 export function parseUsagePublic(json: string | null | undefined): UsagePublic {
   try {
@@ -250,6 +274,8 @@ export function parseUsagePublic(json: string | null | undefined): UsagePublic {
       const n = (v as Record<string, unknown>)[k];
       if (typeof n === "number" && Number.isFinite(n) && n >= 0) out[k] = n;
     }
+    const instance = sandboxInstanceName((v as Record<string, unknown>).sandbox_instance);
+    if (instance !== undefined) out.sandbox_instance = instance;
     return out;
   } catch {
     return {};
@@ -266,5 +292,8 @@ export function mergeUsagePublic(
     if (typeof n !== "number" || !Number.isFinite(n) || n < 0) continue;
     out[k] = Math.max(out[k] ?? 0, n);
   }
+  // 後から大きさの無い usage が届いても、報告済みの大きさは忘れない
+  const instance = sandboxInstanceName(payload.sandbox_instance);
+  if (instance !== undefined) out.sandbox_instance = instance;
   return out;
 }

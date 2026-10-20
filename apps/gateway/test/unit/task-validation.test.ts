@@ -386,3 +386,47 @@ describe("model（D10）", () => {
     expect(both).not.toBe(sol);
   });
 });
+
+describe("sandbox_instance（Sandbox の大きさ）", () => {
+  it("省略できる。standard-1〜4 だけ指定でき、lite・未知の値・文字列以外は拒否する", () => {
+    expect(taskInputSchema.parse(base).sandbox_instance).toBeUndefined();
+    for (const ok of ["standard-1", "standard-2", "standard-3", "standard-4"]) {
+      expect(taskInputSchema.parse({ ...base, sandbox_instance: ok }).sandbox_instance).toBe(ok);
+    }
+    for (const bad of ["lite", "basic", "standard-5", "", "Standard-2", 2, null, "toString"]) {
+      expect(
+        taskInputSchema.safeParse({ ...base, sandbox_instance: bad }).success,
+        String(bad),
+      ).toBe(false);
+    }
+  });
+
+  it("fingerprint: 省略した入力の値は変わらない（v1 / v3 / v4 のまま）。指定すれば別のタスク（v5）", async () => {
+    const hash = async (v: unknown) => {
+      const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(v)));
+      return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    };
+    const head = ["owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]];
+    const fp = (extra: Record<string, unknown> = {}) =>
+      computeFingerprint(taskInputSchema.parse({ ...base, ...extra }));
+    // 省略: 従来の形式のまま
+    expect(await fp()).toBe(await hash(["v1", ...head]));
+    expect(await fp({ merge_policy: "agent_merge" })).toBe(
+      await hash(["v3", ...head, [], "agent_merge"]),
+    );
+    expect(await fp({ model: "anthropic/claude-haiku-5-5" })).toBe(
+      await hash(["v4", ...head, [], "human_review", "anthropic/claude-haiku-5-5"]),
+    );
+    // 指定: 別の値。大きさが違えば別のタスク、model との組み合わせも区別する
+    const s2 = await fp({ sandbox_instance: "standard-2" });
+    const s4 = await fp({ sandbox_instance: "standard-4" });
+    expect(s2).not.toBe(await fp());
+    expect(s4).not.toBe(s2);
+    const withModel = await fp({
+      sandbox_instance: "standard-2",
+      model: "anthropic/claude-haiku-5-5",
+    });
+    expect(withModel).not.toBe(s2);
+    expect(withModel).not.toBe(await fp({ model: "anthropic/claude-haiku-5-5" }));
+  });
+});

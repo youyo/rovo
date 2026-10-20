@@ -2,6 +2,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { listSandboxInstances } from "@rovo/models";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApiApp } from "../../src/app";
 import { readWorkerAudit } from "../../src/audit-sink";
@@ -70,7 +71,7 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("14 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("15 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
@@ -78,6 +79,7 @@ describe("/mcp ツール一覧", () => {
       "budget_status",
       "consult",
       "models_list",
+      "sandbox_instances_list",
       "task_answer",
       "task_cancel",
       "task_pr_merge",
@@ -1917,6 +1919,90 @@ describe("D10: AI への伝え方（instructions と説明）", () => {
     const start = tools.find((t) => t.name === "task_start");
     expect(start?.description).toContain("数分〜数十分");
     expect(start?.description).toContain("task_wait の説明");
+    await client.close();
+  });
+});
+
+describe("sandbox_instances_list / task_start の sandbox_instance", () => {
+  const list = async (client: Client) => (await client.listTools()).tools;
+
+  it("sandbox_instances_list: 入力なし。大きさごとに {name, vcpu, memory_gib, disk_gb, usd_per_hour, default, selectable} を返す（lite は selectable: false）", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tool = (await list(client)).find((t) => t.name === "sandbox_instances_list");
+    expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual([]);
+    const out = body(await client.callTool({ name: "sandbox_instances_list", arguments: {} }));
+    const instances = out.instances as Record<string, unknown>[];
+    expect(instances.map((i) => i.name)).toEqual([
+      "lite",
+      "standard-1",
+      "standard-2",
+      "standard-3",
+      "standard-4",
+    ]);
+    // 値は packages/models の表と関数から作る（数値を二重に持たない）
+    expect(instances).toEqual(listSandboxInstances());
+    expect(instances.find((i) => i.default === true)?.name).toBe("standard-2");
+    expect(instances.filter((i) => i.default === true)).toHaveLength(1);
+    expect(instances.find((i) => i.name === "lite")).toMatchObject({ selectable: false });
+    expect(instances.filter((i) => i.selectable === true)).toHaveLength(4);
+    await client.close();
+  });
+
+  it("sandbox_instances_list: デプロイの既定（env の SANDBOX_INSTANCE）に default が付く。不正な値は standard-2", async () => {
+    const u = await user("alice");
+    for (const [raw, expected] of [
+      ["standard-4", "standard-4"],
+      ["basic", "standard-2"],
+    ] as const) {
+      const client = await connect(createApiApp(), u.props, {
+        ...env,
+        SANDBOX_INSTANCE: raw,
+      } as unknown as Env);
+      const out = body(await client.callTool({ name: "sandbox_instances_list", arguments: {} }));
+      const instances = out.instances as Record<string, unknown>[];
+      expect(instances.find((i) => i.default === true)?.name, raw).toBe(expected);
+      await client.close();
+    }
+  });
+
+  it("task_start は sandbox_instance を受け取り、説明は sandbox_instances_list へ案内する（数値は書かない）。lite は invalid_input", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const start = (await list(client)).find((t) => t.name === "task_start");
+    const props = start?.inputSchema.properties as Record<string, { description?: string }>;
+    expect(props.sandbox_instance).toBeDefined();
+    expect(start?.description).toContain("sandbox_instances_list");
+    expect(props.sandbox_instance?.description).toContain("sandbox_instances_list");
+    expect(props.sandbox_instance?.description).not.toMatch(/\d/);
+    expect(start?.description).not.toMatch(/standard-\d/);
+    const ng = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { sandbox_instance: "lite" }),
+    });
+    expect(body(ng)).toMatchObject({ code: "invalid_input" });
+    const ok = body(
+      await client.callTool({
+        name: "task_start",
+        arguments: startArgs("t", { sandbox_instance: "standard-3" }),
+      }),
+    );
+    const status = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: ok.task_id } }),
+    );
+    expect(status.sandbox_instance).toBe("standard-3");
+    expect((await fakeAgent(String(ok.task_id)).calls()).specs[0]?.sandboxInstance).toBe(
+      "standard-3",
+    );
+    await client.close();
+  });
+
+  it("instructions に sandbox_instances_list の使い方を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const text = client.getInstructions() ?? "";
+    expect(text).toContain("sandbox_instances_list");
+    expect(text).toContain("sandbox_instance");
     await client.close();
   });
 });

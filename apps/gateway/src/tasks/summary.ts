@@ -6,11 +6,13 @@
  * Sandbox と Web の金額は単価をかけた「推定」で、Claude の金額（AI Gateway の usage に基づく）とは別に持つ。
  */
 
+import { DEFAULT_SANDBOX_INSTANCE, sandboxUsdPerHour } from "@rovo/models";
+
 /**
  * 単価（USD）。vars で上書きできる。既定値は Cloudflare の公式料金表（取得日 2026-10-19）から取った。出典は phase6.md。
- * - sandboxUsdPerHour: Containers の `lite`（1/16 vCPU・256 MiB・2 GB）を CPU 100% 稼働で 1 時間動かした上限値。
- *   0.0625 vCPU * 3600 s * $0.000020 + 0.25 GiB * 3600 s * $0.0000025 + 2 GB * 3600 s * $0.00000007 = $0.00725 → 切り上げて 0.0073。
- *   月の無料枠は差し引かない（上限側の推定）。
+ * - sandboxUsdPerHour: 既定のインスタンス（standard-2。1 vCPU・6 GiB・12 GB）を CPU 100% 稼働で 1 時間動かした上限値（$0.129024 → 切り上げて 0.1291）。
+ *   インスタンスごとの単価の表と計算は packages/models（sandboxUsdPerHour）が持つ。月の無料枠は差し引かない（上限側の推定）。
+ *   agent の SANDBOX_INSTANCE を変えたら、この var も合わせる（deploy:config は rovo.config.json の sandbox.instance から両方を決める）。
  * - webUsdPer1kSearch: Web Search API の ceramic（既定のプロバイダ）$0.25 / 1,000 リクエスト。
  * - webUsdPer1kFetch: web_fetch は Cloudflare 側の課金が無い（Workers のリクエスト以外）ので 0。
  * - webUsdPer1kBrowse: Browser Run の REST API $0.09 / ブラウザ時間 * 1 回の上限 30 秒（gotoOptions.timeout）
@@ -24,7 +26,7 @@ export type PriceTable = {
 };
 
 export const DEFAULT_PRICES: PriceTable = {
-  sandboxUsdPerHour: 0.0073,
+  sandboxUsdPerHour: sandboxUsdPerHour(DEFAULT_SANDBOX_INSTANCE),
   webUsdPer1kSearch: 0.25,
   webUsdPer1kFetch: 0,
   webUsdPer1kBrowse: 0.75,

@@ -53,6 +53,9 @@
     // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。例 "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off"）。
     // 空なら upstream の既定（haiku=low, sonnet=high, opus=medium, fable=low, luna=low, sol=medium, astra=low）。思考のトークンは出力として課金される。gateway の同名の var と同じ値にする。
     "MODEL_EFFORTS": "<MODEL_EFFORTS>",
+    // Sandbox コンテナの大きさ（lite / standard-1 / standard-2 / standard-3 / standard-4）。rovo.config.json の sandbox.instance。
+    // gateway の SANDBOX_USD_PER_HOUR（推定費用の単価）もこの大きさから計算して合わせる。docs/deploy.md の 5。
+    "SANDBOX_INSTANCE": "<SANDBOX_INSTANCE>",
     "WEB_SEARCH_LIMIT_PER_TASK": "50",
     "WEB_FETCH_LIMIT_PER_TASK": "100",
     "WEB_BROWSE_LIMIT_PER_TASK": "20",

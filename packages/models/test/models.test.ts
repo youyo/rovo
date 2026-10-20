@@ -4,6 +4,7 @@ import {
   computeCostUsd,
   DEFAULT_MODEL,
   DEFAULT_MODEL_ORDER,
+  DEFAULT_SANDBOX_INSTANCE,
   EFFORTS,
   effortFor,
   MODEL_CATALOG_IDS,
@@ -13,6 +14,10 @@ import {
   piModelId,
   providerOf,
   resolveEfforts,
+  resolveSandboxInstance,
+  SANDBOX_INSTANCES,
+  sandboxInstanceSpec,
+  sandboxUsdPerHour,
   supportedEfforts,
   thinkingOffFor,
 } from "../src";
@@ -407,5 +412,48 @@ describe("既定のモデルの順序（D10b）", () => {
       pickDefaultModel(undefined, ["workers-ai/@cf/openai/gpt-oss-20b", "openai/gpt-6-sol"]),
     ).toBe("workers-ai/@cf/openai/gpt-oss-20b");
     expect(pickDefaultModel("anthropic/claude-sonnet-5-5", [])).toBeUndefined();
+  });
+});
+
+describe("Sandbox のインスタンス（D13）", () => {
+  it("名前付きの 5 種類だけ。既定は standard-2", () => {
+    expect(Object.keys(SANDBOX_INSTANCES)).toEqual([
+      "lite",
+      "standard-1",
+      "standard-2",
+      "standard-3",
+      "standard-4",
+    ]);
+    expect(DEFAULT_SANDBOX_INSTANCE).toBe("standard-2");
+    expect(sandboxInstanceSpec("standard-2")).toEqual({ vcpu: 1, memoryGiB: 6, diskGB: 12 });
+    expect(sandboxInstanceSpec("lite")).toEqual({ vcpu: 1 / 16, memoryGiB: 0.25, diskGB: 2 });
+  });
+
+  it("resolveSandboxInstance: 未設定・空は既定。不正な値は既定に戻して ignored に返す", () => {
+    expect(resolveSandboxInstance(undefined)).toEqual({ instance: "standard-2" });
+    expect(resolveSandboxInstance("  ")).toEqual({ instance: "standard-2" });
+    expect(resolveSandboxInstance(" standard-4 ")).toEqual({ instance: "standard-4" });
+    expect(resolveSandboxInstance("lite")).toEqual({ instance: "lite" });
+    expect(resolveSandboxInstance("basic")).toEqual({ instance: "standard-2", ignored: "basic" });
+    expect(resolveSandboxInstance("toString")).toEqual({
+      instance: "standard-2",
+      ignored: "toString",
+    });
+  });
+
+  it("sandboxUsdPerHour: CPU 100% の上限側。小数 4 桁に切り上げる（少なく数えない）", () => {
+    // lite: 0.0625*3600*0.00002 + 0.25*3600*0.0000025 + 2*3600*0.00000007 = 0.007254
+    expect(sandboxUsdPerHour("lite")).toBe(0.0073);
+    // standard-2: 1*3600*0.00002 + 6*3600*0.0000025 + 12*3600*0.00000007 = 0.129024
+    expect(sandboxUsdPerHour("standard-2")).toBe(0.1291);
+    expect(sandboxUsdPerHour("standard-1")).toBe(0.0741);
+    expect(sandboxUsdPerHour("standard-3")).toBe(0.2201);
+    expect(sandboxUsdPerHour("standard-4")).toBe(0.4011);
+    for (const id of Object.keys(SANDBOX_INSTANCES)) {
+      const s = sandboxInstanceSpec(id as "lite");
+      const exact =
+        s.vcpu * 3600 * 0.00002 + s.memoryGiB * 3600 * 0.0000025 + s.diskGB * 3600 * 0.00000007;
+      expect(sandboxUsdPerHour(id as "lite")).toBeGreaterThanOrEqual(exact - 1e-12);
+    }
   });
 });

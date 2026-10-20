@@ -438,7 +438,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 | `WEB_USD_PER_1K_FETCH` | 0 | web_fetch は取得先への通信で、Cloudflare の従量課金は無い（Workers のリクエストは Workers の料金に含まれる）。Workers AI の `toMarkdown` を使う分は無料枠とみなして 0 |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | Browser Run の REST API: $0.09 / ブラウザ時間（https://developers.cloudflare.com/browser-run/pricing/ ）。1 回あたり `gotoOptions.timeout` の 30 秒を上限として $0.09*30/3600 = $0.00075 / 回 |
 
-- 実際の instance_type を変えたら（例: standard-2）、`SANDBOX_USD_PER_HOUR` を上書きする。
+- **D13（2026-10-20）で更新**: 当時は agent が instance を指定せず `lite` で計算したが、`SANDBOX_INSTANCE`（既定 `standard-2`）を `start()` に渡すようにしたので、既定は 0.1291 になった（表と計算は `packages/models/src/sandbox.ts`。`deploy:config` は `sandbox.instance` から自動で入れる）。上の行は `lite` の場合の計算として残す。
 
 ### `task_summary` 監査イベント
 

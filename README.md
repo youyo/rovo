@@ -255,7 +255,7 @@ rovo を upstream にする private リポジトリ（下流）が、自分の w
 
 | 変数 | 既定値 | 内容 |
 |---|---|---|
-| `SANDBOX_USD_PER_HOUR` | 0.0073 | Sandbox コンテナの 1 時間あたり。`lite`（1/16 vCPU、256 MiB、2 GB）で CPU を 100% 稼働とみなした値。`instance_type` を変えたら上書きする |
+| `SANDBOX_USD_PER_HOUR` | 0.1291 | Sandbox コンテナの 1 時間あたり。既定の大きさ `standard-2`（1 vCPU、6 GiB、12 GB）で CPU を 100% 稼働とみなした値。`SANDBOX_INSTANCE`（agent）を変えたら合わせる（`deploy:config` は自動） |
 | `WEB_USD_PER_1K_SEARCH` | 0.25 | `web_search` 1,000 回あたり。既定のプロバイダ（ceramic）の値。`WEB_SEARCH_PROVIDER` を変えたら上書きする |
 | `WEB_USD_PER_1K_FETCH` | 0 | `web_fetch` 1,000 回あたり |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | `web_browse` 1,000 回あたり（1 回 30 秒を上限としたブラウザ時間） |

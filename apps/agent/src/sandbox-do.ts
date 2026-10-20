@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { posix } from "node:path";
 import { Files } from "@cloudflare/sandbox";
 import type { AuditFields, AuditRecord } from "@rovo/audit";
+import { resolveSandboxInstance } from "@rovo/models";
 import type { GitCredential, SandboxMetrics } from "./agent/types";
 import { appendTestAudit, emitAudit, readTestAudit } from "./audit-adapter";
 import { PROCESS_SCRIPT } from "./container-scripts";
@@ -621,9 +622,18 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       if (!container.running) {
         this.ctx.storage.kv.delete("baseline");
         this.recordStart();
+        // scheduling_policy=durable_object では wrangler の instance_type は効かず、start() の instance が大きさを決める
+        // （指定しないと lite = 1/16 vCPU・256 MiB で、npm ci が遅くメモリ不足で落ちる）。不正な値は既定に戻す（D13）。
+        const { instance, ignored } = resolveSandboxInstance(this.env.SANDBOX_INSTANCE);
+        if (ignored !== undefined) {
+          console.warn(
+            `[sandbox-boot] SANDBOX_INSTANCE=${JSON.stringify(ignored.slice(0, 40))} is not supported; using ${instance}`,
+          );
+        }
         container.start({
           image: container.images.workspace,
           enableInternet: false,
+          instance,
           env: BASE_ENV,
         });
         started = true;

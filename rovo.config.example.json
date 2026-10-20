@@ -17,6 +17,7 @@
     ],
     "efforts": {}
   },
+  "sandbox": { "instance": "standard-2" },
   "webBrowseEnabled": false,
   "vars": { "gateway": {}, "agent": {}, "web": {} }
 }

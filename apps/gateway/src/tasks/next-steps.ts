@@ -10,6 +10,10 @@ import type { MergePolicy } from "./validation";
 export type NextStepsInput = {
   task_id: string;
   status: TaskStatus;
+  /** task_result の reason（失敗の理由のコード） */
+  reason?: string;
+  /** "setup" は準備の段階（runSetup）の失敗。reason はそのコード */
+  failure_phase?: "setup";
   merge_policy: MergePolicy;
   verification: { verified: boolean };
   pr: Pick<
@@ -33,8 +37,22 @@ function fixAdvice(input: NextStepsInput): string {
   return `問題があれば Ready にせず、修正を新しいタスクで頼む（task_steer は実行中のタスク専用で、COMPLETED には使えない）。この PR のブランチに積むなら、task_start の base_ref に ${branchOf(input.task_id)}${sha ? `、base_sha に ${sha}` : ""} を指定する。`;
 }
 
+/** 準備の段階の失敗（FAILED）の案内。理由のコードに合わせる。 */
+function setupFailureAdvice(reason: string | undefined): string {
+  if (reason === "base_sha_not_found") {
+    return "タスクは準備の段階で FAILED になった（reason: base_sha_not_found）。base_sha がそのリポジトリに無い（短縮形や、別のリポジトリ・消えたコミットの SHA）。git ls-remote などで 40 桁の SHA を確かめて、task_start し直す。";
+  }
+  return `タスクは準備の段階で FAILED になった（reason: ${reason ?? "unknown"}）。エージェントは動いていないので成果は無く、PR も作られていないことがある（task_pr_ready / task_pr_merge は使えない）。reason を確かめ、直せる原因（権限・設定・既存のブランチや PR など）なら直してから task_start し直す。直せない場合は管理者に reason を伝える。`;
+}
+
 export function nextSteps(input: NextStepsInput): string {
   const { status, merge_policy: policy, pr } = input;
+  if (status === "FAILED" && input.reason === "base_sha_not_found") {
+    return setupFailureAdvice(input.reason);
+  }
+  if (status === "FAILED" && input.failure_phase === "setup") {
+    return setupFailureAdvice(input.reason);
+  }
   if (status !== "COMPLETED") {
     return `タスクは COMPLETED ではない（status: ${status}）ため、task_pr_ready / task_pr_merge は使えない。summary と warnings で原因を確かめ、作業を続けるなら新しいタスクを task_start で始める${pr ? `（ブランチ ${branchOf(input.task_id)} の続きから行うなら base_ref にそのブランチ名、base_sha に pr.head_sha を指定する）。不要な PR は GitHub 上で閉じる` : ""}。`;
   }

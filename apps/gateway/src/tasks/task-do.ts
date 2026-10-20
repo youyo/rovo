@@ -165,6 +165,11 @@ export type AbandonResult =
 export type ResultView = {
   status: TaskStatus;
   reason?: string;
+  /**
+   * 失敗した段階。"setup" は準備（ブランチ・Draft PR の作成など。runSetup）で FAILED になったこと。
+   * その場合 reason は準備の失敗のコード（base_sha_not_found など）。エージェントが動く前なので結果は合成される。
+   */
+  failure_phase?: "setup";
   summary: string;
   verification: {
     commands: { argv: string[]; cwd?: string; timeout_seconds?: number }[];
@@ -1373,8 +1378,17 @@ export class TaskDO extends DurableObject<Env> {
   private synthesizeResult(row: TaskRow, status: TaskStatus): ResultCore {
     const link = this.getLink();
     const spec = link ? (JSON.parse(link.spec) as BaseSpec) : undefined;
+    // 準備の段階の失敗: 準備が終わらないまま FAILED になった（理由は status_changed の reason に残っている）
+    const gl = this.getGithub();
+    const setupReason =
+      status === "FAILED" && gl !== undefined && gl.setup_done === 0
+        ? this.failedReason()
+        : undefined;
     return {
       status,
+      ...(setupReason !== undefined
+        ? { reason: setupReason, failure_phase: "setup" as const }
+        : {}),
       summary: "",
       verification: {
         commands: (spec?.verificationCommands ?? []).map(shapeCommand),
@@ -2248,6 +2262,20 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   // ---- 終端: PR の更新とトークンの失効 ----
+
+  /** FAILED になったときの status_changed の reason（SetupFailure のコードなど）。無ければ undefined。 */
+  private failedReason(): string | undefined {
+    const rows = this.ctx.storage.sql
+      .exec<{ payload: string }>(
+        "SELECT payload FROM events WHERE type = 'status_changed' ORDER BY seq DESC",
+      )
+      .toArray();
+    for (const r of rows) {
+      const p = JSON.parse(r.payload) as { status?: unknown; reason?: unknown };
+      if (p.status === "FAILED") return typeof p.reason === "string" ? p.reason : undefined;
+    }
+    return undefined;
+  }
 
   private terminalReason(): string | undefined {
     const rows = this.ctx.storage.sql

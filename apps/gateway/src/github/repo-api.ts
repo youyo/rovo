@@ -101,15 +101,24 @@ export class GitHubRepoApi {
   }
 
   /**
-   * tree の直下の項目（再帰しない）。依存関係のキャッシュ（D14）が、ルート直下の lockfile の blob SHA を読むのに使う。
-   * truncated は GitHub が一覧を切り詰めたか（直下だけなら、ほぼ起きない）。形の違う項目は読み飛ばす。
+   * tree の項目。既定は直下だけ。`recursive: true` なら全体（?recursive=1。path は "packages/a/package.json" のような相対パス）。
+   * 依存関係のキャッシュ（D14）が、lockfile・package.json の blob SHA を読むのに使う。
+   * truncated は GitHub が一覧を切り詰めたか（直下だけなら、ほぼ起きない。再帰では大きなリポジトリで起きる）。
+   * 形の違う項目は読み飛ばす。
    */
-  async getTree(treeSha: string): Promise<{
+  async getTree(
+    treeSha: string,
+    opts: { recursive?: boolean } = {},
+  ): Promise<{
     truncated: boolean;
     entries: { path: string; mode: string; type: string; sha: string }[];
   }> {
     const what = "get tree";
-    const { json } = await this.call(what, "GET", this.repoPath(`/git/trees/${enc(treeSha)}`));
+    const { json } = await this.call(
+      what,
+      "GET",
+      this.repoPath(`/git/trees/${enc(treeSha)}${opts.recursive ? "?recursive=1" : ""}`),
+    );
     const b = json as { tree?: unknown; truncated?: unknown } | null;
     if (!Array.isArray(b?.tree)) return this.bad(what);
     const entries: { path: string; mode: string; type: string; sha: string }[] = [];

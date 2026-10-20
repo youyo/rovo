@@ -451,11 +451,11 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 
 タスクの Sandbox は、毎回 `npm ci` などで依存関係を導入すると、Sandbox の時間の大半を使う（`standard-2` で x-mcp のタスクが約 67 秒）。そこで、リポジトリのルート直下の lockfile（`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`）が同じなら、導入済みの `node_modules` を **Containers のスナップショット**（public beta）として使い回す。設計は design.md の 15.8（D14）。
 
-- **効き方**: 最初のタスク（その lockfile の blob SHA で初めて）はキャッシュを作る（導入と同じ時間がかかる。`task_result` の `usage.deps_cache` が `built`、`cache_build_ms` に所要時間）。同じ lockfile の 2 回目以降は、導入済みの状態で起動する（`hit`）。lockfile を変えたブランチ・リポジトリごと・イメージの更新ごとに別のキャッシュになる。`miss` はキャッシュが使えず今までどおり動いた（ログに `deps_cache_miss: <理由>`）、`disabled` は対象外（lockfile が無い、ルート以外にしかない、`DEPS_CACHE_ENABLED=false`）。
+- **効き方**: 最初のタスク（その lockfile の blob SHA で初めて）はキャッシュを作る（導入と同じ時間がかかる。`task_result` の `usage.deps_cache` が `built`、`cache_build_ms` に所要時間）。同じ lockfile・package.json の 2 回目以降は、導入済みの状態で起動する（`hit`）。キャッシュの鍵には lockfile に加えて、ルートの `package.json`・`pnpm-workspace.yaml`・入れ子の `package.json`（workspace の各パッケージ）の内容も入る（scripts を差し替えたブランチと共有しない。大きなリポジトリで tree が切り詰められたときはキャッシュなし）。lockfile を変えたブランチ・リポジトリごと・イメージの更新ごとに別のキャッシュになる。`miss` はキャッシュが使えず今までどおり動いた（ログに `deps_cache_miss: <理由>`）、`disabled` は対象外（lockfile が無い、ルート以外にしかない、`DEPS_CACHE_ENABLED=false`）。
 - **費用**: キャッシュを作るコンテナの時間は、作ったタスクの `sandbox_runtime_ms`（推定費用）に足される。スナップショットの保管の費用は Cloudflare の Containers の料金表を確認する（このリポジトリは単価を持たない）。スナップショットは 30 日で期限切れになる（復元で延長される）。一覧と削除の API は無いので、rovo は消さない。
 - **前提**: `scheduling_policy: durable_object`（agent の `containers` で設定済み）。スナップショットは beta の機能なので、アカウントで使えない・上限に達したときは、タスクは失敗せず `miss` になる（キャッシュなしで今までどおり動く）。
 - **無効にする**: `rovo.config.json` の `depsCache.enabled` を `false` にして `deploy:config` を再生成し、agent を再デプロイする（agent の var `DEPS_CACHE_ENABLED`）。
 - **安全性**: GitHub のトークンは、作成用のコンテナにもスナップショットにも入らない（外向きの転送時に Worker が付ける）。スナップショットにはリポジトリの作業状態が入らず（`node_modules` とパッケージマネージャのキャッシュだけ）、`repository_id` ごとに別なので他のリポジトリとは共有されない。作成用のコンテナが実行するのは、base_sha のコミット済みのコードだけ。
-- **pnpm / yarn**: Dockerfile には入っていないので corepack 経由で呼ぶ（取得先は `registry.npmjs.org`。外向きの許可に既にある）。yarn の berry（`yarn.lock` が `__metadata:` で始まる）は `--frozen-lockfile` を受け付けず、キャッシュの作成が失敗する（`miss`。60 秒のクールダウンの後に作り直す）。その場合は `depsCache.enabled` を `false` にするか、classic にする。
+- **pnpm / yarn**: Dockerfile で `corepack enable` した shim を使う（素の `pnpm` が呼べる。本体は package.json の `packageManager` に従って初回に取る。取得先は `registry.npmjs.org`。外向きの許可に既にある）。python3 もイメージに入っている。yarn の berry（`yarn.lock` が `__metadata:` で始まる）は `--frozen-lockfile` を受け付けず、キャッシュの作成が失敗する（`miss`。60 秒のクールダウンの後に作り直す）。その場合は `depsCache.enabled` を `false` にするか、classic にする。
 - **対象外**: Python / PyPI、ルート以外の lockfile（モノレポの入れ子）、pnpm store のキャッシュ、スナップショットの削除。
 - **実機での確認**: acceptance.md の 24。

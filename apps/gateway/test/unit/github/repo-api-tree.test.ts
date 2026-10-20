@@ -42,6 +42,20 @@ describe("GitHubRepoApi.getTree（D14: ルート直下の lockfile の blob SHA 
     expect(new URL(calls[0]?.url ?? "").search).toBe("");
   });
 
+  it("recursive: true なら ?recursive=1 を付ける", async () => {
+    const { a, calls } = api({
+      [`GET /repos/acme/widgets/git/trees/${TREE}`]: () =>
+        json({
+          truncated: true,
+          tree: [{ path: "packages/a/package.json", mode: "100644", type: "blob", sha: BLOB }],
+        }),
+    });
+    const r = await a.getTree(TREE, { recursive: true });
+    expect(r.truncated).toBe(true);
+    expect(r.entries[0]?.path).toBe("packages/a/package.json");
+    expect(new URL(calls[0]?.url ?? "").search).toBe("?recursive=1");
+  });
+
   it("形が違う項目は読み飛ばす。tree が配列でなければ unexpected response", async () => {
     const { a } = api({
       [`GET /repos/acme/widgets/git/trees/${TREE}`]: [

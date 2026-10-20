@@ -7,6 +7,9 @@ const base = {
   lockfilePath: "package-lock.json",
   blobSha: SHA,
   installCommand: "npm ci",
+  packageJsonSha: "d".repeat(40),
+  workspaceSha: null,
+  manifestsSha: null,
 };
 const IMAGE =
   "registry.cloudflare.com/acct/rovo-agent-sandboxdo-workspace@sha256:" + "b".repeat(64);
@@ -28,6 +31,19 @@ describe("parseDepsSpec", () => {
         installCommand: "yarn install --frozen-lockfile",
       }),
     ).toMatchObject({ lockfilePath: "yarn.lock" });
+  });
+
+  it("packageJsonSha は必須。workspaceSha / manifestsSha は省略か null か SHA。形が違えば null", () => {
+    const { packageJsonSha: _omit, ...noPkg } = base;
+    expect(parseDepsSpec(noPkg)).toBeNull();
+    expect(parseDepsSpec({ ...base, packageJsonSha: "zz" })).toBeNull();
+    // 省略は null として扱う
+    const { workspaceSha: _w, manifestsSha: _m, ...minimal } = base;
+    expect(parseDepsSpec(minimal)).toEqual(base);
+    const full = { ...base, workspaceSha: "e".repeat(40), manifestsSha: "f".repeat(64) };
+    expect(parseDepsSpec(full)).toEqual(full);
+    expect(parseDepsSpec({ ...base, workspaceSha: "zz" })).toBeNull();
+    expect(parseDepsSpec({ ...base, manifestsSha: 1 })).toBeNull();
   });
 
   it("null / 未指定 / 形が違うものは null（キャッシュなし）", () => {
@@ -63,6 +79,34 @@ describe("depsCacheKey", () => {
     const a = await depsCacheKey(base, IMAGE);
     expect(a).toMatch(/^[0-9a-f]{64}$/);
     expect(await depsCacheKey({ ...base }, IMAGE)).toBe(a);
+  });
+
+  it("鍵の版は v2。入力は repository_id・lockfile・blob SHA・導入のコマンド・package.json・pnpm-workspace.yaml・入れ子の package.json・イメージの順", async () => {
+    const input = JSON.stringify([
+      "rovo-deps-cache-v2",
+      base.repositoryId,
+      base.lockfilePath,
+      base.blobSha,
+      base.installCommand,
+      base.packageJsonSha,
+      base.workspaceSha,
+      base.manifestsSha,
+      IMAGE,
+    ]);
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+    const expected = [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    expect(await depsCacheKey(base, IMAGE)).toBe(expected);
+  });
+
+  it("package.json・pnpm-workspace.yaml・入れ子の package.json の SHA が変わると別の鍵（postinstall を差し替えたブランチと共有しない）", async () => {
+    const k = await depsCacheKey(base, IMAGE);
+    const others = await Promise.all([
+      depsCacheKey({ ...base, packageJsonSha: "1".repeat(40) }, IMAGE),
+      depsCacheKey({ ...base, workspaceSha: "2".repeat(40) }, IMAGE),
+      depsCacheKey({ ...base, manifestsSha: "3".repeat(64) }, IMAGE),
+    ]);
+    for (const o of others) expect(o).not.toBe(k);
+    expect(new Set(others).size).toBe(others.length);
   });
 
   it("repository_id・lockfile のパス・blob SHA・導入のコマンド・イメージのどれが変わっても別の鍵", async () => {

@@ -134,3 +134,21 @@ describe("authorizeDashboardSession（セッション + 許可ルールの確か
     });
   });
 });
+
+describe("authorizeDashboardSession: uid の照合", () => {
+  it("この DO の持ち主と違う uid で呼ぶと、許可ルールに通る id でも unauthenticated", async () => {
+    const { uid, stub, session } = await setup();
+    await patchEnv(stub, {
+      ALLOWED_ORG: "",
+      ALLOWED_TEAM: "",
+      ALLOWED_USER_IDS: `${uid},${uid + 1}`,
+    });
+    expect(await stub.authorizeDashboardSession(uid + 1, session.sid, session.version)).toEqual({
+      ok: false,
+      kind: "unauthenticated",
+    });
+    expect(await stub.authorizeDashboardSession(uid, session.sid, session.version)).toMatchObject({
+      ok: true,
+    });
+  });
+});

@@ -213,5 +213,12 @@ export function withTestScripts(env: Env, agent: AgentRpc): AgentRpc {
       (await held()) ? { ok: false } : agent.answer(questionId, answer),
     steer: async (steerId, message) =>
       (await held()) ? { ok: false } : agent.steer(steerId, message),
+    // consult の台本も同じ置き場（最初の user メッセージがキー）から渡す
+    consult: async (request) => {
+      const key = request.messages[0]?.content ?? "";
+      const raw = await env.OAUTH_KV.get(SCRIPT_KEY_PREFIX + key);
+      if (raw !== null) await scriptable.setScript(key, JSON.parse(raw) as unknown[]);
+      return agent.consult(request);
+    },
   };
 }

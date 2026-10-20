@@ -43,7 +43,11 @@
     "ENVIRONMENT": "production",
     // terraform output ai_gateway_id の値
     "AI_GATEWAY_ID": "<AI_GATEWAY_ID>",
+    // 既定のモデル（task_start の model を省略したとき）
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
+    // 選べるモデル（カンマ区切り。task_start の model と consult の model）。空なら AGENT_MODEL だけ。gateway の同名の var と同じ値にする。
+    // OpenAI のモデル（openai/gpt-6-sol など）を足すには、AI Gateway に OpenAI のプロバイダー キーを登録しておく（docs/deploy.md）。
+    "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5",
     "WEB_SEARCH_LIMIT_PER_TASK": "50",
     "WEB_FETCH_LIMIT_PER_TASK": "100",
     "WEB_BROWSE_LIMIT_PER_TASK": "20",

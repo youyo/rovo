@@ -57,6 +57,39 @@ describe("start の冪等性", () => {
   });
 });
 
+describe("タスクごとのモデル（D10）", () => {
+  // vitest.config.ts の AGENT_MODELS: sonnet（既定）・haiku・gpt-6-sol
+
+  it("AGENT_MODELS にあるモデルを spec.model に指定すると受理する", async () => {
+    const fx = newFixture("model-ok", [report()]);
+    const res = await fx.stub.start(makeSpec("model-ok", { model: "anthropic/claude-haiku-5-5" }));
+    expect(res).toMatchObject({ status: "accepted" });
+    expect(await waitForTerminal(fx)).toBe("completed");
+  });
+
+  it("AGENT_MODELS に無いモデル（許可リストにはある gpt-6-astra も、許可リスト外も）は起動時に拒否する", async () => {
+    for (const [i, model] of ["openai/gpt-6-astra", "anthropic/claude-opus-5", "x"].entries()) {
+      const fx = newFixture(`model-ng-${i}`, []);
+      const res = await fx.stub.start(makeSpec(`model-ng-${i}`, { model }));
+      expect(res, model).toMatchObject({ status: "rejected" });
+      expect((res as { reason: string }).reason, model).toContain("unknown_model");
+      expect(fx.sandbox.readySpecs, model).toHaveLength(0);
+      expect(fx.modelCalls.count, model).toBe(0);
+    }
+  });
+
+  it("model の有無は spec の同一性に入る（違えば conflict）", async () => {
+    const fx = newFixture("model-fp", [call("gate")]);
+    const spec = makeSpec("model-fp", { model: "anthropic/claude-haiku-5-5" });
+    expect(await fx.stub.start(spec)).toMatchObject({ status: "accepted" });
+    expect(await fx.stub.start({ ...spec, model: "openai/gpt-6-sol" })).toEqual({
+      status: "conflict",
+    });
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("failed");
+  });
+});
+
 describe("cancel", () => {
   it("start より先に cancel が届くと、start は cancelled を返して何も始めない", async () => {
     const fx = newFixture("cancel-first", [report()]);

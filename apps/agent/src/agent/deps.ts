@@ -44,7 +44,13 @@ export interface AgentTestOverrides {
   /** steer を Pi へ submit する直前（phase を確かめた後） */
   beforeSteerSubmit?: () => Promise<void>;
   /** モデル呼び出し（fake provider が実際に呼ばれた回数と、そのとき見えていた user メッセージの観測用） */
-  onModelCall?: (context?: { userTexts: string[]; toolResults: string[] }) => void;
+  onModelCall?: (context?: {
+    userTexts: string[];
+    toolResults: string[];
+    maxTokens?: number;
+    metadata?: Record<string, unknown>;
+    systemText?: string;
+  }) => void;
 }
 
 const overrides = new Map<string, AgentTestOverrides>();

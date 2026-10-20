@@ -40,8 +40,12 @@
     "ENVIRONMENT": "production",
     // AI Gateway の ID（空なら Gateway を通さない）。デプロイ時に実際の ID へ変える。
     "AI_GATEWAY_ID": "",
-    // 子エージェントのモデル。単価表（src/agent/pricing.ts）にあるものだけ使える。
+    // 子エージェントの既定のモデル。許可リスト（packages/models。単価は pi-ai のカタログ由来）にあるものだけ使える。
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
+    // タスクごとに選べるモデル（カンマ区切り。task_start の model と consult の model に使える）。
+    // 空なら AGENT_MODEL だけ（fail-closed）。許可リストに無い id は無視する。gateway の同名の var と同じ値にする。
+    // 例: "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5,openai/gpt-6-sol"
+    "AGENT_MODELS": "",
     // ENVIRONMENT=test のときだけ有効。許可した外向き通信の転送先（偽サーバー）。空なら実ネットワークへ出る。
     "TEST_UPSTREAM": "",
     // 子の web_search / web_fetch / web_browse の回数の上限（タスクごと）

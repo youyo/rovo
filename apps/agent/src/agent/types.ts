@@ -60,6 +60,11 @@ export interface TaskSpec {
   acceptanceCriteria?: string[];
   verificationCommands?: VerificationCommand[];
   constraints?: string[];
+  /**
+   * 子のモデル（"anthropic/claude-haiku-5-5" など。D10）。省略は env の AGENT_MODEL（既定 anthropic/claude-sonnet-5-5）。
+   * env の AGENT_MODELS に無いモデルは start を拒否する（unknown_model）。
+   */
+  model?: string;
   /** このタスクに使える上限（USD） */
   budgetUsd: number;
   /** epoch ms。開始から 2 時間を超える値は 2 時間に丸める。 */
@@ -71,6 +76,45 @@ export type StartResult =
   | { status: "conflict" }
   | { status: "cancelled" }
   | { status: "rejected"; reason: string };
+
+/** consult（D10）の 1 メッセージ。rovo は会話を保存しない（呼び出し元が毎回すべて渡す）。 */
+export interface ConsultMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** AgentDO.consult の依頼。consult ごとに別の AgentDO インスタンス（名前は consultId）で動く。 */
+export interface ConsultRequest {
+  /** `consult-<ULID>`。AgentDO のインスタンス名と同じ。AI Gateway の metadata に載せる */
+  consultId: string;
+  userId: string;
+  /** "anthropic/claude-sonnet-5-5" など。env の AGENT_MODELS の中だけ */
+  model: string;
+  system?: string;
+  messages: ConsultMessage[];
+  /** 出力の上限の希望。予約額から計算した上限でさらに絞る */
+  maxOutputTokens?: number;
+  /** この consult に使える上限（USD）。UserDO で月の枠から予約した額 */
+  budgetUsd: number;
+}
+
+export interface ConsultUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+export type ConsultErrorCode =
+  | "unknown_model"
+  | "input_too_large"
+  | "invalid_request"
+  | "model_error";
+
+export type ConsultResult =
+  | { ok: true; text: string; model: string; usage: ConsultUsage; costUsd: number }
+  /** 失敗。costUsd はそれまでにかかった実費（モデルを呼ぶ前の失敗は 0） */
+  | { ok: false; code: ConsultErrorCode; message: string; costUsd: number };
 
 /** answer / steer の結果。ignored は「停止・終端のため何もしなかった」（Gateway は成功として扱う）。 */
 export interface DeliveryResult {

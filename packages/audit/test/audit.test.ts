@@ -432,3 +432,63 @@ describe("PR の操作（pr_ready / pr_merged / pr_denied）", () => {
     expect(bad).not.toHaveProperty("reason");
   });
 });
+
+describe("consult（consult_started / consult_finished。D10）", () => {
+  const id = "consult-01HZZZZZZZZZZZZZZZZZZZZZZZ";
+
+  it("2 つのイベント名が閉じた一覧にある", () => {
+    for (const e of ["consult_started", "consult_finished"]) expect(AUDIT_EVENTS).toContain(e);
+  });
+
+  it("userId・model・consult_id・cost_usd を通す（会話の内容は項目として存在しない）", () => {
+    const rec = run("consult_finished", {
+      userId: 5,
+      caller: "parent",
+      model: "anthropic/claude-sonnet-5-5",
+      consult_id: id,
+      cost_usd: 0.0123,
+    }).record;
+    expect(rec).toMatchObject({
+      event: "consult_finished",
+      userId: 5,
+      caller: "parent",
+      model: "anthropic/claude-sonnet-5-5",
+      consult_id: id,
+      cost_usd: 0.0123,
+    });
+    const started = run("consult_started", { userId: 5, model: "openai/gpt-6-sol" }).record;
+    expect(started).toMatchObject({ model: "openai/gpt-6-sol" });
+    expect(started).not.toHaveProperty("cost_usd");
+  });
+
+  it("model は <provider>/<id> の固定の形だけ、cost_usd は非負の有限数だけ、consult_id は固定の形だけを通す", () => {
+    const base = { userId: 5 };
+    for (const bad of ["claude", "anthropic/", "x y/z", "a".repeat(200), 1, null, "ghs_abc/xyz"]) {
+      expect(
+        run("consult_started", { ...base, model: bad }).record,
+        String(bad),
+      ).not.toHaveProperty("model");
+    }
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, "1", null]) {
+      expect(
+        run("consult_finished", { ...base, cost_usd: bad }).record,
+        String(bad),
+      ).not.toHaveProperty("cost_usd");
+    }
+    for (const bad of ["consult-", "task-1", `${id}x`, 5]) {
+      expect(
+        run("consult_finished", { ...base, consult_id: bad }).record,
+        String(bad),
+      ).not.toHaveProperty("consult_id");
+    }
+  });
+
+  it("他のイベントでは model / cost_usd / consult_id を通さない", () => {
+    const rec = run("task_cancelled", {
+      model: "anthropic/claude-sonnet-5-5",
+      cost_usd: 1,
+      consult_id: id,
+    }).record;
+    for (const k of ["model", "cost_usd", "consult_id"]) expect(rec).not.toHaveProperty(k);
+  });
+});

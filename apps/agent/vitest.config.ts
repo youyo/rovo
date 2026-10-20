@@ -16,6 +16,8 @@ export default defineConfig({
         },
         bindings: {
           ENVIRONMENT: "test",
+          // D10: タスクごとに選べるモデル（Unit 用。wrangler.jsonc の既定は空 = AGENT_MODEL だけ）
+          AGENT_MODELS: "anthropic/claude-sonnet-5-5,anthropic/claude-haiku-5-5,openai/gpt-6-sol",
           // 32 バイト（0x07 の繰り返し）の base64。Unit 専用の値
           TOKEN_ENC_KEY: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
         },

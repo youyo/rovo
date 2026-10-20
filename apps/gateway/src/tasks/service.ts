@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentModelsOf } from "../models";
 import { nextSteps, nextStepsAfterMerge, nextStepsAfterReady } from "./next-steps";
 import type { TaskStatus } from "./state";
 import type { ResultView, TaskDO, TaskEvent, TaskView } from "./task-do";
@@ -189,7 +190,7 @@ export function checkStartInput(rawInput: unknown): ServiceResult<CheckedStartIn
 }
 
 export function createTaskService(
-  env: Pick<Env, "USER_DO" | "TASK_DO">,
+  env: Pick<Env, "USER_DO" | "TASK_DO"> & { AGENT_MODEL?: string; AGENT_MODELS?: string },
   overrides: Partial<TaskServiceDeps> = {},
 ) {
   const deps: TaskServiceDeps = {
@@ -211,6 +212,13 @@ export function createTaskService(
       const checked = checkStartInput(rawInput);
       if (!checked.ok) return checked;
       const { idempotency_key: key, input } = checked.value;
+      // 使えるモデルの外は、予約より前に拒否する（env の AGENT_MODELS。models_list で一覧を返す）
+      if (input.model !== undefined && !agentModelsOf(env).includes(input.model)) {
+        return fail(
+          "invalid_input",
+          `model: "${input.model}" is not available; call models_list for the models you can use`,
+        );
+      }
       // 省略時はサーバーで生成する（再試行の重複排除は保証しない）。':' を含むので利用者のキーと衝突しない。
       const requestKey = key ?? `auto:${ulid()}`;
 

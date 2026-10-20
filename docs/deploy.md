@@ -117,6 +117,9 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `PR_SHOW_COST` | gateway | 任意 | `false` | `true` のときだけ費用を PR 本文に載せる。公開リポジトリでは誰でも見られる |
 | `MONTHLY_BUDGET_USD` | gateway | 任意 | `100` | ユーザーごとの月額の費用上限（USD）。1 タスクにつき `TASK_BUDGET_USD` を予約する |
 | `TASK_BUDGET_USD` | gateway | 任意 | `10` | 1 タスクに予約する予算（USD）。子エージェントの `budgetUsd`（超えると `budget_exceeded` で止まる）にも同じ値を渡す。0 以下・不正な値は 10。`MONTHLY_BUDGET_USD` より大きいとタスクを始められないので、月額を 10 未満にするときはこれも下げる |
+| `CONSULT_BUDGET_USD` | gateway | 任意 | `0.5` | `consult`（セカンドオピニオン）1 回に月額の枠から予約する額（USD）。終わったら実費で精算する。`max_output_tokens` もこの額に収まるよう上限が掛かり、入力だけでこの額を超えるときは拒否される。0 以下・不正な値は 0.5 |
+| `AGENT_MODEL` | gateway / agent | 任意 | `anthropic/claude-sonnet-5-5` | 既定のモデル（`task_start` の `model` を省略したとき）。許可リスト（`packages/models`）にあるものだけ使える。**gateway と agent で同じ値にする** |
+| `AGENT_MODELS` | gateway / agent | 任意 | `anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5` | `task_start` の `model` と `consult` の `model` に使えるモデル（カンマ区切り。`models_list` に出る）。空・未設定なら `AGENT_MODEL` だけ（fail closed）。許可リスト（`packages/models` の `MODEL_CATALOG_IDS`: Claude の haiku-5-5 / sonnet-5-5 / opus-5-5 / fable-5-1、OpenAI の gpt-6-luna / sol / astra）に無い id は無視する（起動はエラーにしない。`agent_models_ignored` がログに出る）。`AGENT_MODEL` は許可リストにあれば常に含まれる。**gateway と agent で同じ値にする**（食い違うと、gateway が通したモデルを agent が `unknown_model` で拒否する）。OpenAI のモデルを足す前に 7 の BYOK を登録する |
 | `WEB_SEARCH_DAILY_LIMIT` | gateway | 任意 | `200` | 親の `web_search` の、ユーザーごと・UTC の 1 日あたりの上限 |
 | `WEB_FETCH_DAILY_LIMIT` | gateway | 任意 | `500` | 親の `web_fetch` の同上 |
 | `WEB_BROWSE_DAILY_LIMIT` | gateway | 任意 | `50` | 親の `web_browse` の同上 |
@@ -126,7 +129,6 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_USD_PER_1K_FETCH` | gateway | 任意 | `0` | 同上 |
 | `WEB_USD_PER_1K_BROWSE` | gateway | 任意 | `0.75` | 同上 |
 | `AI_GATEWAY_ID` | agent / web | 必須 | `<YOUR_AI_GATEWAY_ID>` | AI Gateway の ID。agent で空だと `start` が `ai_gateway_not_configured` で拒否される。web で空だと `websearch` も Clef も呼ばず、web 内部では `misconfigured` として失敗する（fail closed）。MCP のツールからは `internal`（`web research service is not available`）に見える |
-| `AGENT_MODEL` | agent | 任意 | `anthropic/claude-sonnet-5-5` | 子エージェントのモデル。`apps/agent/src/agent/pricing.ts` の単価表にあるものだけ使える |
 | `TEST_UPSTREAM` | agent | 本番では不要 | （空） | `ENVIRONMENT=test` のときだけ有効。E2E 専用。本番では設定しない |
 | `WEB_SEARCH_LIMIT_PER_TASK` | agent | 任意 | `50` | 子の `web_search` のタスクごとの回数の上限 |
 | `WEB_FETCH_LIMIT_PER_TASK` | agent | 任意 | `100` | 子の `web_fetch` の同上 |
@@ -189,10 +191,11 @@ wrangler secret put GITHUB_APP_PRIVATE_KEY -c <YOUR_GATEWAY_CONFIG> < app.pkcs8.
 - Require provider credentials（`byok_only`）をオンにしている。BYOK のキーが無い・外れたときに、Claude の呼び出しが Unified Billing（Cloudflare のクレジット）へ流れず、400 で止まる（Anthropic Console の利用上限が効く経路だけを使う）。Workers AI（Clef-flash）は対象外で、課金にも影響しない。
   - Anthropic のキーは、エイリアスを **`default`** にして登録する。AI バインディングの経路では `default` のキーだけが使われ、別名のキーは参照されない（byok_only なので 400 になる）。
   - **Web Search API（`env.AI.websearch()`。既定のプロバイダは Ceramic.ai）は、Unified Billing のクレジットで課金される（15.6）。byok_only で 400 になるかは未確認。** `web_search` が 400 で失敗したら、Ceramic.ai などのキーを BYOK で登録するか、byok_only を外す（外すと、Anthropic のキーが無いときに Claude の呼び出しもクレジットで支払われる。上限は読み込んだクレジットの額と `MONTHLY_BUDGET_USD`）。**【実機で確認して追記】**
+- **OpenAI のモデルを使うとき（任意。`AGENT_MODELS` に `openai/gpt-6-*` を入れる前に）**: AI Gateway の画面の「プロバイダー キー」で、OpenAI の API キーをエイリアス **`default`** で登録する（Anthropic と同じ。BYOK なので Terraform には入れない）。**利用上限は OpenAI 側（OpenAI の画面の usage limit）で設定する**。rovo の `budget_status` は rovo の月の枠だけで、OpenAI の残高は取得できない。**OpenAI を使うタスクでは、対象リポジトリのコード（子が読んだファイルの内容、`consult` の messages）が OpenAI にも送られる。** 組織のポリシー上、コードの送り先が Anthropic に限られるなら `AGENT_MODELS` に OpenAI のモデルを入れない。キーを登録していない OpenAI のモデルを `AGENT_MODELS` に入れると、そのモデルの呼び出しは byok_only により 400 で失敗する（Claude には影響しない）。
 - 経路:
-  - agent: `AI` バインディングが AI Gateway 経由で Claude を呼ぶ（子エージェントのモデル呼び出しは AI Gateway 経由だけ）。
+  - agent: `AI` バインディングが AI Gateway 経由で Claude（と、登録していれば OpenAI の Responses API）を呼ぶ（子エージェントのモデル呼び出しは AI Gateway 経由だけ）。
   - web: `env.AI.websearch()`（Web Search API）と、安全性の評価（`env.AI.run` による Clef-flash）。どちらも AI Gateway を通る。
-- Clef の呼び出しには、metadata として `userId` / `taskId` / `caller` が付く（誰がいくら使ったかの集計用）。
+- Clef の呼び出しには、metadata として `userId` / `taskId` / `caller` が付く（誰がいくら使ったかの集計用）。子エージェントの呼び出しは `userId` / `taskId`、`consult` の呼び出しは `userId` / `consultId` / `caller: "consult"`。
 - AI Gateway の画面での設定項目（認証、レート制限、クレジット〔Unified Billing〕など）: **【実機で確認して追記】**
 
 ## 8. Portal / Access への登録に必要な情報

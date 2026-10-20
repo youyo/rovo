@@ -12,9 +12,9 @@ import {
   type TokenSet,
   type UserPull,
 } from "../github";
-import { taskBudgetUsd } from "./budget";
+import { consultBudgetUsd, taskBudgetUsd } from "./budget";
 import type { TaskDO } from "./task-do";
-import { ulid } from "./ulid";
+import { isConsultId, ulid, ulidTime } from "./ulid";
 
 /** requests の保存期間。 */
 export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -53,6 +53,27 @@ export const DEFAULT_MONTHLY_BUDGET_USD = 100;
 export type ReserveResult =
   | { ok: true; task_id: string; reused: boolean }
   | { ok: false; code: "conflict" | "concurrency_limit" | "budget_exceeded" };
+
+/** 精算されないまま残った consult の予約を、予約額で閉じるまでの時間。 */
+export const CONSULT_STALE_AFTER_MS = 30 * 60 * 1000;
+
+export type ConsultReserveResult =
+  | { ok: true; reserved_usd: number }
+  | { ok: false; code: "budget_exceeded" | "invalid_input" };
+
+/** budget_status の応答（D10）。金額は USD。 */
+export type BudgetStatus = {
+  monthly_budget_usd: number;
+  spent_usd: number;
+  reserved_usd: number;
+  remaining_usd: number;
+  task_budget_usd: number;
+  consult_budget_usd: number;
+  /** 月の残りから、タスクの予約額で何件分を予約できるか（同時実行の枠は別で、ユーザーごとに 1 件まで） */
+  max_concurrent_tasks: number;
+  /** 今月（UTC）。end は翌月の頭（含まない） */
+  period: { start: string; end: string };
+};
 
 export type SettleResult = { ok: true; applied: boolean } | { ok: false };
 export type FinishResult = { ok: true; released: boolean };
@@ -278,6 +299,19 @@ export class UserDO extends DurableObject<Env> {
     return true;
   }
 
+  /** 月の枠のうち、使用済み（実費）と予約中の残り（マイクロドル）。committedMicro = spent + reserved。 */
+  private spentAndReservedMicro(month: string): { spent: number; reserved: number } {
+    return this.ctx.storage.sql
+      .exec<{ spent: number; reserved: number }>(
+        `SELECT COALESCE(SUM(settled_micro), 0) AS spent,
+                COALESCE(SUM(CASE WHEN closed = 1 THEN 0
+                                  ELSE MAX(reserved_micro - settled_micro, 0) END), 0) AS reserved
+         FROM task_budget WHERE month = ?`,
+        month,
+      )
+      .one();
+  }
+
   /** 月の枠のうち、使用済みと予約中の合計（マイクロドル）。 */
   private committedMicro(month: string): number {
     return this.ctx.storage.sql
@@ -356,6 +390,8 @@ export class UserDO extends DurableObject<Env> {
     }
 
     // 同時実行の枠が空いていても、月額の枠が足りなければ始めない（request_key は消費しない）。
+    // 精算されないまま残った consult の予約は、判定の前に閉じる（予約額で数える。reserveConsult と同じ）
+    this.closeStaleConsults(at);
     const month = monthOf(at);
     const reservedMicro = Math.round(taskBudgetUsd(this.env) * MICRO);
     if (this.committedMicro(month) + reservedMicro > Math.round(this.monthlyLimitUsd() * MICRO)) {
@@ -461,6 +497,118 @@ export class UserDO extends DurableObject<Env> {
       return this.clearIfUnchanged(taskId, cur.version);
     });
     return { ok: true, released };
+  }
+
+  /**
+   * 自分の予算の状況（budget_status）。金額は USD（マイクロドルを 6 桁に丸める）。
+   * spent は精算済みの実費、reserved は実行中のタスク・consult の予約の残り。remaining は月の上限から両方を引く（負にしない）。
+   */
+  budgetStatus(): BudgetStatus {
+    const at = this.now();
+    const month = monthOf(at);
+    const { spent, reserved } = this.spentAndReservedMicro(month);
+    const limit = Math.round(this.monthlyLimitUsd() * MICRO);
+    const remaining = Math.max(0, limit - spent - reserved);
+    const taskMicro = Math.round(taskBudgetUsd(this.env) * MICRO);
+    const d = new Date(at);
+    const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+    return {
+      monthly_budget_usd: limit / MICRO,
+      spent_usd: spent / MICRO,
+      reserved_usd: reserved / MICRO,
+      remaining_usd: remaining / MICRO,
+      task_budget_usd: taskMicro / MICRO,
+      consult_budget_usd: consultBudgetUsd(this.env),
+      max_concurrent_tasks: taskMicro > 0 ? Math.floor(remaining / taskMicro) : 0,
+      period: { start: new Date(start).toISOString(), end: new Date(end).toISOString() },
+    };
+  }
+
+  /**
+   * consult の予約。同時実行の枠は使わず、月の枠から CONSULT_BUDGET_USD を予約する（task_budget に consult の行を足す）。
+   * 足りなければ budget_exceeded。同じ consultId の再送は冪等。
+   * 精算されないまま CONSULT_STALE_AFTER_MS を過ぎた consult の予約は、予約額で閉じる（実費が分からないので、
+   * 予約より少なく数えない側に倒す）。
+   */
+  reserveConsult(consultId: string): ConsultReserveResult {
+    if (!isConsultId(consultId)) return { ok: false, code: "invalid_input" };
+    const reservedUsd = consultBudgetUsd(this.env);
+    return this.ctx.storage.transactionSync((): ConsultReserveResult => {
+      const sql = this.ctx.storage.sql;
+      const at = this.now();
+      this.closeStaleConsults(at);
+      const existing = sql
+        .exec<{ reserved_micro: number }>(
+          "SELECT reserved_micro FROM task_budget WHERE task_id = ?",
+          consultId,
+        )
+        .toArray()[0];
+      if (existing) return { ok: true, reserved_usd: existing.reserved_micro / MICRO };
+      const month = monthOf(at);
+      const reservedMicro = Math.round(reservedUsd * MICRO);
+      if (this.committedMicro(month) + reservedMicro > Math.round(this.monthlyLimitUsd() * MICRO)) {
+        return { ok: false, code: "budget_exceeded" };
+      }
+      sql.exec(
+        "INSERT INTO task_budget (task_id, month, reserved_micro) VALUES (?, ?, ?)",
+        consultId,
+        month,
+        reservedMicro,
+      );
+      return { ok: true, reserved_usd: reservedMicro / MICRO };
+    });
+  }
+
+  /** 同期区間内で呼ぶ。古い consult の予約を、予約額（以上）で閉じる。 */
+  private closeStaleConsults(at: number): void {
+    const sql = this.ctx.storage.sql;
+    const open = sql
+      .exec<{ task_id: string }>(
+        "SELECT task_id FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
+      )
+      .toArray();
+    for (const { task_id } of open) {
+      const t = ulidTime(task_id.slice("consult-".length));
+      if (t === undefined || at - t < CONSULT_STALE_AFTER_MS) continue;
+      sql.exec(
+        "UPDATE task_budget SET settled_micro = MAX(settled_micro, reserved_micro), closed = 1 WHERE task_id = ?",
+        task_id,
+      );
+    }
+  }
+
+  /**
+   * consult の精算: 実費（USD）を書いて閉じる。予約の余りは月の枠に戻る。1 回だけ（閉じた後の再送は applied:false）。
+   * costUsd が null のとき（実費が分からない）は予約額で閉じる。壊れた値（負・NaN）は何もしない。
+   * 実費が予約を超えて報告されたときは、そのまま実費を記録する（AgentDO が max_output_tokens で予約内に収める）。
+   */
+  settleConsult(consultId: string, costUsd: number | null): SettleResult {
+    if (!isConsultId(consultId)) return { ok: false };
+    if (costUsd !== null && (!Number.isFinite(costUsd) || costUsd < 0)) {
+      const known = this.ctx.storage.sql
+        .exec("SELECT 1 FROM task_budget WHERE task_id = ?", consultId)
+        .toArray();
+      return known.length > 0 ? { ok: true, applied: false } : { ok: false };
+    }
+    return this.ctx.storage.transactionSync((): SettleResult => {
+      const sql = this.ctx.storage.sql;
+      const row = sql
+        .exec<{ reserved_micro: number; closed: number }>(
+          "SELECT reserved_micro, closed FROM task_budget WHERE task_id = ?",
+          consultId,
+        )
+        .toArray()[0];
+      if (!row) return { ok: false };
+      if (row.closed === 1) return { ok: true, applied: false };
+      const micro = costUsd === null ? row.reserved_micro : Math.round(costUsd * MICRO);
+      sql.exec(
+        "UPDATE task_budget SET settled_micro = ?, closed = 1 WHERE task_id = ?",
+        micro,
+        consultId,
+      );
+      return { ok: true, applied: true };
+    });
   }
 
   // ---- GitHub 連携 ----

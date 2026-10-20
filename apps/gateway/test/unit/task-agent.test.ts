@@ -758,6 +758,8 @@ describe("TaskDO.result", () => {
         },
         warnings: ["w", expect.stringMatching(/^head_moved_after_verification/)],
         merge_policy: "human_review",
+        // D10: 子のモデル（task_start で省略 = 既定）
+        model: "anthropic/claude-sonnet-5-5",
         pr: {
           number: expect.any(Number),
           url: expect.stringMatching(/\/pull\/\d+$/),

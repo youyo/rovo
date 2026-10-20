@@ -70,11 +70,14 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("11 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("14 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "budget_status",
+      "consult",
+      "models_list",
       "task_answer",
       "task_cancel",
       "task_pr_merge",
@@ -1542,6 +1545,244 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     });
     expect(r.isError).toBe(true);
     expect(body(r).code).toBe("invalid_input");
+    await client.close();
+  });
+});
+
+describe("D10: models_list / budget_status / consult / task_start の model", () => {
+  const list = async (client: Client) => (await client.listTools()).tools;
+
+  it("models_list: 入力なし。AGENT_MODELS のモデルを単価つきで返す（USD / 100 万トークン）。既定のモデルに default: true", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tool = (await list(client)).find((t) => t.name === "models_list");
+    expect(tool?.description).toContain("task_start の model");
+    expect(tool?.description).toContain("consult の model");
+    expect(tool?.description).toContain("USD / 100 万トークン");
+    expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual([]);
+    const r = await client.callTool({ name: "models_list", arguments: {} });
+    const models = body(r).models as Record<string, unknown>[];
+    // vitest.config.ts の AGENT_MODELS: sonnet（既定）・haiku・gpt-6-sol
+    expect(models.map((m) => m.id)).toEqual([
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-haiku-5-5",
+      "openai/gpt-6-sol",
+    ]);
+    expect(models.find((m) => m.default === true)?.id).toBe("anthropic/claude-sonnet-5-5");
+    expect(models.filter((m) => m.default === true)).toHaveLength(1);
+    expect(models[0]).toEqual({
+      id: "anthropic/claude-sonnet-5-5",
+      provider: "anthropic",
+      api: "anthropic-messages",
+      input_per_mtok: 2,
+      output_per_mtok: 10,
+      cache_read_per_mtok: 0.2,
+      cache_write_per_mtok: 2.5,
+      tiers: [],
+      context_window: 1_000_000,
+      default: true,
+    });
+    const haiku = models.find((m) => m.id === "anthropic/claude-haiku-5-5");
+    expect(haiku?.tiers).toEqual([
+      {
+        input_tokens_above: 100_000,
+        input_per_mtok: 0.5,
+        output_per_mtok: 2.5,
+        cache_read_per_mtok: 0.05,
+        cache_write_per_mtok: 0.625,
+      },
+    ]);
+    expect(models.find((m) => m.id === "openai/gpt-6-sol")).toMatchObject({
+      provider: "openai",
+      api: "openai-responses",
+    });
+    await client.close();
+  });
+
+  it("budget_status: 入力なし。UserDO の予算の状況を返す。説明にプロバイダーの残高は取得できないと書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tool = (await list(client)).find((t) => t.name === "budget_status");
+    expect(tool?.description).toContain("Anthropic / OpenAI の残高は取得できない");
+    expect(tool?.description).toContain("各プロバイダの画面で上限を管理する");
+    expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual([]);
+    const before = body(await client.callTool({ name: "budget_status", arguments: {} }));
+    expect(before).toMatchObject({
+      monthly_budget_usd: 100,
+      spent_usd: 0,
+      reserved_usd: 0,
+      remaining_usd: 100,
+      task_budget_usd: 10,
+      consult_budget_usd: 0.5,
+      max_concurrent_tasks: 10,
+    });
+    expect(before.period).toEqual({
+      start: expect.stringMatching(/^\d{4}-\d{2}-01T00:00:00\.000Z$/),
+      end: expect.stringMatching(/^\d{4}-\d{2}-01T00:00:00\.000Z$/),
+    });
+    // タスクを始めると予約が載る
+    await client.callTool({ name: "task_start", arguments: startArgs("t") });
+    const during = body(await client.callTool({ name: "budget_status", arguments: {} }));
+    expect(during).toMatchObject({ reserved_usd: 10, remaining_usd: 90, max_concurrent_tasks: 9 });
+    await client.close();
+  });
+
+  it("budget_status は自分の予算だけ（他のユーザーの使用は見えない）", async () => {
+    const a = await user("alice");
+    const b = await user("bob");
+    const ca = await connect(createApiApp(), a.props);
+    const cb = await connect(createApiApp(), b.props);
+    await ca.callTool({ name: "task_start", arguments: startArgs("t") });
+    expect(body(await cb.callTool({ name: "budget_status", arguments: {} }))).toMatchObject({
+      reserved_usd: 0,
+    });
+    await ca.close();
+    await cb.close();
+  });
+
+  it("consult: 入力 {model?, system?, messages, max_output_tokens?}。説明に助言であることと使い方を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tool = (await list(client)).find((t) => t.name === "consult");
+    const props = tool?.inputSchema.properties as Record<string, unknown>;
+    expect(Object.keys(props).sort()).toEqual(["max_output_tokens", "messages", "model", "system"]);
+    expect(tool?.inputSchema.required).toEqual(["messages"]);
+    for (const word of [
+      "セカンドオピニオン",
+      "コードは書かせない",
+      "Sandbox",
+      "会話を保存しない",
+      "cache_read",
+      "CONSULT_BUDGET_USD",
+      "助言",
+      "事実確認",
+      "models_list",
+    ]) {
+      expect(tool?.description, word).toContain(word);
+    }
+    await client.close();
+  });
+
+  it("consult: 予約して AgentDO を呼び、応答 {text, model, usage, cost_usd} を返す。実費で精算される", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const r = await client.callTool({
+      name: "consult",
+      arguments: {
+        system: "You are an architect.",
+        messages: [{ role: "user", content: "Is a queue worth it here?" }],
+        max_output_tokens: 1000,
+      },
+    });
+    expect(r.isError).toBeFalsy();
+    const out = body(r);
+    expect(out).toMatchObject({
+      model: "anthropic/claude-sonnet-5-5",
+      usage: { input: expect.any(Number), output: expect.any(Number) },
+      cost_usd: expect.any(Number),
+    });
+    expect(typeof out.text).toBe("string");
+    const status = body(await client.callTool({ name: "budget_status", arguments: {} }));
+    expect(status).toMatchObject({ reserved_usd: 0, spent_usd: out.cost_usd });
+    await client.close();
+  });
+
+  it("consult: 不正な入力は invalid_input、使えないモデルも invalid_input", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const bad = await client.callTool({ name: "consult", arguments: { messages: [] } });
+    expect(bad.isError).toBe(true);
+    expect(body(bad)).toMatchObject({ code: "invalid_input" });
+    const model = await client.callTool({
+      name: "consult",
+      arguments: { model: "openai/gpt-6-astra", messages: [{ role: "user", content: "x" }] },
+    });
+    expect(body(model)).toMatchObject({ code: "invalid_input" });
+    await client.close();
+  });
+
+  it("task_start は model を受け取り、AGENT_MODELS の外は invalid_input。task_status に返る", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const start = (await list(client)).find((t) => t.name === "task_start");
+    const props = start?.inputSchema.properties as Record<string, unknown>;
+    expect(props.model).toBeDefined();
+    expect(start?.description).toContain("models_list");
+    const ng = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { model: "anthropic/claude-opus-5-5" }),
+    });
+    expect(body(ng)).toMatchObject({ code: "invalid_input" });
+    const ok = body(
+      await client.callTool({
+        name: "task_start",
+        arguments: startArgs("t", { model: "anthropic/claude-haiku-5-5" }),
+      }),
+    );
+    const status = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: ok.task_id } }),
+    );
+    expect(status.model).toBe("anthropic/claude-haiku-5-5");
+    expect((await fakeAgent(String(ok.task_id)).calls()).specs[0]?.model).toBe(
+      "anthropic/claude-haiku-5-5",
+    );
+    await client.close();
+  });
+
+  it("task_status は model を既定のモデルで返す（省略時）", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const s = body(await client.callTool({ name: "task_start", arguments: startArgs("t") }));
+    const status = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: s.task_id } }),
+    );
+    expect(status.model).toBe("anthropic/claude-sonnet-5-5");
+    await client.close();
+  });
+});
+
+describe("D10: AI への伝え方（instructions と説明）", () => {
+  it("instructions に models_list・budget_status・consult の使い方と、キャッシュのコツ、助言であることを書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const text = client.getInstructions() ?? "";
+    for (const word of [
+      "models_list",
+      "budget_status",
+      "consult",
+      "model",
+      "セカンドオピニオン",
+      "前置き",
+      "cache_read",
+      "助言",
+      "事実確認",
+      "USD / 100 万トークン",
+    ]) {
+      expect(text, word).toContain(word);
+    }
+    expect(text).toContain("Anthropic / OpenAI の残高は取得できない");
+    await client.close();
+  });
+
+  it("task_start の説明に、verification_commands でシェルの機能を使うなら sh -c で包むと書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const start = tools.find((t) => t.name === "task_start");
+    expect(start?.description).toContain('["sh", "-c",');
+    expect(start?.description).toContain("パイプ");
+    await client.close();
+  });
+
+  it("task_result の説明と instructions に、終端の直後は数秒 not_ready が返るので task_wait か少し待って呼び直すと書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const result = tools.find((t) => t.name === "task_result");
+    expect(result?.description).toContain("数秒");
+    expect(result?.description).toContain("task_wait");
+    expect(result?.description).toContain("呼び直");
+    expect(client.getInstructions()).toContain("数秒");
     await client.close();
   });
 });

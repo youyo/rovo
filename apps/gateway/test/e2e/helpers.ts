@@ -60,6 +60,9 @@ export type AuditRecord = {
   requestId?: string;
   host?: string;
   kind?: string;
+  model?: string;
+  consult_id?: string;
+  cost_usd?: number;
 };
 
 /** ENVIRONMENT=test のときだけある /__test/audit から、監査イベント（Worker 側 + 指定したタスクの TaskDO 側）を読む。 */
@@ -136,6 +139,25 @@ export async function finishAgent(
     body: JSON.stringify({ task_id: taskId, phase, ...(result !== undefined ? { result } : {}) }),
   });
   if (!res.ok) throw new Error(`/__test/agent/finish failed: ${res.status}`);
+}
+
+/**
+ * consult の台本を預ける（ENVIRONMENT=test のときだけある /__test/agent/set-script）。key は consult の最初の user メッセージ。
+ * 偽の AgentDO が text と usage をそのまま返し、費用はキャッシュ込みの scripted の単価（$1/100万、cacheRead $0.1、cacheWrite $1.25）で計算する。
+ */
+export async function setConsultScript(
+  key: string,
+  step: {
+    text?: string;
+    usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  },
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/__test/agent/set-script`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key, script: [step] }),
+  });
+  if (!res.ok) throw new Error(`/__test/agent/set-script failed: ${res.status}`);
 }
 
 /** COMPLETED の結果（検証済みの commit = push した commit = sha）。 */

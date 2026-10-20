@@ -31,14 +31,15 @@ packages/audit  (監査ログの共通ライブラリ。3 つの Worker が使�
 | `apps/agent` | 子エージェント（`AgentDO`）、Sandbox（`SandboxDO`）、外向き通信の制御（`OutboundGateway`） |
 | `apps/web` | Web Research Service（状態を持たない別 Worker） |
 | `packages/audit` | 監査イベントを 1 行の構造化 JSON で出す `audit()` |
+| `packages/models` | 使えるモデルの許可リストと、pi-ai のカタログから取る単価・費用計算（gateway と agent が共有） |
 
-## 提供するツール（Phase 6 まで実装済み。D9 で PR のツールを追加）
+## 提供するツール（Phase 6 まで実装済み。D9 で PR のツール、D10 でモデル・予算・consult のツールを追加）
 
 GitHub App のユーザー認可でログインし、`/mcp` から次のツールを使える。
 
 | ツール | 内容 |
 |---|---|
-| `task_start` | タスクを作り、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, note}`。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される。`merge_policy`（任意。`human_review`（既定）| `agent_merge`）で、完了後の PR の扱いを選ぶ |
+| `task_start` | タスクを作り、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, note}`。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される。`merge_policy`（任意。`human_review`（既定）| `agent_merge`）で、完了後の PR の扱いを選ぶ。`model`（任意）で子のモデルを選ぶ（`models_list` の id。省略は既定）。`task_status`・`task_result` に `model` が返る |
 | `task_status` | 状態を返す |
 | `task_wait` | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling）。待機中に子エージェントのイベントを取り込む |
 | `task_result` | 終端になったタスクの成果（要約・検証結果・patch・費用・`merge_policy`・PR の `draft` / `merged`）を返す。終端でなければ `not_ready`。応答の `next_steps` が、状態に応じた次の一手（差分のレビュー → `task_pr_ready` → `task_pr_merge`、または人のレビュー待ち）を案内する |
@@ -47,6 +48,9 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 | `task_steer` | 実行中の子エージェントに追加の指示を送る |
 | `task_pr_ready` | COMPLETED のタスクの Draft PR を Ready for review にする（冪等）。`{task_id}` だけを受け、対象の PR はタスクの記録から決まる。利用者本人の GitHub トークンで行う |
 | `task_pr_merge` | PR をマージする。`{task_id, merge_method?: squash \| merge \| rebase, delete_branch?}`。`merge_policy` が `agent_merge`、`head_matches_verified` が true、PR が Ready のときだけ。検証済みの head の sha を GitHub に渡し、ブランチ保護に拒否されたら `merge_blocked`（GitHub の理由つき）。利用者本人の GitHub トークンで行う |
+| `models_list` | 使えるモデルの一覧と単価を返す（入力なし）。`{models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default}]}`。単価は USD / 100 万トークン。`task_start` の `model` と `consult` の `model` に使える（D10） |
+| `budget_status` | 自分の予算の状況を返す（入力なし）。`{monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, period}`。rovo の月の枠だけで、Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する）（D10） |
+| `consult` | セカンドオピニオン（設計の相談役）。`{model?, system?, messages: [{role: user \| assistant, content}], max_output_tokens?}` を 1 回で完結して答える（会話は保存しない。コードは書かせず、Sandbox も使わない）。応答は `{text, model, usage: {input, output, cache_read, cache_write}, cost_usd}`。Anthropic のモデルでは system と最後の user より前にプロンプトキャッシュを付けるので、同じ前置きを送ると 2 回目以降は安くなる。呼ぶ前に `CONSULT_BUDGET_USD`（既定 $0.5）を月の枠から予約し、実費で精算する（D10） |
 | `web_search` | Web Search API の結果（url・title・description）を返す。詳細は下の「Web Research Service」 |
 | `web_fetch` | 公開ページを取得して Markdown で返す（JS は実行しない） |
 | `web_browse` | **実験的・既定で無効。** JS を描画した後のページを取得する |
@@ -55,6 +59,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 
 - Phase 3（M1: Gateway 側）: `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。成果は patch としても `task_result` で返る。
 - PR のレビューと Ready 化・マージ（D9）: rovo 自身は PR を Ready にもマージにもしない（Draft のまま返す）。呼び出し元の AI が `task_result` の差分をレビューし、問題が無ければ `task_pr_ready` で Ready にする。そのあとは `task_start` の `merge_policy` による: `human_review`（既定）は人のレビューを待ち（`task_pr_merge` は `forbidden`）、`agent_merge` は `task_pr_merge` でマージまでできる。ポリシーはデプロイ全体の env ではなくタスクごとの入力で、組織としての強制は GitHub のブランチ保護に任せる（操作は利用者本人の GitHub トークンで行うため、保護に拒否されたら `merge_blocked`）。使い方の流れは MCP の `instructions` と `task_result` の `next_steps` にも書かれる。
+- モデルの選択と予算（D10）: `models_list` で使えるモデルと単価を見て、`task_start` の `model` をタスクの難しさで選ぶ。使えるモデルは env の `AGENT_MODELS`（gateway と agent に同じ値。未設定なら `AGENT_MODEL` だけ）で決まり、単価は pi-ai のカタログ由来（許可リスト: `packages/models`）。OpenAI のモデルは AI Gateway に OpenAI のキーを BYOK 登録すると使える（対象リポジトリのコードが OpenAI にも送られる。利用上限は OpenAI 側で設定する。`docs/deploy.md`）。`budget_status` で月の残りを確かめられる。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
 - 利用者ごとの同時実行は 1 件まで。前のタスクの停止を確認できるまで、次のタスクは始められない。
 - 1 タスクにつき既定で $10（env `TASK_BUDGET_USD`。0 以下・不正な値は 10）を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。子エージェントの予算の上限（`budgetUsd`）にも同じ値を渡す。足りなければ `budget_exceeded`。月額の枠を 10 未満にするときは `TASK_BUDGET_USD` も下げる（受入試験で数ドルに抑えたいとき）。
@@ -152,6 +157,8 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `ALLOWED_USER_IDS` | ログインと全ツール呼び出しを許す GitHub の数値の user ID（カンマ区切り。`gh api user --jq .id` で分かる）。team の無い個人アカウントで使うときはこちらを使う。org/team と両方を設定した場合は、どちらかを満たせば許可する。不正な要素が 1 つでもあれば全体が不正になり、ログインできない（fail closed） |
 | `GITHUB_APP_ID` | GitHub App の App ID（秘密ではない）。Installation Access Token の発行（JWT の `iss`）に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる（fail closed） |
 | `DRAFT_PR_FALLBACK` | Draft PR を作れないリポジトリ（Free プランの private リポジトリなど）での扱い。`fail`（既定。タスクを `draft_pr_unsupported` で FAILED にする）/ `ready`（`[WIP]` を付けた通常の PR を作り、本文冒頭に注記し、警告 `draft_pr_unavailable` を付ける）。**不正な値は `fail` として扱う**。判定は Draft に関する 422 のときだけ |
+| `AGENT_MODEL` / `AGENT_MODELS` | 既定のモデルと、`task_start` / `consult` の `model` に選べるモデル（カンマ区切り。空なら `AGENT_MODEL` だけ）。agent の同名の変数と同じ値にする（D10） |
+| `CONSULT_BUDGET_USD` | `consult` 1 回に月額の枠から予約する額（USD。既定 0.5。実費で精算する。0 以下・不正な値は 0.5）（D10） |
 | `PR_SHOW_COST` | `true` のときだけ、費用を PR 本文に載せる（既定は載せない。公開リポジトリでは誰でも見られるため） |
 
 ### Secret（`wrangler secret put <NAME>`、ローカルは `.dev.vars`）
@@ -168,7 +175,8 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 |---|---|
 | `TOKEN_ENC_KEY`（secret） | Installation Token を SandboxDO の storage に暗号化して保存する鍵。base64 の 32 バイト（`openssl rand -base64 32`）。`cd apps/agent && wrangler secret put TOKEN_ENC_KEY`。gateway の同名の secret とは別の Worker の値で、同じでも違ってもよい。未設定だと Installation Token を預けられず、`start` は拒否される（fail closed）。トークンはコンテナには入らない |
 | `AI_GATEWAY_ID`（変数） | AI Gateway の ID。空だと `start` が `ai_gateway_not_configured` で拒否される |
-| `AGENT_MODEL`（変数） | 子エージェントのモデル（既定 `anthropic/claude-sonnet-5-5`。単価表にあるものだけ） |
+| `AGENT_MODEL`（変数） | 既定のモデル（既定 `anthropic/claude-sonnet-5-5`。許可リスト `packages/models` にあるものだけ） |
+| `AGENT_MODELS`（変数） | `task_start` の `model` と `consult` の `model` に使えるモデル（カンマ区切り。空なら `AGENT_MODEL` だけ）。gateway の同名の変数と同じ値にする |
 | `ENVIRONMENT`（変数） | `production`（既定）。E2E だけ `test` |
 
 | `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` / `WEB_BROWSE_LIMIT_PER_TASK`（変数） | 子の `web_search` / `web_fetch` / `web_browse` のタスクごとの回数の上限（既定 50 / 100 / 20）。0 以上の整数のみ。不正な値は既定に戻る |

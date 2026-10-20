@@ -1,7 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { estimateCallCostUsd, estimateTokens, priceFor } from "../../src/agent/pricing";
+import {
+  estimateCallCostUsd,
+  estimateTokens,
+  maxOutputTokensWithin,
+  priceFor,
+} from "../../src/agent/pricing";
 
 describe("モデル単価表", () => {
+  it("単価はカタログ由来で、許可リストの全 id が引ける（OpenAI も）", () => {
+    for (const id of [
+      "anthropic/claude-haiku-5-5",
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-opus-5-5",
+      "anthropic/claude-fable-5-1",
+      "openai/gpt-6-luna",
+      "openai/gpt-6-sol",
+      "openai/gpt-6-astra",
+    ]) {
+      expect(priceFor(id, false), id).toBeDefined();
+    }
+    // tier がキャッシュの単価まで持つ（haiku の 100k 超）
+    expect(priceFor("anthropic/claude-haiku-5-5", false)?.tiers[0]).toMatchObject({
+      cacheReadPerMTok: 0.05,
+      cacheWritePerMTok: 0.625,
+    });
+  });
+
   it("既知のモデルは単価を返し、未知のモデルは undefined", () => {
     expect(priceFor("anthropic/claude-sonnet-5-5", false)?.inputPerMTok).toBe(2);
     expect(priceFor("anthropic/claude-opus-5-5", false)?.outputPerMTok).toBe(20);
@@ -14,6 +38,11 @@ describe("モデル単価表", () => {
     expect(priceFor("scripted/script-1", true)).toBeDefined();
   });
 
+  it("許可リストに無いモデルは、カタログにあっても使えない", () => {
+    expect(priceFor("anthropic/claude-opus-5", false)).toBeUndefined();
+    expect(priceFor("toString", false)).toBeUndefined();
+  });
+
   it("見積もりは 入力トークン×入力単価 + max_tokens×出力単価", () => {
     const sonnet = priceFor("anthropic/claude-sonnet-5-5", false);
     if (!sonnet) throw new Error("price missing");
@@ -24,7 +53,9 @@ describe("モデル単価表", () => {
   it("haiku は入力が 100k を超えると上位の単価で見積もる", () => {
     const haiku = priceFor("anthropic/claude-haiku-5-5", false);
     if (!haiku) throw new Error("price missing");
-    expect(estimateCallCostUsd(haiku, 200_000, 10_000)).toBeCloseTo(0.1 + 0.025, 6);
+    // D10: 上位の tier も cacheWrite（$0.625/M）を持つので、入力の見積りは max(input, cacheWrite) の上位の値 0.625 になる
+    // （以前は tier の cacheWrite が抜けていて 0.5 で見積もり、過少だった）: 200k × 0.625 + 10k × $2.5/M
+    expect(estimateCallCostUsd(haiku, 200_000, 10_000)).toBeCloseTo(0.125 + 0.025, 6);
   });
 
   it("トークン数は UTF-8 のバイト数を上限として見積もる（1 トークンは 1 バイト以上）", () => {
@@ -48,7 +79,38 @@ describe("モデル単価表", () => {
   it("価格帯は最大値で見積もる（入力が少なくても上位の単価）", () => {
     const haiku = priceFor("anthropic/claude-haiku-5-5", false);
     if (!haiku) throw new Error("price missing");
-    // 1k 入力でも上位帯: 1k × $0.5/M + 10k × $2.5/M
-    expect(estimateCallCostUsd(haiku, 1_000, 10_000)).toBeCloseTo(0.0005 + 0.025, 6);
+    // 1k 入力でも上位帯（cacheWrite の $0.625/M まで含めた最大値）: 1k × $0.625/M + 10k × $2.5/M
+    expect(estimateCallCostUsd(haiku, 1_000, 10_000)).toBeCloseTo(0.000625 + 0.025, 6);
+  });
+});
+
+describe("maxOutputTokensWithin（consult の出力の上限）", () => {
+  const sonnet = priceFor("anthropic/claude-sonnet-5-5", false);
+  const haiku = priceFor("anthropic/claude-haiku-5-5", false);
+  if (!sonnet || !haiku) throw new Error("price missing");
+
+  it("予算から入力の見積り（最悪の単価）を引いた残りを、出力の単価で割る。見積りは予算を超えない", () => {
+    // 入力 100k × $2.5/M（input と cacheWrite の高い方）= $0.25。残り $0.25 ÷ $10/M = 25,000
+    const cap = maxOutputTokensWithin(sonnet, 100_000, 0.5);
+    expect(cap).toBe(25_000);
+    expect(estimateCallCostUsd(sonnet, 100_000, cap)).toBeLessThanOrEqual(0.5);
+    expect(estimateCallCostUsd(sonnet, 100_000, cap + 1)).toBeGreaterThan(0.5);
+  });
+
+  it("入力だけで予算を超えるなら 0", () => {
+    expect(maxOutputTokensWithin(sonnet, 300_000, 0.5)).toBe(0);
+    expect(maxOutputTokensWithin(sonnet, 200_000, 0.5)).toBe(0); // ちょうど使い切りも 0
+  });
+
+  it("価格帯がある（haiku）ときは上位の単価で見積もる（入力 $0.625/M、出力 $2.5/M）", () => {
+    const cap = maxOutputTokensWithin(haiku, 100_000, 0.5);
+    expect(estimateCallCostUsd(haiku, 100_000, cap)).toBeLessThanOrEqual(0.5);
+    expect(estimateCallCostUsd(haiku, 100_000, cap + 1)).toBeGreaterThan(0.5);
+  });
+
+  it("壊れた予算（0・負・NaN）は 0", () => {
+    for (const b of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(maxOutputTokensWithin(sonnet, 10, b)).toBe(0);
+    }
   });
 });

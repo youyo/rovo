@@ -97,6 +97,23 @@ describe("guardProvider の thinking 補正", () => {
     expect(await run(scriptedModel, payload, "streamSimple")).toEqual(payload);
   });
 
+  it("OpenAI（openai-responses。D10）の payload には触らない（thinking の補正は Anthropic だけ）", async () => {
+    const openaiModel = {
+      id: "openai/gpt-6-sol",
+      api: "openai-responses",
+      provider: "cloudflare",
+    } as unknown as Model<Api>;
+    const payload = {
+      model: "gpt-6-sol",
+      input: [],
+      reasoning: { effort: "none" },
+      thinking: { type: "disabled" },
+    };
+    for (const via of ["stream", "streamSimple"] as const) {
+      expect(await run(openaiModel, payload, via)).toEqual(payload);
+    }
+  });
+
   it("呼び出し側の onPayload を先に実行し、その結果にも補正を掛ける", async () => {
     let seen: unknown;
     const inner = {

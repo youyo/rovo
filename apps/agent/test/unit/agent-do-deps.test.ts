@@ -98,6 +98,23 @@ describe("usage の sandbox に depsCache / cacheBuildMs を載せる", () => {
     }
   });
 
+  it("miss の理由（depsMissReason）が usage イベントと結果に載る。miss 以外には載せない", async () => {
+    const fx = newFixture("deps-reason", [call("write_note", { text: "x" }), report()]);
+    const m: SandboxMetrics = { ...base, depsCache: "miss", depsMissReason: "build_failed" };
+    fx.sandbox.metricsValue = m;
+    await fx.stub.start(makeSpec("deps-reason", { deps }));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(done(await fx.stub.getResult()).usage.sandbox).toEqual(m);
+    const usages = (await allEvents(fx)).filter((e) => e.type === "usage");
+    expect(usages.at(-1)?.data.sandbox).toEqual(m);
+
+    const hit = newFixture("deps-reason-hit", [report()]);
+    hit.sandbox.metricsValue = { ...base, depsCache: "hit", depsMissReason: "build_failed" };
+    await hit.stub.start(makeSpec("deps-reason-hit", { deps }));
+    expect(await waitForTerminal(hit)).toBe("completed");
+    expect(done(await hit.stub.getResult()).usage.sandbox).not.toHaveProperty("depsMissReason");
+  });
+
   it("cacheBuildMs は巻き戻さない", async () => {
     const fx = newFixture("deps-mono", [call("gate"), report()]);
     fx.sandbox.metricsValue = { ...base, depsCache: "built", cacheBuildMs: 9_000 };

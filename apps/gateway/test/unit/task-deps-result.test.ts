@@ -57,6 +57,34 @@ describe("task_result の usage（依存関係のキャッシュ）", () => {
     }
   });
 
+  it("miss のときだけ、使えなかった理由を deps_cache_miss_reason に返す（ログにしか出ていなかった固定コード）", async () => {
+    for (const reason of ["build_failed", "cooldown", "snapshot_unsupported", "ensure_timeout"]) {
+      const usage = await resultWith({
+        runtimeMs: 1,
+        restarts: 0,
+        bootRetries: 0,
+        depsCache: "miss",
+        depsMissReason: reason,
+      });
+      expect(usage.deps_cache).toBe("miss");
+      expect(usage.deps_cache_miss_reason).toBe(reason);
+    }
+  });
+
+  it("miss 以外・理由が無い・表に無い値には deps_cache_miss_reason を付けない", async () => {
+    for (const [depsCache, depsMissReason] of [
+      ["hit", "build_failed"],
+      ["built", "cooldown"],
+      ["disabled", "build_failed"],
+      ["miss", undefined],
+      ["miss", "install exit=1 ERR_ASSERTION at /workspace"],
+      ["miss", 3],
+    ] as const) {
+      const usage = await resultWith({ runtimeMs: 1, depsCache, depsMissReason });
+      expect(usage).not.toHaveProperty("deps_cache_miss_reason");
+    }
+  });
+
   it("sandbox_runtime_ms を返す（小数は切り捨て）。sandbox が無ければ付けない", async () => {
     const usage = await resultWith({ runtimeMs: 90_500.9, depsCache: "hit" });
     expect(usage.sandbox_runtime_ms).toBe(90_500);

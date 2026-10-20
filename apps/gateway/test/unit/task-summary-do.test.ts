@@ -1,6 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import type { AuditRecord } from "@rovo/audit";
+import { sandboxUsdPerHour } from "@rovo/models";
 import { describe, expect, it } from "vitest";
 import type { ResultDto } from "../../src/agent/contract";
 import type { TaskSummary } from "../../src/tasks/summary";
@@ -247,6 +248,37 @@ describe("task_summary（終端時の要約）", () => {
     expect(s.web_usd_estimate).toBeCloseTo(1, 9);
     const [rec] = await summaries(t.stub);
     expect(rec?.metrics).toMatchObject({ sandbox_usd_estimate: 3.6, web_usd_estimate: 1 });
+  });
+
+  it("agent が報告した Sandbox の大きさ（usage の sandbox.instance）の単価で推定する。公開イベントにも sandbox_instance が出る", async () => {
+    const t = await createTask({ SANDBOX_USD_PER_HOUR: "9.9" });
+    await t.stub.advance();
+    await t.agent.setUsage(0.1, {
+      sandbox: { runtimeMs: 3_600_000, restarts: 0, bootRetries: 0, instance: "standard-4" },
+    } as never);
+    // 後から大きさの無い usage が届いても、報告済みの大きさを忘れない
+    await t.agent.setUsage(0.2, {
+      sandbox: { runtimeMs: 3_600_000, restarts: 0, bootRetries: 0 },
+    } as never);
+    await complete(t);
+    const s = await summaryOf(t.stub);
+    expect(s.sandbox).toMatchObject({ instance: "standard-4" });
+    expect(s.sandbox_usd_estimate).toBeCloseTo(sandboxUsdPerHour("standard-4"), 9);
+    expect(s.unit_prices.sandbox_usd_per_hour).toBe(sandboxUsdPerHour("standard-4"));
+    const usage = await eventsOf(t.stub, "usage");
+    expect(usage.some((u) => u.sandbox_instance === "standard-4")).toBe(true);
+  });
+
+  it("agent が表に無い大きさを送っても、公開しない・単価にも使わない", async () => {
+    const t = await createTask({ SANDBOX_USD_PER_HOUR: "3.6" });
+    await t.stub.advance();
+    await t.agent.setUsage(0.1, {
+      sandbox: { runtimeMs: 3_600_000, restarts: 0, bootRetries: 0, instance: "evil-<x>" },
+    } as never);
+    await complete(t);
+    const s = await summaryOf(t.stub);
+    expect(s.sandbox_usd_estimate).toBeCloseTo(3.6, 9);
+    expect(JSON.stringify(await eventsOf(t.stub, "usage"))).not.toContain("evil");
   });
 
   it("start を送る前に cancel したタスクでも出す（agent の値は 0）", async () => {

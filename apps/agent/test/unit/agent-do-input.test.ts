@@ -4,6 +4,7 @@ import { clearAgentTestOverrides } from "../../src/agent/deps";
 import {
   allEvents,
   ask,
+  boot,
   call,
   done,
   type Fixture,
@@ -182,14 +183,15 @@ describe("ask_parent: 質問して止まる", () => {
 
   it("未 commit の変更があれば質問を受け付けず、git_commit を促す", async () => {
     const fx = newFixture("ask-dirty", [
-      ask("先に聞く"),
       call("write_note", { text: "x" }),
+      ask("先に聞く"),
+      call("write_note", { text: "y" }),
       ask("commit 後に聞く"),
       report(),
     ]);
     fx.statusResults.push({ stdout: " M src/a.ts\n" });
     await startAndAsk(fx, "ask-dirty");
-    const ends = await typesOf(fx, "tool_end");
+    const ends = (await typesOf(fx, "tool_end")).filter((e) => e.data.name === "ask_parent");
     expect(ends[0]?.data).toMatchObject({ name: "ask_parent", isError: true });
     expect(String(ends[0]?.data.summary)).toContain("git_commit");
     const qs = await typesOf(fx, "question");
@@ -215,7 +217,7 @@ describe("ask_parent: 質問して止まる", () => {
 
 describe("answer", () => {
   it("回答で再開し、回答と続きの台本が進んで完了する。期限の延長は submit より前", async () => {
-    const fx = newFixture("ans-1", [ask("Q?"), report("done")]);
+    const fx = newFixture("ans-1", [boot(), ask("Q?"), report("done")]);
     await startAndAsk(fx, "ans-1");
     await fx.answerGate.hold();
     const pending = fx.stub.answer("q-1", "Aにして");
@@ -239,12 +241,12 @@ describe("answer", () => {
       "verifying",
       "completed",
     ]);
-    expect(fx.modelCalls.count).toBe(2);
-    expect(fx.modelCalls.userTexts[1]?.some((t) => t.includes("Aにして"))).toBe(true);
+    expect(fx.modelCalls.count).toBe(3);
+    expect(fx.modelCalls.userTexts[2]?.some((t) => t.includes("Aにして"))).toBe(true);
   });
 
   it("冪等: 同じ questionId の 2 回目以降は ok:true で、二重に再開しない", async () => {
-    const fx = newFixture("ans-idem", [ask("Q?"), call("gate"), report()]);
+    const fx = newFixture("ans-idem", [boot(), ask("Q?"), call("gate"), report()]);
     await startAndAsk(fx, "ans-idem");
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true });
     await fx.gate.waitEntered();
@@ -255,7 +257,7 @@ describe("answer", () => {
     expect(fx.sandbox.deadlines).toHaveLength(1); // 回答（再送では増えない）
     fx.gate.release();
     expect(await waitForTerminal(fx)).toBe("completed");
-    expect(fx.modelCalls.count).toBe(3);
+    expect(fx.modelCalls.count).toBe(4);
   });
 
   it("知らない questionId は何もせず ignored", async () => {
@@ -267,7 +269,7 @@ describe("answer", () => {
   });
 
   it("期限の延長に失敗したら ok:false で何も変えず、再送で成功する", async () => {
-    const fx = newFixture("ans-extend-fail", [ask("Q?"), report()]);
+    const fx = newFixture("ans-extend-fail", [boot(), ask("Q?"), report()]);
     await startAndAsk(fx, "ans-extend-fail");
     fx.sandbox.setDeadlineError = new Error("sandbox unavailable");
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: false });
@@ -322,7 +324,7 @@ describe("answer", () => {
 
 describe("期限", () => {
   it("回答待ちの間は期限を止める: 元の期限を過ぎても deadline の job や tick で止まらない。回答で待った分だけ延びる", async () => {
-    const fx = newFixture("dl-pause", [ask("Q?"), report()]);
+    const fx = newFixture("dl-pause", [boot(), ask("Q?"), report()]);
     await startAndAsk(fx, "dl-pause");
     await sleep(200);
     fx.clock.now += 5 * HOUR; // 元の期限（T0+2h）を過ぎる
@@ -381,7 +383,7 @@ describe("期限", () => {
   });
 
   it("tick でも 24 時間を検知する。待ちの累計が 24 時間を超える 2 回目の質問も同じ", async () => {
-    const fx = newFixture("dl-cumulative", [ask("Q1"), ask("Q2"), report()]);
+    const fx = newFixture("dl-cumulative", [boot(), ask("Q1"), ask("Q2"), report()]);
     await startAndAsk(fx, "dl-cumulative");
     fx.clock.now += 20 * HOUR;
     expect(await fx.stub.answer("q-1", "A1")).toEqual({ ok: true });
@@ -401,6 +403,7 @@ describe("期限", () => {
 describe("SandboxDO の期限（回答待ちの間に元の期限をまたぐ）", () => {
   it("質問のとき SandboxDO の期限を「待ちの上限（24 時間）」まで延ばす。元の期限を過ぎても認証トークンとコンテナは消えず、回答の後の書き込み・検証・push が通る", async () => {
     const fx = newFixture("sb-span", [
+      boot(),
       ask("Q?"),
       call("write_note", { text: "after answer" }),
       report(),
@@ -437,13 +440,13 @@ describe("SandboxDO の期限（回答待ちの間に元の期限をまたぐ）
   });
 
   it("期限の延長に失敗したら、質問は記録せずエラーを返す。再試行すると質問が記録される", async () => {
-    const fx = newFixture("sb-fail", [ask("Q?"), ask("Q?"), report()]);
+    const fx = newFixture("sb-fail", [boot(), ask("Q?"), ask("Q?"), report()]);
     fx.sandbox.extendError = new Error("sandbox unavailable");
     await fx.stub.start(makeSpec("sb-fail"));
     // 1 回目の ask_parent はエラー（質問なし）、モデルが 2 回目に呼び直して記録される
     await waitForPhase(fx, "input_required");
     expect(await questionIds(fx)).toEqual(["q-1"]);
-    expect(fx.modelCalls.count).toBe(2);
+    expect(fx.modelCalls.count).toBe(3);
     expect(fx.sandbox.extended).toEqual([T0 + 26 * HOUR]);
     const errors = (await typesOf(fx, "tool_end")).filter((e) => e.data.name === "ask_parent");
     expect(errors[0]?.data.isError).toBe(true);
@@ -464,7 +467,7 @@ describe("SandboxDO の期限（回答待ちの間に元の期限をまたぐ）
   });
 
   it("2 回目の質問でも、SandboxDO への期限は 開始から 2h + 24h を超えない", async () => {
-    const fx = newFixture("sb-second", [ask("Q1"), ask("Q2"), report()]);
+    const fx = newFixture("sb-second", [boot(), ask("Q1"), ask("Q2"), report()]);
     await startAndAsk(fx, "sb-second");
     fx.clock.now += 5 * HOUR;
     expect(await fx.stub.answer("q-1", "A1")).toEqual({ ok: true });
@@ -590,7 +593,7 @@ describe("cancel と回答", () => {
   });
 
   it("cancel が先に確定した後の回答は ignored で、Pi に何も渡さない", async () => {
-    const fx = newFixture("c-first", [ask("Q?"), report()]);
+    const fx = newFixture("c-first", [boot(), ask("Q?"), report()]);
     await startAndAsk(fx, "c-first");
     await fx.stub.cancel();
     expect(await fx.stub.answer("q-1", "A")).toEqual({ ok: true, ignored: true });
@@ -713,7 +716,7 @@ describe("回答の入口の守り", () => {
   });
 
   it("回答のとき SandboxDO の期限は正確な値に戻る（質問で延ばした上限より短くなる）", async () => {
-    const fx = newFixture("ans-exact", [ask("Q?"), call("gate"), report()]);
+    const fx = newFixture("ans-exact", [boot(), ask("Q?"), call("gate"), report()]);
     fx.sandbox.clock = () => fx.clock.now;
     await startAndAsk(fx, "ans-exact");
     expect(fx.sandbox.deadlineAt).toBe(T0 + 26 * HOUR);
@@ -726,7 +729,7 @@ describe("回答の入口の守り", () => {
   });
 
   it("期限の設定に失敗した間に cancel が確定していたら、ok:false ではなく ignored を返す", async () => {
-    const fx = newFixture("ans-refused-after-fail", [ask("Q?"), report()]);
+    const fx = newFixture("ans-refused-after-fail", [boot(), ask("Q?"), report()]);
     await startAndAsk(fx, "ans-refused-after-fail");
     await sleep(200);
     fx.sandbox.deadlineGate.held = true;
@@ -737,7 +740,7 @@ describe("回答の入口の守り", () => {
     expect(res).toMatchObject({ stopped: true });
     fx.sandbox.deadlineGate.held = false;
     expect(await answering).toEqual({ ok: true, ignored: true });
-    expect(fx.modelCalls.count).toBe(1);
+    expect(fx.modelCalls.count).toBe(2);
   });
 });
 

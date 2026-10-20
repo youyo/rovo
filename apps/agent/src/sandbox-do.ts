@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { posix } from "node:path";
 import { Files } from "@cloudflare/sandbox";
 import type { AuditFields, AuditRecord } from "@rovo/audit";
-import { resolveSandboxInstance } from "@rovo/models";
+import { resolveSandboxInstance, type SandboxInstance } from "@rovo/models";
 import type { GitCredential, SandboxMetrics } from "./agent/types";
 import { appendTestAudit, emitAudit, readTestAudit } from "./audit-adapter";
 import { PROCESS_SCRIPT } from "./container-scripts";
@@ -333,12 +333,14 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     }
     const depsCache = this.ctx.storage.kv.get<DepsCacheStatus>("deps_cache");
     const cacheBuildMs = this.num("cache_build_ms");
+    const instance = this.ctx.storage.kv.get<SandboxInstance>("instance");
     return {
       runtimeMs: this.num("rt_total") + open,
       restarts: Math.max(0, this.num("starts") - 1),
       bootRetries: this.num("boot_retries"),
       ...(depsCache !== undefined ? { depsCache } : {}),
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
+      ...(instance !== undefined ? { instance } : {}),
     };
   }
 
@@ -734,7 +736,12 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         this.ctx.storage.kv.delete("baseline");
         // scheduling_policy=durable_object では wrangler の instance_type は効かず、start() の instance が大きさを決める
         // （指定しないと lite = 1/16 vCPU・256 MiB で、npm ci が遅くメモリ不足で落ちる）。不正な値は既定に戻す（D13）。
-        const { instance, ignored } = resolveSandboxInstance(this.env.SANDBOX_INSTANCE);
+        // タスクが明示した大きさ（spec.instance。検証済みで standard-1〜4）があればそれ、無ければ env の既定
+        const explicit = spec.instance as SandboxInstance | undefined;
+        const { instance, ignored } =
+          explicit !== undefined
+            ? { instance: explicit, ignored: undefined }
+            : resolveSandboxInstance(this.env.SANDBOX_INSTANCE);
         if (ignored !== undefined) {
           console.warn(
             `[sandbox-boot] SANDBOX_INSTANCE=${JSON.stringify(ignored.slice(0, 40))} is not supported; using ${instance}`,
@@ -762,6 +769,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           });
         }
         this.recordStart();
+        // 実際に start() に渡した大きさ（usage.sandbox.instance として gateway へ。単価の計算に使う）
+        this.ctx.storage.kv.put("instance", instance);
         started = true;
       }
       // DO だけが再起動してコンテナが生きている場合も、傍受は登録し直す（同じ宛先の再登録はハンドラを置き換える）。

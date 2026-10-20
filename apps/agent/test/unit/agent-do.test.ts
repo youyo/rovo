@@ -4,6 +4,7 @@ import { clearAgentTestOverrides } from "../../src/agent/deps";
 import type { UsageDto } from "../../src/agent/types";
 import {
   allEvents,
+  boot,
   call,
   done,
   makeSpec,
@@ -27,7 +28,7 @@ const runInDO = runInDurableObject as unknown as <T>(
 
 describe("start の冪等性", () => {
   it("同一の spec の再送は受理済みを返し、異なる spec は conflict", async () => {
-    const fx = newFixture("idem-1", [call("gate")]);
+    const fx = newFixture("idem-1", [boot(), call("gate")]);
     const spec = makeSpec("idem-1");
     const first = await fx.stub.start(spec);
     expect(first).toMatchObject({ status: "accepted", alreadyAccepted: false });
@@ -35,7 +36,8 @@ describe("start の冪等性", () => {
     expect(again).toMatchObject({ status: "accepted", alreadyAccepted: true });
     const other = await fx.stub.start({ ...spec, instructions: "別の指示" });
     expect(other).toEqual({ status: "conflict" });
-    // ensureReady は 1 回だけ、WorkspaceSpec は spec から作られる
+    // ensureReady は 1 回だけ（最初の Sandbox ツールのとき）、WorkspaceSpec は spec から作られる
+    await waitUntil(() => fx.sandbox.readySpecs.length === 1);
     expect(fx.sandbox.readySpecs).toHaveLength(1);
     expect(fx.sandbox.readySpecs[0]).toMatchObject({
       repository: "octo/repo",
@@ -901,7 +903,7 @@ describe("report_completion の sandbox RPC 中に停止が割り込んでも循
   }
 
   it("検証コマンドなし: git status の await 中に cancel → RPC 成功後も cancelled に収束する", async () => {
-    const fx = newFixture("cycle-nocmd", [report()], { cancelWaitMs: 300 });
+    const fx = newFixture("cycle-nocmd", [boot(), report()], { cancelWaitMs: 300 });
     fx.execGate.status.hold();
     await fx.stub.start(makeSpec("cycle-nocmd", { verificationCommands: [] }));
     await fx.execGate.status.waitEntered();
@@ -961,7 +963,8 @@ describe("検証中に sandbox が例外を投げたとき", () => {
 
 describe("start は Sandbox の準備を待たない", () => {
   it("ensureReady が終わらなくても accepted を返し、その間の cancel でも start は例外にならない", async () => {
-    const fx = newFixture("start-async", [report()], { cancelWaitMs: 300 });
+    // Sandbox は最初のツール（boot）で起動する。起動が終わらない間に cancel する
+    const fx = newFixture("start-async", [boot(), report()], { cancelWaitMs: 300 });
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => {
       release = r;
@@ -979,7 +982,8 @@ describe("start は Sandbox の準備を待たない", () => {
     await fx.stub.cancel();
     release();
     expect(await waitForTerminal(fx)).toBe("cancelled");
-    expect(fx.modelCalls.count).toBe(0);
+    // モデルは 1 回呼ばれた（起動はそのあとのツールの中）が、2 回目は呼ばれない
+    expect(fx.modelCalls.count).toBe(1);
   });
 });
 

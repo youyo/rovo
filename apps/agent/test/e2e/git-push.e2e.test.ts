@@ -402,9 +402,10 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
       tool("report_completion", { summary: "done" }),
     ]);
     await agent.start(s0);
-    // ツール実行が始まる（= clone 済み）まで待ってから、トークンを変える
+    // 最初のツール（FIX）が終わる（= Sandbox が起動して clone 済み）まで待ってから、トークンを変える。
+    // Sandbox は最初に使うツールの中で起動する（lazy boot）ので、tool_start では clone が済んでいない
     await expect
-      .poll(async () => (await agent.allEvents()).some((e) => e.type === "tool_start"), {
+      .poll(async () => (await agent.allEvents()).some((e) => e.type === "tool_end"), {
         timeout: 120_000,
       })
       .toBe(true);

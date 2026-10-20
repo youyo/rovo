@@ -7,6 +7,8 @@ import {
   DEFAULT_SANDBOX_INSTANCE,
   EFFORTS,
   effortFor,
+  isSelectableSandboxInstance,
+  listSandboxInstances,
   MODEL_CATALOG_IDS,
   modelInfo,
   parseAgentModels,
@@ -16,6 +18,7 @@ import {
   resolveEfforts,
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
+  SELECTABLE_SANDBOX_INSTANCES,
   sandboxInstanceSpec,
   sandboxUsdPerHour,
   supportedEfforts,
@@ -455,5 +458,47 @@ describe("Sandbox のインスタンス（D13）", () => {
         s.vcpu * 3600 * 0.00002 + s.memoryGiB * 3600 * 0.0000025 + s.diskGB * 3600 * 0.00000007;
       expect(sandboxUsdPerHour(id as "lite")).toBeGreaterThanOrEqual(exact - 1e-12);
     }
+  });
+
+  it("タスクが選べるのは lite を除く 4 種類（lite はメモリ不足で落ちた実績がある）", () => {
+    expect([...SELECTABLE_SANDBOX_INSTANCES]).toEqual([
+      "standard-1",
+      "standard-2",
+      "standard-3",
+      "standard-4",
+    ]);
+    for (const id of SELECTABLE_SANDBOX_INSTANCES)
+      expect(isSelectableSandboxInstance(id)).toBe(true);
+    for (const v of ["lite", "basic", "toString", "", undefined, 2, null]) {
+      expect(isSelectableSandboxInstance(v), String(v)).toBe(false);
+    }
+  });
+
+  it("listSandboxInstances: 表と単価の関数から作る（数値を二重に持たない）。既定と選べるかの印が付く", () => {
+    const list = listSandboxInstances();
+    expect(list.map((i) => i.name)).toEqual(Object.keys(SANDBOX_INSTANCES));
+    for (const i of list) {
+      const spec = sandboxInstanceSpec(i.name as "lite");
+      expect(i).toEqual({
+        name: i.name,
+        vcpu: spec.vcpu,
+        memory_gib: spec.memoryGiB,
+        disk_gb: spec.diskGB,
+        usd_per_hour: sandboxUsdPerHour(i.name as "lite"),
+        default: i.name === DEFAULT_SANDBOX_INSTANCE,
+        selectable: i.name !== "lite",
+      });
+    }
+    expect(list.filter((i) => i.default).map((i) => i.name)).toEqual(["standard-2"]);
+  });
+
+  it("listSandboxInstances: 既定を引数で変えられる（デプロイの設定）。lite を既定にしても selectable は false のまま", () => {
+    expect(
+      listSandboxInstances("standard-4")
+        .filter((i) => i.default)
+        .map((i) => i.name),
+    ).toEqual(["standard-4"]);
+    const lite = listSandboxInstances("lite").find((i) => i.name === "lite");
+    expect(lite).toMatchObject({ default: true, selectable: false });
   });
 });

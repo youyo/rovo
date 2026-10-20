@@ -20,6 +20,23 @@ export type SandboxInstance = keyof typeof SANDBOX_INSTANCES;
 /** 既定は standard-2（1 vCPU、6 GiB、12 GB）。lite（256 MiB）では npm ci / npm test が遅く、メモリ不足で落ちた。 */
 export const DEFAULT_SANDBOX_INSTANCE: SandboxInstance = "standard-2";
 
+/**
+ * task_start の sandbox_instance に指定できる大きさ（lite を除く）。lite（256 MiB）は npm ci / npm test がメモリ不足で落ちた実績があり、
+ * タスクが選べないようにする（env の既定としては従来どおり書ける）。gateway の入力の検証と sandbox_instances_list の selectable が、ここから導く。
+ */
+export const SELECTABLE_SANDBOX_INSTANCES = [
+  "standard-1",
+  "standard-2",
+  "standard-3",
+  "standard-4",
+] as const satisfies readonly SandboxInstance[];
+
+export type SelectableSandboxInstance = (typeof SELECTABLE_SANDBOX_INSTANCES)[number];
+
+export function isSelectableSandboxInstance(v: unknown): v is SelectableSandboxInstance {
+  return (SELECTABLE_SANDBOX_INSTANCES as readonly unknown[]).includes(v);
+}
+
 export function sandboxInstanceSpec(instance: SandboxInstance): {
   vcpu: number;
   memoryGiB: number;
@@ -63,4 +80,34 @@ export function sandboxUsdPerHour(instance: SandboxInstance): number {
       s.memoryGiB * SANDBOX_PRICE.memoryPerGiBSec +
       s.diskGB * SANDBOX_PRICE.diskPerGBSec);
   return Math.ceil(exact * 10_000 - 1e-6) / 10_000;
+}
+
+/** sandbox_instances_list の 1 件。値は上の表と sandboxUsdPerHour から作る（数値を二重に持たない）。 */
+export type SandboxInstanceInfo = {
+  name: SandboxInstance;
+  vcpu: number;
+  memory_gib: number;
+  disk_gb: number;
+  usd_per_hour: number;
+  /** task_start で sandbox_instance を省略したときの大きさ */
+  default: boolean;
+  /** task_start の sandbox_instance に指定できるか（lite は false） */
+  selectable: boolean;
+};
+
+export function listSandboxInstances(
+  defaultInstance: SandboxInstance = DEFAULT_SANDBOX_INSTANCE,
+): SandboxInstanceInfo[] {
+  return (Object.keys(SANDBOX_INSTANCES) as SandboxInstance[]).map((name) => {
+    const s = sandboxInstanceSpec(name);
+    return {
+      name,
+      vcpu: s.vcpu,
+      memory_gib: s.memoryGiB,
+      disk_gb: s.diskGB,
+      usd_per_hour: sandboxUsdPerHour(name),
+      default: name === defaultInstance,
+      selectable: isSelectableSandboxInstance(name),
+    };
+  });
 }

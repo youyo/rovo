@@ -27,6 +27,7 @@ import {
   resolveGitHubBaseUrls,
 } from "../github";
 import { agentModelsOf, defaultModelOf, effortOf } from "../models";
+import { sandboxInstanceName } from "../sandbox-instance";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
@@ -124,6 +125,8 @@ export type TaskView = {
   model: string;
   /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値。考える量が多いほど出力トークン＝費用が増える） */
   effort: Effort;
+  /** task_start で明示した Sandbox の大きさ。省略したタスクは null（agent の既定。実際に使った大きさは task_result の usage.sandbox_instance） */
+  sandbox_instance: string | null;
   created_at: string;
   updated_at: string;
   /** 最後のイベントの seq（不透明な cursor 文字列）。 */
@@ -222,6 +225,8 @@ export type ResultView = {
     cache_build_ms?: number;
     /** Sandbox を動かした累計の時間（ms。task_summary の sandbox_runtime_ms と同じもの）。agent がカウンタを読めたときだけ付く */
     sandbox_runtime_ms?: number;
+    /** 実際にコンテナを起動した大きさ（standard-2 など）。Sandbox を一度も起動しなかったタスク・agent が報告しなかったタスクには付かない */
+    sandbox_instance?: string;
   };
 };
 
@@ -332,6 +337,8 @@ type TaskRow = {
   model: string | null;
   /** D10 の思考レベル。開始時の値。それより前のタスクは NULL（現在の設定から求める） */
   effort: string | null;
+  /** 明示した Sandbox の大きさ。NULL は省略（agent の既定） */
+  sandbox_instance: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -536,6 +543,8 @@ export class TaskDO extends DurableObject<Env> {
     this.addColumnIfMissing("task", "model", "TEXT");
     // D10: 子のモデルの思考レベル（開始時の値。NULL は現在の設定から求める）
     this.addColumnIfMissing("task", "effort", "TEXT");
+    // task_start の sandbox_instance（明示した Sandbox の大きさ。NULL は省略 = agent の既定）
+    this.addColumnIfMissing("task", "sandbox_instance", "TEXT");
     // Phase 4: 子の質問と回答、親からの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
     sql.exec(`CREATE TABLE IF NOT EXISTS questions (
       question_id TEXT PRIMARY KEY,
@@ -662,6 +671,7 @@ export class TaskDO extends DurableObject<Env> {
       merge_policy: policyOf(row),
       model: this.modelOf(row),
       effort: this.effortOfRow(row),
+      sandbox_instance: row.sandbox_instance ?? null,
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString(),
       latest_cursor: String(this.latestSeq()),
@@ -892,8 +902,8 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO task (singleton, id, owner_id, owner_login, repository, repository_id,
            installation_id, base_ref, base_sha, title, instructions, acceptance_criteria,
-           constraints, verification_commands, fingerprint, merge_policy, model, effort, status, draft_pr_url, created_at, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
+           constraints, verification_commands, fingerprint, merge_policy, model, effort, sandbox_instance, status, draft_pr_url, created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
         input.task_id,
         input.owner_id,
         input.owner_login,
@@ -911,6 +921,7 @@ export class TaskDO extends DurableObject<Env> {
         data.merge_policy,
         model,
         effort,
+        data.sandbox_instance ?? null,
         at,
         at,
       );
@@ -933,6 +944,8 @@ export class TaskDO extends DurableObject<Env> {
           : {}),
         constraints: data.constraints,
         model,
+        // 明示したときだけ載せる（省略は agent の既定。後段の自動の昇格も、明示したタスクでは行わない）
+        ...(data.sandbox_instance !== undefined ? { sandboxInstance: data.sandbox_instance } : {}),
         budgetUsd: taskBudgetUsd(this.env),
         deadlineAt: at + AGENT_DEADLINE_MS,
       };
@@ -2502,6 +2515,7 @@ export class TaskDO extends DurableObject<Env> {
               runtimeMs: up.sandbox_runtime_ms ?? 0,
               restarts: up.sandbox_restarts ?? 0,
               bootRetries: up.sandbox_boot_retries ?? 0,
+              ...(up.sandbox_instance !== undefined ? { instance: up.sandbox_instance } : {}),
             }
           : null,
       },
@@ -2774,6 +2788,7 @@ function shapeUsage(u: UsageDto): ResultView["usage"] {
       browse: count(u.web?.browse),
     },
     ...sandboxRuntimeUsage(u.sandbox),
+    ...sandboxInstanceUsage(u.sandbox),
     ...depsUsage(u.sandbox),
   };
 }
@@ -2786,6 +2801,12 @@ function sandboxRuntimeUsage(sb: UsageDto["sandbox"]): { sandbox_runtime_ms?: nu
     sandbox_runtime_ms:
       typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0,
   };
+}
+
+/** usage.sandbox の実際の大きさ。packages/models の表にある名前だけ通す（任意の文字列を公開しない）。無ければ付けない */
+function sandboxInstanceUsage(sb: UsageDto["sandbox"]): { sandbox_instance?: string } {
+  const name = sandboxInstanceName(sb?.instance);
+  return name !== undefined ? { sandbox_instance: name } : {};
 }
 
 /** usage.sandbox の依存関係のキャッシュ（D14）の結果。sandbox が無い・値が表に無いときは何も付けない */

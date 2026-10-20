@@ -830,6 +830,45 @@ describe("TaskDO.result", () => {
     expect("duration_ms" in (results[2] ?? {})).toBe(false);
   });
 
+  it.each([
+    ["負の数", -1],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["-Infinity", Number.NEGATIVE_INFINITY],
+  ])("duration_ms は有限で 0 以上の数だけを通す（%s は付けない）", async (_name, bad) => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    await agent.setProgram({
+      result: {
+        status: "completed",
+        summary: "s",
+        verification: {
+          commands: [],
+          results: [
+            { argv: ["npm", "ci"], exitCode: 0, timedOut: false, output: "a", durationMs: bad },
+          ],
+          verified: false,
+          attempts: 1,
+        },
+        warnings: [],
+        patchTooLarge: false,
+        usage: {
+          costUsd: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          web: { search: 0, fetch: 0, browse: 0 },
+        },
+      },
+    });
+    await agent.setPhase("completed");
+    await stub.advance();
+    const r = await stub.result(OWNER);
+    if (!r.ok) throw new Error("result");
+    expect("duration_ms" in (r.result.verification.results[0] ?? {})).toBe(false);
+  });
+
   it("verification の output は UTF-8 のバイト数で 16KiB に切り詰める（末尾を残し、文字を壊さない）", async () => {
     const { stub, agent } = await createTask();
     await stub.advance();

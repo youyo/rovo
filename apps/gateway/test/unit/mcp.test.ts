@@ -1913,7 +1913,7 @@ describe("D10: AI への伝え方（instructions と説明）", () => {
     expect(wait?.description).toContain("バックグラウンド");
     expect(wait?.description).toContain("会話を止めない");
     expect(wait?.description).toContain("task_status");
-    expect(wait?.description).toContain("既定 30、上限 60");
+    expect(wait?.description).toContain("既定 30、上限 50");
     const start = tools.find((t) => t.name === "task_start");
     expect(start?.description).toContain("数分〜数十分");
     expect(start?.description).toContain("task_wait の説明");

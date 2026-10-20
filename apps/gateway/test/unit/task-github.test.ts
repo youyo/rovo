@@ -825,6 +825,24 @@ describe("終端: PR の更新とトークンの失効", () => {
     expect(patches()).toBe(n);
   });
 
+  it("PR があるタスクは、終了処理（finalize_done）が済むまで task_result は not_ready を返す。上限を過ぎたら従来どおり返す", async () => {
+    app().setFault({ pattern: "^PATCH /repos/.*/pulls/", status: 502 });
+    const { stub, agent, branch } = await createTask();
+    await stub.advance();
+    await agent.setProgram({ result: completedResult(app().branch(REPO, branch) as string) });
+    await agent.setPhase("completed");
+    await stub.advance();
+    expect((await status(stub)).status).toBe("COMPLETED");
+    expect((await gl(stub)).finalize_done).toBe(0);
+    // 終了処理が済んでいない間は、head が null のまま成功を返さない
+    expect(await stub.result(OWNER)).toEqual({ ok: false, code: "not_ready" });
+    // 上限（時間）を過ぎたら、終了処理が済んでいなくても返す
+    await warp(stub, 61_000);
+    const r = await stub.result(OWNER);
+    if (!r.ok) throw new Error(`result failed: ${r.code}`);
+    expect(r.result.pr?.head_sha).toBeNull();
+  });
+
   it("PR の更新を諦めても（有限回）、トークンの失効は行う", async () => {
     app().setFault({ pattern: "^PATCH /repos/.*/pulls/", status: 403 });
     const { stub, agent, branch } = await createTask();
@@ -896,6 +914,9 @@ describe("終端: PR の更新とトークンの失効", () => {
     await agent.setProgram({ result: completedResult(app().branch(REPO, branch) as string) });
     await agent.setPhase("completed");
     await stub.advance();
+    // 終了処理が済むまでは not_ready。上限を過ぎて初めて、head が読めないまま返す
+    expect(await stub.result(OWNER)).toEqual({ ok: false, code: "not_ready" });
+    await warp(stub, 61_000);
     const r = await stub.result(OWNER);
     if (!r.ok) throw new Error("not ready");
     expect(r.result.pr).toMatchObject({ head_sha: null, head_matches_verified: null });

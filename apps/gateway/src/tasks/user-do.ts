@@ -13,6 +13,7 @@ import {
   type UserPull,
 } from "../github";
 import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
+import { addColumnIfMissing } from "./sql-schema";
 import type { TaskDO } from "./task-do";
 import { isConsultId, ulid, ulidTime } from "./ulid";
 
@@ -202,7 +203,7 @@ export class UserDO extends DurableObject<Env> {
     )`);
     sql.exec("CREATE INDEX IF NOT EXISTS task_budget_month ON task_budget (month)");
     // settled が実費ではなく見積もり（予約額など）で確定した行は 1。列の追加前の行は 0（見積もりではない扱い）。
-    this.addColumnIfMissing("task_budget", "settled_estimated", "INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(sql, "task_budget", "settled_estimated", "INTEGER NOT NULL DEFAULT 0");
     // 親（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
     sql.exec(`CREATE TABLE IF NOT EXISTS web_usage (
       day TEXT NOT NULL,
@@ -217,13 +218,7 @@ export class UserDO extends DurableObject<Env> {
       github_user_id INTEGER
     )`);
     // 旧スキーマ（github_user_id なし）の DO を移行する。NULL の行はキャッシュとして使わない。
-    const hasUserIdColumn = sql
-      .exec<{ name: string }>("PRAGMA table_info(membership_cache)")
-      .toArray()
-      .some((c) => c.name === "github_user_id");
-    if (!hasUserIdColumn) {
-      sql.exec("ALTER TABLE membership_cache ADD COLUMN github_user_id INTEGER");
-    }
+    addColumnIfMissing(sql, "membership_cache", "github_user_id", "INTEGER");
     // 資格の正本。access_token_enc が NULL の行は「削除済み」（世代だけを残す tombstone）。
     sql.exec(`CREATE TABLE IF NOT EXISTS github_credential (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -340,15 +335,6 @@ export class UserDO extends DurableObject<Env> {
     // 枠を手放したタスクは、予約額をもう数えない（実費だけが残る）。
     sql.exec("UPDATE task_budget SET closed = 1 WHERE task_id = ?", taskId);
     return true;
-  }
-
-  private addColumnIfMissing(table: string, column: string, definition: string): void {
-    const sql = this.ctx.storage.sql;
-    const has = sql
-      .exec<{ name: string }>(`PRAGMA table_info(${table})`)
-      .toArray()
-      .some((c) => c.name === column);
-    if (!has) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   /**

@@ -322,6 +322,8 @@ describe("フロー", () => {
       [
         "gateway exec wrangler secret put GITHUB_APP_CLIENT_SECRET",
         "gateway exec wrangler secret put GITHUB_APP_PRIVATE_KEY",
+        // gateway のデプロイの前に、ダッシュボード（assets）をビルドする
+        "dashboard exec vite build",
         "gateway exec wrangler deploy",
       ],
     );

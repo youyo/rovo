@@ -132,8 +132,10 @@ const MODELS_LIST_DESCRIPTION = [
 ].join("\n");
 
 const BUDGET_STATUS_DESCRIPTION = [
-  "自分の予算の状況を返す。入力は無い。応答は {monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, period: {start, end}}（金額は USD）。",
-  "monthly_budget_usd は月の上限、spent_usd は今月使った実費（精算済み）、reserved_usd は実行中のタスクと consult の予約の残り、remaining_usd は月の上限から両方を引いた残り。task_budget_usd は task_start 1 件、consult_budget_usd は consult 1 回が予約する額。max_concurrent_tasks は remaining_usd を task_budget_usd で割った件数（予算から見た上限。実際に同時に実行できるタスクは 1 件まで）。period は今月（UTC。end は翌月の頭で、含まない）。",
+  "自分の予算の状況を返す。入力は無い。応答は {monthly_budget_usd, spent_usd, estimated_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, period: {start, end}}（金額は USD）。",
+  "monthly_budget_usd は月の上限、spent_usd は今月使った実費（精算済み）、reserved_usd は実行中のタスクと consult の予約の残り、remaining_usd は月の上限から両方を引いた残り。task_budget_usd は task_start 1 件、consult_budget_usd は consult 1 回が予約する額。period は今月（UTC。end は翌月の頭で、含まない）。",
+  "estimated_usd は spent_usd のうち、実費が分からず見積もりで確定した分（spent_usd の内数。spent_usd にも含まれる）。失敗して実費が分からない consult は予約額で確定し（consult_budget_usd。spent_usd に含まれる。upstream_unavailable になるタイムアウト・例外・usage の無い失敗など。少なく数えないための保守的な精算）。そのため spent_usd は、各応答の cost_usd の合計より estimated_usd の分だけ多くなりうる。実費が分かった consult の精算は estimated_usd に入らない。",
+  "max_concurrent_tasks は「残りの月額予算（remaining_usd）で、タスクの予約額（task_budget_usd）を何件分予約できるか」の見積もり（remaining_usd ÷ task_budget_usd の切り捨て）で、同時実行の上限ではない。同時に実行できるタスクは 1 件まで。",
   "これは rovo の月の枠だけ。Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する）。",
 ].join("\n");
 

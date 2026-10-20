@@ -201,6 +201,66 @@ describe("AgentDO.consult", () => {
     expect(r).toMatchObject({ ok: false, code: "model_error", costUsd: 0.5 });
   });
 
+  describe("costEstimated（costUsd が実費ではなく見積もりのとき印を立てる）", () => {
+    it("予期しない例外では、予約額を costUsd にして costEstimated を立てる", async () => {
+      const t = setup({ budgetUsd: 0.5 });
+      // モデルを呼ぶ前の now() で例外を起こし、runConsult を予期しない例外で終わらせる
+      setAgentTestOverrides(t.name, {
+        now: () => {
+          throw new Error("boom");
+        },
+      });
+      const r = await t.stub.consult(t.request);
+      expect(r).toMatchObject({
+        ok: false,
+        code: "model_error",
+        costUsd: 0.5,
+        costEstimated: true,
+      });
+    });
+
+    it("usage の無い model_error は、予約額を costUsd にして costEstimated を立てる", async () => {
+      const t = setup({ budgetUsd: 0.5 });
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ error: "stream cut" }]);
+      const r = await t.stub.consult(t.request);
+      expect(r).toMatchObject({
+        ok: false,
+        code: "model_error",
+        costUsd: 0.5,
+        costEstimated: true,
+      });
+    });
+
+    it("usage の空の成功は、最悪の見積もりを costUsd にして costEstimated を立てる", async () => {
+      const t = setup({ budgetUsd: 0.5 });
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      const r = asOk(await t.stub.consult(t.request));
+      expect(r.usageMissing).toBe(true);
+      expect(r.costEstimated).toBe(true);
+    });
+
+    it("実費が分かるとき（usage のある成功・失敗、入力の拒否）は立てない", async () => {
+      const ok = setup();
+      await ok.stub.setScript(ok.request.messages[0]?.content ?? "", [
+        { text: "x", usage: { input: 1000, output: 200 } },
+      ]);
+      expect(await ok.stub.consult(ok.request)).not.toHaveProperty("costEstimated");
+
+      const failed = setup();
+      await failed.stub.setScript(failed.request.messages[0]?.content ?? "", [
+        { error: "upstream 500", usage: { input: 10, output: 0 } },
+      ]);
+      const r = await failed.stub.consult(failed.request);
+      expect(r).toMatchObject({ ok: false, code: "model_error" });
+      expect(r).not.toHaveProperty("costEstimated");
+
+      const bad = setup({ model: "anthropic/no-such-model" });
+      const rb = await bad.stub.consult(bad.request);
+      expect(rb).toMatchObject({ ok: false, code: "unknown_model", costUsd: 0 });
+      expect(rb).not.toHaveProperty("costEstimated");
+    });
+  });
+
   it("終わったら、この consult のインスタンスの保存データを消す（consult ごとに別のインスタンスなので残さない）", async () => {
     const t = setup();
     await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);

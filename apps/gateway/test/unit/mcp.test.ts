@@ -1640,11 +1640,17 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
     const tool = (await list(client)).find((t) => t.name === "budget_status");
     expect(tool?.description).toContain("Anthropic / OpenAI の残高は取得できない");
     expect(tool?.description).toContain("各プロバイダの画面で上限を管理する");
+    // estimated_usd と max_concurrent_tasks の意味
+    expect(tool?.description).toContain("estimated_usd");
+    expect(tool?.description).toContain("実費が分からない consult は予約額で確定し");
+    expect(tool?.description).toContain("spent_usd の内数");
+    expect(tool?.description).toContain("同時実行の上限ではない");
     expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual([]);
     const before = body(await client.callTool({ name: "budget_status", arguments: {} }));
     expect(before).toMatchObject({
       monthly_budget_usd: 100,
       spent_usd: 0,
+      estimated_usd: 0,
       reserved_usd: 0,
       remaining_usd: 100,
       task_budget_usd: 10,

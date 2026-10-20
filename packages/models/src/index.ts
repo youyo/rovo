@@ -10,6 +10,7 @@
  */
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { CLOUDFLARE_AI_GATEWAY_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-ai-gateway.models";
+import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 
 /** 既定のモデル（AGENT_MODEL が未設定のとき）。 */
 export const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
@@ -27,7 +28,67 @@ export const MODEL_CATALOG_IDS: Readonly<Record<string, string>> = {
   "openai/gpt-6-luna": "gpt-6-luna",
   "openai/gpt-6-sol": "gpt-6-sol",
   "openai/gpt-6-astra": "gpt-6-astra",
+  // Workers AI（D10b）。Workers の無料プランでも使えるものだけ（kimi-k2.7-code・glm-5.x・deepseek-v4 は有料プラン専用なので入れない）。
+  // カタログのキーは `workers-ai/@cf/...`（gateway カタログの "openai-completions"）。Pi（createAI）に渡す id は `@cf/...`（piModelId）。
+  "workers-ai/@cf/openai/gpt-oss-120b": "workers-ai/@cf/openai/gpt-oss-120b",
+  "workers-ai/@cf/openai/gpt-oss-20b": "workers-ai/@cf/openai/gpt-oss-20b",
+  "workers-ai/@cf/qwen/qwen3.8-27b": "workers-ai/@cf/qwen/qwen3.8-27b",
+  "workers-ai/@cf/nvidia/nemotron-3-120b-a12b": "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
+  "workers-ai/@cf/zai-org/glm-4.7-flash": "workers-ai/@cf/zai-org/glm-4.7-flash",
+  "workers-ai/@cf/google/gemma-4-26b-a4b-it": "workers-ai/@cf/google/gemma-4-26b-a4b-it",
 };
+
+const WORKERS_AI_PREFIX = "workers-ai/";
+
+/** モデルのプロバイダー。AI Gateway の BYOK が要るのは anthropic / openai で、workers-ai はキー不要。 */
+export type ModelProvider = "anthropic" | "openai" | "workers-ai";
+
+/** rovo の id のプロバイダー。許可リストに無ければ undefined。 */
+export function providerOf(modelId: string): ModelProvider | undefined {
+  if (!Object.hasOwn(MODEL_CATALOG_IDS, modelId)) return undefined;
+  if (modelId.startsWith("anthropic/")) return "anthropic";
+  if (modelId.startsWith("openai/")) return "openai";
+  if (modelId.startsWith(WORKERS_AI_PREFIX)) return "workers-ai";
+  return undefined;
+}
+
+/**
+ * Pi（agents の createAI）に渡す id。Workers AI は `@cf/...`（createAI は `workers-ai/...` の specifier を TypeError で拒否し、
+ * `@cf/` の id を env.AI.run に流す）。それ以外は rovo の id のまま（`<プロバイダー>/<カタログの id>` の specifier）。
+ */
+export function piModelId(modelId: string): string {
+  return modelId.startsWith(WORKERS_AI_PREFIX) ? modelId.slice(WORKERS_AI_PREFIX.length) : modelId;
+}
+
+/**
+ * 既定のモデルを決める固定の順序（D10b）。Anthropic → gpt-oss-120b → 残りの Workers AI → OpenAI。
+ * 希望のモデル（AGENT_MODEL）が使えなければ、使えるモデルのうち、この順で最初のものを選ぶ。
+ * Anthropic のキーが無いとき、またはキーが 1 つも無いときの既定が gpt-oss-120b になる。
+ */
+export const DEFAULT_MODEL_ORDER: readonly string[] = [
+  "anthropic/claude-sonnet-5-5",
+  "anthropic/claude-haiku-5-5",
+  "anthropic/claude-opus-5-5",
+  "anthropic/claude-fable-5-1",
+  "workers-ai/@cf/openai/gpt-oss-120b",
+  "workers-ai/@cf/openai/gpt-oss-20b",
+  "workers-ai/@cf/qwen/qwen3.8-27b",
+  "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
+  "workers-ai/@cf/zai-org/glm-4.7-flash",
+  "workers-ai/@cf/google/gemma-4-26b-a4b-it",
+  "openai/gpt-6-sol",
+  "openai/gpt-6-luna",
+  "openai/gpt-6-astra",
+];
+
+/** 希望のモデルが available に含まれればそれ。なければ DEFAULT_MODEL_ORDER の順で最初の available なモデル。無ければ undefined。 */
+export function pickDefaultModel(
+  preferred: string | undefined,
+  available: readonly string[],
+): string | undefined {
+  if (preferred !== undefined && available.includes(preferred)) return preferred;
+  return DEFAULT_MODEL_ORDER.find((id) => available.includes(id));
+}
 
 /** 思考をオフにするときに Anthropic へ送る thinking.type の値。 */
 export type ThinkingOff = "between_tools" | "disabled";
@@ -81,7 +142,7 @@ export type ModelApi = "anthropic-messages" | "openai-responses" | "openai-compl
 export interface ModelInfo {
   /** rovo の id（"anthropic/claude-sonnet-5-5"） */
   id: string;
-  provider: "anthropic" | "openai";
+  provider: ModelProvider;
   api: ModelApi;
   price: ModelPrice;
   contextWindow: number;
@@ -132,6 +193,18 @@ function readThinkingLevelMap(raw: unknown): Record<string, string | null> {
   return out;
 }
 
+/**
+ * Workers AI のモデルの thinkingLevelMap。gateway カタログのエントリには無く、Pi が実際に使う Workers AI のレジストリ
+ * （cloudflare-workers-ai.models。agents の buildWorkersAIModel と同じ）にある。無ければ undefined（全レベル可）。
+ */
+function workersAiThinkingLevelMap(rovoId: string): unknown {
+  const wire = piModelId(rovoId);
+  const entry = Object.values(CLOUDFLARE_WORKERS_AI_MODELS as unknown as Record<string, unknown>)
+    .map((v) => v as { id?: unknown; thinkingLevelMap?: unknown })
+    .find((v) => v.id === wire);
+  return entry?.thinkingLevelMap;
+}
+
 /** カタログの 1 エントリから ModelInfo を作る。形が合わない（cost が無いなど）なら undefined。 */
 function readEntry(id: string, raw: unknown): ModelInfo | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
@@ -150,11 +223,7 @@ function readEntry(id: string, raw: unknown): ModelInfo | undefined {
   if (api !== "anthropic-messages" && api !== "openai-responses" && api !== "openai-completions") {
     return undefined;
   }
-  const provider = id.startsWith("anthropic/")
-    ? "anthropic"
-    : id.startsWith("openai/")
-      ? "openai"
-      : undefined;
+  const provider = providerOf(id);
   if (provider === undefined || !isNum(e.contextWindow)) return undefined;
   const tiers: PriceTier[] = [];
   if (cost.tiers !== undefined) {
@@ -171,7 +240,9 @@ function readEntry(id: string, raw: unknown): ModelInfo | undefined {
     api,
     contextWindow: e.contextWindow,
     reasoning: e.reasoning === true,
-    thinkingLevelMap: readThinkingLevelMap(e.thinkingLevelMap),
+    thinkingLevelMap: readThinkingLevelMap(
+      provider === "workers-ai" ? workersAiThinkingLevelMap(id) : e.thinkingLevelMap,
+    ),
     forceAdaptiveThinking:
       typeof e.compat === "object" &&
       e.compat !== null &&
@@ -248,6 +319,13 @@ export const EFFORTS: Readonly<Record<string, Effort>> = {
   "openai/gpt-6-luna": "low",
   "openai/gpt-6-sol": "medium",
   "openai/gpt-6-astra": "low",
+  // Workers AI: 6 つとも low から。gemma は low を受け付けない（Workers AI のレジストリでは off / high だけ）ので high
+  "workers-ai/@cf/openai/gpt-oss-120b": "low",
+  "workers-ai/@cf/openai/gpt-oss-20b": "low",
+  "workers-ai/@cf/qwen/qwen3.8-27b": "low",
+  "workers-ai/@cf/nvidia/nemotron-3-120b-a12b": "low",
+  "workers-ai/@cf/zai-org/glm-4.7-flash": "low",
+  "workers-ai/@cf/google/gemma-4-26b-a4b-it": "high",
 };
 
 /**

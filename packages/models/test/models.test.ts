@@ -3,18 +3,22 @@ import {
   ALLOWED_MODEL_IDS,
   computeCostUsd,
   DEFAULT_MODEL,
+  DEFAULT_MODEL_ORDER,
   EFFORTS,
   effortFor,
   MODEL_CATALOG_IDS,
   modelInfo,
   parseAgentModels,
+  pickDefaultModel,
+  piModelId,
+  providerOf,
   resolveEfforts,
   supportedEfforts,
   thinkingOffFor,
 } from "../src";
 
 describe("許可リストとカタログ", () => {
-  it("初期の許可リストは仕様どおりの 7 件で、rovo の id → カタログの id の対応が 1 か所にある", () => {
+  it("許可リストは仕様どおりの 13 件（Anthropic 4 + OpenAI 3 + Workers AI の無料プラン 6）で、rovo の id → カタログの id の対応が 1 か所にある", () => {
     expect(Object.keys(MODEL_CATALOG_IDS).sort()).toEqual(
       [
         "anthropic/claude-fable-5-1",
@@ -24,6 +28,12 @@ describe("許可リストとカタログ", () => {
         "openai/gpt-6-astra",
         "openai/gpt-6-luna",
         "openai/gpt-6-sol",
+        "workers-ai/@cf/google/gemma-4-26b-a4b-it",
+        "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
+        "workers-ai/@cf/openai/gpt-oss-120b",
+        "workers-ai/@cf/openai/gpt-oss-20b",
+        "workers-ai/@cf/qwen/qwen3.8-27b",
+        "workers-ai/@cf/zai-org/glm-4.7-flash",
       ].sort(),
     );
     expect(MODEL_CATALOG_IDS["openai/gpt-6-sol"]).toBe("gpt-6-sol");
@@ -184,6 +194,13 @@ describe("EFFORTS（モデルごとに固定した思考レベル）", () => {
       "openai/gpt-6-luna": "low",
       "openai/gpt-6-sol": "medium",
       "openai/gpt-6-astra": "low",
+      // Workers AI: 6 つとも low から。gemma は low を受け付けない（off / high だけ）ので、受け付ける最小の思考レベル high
+      "workers-ai/@cf/openai/gpt-oss-120b": "low",
+      "workers-ai/@cf/openai/gpt-oss-20b": "low",
+      "workers-ai/@cf/qwen/qwen3.8-27b": "low",
+      "workers-ai/@cf/nvidia/nemotron-3-120b-a12b": "low",
+      "workers-ai/@cf/zai-org/glm-4.7-flash": "low",
+      "workers-ai/@cf/google/gemma-4-26b-a4b-it": "high",
     });
   });
 
@@ -285,5 +302,110 @@ describe("resolveEfforts / effortFor（MODEL_EFFORTS の上書き）", () => {
     expect(effortFor("anthropic/claude-sonnet-5-5", undefined)).toBe("high");
     expect(effortFor("scripted/script-1", undefined)).toBeUndefined();
     expect(effortFor("toString", undefined)).toBeUndefined();
+  });
+});
+
+describe("Workers AI のモデル（D10b。無料プランで使えるものだけ）", () => {
+  const WAI = [
+    "workers-ai/@cf/openai/gpt-oss-120b",
+    "workers-ai/@cf/openai/gpt-oss-20b",
+    "workers-ai/@cf/qwen/qwen3.8-27b",
+    "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
+    "workers-ai/@cf/zai-org/glm-4.7-flash",
+    "workers-ai/@cf/google/gemma-4-26b-a4b-it",
+  ];
+
+  it("provider は workers-ai、単価はカタログ（gpt-oss-120b は 0.35 / 0.75）", () => {
+    for (const id of WAI) {
+      expect(modelInfo(id), id).toMatchObject({ provider: "workers-ai", id });
+    }
+    expect(modelInfo("workers-ai/@cf/openai/gpt-oss-120b")?.price).toMatchObject({
+      inputPerMTok: 0.35,
+      outputPerMTok: 0.75,
+    });
+  });
+
+  it("有料プラン専用のモデルは許可リストに入れない（kimi-k2.7-code / glm-5.x / deepseek-v4）", () => {
+    for (const id of [
+      "workers-ai/@cf/moonshotai/kimi-k2.7-code",
+      "workers-ai/@cf/zai-org/glm-5.2",
+      "workers-ai/@cf/zai-org/glm-5.3",
+      "workers-ai/@cf/zai-org/glm-5.3-flash",
+      "workers-ai/@cf/deepseek-ai/deepseek-v4-flash-0731",
+      "workers-ai/@cf/deepseek-ai/deepseek-v4-pro-0813",
+    ]) {
+      expect(modelInfo(id), id).toBeUndefined();
+      expect(ALLOWED_MODEL_IDS).not.toContain(id);
+    }
+  });
+
+  it("思考レベルは Workers AI のレジストリの thinkingLevelMap に従う（gemma は off / high だけ、gpt-oss は low / medium / high）", () => {
+    expect(supportedEfforts("workers-ai/@cf/google/gemma-4-26b-a4b-it")).toEqual(["off", "high"]);
+    expect(supportedEfforts("workers-ai/@cf/openai/gpt-oss-120b")).toEqual([
+      "low",
+      "medium",
+      "high",
+    ]);
+    // gemma に low を指定しても無視して初期値（high）のまま
+    expect(
+      effortFor(
+        "workers-ai/@cf/google/gemma-4-26b-a4b-it",
+        "workers-ai/@cf/google/gemma-4-26b-a4b-it=low",
+      ),
+    ).toBe("high");
+  });
+
+  it("providerOf: id の接頭辞（許可リストに無ければ undefined）", () => {
+    expect(providerOf("anthropic/claude-sonnet-5-5")).toBe("anthropic");
+    expect(providerOf("openai/gpt-6-sol")).toBe("openai");
+    expect(providerOf("workers-ai/@cf/openai/gpt-oss-120b")).toBe("workers-ai");
+    expect(providerOf("nope/x")).toBeUndefined();
+    expect(providerOf("toString")).toBeUndefined();
+  });
+
+  it("piModelId: Pi（createAI）に渡す id。Workers AI は workers-ai/ を外した @cf/ の id、他はそのまま", () => {
+    expect(piModelId("workers-ai/@cf/openai/gpt-oss-120b")).toBe("@cf/openai/gpt-oss-120b");
+    expect(piModelId("anthropic/claude-sonnet-5-5")).toBe("anthropic/claude-sonnet-5-5");
+    expect(piModelId("openai/gpt-6-sol")).toBe("openai/gpt-6-sol");
+  });
+});
+
+describe("既定のモデルの順序（D10b）", () => {
+  it("順序は固定: Anthropic → gpt-oss-120b → 残りの Workers AI → OpenAI。許可リストの全モデルを 1 回ずつ含む", () => {
+    expect([...DEFAULT_MODEL_ORDER]).toEqual([
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-haiku-5-5",
+      "anthropic/claude-opus-5-5",
+      "anthropic/claude-fable-5-1",
+      "workers-ai/@cf/openai/gpt-oss-120b",
+      "workers-ai/@cf/openai/gpt-oss-20b",
+      "workers-ai/@cf/qwen/qwen3.8-27b",
+      "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
+      "workers-ai/@cf/zai-org/glm-4.7-flash",
+      "workers-ai/@cf/google/gemma-4-26b-a4b-it",
+      "openai/gpt-6-sol",
+      "openai/gpt-6-luna",
+      "openai/gpt-6-astra",
+    ]);
+    expect([...DEFAULT_MODEL_ORDER].sort()).toEqual([...ALLOWED_MODEL_IDS].sort());
+  });
+
+  it("pickDefaultModel: 希望のモデルが使えればそれ。なければ順序の最初の使えるモデル。1 つも無ければ undefined", () => {
+    const all = [...DEFAULT_MODEL_ORDER];
+    expect(pickDefaultModel("openai/gpt-6-sol", all)).toBe("openai/gpt-6-sol");
+    // Anthropic のキーが無い: gpt-oss-120b
+    const noAnthropic = all.filter((m) => !m.startsWith("anthropic/"));
+    expect(pickDefaultModel("anthropic/claude-sonnet-5-5", noAnthropic)).toBe(
+      "workers-ai/@cf/openai/gpt-oss-120b",
+    );
+    // 渡された順序に依らず固定の順序で選ぶ
+    expect(pickDefaultModel(undefined, [...noAnthropic].reverse())).toBe(
+      "workers-ai/@cf/openai/gpt-oss-120b",
+    );
+    // gpt-oss-120b が AGENT_MODELS に無ければ次
+    expect(
+      pickDefaultModel(undefined, ["workers-ai/@cf/openai/gpt-oss-20b", "openai/gpt-6-sol"]),
+    ).toBe("workers-ai/@cf/openai/gpt-oss-20b");
+    expect(pickDefaultModel("anthropic/claude-sonnet-5-5", [])).toBeUndefined();
   });
 });

@@ -1552,6 +1552,24 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
 describe("D10: models_list / budget_status / consult / task_start の model", () => {
   const list = async (client: Client) => (await client.listTools()).tools;
 
+  it("D10b: models_list・task_start・consult の説明に、available / unavailable_reason / model_unavailable が書かれている", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tools = await list(client);
+    const text = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    for (const word of [
+      "available",
+      "unavailable_reason",
+      "no_provider_key",
+      "model_unavailable",
+    ]) {
+      expect(text("models_list"), word).toContain(word);
+    }
+    expect(text("task_start")).toContain("model_unavailable");
+    expect(text("consult")).toContain("model_unavailable");
+    await client.close();
+  });
+
   it("models_list: 入力なし。AGENT_MODELS のモデルを単価つきで返す（USD / 100 万トークン）。既定のモデルに default: true", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
@@ -1562,11 +1580,13 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
     expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual([]);
     const r = await client.callTool({ name: "models_list", arguments: {} });
     const models = body(r).models as Record<string, unknown>[];
-    // vitest.config.ts の AGENT_MODELS: sonnet（既定）・haiku・gpt-6-sol
+    // vitest.config.ts の AGENT_MODELS: sonnet（既定）・haiku・gpt-6-sol・Workers AI の gpt-oss（D10b）
     expect(models.map((m) => m.id)).toEqual([
       "anthropic/claude-sonnet-5-5",
       "anthropic/claude-haiku-5-5",
       "openai/gpt-6-sol",
+      "workers-ai/@cf/openai/gpt-oss-120b",
+      "workers-ai/@cf/openai/gpt-oss-20b",
     ]);
     expect(models.find((m) => m.default === true)?.id).toBe("anthropic/claude-sonnet-5-5");
     expect(models.filter((m) => m.default === true)).toHaveLength(1);
@@ -1582,6 +1602,7 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       context_window: 1_000_000,
       default: true,
       effort: "high",
+      available: true,
     });
     const haiku = models.find((m) => m.id === "anthropic/claude-haiku-5-5");
     expect(haiku?.tiers).toEqual([
@@ -1602,6 +1623,8 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       ["anthropic/claude-sonnet-5-5", "high"],
       ["anthropic/claude-haiku-5-5", "minimal"],
       ["openai/gpt-6-sol", "medium"],
+      ["workers-ai/@cf/openai/gpt-oss-120b", "low"],
+      ["workers-ai/@cf/openai/gpt-oss-20b", "low"],
     ]);
     expect(tool?.description).toContain("effort");
     expect(tool?.description).toContain("思考レベルはモデルごとに決まっている");

@@ -25,7 +25,11 @@ GITHUB_APP_PRIVATE_KEY=
 # 既定のモデルと、task_start / consult の model に選べるモデル（カンマ区切り。空なら AGENT_MODEL だけ）。
 # agent の同名の var と同じ値にする。
 # AGENT_MODEL=anthropic/claude-sonnet-5-5
-# AGENT_MODELS=anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5
+# AGENT_MODELS=anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,workers-ai/@cf/openai/gpt-oss-120b
+# AI Gateway に BYOK 登録されたプロバイダーキーを読んで、キーが無いプロバイダーのモデルを選べなくする（D10b）。
+# CLOUDFLARE_API_TOKEN は権限が Account / AI Gateway / Read だけのトークン（Secret）。CLOUDFLARE_ACCOUNT_ID と AI_GATEWAY_ID は wrangler.jsonc の vars。
+# どれかが空なら判定せず、AGENT_MODELS だけで決める。値はログにも応答にも出さない。
+# CLOUDFLARE_API_TOKEN=
 # モデルごとの思考レベルの上書き（<モデルの id>=<off|minimal|low|medium|high|xhigh|max> のカンマ区切り。空なら既定）。agent の同名の var と同じ値にする。
 # MODEL_EFFORTS=anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off
 

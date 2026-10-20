@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestProject } from "vitest/node";
-import { type FakeGitHub, startFakeGitHub } from "../fake-github/server";
+import { FAKE_CLOUDFLARE_TOKEN, type FakeGitHub, startFakeGitHub } from "../fake-github/server";
 import { generateAppKeyPair } from "../support/app-keys";
 
 declare module "vitest" {
@@ -200,7 +200,14 @@ export async function startGateway(project: TestProject, options: SetupOptions =
       ALLOWED_ORG,
       ALLOWED_TEAM,
       // D10: タスクと consult に選べるモデル（models_list の対象。既定は AGENT_MODEL の sonnet）
-      AGENT_MODELS: "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,openai/gpt-6-sol",
+      AGENT_MODELS:
+        "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,openai/gpt-6-sol,workers-ai/@cf/openai/gpt-oss-120b",
+      // D10b: AI Gateway の BYOK のキー（provider_configs）で使えるモデルを決める。接続先は偽の Cloudflare API（偽 GitHub と同じサーバー）。
+      // 偽の既定は anthropic と openai の default キー（= 全部 available）
+      AI_GATEWAY_ID: "e2e-gateway",
+      CLOUDFLARE_ACCOUNT_ID: "e2e-account",
+      CLOUDFLARE_API_TOKEN: FAKE_CLOUDFLARE_TOKEN,
+      CLOUDFLARE_API_BASE: `${github.url}/client/v4`,
       // モデルごとの思考レベルの上書き（models_list の effort / task_status の effort の確認用。haiku は off、sol は xhigh）
       MODEL_EFFORTS: "anthropic/claude-haiku-5-5=off,openai/gpt-6-sol=xhigh",
       TOKEN_ENC_KEY,

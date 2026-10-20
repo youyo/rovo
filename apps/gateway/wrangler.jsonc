@@ -59,10 +59,16 @@
     // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する）。不正な値・0 以下は 0.5。
     // max_output_tokens もこの額に収まるよう絞られる。
     "CONSULT_BUDGET_USD": "0.5",
+    // AI Gateway の ID（agent の同名の var と同じ値にする）と Cloudflare の account id。secret の CLOUDFLARE_API_TOKEN（Account / AI Gateway / Read だけ）と
+    // 合わせて、Gateway に BYOK 登録されたプロバイダーキー（List provider keys）を読み、キーが無いプロバイダーのモデルを選べなくする（D10b）。
+    // どれかが空なら判定せず、従来どおり AGENT_MODELS だけで決める。account id は公開しない値なので、デプロイ時に実値へ置き換える（deploy.example 参照）。
+    "AI_GATEWAY_ID": "",
+    "CLOUDFLARE_ACCOUNT_ID": "",
     // 既定のモデル（task_start の model を省略したとき）。agent の同名の var と同じ値にする。
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
     // 選べるモデル（カンマ区切り。task_start の model と consult の model。models_list に出る）。
     // 空なら AGENT_MODEL だけ（fail-closed）。許可リスト（packages/models）に無い id は無視する。agent の同名の var と同じ値にする。
+    // Workers AI のモデル（"workers-ai/@cf/openai/gpt-oss-120b" など。キー不要）を入れておくと、Anthropic / OpenAI のキーが無いときの既定になる。
     "AGENT_MODELS": "",
     // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。models_list の effort と task_status / task_result に出る）。
     // 空なら packages/models の EFFORTS。不正な項目は無視して初期値にする。agent の同名の var と同じ値にする。

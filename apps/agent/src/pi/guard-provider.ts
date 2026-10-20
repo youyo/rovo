@@ -94,7 +94,7 @@ export function capOutputTokens(payload: unknown, maxTokens: number): unknown {
   if (typeof payload !== "object" || payload === null) return payload;
   const p = payload as Record<string, unknown>;
   let out: Record<string, unknown> | undefined;
-  for (const key of ["max_tokens", "max_output_tokens"]) {
+  for (const key of ["max_tokens", "max_output_tokens", "max_completion_tokens"]) {
     const v = p[key];
     if (typeof v === "number" && v > maxTokens) {
       out ??= { ...p };

@@ -11,6 +11,14 @@ interface Env {
   GITHUB_APP_PRIVATE_KEY: string;
   /** GitHub トークンを UserDO に暗号化保存する鍵。base64 の 32 バイト */
   TOKEN_ENC_KEY: string;
+  /**
+   * Cloudflare API のトークン（Secret）。権限は Account / AI Gateway / Read だけ（読み取り専用）。
+   * AI Gateway に BYOK 登録されたプロバイダーキーの有無（List provider keys）を読み、キーが無いプロバイダーのモデルを選べなくする（D10b）。
+   * 未設定ならこの判定をせず、従来どおり AGENT_MODELS だけで決める。値をログ・応答・エラーに出さない。
+   */
+  CLOUDFLARE_API_TOKEN?: string;
+  /** ENVIRONMENT=test のときだけ有効な Cloudflare API の接続先（偽サーバー。E2E 用） */
+  CLOUDFLARE_API_BASE?: string;
   // ---- R2 アーカイブ（Phase 6 M4）----
   /**
    * アーカイブ先の R2 バケット。**任意**: wrangler.jsonc には置かない（バケット名は環境固有の値で、下流が束ねる）。

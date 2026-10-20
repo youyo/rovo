@@ -44,10 +44,11 @@
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
     // タスクごとに選べるモデル（カンマ区切り。task_start の model と consult の model に使える）。
     // 空なら AGENT_MODEL だけ（fail-closed）。許可リストに無い id は無視する。gateway の同名の var と同じ値にする。
-    // 例: "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5,openai/gpt-6-sol"
+    // 例: "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5,openai/gpt-6-sol,workers-ai/@cf/openai/gpt-oss-120b"
+    // Workers AI のモデル（workers-ai/@cf/...。キー不要・無料プランでも使えるものだけ。D10b）も同じ var に書く。gateway が決めたモデルを agent がここで再検証する。
     "AGENT_MODELS": "",
     // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。レベルは off / minimal / low / medium / high / xhigh / max）。
-    // 空なら packages/models の EFFORTS（haiku=low, sonnet=high, opus=medium, fable=low, luna=low, sol=medium, astra=low）。
+    // 空なら packages/models の EFFORTS（haiku=low, sonnet=high, opus=medium, fable=low, luna=low, sol=medium, astra=low、Workers AI は gpt-oss / qwen / nemotron / glm-4.7-flash=low、gemma=high）。
     // モデルが受け付けない値・不正な書式は無視して初期値にする（起動はエラーにしない）。思考のトークンは出力として課金される。gateway の同名の var と同じ値にする。
     // 例: "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off"
     "MODEL_EFFORTS": "",

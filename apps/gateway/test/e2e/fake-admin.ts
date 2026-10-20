@@ -26,6 +26,9 @@ export function fakeGitHubAdmin(url: string) {
     setInstallation: (id: number, repositories: FakeRepository[]) =>
       post("installations", { id, repositories }),
     expireAccessTokens: () => post("expire-access-tokens"),
+    /** 偽の Cloudflare API（List provider keys）が返す、AI Gateway に BYOK 登録済みのキー（D10b。既定は anthropic と openai の default） */
+    setProviderKeys: (keys: { provider_slug: string; alias: string }[]) =>
+      post("provider-keys", { keys }),
     revokeRefreshTokens: () => post("revoke-refresh-tokens"),
     setFault: (target: FaultTarget, status: number | null, count?: number) =>
       post("fault", { target, status, count }),

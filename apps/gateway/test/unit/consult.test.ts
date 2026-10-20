@@ -297,4 +297,28 @@ describe("consult: 監査", () => {
     expect(text).not.toContain("SECRET-SYSTEM");
     expect(text).not.toContain("How should I design");
   });
+
+  it("usage が返らなかった成功（usageMissing）は、見積りの費用で精算し、consult_finished に reason: usage_missing を残す", async () => {
+    const fx = fakeAgent([
+      {
+        ok: true,
+        text: "answer",
+        model: "anthropic/claude-sonnet-5-5",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        costUsd: 0.4,
+        usageMissing: true,
+      },
+    ]);
+    const testEnv = { ...env, ENVIRONMENT: "test" } as unknown as Env;
+    const svc = createConsultService(testEnv, { agent: fx.agent });
+    const p = principal();
+    const r = await svc.consult(p, input());
+    expect(r).toMatchObject({ ok: true, value: { cost_usd: 0.4 } });
+    expect((await userStub(p.githubUserId).budgetStatus()).spent_usd).toBeCloseTo(0.4, 9);
+    const records = (await readWorkerAudit(testEnv)).filter((x) => x.userId === p.githubUserId);
+    expect(records.find((x) => x.event === "consult_finished")).toMatchObject({
+      cost_usd: 0.4,
+      reason: "usage_missing",
+    });
+  });
 });

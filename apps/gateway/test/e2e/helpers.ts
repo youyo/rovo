@@ -221,3 +221,14 @@ export async function pullOf(branch: string): Promise<FakePullView | undefined> 
   const pulls = await admin.app<FakePullView[]>("pulls", "acme/widgets");
   return pulls.find((p) => p.head === branch);
 }
+
+/** gateway が KV に持つ provider_configs のキャッシュ（5 分）と失敗の記録を消す（D10b。E2E でキーの有無を切り替えるため）。 */
+export async function resetProviderKeysCache(): Promise<void> {
+  const res = await fetch(`${baseUrl}/__test/provider-keys/reset`, { method: "POST" });
+  if (!res.ok) throw new Error(`/__test/provider-keys/reset failed: ${res.status}`);
+}
+
+/** 偽の Cloudflare API（provider_configs）への呼び出し回数 */
+export async function providerConfigsCalls(): Promise<number> {
+  return (await admin.requests()).filter((r) => r.path.endsWith("/provider_configs")).length;
+}

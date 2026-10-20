@@ -27,7 +27,8 @@ export default defineConfig({
         // Secret / 設定値のテスト用ダミー（実在の値ではない）
         bindings: {
           // D10: タスクごとに選べるモデル（Unit 用。wrangler.jsonc の既定は空 = AGENT_MODEL だけ）
-          AGENT_MODELS: "anthropic/claude-sonnet-5-5,anthropic/claude-haiku-5-5,openai/gpt-6-sol",
+          AGENT_MODELS:
+            "anthropic/claude-sonnet-5-5,anthropic/claude-haiku-5-5,openai/gpt-6-sol,workers-ai/@cf/openai/gpt-oss-120b,workers-ai/@cf/openai/gpt-oss-20b",
           // モデルごとの思考レベルの上書き（Unit 用。haiku の初期値 low を minimal に変える。wrangler.jsonc の既定は空）
           MODEL_EFFORTS: "anthropic/claude-haiku-5-5=minimal",
           GITHUB_APP_CLIENT_ID: "test-client-id",

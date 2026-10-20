@@ -2,6 +2,7 @@ import type { AuditRecord } from "@rovo/audit";
 import type { Hono } from "hono";
 import type { AgentRpc, TaskSpec } from "./agent/contract";
 import { readWorkerAudit } from "./audit-sink";
+import { resetProviderKeysCache } from "./provider-keys";
 
 /**
  * 通しの E2E 専用の仕組み（ENVIRONMENT=test のときだけ有効。それ以外は 404 / 何もしない）。
@@ -33,6 +34,13 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     const body = (await c.req.json().catch(() => ({}))) as { value?: unknown };
     if (typeof body.value === "string") await c.env.OAUTH_KV.put(DRAFT_FALLBACK_KEY, body.value);
     else await c.env.OAUTH_KV.delete(DRAFT_FALLBACK_KEY);
+    return c.json({ ok: true });
+  });
+
+  // provider_configs のキャッシュ（KV）と失敗の記録を消す（D10b。E2E がキーの有無を切り替えたあと、5 分待たずに反映させる）
+  app.post("/__test/provider-keys/reset", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    await resetProviderKeysCache(c.env.OAUTH_KV);
     return c.json({ ok: true });
   });
 

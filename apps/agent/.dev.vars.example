@@ -16,7 +16,7 @@ TOKEN_ENC_KEY=
 # 既定のモデル。許可リスト（packages/models）にあるものだけ使える。
 # AGENT_MODEL=anthropic/claude-sonnet-5-5
 # task_start / consult の model に選べるモデル（カンマ区切り。空なら AGENT_MODEL だけ）。gateway の同名の var と同じ値にする。
-# AGENT_MODELS=anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5
+# AGENT_MODELS=anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,workers-ai/@cf/openai/gpt-oss-120b
 # モデルごとの思考レベルの上書き（<モデルの id>=<off|minimal|low|medium|high|xhigh|max> のカンマ区切り。空なら既定）。gateway の同名の var と同じ値にする。
 # MODEL_EFFORTS=anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off
 

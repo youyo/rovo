@@ -109,6 +109,26 @@ describe("モデルごとの思考レベル（effort）", () => {
     }
   });
 
+  it("D10b: Workers AI のモデルでもタスクが動き（scripted の経路）、思考レベルが渡る（gpt-oss-120b=low、gemma=high）。AGENT_MODELS の外は拒否", async () => {
+    const cases: [string, string][] = [
+      ["workers-ai/@cf/openai/gpt-oss-120b", "low"],
+      ["workers-ai/@cf/google/gemma-4-26b-a4b-it", "high"],
+    ];
+    for (const [i, [model, level]] of cases.entries()) {
+      const fx = newFixture(`wai-${i}`, [report()]);
+      expect(await fx.stub.start(makeSpec(`wai-${i}`, { model })), model).toMatchObject({
+        status: "accepted",
+      });
+      expect(await waitForTerminal(fx), model).toBe("completed");
+      expect(new Set(fx.modelCalls.reasoning), model).toEqual(new Set([level]));
+    }
+    // 許可リストにはあるが、このデプロイの AGENT_MODELS に無い Workers AI のモデルは拒否する
+    const fx = newFixture("wai-out", [report()]);
+    expect(
+      await fx.stub.start(makeSpec("wai-out", { model: "workers-ai/@cf/qwen/qwen3.8-27b" })),
+    ).toMatchObject({ status: "rejected" });
+  });
+
   it("MODEL_EFFORTS の上書きが効く。off ならモデル呼び出しに reasoning を渡さない", async () => {
     const fx = newFixture("effort-override", [report()], {
       modelEfforts: "anthropic/claude-sonnet-5-5=medium",
@@ -473,6 +493,33 @@ describe("予算", () => {
     expect(usageEvents.length).toBeGreaterThan(0);
     const lastUsage = usageEvents[usageEvents.length - 1]?.data as unknown as UsageDto;
     expect(lastUsage.costUsd).toBeCloseTo(0.9, 6);
+  });
+});
+
+describe("usage が返らない成功の呼び出し（少なく数えない）", () => {
+  it("成功なのに usage が 0 のターンは、その呼び出しの見積額（上限側）を費用に積む。usage があるターンは実費のまま", async () => {
+    const fx = newFixture("usage-missing", [call("write_note", { text: "x" }), report()], {
+      maxOutputTokens: 200_000,
+    });
+    // 単価は $1/100万トークン。1 回の見積もりは出力上限 200,000 分だけで $0.2 以上
+    await fx.stub.start(makeSpec("usage-missing", { budgetUsd: 10 }));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.modelCalls.count).toBe(2);
+    const r = done(await fx.stub.getResult());
+    expect(r.usage.costUsd).toBeGreaterThanOrEqual(0.4);
+    expect(r.usage.costUsd).toBeLessThan(1);
+  });
+
+  it("積んだ見積額で予算の判定が働く（usage が返らないモデルでも予算を超えて走り続けない）", async () => {
+    const fx = newFixture(
+      "usage-missing-budget",
+      [call("write_note", { text: "a" }), call("write_note", { text: "b" }), report()],
+      { maxOutputTokens: 200_000 },
+    );
+    // 1 回 $0.2 以上。予算 $0.5 では 3 回目の前に 0.4 + 0.2 > 0.5 で止まる
+    await fx.stub.start(makeSpec("usage-missing-budget", { budgetUsd: 0.5 }));
+    expect(await waitForTerminal(fx)).toBe("budget_exceeded");
+    expect(fx.modelCalls.count).toBe(2);
   });
 });
 

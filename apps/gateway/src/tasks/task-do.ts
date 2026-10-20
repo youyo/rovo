@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "@rovo/audit";
+import type { Effort } from "@rovo/models";
 import type { z } from "zod";
 import { count, mapAgentEvent } from "../agent/agent-events";
 import type {
@@ -24,7 +25,7 @@ import {
   renderReportBlock,
   resolveGitHubBaseUrls,
 } from "../github";
-import { agentModelsOf, defaultModelOf } from "../models";
+import { agentModelsOf, defaultModelOf, effortOf } from "../models";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
@@ -120,6 +121,8 @@ export type TaskView = {
   merge_policy: MergePolicy;
   /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
   model: string;
+  /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値。考える量が多いほど出力トークン＝費用が増える） */
+  effort: Effort;
   created_at: string;
   updated_at: string;
   /** 最後のイベントの seq（不透明な cursor 文字列）。 */
@@ -174,6 +177,8 @@ export type ResultView = {
   merge_policy: MergePolicy;
   /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
   model: string;
+  /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値） */
+  effort: Effort;
   /** Draft PR の情報。PR が無い（作成前に失敗した、Phase 2 のタスク）なら null */
   pr: {
     number: number;
@@ -202,7 +207,7 @@ export type ResultView = {
 };
 
 /** 結果の組み立て途中の形（merge_policy は GitHub 側の情報と一緒に足す）。 */
-type ResultCore = Omit<ResultView, "merge_policy" | "model">;
+type ResultCore = Omit<ResultView, "merge_policy" | "model" | "effort">;
 
 /** task_pr_ready / task_pr_merge の入口で TaskDO が返す、対象と判定の結果。 */
 export type PrContextResult =
@@ -306,6 +311,8 @@ type TaskRow = {
   merge_policy: string;
   /** D10 より前のタスクは NULL（既定のモデルとして扱う） */
   model: string | null;
+  /** D10 の思考レベル。開始時の値。それより前のタスクは NULL（現在の設定から求める） */
+  effort: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -504,6 +511,8 @@ export class TaskDO extends DurableObject<Env> {
     this.addColumnIfMissing("github_link", "pr_merged", "INTEGER NOT NULL DEFAULT 0");
     // D10: 子のモデル（task_start の model。NULL は既定のモデル）
     this.addColumnIfMissing("task", "model", "TEXT");
+    // D10: 子のモデルの思考レベル（開始時の値。NULL は現在の設定から求める）
+    this.addColumnIfMissing("task", "effort", "TEXT");
     // Phase 4: 子の質問と回答、親からの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
     sql.exec(`CREATE TABLE IF NOT EXISTS questions (
       question_id TEXT PRIMARY KEY,
@@ -629,6 +638,7 @@ export class TaskDO extends DurableObject<Env> {
       draft_pr_url: row.draft_pr_url,
       merge_policy: policyOf(row),
       model: this.modelOf(row),
+      effort: this.effortOfRow(row),
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString(),
       latest_cursor: String(this.latestSeq()),
@@ -639,6 +649,11 @@ export class TaskDO extends DurableObject<Env> {
   /** 行のモデル（D10 より前のタスクは NULL。既定のモデルとして扱う）。 */
   private modelOf(row: Pick<TaskRow, "model">): string {
     return row.model ?? defaultModelOf(this.env);
+  }
+
+  /** 行の思考レベル（開始時に保存した値。無ければ現在の設定から求める）。 */
+  private effortOfRow(row: Pick<TaskRow, "model" | "effort">): Effort {
+    return (row.effort as Effort | null) ?? effortOf(this.env, this.modelOf(row));
   }
 
   /** 未回答の質問。終端のタスクには無い。 */
@@ -832,6 +847,8 @@ export class TaskDO extends DurableObject<Env> {
       return { ok: false, code: "invalid_input" };
     }
     const model = data.model ?? defaultModelOf(this.env);
+    // 思考レベルはモデルごとに固定。開始時の値を保存する（あとで MODEL_EFFORTS を変えても、このタスクの表示は変わらない）
+    const effort = effortOf(this.env, model);
     // await のあいだに他の呼び出しが進みうるので、状態の判定は await の後の同期区間で行う。
     const fingerprint = await computeFingerprint(data);
 
@@ -852,8 +869,8 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO task (singleton, id, owner_id, owner_login, repository, repository_id,
            installation_id, base_ref, base_sha, title, instructions, acceptance_criteria,
-           constraints, verification_commands, fingerprint, merge_policy, model, status, draft_pr_url, created_at, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
+           constraints, verification_commands, fingerprint, merge_policy, model, effort, status, draft_pr_url, created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
         input.task_id,
         input.owner_id,
         input.owner_login,
@@ -870,6 +887,7 @@ export class TaskDO extends DurableObject<Env> {
         fingerprint,
         data.merge_policy,
         model,
+        effort,
         at,
         at,
       );
@@ -1291,12 +1309,14 @@ export class TaskDO extends DurableObject<Env> {
     const row = this.getRow();
     const merge_policy = row ? policyOf(row) : DEFAULT_MERGE_POLICY;
     const model = row ? this.modelOf(row) : defaultModelOf(this.env);
-    if (!gl) return { ...view, merge_policy, model, pr: null };
+    const effort = row ? this.effortOfRow(row) : effortOf(this.env, model);
+    if (!gl) return { ...view, merge_policy, model, effort, pr: null };
     const extra = (JSON.parse(gl.warnings) as string[]).filter((w) => !view.warnings.includes(w));
     return {
       ...view,
       merge_policy,
       model,
+      effort,
       warnings: [...view.warnings, ...extra],
       pr:
         gl.pr_number !== null && gl.pr_url !== null

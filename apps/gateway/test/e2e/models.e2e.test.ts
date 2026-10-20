@@ -31,7 +31,18 @@ describe("D10: models_list（実 Worker・MCP SDK Client）", () => {
     const { client } = await memberClient();
     try {
       const out = bodyOf(await client.callTool({ name: "models_list", arguments: {} }));
-      const models = out.models as { id: string; default: boolean; input_per_mtok: number }[];
+      const models = out.models as {
+        id: string;
+        default: boolean;
+        input_per_mtok: number;
+        effort: string;
+      }[];
+      // 思考レベル（effort）: 初期値に、E2E の MODEL_EFFORTS（haiku=off、sol=xhigh）を重ねた最終の値
+      expect(models.map((m) => [m.id, m.effort])).toEqual([
+        ["anthropic/claude-haiku-5-5", "off"],
+        ["anthropic/claude-sonnet-5-5", "high"],
+        ["openai/gpt-6-sol", "xhigh"],
+      ]);
       expect(models.map((m) => m.id)).toEqual([
         "anthropic/claude-haiku-5-5",
         "anthropic/claude-sonnet-5-5",
@@ -89,10 +100,12 @@ describe("D10: task_start の model", () => {
         await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
       );
       expect(status.model).toBe("anthropic/claude-haiku-5-5");
+      expect(status.effort).toBe("off");
 
       await finishAgent(taskId, "completed", completedResult("a".repeat(40)));
       const result = await waitForResult(client, taskId, { needHead: false });
       expect(result.model).toBe("anthropic/claude-haiku-5-5");
+      expect(result.effort).toBe("off");
     } finally {
       await client.close();
     }
@@ -108,6 +121,43 @@ describe("D10: task_start の model", () => {
         await client.callTool({ name: "task_status", arguments: { task_id: started.task_id } }),
       );
       expect(status.model).toBe("anthropic/claude-sonnet-5-5");
+      expect(status.effort).toBe("high");
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("D10: consult のモデルの 4xx", () => {
+  it("モデルが 4xx（リクエストの中身の問題）なら model_rejected（retry_after_seconds なし）。5xx は upstream_unavailable。どちらも費用は精算される", async () => {
+    const { user, client } = await memberClient("rejected");
+    try {
+      const q1 = `consult e2e rejected ${user.id}`;
+      await setConsultScript(q1, { fail: { code: "model_rejected" } });
+      const rejected = await client.callTool({
+        name: "consult",
+        arguments: { messages: [{ role: "user", content: q1 }] },
+      });
+      expect(rejected.isError).toBe(true);
+      const body1 = bodyOf(rejected);
+      expect(body1).toMatchObject({ code: "model_rejected" });
+      expect(body1.retry_after_seconds).toBeUndefined();
+
+      const q2 = `consult e2e server error ${user.id}`;
+      await setConsultScript(q2, { fail: { code: "model_error" } });
+      const failed = await client.callTool({
+        name: "consult",
+        arguments: { messages: [{ role: "user", content: q2 }] },
+      });
+      expect(failed.isError).toBe(true);
+      expect(bodyOf(failed)).toMatchObject({
+        code: "upstream_unavailable",
+        retry_after_seconds: 30,
+      });
+
+      // 予約は閉じている
+      const after = bodyOf(await client.callTool({ name: "budget_status", arguments: {} }));
+      expect(after.reserved_usd).toBe(0);
     } finally {
       await client.close();
     }

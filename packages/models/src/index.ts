@@ -8,6 +8,7 @@
  * JSON は pi-ai の exports に無いので直接は import できない。同じ内容を平坦化した
  * `@earendil-works/pi-ai/providers/cloudflare-ai-gateway.models`（agents/models/pi-ai が使う経路と同じ）を import する。
  */
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { CLOUDFLARE_AI_GATEWAY_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-ai-gateway.models";
 
 /** 既定のモデル（AGENT_MODEL が未設定のとき）。 */
@@ -36,14 +37,14 @@ export type ThinkingOff = "between_tools" | "disabled";
  * モデルによって受け付ける値が違う（本番の AI Gateway のログで確認）:
  * - sonnet-5-5: disabled を 400 で拒否し between_tools を要求する
  * - haiku-5-5: between_tools を 400 で拒否する（"thinking.type.between_tools" is not supported）ので disabled のまま
- * - opus-5-5: 未確認。暫定で between_tools（受入で確かめる）
+ * - opus-5-5: between_tools を 400 で拒否する（haiku と同じ）ので disabled のまま（本番で確認済み 2026-10-20）
  * - fable-5-1: カタログの thinkingLevelMap.off が null で Pi が disabled を送らないので対象外（載せない）
  * OpenAI は対象外。表に無いモデルは置き換えない（Pi の値のまま）。
  */
 export const THINKING_OFF: Readonly<Record<string, ThinkingOff>> = {
   "anthropic/claude-sonnet-5-5": "between_tools",
   "anthropic/claude-haiku-5-5": "disabled",
-  "anthropic/claude-opus-5-5": "between_tools", // 未確認（暫定）
+  "anthropic/claude-opus-5-5": "disabled", // 本番で確認済み 2026-10-20
 };
 
 /** rovo の id またはカタログの id から、思考オフの値を引く。表に無ければ undefined（置き換えない）。 */
@@ -84,6 +85,12 @@ export interface ModelInfo {
   api: ModelApi;
   price: ModelPrice;
   contextWindow: number;
+  /** カタログの reasoning（思考に対応するか） */
+  reasoning: boolean;
+  /** カタログの thinkingLevelMap（null は「そのレベルを受け付けない」）。無ければ空 */
+  thinkingLevelMap: Readonly<Record<string, string | null>>;
+  /** カタログの compat.forceAdaptiveThinking（Anthropic の adaptive thinking。思考が max_tokens の中に収まる） */
+  forceAdaptiveThinking: boolean;
 }
 
 export interface TokenUsage {
@@ -114,6 +121,15 @@ function readTier(raw: unknown): PriceTier | undefined {
     cacheReadPerMTok: t.cacheRead,
     cacheWritePerMTok: t.cacheWrite,
   };
+}
+
+function readThinkingLevelMap(raw: unknown): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  if (typeof raw !== "object" || raw === null) return out;
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "string" || v === null) out[k] = v;
+  }
+  return out;
 }
 
 /** カタログの 1 エントリから ModelInfo を作る。形が合わない（cost が無いなど）なら undefined。 */
@@ -154,6 +170,12 @@ function readEntry(id: string, raw: unknown): ModelInfo | undefined {
     provider,
     api,
     contextWindow: e.contextWindow,
+    reasoning: e.reasoning === true,
+    thinkingLevelMap: readThinkingLevelMap(e.thinkingLevelMap),
+    forceAdaptiveThinking:
+      typeof e.compat === "object" &&
+      e.compat !== null &&
+      (e.compat as Record<string, unknown>).forceAdaptiveThinking === true,
     price: {
       inputPerMTok: cost.input,
       outputPerMTok: cost.output,
@@ -204,6 +226,83 @@ export function parseAgentModels(
   }
   if (INFOS.has(defaultModel) && !models.includes(defaultModel)) models.push(defaultModel);
   return { models, ignored };
+}
+
+// ---- モデルごとの思考レベル（effort）----
+
+/** 思考レベル。pi-ai の ModelThinkingLevel（off / minimal / low / medium / high / xhigh / max）。 */
+export type Effort = ModelThinkingLevel;
+
+const EFFORT_ORDER: readonly Effort[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * 思考レベルの初期値（upstream の既定。モデルごとに固定で、タスクごとには変えない）。
+ * デプロイごとに env MODEL_EFFORTS で上書きできる（resolveEfforts）。
+ * 思考のトークンは出力として課金されるので、考える量が多いほど費用が増える。
+ */
+export const EFFORTS: Readonly<Record<string, Effort>> = {
+  "anthropic/claude-haiku-5-5": "low",
+  "anthropic/claude-sonnet-5-5": "high",
+  "anthropic/claude-opus-5-5": "medium",
+  "anthropic/claude-fable-5-1": "low",
+  "openai/gpt-6-luna": "low",
+  "openai/gpt-6-sol": "medium",
+  "openai/gpt-6-astra": "low",
+};
+
+/**
+ * そのモデルが受け付ける思考レベル（pi-ai の getSupportedThinkingLevels と同じ規則）。
+ * thinkingLevelMap が null のレベルは不可（fable・astra の off、luna / sol の minimal）。xhigh / max は map に載っているものだけ。
+ * 許可リストに無い・カタログに無いモデルは空。
+ */
+export function supportedEfforts(modelId: string): Effort[] {
+  const info = INFOS.get(modelId);
+  if (!info) return [];
+  if (!info.reasoning) return ["off"];
+  return EFFORT_ORDER.filter((level) => {
+    const mapped = info.thinkingLevelMap[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
+
+/**
+ * env MODEL_EFFORTS（`<モデルの id>=<レベル>` のカンマ区切り。例 `anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off`）を
+ * 初期値に重ねた最終の値を返す。同じモデルを複数回書いたら後が勝つ。
+ * 不正な項目（書式の誤り・許可リストに無いモデル・知らないレベル・そのモデルが受け付けないレベル）は無視して初期値のままにし、
+ * 無視した項目を ignored に返す（起動はエラーにしない。AGENT_MODELS と同じ流儀。呼び出し側がログに出す）。
+ */
+export function resolveEfforts(raw: string | undefined): {
+  efforts: Readonly<Record<string, Effort>>;
+  ignored: string[];
+} {
+  const efforts: Record<string, Effort> = { ...EFFORTS };
+  const ignored: string[] = [];
+  for (const part of (raw ?? "").split(",")) {
+    const item = part.trim();
+    if (item === "") continue;
+    const pieces = item.split("=");
+    const id = pieces[0]?.trim() ?? "";
+    const level = pieces[1]?.trim() ?? "";
+    if (
+      pieces.length !== 2 ||
+      !INFOS.has(id) ||
+      !(EFFORT_ORDER as readonly string[]).includes(level) ||
+      !supportedEfforts(id).includes(level as Effort)
+    ) {
+      ignored.push(item);
+      continue;
+    }
+    efforts[id] = level as Effort;
+  }
+  return { efforts, ignored };
+}
+
+/** モデルの最終の思考レベル（MODEL_EFFORTS の上書き込み）。許可リストに無いモデルは undefined。 */
+export function effortFor(modelId: string, raw: string | undefined): Effort | undefined {
+  if (!Object.hasOwn(EFFORTS, modelId)) return undefined;
+  return resolveEfforts(raw).efforts[modelId];
 }
 
 const finite = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0);

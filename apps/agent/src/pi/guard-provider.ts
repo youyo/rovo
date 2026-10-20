@@ -6,16 +6,55 @@ import {
   type Provider,
   type SimpleStreamOptions,
   type StreamOptions,
+  type ThinkingLevel,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { thinkingOffFor } from "@rovo/models";
+
+/**
+ * 失敗したモデル呼び出しの上流の HTTP ステータス。agents の pi-ai 経路は、非 2xx の応答を CloudflareAIError にして、
+ * メッセージの diagnostics（type: "cloudflare-error"）の details.status に載せる。エラー文は解釈しない。
+ * 無ければ undefined（ストリームの途中の失敗・ネットワーク・中断など）。
+ */
+export function upstreamStatus(message: AssistantMessage): number | undefined {
+  for (const d of message.diagnostics ?? []) {
+    if (d.type !== "cloudflare-error") continue;
+    const status = (d.details as { status?: unknown } | undefined)?.status;
+    if (typeof status === "number" && Number.isFinite(status)) return status;
+  }
+  return undefined;
+}
+
+/**
+ * リクエストの中身が拒否された応答か（待っても再試行しても直らない 4xx）。
+ * 408（タイムアウト）・425・429（レート制限）は一時的なので含めない。
+ * HTTP の 4xx はリクエストが生成の前に拒否された応答で、課金されない。
+ */
+export function isRequestRejection(status: number | undefined): boolean {
+  return (
+    status !== undefined &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 425 &&
+    status !== 429
+  );
+}
 
 /** モデル呼び出しの直前に呼ばれる。block を返すと、モデルを呼ばずにエラー応答にする。 */
 export type CallGuard = (
   model: Model<Api>,
   context: TranscriptContext,
   options: StreamOptions | undefined,
-) => Promise<{ block: string } | { maxTokens: number; metadata: Record<string, unknown> }>;
+) => Promise<CallVerdict>;
+
+/**
+ * guard が許可したときの返り値。reasoning は、このモデルの思考レベル（minimal / low / medium / high / xhigh / max）。
+ * 無ければ思考オフで、Pi の options.reasoning を渡さない（thinking の値は THINKING_OFF の表で補正する）。
+ */
+export type CallVerdict =
+  | { block: string }
+  | { maxTokens: number; metadata: Record<string, unknown>; reasoning?: ThinkingLevel };
 
 const ZERO_USAGE = {
   input: 0,
@@ -46,20 +85,46 @@ export function fixAnthropicThinking(model: Model<Api>, payload: unknown): unkno
   return { ...payload, thinking: { type: off } };
 }
 
-/** 呼び出し側の onPayload を先に実行し、その結果（なければ元の payload）に補正を掛ける。 */
-function withThinkingFix<O extends StreamOptions>(options: O | undefined): O {
+/**
+ * 送る直前の payload の出力上限（Anthropic の max_tokens / OpenAI の max_output_tokens）を maxTokens 以下に抑える。
+ * 思考のトークンは出力として課金され、この上限の中に含まれる。Pi は budget 方式の思考（forceAdaptiveThinking でないモデル）で
+ * maxTokens に思考の budget を足して送るので、その場合でも予約した額を超えないようにする（二重の防御）。
+ */
+export function capOutputTokens(payload: unknown, maxTokens: number): unknown {
+  if (typeof payload !== "object" || payload === null) return payload;
+  const p = payload as Record<string, unknown>;
+  let out: Record<string, unknown> | undefined;
+  for (const key of ["max_tokens", "max_output_tokens"]) {
+    const v = p[key];
+    if (typeof v === "number" && v > maxTokens) {
+      out ??= { ...p };
+      out[key] = maxTokens;
+    }
+  }
+  return out ?? payload;
+}
+
+/** 呼び出し側の onPayload を先に実行し、その結果（なければ元の payload）に補正と出力上限を掛ける。 */
+function withPayloadFixes<O extends StreamOptions>(options: O | undefined, maxTokens: number): O {
   const original = options?.onPayload;
   return {
     ...options,
     onPayload: async (payload: unknown, model: Model<Api>) => {
       const replaced = await original?.(payload, model);
-      return fixAnthropicThinking(model, replaced === undefined ? payload : replaced);
+      return capOutputTokens(
+        fixAnthropicThinking(model, replaced === undefined ? payload : replaced),
+        maxTokens,
+      );
     },
   } as O;
 }
 
 /** 「モデル呼び出し前」のフック。provider を包み、guard が拒否したら上流を呼ばない。 */
-export function guardProvider(inner: Provider, guard: CallGuard): Provider {
+export function guardProvider(
+  inner: Provider,
+  guard: CallGuard,
+  hooks: { onResult?: (message: AssistantMessage) => void } = {},
+): Provider {
   const wrap =
     <O extends StreamOptions>(
       call: (
@@ -67,6 +132,7 @@ export function guardProvider(inner: Provider, guard: CallGuard): Provider {
         context: TranscriptContext,
         options?: O,
       ) => ReturnType<Provider["stream"]>,
+      simple: boolean,
     ) =>
     (model: Model<Api>, context: TranscriptContext, options?: O) => {
       const out = createAssistantMessageEventStream();
@@ -89,13 +155,22 @@ export function guardProvider(inner: Provider, guard: CallGuard): Provider {
             out.end(message);
             return;
           }
+          const maxTokens = Math.min(options?.maxTokens ?? verdict.maxTokens, verdict.maxTokens);
+          const { reasoning: _callerReasoning, ...rest } = withPayloadFixes(
+            options,
+            maxTokens,
+          ) as O & { reasoning?: ThinkingLevel };
           const upstream = call(model, context, {
-            ...withThinkingFix(options),
-            maxTokens: Math.min(options?.maxTokens ?? verdict.maxTokens, verdict.maxTokens),
+            ...rest,
+            maxTokens,
             metadata: { ...options?.metadata, ...verdict.metadata },
+            // 思考レベルはモデルごとに固定（呼び出し側の値より優先）。無ければオフ（reasoning を渡さない）
+            ...(simple && verdict.reasoning !== undefined ? { reasoning: verdict.reasoning } : {}),
           } as O);
           for await (const event of upstream) out.push(event);
-          out.end(await upstream.result());
+          const result = await upstream.result();
+          hooks.onResult?.(result);
+          out.end(result);
         } catch (e) {
           const message: AssistantMessage = {
             role: "assistant",
@@ -117,9 +192,9 @@ export function guardProvider(inner: Provider, guard: CallGuard): Provider {
 
   return new Proxy(inner, {
     get(target, key) {
-      if (key === "stream") return wrap<StreamOptions>((m, c, o) => target.stream(m, c, o));
+      if (key === "stream") return wrap<StreamOptions>((m, c, o) => target.stream(m, c, o), false);
       if (key === "streamSimple") {
-        return wrap<SimpleStreamOptions>((m, c, o) => target.streamSimple(m, c, o));
+        return wrap<SimpleStreamOptions>((m, c, o) => target.streamSimple(m, c, o), true);
       }
       const value = Reflect.get(target, key, target);
       return typeof value === "function" ? value.bind(target) : value;

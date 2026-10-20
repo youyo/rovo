@@ -75,6 +75,8 @@ export type FakeCalls = {
 export type ConsultScriptStep = {
   text?: string;
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** 失敗を返す（model_rejected = モデルの 4xx、model_error = 5xx など）。費用は 0 */
+  fail?: { code: "model_rejected" | "model_error" };
 };
 
 const TERMINAL: readonly AgentPhase[] = ["completed", "failed", "budget_exceeded", "cancelled"];
@@ -336,6 +338,14 @@ export class FakeAgentDO extends DurableObject {
   async consult(req: ConsultRequest): Promise<ConsultResult> {
     this.callCounts.consults.push(req);
     const step = this.consultScripts.get(req.messages[0]?.content ?? "");
+    if (step?.fail) {
+      return {
+        ok: false,
+        code: step.fail.code,
+        message: "fake consult failure",
+        costUsd: 0,
+      };
+    }
     const usage = {
       input: step?.usage?.input ?? 1000,
       output: step?.usage?.output ?? 100,

@@ -172,6 +172,13 @@ export function createConsultService(env: ConsultEnv, overrides: Partial<Consult
       await auditFromWorker(env, "consult_finished", { ...audit, cost_usd: result.costUsd });
 
       if (!result.ok) {
+        // モデルがリクエストの中身を拒否した（4xx）。待っても直らないので retry_after_seconds は付けない
+        if (result.code === "model_rejected") {
+          return fail(
+            "model_rejected",
+            "the model rejected the request (a 4xx response, e.g. invalid_request_error); retrying the same request will not help. Change the input or the model",
+          );
+        }
         if (result.code === "model_error") {
           return fail(
             "upstream_unavailable",

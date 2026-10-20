@@ -3,9 +3,13 @@ import {
   ALLOWED_MODEL_IDS,
   computeCostUsd,
   DEFAULT_MODEL,
+  EFFORTS,
+  effortFor,
   MODEL_CATALOG_IDS,
   modelInfo,
   parseAgentModels,
+  resolveEfforts,
+  supportedEfforts,
   thinkingOffFor,
 } from "../src";
 
@@ -153,10 +157,10 @@ describe("parseAgentModels（AGENT_MODELS の解釈）", () => {
 });
 
 describe("thinkingOffFor（思考をオフにするときの値）", () => {
-  it("sonnet は between_tools、haiku は disabled、opus は暫定で between_tools", () => {
+  it("sonnet は between_tools、haiku と opus は disabled（本番で確認済み 2026-10-20）", () => {
     expect(thinkingOffFor("anthropic/claude-sonnet-5-5")).toBe("between_tools");
     expect(thinkingOffFor("anthropic/claude-haiku-5-5")).toBe("disabled");
-    expect(thinkingOffFor("anthropic/claude-opus-5-5")).toBe("between_tools");
+    expect(thinkingOffFor("anthropic/claude-opus-5-5")).toBe("disabled");
   });
   it("カタログの id（プロバイダー接頭辞なし）でも引ける", () => {
     expect(thinkingOffFor("claude-sonnet-5-5")).toBe("between_tools");
@@ -167,5 +171,119 @@ describe("thinkingOffFor（思考をオフにするときの値）", () => {
     expect(thinkingOffFor("openai/gpt-6-sol")).toBeUndefined();
     expect(thinkingOffFor("claude-unknown-9")).toBeUndefined();
     expect(thinkingOffFor("toString")).toBeUndefined();
+  });
+});
+
+describe("EFFORTS（モデルごとに固定した思考レベル）", () => {
+  it("初期値は決定どおり（haiku=low / sonnet=high / opus=medium / fable=low / luna=low / sol=medium / astra=low）", () => {
+    expect(EFFORTS).toEqual({
+      "anthropic/claude-haiku-5-5": "low",
+      "anthropic/claude-sonnet-5-5": "high",
+      "anthropic/claude-opus-5-5": "medium",
+      "anthropic/claude-fable-5-1": "low",
+      "openai/gpt-6-luna": "low",
+      "openai/gpt-6-sol": "medium",
+      "openai/gpt-6-astra": "low",
+    });
+  });
+
+  it("許可リストの全モデルに初期値があり、そのモデルが受け付ける値である", () => {
+    for (const id of ALLOWED_MODEL_IDS) {
+      expect(EFFORTS[id], id).toBeDefined();
+      expect(supportedEfforts(id), id).toContain(EFFORTS[id]);
+    }
+  });
+
+  it("supportedEfforts: カタログの thinkingLevelMap に従う（fable と astra は off 不可、luna / sol は minimal 不可）", () => {
+    const claude = supportedEfforts("anthropic/claude-sonnet-5-5");
+    expect(claude).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    expect(supportedEfforts("anthropic/claude-fable-5-1")).not.toContain("off");
+    expect(supportedEfforts("anthropic/claude-fable-5-1")).toContain("max");
+    expect(supportedEfforts("openai/gpt-6-astra")).not.toContain("off");
+    expect(supportedEfforts("openai/gpt-6-astra")).not.toContain("minimal");
+    expect(supportedEfforts("openai/gpt-6-sol")).toContain("off");
+    expect(supportedEfforts("openai/gpt-6-sol")).not.toContain("minimal");
+    expect(supportedEfforts("unknown/model")).toEqual([]);
+    expect(supportedEfforts("toString")).toEqual([]);
+  });
+
+  it("予算の前提: 許可リストの Anthropic は adaptive thinking（forceAdaptiveThinking）で、max_tokens に思考が含まれる", () => {
+    // 外れると Pi が maxTokens に思考の budget を足して、予約した上限を超える（pi-ai の adjustMaxTokensForThinking）
+    for (const id of ALLOWED_MODEL_IDS) {
+      const info = modelInfo(id);
+      if (info?.api === "anthropic-messages") {
+        expect(info.forceAdaptiveThinking, id).toBe(true);
+      }
+    }
+  });
+});
+
+describe("resolveEfforts / effortFor（MODEL_EFFORTS の上書き）", () => {
+  it("未設定・空は初期値のまま、ignored なし", () => {
+    expect(resolveEfforts(undefined)).toEqual({ efforts: EFFORTS, ignored: [] });
+    expect(resolveEfforts("")).toEqual({ efforts: EFFORTS, ignored: [] });
+    expect(resolveEfforts("  , ,").ignored).toEqual([]);
+  });
+
+  it("モデルごとに上書きできる（空白を許す）。ほかのモデルは初期値のまま", () => {
+    const r = resolveEfforts(
+      " anthropic/claude-sonnet-5-5 = medium , anthropic/claude-haiku-5-5=off",
+    );
+    expect(r.ignored).toEqual([]);
+    expect(r.efforts["anthropic/claude-sonnet-5-5"]).toBe("medium");
+    expect(r.efforts["anthropic/claude-haiku-5-5"]).toBe("off");
+    expect(r.efforts["anthropic/claude-opus-5-5"]).toBe("medium");
+    expect(r.efforts["openai/gpt-6-sol"]).toBe("medium");
+  });
+
+  it("xhigh / max も、モデルが受け付けるなら使える", () => {
+    expect(effortFor("anthropic/claude-opus-5-5", "anthropic/claude-opus-5-5=xhigh")).toBe("xhigh");
+    expect(effortFor("openai/gpt-6-sol", "openai/gpt-6-sol=max")).toBe("max");
+  });
+
+  it("同じモデルを複数回書いたら後のものが勝つ", () => {
+    expect(
+      effortFor(
+        "anthropic/claude-sonnet-5-5",
+        "anthropic/claude-sonnet-5-5=low,anthropic/claude-sonnet-5-5=max",
+      ),
+    ).toBe("max");
+  });
+
+  it("モデルが受け付けない値は無視して初期値のまま（fable / astra の off、luna の minimal）", () => {
+    const r = resolveEfforts(
+      "anthropic/claude-fable-5-1=off,openai/gpt-6-astra=off,openai/gpt-6-luna=minimal",
+    );
+    expect(r.efforts["anthropic/claude-fable-5-1"]).toBe("low");
+    expect(r.efforts["openai/gpt-6-astra"]).toBe("low");
+    expect(r.efforts["openai/gpt-6-luna"]).toBe("low");
+    expect(r.ignored).toHaveLength(3);
+  });
+
+  it("不正な書式・未知の値・許可リストに無いモデル・プロトタイプ名は無視する（ほかの項目は有効）", () => {
+    const r = resolveEfforts(
+      [
+        "no-equals",
+        "=high",
+        "anthropic/claude-sonnet-5-5=",
+        "anthropic/claude-sonnet-5-5=HIGH",
+        "anthropic/claude-sonnet-5-5=turbo",
+        "anthropic/claude-sonnet-5-5=a=b",
+        "anthropic/unknown=high",
+        "__proto__=high",
+        "toString=low",
+        "anthropic/claude-haiku-5-5=medium",
+      ].join(","),
+    );
+    expect(r.efforts["anthropic/claude-haiku-5-5"]).toBe("medium");
+    expect(r.efforts["anthropic/claude-sonnet-5-5"]).toBe("high");
+    expect(r.ignored).toHaveLength(9);
+    expect(Object.keys(r.efforts).sort()).toEqual([...ALLOWED_MODEL_IDS].sort());
+  });
+
+  it("effortFor: 許可リストに無いモデルは undefined", () => {
+    expect(effortFor("anthropic/claude-sonnet-5-5", undefined)).toBe("high");
+    expect(effortFor("scripted/script-1", undefined)).toBeUndefined();
+    expect(effortFor("toString", undefined)).toBeUndefined();
   });
 });

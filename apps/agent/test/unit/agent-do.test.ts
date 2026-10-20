@@ -90,6 +90,82 @@ describe("タスクごとのモデル（D10）", () => {
   });
 });
 
+describe("モデルごとの思考レベル（effort）", () => {
+  // vitest.config.ts の AGENT_MODELS: sonnet（既定）・haiku・gpt-6-sol。EFFORTS の初期値は sonnet=high / haiku=low / sol=medium
+
+  it("モデルの思考レベルを、Pi のモデル呼び出し（options.reasoning）に毎回渡す。指定が無ければ既定のモデル（sonnet=high）", async () => {
+    const cases: [string | undefined, string][] = [
+      [undefined, "high"],
+      ["anthropic/claude-sonnet-5-5", "high"],
+      ["anthropic/claude-haiku-5-5", "low"],
+      ["openai/gpt-6-sol", "medium"],
+    ];
+    for (const [i, [model, level]] of cases.entries()) {
+      const fx = newFixture(`effort-${i}`, [report()]);
+      await fx.stub.start(makeSpec(`effort-${i}`, model ? { model } : {}));
+      expect(await waitForTerminal(fx), model).toBe("completed");
+      expect(fx.modelCalls.reasoning.length, model).toBeGreaterThan(0);
+      expect(new Set(fx.modelCalls.reasoning), model).toEqual(new Set([level]));
+    }
+  });
+
+  it("MODEL_EFFORTS の上書きが効く。off ならモデル呼び出しに reasoning を渡さない", async () => {
+    const fx = newFixture("effort-override", [report()], {
+      modelEfforts: "anthropic/claude-sonnet-5-5=medium",
+    });
+    await fx.stub.start(makeSpec("effort-override"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(new Set(fx.modelCalls.reasoning)).toEqual(new Set(["medium"]));
+
+    const off = newFixture("effort-off", [report()], {
+      modelEfforts: "anthropic/claude-sonnet-5-5=off",
+    });
+    await off.stub.start(makeSpec("effort-off"));
+    expect(await waitForTerminal(off)).toBe("completed");
+    expect(new Set(off.modelCalls.reasoning)).toEqual(new Set([undefined]));
+  });
+
+  it("モデルが受け付けない値の上書きは無視して初期値のまま（起動は失敗しない）", async () => {
+    const fx = newFixture("effort-bad", [report()], {
+      modelEfforts: "anthropic/claude-haiku-5-5=turbo,garbage",
+    });
+    await fx.stub.start(makeSpec("effort-bad", { model: "anthropic/claude-haiku-5-5" }));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(new Set(fx.modelCalls.reasoning)).toEqual(new Set(["low"]));
+  });
+
+  it("思考を含めても、モデルに渡す出力の上限は DEFAULT / 上書きした maxOutputTokens を超えない", async () => {
+    const fx = newFixture("effort-max", [report()], {
+      maxOutputTokens: 777,
+      modelEfforts: "anthropic/claude-sonnet-5-5=max",
+    });
+    await fx.stub.start(makeSpec("effort-max"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(new Set(fx.modelCalls.reasoning)).toEqual(new Set(["max"]));
+    expect(Math.max(...fx.modelCalls.maxTokens.map((n) => n ?? 0))).toBe(777);
+  });
+});
+
+describe("モデルの 4xx と 5xx の区別（タスク）", () => {
+  it("モデルが 4xx（リクエストの中身の問題）で失敗したら、終端の reason は model_rejected（待っても直らない）", async () => {
+    const fx = newFixture("rej-4xx", [{ error: "invalid_request_error", status: 400 }]);
+    await fx.stub.start(makeSpec("rej-4xx"));
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(done(await fx.stub.getResult()).reason).toMatch(/^model_rejected/);
+  });
+
+  it("5xx・status なしは今までどおり model_error", async () => {
+    for (const [i, status] of [503, undefined].entries()) {
+      const fx = newFixture(`rej-5xx-${i}`, [
+        { error: "upstream", ...(status !== undefined ? { status } : {}) },
+      ]);
+      await fx.stub.start(makeSpec(`rej-5xx-${i}`));
+      expect(await waitForTerminal(fx)).toBe("failed");
+      expect(done(await fx.stub.getResult()).reason).toMatch(/^model_error/);
+    }
+  });
+});
+
 describe("cancel", () => {
   it("start より先に cancel が届くと、start は cancelled を返して何も始めない", async () => {
     const fx = newFixture("cancel-first", [report()]);

@@ -26,6 +26,8 @@ GITHUB_APP_PRIVATE_KEY=
 # agent の同名の var と同じ値にする。
 # AGENT_MODEL=anthropic/claude-sonnet-5-5
 # AGENT_MODELS=anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5
+# モデルごとの思考レベルの上書き（<モデルの id>=<off|minimal|low|medium|high|xhigh|max> のカンマ区切り。空なら既定）。agent の同名の var と同じ値にする。
+# MODEL_EFFORTS=anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off
 
 # ログインとツール呼び出しを許可する範囲。次の 2 つのうち少なくとも 1 つを設定する（どちらかを満たせば許可）。
 # 1. org と team（slug）。対で設定する。片方だけだと設定の誤りとしてログインできない

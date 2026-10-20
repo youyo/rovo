@@ -158,3 +158,118 @@ describe("guardProvider の thinking 補正", () => {
     expect(seen).toEqual({ messages: [], thinking: { type: "between_tools" }, extra: 1 });
   });
 });
+
+/** 上流の streamSimple / stream が受け取った options を記録する */
+async function runOptions(
+  verdict: { maxTokens: number; metadata: Record<string, unknown>; reasoning?: string },
+  via: "stream" | "streamSimple",
+  options: Record<string, unknown> = {},
+) {
+  let seen: Record<string, unknown> = {};
+  const inner = {
+    stream: (m: Model<Api>, _c: unknown, o?: Record<string, unknown>) => call(m, o),
+    streamSimple: (m: Model<Api>, _c: unknown, o?: Record<string, unknown>) => call(m, o),
+  } as unknown as Provider;
+  const call = (m: Model<Api>, o?: Record<string, unknown>) => {
+    seen = o ?? {};
+    const out = createAssistantMessageEventStream();
+    out.end(message(m));
+    return out;
+  };
+  const guarded = guardProvider(inner, async () => verdict as never);
+  await guarded[via](anthropicModel, context, options as never).result();
+  return seen;
+}
+
+describe("guardProvider の思考レベル（reasoning）", () => {
+  it("guard が返した reasoning を streamSimple の options.reasoning に渡す", async () => {
+    for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
+      const seen = await runOptions(
+        { maxTokens: 100, metadata: {}, reasoning: level },
+        "streamSimple",
+      );
+      expect(seen.reasoning).toBe(level);
+    }
+  });
+
+  it("reasoning が無い（= off）なら渡さない。呼び出し側が渡していても消す（モデルごとの固定を優先）", async () => {
+    const none = await runOptions({ maxTokens: 100, metadata: {} }, "streamSimple");
+    expect("reasoning" in none).toBe(false);
+    const overridden = await runOptions({ maxTokens: 100, metadata: {} }, "streamSimple", {
+      reasoning: "high",
+    });
+    expect(overridden.reasoning).toBeUndefined();
+    const replaced = await runOptions(
+      { maxTokens: 100, metadata: {}, reasoning: "low" },
+      "streamSimple",
+      { reasoning: "high" },
+    );
+    expect(replaced.reasoning).toBe("low");
+  });
+
+  it("stream（簡易でない経路）には reasoning を足さない", async () => {
+    const seen = await runOptions({ maxTokens: 100, metadata: {}, reasoning: "high" }, "stream");
+    expect("reasoning" in seen).toBe(false);
+  });
+
+  it("maxTokens は guard の上限を超えない（思考を含めた出力の上限）", async () => {
+    const seen = await runOptions(
+      { maxTokens: 100, metadata: {}, reasoning: "high" },
+      "streamSimple",
+      { maxTokens: 5000 },
+    );
+    expect(seen.maxTokens).toBe(100);
+  });
+});
+
+describe("guardProvider の出力上限の二重化（payload）", () => {
+  it("送る直前の payload の max_tokens / max_output_tokens が guard の上限を超えていたら上限へ下げる", async () => {
+    const m = anthropicModel;
+    let seen: unknown;
+    const inner = {
+      streamSimple: (
+        mm: Model<Api>,
+        _c: unknown,
+        o?: { onPayload?: (p: unknown, m: Model<Api>) => unknown },
+      ) => {
+        const out = createAssistantMessageEventStream();
+        void (async () => {
+          seen = await o?.onPayload?.(
+            { max_tokens: 5000, max_output_tokens: 7000, messages: [] },
+            mm,
+          );
+          out.end(message(mm));
+        })();
+        return out;
+      },
+    } as unknown as Provider;
+    const guarded = guardProvider(
+      inner,
+      async () => ({ maxTokens: 100, metadata: {}, reasoning: "high" }) as never,
+    );
+    await guarded.streamSimple(m, context, {} as never).result();
+    expect(seen).toEqual({ max_tokens: 100, max_output_tokens: 100, messages: [] });
+  });
+
+  it("上限以下なら変えない", async () => {
+    const payload = { max_tokens: 50, messages: [] };
+    let seen: unknown;
+    const inner = {
+      streamSimple: (
+        mm: Model<Api>,
+        _c: unknown,
+        o?: { onPayload?: (p: unknown, m: Model<Api>) => unknown },
+      ) => {
+        const out = createAssistantMessageEventStream();
+        void (async () => {
+          seen = await o?.onPayload?.(payload, mm);
+          out.end(message(mm));
+        })();
+        return out;
+      },
+    } as unknown as Provider;
+    const guarded = guardProvider(inner, async () => ({ maxTokens: 100, metadata: {} }));
+    await guarded.streamSimple(anthropicModel, context, {} as never).result();
+    expect(seen).toEqual(payload);
+  });
+});

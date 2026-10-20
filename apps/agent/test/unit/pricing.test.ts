@@ -1,3 +1,4 @@
+import { ALLOWED_MODEL_IDS, computeCostUsd, supportedEfforts } from "@rovo/models";
 import { describe, expect, it } from "vitest";
 import {
   estimateCallCostUsd,
@@ -111,6 +112,46 @@ describe("maxOutputTokensWithin（consult の出力の上限）", () => {
   it("壊れた予算（0・負・NaN）は 0", () => {
     for (const b of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(maxOutputTokensWithin(sonnet, 10, b)).toBe(0);
+    }
+  });
+});
+
+describe("思考レベル（effort）を含めた予算の上限", () => {
+  // 思考のトークンは出力として課金され、max_tokens / max_output_tokens の中に収まる（adaptive thinking・Responses の reasoning）。
+  // なので、出力の上限（cap）いっぱいまで思考で使い切っても、費用は予約額を超えない。レベルによらず同じ式で守れることを固定する。
+  it("どのモデル・どの思考レベルでも、出力を cap トークンまで（思考で）使い切った実費は予約額以下", () => {
+    for (const id of ALLOWED_MODEL_IDS) {
+      const price = priceFor(id, false);
+      if (!price) throw new Error(`price missing: ${id}`);
+      for (const effort of supportedEfforts(id)) {
+        for (const [context, budget] of [
+          [1_100, 0.5],
+          [50_000, 0.5],
+          [150_000, 0.5],
+          [1_100, 0.005],
+        ] as const) {
+          const cap = maxOutputTokensWithin(price, context, budget);
+          // 入力だけで予算を超えるなら出力の余地は 0（consult は input_too_large で拒否する）
+          if (cap === 0) {
+            expect(
+              estimateCallCostUsd(price, context, 0),
+              `${id} ${effort}`,
+            ).toBeGreaterThanOrEqual(budget);
+            continue;
+          }
+          expect(estimateCallCostUsd(price, context, cap), `${id} ${effort}`).toBeLessThanOrEqual(
+            budget,
+          );
+          // 実費の計算（入力 context + 出力 cap。出力に思考の分が含まれる）も予約額以下
+          const actual = computeCostUsd(price, {
+            input: context,
+            output: cap,
+            cacheRead: 0,
+            cacheWrite: 0,
+          });
+          expect(actual, `${id} ${effort}`).toBeLessThanOrEqual(budget);
+        }
+      }
     }
   });
 });

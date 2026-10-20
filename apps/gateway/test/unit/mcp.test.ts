@@ -1581,6 +1581,7 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       tiers: [],
       context_window: 1_000_000,
       default: true,
+      effort: "high",
     });
     const haiku = models.find((m) => m.id === "anthropic/claude-haiku-5-5");
     expect(haiku?.tiers).toEqual([
@@ -1596,6 +1597,14 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       provider: "openai",
       api: "openai-responses",
     });
+    // effort: モデルごとに固定の思考レベル（初期値に MODEL_EFFORTS を重ねた最終の値。Unit の haiku は minimal に上書き）
+    expect(models.map((m) => [m.id, m.effort])).toEqual([
+      ["anthropic/claude-sonnet-5-5", "high"],
+      ["anthropic/claude-haiku-5-5", "minimal"],
+      ["openai/gpt-6-sol", "medium"],
+    ]);
+    expect(tool?.description).toContain("effort");
+    expect(tool?.description).toContain("思考レベルはモデルごとに決まっている");
     await client.close();
   });
 
@@ -1723,6 +1732,7 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       await client.callTool({ name: "task_status", arguments: { task_id: ok.task_id } }),
     );
     expect(status.model).toBe("anthropic/claude-haiku-5-5");
+    expect(status.effort).toBe("minimal"); // Unit の MODEL_EFFORTS（haiku=minimal）
     expect((await fakeAgent(String(ok.task_id)).calls()).specs[0]?.model).toBe(
       "anthropic/claude-haiku-5-5",
     );
@@ -1737,6 +1747,11 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       await client.callTool({ name: "task_status", arguments: { task_id: s.task_id } }),
     );
     expect(status.model).toBe("anthropic/claude-sonnet-5-5");
+    expect(status.effort).toBe("high");
+    const tools = await list(client);
+    for (const name of ["task_status", "task_result"]) {
+      expect(tools.find((t) => t.name === name)?.description, name).toContain("effort");
+    }
     await client.close();
   });
 });
@@ -1761,6 +1776,9 @@ describe("D10: AI への伝え方（instructions と説明）", () => {
       expect(text, word).toContain(word);
     }
     expect(text).toContain("Anthropic / OpenAI の残高は取得できない");
+    // 思考レベル（effort）はモデルごとに決まっていて、考える量が多いほど出力トークン＝費用が増える
+    expect(text).toContain("思考レベルはモデルごとに決まっている（effort）");
+    expect(text).toContain("考える量が多いほど出力トークン＝費用が増える");
     await client.close();
   });
 

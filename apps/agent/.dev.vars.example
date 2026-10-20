@@ -17,6 +17,8 @@ TOKEN_ENC_KEY=
 # AGENT_MODEL=anthropic/claude-sonnet-5-5
 # task_start / consult の model に選べるモデル（カンマ区切り。空なら AGENT_MODEL だけ）。gateway の同名の var と同じ値にする。
 # AGENT_MODELS=anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5
+# モデルごとの思考レベルの上書き（<モデルの id>=<off|minimal|low|medium|high|xhigh|max> のカンマ区切り。空なら既定）。gateway の同名の var と同じ値にする。
+# MODEL_EFFORTS=anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off
 
 # production（既定）/ test。test は E2E 専用（台本付き fake モデルや /test/* ルートが有効になる）。本番で test にしない。
 # ENVIRONMENT=production

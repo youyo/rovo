@@ -24,6 +24,5 @@ describe("偽の AgentDO（Unit の AGENT_DO）", () => {
     const page = await agent.getEvents(0, 100);
     expect(page.events.map((e) => e.type)).toEqual(["phase", "phase"]);
     expect(page.phase).toBe("running");
-    // 全ファイルが 1 つの workerd を共有するので、最初の DO 呼び出しは起動待ちで 5 秒（既定）を超えうる。期待は変えず、待てる時間だけ延ばす
-  }, 30_000);
+  });
 });

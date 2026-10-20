@@ -51,7 +51,7 @@ case "$1" in
     printf 'K%042d=\n' "$n" ;;
   pkcs8)
     pem=""; while [ $# -gt 0 ]; do [ "$1" = "-in" ] && pem="$2"; shift; done
-    grep -q BADPEM "$pem" && exit 1
+    if [ -z "$pem" ]; then in="$(cat)"; case "$in" in *BADPEM*) exit 1 ;; esac; else grep -q BADPEM "$pem" && exit 1; fi
     printf '%s\n%s\n%s\n' "-----BEGIN ""PRIVATE KEY-----" "CONVERTED-FAKE-BODY" "-----END ""PRIVATE KEY-----" ;;
   *) exit 9 ;;
 esac
@@ -274,5 +274,48 @@ run set "$work/link" web; rc=$?
 expect "(f1) upstream の apps/web/wrangler.jsonc へのリンクは失敗し、wrangler を呼ばない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(ncalls)"
 run set "$work/link" all; rc=$?
 expect "(f2) all: 1 つでも upstream へのリンクなら、1 つも実行しない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(ncalls)"
+
+# (g) secrets --github-app-stdin: 新しく作った GitHub App の client secret と pem を標準入力（JSON）で受け取る。
+#     この 2 つだけを、既に入っていても入れ直す（新しい App の資格情報なので）。list・terraform・ほかの secret には触れない
+RSA_BEGIN="-----BEGIN RSA ""PRIVATE KEY-----"; RSA_END="-----END RSA ""PRIVATE KEY-----"
+mkdir -p "$work/stdin-case"
+node -e 'const [b,e]=process.argv.slice(1);process.stdout.write(JSON.stringify({clientSecret:"CS-SENTINEL-1",privateKey:b+"\nPEMBODY\n"+e+"\n"}))' -- "$RSA_BEGIN" "$RSA_END" > "$work/stdin-case/ok.json"
+node -e 'process.stdout.write(JSON.stringify({clientSecret:"CS-SENTINEL-1",privateKey:"BADPEM"}))' > "$work/stdin-case/badpem.json"
+node -e 'process.stdout.write(JSON.stringify({clientSecret:"",privateKey:"x"}))' > "$work/stdin-case/nocs.json"
+node -e 'process.stdout.write(JSON.stringify({clientSecret:"cs"}))' > "$work/stdin-case/nopk.json"
+echo 'not json' > "$work/stdin-case/garbage.json"
+run_in() { # run_in <JSON ファイル> <ROVO_DEPLOY_DIR> <引数...>
+  : > "$FAKE_LOG"; : > "$FAKE_STDIN_LOG"; : > "$FAKE_OPENSSL_LOG"; : > "$FAKE_TF_LOG"; rm -f "$FAKE_RAND_COUNTER"
+  local json="$1" dir="$2"; shift 2
+  ( cd "$work" && ROVO_DEPLOY_DIR="$dir" PATH="$work/bin:$PATH" bash "$deploy" "$@" ) >"$work/out.log" 2>&1 <"$json"
+}
+cs_hash="$(printf '%s' 'CS-SENTINEL-1' | shasum | cut -c1-12)"
+export FAKE_SECRETS_gateway="GITHUB_APP_CLIENT_SECRET GITHUB_APP_PRIVATE_KEY CLOUDFLARE_API_TOKEN TOKEN_ENC_KEY"
+run_in "$work/stdin-case/ok.json" "$work/full" secrets --github-app-stdin; rc=$?
+expect "(g1) 成功し、gateway の GitHub App の 2 つだけを入れる（list も terraform も呼ばない）" "0 gateway exec wrangler secret put GITHUB_APP_CLIENT_SECRET -c $work/full/gateway.wrangler.jsonc
+gateway exec wrangler secret put GITHUB_APP_PRIVATE_KEY -c $work/full/gateway.wrangler.jsonc 0" "$rc $(calls) $(cat "$FAKE_TF_LOG" | wc -l | tr -d ' ')"
+expect "(g2) client secret は標準入力のパイプで渡る（値は JSON から取り出したもの）" "$cs_hash" "$(stdin_of 'gateway GITHUB_APP_CLIENT_SECRET' | cut -d' ' -f1)"
+expect "(g3) 秘密鍵は PKCS#8 に変換して標準入力で渡る" "$converted_hash" "$(stdin_of 'gateway GITHUB_APP_PRIVATE_KEY' | cut -d' ' -f1)"
+expect "(g4) openssl pkcs8 -topk8 -nocrypt は標準入力から読む（-in を使わない＝鍵をファイルにしない）" "openssl pkcs8 -topk8 -nocrypt" "$(cat "$FAKE_OPENSSL_LOG")"
+if grep -q "CS-SENTINEL\|PEMBODY\|CONVERTED-FAKE" "$FAKE_LOG" "$work/out.log"; then
+  expect "(g5) 値を引数・ログ・出力に載せない" ok ng
+else expect "(g5) 値を引数・ログ・出力に載せない" ok ok; fi
+unset FAKE_SECRETS_gateway
+for c in badpem nocs nopk garbage; do
+  run_in "$work/stdin-case/$c.json" "$work/full" secrets --github-app-stdin; rc=$?
+  expect "(g6) $c: 失敗し、1 つも put しない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(nputs)"
+done
+run_in "$work/stdin-case/ok.json" "$work/full" secrets --github-app-stdin --pem "$pem"; rc=$?
+expect "(g7) --pem との併用は失敗し、put しない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(nputs)"
+run_in "$work/stdin-case/ok.json" "$work/full" secrets --github-app-stdin --rotate all; rc=$?
+expect "(g8) --rotate との併用は失敗し、put しない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(nputs)"
+run_in "$work/stdin-case/ok.json" "$work/full" secrets --github-app-stdin --skip-github-app; rc=$?
+expect "(g9) --skip-github-app との併用は失敗し、put しない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(nputs)"
+run_in "$work/stdin-case/ok.json" "$work/full" gateway --github-app-stdin; rc=$?
+expect "(g10) secrets 以外には渡せない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(ncalls)"
+run_in "$work/stdin-case/ok.json" "$work/empty" secrets --github-app-stdin; rc=$?
+expect "(g11) gateway の設定が無ければ失敗し、put しない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(nputs)"
+run_in "$work/stdin-case/ok.json" "$work/ph-gw" secrets --github-app-stdin; rc=$?
+expect "(g12) gateway の設定に <...> が残っていれば失敗し、put しない" "1 0" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(nputs)"
 
 exit "$fail"

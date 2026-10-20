@@ -41,6 +41,8 @@
 | 20 | 公開前の最終確認 | ○（`release:check`） | 公開後の確認 | | ○ | | 履歴の処理・公開・PVR の有効化はユーザーと一緒に行う |
 | 21 | PR の Ready 化とマージ（D9） | ○（偽 GitHub） | ○ | 小 | ○ | ○ | 検証用リポジトリで COMPLETED のタスクを作り、`task_pr_ready` / `task_pr_merge` を呼ぶ。ブランチ保護（必須レビューまたは必須チェック）で拒否されることも確かめる。App の権限（Pull requests / Contents の write）の確認を兼ねる |
 
+| 22 | モデルの選択・予算・consult（D10） | ○（偽の AgentDO・台本） | ○ | 小 | ○ | ○ | 実 Anthropic でキャッシュの効き（2 回目の `cache_read`）と単価を確かめる。OpenAI は BYOK の登録後（任意） |
+
 環境の準備が要る個別の項目（節をまたぐ）:
 
 | 項目 | 節 | 準備 |
@@ -495,6 +497,29 @@ M6（点検）と M11（公開）の結果の記録。履歴の処理・push・�
 - [ ] 実 Claude Code から、MCP の `instructions` と `next_steps` だけを頼りに（手順を教えずに）レビュー → `task_pr_ready` →（`agent_merge` なら）`task_pr_merge` まで進められた。迷った点を備考に書く
 
 ### D9 の結果
+
+| 実施者 | 日付 | 環境 | 結果 | 備考 |
+|---|---|---|---|---|
+| | | | | |
+
+## 22. モデルの選択・予算・consult（D10）
+
+呼び出し元の AI がモデルと単価を見て選び、残りの予算を確かめ、`consult` でセカンドオピニオンを得られることの確認（design 15.8 の D10）。自動テスト（`test:unit` の `models` / `audit` / `user-consult-budget` / `consult` / `task-model` / `mcp` / agent の `pricing` / `consult-cache` / `agent-do-consult`、`test:e2e:gateway` の `models.e2e.test.ts`）は偽の AgentDO（台本）で済んでいる。ここでは実機（実 Anthropic・AI Gateway）で、単価とキャッシュの効きを確かめる。
+
+前提: AI Gateway に Anthropic の BYOK 登録済み（`docs/deploy.md` の 7）。gateway と agent の `AGENT_MODELS` に `anthropic/claude-haiku-5-5` と `anthropic/claude-sonnet-5-5` を入れ、同じ値にしてある。確認ごとに課金される（小。consult は 1 回 $0.5 まで）。
+
+- [ ] `models_list`: `AGENT_MODELS` のモデルだけが、単価つきで返る（`default: true` は `AGENT_MODEL` の 1 件だけ）。単価は pi-ai のカタログ（`providers/data/cloudflare-ai-gateway.json`）と一致する（haiku は `tiers` に 100,000 超の上位の単価〔`cache_read_per_mtok` 0.05、`cache_write_per_mtok` 0.625〕を持つ）。`AGENT_MODELS` に許可リスト外の id を足しても `models_list` に出ず、使えない（`task_start` / `consult` が `invalid_input`）
+- [ ] `task_start` に `model: "anthropic/claude-haiku-5-5"` を指定した小さなタスク: `task_status` / `task_result` の `model` が haiku。AI Gateway のログ（モデル名、metadata の `userId` / `taskId`）が haiku で、`task_result` の `usage.cost_usd` が haiku の単価の桁（sonnet より小さい）。`model` を省略したタスクは `AGENT_MODEL`（既定 sonnet）。`AGENT_MODELS` の外のモデルは `invalid_input`
+- [ ] `budget_status`: タスクの前は `reserved_usd` が 0。実行中は `reserved_usd` がタスクの予約額（`task_budget_usd`）になり、`remaining_usd` がその分減る。終端（停止の確認後）のあとは `reserved_usd` が 0 に戻り、`spent_usd` が `task_result` の `usage.cost_usd` 分だけ増える。`period` が今月（UTC）。説明に Anthropic / OpenAI の残高は取得できないと書かれている
+- [ ] `consult` の予約と精算: `consult` を呼ぶと `usage` と `cost_usd` が返る。`budget_status` の `spent_usd` が `cost_usd` の分だけ増え、`reserved_usd` は呼び出しのあとで 0（実行中だけ `consult_budget_usd` が載る）。`consult` はタスクの実行中でも呼べる（同時実行の枠を使わない）。監査ログに `consult_started` / `consult_finished`（`userId`・`model`・`consult_id`、finished は `cost_usd`）が出ていて、会話の内容は含まれない。AI Gateway のログの metadata に `userId` / `consultId` / `caller: "consult"`
+- [ ] **prompt caching（`consult` を 2 回）**: 前置き（`system` と、最後の user メッセージより前の履歴）を **4,000 トークン以上**にして（短いとキャッシュされない。モデルにより最小は 1024〜4096 程度）、同じ前置き＋違う質問で 5 分以内に 2 回呼ぶ。1 回目は `usage.cache_write` が 0 より大きく、2 回目は `usage.cache_read` が 0 より大きい（1 回目の `cache_write` とほぼ同じ）。2 回目の `cost_usd` が 1 回目より小さい。前置きを変えると `cache_read` は 0 に戻る。AI Gateway のログの `cache_control` の位置（system の末尾と、最後の user の直前）を見られれば見る
+- [ ] `consult` の上限: `max_output_tokens` を小さくすると出力が切れる（`usage.output` がその値以下）。予約額（`CONSULT_BUDGET_USD`）に収まらない大きさの入力（sonnet で UTF-8 の約 200KB 以上。gateway の入力上限 256KB の手前）は `invalid_input` で、モデルは呼ばれない（`budget_status` の `spent_usd` が増えない）。月の枠を使い切った状態（`MONTHLY_BUDGET_USD` を一時的に下げる）では `budget_exceeded`
+- [ ] 食い違い: gateway にだけ `AGENT_MODELS` を足したモデルで `task_start` すると、agent が `unknown_model` で拒否し、タスクが FAILED になる（予約は解放される）。デプロイで揃える（備考に結果を書く）
+- [ ] D9 の受入で見つかった 2 点: `task_start` の説明に `["sh", "-c", ...]` の例があり、実 Claude Code がシェルの機能を使う検証コマンドをその形で渡せた。終端の直後の `task_result` の `not_ready` を、`task_wait` か少し待っての再呼び出しで越えられた
+- [ ] 実 Claude Code から、MCP の `instructions` と説明だけを頼りに（手順を教えずに）、`models_list` でモデルを選んで `task_start` し、`budget_status` で残りを確かめ、設計の相談に `consult` を使えた。迷った点を備考に書く
+- [ ] **OpenAI（BYOK 登録後。任意）**: AI Gateway のプロバイダー キーに OpenAI をエイリアス `default` で登録し、OpenAI 側で利用上限を設定する。`AGENT_MODELS` に `openai/gpt-6-luna`（安いもの）を足し、gateway と agent に反映する。`models_list` に出る。`consult` を `model: "openai/gpt-6-luna"` で 2 回呼び、2 回目に自動キャッシュで `cache_read` が付くか（前置きは 1024 トークン以上）と、`cost_usd` が単価の桁かを見る。AI Gateway のログのプロバイダーが openai。`task_start` に `openai/gpt-6-luna` を指定した小さなタスクが完了する（`reasoning` が原因の 400 などが出ないか。`gpt-6-astra` は `reasoning` を省略する設定のため、出力が reasoning で切れないかも見る）。キーを登録していない OpenAI のモデルは 400 で失敗し、Claude には影響しない。対象リポジトリのコードが OpenAI にも送られることを、運用者が了承している
+
+### D10 の結果
 
 | 実施者 | 日付 | 環境 | 結果 | 備考 |
 |---|---|---|---|---|

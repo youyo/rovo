@@ -34,6 +34,7 @@ export function parseTimeoutSeconds(raw: number | undefined): Parsed<number> {
 
 // 行サイズ（DO の SQLite は 1 行 2MB まで）を超えないための上限。仕様に数値の指定は無い。
 const MAX_TITLE = 200;
+const MAX_MODEL_LENGTH = 100;
 const MAX_INSTRUCTIONS = 100_000;
 const MAX_LIST_ITEMS = 50;
 const MAX_LIST_ITEM_LENGTH = 2_000;
@@ -91,6 +92,8 @@ export const taskInputSchema = z.object({
     .max(MAX_VERIFICATION_COMMANDS)
     .default([]),
   merge_policy: z.enum(MERGE_POLICIES).default(DEFAULT_MERGE_POLICY),
+  /** 子のモデル（D10）。省略は env の AGENT_MODEL。env の AGENT_MODELS の中だけ（照合は service と TaskDO が env で行う） */
+  model: z.string().min(1).max(MAX_MODEL_LENGTH).optional(),
 });
 
 /** 入力全体（JSON）の上限。項目ごとの上限だけでは合計が大きくなりうるため。 */
@@ -109,6 +112,7 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * 配列の省略は空配列として扱う。base_ref などは区別するのでそのまま。
  * verification_commands は argv / cwd / timeout_seconds を順序込みで含める（検証の入力が違えば別のタスク）。
  * merge_policy は既定（human_review）なら含めない（保存済みの値と一致させる）。agent_merge のときだけ v3 として足す。
+ * model は未指定なら含めない（従来の v1 / v2 / v3 のまま）。指定があれば v4 として merge_policy と一緒に末尾へ足す。
  */
 export async function computeFingerprint(input: TaskInput): Promise<string> {
   const fields: unknown[] = [
@@ -127,11 +131,13 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
     c.timeout_seconds ?? null,
   ]);
   const canonical = JSON.stringify(
-    input.merge_policy === "agent_merge"
-      ? ["v3", ...fields, commands, input.merge_policy]
-      : commands.length === 0
-        ? ["v1", ...fields]
-        : ["v2", ...fields, commands],
+    input.model !== undefined
+      ? ["v4", ...fields, commands, input.merge_policy, input.model]
+      : input.merge_policy === "agent_merge"
+        ? ["v3", ...fields, commands, input.merge_policy]
+        : commands.length === 0
+          ? ["v1", ...fields]
+          : ["v2", ...fields, commands],
   );
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -175,3 +181,44 @@ export const prMergeInputSchema = z.object({
   merge_method: z.enum(MERGE_METHODS).default("squash"),
   delete_branch: z.boolean().default(false),
 });
+
+/** consult の入力の上限。行サイズではなく、予約額（CONSULT_BUDGET_USD）に収まる大きさの目安。厳密な判定は AgentDO が行う。 */
+export const MAX_CONSULT_SYSTEM = 100_000;
+export const MAX_CONSULT_CONTENT = 100_000;
+export const MAX_CONSULT_MESSAGES = 100;
+export const MAX_CONSULT_OUTPUT_TOKENS = 64_000;
+export const MAX_CONSULT_INPUT_BYTES = 256 * 1024;
+
+/** consult の入力。messages は最初と最後が user（Anthropic の API の制約と、「最後の user の質問に答える」意味に合わせる）。 */
+export const consultInputSchema = z
+  .object({
+    model: z.string().min(1).max(MAX_MODEL_LENGTH).optional(),
+    system: z.string().max(MAX_CONSULT_SYSTEM).optional(),
+    messages: z
+      .array(
+        z.object({
+          role: z.enum(["user", "assistant"]),
+          content: z.string().min(1).max(MAX_CONSULT_CONTENT),
+        }),
+      )
+      .min(1)
+      .max(MAX_CONSULT_MESSAGES),
+    max_output_tokens: z.number().int().min(1).max(MAX_CONSULT_OUTPUT_TOKENS).optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.messages[0]?.role !== "user") {
+      ctx.addIssue({ code: "custom", path: ["messages", 0], message: "最初のメッセージは user" });
+    }
+    if (v.messages[v.messages.length - 1]?.role !== "user") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["messages", v.messages.length - 1],
+        message: "最後のメッセージは user",
+      });
+    }
+    if (new TextEncoder().encode(JSON.stringify(v)).length > MAX_CONSULT_INPUT_BYTES) {
+      ctx.addIssue({ code: "custom", path: [], message: "input is too large" });
+    }
+  });
+
+export type ConsultInput = z.infer<typeof consultInputSchema>;

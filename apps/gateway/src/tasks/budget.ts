@@ -11,3 +11,16 @@ export function taskBudgetUsd(env: { TASK_BUDGET_USD?: string }): number {
   const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TASK_BUDGET_USD;
 }
+
+/**
+ * consult 1 回に予約する予算（USD）。env の CONSULT_BUDGET_USD（既定 0.5）。
+ * UserDO の月額枠の予約と、AgentDO に渡す上限（max_output_tokens の上限と入力サイズの判定）は、必ずこの値を使う。
+ * 未設定・数でない・0 以下は既定に戻す。
+ */
+export const DEFAULT_CONSULT_BUDGET_USD = 0.5;
+
+export function consultBudgetUsd(env: { CONSULT_BUDGET_USD?: string }): number {
+  const raw = env.CONSULT_BUDGET_USD;
+  const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_CONSULT_BUDGET_USD;
+}

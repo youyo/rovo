@@ -1,15 +1,23 @@
 import { DurableObject } from "cloudflare:workers";
-import { createModels } from "@earendil-works/pi-ai";
+import {
+  type Api,
+  createModels,
+  type Model,
+  normalizeContext,
+  type Provider,
+} from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { AuditFields } from "@rovo/audit";
+import { computeCostUsd } from "@rovo/models";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
-import { aiGatewayRejection } from "./agent/config";
+import { agentModels, aiGatewayRejection, defaultModel } from "./agent/config";
 import { getAgentTestOverrides } from "./agent/deps";
 import {
   estimateCallCostUsd,
   estimateTokens,
+  maxOutputTokensWithin,
   priceFor,
   REQUEST_OVERHEAD_TOKENS,
 } from "./agent/pricing";
@@ -18,6 +26,8 @@ import { decideTerminal, type StopIntent, type TerminalRequest } from "./agent/t
 import { detectTestTampering } from "./agent/test-patterns";
 import {
   type CancelResult,
+  type ConsultRequest,
+  type ConsultResult,
   type DeliveryResult,
   type EventsPage,
   type GitCredential,
@@ -32,10 +42,12 @@ import {
   type WebUsage,
 } from "./agent/types";
 import { emitAudit, readTestAudit } from "./audit-adapter";
+import { applyConsultCacheControl } from "./pi/consult-cache";
 import { type AgentPiHooks, createAgentExtension } from "./pi/extension";
 import { guardProvider } from "./pi/guard-provider";
 import {
   createScriptedProvider,
+  SCRIPTED_MODEL,
   SCRIPTED_MODEL_ID,
   SCRIPTED_PROVIDER_ID,
   type ScriptStep,
@@ -59,7 +71,6 @@ import {
 const finiteCount = (v: unknown): number =>
   typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
 const WORKSPACE_ROOT = "/workspace";
 const MAX_DEADLINE_MS = 2 * 60 * 60 * 1000;
 const MAX_VERIFY_ATTEMPTS = 4; // 最初の 1 回 + 修正 3 回
@@ -67,6 +78,10 @@ const MAX_YIELD_NUDGES = 2;
 const MAX_SETUP_ATTEMPTS = 3;
 const PATCH_LIMIT = 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_000;
+/** consult（D10）: 出力の既定の上限と、これ未満しか出せないなら呼ばない下限（入力が予約額をほぼ使い切っている） */
+const CONSULT_DEFAULT_OUTPUT_TOKENS = 8192;
+const CONSULT_MIN_OUTPUT_TOKENS = 64;
+const CONSULT_NAME_RE = /^consult-[0-9A-HJKMNP-TV-Z]{26}$/;
 const DEFAULT_CANCEL_WAIT_MS = 20_000;
 /** 停止の意図による確定が、Pi の abort（idle）を待つ上限。deadline を超えては待たない。 */
 const DEFAULT_FINALIZE_WAIT_MS = 60_000;
@@ -154,20 +169,7 @@ export class AgentDO extends DurableObject<Env> {
   private readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
       const models = createModels();
-      const env = this.env as AgentEnv;
-      let provider: Parameters<typeof models.setProvider>[0];
-      if (env.ENVIRONMENT === "test") {
-        provider = createScriptedProvider(
-          (key) => this.readScript(key),
-          (ctx) => {
-            this.recordModelCall(ctx?.userTexts ?? [], ctx?.toolResults ?? []);
-            this.overrides().onModelCall?.(ctx);
-          },
-        );
-      } else {
-        if (!env.AI) throw new Error("AI binding is not configured");
-        provider = createAI({ binding: env.AI, id: env.AI_GATEWAY_ID || undefined }).provider;
-      }
+      const { provider } = this.modelAccess();
       models.setProvider(guardProvider(provider, (_model, context) => this.preModelCall(context)));
       const registry = createRegistry();
       // ツールは start より前に作られる。期限は永続化した deadlineAt を呼び出し時に読む。
@@ -196,6 +198,27 @@ export class AgentDO extends DurableObject<Env> {
 
   // ---- 設定・差し替え点 ----
 
+  /**
+   * モデルを呼ぶ口。test では台本付き fake、それ以外は AI バインディング経由の AI Gateway（createAI）。
+   * Pi のセッション（タスク）と consult が同じ口を使う（AI バインディングと thinking の補正が AgentDO にあるため）。
+   */
+  private modelAccess(): { provider: Provider; model: (id: string) => Model<Api> } {
+    const env = this.env as AgentEnv;
+    if (env.ENVIRONMENT === "test") {
+      const provider = createScriptedProvider(
+        (key) => this.readScript(key),
+        (ctx) => {
+          this.recordModelCall(ctx?.userTexts ?? [], ctx?.toolResults ?? []);
+          this.overrides().onModelCall?.(ctx);
+        },
+      );
+      return { provider, model: () => SCRIPTED_MODEL as Model<Api> };
+    }
+    if (!env.AI) throw new Error("AI binding is not configured");
+    const ai = createAI({ binding: env.AI, id: env.AI_GATEWAY_ID || undefined });
+    return { provider: ai.provider, model: (id) => ai(id) as Model<Api> };
+  }
+
   private overrides() {
     return getAgentTestOverrides(this.env, this.ctx.id.name);
   }
@@ -204,20 +227,33 @@ export class AgentDO extends DurableObject<Env> {
     return this.overrides().now?.() ?? Date.now();
   }
 
-  private modelId(): string {
+  private modelId(requested: string | undefined = this.spec()?.model): string {
     const env = this.env as AgentEnv;
     // test では wrangler.jsonc の AGENT_MODEL（本番の既定）を無視して、台本付き fake モデルを使う
     if (env.ENVIRONMENT === "test") {
       return this.overrides().modelId ?? `scripted/${SCRIPTED_MODEL_ID}`;
     }
-    return env.AGENT_MODEL || DEFAULT_MODEL;
+    // タスクごとのモデル（spec.model。start の validate で AGENT_MODELS の中だと確かめ済み）。無ければ既定
+    return requested ?? defaultModel(env);
   }
 
   private initialModel() {
     const env = this.env as AgentEnv;
     return env.ENVIRONMENT === "test"
       ? { provider: SCRIPTED_PROVIDER_ID, id: SCRIPTED_MODEL_ID }
-      : { provider: "cloudflare", id: env.AGENT_MODEL || DEFAULT_MODEL };
+      : { provider: "cloudflare", id: defaultModel(env) };
+  }
+
+  /**
+   * 最初の run の前にセッションへ設定するモデル。既定と違う（spec.model が別）ときだけ返す。
+   * セッションの既定（defaults.model）はハーネスを開いた時点で決まり、start の spec より前かもしれないので、
+   * 投入の直前に setModel で明示する。test ではモデルは台本付き fake のまま。
+   */
+  private sessionModelChange(): { provider: string; id: string } | undefined {
+    const env = this.env as AgentEnv;
+    if (env.ENVIRONMENT === "test") return undefined;
+    const id = this.modelId();
+    return id === defaultModel(env) ? undefined : { provider: "cloudflare", id };
   }
 
   private sandbox(): SandboxPort {
@@ -575,6 +611,154 @@ export class AgentDO extends DurableObject<Env> {
     this.ctx.storage.kv.put(`script:${key}`, script);
   }
 
+  // ---- consult（D10。セカンドオピニオン）----
+
+  /**
+   * 1 回で完結するモデル呼び出し。タスク・Sandbox・Pi のセッションは使わない。consult ごとに別のインスタンス
+   * （名前は consultId = `consult-<ULID>`）で動き、終わったら保存データを消す。Gateway が UserDO で予約した
+   * budgetUsd の範囲に収まるよう、出力の上限（max_tokens）を入力の見積りから計算する。
+   * AI Gateway の metadata に userId・consultId・caller: "consult" を付ける。Anthropic のモデルでは
+   * system と「最後の user より前」にキャッシュのブレークポイントを付ける（onPayload。thinking の補正は guardProvider）。
+   */
+  async consult(req: ConsultRequest): Promise<ConsultResult> {
+    const name = this.ctx.id.name;
+    try {
+      return await this.runConsult(name, req);
+    } catch (e) {
+      console.error("consult_error", e instanceof Error ? e.name : typeof e);
+      // 予期しない例外では、モデルを呼んだかどうかも実費も分からないので、予約額で精算させる（少なく数えない）
+      const budget = Number.isFinite(req.budgetUsd) && req.budgetUsd > 0 ? req.budgetUsd : 0;
+      return { ok: false, code: "model_error", message: "the model call failed", costUsd: budget };
+    } finally {
+      // consult のインスタンスは使い捨て。タスクの DO（fingerprint がある）は消さない
+      if (name !== undefined && CONSULT_NAME_RE.test(name)) {
+        try {
+          if (this.store.meta("fingerprint") === undefined) await this.ctx.storage.deleteAll();
+        } catch {
+          // 片付けの失敗で consult の結果を失わない
+        }
+      }
+    }
+  }
+
+  private async runConsult(name: string | undefined, req: ConsultRequest): Promise<ConsultResult> {
+    const env = this.env as AgentEnv;
+    const bad = (
+      code: "unknown_model" | "input_too_large" | "invalid_request",
+      message: string,
+    ): ConsultResult => ({ ok: false, code, message, costUsd: 0 });
+
+    // タスクの DO では使えない。consultId は DO の名前と一致していること
+    if (name === undefined || !CONSULT_NAME_RE.test(name) || req?.consultId !== name) {
+      return bad("invalid_request", "not a consult instance");
+    }
+    if (this.store.meta("fingerprint") !== undefined) {
+      return bad("invalid_request", "not a consult instance");
+    }
+    const messages = req.messages;
+    const last = Array.isArray(messages) ? messages[messages.length - 1] : undefined;
+    if (
+      typeof req.userId !== "string" ||
+      typeof req.model !== "string" ||
+      !Array.isArray(messages) ||
+      messages.length === 0 ||
+      messages[0]?.role !== "user" ||
+      last?.role !== "user" ||
+      messages.some(
+        (m) =>
+          (m?.role !== "user" && m?.role !== "assistant") ||
+          typeof m.content !== "string" ||
+          m.content === "",
+      ) ||
+      (req.system !== undefined && typeof req.system !== "string") ||
+      !(typeof req.budgetUsd === "number" && Number.isFinite(req.budgetUsd) && req.budgetUsd > 0) ||
+      (req.maxOutputTokens !== undefined &&
+        !(Number.isSafeInteger(req.maxOutputTokens) && req.maxOutputTokens > 0))
+    ) {
+      return bad("invalid_request", "invalid consult request");
+    }
+
+    // モデルは AGENT_MODELS の中だけで、単価の分かるものだけ（fail-closed）
+    if (!agentModels(env).includes(req.model)) {
+      return bad("unknown_model", "the model is not in AGENT_MODELS");
+    }
+    const effective = this.modelId(req.model);
+    const price = priceFor(effective, env.ENVIRONMENT === "test");
+    if (!price) return bad("unknown_model", "the model has no known price");
+
+    // 出力の上限: 入力の見積り（UTF-8 のバイト数 + 枠の余裕）を最悪の単価で引いた残り
+    const inputTokens =
+      estimateTokens(JSON.stringify({ system: req.system ?? "", messages })) +
+      REQUEST_OVERHEAD_TOKENS;
+    const cap = maxOutputTokensWithin(price, inputTokens, req.budgetUsd);
+    if (cap < CONSULT_MIN_OUTPUT_TOKENS) {
+      return bad("input_too_large", "the input does not fit in the consult budget");
+    }
+    const maxTokens = Math.min(req.maxOutputTokens ?? CONSULT_DEFAULT_OUTPUT_TOKENS, cap);
+
+    const access = this.modelAccess();
+    const model = access.model(effective);
+    const now = this.now();
+    const zero = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+    const context = normalizeContext({
+      ...(req.system ? { systemPrompt: req.system } : {}),
+      messages: messages.map((m) =>
+        m.role === "user"
+          ? { role: "user" as const, content: m.content, timestamp: now }
+          : {
+              role: "assistant" as const,
+              content: [{ type: "text" as const, text: m.content }],
+              api: model.api,
+              provider: model.provider,
+              model: model.id,
+              usage: zero,
+              stopReason: "stop" as const,
+              timestamp: now,
+            },
+      ),
+    });
+
+    // guardProvider が thinking の補正と、maxTokens の上限・metadata の付与を行う
+    const guarded = guardProvider(access.provider, async () => ({
+      maxTokens,
+      metadata: { userId: req.userId, consultId: req.consultId, caller: "consult" },
+    }));
+    const stream = guarded.streamSimple(model, context, {
+      maxTokens,
+      onPayload: (payload: unknown, m: Model<Api>) => applyConsultCacheControl(m, payload),
+    });
+    const message = await stream.result();
+
+    const usage = {
+      input: finiteCount(message.usage?.input),
+      output: finiteCount(message.usage?.output),
+      cacheRead: finiteCount(message.usage?.cacheRead),
+      cacheWrite: finiteCount(message.usage?.cacheWrite),
+    };
+    // 実費は単価表（カタログ由来）から計算し、プロバイダー側の報告がそれより大きければそちらを採る（少なく数えない）
+    const costUsd = Math.max(computeCostUsd(price, usage), finiteCount(message.usage?.cost?.total));
+    if (message.stopReason === "error" || message.stopReason === "aborted") {
+      console.error("consult_model_error", message.stopReason);
+      // usage が返らない失敗（ストリームの途中で切れた等）は課金の有無が分からないので、予約額で精算させる
+      const reported = usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0;
+      return {
+        ok: false,
+        code: "model_error",
+        message: "the model call failed",
+        costUsd: reported ? costUsd : req.budgetUsd,
+      };
+    }
+    const text = message.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+    return { ok: true, text, model: req.model, usage, costUsd };
+  }
+
   // ---- 起動・監視 ----
 
   private validate(spec: TaskSpec): string | undefined {
@@ -593,8 +777,19 @@ export class AgentDO extends DurableObject<Env> {
     if (!(spec.budgetUsd > 0) || !Number.isFinite(spec.deadlineAt)) return "invalid_spec";
     const gw = aiGatewayRejection(this.env as AgentEnv);
     if (gw) return gw;
-    if (!priceFor(this.modelId(), (this.env as AgentEnv).ENVIRONMENT === "test")) {
-      return `unknown_model: ${this.modelId()}`;
+    // start の時点では spec はまだ保存されていないので、届いた spec.model で判定する
+    const model = this.modelId(spec.model);
+    if (!priceFor(model, (this.env as AgentEnv).ENVIRONMENT === "test")) {
+      return `unknown_model: ${model}`;
+    }
+    // タスクごとのモデルは、このデプロイの AGENT_MODELS の中だけ（fail-closed。Gateway の検証とは独立にここでも見る）
+    if (spec.model !== undefined) {
+      if (
+        typeof spec.model !== "string" ||
+        !agentModels(this.env as AgentEnv).includes(spec.model)
+      ) {
+        return "unknown_model: not in AGENT_MODELS";
+      }
     }
     return undefined;
   }
@@ -631,6 +826,8 @@ export class AgentDO extends DurableObject<Env> {
       }
       if (this.store.meta("tombstone") || isTerminal(this.store.phase())) return;
       await this.overrides().beforeSubmit?.();
+      const change = this.sessionModelChange();
+      if (change) await this.harness.session().setModel(change);
       // starting の間に届いた steer は、最初の指示に添える（どの steer を添えたかは submit の前に永続化する）
       const carried = this.carrySteers(this.operationId());
       await this.harness.submit(this.userInput(spec.instructions, carried), {

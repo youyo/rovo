@@ -3,6 +3,8 @@ import type {
   AgentEventDto,
   AgentPhase,
   CancelResult,
+  ConsultRequest,
+  ConsultResult,
   EventsPage,
   GitCredential,
   ResultDto,
@@ -56,6 +58,8 @@ export type FakeCalls = {
   getEvents: number;
   getResult: number;
   specs: TaskSpec[];
+  /** consult の依頼（D10） */
+  consults: ConsultRequest[];
   setGitCredential: number;
   /** setGitCredential で受け取った資格（効果が起きたもの。not_ok / throw は含まない） */
   credentials: GitCredential[];
@@ -65,6 +69,12 @@ export type FakeCalls = {
   answers: { questionId: string; answer: string }[];
   steer: number;
   steers: { steerId: string; message: string }[];
+};
+
+/** consult の台本の 1 手（apps/agent の ScriptStep の usage にキャッシュを足した形）。 */
+export type ConsultScriptStep = {
+  text?: string;
+  usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
 };
 
 const TERMINAL: readonly AgentPhase[] = ["completed", "failed", "budget_exceeded", "cancelled"];
@@ -98,6 +108,7 @@ export class FakeAgentDO extends DurableObject {
     getEvents: 0,
     getResult: 0,
     specs: [],
+    consults: [],
     setGitCredential: 0,
     credentials: [],
     answer: 0,
@@ -110,6 +121,15 @@ export class FakeAgentDO extends DurableObject {
   private seenSteers = new Set<string>();
 
   // ---- 制御用 RPC（テストから呼ぶ）----
+
+  /** 台本付き consult の台本（key は最初の user メッセージ。本物の AgentDO.setScript と同じ形）。 */
+  private consultScripts = new Map<string, ConsultScriptStep>();
+
+  /** E2E 用: consult の台本を置く（withTestScripts が consult の直前に呼ぶ）。最初の 1 手だけ使う。 */
+  setScript(key: string, script: ConsultScriptStep[]): void {
+    const first = script[0];
+    if (first) this.consultScripts.set(key, first);
+  }
 
   /** E2E 用の診断（/__test/agent/diagnostics の結果）。本物の AgentDO.testDiagnostics の代わり。 */
   testDiagnostics(): unknown {
@@ -139,6 +159,7 @@ export class FakeAgentDO extends DurableObject {
     return {
       ...this.callCounts,
       specs: [...this.callCounts.specs],
+      consults: [...this.callCounts.consults],
       credentials: [...this.callCounts.credentials],
       answers: [...this.callCounts.answers],
       steers: [...this.callCounts.steers],
@@ -305,6 +326,32 @@ export class FakeAgentDO extends DurableObject {
     }
     if (step === "lose") throw new Error("fake agent: steer response lost");
     return { ok: true };
+  }
+
+  /**
+   * consult（D10）の偽物。台本（最初の user メッセージで引く）の text と usage をそのまま返し、費用は
+   * apps/agent の TEST_MODEL_PRICES（scripted/script-1）と同じ単価で計算する（入出力 $1/100万、cacheRead $0.1、cacheWrite $1.25）。
+   * 台本が無ければ固定の応答。実際のキャッシュの付け方と費用計算は apps/agent の Unit が確かめる。
+   */
+  async consult(req: ConsultRequest): Promise<ConsultResult> {
+    this.callCounts.consults.push(req);
+    const step = this.consultScripts.get(req.messages[0]?.content ?? "");
+    const usage = {
+      input: step?.usage?.input ?? 1000,
+      output: step?.usage?.output ?? 100,
+      cacheRead: step?.usage?.cacheRead ?? 0,
+      cacheWrite: step?.usage?.cacheWrite ?? 0,
+    };
+    const costUsd =
+      (usage.input * 1 + usage.output * 1 + usage.cacheRead * 0.1 + usage.cacheWrite * 1.25) /
+      1_000_000;
+    return {
+      ok: true,
+      text: step?.text ?? "fake consult answer",
+      model: req.model,
+      usage,
+      costUsd,
+    };
   }
 
   async getResult(): Promise<ResultDto> {

@@ -24,6 +24,7 @@ import {
   renderReportBlock,
   resolveGitHubBaseUrls,
 } from "../github";
+import { agentModelsOf, defaultModelOf } from "../models";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
@@ -117,6 +118,8 @@ export type TaskView = {
   draft_pr_url: string | null;
   /** PR のマージの方針（task_start で指定。既定 human_review） */
   merge_policy: MergePolicy;
+  /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
+  model: string;
   created_at: string;
   updated_at: string;
   /** 最後のイベントの seq（不透明な cursor 文字列）。 */
@@ -169,6 +172,8 @@ export type ResultView = {
   warnings: string[];
   /** タスクの merge_policy（task_start で指定。task_pr_merge が使えるかを決める） */
   merge_policy: MergePolicy;
+  /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
+  model: string;
   /** Draft PR の情報。PR が無い（作成前に失敗した、Phase 2 のタスク）なら null */
   pr: {
     number: number;
@@ -197,7 +202,7 @@ export type ResultView = {
 };
 
 /** 結果の組み立て途中の形（merge_policy は GitHub 側の情報と一緒に足す）。 */
-type ResultCore = Omit<ResultView, "merge_policy">;
+type ResultCore = Omit<ResultView, "merge_policy" | "model">;
 
 /** task_pr_ready / task_pr_merge の入口で TaskDO が返す、対象と判定の結果。 */
 export type PrContextResult =
@@ -299,6 +304,8 @@ type TaskRow = {
   status: string;
   draft_pr_url: string | null;
   merge_policy: string;
+  /** D10 より前のタスクは NULL（既定のモデルとして扱う） */
+  model: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -495,6 +502,8 @@ export class TaskDO extends DurableObject<Env> {
     // D9: PR のマージの方針（task_start の merge_policy）と、task_pr_merge でマージ済みか
     this.addColumnIfMissing("task", "merge_policy", "TEXT NOT NULL DEFAULT 'human_review'");
     this.addColumnIfMissing("github_link", "pr_merged", "INTEGER NOT NULL DEFAULT 0");
+    // D10: 子のモデル（task_start の model。NULL は既定のモデル）
+    this.addColumnIfMissing("task", "model", "TEXT");
     // Phase 4: 子の質問と回答、親からの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
     sql.exec(`CREATE TABLE IF NOT EXISTS questions (
       question_id TEXT PRIMARY KEY,
@@ -619,11 +628,17 @@ export class TaskDO extends DurableObject<Env> {
       title: row.title,
       draft_pr_url: row.draft_pr_url,
       merge_policy: policyOf(row),
+      model: this.modelOf(row),
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString(),
       latest_cursor: String(this.latestSeq()),
       pending_question: this.pendingQuestion(this.statusOf(row)),
     };
+  }
+
+  /** 行のモデル（D10 より前のタスクは NULL。既定のモデルとして扱う）。 */
+  private modelOf(row: Pick<TaskRow, "model">): string {
+    return row.model ?? defaultModelOf(this.env);
   }
 
   /** 未回答の質問。終端のタスクには無い。 */
@@ -812,6 +827,11 @@ export class TaskDO extends DurableObject<Env> {
       return { ok: false, code: "invalid_input" };
     }
     const data = parsed.data;
+    // D10: モデルはこのデプロイの AGENT_MODELS の中だけ（service でも見るが、TaskDO への直接の呼び出しにも効かせる）
+    if (data.model !== undefined && !agentModelsOf(this.env).includes(data.model)) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const model = data.model ?? defaultModelOf(this.env);
     // await のあいだに他の呼び出しが進みうるので、状態の判定は await の後の同期区間で行う。
     const fingerprint = await computeFingerprint(data);
 
@@ -832,8 +852,8 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO task (singleton, id, owner_id, owner_login, repository, repository_id,
            installation_id, base_ref, base_sha, title, instructions, acceptance_criteria,
-           constraints, verification_commands, fingerprint, merge_policy, status, draft_pr_url, created_at, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
+           constraints, verification_commands, fingerprint, merge_policy, model, status, draft_pr_url, created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
         input.task_id,
         input.owner_id,
         input.owner_login,
@@ -849,6 +869,7 @@ export class TaskDO extends DurableObject<Env> {
         JSON.stringify(data.verification_commands),
         fingerprint,
         data.merge_policy,
+        model,
         at,
         at,
       );
@@ -870,6 +891,7 @@ export class TaskDO extends DurableObject<Env> {
             }
           : {}),
         constraints: data.constraints,
+        model,
         budgetUsd: taskBudgetUsd(this.env),
         deadlineAt: at + AGENT_DEADLINE_MS,
       };
@@ -1268,11 +1290,13 @@ export class TaskDO extends DurableObject<Env> {
     const gl = this.getGithub();
     const row = this.getRow();
     const merge_policy = row ? policyOf(row) : DEFAULT_MERGE_POLICY;
-    if (!gl) return { ...view, merge_policy, pr: null };
+    const model = row ? this.modelOf(row) : defaultModelOf(this.env);
+    if (!gl) return { ...view, merge_policy, model, pr: null };
     const extra = (JSON.parse(gl.warnings) as string[]).filter((w) => !view.warnings.includes(w));
     return {
       ...view,
       merge_policy,
+      model,
       warnings: [...view.warnings, ...extra],
       pr:
         gl.pr_number !== null && gl.pr_url !== null

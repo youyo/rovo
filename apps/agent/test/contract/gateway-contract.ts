@@ -31,4 +31,7 @@ export type Checks = [
   Assert<Returns<"answer">>,
   Assert<Params<"steer">>,
   Assert<Returns<"steer">>,
+  // D10: consult
+  Assert<Params<"consult">>,
+  Assert<Returns<"consult">>,
 ];

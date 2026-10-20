@@ -26,6 +26,8 @@ export default defineConfig({
         durableObjects: { AGENT_DO: { className: "FakeAgentDO", useSQLite: true } },
         // Secret / 設定値のテスト用ダミー（実在の値ではない）
         bindings: {
+          // D10: タスクごとに選べるモデル（Unit 用。wrangler.jsonc の既定は空 = AGENT_MODEL だけ）
+          AGENT_MODELS: "anthropic/claude-sonnet-5-5,anthropic/claude-haiku-5-5,openai/gpt-6-sol",
           GITHUB_APP_CLIENT_ID: "test-client-id",
           GITHUB_APP_CLIENT_SECRET: "test-client-secret",
           ALLOWED_ORG: "acme",

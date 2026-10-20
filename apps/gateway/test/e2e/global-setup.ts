@@ -199,6 +199,8 @@ export async function startGateway(project: TestProject, options: SetupOptions =
       GITHUB_APP_CLIENT_SECRET: github.clientSecret,
       ALLOWED_ORG,
       ALLOWED_TEAM,
+      // D10: タスクと consult に選べるモデル（models_list の対象。既定は AGENT_MODEL の sonnet）
+      AGENT_MODELS: "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,openai/gpt-6-sol",
       TOKEN_ENC_KEY,
       GITHUB_APP_ID: APP_ID,
       // 改行を避けるため、ヘッダーなしの base64（1 行）で渡す。PEM 本体と同じ内容

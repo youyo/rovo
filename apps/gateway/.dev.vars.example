@@ -19,6 +19,14 @@ GITHUB_APP_PRIVATE_KEY=
 # 月額の枠（MONTHLY_BUDGET_USD）を 10 未満にするときは、これも下げる
 # TASK_BUDGET_USD=10
 
+# consult（セカンドオピニオン）1 回に予約する予算（USD。既定 0.5。0 以下・不正な値は 0.5）
+# CONSULT_BUDGET_USD=0.5
+
+# 既定のモデルと、task_start / consult の model に選べるモデル（カンマ区切り。空なら AGENT_MODEL だけ）。
+# agent の同名の var と同じ値にする。
+# AGENT_MODEL=anthropic/claude-sonnet-5-5
+# AGENT_MODELS=anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5
+
 # ログインとツール呼び出しを許可する範囲。次の 2 つのうち少なくとも 1 つを設定する（どちらかを満たせば許可）。
 # 1. org と team（slug）。対で設定する。片方だけだと設定の誤りとしてログインできない
 ALLOWED_ORG=

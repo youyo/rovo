@@ -31,6 +31,8 @@ export interface TaskSpec {
   acceptanceCriteria?: string[];
   verificationCommands?: VerificationCommand[];
   constraints?: string[];
+  /** 子のモデル（D10。"anthropic/claude-haiku-5-5" など）。省略は AgentDO の env の AGENT_MODEL */
+  model?: string;
   budgetUsd: number;
   deadlineAt: number;
   /** 作業ブランチ名（agent/task-<id>）。TaskDO が AgentDO.start より前に作っている */
@@ -140,6 +142,45 @@ export type ResultDto =
       pushedSha?: string;
     };
 
+/** consult（D10）の 1 メッセージ。rovo は会話を保存しない（呼び出し元が毎回すべて渡す）。 */
+export interface ConsultMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** AgentDO.consult の依頼。consult ごとに別の AgentDO インスタンス（名前は consultId）で動く。 */
+export interface ConsultRequest {
+  /** `consult-<ULID>`。AgentDO のインスタンス名と同じ。AI Gateway の metadata に載せる */
+  consultId: string;
+  userId: string;
+  /** "anthropic/claude-sonnet-5-5" など。AgentDO の env の AGENT_MODELS の中だけ */
+  model: string;
+  system?: string;
+  messages: ConsultMessage[];
+  /** 出力の上限の希望。AgentDO が予約額から計算した上限でさらに絞る */
+  maxOutputTokens?: number;
+  /** この consult に使える上限（USD）。UserDO で月の枠から予約した額 */
+  budgetUsd: number;
+}
+
+export interface ConsultUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+export type ConsultErrorCode =
+  | "unknown_model"
+  | "input_too_large"
+  | "invalid_request"
+  | "model_error";
+
+export type ConsultResult =
+  | { ok: true; text: string; model: string; usage: ConsultUsage; costUsd: number }
+  /** 失敗。costUsd はそれまでにかかった実費（モデルを呼ぶ前の失敗は 0） */
+  | { ok: false; code: ConsultErrorCode; message: string; costUsd: number };
+
 /** AgentDO の公開 RPC。 */
 export interface AgentRpc {
   start(spec: TaskSpec): Promise<StartResult>;
@@ -155,4 +196,6 @@ export interface AgentRpc {
   answer(questionId: string, answer: string): Promise<{ ok: boolean; ignored?: boolean }>;
   /** 追加の指示。steer_id（Gateway が発行）で冪等。ok:false なら TaskDO が再送する */
   steer(steerId: string, message: string): Promise<{ ok: boolean; ignored?: boolean }>;
+  /** セカンドオピニオン（D10）。Sandbox もタスクも使わない、1 回で完結するモデル呼び出し */
+  consult(request: ConsultRequest): Promise<ConsultResult>;
 }

@@ -45,6 +45,12 @@
     // 予算（USD）。月額の枠から 1 タスクにつき TASK_BUDGET_USD を予約する。月額を 10 未満にするときは TASK_BUDGET_USD も下げる。
     "MONTHLY_BUDGET_USD": "100",
     "TASK_BUDGET_USD": "10",
+    // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する。既定 0.5）。max_output_tokens もこの額に収まるよう絞られる。
+    "CONSULT_BUDGET_USD": "0.5",
+    // 使えるモデル。AGENT_MODEL は既定（task_start の model を省略したとき）、AGENT_MODELS はカンマ区切りの選べるモデル
+    // （task_start の model と consult の model。models_list に出る）。空なら AGENT_MODEL だけ。agent の同名の var と同じ値にする。
+    "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
+    "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5",
     "WEB_SEARCH_DAILY_LIMIT": "200",
     "WEB_FETCH_DAILY_LIMIT": "500",
     "WEB_BROWSE_DAILY_LIMIT": "50",

@@ -26,6 +26,9 @@ export type Checks = [
   Assert<Equal<Awaited<ReturnType<Gateway.AgentRpc["steer"]>>, Agent.DeliveryResult>>,
   Assert<Equal<Parameters<Gateway.AgentRpc["answer"]>, [questionId: string, answer: string]>>,
   Assert<Equal<Parameters<Gateway.AgentRpc["steer"]>, [steerId: string, message: string]>>,
+  // D10: consult の依頼と結果
+  Assert<Equal<Gateway.ConsultRequest, Agent.ConsultRequest>>,
+  Assert<Equal<Gateway.ConsultResult, Agent.ConsultResult>>,
   // 同一の関数型として扱える（Gateway のスタブに apps/agent の型で書いた実装を代入できる）
   Assert<
     Equal<

@@ -19,8 +19,13 @@ export interface ScriptStep {
   toolCall?: ScriptToolCall;
   /** 1 つの応答で複数のツールを呼ぶ（toolCall より優先） */
   toolCalls?: ScriptToolCall[];
-  /** このターンで消費したトークン数。費用は scripted モデルの単価（$1/100万トークン）で計算する。 */
-  usage?: { input?: number; output?: number };
+  /**
+   * このターンで消費したトークン数。費用は scripted モデルの単価で計算する
+   * （入出力 $1/100万、cacheRead $0.1/100万、cacheWrite $1.25/100万。apps/agent の TEST_MODEL_PRICES と同じ）。
+   */
+  usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** モデルの呼び出しの失敗を再現する（stopReason: error。usage があればそれまでの消費として報告する） */
+  error?: string;
   /** 応答を返すまでの待ち（ms）。呼び出しの途中で cancel されるケースの再現用。abort しても応答は返る（usage が後から増える）。 */
   delayMs?: number;
 }
@@ -28,14 +33,14 @@ export interface ScriptStep {
 export const SCRIPTED_PROVIDER_ID = "scripted";
 export const SCRIPTED_MODEL_ID = "script-1";
 
-const MODEL: Model<string> = {
+export const SCRIPTED_MODEL: Model<string> = {
   id: SCRIPTED_MODEL_ID,
   name: "Scripted fake model",
   api: "scripted",
   provider: SCRIPTED_PROVIDER_ID,
   baseUrl: "http://scripted.invalid",
   input: ["text"],
-  cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+  cost: { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 1.25 },
   reasoning: false,
   contextWindow: 100_000,
   maxTokens: 4096,
@@ -65,6 +70,13 @@ function userTexts(context: TranscriptContext): string[] {
   );
 }
 
+/** 先頭の system メッセージの本文（テストの観測用。無ければ undefined） */
+function systemText(context: TranscriptContext): string | undefined {
+  const first = context.messages[0];
+  if (first?.role !== "system") return undefined;
+  return textOf(first.content as Parameters<typeof textOf>[0]);
+}
+
 /** transcript のツール結果の本文（テストの観測用。ツールの結果がモデルに届いたことの確認） */
 function toolResultTexts(context: TranscriptContext): string[] {
   return context.messages.flatMap((m) =>
@@ -90,30 +102,50 @@ const ZERO_USAGE = {
  */
 export function createScriptedProvider(
   getScript: (key: string) => readonly ScriptStep[],
-  onCall?: (context: { userTexts: string[]; toolResults: string[] }) => void,
+  onCall?: (context: {
+    userTexts: string[];
+    toolResults: string[];
+    /** 呼び出し側が渡した maxTokens と metadata（consult の上限・AI Gateway の metadata の確認用） */
+    maxTokens?: number;
+    metadata?: Record<string, unknown>;
+    systemText?: string;
+  }) => void,
 ): Provider {
   const stream = (
     _model: Model<string>,
     context: TranscriptContext,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; maxTokens?: number; metadata?: Record<string, unknown> },
   ) => {
     const out = createAssistantMessageEventStream();
-    onCall?.({ userTexts: userTexts(context), toolResults: toolResultTexts(context) });
+    onCall?.({
+      userTexts: userTexts(context),
+      toolResults: toolResultTexts(context),
+      maxTokens: options?.maxTokens,
+      metadata: options?.metadata,
+      systemText: systemText(context),
+    });
     const turn = context.messages.filter((m) => m.role === "assistant").length;
     const step = getScript(userText(context))[turn] ?? { text: "script exhausted" };
     const inTok = step.usage?.input ?? 0;
     const outTok = step.usage?.output ?? 0;
+    const readTok = step.usage?.cacheRead ?? 0;
+    const writeTok = step.usage?.cacheWrite ?? 0;
+    const cost = {
+      input: inTok / 1e6,
+      output: outTok / 1e6,
+      cacheRead: (readTok * SCRIPTED_MODEL.cost.cacheRead) / 1e6,
+      cacheWrite: (writeTok * SCRIPTED_MODEL.cost.cacheWrite) / 1e6,
+      total: 0,
+    };
+    cost.total = cost.input + cost.output + cost.cacheRead + cost.cacheWrite;
     const usage = {
       ...ZERO_USAGE,
       input: inTok,
       output: outTok,
-      totalTokens: inTok + outTok,
-      cost: {
-        ...ZERO_USAGE.cost,
-        input: inTok / 1e6,
-        output: outTok / 1e6,
-        total: (inTok + outTok) / 1e6,
-      },
+      cacheRead: readTok,
+      cacheWrite: writeTok,
+      totalTokens: inTok + outTok + readTok + writeTok,
+      cost,
     };
     const content: AssistantMessage["content"] = [];
     if (step.text) content.push({ type: "text", text: step.text });
@@ -138,6 +170,17 @@ export function createScriptedProvider(
       timestamp: Date.now(),
     };
     const emit = () => {
+      if (step.error !== undefined) {
+        const failed: AssistantMessage = {
+          ...message,
+          content: [],
+          stopReason: "error",
+          errorMessage: step.error,
+        };
+        out.push({ type: "error", reason: "error", error: failed });
+        out.end(failed);
+        return;
+      }
       if (!step.delayMs) out.push({ type: "start", partial: message });
       out.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
       out.end(message);
@@ -176,7 +219,7 @@ export function createScriptedProvider(
     auth: {
       apiKey: { name: "none", resolve: async () => ({ auth: { apiKey: "unused" } }) },
     },
-    models: [MODEL],
+    models: [SCRIPTED_MODEL],
     api: { stream, streamSimple: stream },
   });
 }

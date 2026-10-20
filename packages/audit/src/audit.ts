@@ -41,6 +41,9 @@ export const AUDIT_EVENTS = [
   "pr_ready",
   "pr_merged",
   "pr_denied",
+  // gateway（D10）: consult（セカンドオピニオン。会話の内容は出さない。モデルと費用だけ）
+  "consult_started",
+  "consult_finished",
 ] as const;
 
 export type AuditEventName = (typeof AUDIT_EVENTS)[number];
@@ -71,6 +74,12 @@ export type AuditFields = {
   bytes?: number;
   /** pr_ready / pr_merged / pr_denied だけ: タスクの merge_policy（MERGE_POLICIES のどれか） */
   merge_policy?: string;
+  /** consult_started / consult_finished だけ: モデルの id（"anthropic/claude-sonnet-5-5" の形） */
+  model?: string;
+  /** consult_started / consult_finished だけ: consult の ID（`consult-<ULID>`） */
+  consult_id?: string;
+  /** consult_finished だけ: 実費（USD。非負の有限数） */
+  cost_usd?: number;
 };
 
 /** 出力される 1 件。キーの順序は固定。 */
@@ -123,7 +132,10 @@ const MERGE_POLICY_SET: ReadonlySet<unknown> = new Set(MERGE_POLICIES);
 /** イベント固有のフィールド。ここに無いイベントは共通のものだけ通す。 */
 const EVENT_FIELDS: Readonly<
   Partial<
-    Record<AuditEventName, readonly ("op" | "dest" | "metrics" | "prefix" | "bytes" | "policy")[]>
+    Record<
+      AuditEventName,
+      readonly ("op" | "dest" | "metrics" | "prefix" | "bytes" | "policy" | "consult")[]
+    >
   >
 > = {
   sandbox_privileged_op: ["op"],
@@ -133,7 +145,14 @@ const EVENT_FIELDS: Readonly<
   pr_ready: ["policy"],
   pr_merged: ["policy"],
   pr_denied: ["policy"],
+  consult_started: ["consult"],
+  consult_finished: ["consult"],
 };
+
+/** モデルの id（`<provider>/<id>`）。許可リストの形だけを通す。 */
+const MODEL_RE = /^(anthropic|openai)\/[a-z0-9][a-z0-9.-]{0,63}$/;
+/** consult の ID（`consult-<ULID>`）。 */
+const CONSULT_ID_RE = /^consult-[0-9A-HJKMNP-TV-Z]{26}$/;
 
 /** R2 のキーの接頭辞。キーの全体や任意の文字列は通さない。 */
 const ARCHIVE_PREFIX_RE = /^tasks\/\d{4}\/\d{2}\/[A-Za-z0-9_-]{1,64}\/$/;
@@ -240,6 +259,15 @@ export function buildAudit(
   if (extra.includes("policy")) {
     const policy = own("merge_policy");
     put("merge_policy", MERGE_POLICY_SET.has(policy) ? policy : undefined);
+  }
+  if (extra.includes("consult")) {
+    put("model", safeCode(own("model"), MODEL_RE));
+    put("consult_id", safeCode(own("consult_id"), CONSULT_ID_RE));
+    const cost = own("cost_usd");
+    put(
+      "cost_usd",
+      typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined,
+    );
   }
   return record as AuditRecord;
 }

@@ -43,6 +43,11 @@ description = "packages/audit の Unit テスト（vitest。純粋関数だけ�
 dir = "packages/audit"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
+[tasks."test:unit:models"]
+description = "packages/models の Unit テスト（許可リスト・カタログからの単価・費用計算。vitest。workerd は使わない）"
+dir = "packages/models"
+run = "pnpm exec vitest run --config vitest.config.ts"
+
 [tasks."test:unit:gateway"]
 description = "gateway の Unit テスト（vitest + workerd）"
 dir = "apps/gateway"
@@ -63,8 +68,8 @@ description = "デプロイスクリプト（scripts/deploy.sh）の自己確認
 run = "bash scripts/test-deploy.sh"
 
 [tasks."test:unit"]
-description = "Unit テスト（audit + gateway + agent + web + デプロイスクリプト）"
-depends = ["test:unit:audit", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy"]
+description = "Unit テスト（audit + models + gateway + agent + web + デプロイスクリプト）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
@@ -118,6 +123,11 @@ description = "packages/audit の型検査"
 dir = "packages/audit"
 run = "pnpm exec tsc -p tsconfig.json"
 
+[tasks."typecheck:models"]
+description = "packages/models の型検査"
+dir = "packages/models"
+run = "pnpm exec tsc -p tsconfig.json"
+
 [tasks."typecheck:gateway"]
 description = "gateway の型検査"
 dir = "apps/gateway"
@@ -135,7 +145,7 @@ run = "pnpm exec tsc -p tsconfig.json"
 
 [tasks.typecheck]
 description = "TypeScript の型検査（全アプリ）"
-depends = ["typecheck:audit", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
+depends = ["typecheck:audit", "typecheck:models", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
 
 [tasks."lint:biome"]
 description = "Biome による lint / format チェック"

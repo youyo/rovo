@@ -55,6 +55,14 @@
     "WEB_USD_PER_1K_BROWSE": "0.75",
     // タスク 1 件に予約する予算（USD）。月額の枠（MONTHLY_BUDGET_USD、既定 100）からこの額を予約し、子エージェントの上限（budgetUsd）にも同じ値を渡す。
     // 不正な値・0 以下は 10。月額の枠を 10 未満にするときは、これも下げる（枠より大きいとタスクを始められない）。
-    "TASK_BUDGET_USD": "10"
+    "TASK_BUDGET_USD": "10",
+    // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する）。不正な値・0 以下は 0.5。
+    // max_output_tokens もこの額に収まるよう絞られる。
+    "CONSULT_BUDGET_USD": "0.5",
+    // 既定のモデル（task_start の model を省略したとき）。agent の同名の var と同じ値にする。
+    "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
+    // 選べるモデル（カンマ区切り。task_start の model と consult の model。models_list に出る）。
+    // 空なら AGENT_MODEL だけ（fail-closed）。許可リスト（packages/models）に無い id は無視する。agent の同名の var と同じ値にする。
+    "AGENT_MODELS": ""
   }
 }

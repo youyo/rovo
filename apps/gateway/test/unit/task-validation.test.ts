@@ -320,3 +320,47 @@ describe("merge_policy（D9）", () => {
     expect(implicit).toBe(hex);
   });
 });
+
+describe("model（D10）", () => {
+  it("省略できる。指定は文字列だけ（許可リストとの照合は service が env の AGENT_MODELS で行う）", () => {
+    expect(taskInputSchema.parse(base).model).toBeUndefined();
+    expect(taskInputSchema.parse({ ...base, model: "anthropic/claude-haiku-5-5" }).model).toBe(
+      "anthropic/claude-haiku-5-5",
+    );
+    for (const bad of ["", 1, null, "x".repeat(101)]) {
+      expect(taskInputSchema.safeParse({ ...base, model: bad }).success).toBe(false);
+    }
+  });
+
+  it("fingerprint: 未指定は従来の値のまま（v1 / v2 / v3）。指定すれば別のタスク（v4）", async () => {
+    const implicit = await computeFingerprint(taskInputSchema.parse(base));
+    const haiku = await computeFingerprint(
+      taskInputSchema.parse({ ...base, model: "anthropic/claude-haiku-5-5" }),
+    );
+    const sol = await computeFingerprint(
+      taskInputSchema.parse({ ...base, model: "openai/gpt-6-sol" }),
+    );
+    expect(haiku).not.toBe(implicit);
+    expect(sol).not.toBe(haiku);
+    // 既存の値が変わらない: v1 / v3 を直接計算して一致を確かめる
+    const sha = async (v: unknown) => {
+      const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(v)));
+      return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    };
+    expect(implicit).toBe(
+      await sha(["v1", "owner/repo", "main", "0123456", "t", "i", ["a"], ["c"]]),
+    );
+    const merge = await computeFingerprint(
+      taskInputSchema.parse({ ...base, merge_policy: "agent_merge" }),
+    );
+    expect(merge).toBe(
+      await sha(["v3", "owner/repo", "main", "0123456", "t", "i", ["a"], ["c"], [], "agent_merge"]),
+    );
+    // model と merge_policy の組み合わせも別のタスク
+    const both = await computeFingerprint(
+      taskInputSchema.parse({ ...base, merge_policy: "agent_merge", model: "openai/gpt-6-sol" }),
+    );
+    expect(both).not.toBe(merge);
+    expect(both).not.toBe(sol);
+  });
+});

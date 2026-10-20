@@ -65,8 +65,10 @@ resource "cloudflare_workers_kv_namespace" "oauth" {
 }
 
 # ---- AI Gateway -------------------------------------------------------------
-# agent と web は AI バインディングと AI_GATEWAY_ID だけで呼ぶので、Gateway 側の認証は付けない。
+# 認証は付ける（BYOK の前提）。agent と web は AI バインディングと AI_GATEWAY_ID だけで呼び、
+# バインディングからの呼び出しは認証済みとして扱われるので、gateway token の secret は要らない。
 # Anthropic の API キーは Terraform に入れず、AI Gateway の画面で BYOK として登録する。
+# byok_only: キーが無いときに Unified Billing（Cloudflare のクレジット）へ流さず、400 で止める。
 # キャッシュは切る（TTL 0。モデルの応答を使い回さない）。レート制限は切る（0 = 無効）。
 # 費用の上限は gateway の MONTHLY_BUDGET_USD / TASK_BUDGET_USD が担う。
 
@@ -74,7 +76,8 @@ resource "cloudflare_ai_gateway" "this" {
   account_id = var.account_id
   id         = "${var.name_prefix}-gateway"
 
-  authentication             = false
+  authentication             = true
+  byok_only                  = true
   collect_logs               = var.ai_gateway_collect_logs
   cache_ttl                  = 0
   cache_invalidate_on_update = false

@@ -1,6 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { isUserIdAllowed, loadAllowRules } from "../auth/allowlist";
 import {
+  randomToken,
+  SESSION_ABSOLUTE_MS,
+  SESSION_IDLE_MS,
+  SESSION_TOUCH_MS,
+} from "../dashboard/session";
+import {
   CredentialManager,
   type CredentialState,
   type CredentialStorage,
@@ -231,6 +237,89 @@ export class UserDO extends DurableObject<Env> {
       updated_at INTEGER
     )`);
     sql.exec("INSERT OR IGNORE INTO github_credential (singleton, generation) VALUES (1, 0)");
+    // ダッシュボードのブラウザセッション（D3）。epoch はログインのたびに進む永続の世代で、MCP の loginEpoch（メモリのみ）とは別。
+    // 資格（github_credential）とは独立に持つ。GitHub のトークンは入れない。
+    sql.exec(`CREATE TABLE IF NOT EXISTS dashboard_epoch (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      epoch INTEGER NOT NULL
+    )`);
+    sql.exec("INSERT OR IGNORE INTO dashboard_epoch (singleton, epoch) VALUES (1, 0)");
+    sql.exec(`CREATE TABLE IF NOT EXISTS dashboard_session (
+      sid TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      login TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      last_seen INTEGER NOT NULL
+    )`);
+  }
+
+  /**
+   * ブラウザのログイン成功後にセッションを作る。世代を進め、既存のセッションはすべて消す
+   * （ログインのたびに新しい sid。ログイン前の sid は引き継がない = セッション固定の対策）。
+   * 同じ利用者のセッションは常に 1 つだけ。
+   */
+  async createDashboardSession(
+    login: string,
+  ): Promise<{ sid: string; version: number; expiresAt: number }> {
+    const sql = this.ctx.storage.sql;
+    const now = this.now();
+    const sid = randomToken();
+    const expiresAt = now + SESSION_ABSOLUTE_MS;
+    const version = this.ctx.storage.transactionSync(() => {
+      sql.exec("UPDATE dashboard_epoch SET epoch = epoch + 1 WHERE singleton = 1");
+      const epoch = sql
+        .exec<{ epoch: number }>("SELECT epoch FROM dashboard_epoch WHERE singleton = 1")
+        .one().epoch;
+      sql.exec("DELETE FROM dashboard_session");
+      sql.exec(
+        "INSERT INTO dashboard_session (sid, version, login, created_at, expires_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+        sid,
+        epoch,
+        login,
+        now,
+        expiresAt,
+        now,
+      );
+      return epoch;
+    });
+    return { sid, version, expiresAt };
+  }
+
+  /**
+   * Cookie の sid と世代を、サーバー側の記録と照合する。失敗の理由は区別しない（呼び出し側は一律 401 にする）。
+   * 絶対期限・無操作の期限を過ぎた記録は、ここで消す。last_seen の更新は最大 5 分に 1 回。
+   */
+  async checkDashboardSession(
+    sid: string,
+    version: number,
+  ): Promise<{ ok: true; login: string } | { ok: false }> {
+    const sql = this.ctx.storage.sql;
+    const row = sql
+      .exec<{ version: number; login: string; expires_at: number; last_seen: number }>(
+        "SELECT version, login, expires_at, last_seen FROM dashboard_session WHERE sid = ?",
+        sid,
+      )
+      .toArray()[0];
+    if (!row) return { ok: false };
+    const epoch = sql
+      .exec<{ epoch: number }>("SELECT epoch FROM dashboard_epoch WHERE singleton = 1")
+      .one().epoch;
+    const now = this.now();
+    if (row.version !== version || version !== epoch) return { ok: false };
+    if (now >= row.expires_at || now - row.last_seen >= SESSION_IDLE_MS) {
+      sql.exec("DELETE FROM dashboard_session WHERE sid = ?", sid);
+      return { ok: false };
+    }
+    if (now - row.last_seen >= SESSION_TOUCH_MS) {
+      sql.exec("UPDATE dashboard_session SET last_seen = ? WHERE sid = ?", now, sid);
+    }
+    return { ok: true, login: row.login };
+  }
+
+  /** ログアウト。sid の記録を消す（冪等）。GitHub の資格には触れない（MCP と共用のため）。 */
+  async revokeDashboardSession(sid: string): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM dashboard_session WHERE sid = ?", sid);
   }
 
   /**

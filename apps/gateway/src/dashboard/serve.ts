@@ -1,4 +1,6 @@
 import { isTaskId } from "../tasks/ulid";
+import { handleLogout, handleMe, startDashboardLogin } from "./auth";
+import { fetchSiteGate, jsonResponse } from "./guard";
 
 /**
  * ダッシュボード（読み取り専用の SPA）の配信（docs/specs/dashboard.md D11）。
@@ -37,23 +39,29 @@ function plain(status: number, extra: HeadersInit = {}): Response {
   });
 }
 
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "content-type": "application/json",
-      "x-content-type-options": "nosniff",
-      "cache-control": "no-store",
-    },
-  });
-}
-
-/** `/dashboard/api` と配下。M5 までは何も実装していないので、どのメソッドでも JSON の 404。CORS ヘッダは出さない。 */
-function handleApi(request: Request): Response {
-  // 別サイトからの呼び出しは拒否する。same-origin / none（アドレスバー）とヘッダの無い呼び出しの扱いは M4 で決める。
-  const site = request.headers.get("sec-fetch-site");
-  if (site === "cross-site" || site === "same-site") return json(403, { error: "forbidden" });
-  return json(404, { error: "not_found" });
+/**
+ * `/dashboard/api` と配下。入口で Sec-Fetch-Site を検査し（ルートの有無を漏らさないよう、ルーティングより前）、
+ * そのあと /me・/logout だけを扱う。M5 で読み取り API を足すまで、それ以外は JSON の 404。CORS ヘッダは出さない。
+ */
+async function handleApi(request: Request, env: Env, pathname: string): Promise<Response> {
+  const blocked = fetchSiteGate(request, env);
+  if (blocked) return blocked;
+  const method = request.method.toUpperCase();
+  try {
+    if (pathname === `${PREFIX}/api/me`) {
+      if (method === "GET" || method === "HEAD") return await handleMe(request, env);
+      return jsonResponse(405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
+    }
+    if (pathname === `${PREFIX}/api/logout`) {
+      if (method === "POST") return await handleLogout(request, env);
+      return jsonResponse(405, { error: "method_not_allowed" }, { allow: "POST" });
+    }
+  } catch (error) {
+    // UserDO などの障害。内容（スタック・トークン）は出さない
+    console.error("dashboard_api_error", error instanceof Error ? error.name : typeof error);
+    return jsonResponse(503, { error: "unavailable" });
+  }
+  return jsonResponse(404, { error: "not_found" });
 }
 
 /** SPA の index.html。dist 直下の index.html は "/" で取る（/index.html は / へリダイレクトされうる）。 */
@@ -113,8 +121,11 @@ export async function handleDashboard(request: Request, env: Env): Promise<Respo
   const { pathname } = new URL(request.url);
 
   if (pathname === `${PREFIX}/api` || pathname.startsWith(`${PREFIX}/api/`)) {
-    return handleApi(request);
+    return handleApi(request, env, pathname);
   }
+
+  // ログインの開始（ナビゲーション。クロスサイトのリンクから開かれても害はない: state + 専用 Cookie で守る）
+  if (pathname === `${PREFIX}/auth/login`) return startDashboardLogin(request, env);
 
   if (request.method !== "GET" && request.method !== "HEAD") {
     return plain(405, { allow: "GET, HEAD" });

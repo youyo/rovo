@@ -1,50 +1,14 @@
 import { AuthorizationError, authorizationErrorRedirect } from "@cloudflare/workers-oauth-provider";
 import type { Hono } from "hono";
 import { auditFromWorker } from "../audit-sink";
-import { GitHubClient, GitHubError, resolveGitHubBaseUrls } from "../github";
-import { type AllowRules, isUserIdAllowed, loadAllowRules } from "./allowlist";
+import { finishDashboardLogin, isDashboardState } from "../dashboard/auth";
 import { CONSENT_CSP, renderConsentPage } from "./consent";
+import { type LoginDeps, loadConfig, verifyIdentity } from "./identity";
 import type { AuthProps } from "./props";
 
+export type { LoginDeps } from "./identity";
+
 type AppEnv = { Bindings: Env };
-
-export interface LoginDeps {
-  /** GitHub への fetch（テストで差し替える） */
-  fetch?: typeof fetch;
-}
-
-interface LoginConfig {
-  client: GitHubClient;
-  rules: AllowRules;
-  redirectUri: string;
-}
-
-/** 設定が足りない・不正なら null（呼び出し側は 500 で止める。fail closed）。 */
-function loadConfig(env: Env, deps: LoginDeps): LoginConfig | null {
-  const { GITHUB_APP_CLIENT_ID: id, GITHUB_APP_CLIENT_SECRET: secret } = env;
-  if (!id || !secret || !env.PUBLIC_BASE_URL) return null;
-  // org/team と user ID の許可ルール。不正・不足（org/team の片方だけ、ID の不正な要素など）なら null
-  const rules = loadAllowRules(env);
-  if (!rules) return null;
-  let urls: ReturnType<typeof resolveGitHubBaseUrls>;
-  try {
-    // 本番（ENVIRONMENT !== "test"）で既定値以外が指定されていたら例外
-    urls = resolveGitHubBaseUrls(env);
-  } catch {
-    return null;
-  }
-  return {
-    client: new GitHubClient({
-      clientId: id,
-      clientSecret: secret,
-      oauthBase: urls.oauthBase,
-      apiBase: urls.apiBase,
-      ...(deps.fetch ? { fetch: deps.fetch } : {}),
-    }),
-    rules,
-    redirectUri: `${env.PUBLIC_BASE_URL.replace(/\/+$/, "")}/callback`,
-  };
-}
 
 const NO_STORE = { "cache-control": "no-store" };
 
@@ -155,6 +119,12 @@ export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
     const config = loadConfig(c.env, deps);
     if (!config) return misconfigured();
 
+    // 振り分けは state の接頭辞（rovo-dash.）だけ。接頭辞付きなら必ずダッシュボードのハンドラで、
+    // KV・Cookie の不一致や期限切れ・再使用もそこで 400 にする（MCP の経路・監査に落とさない）。
+    if (isDashboardState(new URL(c.req.url))) {
+      return finishDashboardLogin(c.req.raw, c.env, config);
+    }
+
     let resumed: Awaited<ReturnType<Env["OAUTH_PROVIDER"]["finishUpstream"]>>;
     try {
       // state の不一致・再使用・期限切れ・Cookie 無し（別のブラウザ）はここで拒否される
@@ -187,49 +157,22 @@ export function registerLoginRoutes(app: Hono<AppEnv>, deps: LoginDeps = {}) {
       return fail("invalid_request");
     }
 
-    try {
-      const tokens = await config.client.exchangeCode({ code, redirectUri: config.redirectUri });
-      const user = await config.client.getUser(tokens.accessToken);
-      // user ID のルールは GET /user で得た id で判定する。通らず、org/team の対があるときだけ team を確認する
-      const { rules } = config;
-      const member =
-        isUserIdAllowed(rules, user.id) ||
-        (rules.team !== null &&
-          (await config.client.isActiveTeamMember(tokens.accessToken, {
-            org: rules.team.org,
-            teamSlug: rules.team.team,
-            username: user.login,
-          })));
-      if (!member) {
-        await auditFromWorker(c.env, "authz_denied", {
-          userId: user.id,
-          caller: "parent",
-          reason: "not_team_member",
-        });
-        return fail("access_denied");
-      }
-
-      await c.env.USER_DO.getByName(String(user.id)).saveCredential(tokens);
-
-      // props は識別子だけ。GitHub のトークンは UserDO に置き、ここには入れない。
-      const props: AuthProps = { githubUserId: user.id, login: user.login };
-      const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
-        request: original,
-        userId: String(user.id), // ":" を含められない。数字文字列
-        metadata: {},
-        scope: original.scope,
-        props,
-      });
-      return redirect(redirectTo, headers);
-    } catch (error) {
-      if (error instanceof GitHubError) {
-        // 一時的な障害（upstream_unavailable）は認証の失敗ではない
-        if (error.code !== "upstream_unavailable") await failed("code_exchange_rejected");
-        return fail(
-          error.code === "upstream_unavailable" ? "temporarily_unavailable" : "access_denied",
-        );
-      }
-      throw error;
+    // 身元確認（交換 → 本人 → 許可ルール → 資格の保存）は共通。caller: "parent" で MCP と区別する
+    const identity = await verifyIdentity(c.env, config, code, "parent");
+    if (!identity.ok) {
+      return fail(identity.kind === "unavailable" ? "temporarily_unavailable" : "access_denied");
     }
+    const { user } = identity;
+
+    // props は識別子だけ。GitHub のトークンは UserDO に置き、ここには入れない。
+    const props: AuthProps = { githubUserId: user.id, login: user.login };
+    const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
+      request: original,
+      userId: String(user.id), // ":" を含められない。数字文字列
+      metadata: {},
+      scope: original.scope,
+      props,
+    });
+    return redirect(redirectTo, headers);
   });
 }

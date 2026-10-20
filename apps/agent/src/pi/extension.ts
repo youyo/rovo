@@ -51,6 +51,7 @@ const SECTION_KEYS = [
   "untrusted_data",
   "web",
   "ask_parent",
+  "dependencies",
   "no_push",
 ] as const;
 

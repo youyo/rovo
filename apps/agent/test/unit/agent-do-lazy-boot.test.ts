@@ -131,11 +131,33 @@ describe("lazy boot: Sandbox は必要になるまで起動しない", () => {
     await waitForTerminal(fx);
   });
 
-  it("起動に失敗した試行は数え、3 回目で sandbox_setup_failed として終える。それまではツールがエラーを返す", async () => {
+  it("起動に失敗しても rovo の側で再試行する: 1〜2 回失敗して 3 回目で成功すれば、ツールは成功し、モデルの呼び出しは増えない", async () => {
+    const fx = newFixture("lazy-retry", [
+      call("write_note", { text: "1" }),
+      call("write_note", { text: "2" }),
+      report(),
+    ]);
+    const orig = fx.sandbox.ensureReady.bind(fx.sandbox);
+    let n = 0;
+    fx.sandbox.ensureReady = async (spec) => {
+      n += 1;
+      if (n <= 2) throw new Error("transient");
+      return orig(spec);
+    };
+    await fx.stub.start(noVerify("lazy-retry"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(n).toBe(3);
+    expect(fx.sandbox.files.get("/workspace/note.txt")).toBe("2");
+    const ends = (await allEvents(fx)).filter((e) => e.type === "tool_end");
+    expect(ends.some((e) => e.data.isError === true)).toBe(false);
+    // write_note x2 + report の 3 回だけ（失敗の判断をモデルに任せない）
+    expect(fx.modelCalls.count).toBe(3);
+  });
+
+  it("3 回とも失敗したら、モデルを介さずに sandbox_setup_failed で終える", async () => {
     const fx = newFixture("lazy-fail", [
       call("write_note", { text: "1" }),
       call("write_note", { text: "2" }),
-      call("write_note", { text: "3" }),
       report(),
     ]);
     let attempts = 0;
@@ -156,24 +178,19 @@ describe("lazy boot: Sandbox は必要になるまで起動しない", () => {
     const phase = events.filter((e) => e.type === "phase").at(-1);
     expect(phase?.data).toMatchObject({ phase: "failed", reason: "sandbox_setup_failed" });
     expect(fx.sandbox.files.size).toBe(0);
+    // 失敗はモデルに返さない: 最初の 1 回のあと、モデルは呼ばれない
+    expect(fx.modelCalls.count).toBe(1);
   });
 
-  it("起動に失敗しても、あとで成功すれば続けられる（失敗は 3 回未満）", async () => {
-    const fx = newFixture("lazy-retry", [
-      call("write_note", { text: "1" }),
-      call("write_note", { text: "2" }),
-      report(),
-    ]);
-    const orig = fx.sandbox.ensureReady.bind(fx.sandbox);
-    let n = 0;
-    fx.sandbox.ensureReady = async (spec) => {
-      n += 1;
-      if (n === 1) throw new Error("transient");
-      return orig(spec);
-    };
-    await fx.stub.start(noVerify("lazy-retry"));
+  it("起動を試みて失敗したタスクは、report_completion の近道（起動せずに完了）で成功にならない", async () => {
+    const fx = newFixture("lazy-failed-noshortcut", [call("gate"), report()]);
+    await fx.stub.start(noVerify("lazy-failed-noshortcut"));
+    await fx.gate.waitEntered();
+    await runInDO(fx.stub, (inst) => inst.store.setMeta("setup_attempts", 1));
+    fx.gate.release();
     expect(await waitForTerminal(fx)).toBe("completed");
-    expect(fx.sandbox.files.get("/workspace/note.txt")).toBe("2");
+    // 近道を使わず、確かめるために起動した
+    expect(fx.sandbox.readySpecs).toHaveLength(1);
   });
 
   it("依存キャッシュの結果は起動のときに読む（子のプロンプトの「依存は導入済み」の判断に使う）", async () => {
@@ -289,3 +306,24 @@ describe("子のシステムプロンプト", () => {
     expect(text).toContain("trailing newline");
   });
 });
+
+describe("子のシステムプロンプト（Pi が実際に組み立てたもの）", () => {
+  it("dependencies の節が実際のプロンプトに出る。起動前でも正しい文（最初のコマンドの前に導入される）", async () => {
+    const fx = newFixture("prompt-deps", [call("echo", { text: "x" }), report()]);
+    await fx.stub.start(noVerify("prompt-deps", { deps: DEPS }));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const sys = fx.modelCalls.systemTexts[0] ?? "";
+    expect(sys).toContain("installed before your first command");
+    expect(sys).toContain("only the tests related to the files you changed");
+  });
+});
+
+const DEPS = {
+  repositoryId: 4242,
+  lockfilePath: "pnpm-lock.yaml",
+  blobSha: "a".repeat(40),
+  installCommand: "pnpm install --frozen-lockfile",
+  packageJsonSha: "d".repeat(40),
+  workspaceSha: null,
+  manifestsSha: null,
+};

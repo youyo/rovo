@@ -136,7 +136,7 @@ describe("子のシステムプロンプト", () => {
 
   it("miss / disabled / 不明: 節を出さない（導入済みと誤解させない）", async () => {
     for (const status of ["miss", "disabled", undefined] as const) {
-      const fx = newFixture(`deps-prompt-no-${status ?? "unknown"}`, [call("gate")]);
+      const fx = newFixture(`deps-prompt-no-${status ?? "unknown"}`, [boot(), call("gate")]);
       fx.sandbox.metricsValue = status ? { ...base, depsCache: status } : base;
       await fx.stub.start(makeSpec(`deps-prompt-no-${status ?? "unknown"}`, { deps }));
       await fx.gate.waitEntered();

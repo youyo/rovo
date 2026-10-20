@@ -53,5 +53,9 @@ export default defineConfig({
     // 最初の DO 呼び出しが 5 秒のタイムアウトに間に合わなくなる（fake-agent.test.ts で再現）。4 並列なら安定し、速くもなる
     // （18 コアで 12 秒 → 7 秒）。
     maxWorkers: 4,
+    // 1 vCPU の Sandbox では、DO を呼ぶだけで数秒かかることがある。個々のテストに延長を足さず、ここで現実的な値にする
+    // （待ち時間の上限であって、通る条件は変えない。止まったテストは 30 秒で落ちる）。初期化の待ちは setup.ts の beforeAll に出してある。
+    testTimeout: 30_000,
+    hookTimeout: 60_000,
   },
 });

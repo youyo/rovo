@@ -2223,12 +2223,16 @@ export class AgentDO extends DurableObject<Env> {
           fail(cmd.argv, "invalid cwd");
           break;
         }
+        // 1 本ごとの所要時間（開始から終了まで。タイムアウトも含む）を、テストで差し替えられる時計で計る
+        const startedAt = this.now();
         const r = await sb.exec(cmd.argv, { cwd, timeoutMs: (cmd.timeoutSeconds ?? 600) * 1000 });
+        const durationMs = Math.max(0, this.now() - startedAt);
         results.push({
           argv: cmd.argv,
           exitCode: r.exitCode,
           timedOut: r.timedOut,
           output: tail(`${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`),
+          durationMs,
         });
         if (r.timedOut) destroyed = true; // タイムアウトでコンテナは破棄され、作業ツリーは作り直される
         if (r.exitCode !== 0 || r.timedOut) {

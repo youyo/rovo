@@ -785,6 +785,51 @@ describe("TaskDO.result", () => {
     });
   });
 
+  it("verification.results の各要素に duration_ms が入る。durationMs が無い結果（古い agent）には付けない", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    await agent.setProgram({
+      result: {
+        status: "completed",
+        summary: "s",
+        verification: {
+          commands: [],
+          results: [
+            { argv: ["npm", "ci"], exitCode: 0, timedOut: false, output: "a", durationMs: 1234 },
+            { argv: ["npm", "test"], exitCode: 137, timedOut: true, output: "b", durationMs: 0 },
+            { argv: ["npm", "run", "lint"], exitCode: 0, timedOut: false, output: "c" },
+          ],
+          verified: false,
+          attempts: 1,
+        },
+        warnings: [],
+        patchTooLarge: false,
+        usage: {
+          costUsd: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          web: { search: 0, fetch: 0, browse: 0 },
+        },
+      },
+    });
+    await agent.setPhase("completed");
+    await stub.advance();
+    const r = await stub.result(OWNER);
+    if (!r.ok) throw new Error("result");
+    const results = r.result.verification.results;
+    expect(results[0]).toMatchObject({ argv: ["npm", "ci"], exit_code: 0, duration_ms: 1234 });
+    expect(results[1]).toMatchObject({ timed_out: true, duration_ms: 0 });
+    expect(results[2]).toEqual({
+      argv: ["npm", "run", "lint"],
+      exit_code: 0,
+      timed_out: false,
+      output: "c",
+    });
+    expect("duration_ms" in (results[2] ?? {})).toBe(false);
+  });
+
   it("verification の output は UTF-8 のバイト数で 16KiB に切り詰める（末尾を残し、文字を壊さない）", async () => {
     const { stub, agent } = await createTask();
     await stub.advance();

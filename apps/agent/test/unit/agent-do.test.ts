@@ -341,6 +341,37 @@ describe("完了判定", () => {
     ).toBe(true);
   });
 
+  it("検証コマンドごとに durationMs（開始から終了まで）が入る", async () => {
+    const fx = newFixture("verify-duration", [report("実装した")]);
+    fx.verifyAdvanceMs.push(1200, 3400);
+    await fx.stub.start(
+      makeSpec("verify-duration", {
+        verificationCommands: [{ argv: ["npm", "ci"] }, { argv: ["npm", "test"] }],
+      }),
+    );
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const r = done(await fx.stub.getResult());
+    expect(r.verification.results.map((x) => x.durationMs)).toEqual([1200, 3400]);
+  });
+
+  it("タイムアウトしたコマンドにも durationMs が入る", async () => {
+    const fx = newFixture("verify-duration-timeout", [
+      report("1"),
+      report("2"),
+      report("3"),
+      report("4"),
+    ]);
+    for (let i = 0; i < 4; i++) {
+      fx.verifyAdvanceMs.push(600_000);
+      fx.verifyResults.push({ exitCode: 137, timedOut: true });
+    }
+    await fx.stub.start(makeSpec("verify-duration-timeout"));
+    await waitForTerminal(fx);
+    const first = done(await fx.stub.getResult()).verification.results[0];
+    expect(first?.timedOut).toBe(true);
+    expect(first?.durationMs).toBe(600_000);
+  });
+
   it("検証失敗 → 結果をモデルへ返して修正 → 成功", async () => {
     const fx = newFixture("verify-fix", [
       report("1回目"),

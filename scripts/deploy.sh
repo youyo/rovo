@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 下流の wrangler 設定（ROVO_DEPLOY_DIR）で Worker をデプロイする。mise の deploy:* から呼ばれる。
-#   使い方: scripts/deploy.sh <web|agent|gateway|all>
+#   使い方: scripts/deploy.sh <web|agent|gateway|all>   （gateway のデプロイの前に、ダッシュボード〔apps/dashboard〕をビルドする）
 #           scripts/deploy.sh secrets [--pem <GitHub App の .pem>] [--skip-github-app] [--rotate <名前>]...
 #   ROVO_DEPLOY_DIR/{gateway,agent,web}.wrangler.jsonc を使う（相対パスは実行したディレクトリから）。
 # upstream の apps/*/wrangler.jsonc には本番の値が無いので、誤ってデプロイしないよう、
@@ -99,7 +99,16 @@ require() {
   [ "$bad" -eq 0 ] || exit 1
 }
 
+# gateway の assets（apps/dashboard/dist。ダッシュボードの SPA）を作る。dist が無い・古いままデプロイしないよう、
+# ビルドが失敗したら（set -e で）ここで止まり、wrangler は呼ばない。vite は成功時に dist を空にしてから書き出す（emptyOutDir）。
+# 依存は pnpm install 済みを前提にする（今のデプロイもそう）。新しい secret・手順は無い。
+build_dashboard() {
+  echo "==> ダッシュボード（apps/dashboard）をビルドする"
+  (cd "$root/apps/dashboard" && pnpm exec vite build)
+}
+
 deploy_one() { # deploy_one <web|agent|gateway>
+  [ "$1" = gateway ] && build_dashboard
   echo "==> $1 をデプロイする（設定: $(cfg "$1")）"
   (cd "$root/apps/$1" && pnpm exec wrangler deploy -c "$(cfg "$1")")
 }

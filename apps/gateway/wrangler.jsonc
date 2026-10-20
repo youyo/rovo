@@ -4,6 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-12",
   "compatibility_flags": ["nodejs_compat"],
+  // ダッシュボード（apps/dashboard の SPA。/dashboard）の静的ファイル。dist は mise の build:dashboard が作る（無いと wrangler dev / deploy が失敗する）。
+  // run_worker_first: true は必須: Worker が /dashboard/* だけを env.ASSETS に渡す。assets の自動配信に任せると、/mcp などを飲み込みうる。
+  "assets": { "directory": "../dashboard/dist", "binding": "ASSETS", "run_worker_first": true },
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   "durable_objects": {
     "bindings": [

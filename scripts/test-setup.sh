@@ -118,13 +118,14 @@ export CLOUDFLARE_API_TOKEN="TFTOKEN-SENTINEL-XYZ"
 run "$work/bin" "$cfg_ok" --pem "$pem" --yes; rc=$?
 expect "(b1) 通しで成功する" 0 "$rc"
 seq="$(calls | sed -E "s#-chdir=[^ ]+ ##; s#-var-file=[^ ]+#-var-file=VARS#; s#-c $work/deploy/#-c DEPLOY/#" | grep -v '^docker\|whoami')"
-expect "(b2) 順序: init → apply → output ×3 → deploy web/agent/gateway → secret list ×2 → put ×5" "terraform init -input=false
+expect "(b2) 順序: init → apply → output ×3 → deploy web/agent/ダッシュボードのビルド/gateway → secret list ×2 → put ×5" "terraform init -input=false
 terraform apply -var-file=VARS -auto-approve
 terraform output -raw kv_namespace_id
 terraform output -raw archive_bucket_name
 terraform output -raw ai_gateway_id
 web exec wrangler deploy -c DEPLOY/web.wrangler.jsonc
 agent exec wrangler deploy -c DEPLOY/agent.wrangler.jsonc
+dashboard exec vite build
 gateway exec wrangler deploy -c DEPLOY/gateway.wrangler.jsonc
 gateway exec wrangler secret list --format json -c DEPLOY/gateway.wrangler.jsonc
 agent exec wrangler secret list --format json -c DEPLOY/agent.wrangler.jsonc
@@ -218,6 +219,7 @@ terraform output -raw archive_bucket_name
 terraform output -raw ai_gateway_id
 web exec wrangler deploy -c DEPLOY/web.wrangler.jsonc
 agent exec wrangler deploy -c DEPLOY/agent.wrangler.jsonc
+dashboard exec vite build
 gateway exec wrangler deploy -c DEPLOY/gateway.wrangler.jsonc
 gateway exec wrangler secret list --format json -c DEPLOY/gateway.wrangler.jsonc
 agent exec wrangler secret list --format json -c DEPLOY/agent.wrangler.jsonc
@@ -227,6 +229,7 @@ gateway exec wrangler secret put TOKEN_ENC_KEY -c DEPLOY/gateway.wrangler.jsonc
 agent exec wrangler secret put TOKEN_ENC_KEY -c DEPLOY/agent.wrangler.jsonc
 gateway exec wrangler secret put GITHUB_APP_CLIENT_SECRET -c DEPLOY/gateway.wrangler.jsonc
 gateway exec wrangler secret put GITHUB_APP_PRIVATE_KEY -c DEPLOY/gateway.wrangler.jsonc
+dashboard exec vite build
 gateway exec wrangler deploy -c DEPLOY/gateway.wrangler.jsonc" "$seq_h"
 expect "(h3) rovo.config.json に githubApp の id と clientId が入る" "424242 Iv1.fakeclientid0001" "$(node -e 'const g=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).githubApp;console.log(g.id,g.clientId)' "$cfg_h")"
 grep -q '"GITHUB_APP_ID": "424242"' "$work/deploy/gateway.wrangler.jsonc"; expect "(h4) 再生成した gateway の設定に GITHUB_APP_ID が入る" 0 $?

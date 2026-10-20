@@ -38,7 +38,7 @@ rovo を upstream として取り込み、自分の Cloudflare アカウント�
 |---|---|---|---|
 | `rovo-web` | `apps/web` | Web Research Service（`web_search` / `web_fetch` / `web_browse`）。状態を持たない | しない（`workers_dev: false`。service binding からだけ呼ぶ） |
 | `rovo-agent` | `apps/agent` | 子エージェント（`AgentDO`）と Sandbox（`SandboxDO`） | しない（`workers_dev: false`。gateway の DO バインディングからだけ呼ぶ） |
-| `rovo-gateway` | `apps/gateway` | MCP サーバー（`/mcp`）、OAuth、`TaskDO` / `UserDO` | する |
+| `rovo-gateway` | `apps/gateway` | MCP サーバー（`/mcp`）、OAuth、`TaskDO` / `UserDO`、ダッシュボード（`/dashboard`。18） | する |
 
 依存関係:
 
@@ -192,7 +192,7 @@ AI Gateway の ID・KV の id・アーカイブのバケット名は Terraform �
 | `github-app` | GitHub App を manifest フローで作る（上の「GitHub App の自動作成」）。`-- --recreate` / `--org <名前>` / `--personal` / `--name <名前>` / `--no-deploy` |
 | `byok` | AI Gateway にプロバイダーのキーを登録する（上の「BYOK を CLI で登録する」）。`-- <anthropic\|openai> [--yes]` |
 | `deploy:config` / `deploy:config:check` | 設定の生成 / 差分の確認 |
-| `deploy:web` / `deploy:agent` / `deploy:gateway` | 1 つの Worker をデプロイする |
+| `deploy:web` / `deploy:agent` / `deploy:gateway` | 1 つの Worker をデプロイする（gateway は、デプロイの前にダッシュボード〔`apps/dashboard`〕を自動でビルドする。18） |
 | `deploy:all` | web → agent → gateway の順にデプロイする。3 つの設定のどれかが欠けていたら、何も実行しない。途中で失敗したら後続は実行しない |
 | `deploy:secrets` | 上の「secret」 |
 
@@ -275,6 +275,7 @@ web に secret は無い（GitHub のトークンも Anthropic のキーも持�
 
 | 名前 | Worker | 必須 | 説明 |
 |---|---|---|---|
+| `ASSETS`（assets） | gateway | 必須 | ダッシュボードの静的ファイル（`apps/dashboard/dist`）。`run_worker_first: true` で、Worker が `/dashboard/*` だけを渡す。下流の設定は `deploy.example/` の雛形に入っている（18） |
 | `OAUTH_KV`（KV） | gateway | 必須 | KV namespace の id は下流の設定に書く（rovo の `wrangler.jsonc` には id が無い） |
 | `LOGS`（R2） | gateway だけ | 任意 | アーカイブ先のバケット。無ければアーカイブはスキップされる（9） |
 | `TASK_DO` / `USER_DO`（DO） | gateway | 必須 | 設定済み |
@@ -464,3 +465,12 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 - **pnpm / yarn**: Dockerfile で `corepack enable` した shim を使う（素の `pnpm` が呼べる。本体は package.json の `packageManager` に従って初回に取る。取得先は `registry.npmjs.org`。外向きの許可に既にある）。python3 もイメージに入っている。yarn の berry（`yarn.lock` が `__metadata:` で始まる）は `--frozen-lockfile` を受け付けず、キャッシュの作成が失敗する（`miss`。60 秒のクールダウンの後に作り直す）。その場合は `depsCache.enabled` を `false` にするか、classic にする。
 - **対象外**: Python / PyPI、ルート以外の lockfile（モノレポの入れ子）、pnpm store のキャッシュ、スナップショットの削除。
 - **実機での確認**: acceptance.md の 24。
+
+## 18. ダッシュボード（`/dashboard`）
+
+gateway は、読み取り専用のダッシュボード（`apps/dashboard`。Vite + React + TypeScript の SPA）を `/dashboard` で配信する。設計は `docs/specs/dashboard.md`。現時点は配信の土台だけで、画面は「準備中」の雛形（ログインと中身は後続）。
+
+- **ビルドは自動**: `mise run deploy:gateway`（`deploy:all` を含む）と `mise run setup` が、gateway のデプロイの前に `pnpm exec vite build`（`apps/dashboard`）を実行して `apps/dashboard/dist` を作る。ビルドが失敗したら、古い `dist` をデプロイしないよう `wrangler deploy` を呼ばずに止まる。新しい secret・トークン・手順は要らない（`pnpm install` 済みであれば足りる）。手元で `wrangler dev` を使う場合は `mise run dev`（先にビルドする）。
+- **配信の仕組み**: gateway の `assets` は `run_worker_first: true`。すべてのリクエストが先に Worker に届き、`/dashboard` と `/dashboard/*` だけを SPA として扱う。それ以外（`/mcp`・`/authorize`・`/.well-known/...` など）は今までどおり OAuthProvider が処理する。`/dashboard/api/*` は JSON の API の置き場所で、未知のパスは JSON の 404。
+- **下流の設定**: `deploy.example/gateway.wrangler.jsonc` の `assets`（`"directory": "../apps/dashboard/dist"`）を `deploy:config` がそのまま出す。`deploy/` にコミット済みの設定は、`mise run deploy:config` で再生成する（`deploy:config:check` で差分を確かめる）。
+- **アクセス**: ダッシュボードの認証は GitHub（後続の実装）。Portal / Access を前に置くかは下流の判断（8）。

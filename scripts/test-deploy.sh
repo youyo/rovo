@@ -127,7 +127,16 @@ run set "$work/full" web; rc=$?
 expect "(b1) web: 成功する" 0 "$rc"
 expect "(b2) web: apps/web で wrangler deploy -c <下流の設定>" "web exec wrangler deploy -c $work/full/web.wrangler.jsonc" "$(calls)"
 run set "$work/full" agent; expect "(b3) agent" "agent exec wrangler deploy -c $work/full/agent.wrangler.jsonc" "$(calls)"
-run set "$work/full" gateway; expect "(b4) gateway" "gateway exec wrangler deploy -c $work/full/gateway.wrangler.jsonc" "$(calls)"
+# gateway は assets（apps/dashboard/dist）を持つので、wrangler deploy の前にダッシュボードをビルドする（ビルドは 1 回だけ）
+run set "$work/full" gateway; expect "(b4) gateway: ダッシュボードのビルド → wrangler deploy" "dashboard exec vite build
+gateway exec wrangler deploy -c $work/full/gateway.wrangler.jsonc" "$(calls)"
+expect "(b4) gateway: ビルドは 1 回" 1 "$(grep -c 'vite build' "$FAKE_LOG")"
+run set "$work/full" web; expect "(b4) web: ダッシュボードをビルドしない" 0 "$(grep -c 'vite build' "$FAKE_LOG")"
+run set "$work/full" agent; expect "(b4) agent: ダッシュボードをビルドしない" 0 "$(grep -c 'vite build' "$FAKE_LOG")"
+# ビルドが失敗したら、古い dist をデプロイしないよう wrangler を呼ばずに止まる
+FAKE_FAIL_ON="vite build" run set "$work/full" gateway; rc=$?
+expect "(b4) gateway: ビルドが失敗したら 0 以外で終わる" 1 "$([ $rc -ne 0 ] && echo 1 || echo 0)"
+expect "(b4) gateway: ビルドが失敗したら wrangler deploy を呼ばない" "dashboard exec vite build" "$(calls)"
 # 相対パスは実行したディレクトリからの相対として絶対パスにして渡す
 run set "full" web
 expect "(b5) 相対パスは絶対パスにして渡す" "web exec wrangler deploy -c $work/full/web.wrangler.jsonc" "$(calls)"
@@ -137,8 +146,9 @@ if grep -q "apps/.*/wrangler.jsonc" "$FAKE_LOG"; then expect "(b6) upstream の�
 # (c) all
 run set "$work/full" all; rc=$?
 expect "(c1) all: 成功する" 0 "$rc"
-expect "(c2) all: web → agent → gateway の順" "web exec wrangler deploy -c $work/full/web.wrangler.jsonc
+expect "(c2) all: web → agent → ダッシュボードのビルド → gateway の順（ビルドは gateway の直前に 1 回）" "web exec wrangler deploy -c $work/full/web.wrangler.jsonc
 agent exec wrangler deploy -c $work/full/agent.wrangler.jsonc
+dashboard exec vite build
 gateway exec wrangler deploy -c $work/full/gateway.wrangler.jsonc" "$(calls)"
 run set "$work/partial" all; rc=$?
 expect "(c3) all: 設定が 1 つ欠けたら失敗" 1 "$([ $rc -ne 0 ] && echo 1 || echo 0)"
@@ -148,6 +158,11 @@ FAKE_FAIL_ON="agent.wrangler" run set "$work/full" all; rc=$?
 expect "(c6) all: 途中で失敗したら 0 以外で終わる" 1 "$([ $rc -ne 0 ] && echo 1 || echo 0)"
 expect "(c7) all: 途中で失敗したら後続を実行しない" "web exec wrangler deploy -c $work/full/web.wrangler.jsonc
 agent exec wrangler deploy -c $work/full/agent.wrangler.jsonc" "$(calls)"
+
+FAKE_FAIL_ON="vite build" run set "$work/full" all; rc=$?
+expect "(c8) all: ダッシュボードのビルドが失敗したら 0 以外で終わり、gateway をデプロイしない" "1 web exec wrangler deploy -c $work/full/web.wrangler.jsonc
+agent exec wrangler deploy -c $work/full/agent.wrangler.jsonc
+dashboard exec vite build" "$([ $rc -ne 0 ] && echo 1 || echo 0) $(calls)"
 
 # (d) secrets
 pem="$work/app.pem"; echo "FAKE-PEM-CONTENT" > "$pem"
@@ -262,7 +277,7 @@ for n in gateway agent web; do
   sed -E 's/<[A-Za-z_][A-Za-z0-9_]*>/filled/g' "$example/$n.wrangler.jsonc" > "$work/filled/$n.wrangler.jsonc"
 done
 run set "$work/filled" all; rc=$?
-expect "(e10) 全部置き換えた deploy.example/ のコピーは all が通る" "0 3" "$rc $(ncalls)"
+expect "(e10) 全部置き換えた deploy.example/ のコピーは all が通る（web・agent・ダッシュボードのビルド・gateway の 4 回）" "0 4" "$rc $(ncalls)"
 run set "$work/filled" secrets --pem "$pem"; rc=$?
 expect "(e11) 全部置き換えたコピーは secrets も通る（list 2 + put 5）" "0 7" "$rc $(ncalls)"
 

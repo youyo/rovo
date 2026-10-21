@@ -78,3 +78,18 @@ done
 echo stuck
 exit 1
 `;
+
+/**
+ * 作業ツリーの状態の指紋（Sandbox の昇格の前後で、作業ツリーがそのまま残っていることを比べる）。
+ * HEAD の commit、未 commit の変更（追跡ファイルの差分と、追跡されていないファイル）をそれぞれハッシュにして出力する。
+ * 出力が同じなら、昇格の前後で作業ツリーは同じ。ファイルの中身は出さない（ハッシュだけ）。
+ * 引数: $1=作業ツリー。git が失敗したら（HEAD が無いなど）失敗する。argv は `bash -c <script> rovo-promote-state <作業ツリー>`。
+ */
+export const PROMOTE_STATE_SCRIPT = `
+set -e
+set -o pipefail
+cd "$1"
+git rev-parse HEAD
+git status --porcelain --untracked-files=normal | sha256sum
+git diff HEAD | sha256sum
+`;

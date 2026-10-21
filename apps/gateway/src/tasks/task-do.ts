@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "@rovo/audit";
-import type { Effort } from "@rovo/models";
+import { type Effort, isSandboxPromotionReason } from "@rovo/models";
 import type { z } from "zod";
 import { count, depsCacheStatus, depsMissReason, mapAgentEvent } from "../agent/agent-events";
 import type {
@@ -244,8 +244,16 @@ export type ResultView = {
     cache_build_ms?: number;
     /** Sandbox を動かした累計の時間（ms。task_summary の sandbox_runtime_ms と同じもの）。agent がカウンタを読めたときだけ付く */
     sandbox_runtime_ms?: number;
-    /** 実際にコンテナを起動した大きさ（standard-2 など）。Sandbox を一度も起動しなかったタスク・agent が報告しなかったタスクには付かない */
+    /** 最初にコンテナを起動した大きさ（standard-2 など）。Sandbox を一度も起動しなかったタスク・agent が報告しなかったタスクには付かない。昇格しても変わらない */
     sandbox_instance?: string;
+    /** 重いコマンド（テスト・ビルドなど）の初回に昇格した先の大きさ（standard-3 など）。昇格していなければ付かない。昇格前の時間は sandbox_instance、残りは sandbox_promoted_to の単価で推定費用に按分される */
+    sandbox_promoted_to?: string;
+    /** 昇格した時刻（epoch ms） */
+    sandbox_promoted_at?: number;
+    /** 昇格した時点までの Sandbox の時間（ms。sandbox_runtime_ms のうち昇格前の分） */
+    sandbox_runtime_ms_before_promotion?: number;
+    /** 昇格を見送った・失敗した理由の固定コード（fixed_instance / already_large / state_unreadable / snapshot_unsupported / snapshot_failed / start_failed / cert_missing / workspace_mismatch / fallback_failed）。昇格が成功したとき・設定で無効のときは付かない */
+    sandbox_promotion_reason?: string;
   };
 };
 
@@ -2639,6 +2647,18 @@ export class TaskDO extends DurableObject<Env> {
               restarts: up.sandbox_restarts ?? 0,
               bootRetries: up.sandbox_boot_retries ?? 0,
               ...(up.sandbox_instance !== undefined ? { instance: up.sandbox_instance } : {}),
+              ...(up.sandbox_promoted_to !== undefined
+                ? {
+                    promotedTo: up.sandbox_promoted_to,
+                    ...(up.sandbox_promoted_at !== undefined
+                      ? { promotedAt: up.sandbox_promoted_at }
+                      : {}),
+                    runtimeMsBeforePromotion: up.sandbox_runtime_ms_before_promotion ?? 0,
+                  }
+                : {}),
+              ...(up.sandbox_promotion_reason !== undefined
+                ? { promotionReason: up.sandbox_promotion_reason }
+                : {}),
             }
           : null,
       },
@@ -3061,6 +3081,7 @@ function shapeUsage(u: UsageDto): ResultView["usage"] {
     },
     ...sandboxRuntimeUsage(u.sandbox),
     ...sandboxInstanceUsage(u.sandbox),
+    ...sandboxPromotionUsage(u.sandbox),
     ...depsUsage(u.sandbox),
   };
 }
@@ -3079,6 +3100,32 @@ function sandboxRuntimeUsage(sb: UsageDto["sandbox"]): { sandbox_runtime_ms?: nu
 function sandboxInstanceUsage(sb: UsageDto["sandbox"]): { sandbox_instance?: string } {
   const name = sandboxInstanceName(sb?.instance);
   return name !== undefined ? { sandbox_instance: name } : {};
+}
+
+/**
+ * usage.sandbox の昇格（重いコマンドの初回に大きい Sandbox へ）。昇格先は表にある名前だけ、理由は固定コードだけ通す（任意の文字列を公開しない）。
+ * 昇格前の時間は昇格したときだけ付ける。何も無ければ何も付けない。
+ */
+function sandboxPromotionUsage(sb: UsageDto["sandbox"]): {
+  sandbox_promoted_to?: string;
+  sandbox_promoted_at?: number;
+  sandbox_runtime_ms_before_promotion?: number;
+  sandbox_promotion_reason?: string;
+} {
+  const promotedTo = sandboxInstanceName(sb?.promotedTo);
+  const reason = isSandboxPromotionReason(sb?.promotionReason) ? sb?.promotionReason : undefined;
+  const ms = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  return {
+    ...(promotedTo !== undefined
+      ? {
+          sandbox_promoted_to: promotedTo,
+          ...(ms(sb?.promotedAt) > 0 ? { sandbox_promoted_at: ms(sb?.promotedAt) } : {}),
+          sandbox_runtime_ms_before_promotion: ms(sb?.runtimeMsBeforePromotion),
+        }
+      : {}),
+    ...(reason !== undefined ? { sandbox_promotion_reason: reason } : {}),
+  };
 }
 
 /** usage.sandbox の依存関係のキャッシュ（D14）の結果。sandbox が無い・値が表に無いときは何も付けない */

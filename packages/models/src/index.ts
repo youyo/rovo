@@ -424,14 +424,19 @@ export function computeCostUsd(price: ModelPrice, usage: TokenUsage): number {
 
 // Sandbox コンテナの大きさと単価（D13）。deploy:config（scripts/*.mjs）も同じ表を読むので、依存のない別ファイルに置く。
 export {
+  DEFAULT_HEAVY_SANDBOX_INSTANCE,
   DEFAULT_SANDBOX_INSTANCE,
+  isSandboxPromotionReason,
   isSelectableSandboxInstance,
   listSandboxInstances,
+  resolveHeavySandboxInstance,
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
   SANDBOX_PRICE,
+  SANDBOX_PROMOTION_REASONS,
   type SandboxInstance,
   type SandboxInstanceInfo,
+  type SandboxPromotionReason,
   SELECTABLE_SANDBOX_INSTANCES,
   type SelectableSandboxInstance,
   sandboxInstanceSpec,

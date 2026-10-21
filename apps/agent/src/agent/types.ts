@@ -1,3 +1,4 @@
+import type { SandboxPromotionReason } from "@rovo/models";
 import type { DepsMissReason, DepsSpec } from "../deps-cache";
 
 /** AgentDO の公開 RPC の型（戻り値は DTO。Pi の EntryRecord は返さない）。 */
@@ -188,8 +189,16 @@ export interface SandboxMetrics {
   depsMissReason?: DepsMissReason;
   /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms）。runtimeMs（Sandbox の時間）にも含む */
   cacheBuildMs?: number;
-  /** 実際にコンテナを start() した大きさ。一度も起動していなければ無い（Sandbox が必要になるまで起動しない） */
+  /** 最初にコンテナを start() した大きさ。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
+  /** 重いコマンドの初回に昇格した先の大きさ。昇格していなければ無い。一度昇格したら戻さない（作り直しも昇格先で起動する） */
+  promotedTo?: string;
+  /** 昇格した時刻（epoch ms）。昇格していなければ無い */
+  promotedAt?: number;
+  /** 昇格した時点までの Sandbox の累計時間（ms）。runtimeMs のうち、これまでが instance の単価、残りが promotedTo の単価。昇格していなければ無い */
+  runtimeMsBeforePromotion?: number;
+  /** 昇格を見送った・失敗した理由の固定コード（packages/models の SANDBOX_PROMOTION_REASONS）。昇格が成功したときは無い。設定で無効のときも無い */
+  promotionReason?: SandboxPromotionReason;
 }
 
 export interface WebUsage {

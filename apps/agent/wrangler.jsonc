@@ -59,6 +59,11 @@
     // wrangler の instance_type は効かず、SandboxDO が start() の instance に渡す。既定は standard-2（1 vCPU、6 GiB、12 GB）。
     // 不正な値は standard-2 に戻す（警告のログだけ）。単価（gateway の SANDBOX_USD_PER_HOUR）は大きさに合わせる。docs/deploy.md の 5。
     "SANDBOX_INSTANCE": "standard-2",
+    // 重いコマンド（テスト・ビルドなど）の初回に昇格する先の大きさ（standard-1〜standard-4）。小さく始めて、重いコマンドの前に
+    // 今のコンテナのスナップショットを取り、同じスナップショットから大きい大きさで起動し直す。空・"off" で無効（昇格しない）。
+    // task_start で sandbox_instance を明示したタスクは昇格しない。スナップショットが使えなくても失敗はしない（小さいまま続ける）。
+    // 既定は standard-3（本番のベンチマークで、費用が standard-2 とほぼ同じで時間が約半分）。docs/deploy.md の 11。
+    "SANDBOX_HEAVY_INSTANCE": "standard-3",
     // 依存関係のキャッシュ（D14。Containers のスナップショット）を使うか。"false" / "0" / "off" で無効にする（既定は有効）。
     // スナップショットは public beta で、使えない・失敗してもタスクは今までどおり動く（fail-soft）。docs/deploy.md の 5。
     "DEPS_CACHE_ENABLED": "true",

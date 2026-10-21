@@ -88,9 +88,9 @@ describe("決定論ルールの検出率と誤検知率（モデルを除く。M
     // 期待値の表から出した率と、実測が一致する（ルールを変えたら表を更新する）
     expect(actualDetect).toBe(rate(inj));
     expect(actualFalsePositive).toBe(rate(ben));
-    // 基準線（実測: ja 検出 64% / 誤検知 30%、en 検出 64% / 誤検知 40%）。ルールを直して悪化させない。
+    // 基準線（実測: ja 検出 64% / 誤検知 30%、en 検出 64% / 誤検知 33%。en は 2026-10-22 に、宛先のない changelog の行を通常サンプルに足した）。ルールを直して悪化させない。
     // en の検出率は 64%（7/11）で、基準線 0.6 との余裕はサンプル 1 件分しかない。1 件取りこぼすと 55% で落ちる。
-    // 誤検知率の上限 0.4 は、実測（ja 30% / en 40%）にちょうど一致する。
+    // 誤検知率の上限 0.4 は、実測（ja 30% / en 33%）に近い値。
     // サンプルを増やしたり入れ替えたりするときは、実測を見てこの基準線を見直す（引き上げるのはよいが、下げない）。
     expect(actualDetect).toBeGreaterThanOrEqual(0.6);
     expect(actualFalsePositive).toBeLessThanOrEqual(0.4);

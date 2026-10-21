@@ -299,13 +299,13 @@ rovo の運用者（このリポジトリの作者）は、下の「有効化前
 - [ ] 下流で remote: true を設定した BROWSER が、実際に使う wrangler の版と compatibility_date で動く
 - [ ] 有効化は web → agent → gateway の順に WEB_BROWSE_ENABLED を "true" にし、tools/list に web_browse が現れる
 
-## 12. Clef の応答の形・usage.input_tokens・sentinel の効き方
+## 12. Clef の応答の形・usage.input_tokens・窓を超えたときの扱い
 
 Clef-flash はドキュメントに複数の形があり、実機で確かめていない前提がある（`apps/web/src/safety/clef.ts`）。
 
 - [ ] `AI.run("@cf/cloudflare/clef-flash", ...)` の応答の形: `answers.<id>` が確率（数値）か `answers.<id>.noul` か。両方を受けるコードだが、実際にどちらかを記録する。想定外の形なら `unexpected_response` で `unknown` になる
 - [ ] `usage.input_tokens` が返る。実際の入力（本文 + questions）のトークン数と見積もり（UTF-8 のバイト数）がどれだけ違うか。英語・日本語・コードで記録する
-- [ ] 窓（24,576 トークン）を超える本文（約 10,000 トークンのチャンクを超える長さ）で、sentinel の質問（`state_ends_with_marker`）が効く: 切り詰められたチャンクは `state_truncated` になり `unknown` になる。切り詰められないチャンクで sentinel の確率が 0.5 以上になる（誤検知で `unknown` が多発しない）
+- [ ] 窓（24,576 トークン）を超える入力は、AI.run の例外（3030 / 5021）か usage.input_tokens の検査で未完了（`unknown`）になる。チャンク（20,000 バイト）と質問は窓に収まり、通常の長い本文（日本語を含む）が `unknown` にならない（sentinel は 2026-10-22 に廃止。理由は phase5.md）
 - [ ] 長い本文の末尾に仕込んだ注入が、チャンクの分割で検出される
 - [ ] AI Gateway 経由の呼び出しに、metadata（`userId` / `taskId` / `caller`）が付いてログに出る
 

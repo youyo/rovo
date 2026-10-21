@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SENTINEL_QUESTION_ID } from "../../src/safety/clef";
 import { createWebResearchService, type ServiceDeps } from "../../src/service";
 import { CATEGORIES } from "../../src/types";
 import { envelope, fakeBrowser, fakeFetch, REQ } from "./browse-helpers";
@@ -35,10 +34,9 @@ function envFor(over: Record<string, unknown> = {}): Env {
 
 function clefAnswers(score: number) {
   return {
-    answers: {
-      ...Object.fromEntries(CATEGORIES.map((c) => [c, { noul: score }])),
-      [SENTINEL_QUESTION_ID]: { noul: 0.99 },
-    },
+    answers: Object.fromEntries(CATEGORIES.map((c) => [c, { noul: score }])),
+    // 実機の応答は usage を必ず含む（無いと評価は未完了になる）
+    usage: { input_tokens: 100 },
   };
 }
 

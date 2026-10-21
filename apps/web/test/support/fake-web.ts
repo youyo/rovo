@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 /**
  * apps/web の E2E 用の偽サーバー（Node）。web には ENVIRONMENT=test と TEST_FAKE_BASE=この URL を渡す。
  * apps/web/src/test-hooks.ts の差し込み口に合わせて、次を実装する。
- *   - POST /ai/run          Clef-flash（AI.run）の応答。sentinel の質問にも答える
+ *   - POST /ai/run          Clef-flash（AI.run）の応答。窓（24,576 トークン）を超える入力は実機と同じく 422 を返す
  *   - POST /ai/websearch    Web Search API（AI.websearch）の応答
  *   - POST /ai/tomarkdown   AI.toMarkdown の応答（HTML をごく簡単に Markdown にする）
  *   - その他の GET          ページの配信。本来のホストは x-original-host、スキームは x-original-scheme で届く
@@ -219,19 +219,29 @@ function searchItems(query: string): SearchItem[] {
 
 // ---- Clef ----
 
+const CLEF_WINDOW_TOKENS = 24_576;
+
 type ClefInput = { state?: string; questions?: Record<string, { instructions?: string }> };
 
-/** 偽 Clef の応答。questions の id ごとに確率を返す。sentinel の質問には、state が目印で終わっているかで答える。 */
+/** 偽 Clef の応答。questions の id ごとに確率を返す。入力が窓を超えるときは、実機（REST・binding）と同じくエラーにする。 */
 export function clefAnswer(input: ClefInput): { status: number; body: unknown } {
   const state = input.state ?? "";
   if (state.includes(MODEL_FAIL_MARKER)) return { status: 500, body: { error: "clef down" } };
+  // 実機は窓（24,576 トークン）を超えると黙って切り詰めず、422 を返す。トークン数は UTF-8 のバイト数以下（最悪 1 トークン / バイト）
+  const requestTokens =
+    Buffer.byteLength(state, "utf8") +
+    Buffer.byteLength(JSON.stringify(input.questions ?? {}), "utf8");
+  if (requestTokens > CLEF_WINDOW_TOKENS) {
+    return {
+      status: 422,
+      body: {
+        error: `Request requires ${requestTokens} tokens; the maximum is ${CLEF_WINDOW_TOKENS}`,
+      },
+    };
+  }
   const answers: Record<string, number> = {};
-  for (const [id, q] of Object.entries(input.questions ?? {})) {
-    const m = /exact marker "([^"]+)"/.exec(q.instructions ?? "");
-    if (m?.[1]) {
-      // sentinel の質問: state の末尾が目印か
-      answers[id] = state.endsWith(m[1]) ? 0.99 : 0.01;
-    } else if (state.includes(MODEL_INJECTION_MARKER)) {
+  for (const id of Object.keys(input.questions ?? {})) {
+    if (state.includes(MODEL_INJECTION_MARKER)) {
       answers[id] = id === "prompt_injection" || id === "instruction_override" ? 0.95 : 0.05;
     } else if (state.includes(MODEL_CAUTION_MARKER)) {
       answers[id] = id === "role_spoofing" ? 0.5 : 0.02;

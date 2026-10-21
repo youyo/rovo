@@ -42,3 +42,23 @@ export function normalizeContent(raw: string, options: { maxChars?: number } = {
   }
   return { text, truncated, originalChars, strippedHidden };
 }
+
+/**
+ * normalizeContent が返す本文（切り詰め後）を覆う、raw の先頭部分。
+ * 決定論ルールを「返す範囲」にだけかけるために使う（返さない末尾の語句や隠し文字で止めない）。
+ * 切り詰めがなければ raw 全体。正規化は文字の削除と改行の圧縮だけなので、正規化後の長さは raw の先頭からの長さに対して単調。
+ */
+export function coveringRawPrefix(raw: string, options: { maxChars?: number } = {}): string {
+  const n = normalizeContent(raw, options);
+  if (!n.truncated) return raw;
+  const target = n.text.length;
+  const unbounded = { maxChars: Number.POSITIVE_INFINITY };
+  let lo = 0;
+  let hi = raw.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (normalizeContent(raw.slice(0, mid), unbounded).text.length >= target) hi = mid;
+    else lo = mid + 1;
+  }
+  return raw.slice(0, lo);
+}

@@ -629,6 +629,53 @@ describe("SandboxDO: 子の見立ての的中（heavyCommandsCoveredByAgent）",
   });
 });
 
+describe("SandboxDO: 的中は規則の試行が残っていたときだけ数える", () => {
+  it("規則の昇格が失敗して試行を使い切ったあとで子が上げても、以降の重いコマンドは的中として数えない", async () => {
+    await runInDO(sandboxStub("covered-after-rule-failed"), async (inst) => {
+      const fake = setup(inst, AGENT_MAX);
+      fake.snapshotResult = new Error("boom");
+      await inst.ensureReady(spec());
+      await inst.exec(HEAVY); // 規則の昇格が snapshot_failed で見送り（試行を使い切る）
+      fake.snapshotResult = { id: "snap-ok", size: 1 };
+      await inst.scaleUp("standard-4");
+      await inst.exec(HEAVY);
+      await inst.exec(HEAVY);
+      const m = await inst.metrics();
+      expect(m.heavyCommandsAfterAgentScaleUp).toBe(2);
+      expect(m.heavyCommandsCoveredByAgent).toBe(0);
+    });
+  });
+
+  it("検証コマンドの昇格が失敗して試行を使い切ったあとで子が上げた場合も、的中として数えない", async () => {
+    await runInDO(sandboxStub("covered-after-verification-failed"), async (inst) => {
+      const fake = setup(inst, AGENT_MAX);
+      fake.snapshotResult = new Error("boom");
+      await inst.ensureReady(spec());
+      await inst.exec(["./scripts/check.sh"], { heavy: true });
+      fake.snapshotResult = { id: "snap-ok", size: 1 };
+      await inst.scaleUp("standard-4");
+      await inst.exec(HEAVY);
+      const m = await inst.metrics();
+      expect(m.heavyCommandsCoveredByAgent).toBe(0);
+    });
+  });
+
+  it("子が先に上げていて規則が見送った（試行を使った）あとの重いコマンドも、的中として数え続ける", async () => {
+    await runInDO(sandboxStub("covered-keeps-counting"), async (inst) => {
+      setup(inst, AGENT_MAX);
+      await inst.ensureReady(spec());
+      await inst.scaleUp("standard-4");
+      await inst.exec(HEAVY);
+      await inst.exec(HEAVY);
+      await inst.exec(["./scripts/check.sh"], { heavy: true });
+      await inst.exec(HEAVY);
+      const m = await inst.metrics();
+      expect(m.heavyCommandsAfterAgentScaleUp).toBe(3);
+      expect(m.heavyCommandsCoveredByAgent).toBe(3);
+    });
+  });
+});
+
 describe("SandboxDO: 昇格の失敗の内訳（promotionFailures）", () => {
   it("規則の昇格がスナップショットの失敗で見送られたら { trigger: rule, reason: snapshot_failed } を 1 件足す。promotionReason は最後の理由のまま", async () => {
     await runInDO(sandboxStub("fail-rule-snap"), async (inst) => {

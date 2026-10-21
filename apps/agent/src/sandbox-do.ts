@@ -1035,7 +1035,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   /**
    * 規則の昇格が要らなかったか（子の見立てが当たったか）。子が sandbox_scale_up で上げた大きさが規則の昇格先以上で、
-   * 規則・検証による昇格がまだ起きていないとき。規則の昇格を無効にしているデプロイでは false（防ぐ対象が無い）。
+   * 規則・検証による昇格がまだ起きていないときで、かつ規則の試行がまだ残っていたとき
+   * （試行を失敗・見送りで使い切ったあとは、規則はもう動けないので数えない）。
+   * 子が先に上げていて規則が見送った分岐も promotion_attempted を立てるので、その見送りで使った試行は
+   * promotion_skipped_for_agent で区別し、以降の重いコマンドも数え続ける。
+   * 規則の昇格を無効にしているデプロイでは false（防ぐ対象が無い）。
    */
   private coveredByAgent(): boolean {
     const target = resolveHeavySandboxInstance(
@@ -1047,8 +1051,13 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const ruleDone = (this.ctx.storage.kv.get<SandboxPromotionRecord[]>("promotions") ?? []).some(
       (p) => p.trigger !== "agent",
     );
+    const kv = this.ctx.storage.kv;
+    const ruleCouldStillAct =
+      kv.get<boolean>("promotion_attempted") !== true ||
+      kv.get<boolean>("promotion_skipped_for_agent") === true;
     return (
       !ruleDone &&
+      ruleCouldStillAct &&
       SANDBOX_INSTANCES[agentTo as SandboxInstance].vcpu >= SANDBOX_INSTANCES[target].vcpu
     );
   }
@@ -1095,7 +1104,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const current = this.currentInstance();
     if (SANDBOX_INSTANCES[current].vcpu >= SANDBOX_INSTANCES[target].vcpu) {
       // 子がすでに昇格先以上に上げていた（昇格が成功している）。見送りの理由は残さない（promoted_to があるのに already_large、にしない）
-      if (this.promotedTo() !== undefined) return "skipped";
+      if (this.promotedTo() !== undefined) {
+        // 試行はここで使うが、子のおかげで要らなかっただけ。的中の判定（coveredByAgent）が以降も数え続けられるよう印を残す
+        kv.put("promotion_skipped_for_agent", true);
+        return "skipped";
+      }
       return skip("already_large");
     }
     return this.runPromotion(target, trigger, ruleMatch);

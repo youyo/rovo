@@ -1,4 +1,5 @@
 import { SANDBOX_OPS } from "@rovo/audit";
+import { isSandboxPromotionReason } from "@rovo/models";
 import { sandboxInstanceName } from "../sandbox-instance";
 import type { TaskStatus } from "../tasks/state";
 import type { AgentEventDto, AgentPhase, SandboxUsageDto } from "./contract";
@@ -86,6 +87,8 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
     typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
   const cacheBuildMs = n(s.cacheBuildMs);
   const instance = sandboxInstanceName(s.instance);
+  const promotedTo = sandboxInstanceName(s.promotedTo);
+  const reason = isSandboxPromotionReason(s.promotionReason) ? s.promotionReason : undefined;
   return {
     sandbox_runtime_ms: n(s.runtimeMs),
     sandbox_restarts: count(s.restarts),
@@ -93,6 +96,15 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
     ...depsCacheFields(s.depsCache, cacheBuildMs, s.depsMissReason),
     // 実際に起動した大きさ。表にある名前だけ（任意の文字列を公開しない）。起動していなければ付けない
     ...(instance !== undefined ? { sandbox_instance: instance } : {}),
+    // 昇格（重いコマンドの初回に大きい Sandbox へ）。昇格先は表にある名前だけ、理由は固定コードだけ。昇格前の時間は昇格したときだけ付ける
+    ...(promotedTo !== undefined
+      ? {
+          sandbox_promoted_to: promotedTo,
+          ...(n(s.promotedAt) > 0 ? { sandbox_promoted_at: n(s.promotedAt) } : {}),
+          sandbox_runtime_ms_before_promotion: n(s.runtimeMsBeforePromotion),
+        }
+      : {}),
+    ...(reason !== undefined ? { sandbox_promotion_reason: reason } : {}),
   };
 }
 

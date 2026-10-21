@@ -8,6 +8,11 @@ export interface ExecOptions {
   timeoutMs?: number;
   /** 既定 64KiB。超えた分は捨て、末尾を残す。 */
   maxOutputBytes?: number;
+  /**
+   * 重いコマンドとして扱う（argv のパターンに関係なく、Sandbox の昇格の引き金にする）。検証コマンドの実行の前に付ける。
+   * 付けなくても、argv が重いコマンド（テスト・ビルドなど。heavy-command.ts）なら昇格する。
+   */
+  heavy?: boolean;
 }
 
 export interface ExecResult {
@@ -39,7 +44,8 @@ export interface WorkspaceSpec {
   deps?: DepsSpec | null;
   /**
    * コンテナの大きさ（task_start の sandbox_instance。standard-1〜4）。**あれば利用者が明示した**ので、このタスクの間はずっとこの大きさで
-   * 起動する（env の SANDBOX_INSTANCE より優先）。無ければ env の既定。ensureReady の同一性（conflict）の判定には含めない。
+   * 起動する（env の SANDBOX_INSTANCE より優先。重いコマンドの初回の昇格もしない）。無ければ env の既定から始めて、重いコマンドの初回に
+   * 昇格先（env の SANDBOX_HEAVY_INSTANCE）へ昇格する。ensureReady の同一性（conflict）の判定には含めない。
    * 依存関係のキャッシュを作るコンテナ（deps-<key>）には使わない（常に既定のまま）。
    */
   instance?: string;

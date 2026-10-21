@@ -7,7 +7,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // Sandbox の大きさと単価の表は packages/models が 1 か所で持つ（依存のないファイルを Node の型除去で読む）
 import {
+  DEFAULT_HEAVY_SANDBOX_INSTANCE,
   DEFAULT_SANDBOX_INSTANCE,
+  isSelectableSandboxInstance,
   SANDBOX_INSTANCES,
   sandboxUsdPerHour,
 } from "../packages/models/src/sandbox.ts";
@@ -34,7 +36,8 @@ export const DEFAULTS = {
     ],
     efforts: "",
   },
-  sandbox: { instance: DEFAULT_SANDBOX_INSTANCE },
+  // heavyInstance: 重いコマンド（テスト・ビルドなど）の初回に昇格する先。null で無効（昇格しない）
+  sandbox: { instance: DEFAULT_SANDBOX_INSTANCE, heavyInstance: DEFAULT_HEAVY_SANDBOX_INSTANCE },
   // 依存関係のキャッシュ（D14。Containers のスナップショット）。public beta の機能なので、止められるようにしてある
   depsCache: { enabled: true },
   webBrowseEnabled: false,
@@ -269,11 +272,21 @@ export function validateConfig(raw, templates = loadTemplates()) {
 
   const sb = isObj(raw.sandbox) ? raw.sandbox : {};
   if (raw.sandbox !== undefined && !isObj(raw.sandbox)) errors.push("sandbox: オブジェクトにする");
-  for (const k of Object.keys(sb)) if (k !== "instance") errors.push(`sandbox.${k}: 未知のキー`);
+  for (const k of Object.keys(sb))
+    if (k !== "instance" && k !== "heavyInstance") errors.push(`sandbox.${k}: 未知のキー`);
   const sandboxInstance = sb.instance ?? DEFAULT_SANDBOX_INSTANCE;
   if (!isStr(sandboxInstance) || !Object.hasOwn(SANDBOX_INSTANCES, sandboxInstance)) {
     errors.push(
       `sandbox.instance: ${Object.keys(SANDBOX_INSTANCES).join(" / ")} のどれかにする（既定 ${DEFAULT_SANDBOX_INSTANCE}）`,
+    );
+  }
+
+  // 昇格先: 省略は既定、null は無効。タスクが選べる 4 種類（lite を除く）のどれか
+  const sandboxHeavyInstance =
+    sb.heavyInstance === undefined ? DEFAULTS.sandbox.heavyInstance : sb.heavyInstance;
+  if (sandboxHeavyInstance !== null && !isSelectableSandboxInstance(sandboxHeavyInstance)) {
+    errors.push(
+      `sandbox.heavyInstance: standard-1 / standard-2 / standard-3 / standard-4 のどれか、または null（昇格しない）にする（既定 ${DEFAULT_HEAVY_SANDBOX_INSTANCE}）`,
     );
   }
 
@@ -332,7 +345,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
       budget: b,
       concurrency: { maxTasks },
       models: { default: modelDefault.trim(), list: modelList, efforts },
-      sandbox: { instance: sandboxInstance },
+      sandbox: { instance: sandboxInstance, heavyInstance: sandboxHeavyInstance },
       depsCache: { enabled: depsCacheEnabled },
       webBrowseEnabled: web,
       vars,
@@ -379,6 +392,8 @@ function placeholderValues(config, infra) {
     AGENT_MODELS: config.models.list.join(","),
     MODEL_EFFORTS: config.models.efforts,
     SANDBOX_INSTANCE: config.sandbox.instance,
+    // 昇格先（agent と gateway の同名の var）。null は空文字 = 昇格しない
+    SANDBOX_HEAVY_INSTANCE: config.sandbox.heavyInstance ?? "",
     // 推定費用の単価は instance から決める（vars.gateway.SANDBOX_USD_PER_HOUR を書けば、renderOne の上書きがそれを優先する）
     SANDBOX_USD_PER_HOUR: String(sandboxUsdPerHour(config.sandbox.instance)),
     DEPS_CACHE_ENABLED: String(config.depsCache.enabled),

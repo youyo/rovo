@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildTaskSummary,
   DEFAULT_PRICES,
+  mergeUsagePublic,
   parsePrices,
+  parseUsagePublic,
   type SummaryInput,
   summaryMetrics,
 } from "../../src/tasks/summary";
@@ -233,5 +235,115 @@ describe("Sandbox の大きさごとの単価（sandbox_usd_estimate）", () => 
       expect(s.unit_prices.sandbox_usd_per_hour).toBe(3.6);
       expect(s.sandbox).not.toHaveProperty("instance");
     }
+  });
+});
+
+describe("Sandbox の昇格と費用の按分（sandbox_usd_estimate）", () => {
+  const HOUR = 3_600_000;
+  const promoted = (over: Record<string, unknown> = {}) =>
+    input({
+      usage: {
+        ...input().usage,
+        sandbox: {
+          runtimeMs: HOUR,
+          restarts: 0,
+          bootRetries: 0,
+          instance: "standard-2",
+          promotedTo: "standard-3",
+          promotedAt: 1_700_000_000_000,
+          runtimeMsBeforePromotion: HOUR / 4,
+          ...over,
+        },
+      } as SummaryInput["usage"],
+    });
+
+  it("昇格前の時間は元の大きさの単価、昇格後の時間は昇格先の単価で按分する", () => {
+    const s = buildTaskSummary(promoted());
+    const expected =
+      0.25 * sandboxUsdPerHour("standard-2") + 0.75 * sandboxUsdPerHour("standard-3");
+    expect(s.sandbox_usd_estimate).toBeCloseTo(expected, 9);
+    expect(s.sandbox).toMatchObject({
+      instance: "standard-2",
+      promoted_to: "standard-3",
+      promoted_at: 1_700_000_000_000,
+      runtime_ms_before_promotion: HOUR / 4,
+    });
+    expect(s.unit_prices.sandbox_usd_per_hour).toBe(sandboxUsdPerHour("standard-2"));
+    expect(s.unit_prices.sandbox_promoted_usd_per_hour).toBe(sandboxUsdPerHour("standard-3"));
+  });
+
+  it("昇格前の時間が累計を超える・負・壊れた値のときは 0 〜 累計に収める（多く数えすぎない）", () => {
+    const over = buildTaskSummary(promoted({ runtimeMsBeforePromotion: 10 * HOUR }));
+    expect(over.sandbox_usd_estimate).toBeCloseTo(sandboxUsdPerHour("standard-2"), 9);
+    expect(over.sandbox.runtime_ms_before_promotion).toBe(HOUR);
+    for (const bad of [-5, Number.NaN, undefined]) {
+      const s = buildTaskSummary(promoted({ runtimeMsBeforePromotion: bad }));
+      expect(s.sandbox_usd_estimate).toBeCloseTo(sandboxUsdPerHour("standard-3"), 9);
+      expect(s.sandbox.runtime_ms_before_promotion).toBe(0);
+    }
+  });
+
+  it("昇格していなければ、今までどおり 1 つの単価。昇格に関する項目は付けない", () => {
+    const s = buildTaskSummary(promoted({ promotedTo: undefined }));
+    expect(s.sandbox_usd_estimate).toBeCloseTo(sandboxUsdPerHour("standard-2"), 9);
+    expect(s.sandbox).not.toHaveProperty("promoted_to");
+    expect(s.sandbox).not.toHaveProperty("runtime_ms_before_promotion");
+    expect(s.unit_prices).not.toHaveProperty("sandbox_promoted_usd_per_hour");
+  });
+
+  it("表に無い昇格先は無視する（昇格していないものとして扱う）", () => {
+    const s = buildTaskSummary(promoted({ promotedTo: "evil" }));
+    expect(s.sandbox_usd_estimate).toBeCloseTo(sandboxUsdPerHour("standard-2"), 9);
+    expect(s.sandbox).not.toHaveProperty("promoted_to");
+  });
+
+  it("元の大きさが分からない（古い agent）が昇格している場合、昇格前は prices の単価で按分する", () => {
+    const prices = { ...DEFAULT_PRICES, sandboxUsdPerHour: 3.6 };
+    const s = buildTaskSummary({ ...promoted({ instance: undefined }), prices });
+    expect(s.sandbox_usd_estimate).toBeCloseTo(
+      0.25 * 3.6 + 0.75 * sandboxUsdPerHour("standard-3"),
+      9,
+    );
+  });
+
+  it("見送りの理由は固定コードだけ summary に残す", () => {
+    const s = buildTaskSummary(
+      promoted({ promotedTo: undefined, promotionReason: "snapshot_unsupported" }),
+    );
+    expect(s.sandbox).toMatchObject({ promotion_reason: "snapshot_unsupported" });
+    const bad = buildTaskSummary(promoted({ promotedTo: undefined, promotionReason: "evil" }));
+    expect(bad.sandbox).not.toHaveProperty("promotion_reason");
+  });
+});
+
+describe("usage_public に昇格の項目を覚える", () => {
+  it("merge: 最後に報告された昇格先・理由を覚える。後から項目の無い usage が届いても忘れない", () => {
+    let up = mergeUsagePublic(
+      {},
+      {
+        sandbox_runtime_ms: 100,
+        sandbox_instance: "standard-2",
+        sandbox_promoted_to: "standard-3",
+        sandbox_promoted_at: 1_700_000_000_000,
+        sandbox_runtime_ms_before_promotion: 40,
+        sandbox_promotion_reason: "start_failed",
+      },
+    );
+    up = mergeUsagePublic(up, { sandbox_runtime_ms: 200 });
+    expect(up).toMatchObject({
+      sandbox_promoted_to: "standard-3",
+      sandbox_promoted_at: 1_700_000_000_000,
+      sandbox_runtime_ms_before_promotion: 40,
+      sandbox_promotion_reason: "start_failed",
+    });
+    expect(parseUsagePublic(JSON.stringify(up))).toEqual(up);
+  });
+
+  it("parse: 表に無い値は捨てる", () => {
+    const up = parseUsagePublic(
+      JSON.stringify({ sandbox_promoted_to: "evil", sandbox_promotion_reason: "x".repeat(300) }),
+    );
+    expect(up).not.toHaveProperty("sandbox_promoted_to");
+    expect(up).not.toHaveProperty("sandbox_promotion_reason");
   });
 });

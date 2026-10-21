@@ -182,6 +182,46 @@ describe("sandbox.instance（D13）", () => {
   });
 });
 
+describe("sandbox.heavyInstance（重いコマンドの初回の昇格先）", () => {
+  const gen = (patch) =>
+    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
+  it("既定は standard-3。agent の SANDBOX_HEAVY_INSTANCE と gateway の同名の var に反映される", () => {
+    assert.equal(DEFAULTS.sandbox.heavyInstance, "standard-3");
+    for (const patch of [{}, { sandbox: {} }, { sandbox: { instance: "standard-1" } }]) {
+      const o = gen(patch);
+      assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, "standard-3");
+      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_HEAVY_INSTANCE, "standard-3");
+    }
+  });
+  it("選べる 4 種類のどれかにできる", () => {
+    for (const name of ["standard-1", "standard-2", "standard-3", "standard-4"]) {
+      const o = gen({ sandbox: { heavyInstance: name } });
+      assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, name);
+      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_HEAVY_INSTANCE, name);
+    }
+  });
+  it("null で無効（空文字になる）。agent と gateway の両方", () => {
+    const o = gen({ sandbox: { heavyInstance: null } });
+    assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, "");
+    assert.equal(parseJsonc(o.gateway).vars.SANDBOX_HEAVY_INSTANCE, "");
+  });
+  it("web には出さない（Sandbox を持たない）", () => {
+    assert.equal(parseJsonc(gen({}).web).vars.SANDBOX_HEAVY_INSTANCE, undefined);
+  });
+  it("lite・名前にない値・型の誤り・空文字・未知のキーはエラー", () => {
+    const bad = (sandbox) => validateConfig({ ...productionLike(), sandbox }).errors;
+    for (const v of ["lite", "basic", "standard-9", 3, true, "", "off"]) {
+      assert.ok(
+        bad({ heavyInstance: v }).some((e) => e.includes("sandbox.heavyInstance")),
+        String(v),
+      );
+    }
+    assert.ok(
+      bad({ heavyInstanse: "standard-3" }).some((e) => e.includes("sandbox.heavyInstanse")),
+    );
+  });
+});
+
 describe("concurrency.maxTasks（利用者ごとの同時実行数）", () => {
   const gen = (patch) =>
     generateAll(validated({ ...productionLike(), ...patch }), infra, templates);

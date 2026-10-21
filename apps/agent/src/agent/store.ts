@@ -36,7 +36,11 @@ export function sameUsage(a: UsageDto, b: UsageDto): boolean {
     a.sandbox?.bootRetries === b.sandbox?.bootRetries &&
     a.sandbox?.depsCache === b.sandbox?.depsCache &&
     a.sandbox?.cacheBuildMs === b.sandbox?.cacheBuildMs &&
-    a.sandbox?.instance === b.sandbox?.instance
+    a.sandbox?.instance === b.sandbox?.instance &&
+    a.sandbox?.promotedTo === b.sandbox?.promotedTo &&
+    a.sandbox?.promotedAt === b.sandbox?.promotedAt &&
+    a.sandbox?.runtimeMsBeforePromotion === b.sandbox?.runtimeMsBeforePromotion &&
+    a.sandbox?.promotionReason === b.sandbox?.promotionReason
   );
 }
 

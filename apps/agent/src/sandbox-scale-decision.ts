@@ -301,7 +301,8 @@ function fourMatters(a: Pick<ClefAnswers, "heavy">, ctx: PickContext): boolean {
 
 /** flash の答えが曖昧で、clef で聞き直すべきか */
 export function isAmbiguous(a: Pick<ClefAnswers, "heavy" | "fast4">, ctx: PickContext): boolean {
-  if (within(a.heavy, ctx.thresholds.heavyBand)) return true;
+  // 重い確率の帯は上端が排他（0.7 以上は flash だけで決める）
+  if (a.heavy >= ctx.thresholds.heavyBand[0] && a.heavy < ctx.thresholds.heavyBand[1]) return true;
   return fourMatters(a, ctx) && within(a.fast4, ctx.thresholds.fourBand);
 }
 

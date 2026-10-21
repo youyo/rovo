@@ -114,7 +114,9 @@ describe("isAmbiguous: flash の確率が曖昧か", () => {
   };
   it("重い確率が 0.2〜0.7 なら曖昧", () => {
     expect(isAmbiguous({ heavy: 0.2, fast4: 0 }, ctx)).toBe(true);
-    expect(isAmbiguous({ heavy: 0.7, fast4: 0.9 }, ctx)).toBe(true);
+    expect(isAmbiguous({ heavy: 0.69, fast4: 0.9 }, ctx)).toBe(true);
+    // 上端は排他: ちょうど 0.7 は flash だけで決める（clef を呼ばない）
+    expect(isAmbiguous({ heavy: 0.7, fast4: 0.9 }, ctx)).toBe(false);
     expect(isAmbiguous({ heavy: 0.19, fast4: 0.3 }, ctx)).toBe(false);
     expect(isAmbiguous({ heavy: 0.71, fast4: 0.9 }, ctx)).toBe(false);
   });
@@ -382,27 +384,60 @@ describe("帯の中は flash と clef の重い確率の大きいほうで決め
 // 実際の Clef（2026-10-22 に実測）の確率をそのまま入れた偽の AI.run で、期待する判断を固定する。
 // [コマンド, flash の重い・4 vCPU, clef の重い・4 vCPU（聞き直すときだけ）, 上げるか]
 describe("実 Clef で測った 10 コマンドの確率フィクスチャ", () => {
-  const table: [string, [number, number], [number, number] | null, boolean][] = [
-    ["ls -la", [0.08, 0.13], null, false],
-    ["git status", [0.07, 0.11], null, false],
-    ["cat package.json", [0.2, 0.23], [0.02, 0.13], false],
-    ["pnpm test (maxWorkers 4)", [0.42, 0.5], [0.76, 0.53], true],
-    ["pnpm test (maxWorkers 2)", [0.28, 0.06], [0.64, 0.05], true],
-    ["pnpm test (singleWorker)", [0.34, 0.08], [0.53, 0.06], true],
-    ["make -j4", [0.58, 0.63], [0.15, 0.16], true],
-    ["pytest -n auto", [0.57, 0.54], [0.76, 0.68], true],
-    ["pnpm build", [0.53, 0.12], [0.29, 0.05], true],
-    ["cargo build --release", [0.82, 0.66], null, true],
+  const table: [string, [number, number], [number, number] | null, string | null][] = [
+    ["ls -la", [0.08, 0.13], null, null],
+    ["git status", [0.07, 0.11], null, null],
+    ["cat package.json", [0.2, 0.23], [0.02, 0.13], null],
+    ["pnpm test (maxWorkers 4)", [0.42, 0.5], [0.76, 0.53], "standard-4"],
+    ["pnpm test (maxWorkers 2)", [0.28, 0.06], [0.64, 0.05], "standard-3"],
+    ["pnpm test (singleWorker)", [0.34, 0.08], [0.53, 0.06], "standard-3"],
+    ["make -j4", [0.58, 0.63], [0.15, 0.16], "standard-3"],
+    ["pytest -n auto", [0.57, 0.54], [0.76, 0.68], "standard-4"],
+    ["pnpm build", [0.53, 0.12], [0.29, 0.05], "standard-3"],
+    ["cargo build --release", [0.82, 0.66], null, "standard-4"],
   ];
-  for (const [cmd, f, c, up] of table) {
-    it(`${cmd}: ${up ? "上げる" : "上げない"}`, async () => {
+  for (const [cmd, f, c, want] of table) {
+    it(`${cmd}: ${want ?? "上げない"}`, async () => {
       const { ai } = fakeAi({
         [CLEF_FLASH.id]: [response({ heavy: f[0], fast4: f[1] })],
         [CLEF_FULL.id]: c ? [response({ heavy: c[0], fast4: c[1] })] : [],
       });
       const r = await decideSandboxSize(deps(ai), input());
       expect(r.ok).toBe(true);
-      if (r.ok) expect(r.target !== null).toBe(up);
+      if (r.ok) expect(r.target).toBe(want);
     });
   }
+});
+
+describe("帯の上端（0.7）は排他", () => {
+  it("flash の重い確率がちょうど 0.7 なら clef を呼ばず、flash だけで上げる", async () => {
+    const { ai, calls } = fakeAi({ [CLEF_FLASH.id]: [response({ heavy: 0.7, fast4: 0.1 })] });
+    const r = await decideSandboxSize(deps(ai), input());
+    expect(r).toMatchObject({ ok: true, target: "standard-3", model: "flash" });
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("buildDecisionState: 秘密は事実と直近のコマンドからも伏せる", () => {
+  it("repository_facts と recent_commands に既知の形式の秘密があっても、state に生の値が出ない", () => {
+    const gh = `ghp_${"b".repeat(36)}`;
+    const sk = `sk-${"c".repeat(40)}`;
+    const state = buildDecisionState({
+      argv: ["pnpm", "test"],
+      cwd: "/workspace",
+      current: "standard-2",
+      max: "standard-4",
+      facts: `## package.json\n{"scripts":{"test":"GH=${gh} vitest run","x":"KEY=${sk} node"}}\n`,
+      recent: [
+        {
+          command: `curl -H "Authorization: Bearer ${gh}" https://example.com`,
+          seconds: 1,
+          exitCode: 0,
+        },
+      ],
+    });
+    expect(state).not.toContain(gh);
+    expect(state).not.toContain(sk);
+    expect(JSON.parse(state).repository_facts).toContain("vitest run");
+  });
 });

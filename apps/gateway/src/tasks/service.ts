@@ -73,12 +73,23 @@ export type StartValue = {
 export const START_NOTE =
   "Phase 3: 作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントが Sandbox で編集・テスト・commit・push します。draft_pr_url は作成前なので null です。PR の URL は task_status・task_result・イベント draft_pr_created で返ります。成果は終端になってから task_result で取得できます（rovo は PR を Ready にもマージにもしません。PR は Draft のまま返り、あなたが差分をレビューして問題が無ければ task_pr_ready で Ready にします。merge_policy が agent_merge なら task_pr_merge でマージもできます。次の一手は task_result の next_steps に書かれます）。";
 
+/** クライアントに返すイベントの値。TaskDO の保存形はプリミティブだけ（RPC・保存のため）だが、usage の履歴だけは配列で返す */
+export type PublicEventValue =
+  | string
+  | number
+  | boolean
+  | null
+  | Record<string, string | number | boolean | null>[];
+export type PublicTaskEvent = Omit<TaskEvent, "payload"> & {
+  payload: Record<string, PublicEventValue>;
+};
+
 export type StatusValue = Omit<TaskView, "owner_id">;
 export type WaitValue = {
   task_id: string;
   status: TaskStatus;
   cursor: string;
-  events: TaskEvent[];
+  events: PublicTaskEvent[];
   retry_after_seconds?: number;
 };
 export type AnswerValue = { task_id: string; question_id: string; status: TaskStatus };
@@ -155,7 +166,7 @@ const FREE_TEXT_FIELDS: Record<string, readonly string[]> = {
   completion_report: ["summary"],
 };
 
-function wrapFreeText(e: TaskEvent, fields: readonly string[]): TaskEvent {
+function wrapFreeText(e: TaskEvent, fields: readonly string[]): PublicTaskEvent {
   const payload: Record<string, string | number | boolean | null> = { ...e.payload };
   for (const f of fields) {
     const v = payload[f];
@@ -164,7 +175,34 @@ function wrapFreeText(e: TaskEvent, fields: readonly string[]): TaskEvent {
   return { ...e, payload };
 }
 
-function wrapEvent(e: TaskEvent): TaskEvent {
+/**
+ * usage イベントの履歴（昇格の履歴・失敗の内訳）は、保存形では JSON 文字列（payload がプリミティブだけのため）。
+ * task_result の usage と同じく配列で返す。壊れた文字列は配列にせず、そのキーを外す（保存時に検証済みなので通常は起きない）。
+ */
+const USAGE_ARRAY_FIELDS = ["sandbox_promotions", "sandbox_promotion_failures"] as const;
+
+export function expandUsageArrays(e: TaskEvent): PublicTaskEvent {
+  const payload: Record<string, PublicEventValue> = { ...e.payload };
+  for (const f of USAGE_ARRAY_FIELDS) {
+    const v = e.payload[f];
+    if (typeof v !== "string") continue;
+    try {
+      const parsed: unknown = JSON.parse(v);
+      // 要素がすべてオブジェクトの配列だけ通す（それ以外はキーを外す）
+      const ok =
+        Array.isArray(parsed) &&
+        parsed.every((x) => typeof x === "object" && x !== null && !Array.isArray(x));
+      if (ok) payload[f] = parsed as Record<string, string | number | boolean | null>[];
+      else delete payload[f];
+    } catch {
+      delete payload[f];
+    }
+  }
+  return { ...e, payload };
+}
+
+function wrapEvent(e: TaskEvent): PublicTaskEvent {
+  if (e.type === "usage") return expandUsageArrays(e);
   const free = FREE_TEXT_FIELDS[e.type];
   if (free !== undefined) return wrapFreeText(e, free);
   if (e.type !== "question" || typeof e.payload.message !== "string") return e;

@@ -251,6 +251,23 @@ describe("SandboxDO: 判断ごとの記録と集計（usage の振り返り用�
     });
   });
 
+  it("bash -c の形（子の bash ツール・検証コマンド）は、コマンド文字列の先頭の語を cmd に残す（文字列の全体は残さない）", async () => {
+    await runInDO(sandboxStub("clef-cmd-bash"), async (inst) => {
+      setup(inst);
+      await inst.ensureReady(spec());
+      await inst.exec(
+        ["bash", "-c", "cd app && FOO=secret-env timeout 600 pnpm test --reporter x"],
+        AGENT,
+      );
+      await inst.exec(["/bin/sh", "-lc", "vitest run"], AGENT);
+      const m = await inst.metrics();
+      const [a, b] = m.scaleDecisions ?? [];
+      expect([a?.cmd, b?.cmd]).toEqual(["pnpm", "vitest"]);
+      expect(JSON.stringify(m)).not.toContain("secret-env");
+      expect(JSON.stringify(m)).not.toContain("--reporter");
+    });
+  });
+
   it("上げなかったのに長くかかったコマンドを数える（上げたコマンドや、短いコマンドは数えない）", async () => {
     await runInDO(sandboxStub("clef-slow"), async (inst) => {
       const fake = setup(inst);

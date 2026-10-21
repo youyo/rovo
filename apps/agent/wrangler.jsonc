@@ -65,7 +65,7 @@
     // 空・"off" で無効（Clef を呼ばず、昇格しない）。task_start で sandbox_instance を明示したタスクは固定で、Clef も呼ばない。
     // Clef の判断やスナップショットが失敗しても、タスクは失敗しない（今の大きさのまま続ける）。既定は standard-4。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
     "SANDBOX_MAX_INSTANCE": "standard-4",
-    // Clef の判断の閾値（任意。空は既定）。`heavy=0.5,four=0.4,heavy_band=0.3-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする。実験で調整した既定値を env で変えられるようにしてある。docs/deploy.md の 11。
+    // Clef の判断の閾値（任意。空は既定）。`heavy=0.5,four=0.4,heavy_band=0.2-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする。実験で調整した既定値を env で変えられるようにしてある。docs/deploy.md の 11。
     "SANDBOX_CLEF_THRESHOLDS": "",
     // 依存関係のキャッシュ（D14。Containers のスナップショット）を使うか。"false" / "0" / "off" で無効にする（既定は有効）。
     // スナップショットは public beta で、使えない・失敗してもタスクは今までどおり動く（fail-soft）。docs/deploy.md の 5。

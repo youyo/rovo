@@ -11,7 +11,7 @@
  *     - size（choice）: standard-2 / 3 / 4 のどれが良いか（振り返り用に確率を残す）
  *     - beyond2（noul）: 4 vCPU で 2 vCPU より明らかに速くなるか
  *  2. 重い確率 < 0.5 は上げない。重い → beyond2 >= 0.4 なら standard-4、そうでなければ standard-3（上限の範囲で、今より大きいときだけ）
- *  3. flash の確率が曖昧な帯のときだけ、clef（@cf/cloudflare/clef）で聞き直し、その答えを使う
+ *  3. flash の確率が曖昧な帯のときだけ、clef（@cf/cloudflare/clef）で聞き直し、flash と clef の重い確率の大きいほうで決める（4 vCPU の確率は clef の答え）
  *  4. 失敗（例外・時間切れ・想定外の応答）は 1 回 5 秒・最大 3 回まで再試行する。それでも駄目なら ok: false（呼び出し側は今の大きさのまま実行する）
  *
  * 閾値は実験で調整した値（同じデータで調整したので env SANDBOX_CLEF_THRESHOLDS で変えられる）。
@@ -61,7 +61,7 @@ export type ClefThresholds = {
 export const DEFAULT_CLEF_THRESHOLDS: ClefThresholds = {
   heavy: 0.5,
   four: 0.4,
-  heavyBand: [0.3, 0.7],
+  heavyBand: [0.2, 0.7],
   fourBand: [0.2, 0.5],
 };
 
@@ -80,7 +80,7 @@ const band = (s: string): [number, number] | undefined => {
 };
 
 /**
- * env SANDBOX_CLEF_THRESHOLDS を解く。`heavy=0.5,four=0.4,heavy_band=0.3-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする。
+ * env SANDBOX_CLEF_THRESHOLDS を解く。`heavy=0.5,four=0.4,heavy_band=0.2-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする。
  * 未設定・空は既定。不正な値は丸ごと既定に戻して、受け付けなかった値を ignored に返す（起動はエラーにしない）。
  */
 export function resolveClefThresholds(raw: string | undefined): {
@@ -458,11 +458,14 @@ export async function decideSandboxSize(
 
   const full = await query(CLEF_FULL);
   if (full.ok) {
+    // 帯の中は、flash と clef の重い確率の大きいほうで決める（上げすぎの損は小さく、上げ損ねは時間を失う。非対称）。
+    // 4 vCPU の確率は clef の答えを使う
+    const merged = { ...full.answers, heavy: Math.max(f.heavy, full.answers.heavy) };
     return {
       ok: true,
-      target: pickTarget(full.answers, ctx),
+      target: pickTarget(merged, ctx),
       model: "clef",
-      probs: full.answers,
+      probs: merged,
       clefCalls,
       ms: elapsed(),
     };

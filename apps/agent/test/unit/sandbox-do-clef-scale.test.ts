@@ -172,7 +172,7 @@ describe("SandboxDO: Clef の失敗は fail-soft（今の大きさのまま実�
     await runInDO(sandboxStub("clef-ambiguous"), async (inst) => {
       const fake = setup(inst);
       fake.clef.answer = (_state, model) =>
-        model.endsWith("clef-flash") ? { heavy: 0.5, fast4: 0.9 } : { heavy: 0.9, fast4: 0.1 };
+        model.endsWith("clef-flash") ? { heavy: 0.3, fast4: 0.9 } : { heavy: 0.9, fast4: 0.1 };
       await inst.ensureReady(spec());
       await inst.exec(HEAVY, AGENT);
       expect(fake.clef.calls.map((c) => c.model)).toEqual([

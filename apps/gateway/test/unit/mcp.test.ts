@@ -2100,3 +2100,46 @@ describe("sandbox_instances_list / task_start の sandbox_instance", () => {
     await client.close();
   });
 });
+
+describe("AI への伝え方: Web の優先・タスクの分割と並列・モデルと Sandbox の選び方", () => {
+  it("instructions に、Web は rovo のツールを優先する理由と使い分け、並列化と積み方、モデルの役割分担、子への指示の書き方を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const text = client.getInstructions() ?? "";
+    for (const key of [
+      "優先",
+      "web_search",
+      "web_fetch",
+      "web_browse",
+      "組み込み",
+      "並列",
+      "concurrency_limit",
+      "agent/task-<task_id>",
+      "pr.head_sha",
+      "積んだ順",
+      "git_commit",
+      "acceptance_criteria",
+      "verification_commands",
+      "auto_scale_max",
+      "sandbox_promotions",
+      "caution",
+    ]) {
+      expect(text, key).toContain(key);
+    }
+    await client.close();
+  });
+
+  it("web_search / web_fetch / web_browse の説明に「Web を調べるときは rovo を優先」と、task_start に並列・分割・model・sandbox_instance の要点を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props, withBrowse(fakeWeb().port));
+    const { tools } = await client.listTools();
+    const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    for (const name of ["web_search", "web_fetch", "web_browse"]) {
+      expect(desc(name), name).toContain("優先");
+    }
+    for (const key of ["並列", "分け", "model", "sandbox_instance", "concurrency_limit"]) {
+      expect(desc("task_start"), key).toContain(key);
+    }
+    await client.close();
+  });
+});

@@ -55,6 +55,7 @@ const infra = {
   kv_namespace_id: "kv-namespace-id-example",
   archive_bucket_name: "acme-archive",
   ai_gateway_id: "acme-gateway",
+  ai_web_gateway_id: "acme-web-gateway",
 };
 const validated = (raw) => {
   const r = validateConfig(raw);
@@ -116,7 +117,9 @@ describe("回帰: 本番相当の入力から手書き相当の設定が出る",
     assert.equal(g.services[0].service, w.name);
     assert.equal(a.services[0].service, w.name);
     assert.equal(g.vars.AI_GATEWAY_ID, a.vars.AI_GATEWAY_ID);
-    assert.equal(a.vars.AI_GATEWAY_ID, w.vars.AI_GATEWAY_ID);
+    // web だけ Web Search 用の別の Gateway（byok_only なし）を通る。agent / gateway は Claude 用の Gateway
+    assert.equal(w.vars.AI_GATEWAY_ID, "acme-web-gateway");
+    assert.notEqual(a.vars.AI_GATEWAY_ID, w.vars.AI_GATEWAY_ID);
     assert.equal(g.vars.AGENT_MODELS, a.vars.AGENT_MODELS);
     assert.equal(g.vars.MODEL_EFFORTS, a.vars.MODEL_EFFORTS);
     for (const x of [g, a, w]) assert.equal(x.vars.WEB_BROWSE_ENABLED, "true");
@@ -408,6 +411,13 @@ describe("入力の検証", () => {
       bad({ vars: { gateway: { TOKEN_ENC_KEY: "x" } } }).some((e) => e.includes("TOKEN_ENC_KEY")),
     );
   });
+  it("infra に ai_web_gateway_id が無い（古い infra.json）なら生成せず、terraform apply を促す", () => {
+    const { ai_web_gateway_id: _omit, ...old } = infra;
+    assert.throws(
+      () => generateAll(validated(productionLike()), old, templates),
+      /ai_web_gateway_id.*terraform apply/,
+    );
+  });
   it("infra の値が欠けていたら生成しない", () => {
     assert.throws(
       () => generateAll(validated(productionLike()), { ...infra, kv_namespace_id: "" }, templates),
@@ -441,6 +451,7 @@ case "$*" in
   *"output -raw kv_namespace_id") printf 'kv-namespace-id-example' ;;
   *"output -raw archive_bucket_name") printf 'acme-archive' ;;
   *"output -raw ai_gateway_id") printf 'acme-gateway' ;;
+  *"output -raw ai_web_gateway_id") printf 'acme-web-gateway' ;;
   *) echo "SECRET-SENTINEL-VALUE"; exit 0 ;;
 esac
 `,
@@ -464,12 +475,17 @@ esac
     return { ...r, calls: read(log).trim() };
   };
 
-  it("既定: terraform の非秘密の出力を名前指定の -raw で 3 つだけ読み、infra.json と 3 つの設定を書く", () => {
+  it("既定: terraform の非秘密の出力を名前指定の -raw で 4 つだけ読み、infra.json と 3 つの設定を書く", () => {
     const r = run();
     assert.equal(r.status, 0, r.stderr);
     const calls = r.calls.split("\n");
-    assert.equal(calls.length, 3, r.calls);
-    for (const name of ["kv_namespace_id", "archive_bucket_name", "ai_gateway_id"]) {
+    assert.equal(calls.length, 4, r.calls);
+    for (const name of [
+      "kv_namespace_id",
+      "archive_bucket_name",
+      "ai_gateway_id",
+      "ai_web_gateway_id",
+    ]) {
       assert.ok(
         calls.some((c) => c.endsWith(`output -raw ${name}`)),
         name,

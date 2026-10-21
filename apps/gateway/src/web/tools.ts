@@ -84,6 +84,10 @@ export function isWebBrowseEnabled(env: { WEB_BROWSE_ENABLED?: unknown }): boole
   return typeof v === "string" && v.trim().toLowerCase() === "true";
 }
 
+/** web が設定の誤りで失敗したときの固定の文言（再試行を促さない） */
+export const WEB_MISCONFIGURED_MESSAGE =
+  "web research is misconfigured on the operator side; retrying will not help (the operator must fix the configuration)";
+
 export type WebToolError = {
   code: "invalid_input" | "upstream_unavailable" | "internal";
   message: string;
@@ -126,6 +130,8 @@ export function mapWebError(e: unknown): WebToolError {
     case "upstream_error":
       return unavailable;
     case "misconfigured":
+      // 運用者の設定・資格情報の誤り（再試行しても直らない）。retry_after_seconds は付けず、上流の文字列は返さない
+      return { code: "internal", message: WEB_MISCONFIGURED_MESSAGE };
     case "not_implemented":
     case "disabled":
       return { code: "internal", message: "web research service is not available" };

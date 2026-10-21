@@ -157,6 +157,28 @@ run "ai_gateway_auth_and_byok_only" {
   }
 }
 
+# web 専用の AI Gateway。Web Search API をクレジットで払うため byok_only にしない（byok_only だと 400 で必ず失敗する）
+run "ai_web_gateway_is_not_byok_only" {
+  command = plan
+
+  assert {
+    condition     = cloudflare_ai_gateway.web.id == "rovo-web-gateway" && cloudflare_ai_gateway.web.id != cloudflare_ai_gateway.this.id
+    error_message = "web 専用の AI Gateway の id が <name_prefix>-web-gateway ではない、または Claude 用と同じ"
+  }
+  assert {
+    condition     = cloudflare_ai_gateway.web.byok_only == false
+    error_message = "web 専用の AI Gateway が byok_only（Web Search をクレジットで払えず、必ず失敗する）"
+  }
+  assert {
+    condition     = cloudflare_ai_gateway.this.byok_only == true
+    error_message = "Claude 用の AI Gateway は byok_only のままにする"
+  }
+  assert {
+    condition     = cloudflare_ai_gateway.web.authentication == true && cloudflare_ai_gateway.web.cache_ttl == 0 && cloudflare_ai_gateway.web.rate_limiting_limit == 0 && cloudflare_ai_gateway.web.collect_logs == cloudflare_ai_gateway.this.collect_logs
+    error_message = "web 専用の AI Gateway の認証・キャッシュ・レート制限・ログが Claude 用と揃っていない"
+  }
+}
+
 run "token_is_scoped_to_audit_bucket" {
   command = plan
 
@@ -270,6 +292,10 @@ run "outputs" {
   assert {
     condition     = output.ai_gateway_id == "rovo-gateway"
     error_message = "ai_gateway_id の output が違う"
+  }
+  assert {
+    condition     = output.ai_web_gateway_id == "rovo-web-gateway"
+    error_message = "ai_web_gateway_id の output が違う"
   }
   # sensitive の output は、そのままでは比較できない（nonsensitive で外して比べる。テストの中だけ）
   assert {

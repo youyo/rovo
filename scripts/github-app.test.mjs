@@ -178,7 +178,7 @@ exit 0`,
     writeFileSync(join(work, "deploy", `${n}.wrangler.jsonc`), "{}\n");
   writeFileSync(
     join(work, "deploy", "infra.json"),
-    `${JSON.stringify({ kv_namespace_id: "kv-namespace-id-example", archive_bucket_name: "acme-archive", ai_gateway_id: "acme-gateway" })}\n`,
+    `${JSON.stringify({ kv_namespace_id: "kv-namespace-id-example", archive_bucket_name: "acme-archive", ai_gateway_id: "acme-gateway", ai_web_gateway_id: "acme-web-gateway" })}\n`,
   );
   return work;
 }

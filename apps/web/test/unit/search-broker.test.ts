@@ -297,4 +297,51 @@ describe("searchWeb: 結果", () => {
       code: "search_failed",
     });
   });
+
+  // 再試行しても直らない設定・資格情報のエラーは、一時的な障害（search_failed）に見せず misconfigured にする
+  const searchError = (code: string, status: number, retryable: boolean): WebSearchSource => ({
+    search: async () => {
+      throw Object.assign(new Error(`${code} message`), {
+        name: "WebSearchError",
+        code,
+        status,
+        retryable,
+      });
+    },
+  });
+
+  it.each([
+    ["web_search_byok_not_configured", 400, false],
+    ["web_search_payment_required", 402, false],
+    ["web_search_gateway_not_configured", 404, false],
+    ["web_search_unauthorized", 401, false],
+    ["web_search_unauthorized", 403, false],
+    ["web_search_unsupported_runtime", 500, false],
+  ] as const)(
+    "設定・資格情報のエラー（%s, status %s）は misconfigured。code は message に残す",
+    async (code, status, retryable) => {
+      await expect(
+        searchWeb({ ...CTX, query: "q" }, deps(searchError(code, status, retryable))),
+      ).rejects.toMatchObject({
+        code: "misconfigured",
+        message: expect.stringMatching(new RegExp(`^misconfigured: ${code}: `)),
+      });
+    },
+  );
+
+  it.each([
+    ["web_search_unavailable", 503, true],
+    ["web_search_rate_limited", 429, true],
+    ["web_search_timeout", 504, true],
+    ["web_search_unavailable", 500, false],
+    // 呼び出し側の入力の誤りは設定の誤りではない
+    ["invalid_web_search_input", 400, false],
+  ] as const)(
+    "一時的な障害・入力の誤り（%s, status %s, retryable %s）は従来どおり search_failed",
+    async (code, status, retryable) => {
+      await expect(
+        searchWeb({ ...CTX, query: "q" }, deps(searchError(code, status, retryable))),
+      ).rejects.toMatchObject({ code: "search_failed" });
+    },
+  );
 });

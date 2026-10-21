@@ -26,6 +26,27 @@ export const TITLE_MAX_CHARS = 200;
 /** block / unknown のとき、title の代わりに返す */
 export const TITLE_WITHHELD = "(title withheld)";
 
+/** 再試行しても直らない、設定・資格情報の誤りを表す Web Search API のエラーコード */
+const SEARCH_CONFIG_ERROR_CODES = new Set([
+  "web_search_payment_required",
+  "web_search_byok_not_configured",
+  "web_search_gateway_not_configured",
+  "web_search_unauthorized",
+  "web_search_unsupported_runtime",
+]);
+
+/**
+ * WebSearchError が、運用者の設定・資格情報の誤り（AI Gateway が byok_only でクレジットを使えない、認証の不足など）か。
+ * retryable === false が前提（retryable なものや一時的な障害は、従来どおり search_failed）。
+ * invalid_web_search_input（呼び出し側の入力の誤り。status 400）は設定の誤りではない。
+ */
+function isSearchConfigError(cause: unknown): boolean {
+  const e = (cause ?? {}) as { retryable?: unknown; code?: unknown; status?: unknown };
+  if (e.retryable !== false) return false;
+  if (typeof e.code === "string" && SEARCH_CONFIG_ERROR_CODES.has(e.code)) return true;
+  return e.status === 401 || e.status === 402 || e.status === 403;
+}
+
 export type SearchBrokerDeps = {
   source: WebSearchSource;
   evaluator: SafetyEvaluator;
@@ -60,7 +81,7 @@ export async function searchWeb(
     const code = (cause as { code?: unknown } | null)?.code;
     const message = cause instanceof Error ? cause.message : String(cause);
     throw new WebResearchError(
-      "search_failed",
+      isSearchConfigError(cause) ? "misconfigured" : "search_failed",
       `${typeof code === "string" ? `${code}: ` : ""}${message}`,
       {
         cause,

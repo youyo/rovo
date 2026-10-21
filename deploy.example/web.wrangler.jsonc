@@ -17,8 +17,8 @@
   "browser": { "binding": "BROWSER" },
   "vars": {
     "ENVIRONMENT": "production",
-    // terraform output ai_gateway_id の値（空だと websearch も AI.run も呼ばない）
-    "AI_GATEWAY_ID": "<AI_GATEWAY_ID>",
+    // terraform output ai_web_gateway_id の値（空だと websearch も AI.run も呼ばない）。agent / gateway の ai_gateway_id（Claude 用、byok_only）とは別の Gateway で、Web Search API をクレジットで払う
+    "AI_GATEWAY_ID": "<AI_WEB_GATEWAY_ID>",
     "WEB_SEARCH_PROVIDER": "ceramic",
     "SAFETY_BLOCK_THRESHOLD": "0.8",
     "SAFETY_CAUTION_THRESHOLD": "0.4",

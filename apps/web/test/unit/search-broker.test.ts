@@ -284,6 +284,53 @@ describe("searchWeb: 結果", () => {
     expect(r.results[0]?.content).toBe("hi </untrusted_web_content>");
   });
 
+  it("検索プロバイダが 5xx を返したら search_provider_error。provider と status だけを固定の形で載せ、上流の本文は載せない", async () => {
+    const source: WebSearchSource = {
+      provider: "ceramic",
+      search: async () => {
+        throw Object.assign(
+          new Error("Web search failed with HTTP 502: <html>Bad Gateway EVIL-BODY</html>"),
+          { name: "WebSearchError", code: "web_search_unavailable", status: 502, retryable: true },
+        );
+      },
+    };
+    const err = await searchWeb({ ...CTX, query: "東京 天気" }, deps(source)).catch((e) => e);
+    expect(err).toMatchObject({ code: "search_provider_error" });
+    expect(err.message).toBe("search_provider_error: provider=ceramic status=502");
+    expect(err.message).not.toContain("EVIL-BODY");
+  });
+
+  it("provider 名が分からない・不正な形なら unknown にする。4xx・タイムアウトは search_failed のまま", async () => {
+    const make = (
+      provider: string | undefined,
+      over: Record<string, unknown>,
+    ): WebSearchSource => ({
+      ...(provider !== undefined ? { provider: provider as never } : {}),
+      search: async () => {
+        throw Object.assign(new Error("x"), { name: "WebSearchError", ...over });
+      },
+    });
+    const noProvider = await searchWeb(
+      { ...CTX, query: "q" },
+      deps(make(undefined, { code: "web_search_unavailable", status: 503 })),
+    ).catch((e) => e);
+    expect(noProvider.message).toBe("search_provider_error: provider=unknown status=503");
+    const weird = await searchWeb(
+      { ...CTX, query: "q" },
+      deps(make("Ev il\n!", { code: "web_search_unavailable", status: 502 })),
+    ).catch((e) => e);
+    expect(weird.message).toBe("search_provider_error: provider=unknown status=502");
+    for (const over of [
+      { code: "web_search_timeout", status: 504 },
+      { code: "web_search_rate_limited", status: 429 },
+      { code: "web_search_unavailable", status: 200 },
+    ]) {
+      await expect(
+        searchWeb({ ...CTX, query: "q" }, deps(make("ceramic", over))),
+      ).rejects.toMatchObject({ code: "search_failed" });
+    }
+  });
+
   it("source のエラーは WebResearchError（search_failed）にする", async () => {
     const source: WebSearchSource = {
       search: async () => {
@@ -300,6 +347,7 @@ describe("searchWeb: 結果", () => {
 
   // 再試行しても直らない設定・資格情報のエラーは、一時的な障害（search_failed）に見せず misconfigured にする
   const searchError = (code: string, status: number, retryable: boolean): WebSearchSource => ({
+    provider: "ceramic",
     search: async () => {
       throw Object.assign(new Error(`${code} message`), {
         name: "WebSearchError",
@@ -330,10 +378,8 @@ describe("searchWeb: 結果", () => {
   );
 
   it.each([
-    ["web_search_unavailable", 503, true],
     ["web_search_rate_limited", 429, true],
     ["web_search_timeout", 504, true],
-    ["web_search_unavailable", 500, false],
     // 呼び出し側の入力の誤りは設定の誤りではない
     ["invalid_web_search_input", 400, false],
   ] as const)(
@@ -342,6 +388,23 @@ describe("searchWeb: 結果", () => {
       await expect(
         searchWeb({ ...CTX, query: "q" }, deps(searchError(code, status, retryable))),
       ).rejects.toMatchObject({ code: "search_failed" });
+    },
+  );
+
+  // 上流が 5xx を返したときは、provider と status を伝える（再試行は禁止しない。一時的なこともあるため）
+  it.each([
+    ["web_search_unavailable", 503, true],
+    ["web_search_unavailable", 502, true],
+    ["web_search_unavailable", 500, false],
+  ] as const)(
+    "検索プロバイダの 5xx（%s, status %s, retryable %s）は search_provider_error",
+    async (code, status, retryable) => {
+      await expect(
+        searchWeb({ ...CTX, query: "q" }, deps(searchError(code, status, retryable))),
+      ).rejects.toMatchObject({
+        code: "search_provider_error",
+        message: `search_provider_error: provider=ceramic status=${status}`,
+      });
     },
   );
 });

@@ -223,7 +223,7 @@ apps/agent    ──service binding──▶     search / fetch / browse
 - **非信頼データの目印は呼び出し元が付ける。** 目印で囲むのは gateway の MCP ツールと agent の Pi ツールで、既存の方式に合わせる。web は 8.7 の JSON（content は生の Markdown）を返すだけにする。
 - **source.via は agents の `WebFetchVia` に合わせる。** fetch は `direct`、browse は `rendered`。
 - **AI_GATEWAY_ID が空なら、websearch も AI.run も呼ばない（fail-closed）。**
-- **web の AI_GATEWAY_ID は web 専用の Gateway（byok_only なし）。** Web Search API は provider のキーが無いとクレジットで払うので、byok_only の Gateway（Claude 用）では `web_search_byok_not_configured`（400）で断られる。再試行しても直らない設定・資格情報のエラー（`WebSearchError` の `retryable === false` で、`web_search_byok_not_configured` / `web_search_payment_required` / `web_search_gateway_not_configured` / `web_search_unauthorized` / `web_search_unsupported_runtime`、または status 401 / 402 / 403）は `search_failed` ではなく `misconfigured` にする。gateway と agent のツールはこれを `retry_after_seconds` なし・「運用者の設定の問題」の固定の文言で返す。5xx・429・retryable なものは従来どおり `search_failed` → `upstream_unavailable`。
+- **web の AI_GATEWAY_ID は web 専用の Gateway（byok_only なし）。** Web Search API は provider のキーが無いとクレジットで払うので、byok_only の Gateway（Claude 用）では `web_search_byok_not_configured`（400）で断られる。再試行しても直らない設定・資格情報のエラー（`WebSearchError` の `retryable === false` で、`web_search_byok_not_configured` / `web_search_payment_required` / `web_search_gateway_not_configured` / `web_search_unauthorized` / `web_search_unsupported_runtime`、または status 401 / 402 / 403）は `search_failed` ではなく `misconfigured` にする。gateway と agent のツールはこれを `retry_after_seconds` なし・「運用者の設定の問題」の固定の文言で返す。429・タイムアウトなどは従来どおり `search_failed` → `upstream_unavailable`。検索プロバイダの 5xx は `search_provider_error` にする（下の「本番の不具合の修正（2026-10-22）」）。
 - **agents の Pi アダプタ（webSearchTool / webFetchTool）は使わない。** replay が safe なため。使うのは createAIWebSearch / createDirectWebFetch だけ。
 
 ### robots.txt
@@ -246,8 +246,8 @@ apps/agent    ──service binding──▶     search / fetch / browse
 - **URL の検査（url-policy）はホスト名の文字列だけを見る。** `127.0.0.1.nip.io` のように、公開の名前が private / loopback / link-local のアドレスに解決される場合、DNS の解決後の IP はこちらでは検査できず、検査を通ってしまう。
   - `web_fetch`（`createDirectWebFetch`）は Workers の `fetch` で取得する。解決後の IP を検査するフックは無い。
   - 防御は、Workers の `fetch` が private / loopback / link-local のアドレスへ接続できないこと（プラットフォーム側の制約）に頼っている。この前提は受入（acceptance.md 11）で実機を使って確かめる。
-  - `web_browse` は DoH で解決して補助的に検査するが、解決後に別のアドレスへ変わる DNS rebinding は防げない（上の「web_browse の安全策」3）。
-  - redirect の行き先も、名前の検査と上記の制約だけで守る。
+  - `web_browse` と `web_fetch` は、取得の前に DoH で解決して補助的に検査する（web_fetch も 2026-10-22 から同じ。下の「本番の不具合の修正」）。ただし、解決後に別のアドレスへ変わる DNS rebinding は防げない（上の「web_browse の安全策」3）。
+  - redirect の行き先も、名前の検査と上記の制約だけで守る（DoH の検査は最初の URL のホストだけ。行き先のホスト名は DoH にかけない）。
 - 拒否するアドレスの範囲は url-policy で `agents/webfetch` の判定に足している: Teredo（2001:0::/32）、IPv4-mapped（::ffff:0:0/96。公開の IPv4 を包んだ形も拒否）、ローカル NAT64（64:ff9b:1::/48）、discard（100::/64）、ドキュメント用（2001:db8::/32、3fff::/20、192.0.2.0/24、198.51.100.0/24、203.0.113.0/24）、ベンチマーク（198.18.0.0/15）。IPv4 を埋め込む形は、埋め込み IPv4 を取り出して IPv4 の判定（agents/webfetch + 上記の追加範囲）にかける: 周知 NAT64（64:ff9b::/96）と 6to4（2002::/16）。SIIT（::ffff:0:0:0/96）は通常のインターネット宛てではないので丸ごと拒否する。公開の IPv4 を埋めた NAT64 / 6to4 は通す。
 - gateway は、回数を消費する前に同じ URL の検査（url-policy を共有）を行い、違反の URL では回数を消費しない。返す URL は 2000 文字までに制限し、ツールの説明に「URL も非信頼のデータ」と書く。
 
@@ -440,3 +440,33 @@ E2E（apps/web を含む3 Worker 同時起動、`ENVIRONMENT=test` の fake BROW
 - 大ページ（数百 KB）の所要時間とサイズ上限（2 MiB）、並列呼び出し、レート制限の挙動。
 - Kitesurf が名乗る User-Agent と、robots.txt の照合に使う `rovo-web` の食い違いの扱い。
 - 実際に使う wrangler の版と compatibility_date で、`remote: true` の BROWSER が動くこと。
+
+## 本番の不具合の修正（2026-10-22）
+
+本番で見つかった 4 件を直した。受入（acceptance.md）は編集していない。
+
+### web_fetch を web_browse に揃える（取得先のエラー・名前の検査）
+- **取得先が 4xx / 5xx を返したとき**: `status: "http_error"`、`http_status`、`content: null`、`safety.verdict: unknown`（reason `http_error`、`evaluated: false`）。本文は返さず、評価器も呼ばない。web_browse と同じ。
+  - 原因 1: `agents/webfetch` は本文のある 404 を、HTTP ステータスを持つ `page` として返す。以前はこれをそのまま評価して `status: "ok"` で返し、`http_status` も無かった。いまは `page.status >= 400` を `http_error` にする。
+  - 原因 2（`httpbin.org/status/404` が `upstream_unavailable` になった件）: 本文が空（または文書でない）4xx / 5xx は `WebFetchError`（`web_fetch_http_error`、`status` を持つ）になり、以前はこれを `fetch_failed` に丸めたため、gateway が `upstream_unavailable` にしていた。いまは `status` が 4xx / 5xx なら `http_error` にする。robots.txt の取得の失敗が原因ではない（robots.txt の 4xx は「なし」で許可）。
+- **名前の検査（DoH）**: web_fetch も、robots.txt や本文の取得より前に、web_browse と同じ `preflightHost`（`dns-check.ts`。web_browse と共有）を通す。private に解決される名前は `blocked`（`private_address`）、解決できない名前（NXDOMAIN・DoH の失敗・NODATA）は `unknown`（`unknown_reason: dns_check_failed`。fail-closed）。IP リテラルの URL は DoH にかけない。以前は robots.txt の取得が失敗して、どちらも `robots_unreachable` になっていた。
+  - `FetchResult` の `status` は `ok` / `blocked` / `http_error` / `unknown` になり、`BrowseResult` と同じ型（`http_status`・`unknown_reason` を持つ）。gateway と agent の写し（`contract.ts` / `tools/web.ts`）も同じ。
+  - 監査（`web_blocked`）: web_fetch の `dns_check_failed`（unknown）と `private_address`（blocked）も出す。`http_error` は出さない（web_browse と同じ）。
+  - コスト: 1 回の web_fetch で DoH が 2 問い合わせ（A と AAAA。並列、各 3 秒の期限）増える。追加の遅延は通常数十 ms（Cloudflare の DoH は同じネットワーク）、最悪 3 秒。DoH が落ちていると web_fetch は返せなくなる（web_browse と同じく fail-closed。web_fetch は既定で有効なので可用性の影響は大きい）。結果のキャッシュは持たない（web は永続の状態を持たない設計。必要なら isolate 内の短い TTL のキャッシュを足せる）。
+
+### 検索プロバイダの 5xx（`search_provider_error`）
+- `WebSearchError` の `status` が 5xx（実際の HTTP の応答。期限切れ `web_search_timeout` と、例外を包んだもの〔`cause` が付く〕は含めない）のとき、web は `search_provider_error` を投げる。message は固定の形 `provider=<名前> status=<番号>` だけで、上流の本文は載せない。provider 名は `[a-z0-9_-]{1,40}` に合わなければ `unknown`。設定・資格情報の誤り（`misconfigured`）の判定が先。
+- gateway は `upstream_unavailable`（`retry_after_seconds: 30` のまま。上流の 5xx は一時的なこともあるので再試行は禁止しない）で、message に「the search provider (<名前>) returned HTTP <番号>」と、同じ検索語で繰り返し失敗するなら語を変える旨を入れる。agent のツールも同じ情報を伝え、再試行は 1 回までと促す。固定の形に合わない message は、従来の固定の文言にする。
+- 本番の Ceramic は、日本語だけの検索語と「the」「a」だけの検索語で HTTP 502 を返す（Exa / Linkup では成功する）。プロバイダの切り替えはここでは扱わない。
+
+### エラーと理由の一覧（web_fetch / web_browse 共通）
+| status | 理由のフィールド | 値 |
+|---|---|---|
+| `blocked` | `blocked_reason` | `bot_challenge` / `robots_disallowed` / `robots_unreachable` / `redirect_policy` / `private_address` |
+| `http_error` | `http_status` | 取得先の 4xx / 5xx |
+| `unknown` | `unknown_reason` | `dns_check_failed`（web_fetch / web_browse）、`invalid_status` / `invalid_final_url` / `invalid_redirect_chain` / `invalid_result`（web_browse のみ） |
+
+web_search の失敗（MCP のエラー）: `invalid_input`（入力の誤り）/ `upstream_unavailable`（`search_failed`・`timeout`・`search_provider_error`。後者だけ provider と status が message に入る）/ `internal`（`misconfigured` など）。
+
+### budget_status の説明
+gateway の MCP ツールの説明（`apps/gateway/src/mcp/server.ts` の `BUDGET_STATUS_DESCRIPTION`）は、`concurrency_limit`・`max_concurrent_tasks`・`estimated_usd` を含み、応答の項目と一致している。「同時に実行できるタスクは 1 件まで」という古い説明は gateway のコードに無く、利用者のクライアントがツール定義を古いまま持っていた（再接続で更新される）。コードの変更はしていない。

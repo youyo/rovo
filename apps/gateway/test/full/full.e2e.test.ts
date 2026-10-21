@@ -14,6 +14,7 @@ import {
 } from "../../../agent/test/support/wrangler";
 import {
   BROWSE_INTERNAL_TOKEN,
+  DNS_NXDOMAIN_HOST,
   DNS_PRIVATE_HOST,
   type FakeWeb,
   startFakeWeb,
@@ -1407,6 +1408,46 @@ describe("Gateway → Web Research Service（Phase 5: 親の MCP ツール）", 
       expect(r.isError, url).toBe(true);
       expect(r.body.code, url).toBe("invalid_input");
     }
+    await client.close();
+  });
+});
+
+describe("Gateway → Web Research Service（Phase 5: web_fetch の取得先のエラー・DoH 検査・検索プロバイダの 5xx）", () => {
+  it("m2. web_fetch は取得先の 404 を http_error（本文なし）にし、名前の検査の理由を web_browse と揃える。検索プロバイダの 5xx は provider と status を伝える", async () => {
+    const client = await newClient("gina");
+    // 404（本文あり）と本文が空の 404: どちらも http_error。本文は返さない
+    for (const path of ["gone-page", "empty-404"]) {
+      const r = await webFetch(client, `https://docs.example.com/${path}`);
+      expect(r.isError, JSON.stringify(r.body)).toBe(false);
+      expect(r.view, path).toMatchObject({ status: "http_error", http_status: 404, content: null });
+      expect(JSON.stringify(r.body)).not.toContain("GONE-PAGE-BODY-TOKEN");
+    }
+    // 存在しない名前は DoH の検査で unknown（dns_check_failed）。robots.txt も取りに行かない
+    const robotsBefore = fakeWeb.requests.filter((q) => q.path === "/robots.txt").length;
+    const gone = await webFetch(client, `https://${DNS_NXDOMAIN_HOST}/`);
+    expect(gone.view).toMatchObject({
+      status: "unknown",
+      unknown_reason: "dns_check_failed",
+      content: null,
+    });
+    // private に解決される名前は blocked（private_address）。web_browse と同じ理由
+    const priv = await webFetch(client, `https://${DNS_PRIVATE_HOST}/`);
+    expect(priv.view).toMatchObject({
+      status: "blocked",
+      blocked_reason: "private_address",
+      content: null,
+    });
+    expect(fakeWeb.requests.filter((q) => q.path === "/robots.txt").length).toBe(robotsBefore);
+
+    // 検索プロバイダが 5xx（HTML のエラーページ）: provider と status を伝え、上流の本文は載せない。一時障害として retry_after_seconds も付く
+    const failed = await webSearch(client, "provider-502 東京 天気");
+    expect(failed.isError).toBe(true);
+    expect(failed.body).toMatchObject({
+      code: "upstream_unavailable",
+      retry_after_seconds: 30,
+      message: expect.stringContaining("search provider (ceramic) returned HTTP 502"),
+    });
+    expect(JSON.stringify(failed.body)).not.toContain("PROVIDER-BODY-TOKEN");
     await client.close();
   });
 });

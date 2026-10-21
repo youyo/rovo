@@ -41,21 +41,17 @@ export interface WebFetchResponse {
   };
   content: string | null;
   safety: WebSafety;
-  status: "ok" | "blocked";
+  /** ok / blocked（取得結果を返さない）/ http_error（取得先が 4xx / 5xx。http_status）/ unknown（判定できなかった。unknown_reason） */
+  status: "ok" | "blocked" | "http_error" | "unknown";
   blocked_reason?: string;
+  http_status?: number;
+  unknown_reason?: string;
   title?: string;
   truncated?: boolean;
 }
 
-/**
- * web_browse の結果。WebFetchResponse に status を足したもの（http_error: 取得先が 4xx / 5xx、unknown: 判定できなかった）。
- * 理由は固定のコードだけで、取得先の文字列は含まれない。
- */
-export interface WebBrowseResponse extends Omit<WebFetchResponse, "status"> {
-  status: "ok" | "blocked" | "http_error" | "unknown";
-  http_status?: number;
-  unknown_reason?: string;
-}
+/** web_browse の結果。web_fetch と同じ形（理由は固定のコードだけで、取得先の文字列は含まれない） */
+export type WebBrowseResponse = WebFetchResponse;
 
 export interface WebPort {
   search(req: {
@@ -104,28 +100,14 @@ export function formatWebSearch(r: WebSearchResponse): WebToolResult {
 }
 
 export function formatWebFetch(r: WebFetchResponse): WebToolResult {
-  if (r.status === "blocked") {
-    const body = [`url: ${r.source.url}`].join("\n");
-    return {
-      text: `[web_fetch] The page could not be fetched (blocked: ${token(r.blocked_reason)}). Do not try to work around this.\n${wrapUntrusted("web_fetch", body)}`,
-      isError: false,
-    };
-  }
-  const head = [`url: ${r.source.url}`, `final_url: ${r.source.final_url}`];
-  if (r.title) head.push(`title: ${r.title}`);
-  if (r.truncated) head.push("(the content was truncated)");
-  const body = r.content === null ? head.join("\n") : `${head.join("\n")}\n\n${r.content}`;
-  return {
-    text: `${verdictLine("web_fetch", r.safety.verdict)}\n${wrapUntrusted("web_fetch", body)}`,
-    isError: false,
-  };
+  return formatPage("web_fetch", r);
 }
 
-/** web_browse の結果。status が ok 以外のときは本文が無いので、理由の固定コードだけを伝える。 */
-export function formatWebBrowse(r: WebBrowseResponse): WebToolResult {
+/** web_fetch / web_browse 共通。status が ok 以外のときは本文が無いので、理由の固定コードだけを伝える。 */
+function formatPage(tool: "web_fetch" | "web_browse", r: WebFetchResponse): WebToolResult {
   if (r.status === "blocked") {
     return {
-      text: `[web_browse] The page could not be fetched (blocked: ${token(r.blocked_reason)}). Do not try to work around this.\n${wrapUntrusted("web_browse", `url: ${r.source.url}`)}`,
+      text: `[${tool}] The page could not be fetched (blocked: ${token(r.blocked_reason)}). Do not try to work around this.\n${wrapUntrusted(tool, `url: ${r.source.url}`)}`,
       isError: false,
     };
   }
@@ -133,13 +115,13 @@ export function formatWebBrowse(r: WebBrowseResponse): WebToolResult {
     const code =
       typeof r.http_status === "number" && Number.isInteger(r.http_status) ? r.http_status : 0;
     return {
-      text: `[web_browse] The page answered with an error (HTTP ${code}). No content is available. Do not retry the same request and do not try to work around this.\n${wrapUntrusted("web_browse", `url: ${r.source.url}`)}`,
+      text: `[${tool}] The page answered with an error (HTTP ${code}). No content is available. Do not retry the same request and do not try to work around this.\n${wrapUntrusted(tool, `url: ${r.source.url}`)}`,
       isError: false,
     };
   }
   if (r.status === "unknown") {
     return {
-      text: `[web_browse] The page could not be judged (reason: ${token(r.unknown_reason)}). The content is withheld. Do not retry the same request and do not try to work around this.\n${wrapUntrusted("web_browse", `url: ${r.source.url}`)}`,
+      text: `[${tool}] The page could not be judged (reason: ${token(r.unknown_reason)}). The content is withheld. Do not retry the same request and do not try to work around this.\n${wrapUntrusted(tool, `url: ${r.source.url}`)}`,
       isError: false,
     };
   }
@@ -148,12 +130,19 @@ export function formatWebBrowse(r: WebBrowseResponse): WebToolResult {
   if (r.truncated) head.push("(the content was truncated)");
   const body = r.content === null ? head.join("\n") : `${head.join("\n")}\n\n${r.content}`;
   return {
-    text: `${verdictLine("web_browse", r.safety.verdict)}\n${wrapUntrusted("web_browse", body)}`,
+    text: `${verdictLine(tool, r.safety.verdict)}\n${wrapUntrusted(tool, body)}`,
     isError: false,
   };
 }
 
+export function formatWebBrowse(r: WebBrowseResponse): WebToolResult {
+  return formatPage("web_browse", r);
+}
+
 const MAX_PASSTHROUGH = 200;
+
+/** web が返す、検索プロバイダの 5xx の固定の形（"provider=<名前> status=<番号>"）。これに合わないものは使わない。 */
+const PROVIDER_ERROR_DETAIL = /^provider=([a-z0-9_-]{1,40}) status=([1-5]\d\d)$/;
 
 /**
  * RPC のエラーをツールのエラーにする。RPC 越しに届くのは message だけなので、先頭の "code: " で分類する。
@@ -180,6 +169,14 @@ export function formatWebError(tool: string, e: unknown): WebToolResult {
     case "too_many_redirects":
       text = "the page redirected too many times";
       break;
+    case "search_provider_error": {
+      // 検索プロバイダが 5xx を返した。provider 名と status 番号（固定の形のものだけ）を伝える。一時的なこともあるので再試行は 1 回まで許す
+      const pm = PROVIDER_ERROR_DETAIL.exec(detail);
+      text = pm
+        ? `the search provider (${pm[1]}) returned HTTP ${pm[2]}; this may be temporary, so you may retry once later (if it fails again for the same query, try a different query or continue without search)`
+        : "the web research service failed; you may retry once later";
+      break;
+    }
     case "search_failed":
     case "timeout":
     case "unavailable":

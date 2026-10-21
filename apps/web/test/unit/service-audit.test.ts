@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWebResearchService, type ServiceDeps } from "../../src/service";
 import { CATEGORIES } from "../../src/types";
 import { envelope, fakeBrowser, fakeFetch, REQ } from "./browse-helpers";
-import { fakeEvaluator } from "./helpers";
+import { fakeEvaluator, withPublicDoh } from "./helpers";
 
 const CTX = { caller: "child" as const, userId: "42", taskId: "task-1" };
 
@@ -46,11 +46,11 @@ function fetchSvc(
   runImpl?: () => unknown,
 ) {
   const ai = { run: vi.fn(runImpl ?? (async () => clefAnswers(0.01))), websearch: vi.fn() };
-  const fetchFn = (async (input: string | URL | Request) => {
+  const fetchFn = withPublicDoh(async (input: string | URL | Request) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith("/robots.txt")) return new Response("", { status: 404 });
     return respond(url);
-  }) as unknown as typeof fetch;
+  });
   return createWebResearchService(envFor({ AI: ai }), {
     fetch: fetchFn,
     robotsCache: new Map(),
@@ -99,13 +99,13 @@ describe("web の監査（web_blocked）", () => {
 
   it("fetch: robots の拒否 → reason=robots_disallowed", async () => {
     const a = captureAudit();
-    const fetchFn = (async (input: string | URL | Request) => {
+    const fetchFn = withPublicDoh(async (input: string | URL | Request) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.endsWith("/robots.txt")) {
         return new Response("User-agent: *\nDisallow: /", { status: 200 });
       }
       return new Response("hi", { headers: { "content-type": "text/markdown" } });
-    }) as unknown as typeof fetch;
+    });
     const svc = createWebResearchService(envFor(), {
       fetch: fetchFn,
       robotsCache: new Map(),

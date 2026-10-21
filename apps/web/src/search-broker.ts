@@ -47,6 +47,21 @@ function isSearchConfigError(cause: unknown): boolean {
   return e.status === 401 || e.status === 402 || e.status === 403;
 }
 
+/** 検索プロバイダの 5xx の status（固定の整数）。それ以外は undefined。合成された失敗（timeout・例外の包み）は含めない。 */
+function providerServerErrorStatus(cause: unknown): number | undefined {
+  const e = (cause ?? {}) as { status?: unknown; code?: unknown; cause?: unknown };
+  if (typeof e.status !== "number" || !Number.isInteger(e.status)) return undefined;
+  if (e.status < 500 || e.status > 599) return undefined;
+  // agents が合成するエラー: 期限切れ（web_search_timeout）、例外を包んだもの（cause が付く）
+  if (e.code === "web_search_timeout" || e.cause !== undefined) return undefined;
+  return e.status;
+}
+
+/** message に載せる provider 名は、固定の語彙（英数字・_・-）だけ。それ以外は unknown */
+function providerLabel(provider: unknown): string {
+  return typeof provider === "string" && /^[a-z0-9_-]{1,40}$/.test(provider) ? provider : "unknown";
+}
+
 export type SearchBrokerDeps = {
   source: WebSearchSource;
   evaluator: SafetyEvaluator;
@@ -78,6 +93,17 @@ export async function searchWeb(
   try {
     response = await deps.source.search({ query, limit });
   } catch (cause) {
+    // 設定・資格情報の誤りが先（status 5xx のもの＝unsupported_runtime を provider の障害にしない）
+    const providerStatus = isSearchConfigError(cause)
+      ? undefined
+      : providerServerErrorStatus(cause);
+    if (providerStatus !== undefined) {
+      throw new WebResearchError(
+        "search_provider_error",
+        `provider=${providerLabel(deps.source.provider)} status=${providerStatus}`,
+        { cause },
+      );
+    }
     const code = (cause as { code?: unknown } | null)?.code;
     const message = cause instanceof Error ? cause.message : String(cause);
     throw new WebResearchError(

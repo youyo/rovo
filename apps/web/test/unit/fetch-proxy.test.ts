@@ -1,19 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { type FetchProxyDeps, fetchPage } from "../../src/fetch-proxy";
+import { withPublicDoh } from "./helpers";
 
 type FakeResponder = (url: string, init?: RequestInit) => Response | Promise<Response>;
 
 function setup(responder: FakeResponder, over: Partial<FetchProxyDeps> = {}) {
   const calls: { url: string; init?: RequestInit }[] = [];
-  const fakeFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    calls.push({ url, init });
-    if (url.endsWith("/robots.txt")) {
-      const r = await responder(url, init);
-      return r;
-    }
-    return responder(url, init);
-  }) as unknown as typeof fetch;
+  // DoH の事前検査には公開アドレスで答える（calls には載せない）
+  const fakeFetch = vi.fn(
+    withPublicDoh(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      calls.push({ url, init });
+      return responder(url, init);
+    }),
+  ) as unknown as typeof fetch;
   const ai = {
     toMarkdown: vi.fn(async (f: { name: string; blob: Blob }) => ({
       name: f.name,
@@ -259,5 +259,102 @@ describe("fetchPage: bot チャレンジ・上限", () => {
   it("既定の上限は maxBytes 2MB・timeout 20 秒・redirect 5 回", async () => {
     const { FETCH_LIMITS } = await import("../../src/fetch-proxy");
     expect(FETCH_LIMITS).toEqual({ maxBytes: 2 * 1024 * 1024, timeoutMs: 20_000, maxRedirects: 5 });
+  });
+});
+
+describe("fetchPage: 取得先のエラー応答（web_browse の http_error に揃える）", () => {
+  const status = (code: number, body: string, type = "text/html") =>
+    new Response(body, { status: code, headers: { "content-type": type } });
+
+  it("404 で本文があっても http_error（http_status 404）。本文は返さない", async () => {
+    const { deps } = setup(
+      router({
+        "https://example.com/missing": () => status(404, "<html><body>BODY-404</body></html>"),
+      }),
+    );
+    const r = await fetchPage({ url: "https://example.com/missing" }, deps);
+    expect(r).toMatchObject({ kind: "http_error", httpStatus: 404 });
+    expect(JSON.stringify(r)).not.toContain("BODY-404");
+  });
+
+  it("本文が空の 404 / 503（httpbin.org/status/404 など）も、エラーではなく http_error", async () => {
+    const { deps } = setup(
+      router({
+        "https://example.com/e404": () => status(404, ""),
+        "https://example.com/e503": () => status(503, ""),
+      }),
+    );
+    expect(await fetchPage({ url: "https://example.com/e404" }, deps)).toMatchObject({
+      kind: "http_error",
+      httpStatus: 404,
+    });
+    expect(await fetchPage({ url: "https://example.com/e503" }, deps)).toMatchObject({
+      kind: "http_error",
+      httpStatus: 503,
+    });
+  });
+});
+
+describe("fetchPage: DoH の事前検査（web_browse と同じ。robots.txt の前）", () => {
+  function setupDoh(resolve: (host: string, type: string) => Response | null) {
+    const urls: string[] = [];
+    const f = withPublicDoh(async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      urls.push(url);
+      if (url.endsWith("/robots.txt")) return ROBOTS_OK();
+      return md("hello");
+    }, resolve);
+    const ai = { toMarkdown: vi.fn() } as unknown as Ai;
+    const deps: FetchProxyDeps = {
+      fetch: vi.fn(async (i: string | URL | Request, init?: RequestInit) => {
+        const u = typeof i === "string" ? i : i instanceof URL ? i.href : i.url;
+        if (new URL(u).hostname !== "cloudflare-dns.com") urls.push(`site:${u}`);
+        return f(i, init);
+      }) as unknown as typeof fetch,
+      ai,
+      robotsCache: new Map(),
+    };
+    return { deps, urls };
+  }
+
+  it("private に解決される名前は blocked（private_address）。robots.txt も本文も取得しない", async () => {
+    const { deps, urls } = setupDoh((_h, type) =>
+      Response.json({
+        Status: 0,
+        Answer: type === "A" ? [{ name: "x", type: 1, data: "127.0.0.1" }] : [],
+      }),
+    );
+    const r = await fetchPage({ url: "https://127.0.0.1.nip.io/" }, deps);
+    expect(r).toMatchObject({ kind: "blocked", reason: "private_address" });
+    expect(urls.filter((u) => u.startsWith("site:"))).toEqual([]);
+  });
+
+  it("存在しない名前（NXDOMAIN）・DoH の失敗は unknown（dns_check_failed）。fail-closed で robots.txt も取らない", async () => {
+    for (const resolve of [
+      () => Response.json({ Status: 3 }),
+      () => new Response("down", { status: 500 }),
+    ]) {
+      const { deps, urls } = setupDoh(resolve);
+      const r = await fetchPage({ url: "https://no-such-host.example.invalid/" }, deps);
+      expect(r).toMatchObject({ kind: "unknown", reason: "dns_check_failed" });
+      expect(urls.filter((u) => u.startsWith("site:"))).toEqual([]);
+    }
+  });
+
+  it("公開アドレスなら進む。IP リテラルの host は DoH にかけない", async () => {
+    const { deps } = setupDoh(() => null);
+    expect((await fetchPage({ url: "https://example.com/" }, deps)).kind).toBe("page");
+    const dohCalls: string[] = [];
+    const f = vi.fn(async (i: string | URL | Request) => {
+      const u = typeof i === "string" ? i : i instanceof URL ? i.href : i.url;
+      if (new URL(u).hostname === "cloudflare-dns.com") dohCalls.push(u);
+      return u.endsWith("/robots.txt") ? ROBOTS_OK() : md("hi");
+    }) as unknown as typeof fetch;
+    const r = await fetchPage(
+      { url: "https://93.184.216.34/" },
+      { fetch: f, ai: { toMarkdown: vi.fn() } as unknown as Ai, robotsCache: new Map() },
+    );
+    expect(r.kind).toBe("page");
+    expect(dohCalls).toEqual([]);
   });
 });

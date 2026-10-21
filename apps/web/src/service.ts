@@ -122,16 +122,44 @@ export function createWebResearchService(
         },
       );
       const retrievedAt = now().toISOString();
+      const source = {
+        url: req.url,
+        final_url: req.url,
+        retrieved_at: retrievedAt,
+        via: "direct",
+      } as const;
 
+      // 拒否・取得先のエラー・判定不能の経路（web_browse と同じ形）: 本文も title も返さず、評価器は呼ばない
       if (outcome.kind === "blocked") {
         logWeb(ctx, "fetch", req.url, "blocked", { blocked_reason: outcome.reason });
         auditWeb(ctx, "fetch", req.url, outcome.reason);
         return {
-          source: { url: req.url, final_url: req.url, retrieved_at: retrievedAt, via: "direct" },
+          source,
           content: null,
           safety: blockedSafety(info, outcome.reason),
           status: "blocked",
           blocked_reason: outcome.reason,
+        };
+      }
+      if (outcome.kind === "http_error") {
+        logWeb(ctx, "fetch", req.url, "http_error", { http_status: outcome.httpStatus });
+        return {
+          source,
+          content: null,
+          safety: unjudgedSafety(info, "http_error"),
+          status: "http_error",
+          http_status: outcome.httpStatus,
+        };
+      }
+      if (outcome.kind === "unknown") {
+        logWeb(ctx, "fetch", req.url, "unknown", { unknown_reason: outcome.reason });
+        auditWeb(ctx, "fetch", req.url, outcome.reason);
+        return {
+          source,
+          content: null,
+          safety: unjudgedSafety(info, outcome.reason),
+          status: "unknown",
+          unknown_reason: outcome.reason,
         };
       }
 

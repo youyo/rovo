@@ -74,6 +74,12 @@ export const PAGES: Record<string, Page> = {
     status: 302,
     headers: { location: "https://docs.example.com/guide" },
   },
+  // 404（本文あり）と、本文が空の 404（httpbin.org/status/404 相当）
+  "docs.example.com/gone-page": {
+    status: 404,
+    body: html("Not Found", "<h1>Not Found</h1><p>GONE-PAGE-BODY-TOKEN</p>"),
+  },
+  "docs.example.com/empty-404": { status: 404, body: "" },
   "private.example.com/secret": {
     body: html("Secret", "<h1>Secret</h1><p>SECRET-BODY-TOKEN</p>"),
   },
@@ -172,6 +178,9 @@ export const BROWSE_PAGES: Record<string, BrowseEnvelope> = {
 
 /** この目印を含む URL は、DoH で private（10.0.0.9）に解決される */
 export const DNS_PRIVATE_HOST = "rebind.example.com";
+
+/** DoH で NXDOMAIN（Status 3）になる名前 */
+export const DNS_NXDOMAIN_HOST = "nxdomain.example.com";
 
 /** ホストごとの robots.txt。無ければ 404（許可） */
 export const ROBOTS: Record<string, string> = {
@@ -339,6 +348,10 @@ export async function startFakeWeb(): Promise<FakeWeb> {
       if (req.method === "POST" && url.pathname === "/ai/websearch") {
         const query = String((body as { query?: unknown } | undefined)?.query ?? "");
         searchSeq++;
+        // 検索プロバイダが HTML のエラーページ付きで 502 を返す（本番の Ceramic の日本語だけの検索語に相当）
+        if (query.includes("provider-502")) {
+          return send(res, 502, "<html><body>502 Bad Gateway PROVIDER-BODY-TOKEN</body></html>");
+        }
         return send(res, 200, {
           items: searchItems(query),
           metadata: { query, requestId: `fake-search-${searchSeq}`, latencyMs: 3 },
@@ -364,6 +377,7 @@ export async function startFakeWeb(): Promise<FakeWeb> {
       if (req.method === "GET" && host === "cloudflare-dns.com" && url.pathname === "/dns-query") {
         const name = url.searchParams.get("name") ?? "";
         const type = url.searchParams.get("type");
+        if (name === DNS_NXDOMAIN_HOST) return send(res, 200, { Status: 3 });
         const ip = name === DNS_PRIVATE_HOST ? "10.0.0.9" : "93.184.216.34";
         return send(res, 200, {
           Status: 0,

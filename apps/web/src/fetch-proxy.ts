@@ -1,7 +1,8 @@
 import { fetchWeb, WebFetchError, type WebFetchVia } from "agents/webfetch";
+import { preflightHost } from "./dns-check";
 import { WebResearchError } from "./errors";
 import { createRobotsChecker, type RobotsCache, USER_AGENT } from "./robots";
-import type { BlockedReason } from "./types";
+import type { BlockedReason, UnknownReason } from "./types";
 import { checkUrl } from "./url-policy";
 
 /**
@@ -11,7 +12,8 @@ import { checkUrl } from "./url-policy";
  * 本文のストリーム読み取りと上限・HTML/文書の Markdown 変換・bot チャレンジの検出（web_fetch_blocked）。
  * webfetch の検査は private / loopback / link-local / CGNAT / localhost / .internal と userinfo まで。
  *
- * ここで足すこと: スキーム・ポート（80/443）・`.local` を含む自前の URL ポリシーを「すべてのリクエスト（redirect の行き先を含む）」に
+ * ここで足すこと: 取得の前の DoH 検査（web_browse と同じ preflightHost。private への解決は blocked、検査できなければ unknown）、
+ * 取得先の 4xx / 5xx を http_error にすること（web_browse と同じ。本文は返さない）、スキーム・ポート（80/443）・`.local` を含む自前の URL ポリシーを「すべてのリクエスト（redirect の行き先を含む）」に
  * かけること、robots.txt の確認、上限の固定、エラーの分類。注入する `fetch` を包んで実現する。
  */
 
@@ -49,7 +51,11 @@ export type FetchOutcome =
       reason: BlockedReason;
       url: string;
       detail: string;
-    };
+    }
+  /** 取得先が 4xx / 5xx を返した。本文は返さない（web_browse の http_error と同じ） */
+  | { kind: "http_error"; httpStatus: number; url: string }
+  /** 判定できなかった（DoH の検査に失敗。fail-closed） */
+  | { kind: "unknown"; reason: UnknownReason; url: string };
 
 /** 注入する fetch の中で投げる。webfetch が cause に包むので、外で拾って blocked にする。 */
 class BlockedByPolicy extends Error {
@@ -82,6 +88,19 @@ export async function fetchPage(
 ): Promise<FetchOutcome> {
   const checked = checkUrl(request.url);
   if (!checked.ok) throw new WebResearchError("invalid_url", checked.message);
+
+  // 補助: robots.txt や本文の取得より前に、解決先が private でないか確かめる（web_browse と同じ検査）。
+  // 検査できなかったときも取得しない（fail-closed）。redirect の行き先のホスト名は、この検査の対象外（IP リテラルは webfetch が検査する）
+  const pre = await preflightHost(checked.url.hostname, deps.fetch);
+  if (pre?.kind === "blocked") {
+    return {
+      kind: "blocked",
+      reason: pre.reason,
+      url: request.url,
+      detail: "resolves to a private address",
+    };
+  }
+  if (pre?.kind === "unknown") return { kind: "unknown", reason: pre.reason, url: request.url };
 
   const robots = createRobotsChecker({
     fetch: deps.fetch,
@@ -119,6 +138,9 @@ export async function fetchPage(
         signal,
       },
     );
+    // 取得先が 4xx / 5xx（本文があっても）。web_browse と同じく http_error にして、本文は返さない
+    if (page.status >= 400)
+      return { kind: "http_error", httpStatus: page.status, url: request.url };
     return {
       kind: "page",
       url: request.url,
@@ -144,6 +166,12 @@ export async function fetchPage(
             url: request.url,
             detail: error.message,
           };
+        case "web_fetch_http_error":
+          // 本文が空・文書でない 4xx / 5xx（httpbin.org/status/404 など）。webfetch は status を持つ例外にする
+          if (typeof error.status === "number" && error.status >= 400 && error.status <= 599) {
+            return { kind: "http_error", httpStatus: error.status, url: request.url };
+          }
+          throw new WebResearchError("fetch_failed", error.message, { cause: error });
         case "web_fetch_disallowed_redirect":
           return {
             kind: "blocked",

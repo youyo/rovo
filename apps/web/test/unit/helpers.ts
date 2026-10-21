@@ -33,3 +33,25 @@ export function fakeEvaluator(
   const evaluator: SafetyEvaluator = { name: "fake", modelVersion: "fake-1", evaluate };
   return { evaluator, calls, evaluate };
 }
+
+/** DoH（cloudflare-dns.com）の問い合わせに「公開アドレス」で答え、それ以外は元の fetch に渡す。web_fetch の事前検査を通すための fake。 */
+export function withPublicDoh(
+  inner: (input: string | URL | Request, init?: RequestInit) => Response | Promise<Response>,
+  resolve: (host: string, type: string) => Response | null = () => null,
+): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const u = new URL(url);
+    if (u.hostname === "cloudflare-dns.com") {
+      const host = u.searchParams.get("name") ?? "";
+      const type = u.searchParams.get("type") ?? "";
+      const custom = resolve(host, type);
+      if (custom) return custom;
+      return Response.json({
+        Status: 0,
+        Answer: type === "A" ? [{ name: host, type: 1, data: "93.184.216.34" }] : [],
+      });
+    }
+    return inner(input, init);
+  }) as typeof fetch;
+}

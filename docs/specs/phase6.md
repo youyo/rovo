@@ -435,7 +435,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 | var | 既定値 | 根拠（Cloudflare の公式料金表。取得日 2026-10-19） |
 |---|---|---|
 | `SANDBOX_USD_PER_HOUR` | 0.0073 | Containers の料金（https://developers.cloudflare.com/containers/platform/pricing/ 、2026-10-05 更新）: CPU $0.000020 / vCPU 秒（稼働分）、メモリ $0.0000025 / GiB 秒、ディスク $0.00000007 / GB 秒。instance_type は agent が指定していない（`container.start` は `lite` 相当の既定）ので `lite`（1/16 vCPU、256 MiB、2 GB）で計算: 0.0625*3600*0.00002 + 0.25*3600*0.0000025 + 2*3600*0.00000007 = $0.00725 → 0.0073。CPU を 100% 稼働とみなした上限側。月の無料枠は差し引かない |
-| `WEB_USD_PER_1K_SEARCH` | 0.25 | Web Search API の ceramic（既定のプロバイダ）$0.25 / 1,000 リクエスト（https://developers.cloudflare.com/web-search/providers/ 。exa は $7.00、linkup は $5.00。`WEB_SEARCH_PROVIDER` を変えたら上書きする） |
+| `WEB_USD_PER_1K_SEARCH` | 5.00 | Web Search API の linkup（既定のプロバイダ）$5.00 / 1,000 リクエスト（https://developers.cloudflare.com/web-search/providers/ 。exa は $7.00、ceramic は $0.25。`WEB_SEARCH_PROVIDER` を変えたら上書きする） |
 | `WEB_USD_PER_1K_FETCH` | 0 | web_fetch は取得先への通信で、Cloudflare の従量課金は無い（Workers のリクエストは Workers の料金に含まれる）。Workers AI の `toMarkdown` を使う分は無料枠とみなして 0 |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | Browser Run の REST API: $0.09 / ブラウザ時間（https://developers.cloudflare.com/browser-run/pricing/ ）。1 回あたり `gotoOptions.timeout` の 30 秒を上限として $0.09*30/3600 = $0.00075 / 回 |
 

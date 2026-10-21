@@ -201,7 +201,7 @@ secret は無い（GitHub のトークンも Anthropic のキーも持たせな�
 | 変数 | 内容 |
 |---|---|
 | `AI_GATEWAY_ID` | AI Gateway の ID。**必須**。空だと `websearch` も `AI.run`（Clef）も呼ばず、呼び出しは `misconfigured` のエラーになる（fail closed）。Clef の呼び出しには `userId` / `taskId` / `caller` を metadata に付ける |
-| `WEB_SEARCH_PROVIDER` | 検索プロバイダ（`ceramic` / `exa` / `linkup`。既定 `ceramic`） |
+| `WEB_SEARCH_PROVIDER` | 検索プロバイダ（`ceramic` / `exa` / `linkup`。既定 `linkup`） |
 | `SAFETY_BLOCK_THRESHOLD` / `SAFETY_CAUTION_THRESHOLD` | Policy Engine の閾値（既定 0.8 / 0.4）。モデルのスコアがこれ以上なら block / caution。**仮の値**で、受入試験で調整する |
 | `ENVIRONMENT` / `TEST_FAKE_BASE` | E2E 専用。`ENVIRONMENT=test` のときだけ、`TEST_FAKE_BASE`（偽サーバーの URL）に AI（`run` / `websearch` / `toMarkdown`）と取得を向ける。本番は必ず `production` |
 
@@ -259,7 +259,7 @@ rovo を upstream にする private リポジトリ（下流）が、自分の w
 | 変数 | 既定値 | 内容 |
 |---|---|---|
 | `SANDBOX_USD_PER_HOUR` | 0.1291 | Sandbox コンテナの 1 時間あたり。既定の大きさ `standard-2`（1 vCPU、6 GiB、12 GB）で CPU を 100% 稼働とみなした値。`SANDBOX_INSTANCE`（agent）を変えたら合わせる（`deploy:config` は自動） |
-| `WEB_USD_PER_1K_SEARCH` | 0.25 | `web_search` 1,000 回あたり。既定のプロバイダ（ceramic）の値。`WEB_SEARCH_PROVIDER` を変えたら上書きする |
+| `WEB_USD_PER_1K_SEARCH` | 5.00 | `web_search` 1,000 回あたり。既定のプロバイダ（linkup）の値。`WEB_SEARCH_PROVIDER` を変えたら上書きする |
 | `WEB_USD_PER_1K_FETCH` | 0 | `web_fetch` 1,000 回あたり |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | `web_browse` 1,000 回あたり（1 回 30 秒を上限としたブラウザ時間） |
 

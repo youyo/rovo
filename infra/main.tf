@@ -87,7 +87,7 @@ resource "cloudflare_ai_gateway" "this" {
   rate_limiting_limit        = 0
 }
 
-# web 専用の AI Gateway。Web Search API（env.AI.websearch。provider ceramic）は、Gateway に provider のキーが
+# web 専用の AI Gateway。Web Search API（env.AI.websearch。既定の provider は linkup）は、Gateway に provider のキーが
 # 無いときは AI Gateway のクレジットで払う。byok_only の Gateway では「キーが無いのでクレジットへは流さない」と
 # 400（web_search_byok_not_configured）で断られ、web_search が必ず失敗する。そのため、byok_only にした上の
 # Gateway（Claude 用。agent と gateway が使う）とは分け、こちらは byok_only = false にする。

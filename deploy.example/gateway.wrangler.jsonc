@@ -86,7 +86,7 @@
     // 推定費用の単価（docs/deploy.md の 11）。Sandbox は rovo.config.json の sandbox.instance（agent の SANDBOX_INSTANCE と同じ）から
     // 計算した 1 時間あたりの上限側の値。vars.gateway.SANDBOX_USD_PER_HOUR を書けばそれを優先する。
     "SANDBOX_USD_PER_HOUR": "<SANDBOX_USD_PER_HOUR>",
-    "WEB_USD_PER_1K_SEARCH": "0.25",
+    "WEB_USD_PER_1K_SEARCH": "5.00",
     "WEB_USD_PER_1K_FETCH": "0",
     "WEB_USD_PER_1K_BROWSE": "0.75"
   }

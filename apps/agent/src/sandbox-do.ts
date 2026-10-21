@@ -47,6 +47,7 @@ import {
   type RecentCommand,
   resolveClefThresholds,
 } from "./sandbox-scale-decision";
+import { scaleCmd } from "./scale-cmd";
 import { TailBuffer } from "./tail-buffer";
 import {
   isInsideWorkspace,
@@ -127,8 +128,6 @@ const SCALE_FACTS_KEEP = 3;
 const RECENT_COMMANDS_KEEP = 3;
 /** 「上げなかったのに長くかかった」とみなすコマンドの実行時間（ms） */
 const SLOW_COMMAND_MS = 60_000;
-/** 判断の記録の cmd（argv[0] の basename）の最大の文字数 */
-const SCALE_CMD_CHARS = 24;
 
 /** 依存関係のキャッシュの ensure（作成を待つことがある）を待つ上限。作成の時間切れ + 余裕 */
 const DEPS_ENSURE_WAIT_MS = DEPS_BUILD_TIMEOUT_MS + 60_000;
@@ -175,12 +174,6 @@ async function withDeadline<T>(promise: Promise<T>, until: number): Promise<T | 
  */
 function promoteSnapshotName(taskId: string | undefined, seq: number): string {
   return `promote-${(taskId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}-${seq}`;
-}
-
-/** 判断の記録の cmd: argv[0] の basename を短く切ったもの（argv の全体は残さない） */
-function scaleCmd(argv: readonly string[]): string {
-  const first = argv[0] ?? "";
-  return first.slice(first.lastIndexOf("/") + 1).slice(0, SCALE_CMD_CHARS);
 }
 
 /** 確率を小数 2 桁にする（記録を小さくする） */

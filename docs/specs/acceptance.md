@@ -641,15 +641,21 @@ DNS rebinding の名前は、ユーザーが管理するドメインの DNS で�
 
 前提: agent と gateway の `SANDBOX_HEAVY_INSTANCE` が `standard-3`（`sandbox.heavyInstance` の既定）、`SANDBOX_INSTANCE` が `standard-2`。スナップショットが使えるアカウント。テストに十数秒以上かかるリポジトリ。
 
-- [ ] **昇格する**: `sandbox_instance` を省略し、重いテストを流すタスクを実行する。`task_result` の `usage.sandbox_instance` が `standard-2`、`usage.sandbox_promoted_to` が `standard-3`、`sandbox_promoted_at` と `sandbox_runtime_ms_before_promotion` が付く。`sandbox_promotion_reason` は付かない。子の最初のテストの前に数十秒の間が空く（`task_wait` のイベントの間隔で確かめる）
-- [ ] **作業ツリーが残る**: 昇格の前に子が行った未 commit の編集とローカルの commit が、昇格後もそのまま残っている（子の最終的な PR の差分に含まれる。「再起動した」エラーが子に返っていない）
+- [x] **昇格する**: `sandbox_instance` を省略し、重いテストを流すタスクを実行する。`task_result` の `usage.sandbox_instance` が `standard-2`、`usage.sandbox_promoted_to` が `standard-3`、`sandbox_promoted_at` と `sandbox_runtime_ms_before_promotion` が付く。`sandbox_promotion_reason` は付かない。子の最初のテストの前に数十秒の間が空く（`task_wait` のイベントの間隔で確かめる）
+- [x] **作業ツリーが残る**: 昇格の前に子が行った未 commit の編集とローカルの commit が、昇格後もそのまま残っている（子の最終的な PR の差分に含まれる。「再起動した」エラーが子に返っていない）
 - [ ] **速くなる**: 同じタスクで、昇格したときの `sandbox_runtime_ms` の合計が、`sandbox_instance: standard-2` を明示した（昇格しない）場合と同程度か短い。`sandbox_usd_estimate` が、昇格前後の時間でそれぞれの単価に按分されている（`unit_prices.sandbox_promoted_usd_per_hour` が `standard-3` の単価）
-- [ ] **一度だけ**: 2 本目以降の重いコマンドでは昇格しない（`sandbox_runtime_ms_before_promotion` が変わらない）。ログに `sandbox_promoted: standard-2 -> standard-3` が 1 回だけ出る
+- [x] **一度だけ**: 2 本目以降の重いコマンドでは昇格しない（`sandbox_runtime_ms_before_promotion` が変わらない）。ログに `sandbox_promoted: standard-2 -> standard-3` が 1 回だけ出る
 - [ ] **検証コマンド**: 子が重いコマンドを一度も流さずに完了したタスクでも、検証コマンドの実行の前に昇格する
 - [ ] **固定**: `sandbox_instance: standard-1` を明示したタスクは昇格せず、`usage.sandbox_promotion_reason` が `fixed_instance`
 - [ ] **無効にする**: `sandbox.heavyInstance` を `null` にして再デプロイすると、昇格せず、`sandbox_promotion_reason` も付かない。`sandbox_instances_list` の `promotion_target` がどれも `false`
 - [ ] **使えないとき（fail-soft）**: スナップショットが使えない状態では、タスクは失敗せず小さいまま進み、`usage.sandbox_promotion_reason` が `snapshot_unsupported` / `snapshot_failed`（ログに `sandbox_promotion_skipped: <理由>`）
 - [ ] **昇格先の起動に失敗したとき**: 昇格先の大きさを一時的に使えない状態にして、同じスナップショットから元の大きさで起動し直され、作業ツリーが残り、`sandbox_promotion_reason` が `start_failed` 等になる（再現が難しければログの確認で足りる）
-- [ ] **依存キャッシュと両立する**: `usage.deps_cache` が `hit` のタスクで昇格しても、`node_modules` が使える（昇格後の最初のテストが `npm ci` なしで通る）
+- [x] **依存キャッシュと両立する**: `usage.deps_cache` が `hit` のタスクで昇格しても、`node_modules` が使える（昇格後の最初のテストが `npm ci` なしで通る）
 - [ ] 監査ログ・R2 のアーカイブ・`task_summary` に、トークンや入力の文面が増えていない（`sandbox_promotion_reason` は固定の 9 値）
 - [ ] **スナップショットの残り方**: 昇格のたびにスナップショットが 1 つ残る。保管の費用と、30 日の期限切れを Cloudflare の画面・料金表で確かめ、備考に書く
+
+### 25 の結果
+
+| 実施者 | 日付 | 環境 | 結果 | 備考 |
+|---|---|---|---|---|
+| youyo | 2026-10-21 | Claude Code、本番（既定 standard-2・昇格先 standard-3） | 昇格する・作業ツリーが残る・一度だけ・依存キャッシュと両立: 合格 | rovo の gateway の vitest を 2 回流すタスク（haiku）。重いテストの開始から約 8 秒で昇格（`sandbox_runtime_ms_before_promotion` 11557）。昇格前のローカルの commit と未 add のファイルが PR の差分に残った。2 回目は昇格せず。`deps_cache` は `hit`。vitest の 1 回目は昇格なし 174 秒 → 昇格あり 127 秒、`sandbox_runtime_ms` の合計は 446 秒 → 301 秒。按分（`task_summary` の `sandbox_usd_estimate`）は未確認。初回は deploy の設定に `SANDBOX_HEAVY_INSTANCE` が入っておらず昇格しなかった（`deploy:config` で作り直して解消） |

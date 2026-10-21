@@ -87,12 +87,34 @@ export function resolveAgentMaxSandboxInstance(raw: string | undefined): {
 }
 
 /**
- * 昇格の引き金（usage.sandbox_promotions[].trigger。固定の値）。
- * - agent: 子が sandbox_scale_up で頼んだ
- * - rule: 重いコマンドの規則（apps/agent の heavy-command.ts）に一致した（保険）
- * - verification: 検証コマンド（heavy: true）の実行の前
+ * Clef による昇格の上限の既定（standard-4）。Sandbox は小さく始めて、コマンドの前に Clef（Workers AI の決定モデル）が
+ * 「この大きさで足りるか」を判断し、足りなければ上限まで（2 → 3 → 4 と何回でも）上げる。上げるだけで、下げない。
+ * 運用者が上限を決める（env SANDBOX_MAX_INSTANCE）。
  */
-export const SANDBOX_PROMOTION_TRIGGERS = ["agent", "rule", "verification"] as const;
+export const DEFAULT_MAX_SANDBOX_INSTANCE: SelectableSandboxInstance = "standard-4";
+
+/**
+ * env SANDBOX_MAX_INSTANCE を解く。未設定・空・off / none は無効（instance: null。Clef による昇格をしない）。
+ * タスクが選べる 4 種類（lite を除く）だけ有効で、それ以外は無効にして、受け付けなかった値を ignored に返す
+ * （起動はエラーにしない。デプロイ設定の生成器は不正な値をエラーにする）。
+ */
+export function resolveMaxSandboxInstance(raw: string | undefined): {
+  instance: SelectableSandboxInstance | null;
+  ignored?: string;
+} {
+  const v = (raw ?? "").trim();
+  const lower = v.toLowerCase();
+  if (v === "" || lower === "off" || lower === "none") return { instance: null };
+  if (isSelectableSandboxInstance(v)) return { instance: v };
+  return { instance: null, ignored: v };
+}
+
+/**
+ * 昇格の引き金（usage.sandbox_promotions[].trigger。固定の値）。
+ * - clef: コマンドの前に Clef が上げると判断した
+ * - agent / rule / verification: 古いタスクの記録を読むために残す（子の sandbox_scale_up・重いコマンドの規則・検証コマンドの heavy。今は使わない）
+ */
+export const SANDBOX_PROMOTION_TRIGGERS = ["agent", "rule", "verification", "clef"] as const;
 export type SandboxPromotionTrigger = (typeof SANDBOX_PROMOTION_TRIGGERS)[number];
 
 export function isSandboxPromotionTrigger(v: unknown): v is SandboxPromotionTrigger {

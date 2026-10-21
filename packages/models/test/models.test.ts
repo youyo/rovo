@@ -4,6 +4,7 @@ import {
   computeCostUsd,
   DEFAULT_AGENT_MAX_SANDBOX_INSTANCE,
   DEFAULT_HEAVY_SANDBOX_INSTANCE,
+  DEFAULT_MAX_SANDBOX_INSTANCE,
   DEFAULT_MODEL,
   DEFAULT_MODEL_ORDER,
   DEFAULT_SANDBOX_INSTANCE,
@@ -23,6 +24,7 @@ import {
   resolveAgentMaxSandboxInstance,
   resolveEfforts,
   resolveHeavySandboxInstance,
+  resolveMaxSandboxInstance,
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
   SANDBOX_PROMOTION_REASONS,
@@ -573,6 +575,23 @@ describe("Sandbox のインスタンス（D13）", () => {
   });
 });
 
+describe("Clef による Sandbox の昇格の上限（SANDBOX_MAX_INSTANCE）", () => {
+  it("上限の既定は standard-4", () => {
+    expect(DEFAULT_MAX_SANDBOX_INSTANCE).toBe("standard-4");
+  });
+
+  it("resolveMaxSandboxInstance: 未設定・空・off / none は無効（null。Clef による昇格をしない）。選べる 4 種類だけ有効。不正な値は無効にして ignored に返す", () => {
+    expect(resolveMaxSandboxInstance(undefined)).toEqual({ instance: null });
+    expect(resolveMaxSandboxInstance("")).toEqual({ instance: null });
+    expect(resolveMaxSandboxInstance(" Off ")).toEqual({ instance: null });
+    expect(resolveMaxSandboxInstance("none")).toEqual({ instance: null });
+    expect(resolveMaxSandboxInstance(" standard-4 ")).toEqual({ instance: "standard-4" });
+    expect(resolveMaxSandboxInstance("standard-3")).toEqual({ instance: "standard-3" });
+    expect(resolveMaxSandboxInstance("lite")).toEqual({ instance: null, ignored: "lite" });
+    expect(resolveMaxSandboxInstance("toString")).toEqual({ instance: null, ignored: "toString" });
+  });
+});
+
 describe("子が自分で Sandbox を大きくするツール（sandbox_scale_up）の設定", () => {
   it("子が選べる上限の既定は standard-4", () => {
     expect(DEFAULT_AGENT_MAX_SANDBOX_INSTANCE).toBe("standard-4");
@@ -606,8 +625,9 @@ describe("子が自分で Sandbox を大きくするツール（sandbox_scale_up
     expect(names(null)).toEqual([]);
   });
 
-  it("昇格の引き金は固定の 3 値", () => {
-    expect([...SANDBOX_PROMOTION_TRIGGERS]).toEqual(["agent", "rule", "verification"]);
+  it("昇格の引き金は固定の値（clef は Clef による判断。agent / rule / verification は古いタスクの記録を読むために残す）", () => {
+    expect([...SANDBOX_PROMOTION_TRIGGERS]).toEqual(["agent", "rule", "verification", "clef"]);
+    expect(isSandboxPromotionTrigger("clef")).toBe(true);
     expect(isSandboxPromotionTrigger("agent")).toBe(true);
     expect(isSandboxPromotionTrigger("rule")).toBe(true);
     expect(isSandboxPromotionTrigger("verification")).toBe(true);

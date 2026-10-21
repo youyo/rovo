@@ -129,6 +129,33 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ row: await c.env.DIRECTORY_DO.getByName(DIRECTORY_NAME).testGetTask(id) });
   });
 
+  // 索引（DirectoryDO）の consult の行（M3b）。無ければ row: null
+  app.post("/__test/directory/consult", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const body = (await c.req.json().catch(() => ({}))) as { consult_id?: unknown };
+    const id = typeof body.consult_id === "string" ? body.consult_id : "";
+    if (!/^consult-[0-9A-HJKMNP-TV-Z]{26}$/.test(id)) {
+      return c.json({ error: "consult_id is required" }, 400);
+    }
+    return c.json({ row: await c.env.DIRECTORY_DO.getByName(DIRECTORY_NAME).testGetConsult(id) });
+  });
+
+  // 自分の consult の consult_id と、索引に入った行の一覧（M3b の E2E 用）
+  app.post("/__test/directory/consults", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const body = (await c.req.json().catch(() => ({}))) as { owner_id?: unknown };
+    if (typeof body.owner_id !== "number" || !Number.isSafeInteger(body.owner_id)) {
+      return c.json({ error: "owner_id is required" }, 400);
+    }
+    const res = await c.env.DIRECTORY_DO.getByName(DIRECTORY_NAME).listConsults({
+      from: 0,
+      to: Number.MAX_SAFE_INTEGER,
+      ownerId: body.owner_id,
+      limit: 100,
+    });
+    return c.json(res);
+  });
+
   // git_token の暗号文が空になったか（finalize_done の後）。暗号文そのものは返さず、件数と真偽だけを返す
   app.post("/__test/task/token-state", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();

@@ -109,7 +109,10 @@ export function createConsultService(
 
       const users = deps.users(principal.githubUserId);
       const consultId = newConsultId();
-      const reserved = await users.reserveConsult(consultId);
+      const reserved = await users.reserveConsult(consultId, model, {
+        id: principal.githubUserId,
+        login: principal.login,
+      });
       if (!reserved.ok) {
         return reserved.code === "budget_exceeded"
           ? fail("budget_exceeded", "the monthly budget is insufficient for a consult")

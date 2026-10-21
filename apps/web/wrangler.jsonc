@@ -18,7 +18,7 @@
     // AI Gateway の ID（必須。空なら websearch も AI.run も呼ばず、呼び出しをエラーにする）。デプロイ時に実際の ID へ変える。
     "AI_GATEWAY_ID": "",
     // 検索プロバイダ（ceramic / exa / linkup）
-    "WEB_SEARCH_PROVIDER": "ceramic",
+    "WEB_SEARCH_PROVIDER": "linkup",
     // Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block / caution
     "SAFETY_BLOCK_THRESHOLD": "0.8",
     "SAFETY_CAUTION_THRESHOLD": "0.4",

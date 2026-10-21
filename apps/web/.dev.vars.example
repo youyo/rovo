@@ -7,7 +7,7 @@
 # AI_GATEWAY_ID=
 
 # 検索プロバイダ（ceramic / exa / linkup）
-# WEB_SEARCH_PROVIDER=ceramic
+# WEB_SEARCH_PROVIDER=linkup
 
 # Policy Engine の閾値（仮の値。受入試験で調整する）
 # SAFETY_BLOCK_THRESHOLD=0.8

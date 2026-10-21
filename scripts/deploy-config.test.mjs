@@ -488,7 +488,7 @@ esac
     const before = read(f);
     writeFileSync(
       f,
-      before.replace('"WEB_SEARCH_PROVIDER": "ceramic"', '"WEB_SEARCH_PROVIDER": "exa"'),
+      before.replace('"WEB_SEARCH_PROVIDER": "linkup"', '"WEB_SEARCH_PROVIDER": "exa"'),
     );
     const tampered = read(f);
     const r = run("--check");

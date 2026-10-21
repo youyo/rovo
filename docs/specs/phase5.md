@@ -61,7 +61,7 @@ apps/agent    ──service binding──▶     search / fetch / browse
 
 ### web_search
 
-- 入力: `{query, limit?}`（limit は 1〜10、既定 5）。プロバイダは Ceramic（env `WEB_SEARCH_PROVIDER` で切り替える）。
+- 入力: `{query, limit?}`（limit は 1〜10、既定 5）。プロバイダは Linkup が既定（env `WEB_SEARCH_PROVIDER` で切り替える）。
 - 結果は `items[]{url, title, description}`。description は外部のコンテンツなので、まとめて Safety Evaluator にかける（1回の評価で、すべての説明文を対象にする）。verdict が `block` の項目は description を落とし、URL とタイトルだけを返す。
 - URL は、Fetch Proxy と同じ URL ポリシーで検査する。private なアドレスなどを指すものは、結果から落とす。
 
@@ -114,7 +114,7 @@ apps/agent    ──service binding──▶     search / fetch / browse
 - 回数は、呼び出し元（Gateway の TaskDO / UserDO、または AgentDO）が数える。web は状態を持たない。
   - 子の分: AgentDO が数え、usage イベントに `web: {search, fetch, browse}` として載せる（設計 11.1 の記録項目）。
   - 親の分: Gateway の UserDO が数える。
-- 金額は小さい（Ceramic は 1,000回で $0.25、Clef-flash も入力 100 万トークンで $0.038）ので、タスクの予算（$10）には含めない。回数の上限で抑える。
+- 金額は小さい（Linkup は 1,000回で $5.00、Clef-flash も入力 100 万トークンで $0.038）ので、タスクの予算（$10）には含めない。回数の上限で抑える。
 
 ## 公開
 
@@ -457,7 +457,7 @@ E2E（apps/web を含む3 Worker 同時起動、`ENVIRONMENT=test` の fake BROW
 ### 検索プロバイダの 5xx（`search_provider_error`）
 - `WebSearchError` の `status` が 5xx（実際の HTTP の応答。期限切れ `web_search_timeout` と、例外を包んだもの〔`cause` が付く〕は含めない）のとき、web は `search_provider_error` を投げる。message は固定の形 `provider=<名前> status=<番号>` だけで、上流の本文は載せない。provider 名は `[a-z0-9_-]{1,40}` に合わなければ `unknown`。設定・資格情報の誤り（`misconfigured`）の判定が先。
 - gateway は `upstream_unavailable`（`retry_after_seconds: 30` のまま。上流の 5xx は一時的なこともあるので再試行は禁止しない）で、message に「the search provider (<名前>) returned HTTP <番号>」と、同じ検索語で繰り返し失敗するなら語を変える旨を入れる。agent のツールも同じ情報を伝え、再試行は 1 回までと促す。固定の形に合わない message は、従来の固定の文言にする。
-- 本番の Ceramic は、日本語だけの検索語と「the」「a」だけの検索語で HTTP 502 を返す（Exa / Linkup では成功する）。プロバイダの切り替えはここでは扱わない。
+- 本番の Ceramic は、日本語だけの検索語と「the」「a」だけの検索語で HTTP 502 を返す（Exa / Linkup では成功する）。既定のプロバイダは、この結果を受けて Ceramic から Linkup に変えた（design 15.6）。
 
 ### エラーと理由の一覧（web_fetch / web_browse 共通）
 | status | 理由のフィールド | 値 |

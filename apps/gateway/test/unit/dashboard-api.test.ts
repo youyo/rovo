@@ -11,6 +11,7 @@ import { snapshotToVisibleTask } from "../../src/dashboard/api";
 import { handleDashboard } from "../../src/dashboard/serve";
 import { SESSION_COOKIE, sealSession } from "../../src/dashboard/session";
 import { DIRECTORY_NAME, type TaskIndexSnapshot } from "../../src/directory/types";
+import { ulid } from "../../src/tasks/ulid";
 import { createTask } from "./pr-helpers";
 
 // ダッシュボードの読み取り API（docs/specs/dashboard.md M5b）。認可の最後の関門なので、
@@ -239,7 +240,6 @@ describe("overview", () => {
     expect(dto.tasks.map((t) => t.task_id)).not.toContain(hidden.id);
     expect(dto.scope).toBe("all");
     expect(dto.viewer).toEqual({ login: v.login });
-    expect(dto.consults).toEqual([]); // consult の索引（M3b）が入るまでは空
     expect(dto.month.hidden_tasks.count - before.month.hidden_tasks.count).toBe(1);
     expect(dto.month.hidden_tasks.cost_usd - before.month.hidden_tasks.cost_usd).toBeCloseTo(2.5);
     expect(dto.month.task_cost_usd - before.month.task_cost_usd).toBeCloseTo(2.5);
@@ -331,6 +331,99 @@ describe("overview", () => {
     const a = dto.models.find((m) => m.model === "shared/model-a");
     expect(a?.task_cost_usd).toBeGreaterThanOrEqual(4); // 全員分（1 + 3 以上）
     expect(dto.models.find((m) => m.model === "other")?.task_cost_usd).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("overview の consult（D9。M3b の索引）", () => {
+  const dir = () => workerEnv.DIRECTORY_DO.getByName(DIRECTORY_NAME);
+  async function seedConsult(over: Record<string, unknown> = {}) {
+    const consult_id = `consult-${ulid()}`;
+    const snap = {
+      consult_id,
+      owner_id: 1,
+      owner_login: "carol",
+      at: Date.now(),
+      model: "consult-vendor/model-x",
+      cost_micro: 2_000_000,
+      estimated: false,
+      ...over,
+    };
+    const r = await dir().upsertConsult(snap, 1);
+    if (!r.ok) throw new Error(`upsertConsult failed: ${r.code}`);
+    return snap;
+  }
+
+  it("consult の点が人のレーン用に出る（誰が・いつ・モデル・費用だけ）。見えるリポジトリの集合では絞らない", async () => {
+    const v = newViewer([]); // 見えるリポジトリが無くても、consult は全員分が見える（対象のリポジトリが無い）
+    const c = await seedConsult({ owner_login: "carol-zq", estimated: true });
+    const dto = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
+    const point = dto.consults.find((x) => x.consult_id === c.consult_id);
+    expect(point).toEqual({
+      consult_id: c.consult_id,
+      owner_login: "carol-zq",
+      at: new Date(c.at).toISOString(),
+      model: "consult-vendor/model-x",
+      cost_usd: 2,
+      estimated: true,
+    });
+  });
+
+  it("scope=me は自分の consult だけ。範囲外の時刻は出ない", async () => {
+    const v = newViewer([newRepoId()]);
+    const mine = await seedConsult({ owner_id: v.uid, owner_login: "me-zq" });
+    const other = await seedConsult({ owner_id: v.uid + 1000 });
+    const old = await seedConsult({ owner_id: v.uid, at: Date.now() - 5 * HOUR });
+    const ids = async (q: string) =>
+      OverviewDtoSchema.parse((await api(v, overviewPath(q))).json()).consults.map(
+        (x) => x.consult_id,
+      );
+    const all = await ids("");
+    expect(all).toEqual(expect.arrayContaining([mine.consult_id, other.consult_id]));
+    expect(all).not.toContain(old.consult_id);
+    const me = await ids("&scope=me");
+    expect(me).toContain(mine.consult_id);
+    expect(me).not.toContain(other.consult_id);
+  });
+
+  it("モデル別の費用と budget_actual に consult 分が足される（estimated は consult の見積もり分）。consult のモデルは名前で出る", async () => {
+    const v = newViewer([newRepoId()]);
+    const before = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
+    const model = `consult-only/m-${v.uid}`;
+    await seedConsult({ model, cost_micro: 3_000_000 });
+    await seedConsult({ model, cost_micro: 1_000_000, estimated: true });
+    const after = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
+    const m = after.models.find((x) => x.model === model);
+    expect(m).toEqual({ model, task_cost_usd: 0, consult_cost_usd: 4 });
+    expect(after.month.budget_actual.spent_usd - before.month.budget_actual.spent_usd).toBeCloseTo(
+      4,
+    );
+    expect(
+      after.month.budget_actual.estimated_usd - before.month.budget_actual.estimated_usd,
+    ).toBeCloseTo(1);
+    // タスクの費用の合計は consult で変わらない
+    expect(after.month.task_cost_usd).toBeCloseTo(before.month.task_cost_usd);
+  });
+
+  it("consult の本文に当たる値は索引に無く、応答にも出ない。consult があっても見えないタスクの値は出ない", async () => {
+    const hiddenRepo = newRepoId();
+    const v = newViewer([newRepoId()]);
+    await seedConsult();
+    const t = await seedTask(
+      { repository_id: hiddenRepo, title: "CONSULT-LEAK-TITLE-zq" },
+      { index: { model: "hidden-vendor/hidden-model-zq" } },
+    );
+    const r = await api(v, overviewPath());
+    expect(r.text).not.toContain("CONSULT-LEAK-TITLE-zq");
+    expect(r.text).not.toContain("hidden-model-zq");
+    expect(r.text).not.toContain(t.id);
+    expect(Object.keys(OverviewDtoSchema.parse(r.json()).consults[0] ?? {}).sort()).toEqual([
+      "at",
+      "consult_id",
+      "cost_usd",
+      "estimated",
+      "model",
+      "owner_login",
+    ]);
   });
 });
 

@@ -84,8 +84,10 @@ const PHRASE_RULES: PhraseRule[] = [
     category: "credential_exfiltration",
   },
   {
+    // 英語の資格情報の外部送信。日本語版と同様に宛先（URL・メールアドレス・webhook などの語）を条件にする。
+    // 宛先がなければ「correctly send API key」のような changelog や API の使い方の文を拾うため（2026-10-22 の実機で誤検知）。
     rule: "credential_exfiltration",
-    re: /\b(?:send|post|upload|email|e-mail|exfiltrate|transmit|forward|leak|submit)\b[^.\n]{0,60}\b(?:api[ _-]?keys?|secrets?|access tokens?|auth tokens?|credentials?|passwords?|private keys?|ssh keys?|\.env|cookies?|environment variables)\b/,
+    re: /\b(?:send|post|upload|email|e-mail|exfiltrate|transmit|forward|leak|submit)\b[^.\n]{0,60}\b(?:api[ _-]?keys?|secrets?|access tokens?|auth tokens?|credentials?|passwords?|private keys?|ssh keys?|\.env|cookies?|environment variables)\b(?:[^.\n]|\.(?=env\b)){0,80}(?:https?:\/\/|\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b|\b(?:to|at|into)\b[^.\n]{0,25}\b(?:webhooks?|endpoints?|external|remote|attacker|third[- ]party|server)\b)/,
     verdict: "block",
     category: "credential_exfiltration",
   },

@@ -426,6 +426,7 @@ export function computeCostUsd(price: ModelPrice, usage: TokenUsage): number {
 export {
   DEFAULT_AGENT_MAX_SANDBOX_INSTANCE,
   DEFAULT_HEAVY_SANDBOX_INSTANCE,
+  DEFAULT_MAX_SANDBOX_INSTANCE,
   DEFAULT_SANDBOX_INSTANCE,
   isSandboxPromotionReason,
   isSandboxPromotionTrigger,
@@ -434,6 +435,7 @@ export {
   listSandboxInstances,
   resolveAgentMaxSandboxInstance,
   resolveHeavySandboxInstance,
+  resolveMaxSandboxInstance,
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
   SANDBOX_PRICE,

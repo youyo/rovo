@@ -81,10 +81,8 @@
     "WEB_BROWSE_ENABLED": "<WEB_BROWSE_ENABLED>",
     // task_start で sandbox_instance を省略したときの Sandbox の大きさ（sandbox_instances_list の default）。rovo.config.json の sandbox.instance から入り、agent の同名の var と同じ値になる。
     "SANDBOX_INSTANCE": "<SANDBOX_INSTANCE>",
-    // 重いコマンド（テスト・ビルドなど）の初回に Sandbox が自動で昇格する先の大きさ（sandbox_instances_list の promotion_target。空は昇格しない）。rovo.config.json の sandbox.heavyInstance から入り、agent の同名の var と同じ値になる。
-    "SANDBOX_HEAVY_INSTANCE": "<SANDBOX_HEAVY_INSTANCE>",
-    // 子が sandbox_scale_up で自分で選べる大きさの上限（sandbox_instances_list の agent_max。空は無効）。rovo.config.json の sandbox.agentMaxInstance から入り、agent の同名の var と同じ値になる。
-    "SANDBOX_AGENT_MAX_INSTANCE": "<SANDBOX_AGENT_MAX_INSTANCE>",
+    // Clef が Sandbox を自動で上げる上限の大きさ（sandbox_instances_list の auto_scale_max。空は昇格しない）。rovo.config.json の sandbox.maxInstance から入り、agent の同名の var と同じ値になる。
+    "SANDBOX_MAX_INSTANCE": "<SANDBOX_MAX_INSTANCE>",
     // 推定費用の単価（docs/deploy.md の 11）。Sandbox は rovo.config.json の sandbox.instance（agent の SANDBOX_INSTANCE と同じ）から
     // 計算した 1 時間あたりの上限側の値。vars.gateway.SANDBOX_USD_PER_HOUR を書けばそれを優先する。
     "SANDBOX_USD_PER_HOUR": "<SANDBOX_USD_PER_HOUR>",

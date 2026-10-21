@@ -20,8 +20,7 @@
   },
   "sandbox": {
     "instance": "standard-2",
-    "heavyInstance": "standard-3",
-    "agentMaxInstance": "standard-4"
+    "maxInstance": "standard-4"
   },
   "depsCache": { "enabled": true },
   "webBrowseEnabled": false,

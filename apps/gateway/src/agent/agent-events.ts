@@ -4,6 +4,7 @@ import {
   sandboxInstanceName,
   sanitizePromotionFailures,
   sanitizePromotions,
+  sanitizeScaleStats,
 } from "../sandbox-instance";
 import type { TaskStatus } from "../tasks/state";
 import type { AgentEventDto, AgentPhase, SandboxUsageDto } from "./contract";
@@ -96,6 +97,7 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
   // 昇格の履歴（trigger・規則名つき）。payload はプリミティブだけなので JSON 文字列にする（question の options と同じ）。固定の値だけを通す
   const promotions = sanitizePromotions(s.promotions, "camel");
   const failures = sanitizePromotionFailures(s.promotionFailures);
+  const scale = sanitizeScaleStats(s.scaleStats);
   return {
     sandbox_runtime_ms: n(s.runtimeMs),
     sandbox_restarts: count(s.restarts),
@@ -113,7 +115,7 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
       : {}),
     ...(reason !== undefined ? { sandbox_promotion_reason: reason } : {}),
     ...(promotions.length > 0 ? { sandbox_promotions: JSON.stringify(promotions) } : {}),
-    // 子が上げたあとに規則で重いと判定されたコマンドの本数（子が上げていなければ agent は報告しない）
+    // 古い agent の記録（子が上げたあとに規則で重いと判定されたコマンドの本数。今の agent は報告しない）
     ...(typeof s.heavyCommandsAfterAgentScaleUp === "number"
       ? { sandbox_heavy_commands_after_agent_scale_up: n(s.heavyCommandsAfterAgentScaleUp) }
       : {}),
@@ -123,6 +125,15 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
       : {}),
     // 昇格の見送り・失敗の内訳（固定の trigger と理由コードだけ。JSON 文字列）
     ...(failures.length > 0 ? { sandbox_promotion_failures: JSON.stringify(failures) } : {}),
+    // Clef の判断の集計（数値だけ。agent は終端の確定のときだけ報告する）。判断ごとの記録は usage イベントには載せず、task_result の usage にだけ出す
+    ...(scale !== undefined
+      ? {
+          sandbox_scale_decisions: scale.decisions,
+          sandbox_scale_raised: scale.raised,
+          sandbox_scale_clef_failures: scale.clef_failures,
+          sandbox_scale_slow_not_raised: scale.slow_not_raised,
+        }
+      : {}),
   };
 }
 

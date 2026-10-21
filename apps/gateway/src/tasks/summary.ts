@@ -16,9 +16,11 @@ import {
 import {
   type PublicPromotion,
   type PublicPromotionFailure,
+  type PublicScaleStats,
   sandboxInstanceName,
   sanitizePromotionFailures,
   sanitizePromotions,
+  sanitizeScaleStats,
 } from "../sandbox-instance";
 
 /**
@@ -105,10 +107,17 @@ export type SummaryInput = {
       promotionReason?: SandboxPromotionReason;
       /** 成功した昇格の履歴（公開用の形に検証済みのもの。古い順）。あれば、区間ごとに按分する */
       promotions?: PublicPromotion[];
-      /** 子が上げたあと、規則で重いと判定されたコマンドを実行した本数 */
+      /** 古いタスクの記録: 子が上げたあと、規則で重いと判定されたコマンドを実行した本数 */
       heavyCommandsAfterAgentScaleUp?: number;
-      /** そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数 */
+      /** 古いタスクの記録: そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数 */
       heavyCommandsCoveredByAgent?: number;
+      /** Clef の判断の集計（Clef を呼んだタスクだけ） */
+      scaleStats?: {
+        decisions: number;
+        raised: number;
+        clefFailures: number;
+        slowNotRaised: number;
+      };
       /** 昇格の試みの見送り・失敗の内訳（固定の trigger と理由コード） */
       promotionFailures?: PublicPromotionFailure[];
     } | null;
@@ -154,12 +163,14 @@ export type TaskSummary = {
     runtime_ms_before_promotion?: number;
     /** 昇格を見送った・失敗した理由（固定コード）。最後に残したもの */
     promotion_reason?: SandboxPromotionReason;
-    /** 成功した昇格の履歴（古い順）。trigger は agent（子が頼んだ）/ rule（重いコマンドの規則＝保険）/ verification。rule_match は規則で上がったときだけ（固定の表の名前）。昇格していなければ無い */
+    /** 成功した昇格の履歴（古い順）。trigger は clef（Clef が上げると判断した）。古いタスクは agent / rule / verification で、rule_match は規則で上がったときだけ。昇格していなければ無い */
     promotions?: PublicPromotion[];
-    /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数（0 なら不要だった昇格の候補）。子が上げていなければ無い */
+    /** 古いタスクの記録: 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。今のタスクには付かない */
     heavy_commands_after_agent_scale_up?: number;
-    /** 上の本数のうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（子の見立ての的中）。子が上げていなければ無い */
+    /** 古いタスクの記録: 上の本数のうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数 */
     heavy_commands_covered_by_agent?: number;
+    /** Clef の判断の集計（Clef を呼んだタスクだけ）。判断ごとの記録は summary には入れず、task_result の usage.sandbox_scale_log にだけ出す */
+    scale?: PublicScaleStats;
     /** 昇格の試みが見送り・失敗になった記録（固定の trigger と理由コード。古い順、最大 8 件）。無ければ無い */
     promotion_failures?: PublicPromotionFailure[];
   };
@@ -262,6 +273,7 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
       ? Math.floor(nn(sb.heavyCommandsCoveredByAgent))
       : undefined;
   const promotionFailures = sanitizePromotionFailures(sb?.promotionFailures);
+  const scale = sanitizeScaleStats(sb?.scaleStats);
   const promotionReason = isSandboxPromotionReason(sb?.promotionReason)
     ? sb?.promotionReason
     : undefined;
@@ -304,6 +316,7 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
         : {}),
       ...(coveredByAgent !== undefined ? { heavy_commands_covered_by_agent: coveredByAgent } : {}),
       ...(promotionFailures.length > 0 ? { promotion_failures: promotionFailures } : {}),
+      ...(scale !== undefined ? { scale } : {}),
     },
     ...(steps.length > 0 ? { sandbox_segments: segments } : {}),
     sandbox_usd_estimate: usd(
@@ -380,6 +393,10 @@ export const USAGE_PUBLIC_KEYS = [
   "sandbox_runtime_ms_before_promotion",
   "sandbox_heavy_commands_after_agent_scale_up",
   "sandbox_heavy_commands_covered_by_agent",
+  "sandbox_scale_decisions",
+  "sandbox_scale_raised",
+  "sandbox_scale_clef_failures",
+  "sandbox_scale_slow_not_raised",
 ] as const;
 
 export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], number>> & {

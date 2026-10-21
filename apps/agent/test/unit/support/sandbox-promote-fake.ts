@@ -1,13 +1,16 @@
 import { env, runInDurableObject } from "cloudflare:test";
 
-// sandbox-do-promote.test.ts と sandbox-do-scale-up.test.ts が共有する、コンテナの fake と補助。
+// sandbox-do-promote.test.ts と sandbox-do-clef-scale.test.ts が共有する、コンテナと Clef の fake と補助。
 // vitest 上では ctx.container が無いので maybeContainer を fake に差し替える（snapshotContainer と containerSnapshot での起動に対応）。
 
 export const SHA = "a".repeat(40);
 export const CA_CERT = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 export const IMAGE = `registry.cloudflare.com/acct/rovo-agent-sandboxdo-workspace@sha256:${"b".repeat(64)}`;
 export const HEAVY = ["pnpm", "test"];
+export const BUILD = ["pnpm", "build"];
 export const LIGHT = ["ls", "-la"];
+/** 子（bash ツール）が実行したコマンド。Clef の判断の対象になる（Sandbox 自身の内部の exec には付けない） */
+export const AGENT = { origin: "agent_command" } as const;
 
 // biome-ignore lint/suspicious/noExplicitAny: private メンバーを差し替えるテスト
 export type Inst = any;
@@ -68,6 +71,8 @@ export class FakeContainer {
   onDestroy: (() => Promise<void>) | undefined;
   /** exec の応答の前に呼ばれる */
   onExec: ((argv: string[]) => Promise<void>) | undefined;
+  /** 大きさの判断をする Clef の fake（setup が env.AI に差し込む） */
+  clef = new FakeClef();
 
   start(options: Record<string, unknown>) {
     this.startCalls.push(options);
@@ -154,11 +159,76 @@ export class FakeContainer {
   }
 }
 
-export function setup(inst: Inst, vars: Record<string, string> = {}) {
+/** Clef の応答（answers.<id> が score / choice / noul）。重い確率 = P(2)+P(3) になるように作る */
+export function clefResponse(p: { heavy: number; fast4: number }, inputTokens = 900) {
+  return {
+    answers: {
+      weight: {
+        type: "score",
+        score: p.heavy >= 0.5 ? 2 : 0,
+        probabilities: {
+          "0": (1 - p.heavy) / 2,
+          "1": (1 - p.heavy) / 2,
+          "2": p.heavy / 2,
+          "3": p.heavy / 2,
+        },
+        confidence: 0.9,
+      },
+      size: {
+        type: "choice",
+        choice: "standard-3",
+        probabilities: { "standard-2": 0.2, "standard-3": 0.5, "standard-4": 0.3 },
+        confidence: 0.8,
+      },
+      beyond2: { type: "noul", noul: p.fast4 },
+    },
+    usage: { input_tokens: inputTokens },
+  };
+}
+
+export type ClefCall = {
+  model: string;
+  state: Record<string, unknown>;
+  options: unknown;
+};
+
+/**
+ * Clef の fake（env.AI の代わり）。state の command の文字列で台本を決める。これはテストの台本で、本番に規則は無い。
+ * 既定: "build" を含むと重く 4 vCPU でも速い / "test" を含むと重く 4 vCPU までは要らない / それ以外は軽い。
+ */
+export class FakeClef {
+  calls: ClefCall[] = [];
+  /** 応答の台本。Error を返すと AI.run が例外を投げ、"hang" は返らない */
+  answer: (
+    state: Record<string, unknown>,
+    model: string,
+  ) => { heavy: number; fast4: number } | Error | "hang" = (state) => {
+    const command = String(state.command ?? "");
+    if (command.includes("build")) return { heavy: 0.95, fast4: 0.9 };
+    if (command.includes("test")) return { heavy: 0.95, fast4: 0.1 };
+    return { heavy: 0.02, fast4: 0.02 };
+  };
+  async run(model: string, input: { state: string }, options: unknown) {
+    const state = JSON.parse(input.state) as Record<string, unknown>;
+    this.calls.push({ model, state, options });
+    const a = this.answer(state, model);
+    if (a === "hang") return new Promise(() => {});
+    if (a instanceof Error) throw a;
+    return clefResponse(a);
+  }
+}
+
+export function setup(inst: Inst, vars: Record<string, unknown> = {}) {
   const fake = new FakeContainer();
   inst.maybeContainer = () => fake;
   inst.depsCacheEnabled = () => false;
-  inst.env = { ...inst.env, SANDBOX_HEAVY_INSTANCE: "standard-3", ...vars };
+  inst.env = {
+    ...inst.env,
+    SANDBOX_MAX_INSTANCE: "standard-4",
+    AI_GATEWAY_ID: "gw",
+    AI: fake.clef,
+    ...vars,
+  };
   return fake;
 }
 

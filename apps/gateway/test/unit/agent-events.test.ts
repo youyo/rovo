@@ -399,7 +399,7 @@ describe("usage の Sandbox の昇格の履歴（sandbox_promotions）と、子�
       promotions: [
         { to: "evil", at: 1, trigger: "agent", runtimeMsBefore: 1 },
         { to: "standard-3", at: 1, trigger: "me", runtimeMsBefore: 1 },
-        { to: "standard-3", at: 1, trigger: "rule", runtimeMsBefore: 1, ruleMatch: "any command" },
+        { to: "standard-3", at: 1, trigger: "rule", runtimeMsBefore: 1, ruleMatch: "Any;Command" },
         { to: "standard-3", at: 1, trigger: "agent", runtimeMsBefore: 1, ruleMatch: "vitest" },
         { to: "standard-4", at: 2, trigger: "verification", runtimeMsBefore: 2, argv: ["x"] },
         "evil",
@@ -412,7 +412,7 @@ describe("usage の Sandbox の昇格の履歴（sandbox_promotions）と、子�
       { to: "standard-3", at: 1, trigger: "agent", runtime_ms_before: 1 },
       { to: "standard-4", at: 2, trigger: "verification", runtime_ms_before: 2 },
     ]);
-    expect(String(p.sandbox_promotions)).not.toContain("any command");
+    expect(String(p.sandbox_promotions)).not.toContain("Any;Command");
     expect(String(p.sandbox_promotions)).not.toContain("argv");
   });
 
@@ -484,6 +484,34 @@ describe("usage の的中の本数（sandbox_heavy_commands_covered_by_agent）�
     for (const bad of [undefined, null, "x", {}, [], [{ trigger: "evil", reason: "x" }]]) {
       expect(usage({ promotionFailures: bad }), JSON.stringify(bad)).not.toHaveProperty(
         "sandbox_promotion_failures",
+      );
+    }
+  });
+});
+
+describe("usage の Clef による昇格の判断の集計（sandbox_scale_*）", () => {
+  const usage = (sandbox: Record<string, unknown>) =>
+    payloadOf(mapAgentEvent(ev("usage", { costUsd: 1, sandbox: { runtimeMs: 100, ...sandbox } })));
+
+  it("集計は数値だけを sandbox_scale_* に写す（整数に切り捨て）。判断ごとの記録は usage イベントに載せない（イベントを大きくしない）", () => {
+    const p = usage({
+      scaleStats: { decisions: 12.9, raised: 2, clefFailures: 1, slowNotRaised: 0 },
+      scaleDecisions: [{ at: 1, from: "standard-2", to: null, clefMs: 1, cmd: "ls" }],
+    });
+    expect(p).toMatchObject({
+      sandbox_scale_decisions: 12,
+      sandbox_scale_raised: 2,
+      sandbox_scale_clef_failures: 1,
+      sandbox_scale_slow_not_raised: 0,
+    });
+    expect(JSON.stringify(p)).not.toContain("clefMs");
+    expect(Object.keys(p).filter((k) => k.includes("log"))).toEqual([]);
+  });
+
+  it("無い・判断が 0 回・壊れた値なら付けない", () => {
+    for (const bad of [undefined, null, "x", {}, { decisions: 0 }, { decisions: "3" }]) {
+      expect(usage({ scaleStats: bad }), JSON.stringify(bad)).not.toHaveProperty(
+        "sandbox_scale_decisions",
       );
     }
   });

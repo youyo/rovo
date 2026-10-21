@@ -56,8 +56,8 @@
     // 空なら upstream の既定（haiku=low, sonnet=high, opus=medium, fable=low, luna=low, sol=medium, astra=low）。思考のトークンは出力として課金される。gateway の同名の var と同じ値にする。
     "MODEL_EFFORTS": "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off",
     "SANDBOX_INSTANCE": "standard-1",
-    "SANDBOX_HEAVY_INSTANCE": "standard-3",
-    "SANDBOX_AGENT_MAX_INSTANCE": "standard-4",
+    "SANDBOX_MAX_INSTANCE": "standard-4",
+    "SANDBOX_CLEF_THRESHOLDS": "",
     "DEPS_CACHE_ENABLED": "true",
     "WEB_SEARCH_LIMIT_PER_TASK": "50",
     "WEB_FETCH_LIMIT_PER_TASK": "100",

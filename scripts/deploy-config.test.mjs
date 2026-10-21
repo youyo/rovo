@@ -185,97 +185,65 @@ describe("sandbox.instance（D13）", () => {
   });
 });
 
-describe("sandbox.heavyInstance（重いコマンドの初回の昇格先）", () => {
+describe("sandbox.maxInstance（Clef が Sandbox を自動で上げる上限）", () => {
   const gen = (patch) =>
     generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
-  it("既定は standard-3。agent の SANDBOX_HEAVY_INSTANCE と gateway の同名の var に反映される", () => {
-    assert.equal(DEFAULTS.sandbox.heavyInstance, "standard-3");
+  it("既定は standard-4。agent の SANDBOX_MAX_INSTANCE と gateway の同名の var に反映される（他の sandbox の設定だけ書いても落ちない）", () => {
+    assert.equal(DEFAULTS.sandbox.maxInstance, "standard-4");
     for (const patch of [{}, { sandbox: {} }, { sandbox: { instance: "standard-1" } }]) {
       const o = gen(patch);
-      assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, "standard-3");
-      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_HEAVY_INSTANCE, "standard-3");
+      assert.equal(parseJsonc(o.agent).vars.SANDBOX_MAX_INSTANCE, "standard-4");
+      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_MAX_INSTANCE, "standard-4");
     }
   });
   it("選べる 4 種類のどれかにできる", () => {
     for (const name of ["standard-1", "standard-2", "standard-3", "standard-4"]) {
-      const o = gen({ sandbox: { heavyInstance: name } });
-      assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, name);
-      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_HEAVY_INSTANCE, name);
+      const o = gen({ sandbox: { maxInstance: name } });
+      assert.equal(parseJsonc(o.agent).vars.SANDBOX_MAX_INSTANCE, name);
+      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_MAX_INSTANCE, name);
     }
   });
-  it("null で無効（空文字になる）。agent と gateway の両方", () => {
-    const o = gen({ sandbox: { heavyInstance: null } });
-    assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, "");
-    assert.equal(parseJsonc(o.gateway).vars.SANDBOX_HEAVY_INSTANCE, "");
+  it("null で無効（空文字になる = Clef を呼ばず、昇格しない）。agent と gateway の両方", () => {
+    const o = gen({ sandbox: { maxInstance: null } });
+    assert.equal(parseJsonc(o.agent).vars.SANDBOX_MAX_INSTANCE, "");
+    assert.equal(parseJsonc(o.gateway).vars.SANDBOX_MAX_INSTANCE, "");
   });
   it("web には出さない（Sandbox を持たない）", () => {
-    assert.equal(parseJsonc(gen({}).web).vars.SANDBOX_HEAVY_INSTANCE, undefined);
+    assert.equal(parseJsonc(gen({}).web).vars.SANDBOX_MAX_INSTANCE, undefined);
   });
-  it("lite・名前にない値・型の誤り・空文字・未知のキーはエラー", () => {
-    const bad = (sandbox) => validateConfig({ ...productionLike(), sandbox }).errors;
-    for (const v of ["lite", "basic", "standard-9", 3, true, "", "off"]) {
-      assert.ok(
-        bad({ heavyInstance: v }).some((e) => e.includes("sandbox.heavyInstance")),
-        String(v),
-      );
-    }
-    assert.ok(
-      bad({ heavyInstanse: "standard-3" }).some((e) => e.includes("sandbox.heavyInstanse")),
-    );
-  });
-});
-
-describe("sandbox.agentMaxInstance（子が sandbox_scale_up で選べる上限）", () => {
-  const gen = (patch) =>
-    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
-  it("既定は standard-4。agent の SANDBOX_AGENT_MAX_INSTANCE と gateway の同名の var に反映される（他の sandbox の設定だけ書いても落ちない）", () => {
-    assert.equal(DEFAULTS.sandbox.agentMaxInstance, "standard-4");
-    for (const patch of [
-      {},
-      { sandbox: {} },
-      { sandbox: { instance: "standard-1" } },
-      { sandbox: { heavyInstance: null } },
-    ]) {
-      const o = gen(patch);
-      assert.equal(parseJsonc(o.agent).vars.SANDBOX_AGENT_MAX_INSTANCE, "standard-4");
-      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_AGENT_MAX_INSTANCE, "standard-4");
-    }
-  });
-  it("選べる 4 種類のどれかにできる。昇格先（heavyInstance）より小さくてもよい", () => {
-    for (const name of ["standard-1", "standard-2", "standard-3", "standard-4"]) {
-      const o = gen({ sandbox: { agentMaxInstance: name } });
-      assert.equal(parseJsonc(o.agent).vars.SANDBOX_AGENT_MAX_INSTANCE, name);
-      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_AGENT_MAX_INSTANCE, name);
-    }
-    const o = gen({ sandbox: { heavyInstance: "standard-4", agentMaxInstance: "standard-3" } });
-    assert.equal(parseJsonc(o.agent).vars.SANDBOX_AGENT_MAX_INSTANCE, "standard-3");
-    assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, "standard-4");
-  });
-  it("null で無効（空文字になる = ツールを子に見せない）。agent と gateway の両方。heavyInstance には影響しない", () => {
-    const o = gen({ sandbox: { agentMaxInstance: null } });
-    assert.equal(parseJsonc(o.agent).vars.SANDBOX_AGENT_MAX_INSTANCE, "");
-    assert.equal(parseJsonc(o.gateway).vars.SANDBOX_AGENT_MAX_INSTANCE, "");
-    assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, "standard-3");
-  });
-  it("web には出さない（Sandbox を持たない）", () => {
-    assert.equal(parseJsonc(gen({}).web).vars.SANDBOX_AGENT_MAX_INSTANCE, undefined);
-  });
-  it("生成物に未置換の雛形（<SANDBOX_AGENT_MAX_INSTANCE>）が残らない", () => {
+  it("廃止した SANDBOX_HEAVY_INSTANCE・SANDBOX_AGENT_MAX_INSTANCE は、どの生成物にも出ない。未置換の雛形も残らない", () => {
     const o = gen({});
-    for (const app of ["agent", "gateway"])
-      assert.ok(!o[app].includes("<SANDBOX_AGENT_MAX_INSTANCE>"));
+    for (const app of ["agent", "gateway", "web"]) {
+      assert.ok(!o[app].includes("SANDBOX_HEAVY_INSTANCE"), app);
+      assert.ok(!o[app].includes("SANDBOX_AGENT_MAX_INSTANCE"), app);
+      assert.ok(!o[app].includes("<SANDBOX_MAX_INSTANCE>"), app);
+    }
   });
   it("lite・名前にない値・型の誤り・空文字・未知のキーはエラー", () => {
     const bad = (sandbox) => validateConfig({ ...productionLike(), sandbox }).errors;
     for (const v of ["lite", "basic", "standard-9", 3, true, "", "off"]) {
       assert.ok(
-        bad({ agentMaxInstance: v }).some((e) => e.includes("sandbox.agentMaxInstance")),
+        bad({ maxInstance: v }).some((e) => e.includes("sandbox.maxInstance")),
         String(v),
       );
     }
-    assert.ok(
-      bad({ agentMaxInstanse: "standard-3" }).some((e) => e.includes("sandbox.agentMaxInstanse")),
-    );
+    assert.ok(bad({ maxInstanse: "standard-3" }).some((e) => e.includes("sandbox.maxInstanse")));
+  });
+  it("廃止したキー（heavyInstance・agentMaxInstance）は、maxInstance に移るよう案内するエラーにする", () => {
+    const bad = (sandbox) => validateConfig({ ...productionLike(), sandbox }).errors;
+    for (const key of ["heavyInstance", "agentMaxInstance"]) {
+      const errors = bad({ [key]: "standard-3" });
+      assert.ok(
+        errors.some((e) => e.includes(`sandbox.${key}`) && e.includes("maxInstance")),
+        key,
+      );
+    }
+  });
+  it("Clef の判断の閾値（SANDBOX_CLEF_THRESHOLDS）は、vars.agent で任意に上書きできる（既定は空 = 既定の閾値）", () => {
+    assert.equal(parseJsonc(gen({}).agent).vars.SANDBOX_CLEF_THRESHOLDS, "");
+    const o = gen({ vars: { agent: { SANDBOX_CLEF_THRESHOLDS: "four=0.5" } } });
+    assert.equal(parseJsonc(o.agent).vars.SANDBOX_CLEF_THRESHOLDS, "four=0.5");
+    assert.equal(parseJsonc(o.gateway).vars.SANDBOX_CLEF_THRESHOLDS, undefined);
   });
 });
 

@@ -2,7 +2,6 @@ import type {
   SandboxInstance,
   SandboxPromotionReason,
   SandboxPromotionTrigger,
-  SandboxRuleMatch,
 } from "@rovo/models";
 import type { DepsMissReason, DepsSpec } from "../deps-cache";
 
@@ -196,7 +195,7 @@ export interface SandboxMetrics {
   cacheBuildMs?: number;
   /** 最初にコンテナを start() した大きさ。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
-  /** 昇格した最終の大きさ（子が頼んだ・重いコマンドの規則・検証のどれでも）。昇格していなければ無い。上げる方向だけで、戻さない（作り直しも最終の大きさで起動する） */
+  /** 昇格した最終の大きさ（Clef が上げると判断した先）。昇格していなければ無い。上げる方向だけで、戻さない（作り直しも最終の大きさで起動する） */
   promotedTo?: string;
   /** 最初の昇格の時刻（epoch ms）。昇格していなければ無い */
   promotedAt?: number;
@@ -204,16 +203,15 @@ export interface SandboxMetrics {
   runtimeMsBeforePromotion?: number;
   /** 昇格を見送った・失敗した理由の固定コード（packages/models の SANDBOX_PROMOTION_REASONS）。最後に残したもので、あとで昇格が成功しても消さない。設定で無効のときは無い */
   promotionReason?: SandboxPromotionReason;
-  /** 成功した昇格だけを時系列に並べたもの（見送り・失敗は promotionReason）。子が頼んだ・規則・検証のどれかは trigger で分かる */
+  /** 成功した昇格だけを時系列に並べたもの（見送り・失敗は promotionReason）。trigger は clef */
   promotions?: SandboxPromotionRecord[];
-  /** 子が sandbox_scale_up で上げたあと、タスクの終了までに規則（heavy-command.ts の表）で重いと判定されたコマンドを実行した本数。子が上げていなければ 0。検証コマンドの heavy フラグは数えない */
-  heavyCommandsAfterAgentScaleUp?: number;
   /**
-   * heavyCommandsAfterAgentScaleUp のうち、実行の時点で「子が sandbox_scale_up で上げた大きさ」が規則の昇格先以上だったために、
-   * 規則が昇格しなくて済んだ本数（子の見立てが当たった数）。子が上げていなければ無い。規則の昇格を無効にしているデプロイでは 0
+   * Clef の判断の集計（振り返り用）。Clef を呼んだタスクだけ付く。usage イベントを増やさないよう、AgentDO は終端の確定のときだけ反映する。
    */
-  heavyCommandsCoveredByAgent?: number;
-  /** 昇格の試みが見送り・失敗になった記録（固定の trigger と理由コード。1 件ずつ、古い順。最大 8 件）。子が先に上げていて規則が見送った場合は入れない */
+  scaleStats?: SandboxScaleStats;
+  /** Clef の判断ごとの記録（古い順、直近 50 件まで）。AgentDO は終端の確定のときだけ反映する */
+  scaleDecisions?: SandboxScaleDecision[];
+  /** 昇格の試みが見送り・失敗になった記録（固定の trigger と理由コード。1 件ずつ、古い順。最大 8 件）。Clef の失敗（判断できなかった）は入れない（scaleStats.clefFailures） */
   promotionFailures?: SandboxPromotionFailure[];
 }
 
@@ -221,6 +219,49 @@ export interface SandboxMetrics {
 export interface SandboxPromotionFailure {
   trigger: SandboxPromotionTrigger;
   reason: SandboxPromotionReason;
+}
+
+/** Clef の判断の集計 */
+export interface SandboxScaleStats {
+  /** 判断した回数（Clef を呼んだコマンドの数） */
+  decisions: number;
+  /** 上げた回数（昇格に成功した判断） */
+  raised: number;
+  /** Clef が失敗した回数（再試行しても判断できず、今の大きさのまま実行した） */
+  clefFailures: number;
+  /** 上げなかったのに長くかかった（60 秒超）コマンドの数。Clef の見落としの候補 */
+  slowNotRaised: number;
+}
+
+/**
+ * Clef の判断 1 件の記録。値はすべて固定の値か数値で、コマンドは argv[0] の basename を短く切ったものだけ
+ * （argv の全体・リポジトリの内容・子の自由文は入らない）。
+ */
+export interface SandboxScaleDecision {
+  /** 判断した時刻（epoch ms） */
+  at: number;
+  /** そのときの大きさ */
+  from: SandboxInstance;
+  /** 判断の結果、上げた先。上げなかった・昇格に失敗した・Clef が失敗したときは null */
+  to: SandboxInstance | null;
+  /** 重い確率（0〜1。小数 2 桁） */
+  heavy?: number;
+  /** 4 vCPU で 2 vCPU より速い確率 */
+  fast4?: number;
+  /** 大きさの選択の確率 [standard-2, standard-3, standard-4] */
+  choice?: number[];
+  /** 答えを使ったモデル（flash は clef-flash、clef は聞き直したとき） */
+  model?: "flash" | "clef";
+  /** Clef が失敗した（再試行しても判断できなかった）。確率・モデルは無い */
+  failed?: true;
+  /** Clef の判断にかかった時間（ms。再試行を含む） */
+  clefMs: number;
+  /** そのコマンドの実行時間（ms。昇格の時間は含まない）。実行前に終わった判断には無い */
+  cmdMs?: number;
+  /** そのコマンドの終了コード */
+  exitCode?: number;
+  /** コマンドの先頭の語（argv[0] の basename。24 文字まで） */
+  cmd: string;
 }
 
 /** 成功した昇格 1 回分。値はすべて固定の値か数値（子の自由文・argv の文字列は入らない） */
@@ -232,8 +273,6 @@ export interface SandboxPromotionRecord {
   trigger: SandboxPromotionTrigger;
   /** この昇格までの Sandbox の累計時間（ms）。1 つ前の昇格（無ければ起動）からこの昇格までが、1 つ前の大きさの区間 */
   runtimeMsBefore: number;
-  /** trigger が rule のときだけ: 一致した重いコマンドの表の名前（固定の一覧） */
-  ruleMatch?: SandboxRuleMatch;
 }
 
 export interface WebUsage {

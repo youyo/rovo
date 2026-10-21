@@ -79,8 +79,7 @@
     "WEB_BROWSE_ENABLED": "true",
     // task_start で sandbox_instance を省略したときの Sandbox の大きさ（sandbox_instances_list の default）。rovo.config.json の sandbox.instance から入り、agent の同名の var と同じ値になる。
     "SANDBOX_INSTANCE": "standard-1",
-    "SANDBOX_HEAVY_INSTANCE": "standard-3",
-    "SANDBOX_AGENT_MAX_INSTANCE": "standard-4",
+    "SANDBOX_MAX_INSTANCE": "standard-4",
     // 推定費用の単価（docs/deploy.md の 11）
     "SANDBOX_USD_PER_HOUR": "0.0741",
     "WEB_USD_PER_1K_SEARCH": "0.25",

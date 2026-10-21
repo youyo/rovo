@@ -59,15 +59,14 @@
     // wrangler の instance_type は効かず、SandboxDO が start() の instance に渡す。既定は standard-2（1 vCPU、6 GiB、12 GB）。
     // 不正な値は standard-2 に戻す（警告のログだけ）。単価（gateway の SANDBOX_USD_PER_HOUR）は大きさに合わせる。docs/deploy.md の 5。
     "SANDBOX_INSTANCE": "standard-2",
-    // 重いコマンド（テスト・ビルドなど）の初回に昇格する先の大きさ（standard-1〜standard-4）。小さく始めて、重いコマンドの前に
-    // 今のコンテナのスナップショットを取り、同じスナップショットから大きい大きさで起動し直す。空・"off" で無効（昇格しない）。
-    // task_start で sandbox_instance を明示したタスクは昇格しない。スナップショットが使えなくても失敗はしない（小さいまま続ける）。
-    // 既定は standard-3（本番のベンチマークで、費用が standard-2 とほぼ同じで時間が約半分）。docs/deploy.md の 11。
-    "SANDBOX_HEAVY_INSTANCE": "standard-3",
-    // 子が sandbox_scale_up で自分で選べる大きさの上限（standard-1〜standard-4）。子は重い処理（テスト・ビルド・型検査・大きなインストール）の前に
-    // 自分で Sandbox を大きくできる（上げる方向だけ。昇格と同じ手順）。上限を超える指定は拒否される。空・"off" で無効（ツールを子に見せない）。
-    // task_start で sandbox_instance を明示したタスクは固定。既定は standard-4。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
-    "SANDBOX_AGENT_MAX_INSTANCE": "standard-4",
+    // Sandbox を自動で上げる上限の大きさ（standard-1〜standard-4）。Sandbox は小さく始まり、子のコマンド（と検証コマンド）の前に
+    // Clef（Workers AI の決定モデル。既存の ai バインディングと AI_GATEWAY_ID を使う）が「今の大きさで足りるか」を判断し、足りなければ
+    // 今のコンテナのスナップショットを取り、同じスナップショットから大きい大きさで起動し直す（2 → 3 → 4 と何回でも。上げるだけで下げない）。
+    // 空・"off" で無効（Clef を呼ばず、昇格しない）。task_start で sandbox_instance を明示したタスクは固定で、Clef も呼ばない。
+    // Clef の判断やスナップショットが失敗しても、タスクは失敗しない（今の大きさのまま続ける）。既定は standard-4。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
+    "SANDBOX_MAX_INSTANCE": "standard-4",
+    // Clef の判断の閾値（任意。空は既定）。`heavy=0.5,four=0.4,heavy_band=0.2-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする。実験で調整した既定値を env で変えられるようにしてある。docs/deploy.md の 11。
+    "SANDBOX_CLEF_THRESHOLDS": "",
     // 依存関係のキャッシュ（D14。Containers のスナップショット）を使うか。"false" / "0" / "off" で無効にする（既定は有効）。
     // スナップショットは public beta で、使えない・失敗してもタスクは今までどおり動く（fail-soft）。docs/deploy.md の 5。
     "DEPS_CACHE_ENABLED": "true",

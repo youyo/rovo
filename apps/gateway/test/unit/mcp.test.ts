@@ -1970,31 +1970,7 @@ describe("sandbox_instances_list / task_start の sandbox_instance", () => {
     }
   });
 
-  it("sandbox_instances_list: 重いコマンドの初回の昇格先に promotion_target が付く（デプロイの SANDBOX_HEAVY_INSTANCE。未設定・空・不正なら付かない）", async () => {
-    const u = await user("alice");
-    for (const [raw, expected] of [
-      ["standard-3", "standard-3"],
-      ["standard-4", "standard-4"],
-      [undefined, undefined],
-      ["", undefined],
-      ["off", undefined],
-      ["lite", undefined],
-      ["basic", undefined],
-    ] as const) {
-      const client = await connect(createApiApp(), u.props, {
-        ...env,
-        SANDBOX_HEAVY_INSTANCE: raw,
-      } as unknown as Env);
-      const out = body(await client.callTool({ name: "sandbox_instances_list", arguments: {} }));
-      const instances = out.instances as Record<string, unknown>[];
-      const targets = instances.filter((i) => i.promotion_target === true).map((i) => i.name);
-      expect(targets, String(raw)).toEqual(expected === undefined ? [] : [expected]);
-      expect(instances.every((i) => typeof i.promotion_target === "boolean")).toBe(true);
-      await client.close();
-    }
-  });
-
-  it("sandbox_instances_list: 子が sandbox_scale_up で選べる上限に agent_max が付く（デプロイの SANDBOX_AGENT_MAX_INSTANCE。未設定・空・不正なら付かない）", async () => {
+  it("sandbox_instances_list: Clef が自動で上げる上限に auto_scale_max が付く（デプロイの SANDBOX_MAX_INSTANCE。未設定・空・不正なら付かない）。promotion_target / agent_max は無い", async () => {
     const u = await user("alice");
     for (const [raw, expected] of [
       ["standard-4", "standard-4"],
@@ -2007,44 +1983,54 @@ describe("sandbox_instances_list / task_start の sandbox_instance", () => {
     ] as const) {
       const client = await connect(createApiApp(), u.props, {
         ...env,
-        SANDBOX_AGENT_MAX_INSTANCE: raw,
+        SANDBOX_MAX_INSTANCE: raw,
       } as unknown as Env);
       const out = body(await client.callTool({ name: "sandbox_instances_list", arguments: {} }));
       const instances = out.instances as Record<string, unknown>[];
-      const maxes = instances.filter((i) => i.agent_max === true).map((i) => i.name);
+      const maxes = instances.filter((i) => i.auto_scale_max === true).map((i) => i.name);
       expect(maxes, String(raw)).toEqual(expected === undefined ? [] : [expected]);
-      expect(instances.every((i) => typeof i.agent_max === "boolean")).toBe(true);
+      expect(instances.every((i) => typeof i.auto_scale_max === "boolean")).toBe(true);
+      expect(instances.every((i) => !("promotion_target" in i) && !("agent_max" in i))).toBe(true);
       await client.close();
     }
   });
 
-  it("説明: 子の自己昇格（sandbox_scale_up）と usage の履歴（sandbox_promotions・trigger・rule_match・重いコマンドの本数）を task_result / sandbox_instances_list / instructions に書く。子の自由文は残さないことも書く", async () => {
+  it("説明: Clef による自動の昇格（上限は auto_scale_max・何回でも上がる・失敗しても続く）と、usage の振り返り（sandbox_scale_*・sandbox_promotions の trigger）を task_result / sandbox_instances_list / instructions に書く。sandbox_scale_up はもう無い", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const tools = await list(client);
     const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
-    expect(desc("sandbox_instances_list")).toContain("agent_max");
-    expect(desc("sandbox_instances_list")).toContain("sandbox_scale_up");
+    expect(desc("sandbox_instances_list")).toContain("auto_scale_max");
+    expect(desc("sandbox_instances_list")).toContain("Clef");
+    expect(desc("sandbox_instances_list")).not.toContain("sandbox_scale_up");
     for (const key of [
       "sandbox_promotions",
       "trigger",
-      "rule_match",
-      "sandbox_heavy_commands_after_agent_scale_up",
-      "sandbox_heavy_commands_covered_by_agent",
+      "sandbox_scale_decisions",
+      "sandbox_scale_raised",
+      "sandbox_scale_clef_failures",
+      "sandbox_scale_slow_not_raised",
+      "sandbox_scale_log",
       "sandbox_promotion_failures",
     ]) {
       expect(desc("task_result"), key).toContain(key);
     }
-    expect(client.getInstructions() ?? "").toContain("sandbox_scale_up");
+    expect(desc("task_result")).not.toContain("sandbox_scale_up");
+    expect(desc("task_result")).not.toContain("sandbox_heavy_commands");
+    const instructions = client.getInstructions() ?? "";
+    expect(instructions).toContain("Clef");
+    expect(instructions).toContain("auto_scale_max");
+    expect(instructions).not.toContain("sandbox_scale_up");
+    expect(instructions).not.toContain("promotion_target");
     await client.close();
   });
 
-  it("説明: sandbox_instances_list は promotion_target と昇格（小さく始めて重いコマンドの初回に大きくなる）を、task_result は usage の昇格の項目を説明する。instructions にも書く", async () => {
+  it("説明: task_result は昇格の理由の固定コードと usage の昇格の項目を説明し、task_start は大きさを明示したら昇格しないことを書く（数値は書かない）。instructions にも昇格を書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const tools = await list(client);
     const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
-    expect(desc("sandbox_instances_list")).toContain("promotion_target");
+    expect(desc("sandbox_instances_list")).toContain("auto_scale_max");
     expect(desc("sandbox_instances_list")).toContain("昇格");
     for (const key of [
       "sandbox_promoted_to",

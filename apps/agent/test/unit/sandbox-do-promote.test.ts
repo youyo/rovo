@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-// Sandbox の昇格（小さく始めて、重いコマンドの初回に大きい Sandbox へ）の SandboxDO 側。
+// Sandbox の昇格（小さく始めて、コマンドの前に Clef が上げると判断したら大きい Sandbox へ）の SandboxDO 側。
 // vitest 上では ctx.container が無いので maybeContainer を fake に差し替える（snapshotContainer と containerSnapshot での起動に対応）。
+// Clef（env.AI）も fake。判断そのもの（確率 → 大きさ）は sandbox-scale-decision.test.ts、複数回の昇格・記録は sandbox-do-clef-scale.test.ts で確かめる。
 // 昇格が成功する通常の経路は Docker の E2E（sandbox-do.e2e.test.ts。ローカルの wrangler dev も snapshotContainer に対応している）でも確かめる。
 // ここでは container の API を差し替えて、順序と fail-soft の各経路（見送り・昇格先の起動の失敗・元の大きさでの起動し直し・terminate）を確かめる。
 // 本番の確認は docs/specs/acceptance.md。
 import {
+  AGENT,
   CA_CERT,
   capturingWarn,
   HEAVY,
@@ -17,7 +19,7 @@ import {
   spec,
 } from "./support/sandbox-promote-fake";
 
-describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格する", () => {
+describe("SandboxDO: Clef が上げると判断したら、コマンドの前に大きい Sandbox へ昇格する", () => {
   it("スナップショット → 停止 → containerSnapshot で昇格先を起動 → 確認 → 元のコマンド、の順に進む", async () => {
     await runInDO(sandboxStub("promote-ok"), async (inst) => {
       const fake = setup(inst);
@@ -25,7 +27,7 @@ describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格�
       expect(fake.startCalls).toHaveLength(1);
       expect(fake.startCalls[0]).toMatchObject({ image: IMAGE, instance: "standard-2" });
 
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.exitCode).toBe(0);
 
       // 昇格先の起動: スナップショットから（image は渡さない）、傍受を有効にして standard-3
@@ -67,6 +69,7 @@ describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格�
       const m = await inst.metrics();
       expect(m.instance).toBe("standard-2");
       expect(m.promotedTo).toBe("standard-3");
+      expect(m.promotions).toMatchObject([{ to: "standard-3", trigger: "clef" }]);
       expect(typeof m.promotedAt).toBe("number");
       expect(m.runtimeMsBeforePromotion).toBeGreaterThanOrEqual(0);
       expect(m.runtimeMsBeforePromotion).toBeLessThanOrEqual(m.runtimeMs);
@@ -76,11 +79,12 @@ describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格�
     });
   });
 
-  it("軽いコマンドでは昇格しない", async () => {
+  it("Clef が軽いと判断したコマンドでは昇格しない", async () => {
     await runInDO(sandboxStub("promote-light"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());
-      await inst.exec(LIGHT);
+      await inst.exec(LIGHT, AGENT);
+      expect(fake.clef.calls).toHaveLength(1);
       expect(fake.snapshotCalls).toHaveLength(0);
       expect(fake.startCalls).toHaveLength(1);
       const m = await inst.metrics();
@@ -89,26 +93,44 @@ describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格�
     });
   });
 
-  it("2 本目の重いコマンドでは昇格しない（一度だけ。戻さない）", async () => {
-    await runInDO(sandboxStub("promote-once"), async (inst) => {
+  it("子のコマンドと検証コマンド（origin 付き）だけを Clef に聞く。Sandbox 自身の内部の exec（origin なし）は聞かない", async () => {
+    await runInDO(sandboxStub("promote-origin"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());
+      // origin が無い exec は、argv が重く見えても Clef を呼ばず、昇格しない
       await inst.exec(HEAVY);
-      await inst.exec(["vitest", "run"]);
-      await inst.exec(["tsc", "--noEmit"]);
-      expect(fake.snapshotCalls).toHaveLength(1);
-      expect(fake.startCalls).toHaveLength(2);
-      expect(fake.currentInstance).toBe("standard-3");
+      await inst.exec(["git", "status"]);
+      expect(fake.clef.calls).toHaveLength(0);
+      expect(fake.snapshotCalls).toHaveLength(0);
+      await inst.exec(LIGHT, { origin: "verification" });
+      expect(fake.clef.calls).toHaveLength(1);
     });
   });
 
-  it("検証コマンドなど、呼び出し側が heavy: true を付けたときは argv が軽くても昇格する", async () => {
-    await runInDO(sandboxStub("promote-hint"), async (inst) => {
+  it("検証コマンド（origin: verification）も Clef が重いと判断すれば昇格する。引き金は clef", async () => {
+    await runInDO(sandboxStub("promote-verification"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());
-      await inst.exec(["./scripts/check.sh"], { heavy: true });
+      await inst.exec(HEAVY, { origin: "verification" });
       expect(fake.snapshotCalls).toHaveLength(1);
       expect(fake.currentInstance).toBe("standard-3");
+      expect((await inst.metrics()).promotions).toMatchObject([{ trigger: "clef" }]);
+    });
+  });
+
+  it("コマンドは state に入り、Clef には gateway と metadata（caller・taskId）を付けて聞く", async () => {
+    await runInDO(sandboxStub("promote-call"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      await inst.exec(["bash", "-lc", "pnpm test --run"], { ...AGENT, cwd: "/workspace" });
+      const call = fake.clef.calls[0];
+      expect(call?.model).toBe("@cf/cloudflare/clef-flash");
+      expect(call?.state.command).toBe("pnpm test --run");
+      expect(call?.state.cwd).toBe("/workspace");
+      expect(call?.state.current_sandbox).toBe("standard-2 (1 vCPU, 6 GiB)");
+      expect(call?.options).toEqual({
+        gateway: { id: "gw", metadata: { caller: "sandbox_scale", taskId: "promote-call" } },
+      });
     });
   });
 
@@ -116,18 +138,15 @@ describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格�
     await runInDO(sandboxStub("promote-restart"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());
-      await inst.exec(HEAVY);
+      await inst.exec(HEAVY, AGENT);
       fake.running = false; // 落ちた
-      await expect(inst.exec(LIGHT)).rejects.toThrow(/restarted/);
+      await expect(inst.exec(LIGHT, AGENT)).rejects.toThrow(/restarted/);
       const last = fake.startCalls.at(-1) as Record<string, unknown>;
       expect(last).toMatchObject({ image: IMAGE, instance: "standard-3" });
       const m = await inst.metrics();
       expect(m.instance).toBe("standard-2");
       expect(m.promotedTo).toBe("standard-3");
       expect(m.restarts).toBe(1);
-      // 再起動後の重いコマンドでは、もう昇格を試みない
-      await inst.exec(HEAVY);
-      expect(fake.snapshotCalls).toHaveLength(1);
     });
   });
 
@@ -135,7 +154,7 @@ describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格�
     await runInDO(sandboxStub("promote-baseline"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());
-      await inst.exec(HEAVY);
+      await inst.exec(HEAVY, AGENT);
       const destroyedBefore = fake.destroyCalls;
       await inst.exec(LIGHT); // 終了後の掃除が baseline を使う
       expect(fake.execLog.some((a) => a[3] === "rovo-reaper")).toBe(true);
@@ -145,91 +164,107 @@ describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格�
   });
 });
 
-describe("SandboxDO: 昇格しない場合", () => {
-  it("task_start で大きさを明示したタスク（spec.instance）は固定。理由は fixed_instance", async () => {
+describe("SandboxDO: Clef を呼ばない・昇格しない場合", () => {
+  it("task_start で大きさを明示したタスク（spec.instance）は固定。Clef を呼ばない。理由は fixed_instance（1 回だけ残す）", async () => {
     await runInDO(sandboxStub("promote-fixed"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec({ instance: "standard-1" }));
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.exitCode).toBe(0);
+      await inst.exec(HEAVY, AGENT);
+      expect(fake.clef.calls).toHaveLength(0);
       expect(fake.snapshotCalls).toHaveLength(0);
       expect(fake.startCalls).toHaveLength(1);
       expect(fake.startCalls[0]).toMatchObject({ instance: "standard-1" });
       const m = await inst.metrics();
       expect(m.promotionReason).toBe("fixed_instance");
+      expect(m.promotionFailures).toHaveLength(1);
       expect(m.promotedTo).toBeUndefined();
     });
   });
 
-  it("明示した大きさが昇格先と同じでも、固定として扱う", async () => {
+  it("明示した大きさが standard-4 でも、固定として扱う", async () => {
     await runInDO(sandboxStub("promote-fixed-same"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec({ instance: "standard-3" }));
-      await inst.exec(HEAVY);
+      await inst.exec(HEAVY, AGENT);
+      expect(fake.clef.calls).toHaveLength(0);
       expect(fake.snapshotCalls).toHaveLength(0);
       expect((await inst.metrics()).promotionReason).toBe("fixed_instance");
     });
   });
 
-  it("設定で無効（SANDBOX_HEAVY_INSTANCE が空・未設定・off）なら昇格しない。理由も残さない", async () => {
-    for (const raw of ["", "off", "none"]) {
+  it("設定で無効（SANDBOX_MAX_INSTANCE が空・off・none・未設定・不正）なら Clef を呼ばず昇格しない。理由も残さない", async () => {
+    for (const raw of ["", "off", "none", "lite", "bogus"]) {
       await runInDO(sandboxStub(`promote-off-${raw || "empty"}`), async (inst) => {
-        const fake = setup(inst, { SANDBOX_HEAVY_INSTANCE: raw });
+        const fake = setup(inst, { SANDBOX_MAX_INSTANCE: raw });
         await inst.ensureReady(spec());
-        await inst.exec(HEAVY);
+        await inst.exec(HEAVY, AGENT);
+        expect(fake.clef.calls, raw).toHaveLength(0);
         expect(fake.snapshotCalls, raw).toHaveLength(0);
         const m = await inst.metrics();
         expect(m.promotedTo).toBeUndefined();
         expect(m.promotionReason).toBeUndefined();
+        expect(m.scaleDecisions).toBeUndefined();
       });
     }
     await runInDO(sandboxStub("promote-off-unset"), async (inst) => {
       const fake = setup(inst);
-      const { SANDBOX_HEAVY_INSTANCE: _x, ...rest } = inst.env;
+      const { SANDBOX_MAX_INSTANCE: _x, ...rest } = inst.env;
       inst.env = rest;
       await inst.ensureReady(spec());
-      await inst.exec(HEAVY);
-      expect(fake.snapshotCalls).toHaveLength(0);
+      await inst.exec(HEAVY, AGENT);
+      expect(fake.clef.calls).toHaveLength(0);
     });
   });
 
-  it("不正な値（lite など）は無効として扱う", async () => {
-    await runInDO(sandboxStub("promote-invalid"), async (inst) => {
-      const fake = setup(inst, { SANDBOX_HEAVY_INSTANCE: "lite" });
+  it("AI_GATEWAY_ID が空・AI バインディングが無いときは Clef を呼べないので、今の大きさのまま実行する（fail-soft）", async () => {
+    await runInDO(sandboxStub("promote-no-gateway"), async (inst) => {
+      const fake = setup(inst, { AI_GATEWAY_ID: "" });
       await inst.ensureReady(spec());
-      await inst.exec(HEAVY);
+      const { value: r } = await capturingWarn(
+        async () => (await inst.exec(HEAVY, AGENT)) as { exitCode: number },
+      );
+      expect(r.exitCode).toBe(0);
+      expect(fake.clef.calls).toHaveLength(0);
+      expect(fake.snapshotCalls).toHaveLength(0);
+    });
+    await runInDO(sandboxStub("promote-no-ai"), async (inst) => {
+      const fake = setup(inst, { AI: undefined });
+      await inst.ensureReady(spec());
+      const r = await inst.exec(HEAVY, AGENT);
+      expect(r.exitCode).toBe(0);
       expect(fake.snapshotCalls).toHaveLength(0);
     });
   });
 
-  it("すでに昇格先以上の大きさ（既定が standard-4 / 昇格先と同じ）なら昇格しない。理由は already_large", async () => {
-    for (const [defaultInstance, heavy] of [
-      ["standard-4", "standard-3"],
+  it("今の大きさがすでに上限なら、Clef を呼ばない（既定が上限 / 上限が既定と同じ）", async () => {
+    for (const [defaultInstance, max] of [
+      ["standard-4", "standard-4"],
+      ["standard-2", "standard-2"],
       ["standard-3", "standard-3"],
     ] as const) {
-      await runInDO(sandboxStub(`promote-large-${defaultInstance}`), async (inst) => {
-        const fake = setup(inst, {
-          SANDBOX_INSTANCE: defaultInstance,
-          SANDBOX_HEAVY_INSTANCE: heavy,
-        });
+      await runInDO(sandboxStub(`promote-large-${defaultInstance}-${max}`), async (inst) => {
+        const fake = setup(inst, { SANDBOX_INSTANCE: defaultInstance, SANDBOX_MAX_INSTANCE: max });
         await inst.ensureReady(spec());
-        await inst.exec(HEAVY);
+        await inst.exec(HEAVY, AGENT);
+        expect(fake.clef.calls).toHaveLength(0);
         expect(fake.snapshotCalls).toHaveLength(0);
         expect(fake.startCalls).toHaveLength(1);
-        expect((await inst.metrics()).promotionReason).toBe("already_large");
+        expect((await inst.metrics()).promotionReason).toBeUndefined();
       });
     }
   });
 });
 
 describe("SandboxDO: 昇格の fail-soft", () => {
-  it("snapshotContainer が無いランタイム: 見送って小さいまま続ける。snapshot_unsupported。再試行しない", async () => {
+  it("snapshotContainer が無いランタイム: 見送って小さいまま続ける。snapshot_unsupported。引き金は clef", async () => {
     await runInDO(sandboxStub("promote-unsupported"), async (inst) => {
       const fake = setup(inst);
       fake.snapshotContainer = undefined;
       await inst.ensureReady(spec());
       const { lines } = await capturingWarn(async () => {
-        const r = await inst.exec(HEAVY);
+        const r = await inst.exec(HEAVY, AGENT);
         expect(r.exitCode).toBe(0);
       });
       expect(fake.startCalls).toHaveLength(1);
@@ -237,11 +272,9 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       expect(fake.running).toBe(true);
       const m = await inst.metrics();
       expect(m.promotionReason).toBe("snapshot_unsupported");
+      expect(m.promotionFailures).toEqual([{ trigger: "clef", reason: "snapshot_unsupported" }]);
       expect(m.promotedTo).toBeUndefined();
       expect(lines.join("\n")).toContain("sandbox_promotion_skipped: snapshot_unsupported");
-      // 2 回目の重いコマンドでも試みない
-      await inst.exec(HEAVY);
-      expect(fake.execLog.filter((a) => a[3] === "rovo-promote-state")).toHaveLength(0);
     });
   });
 
@@ -250,7 +283,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       const fake = setup(inst);
       fake.snapshotResult = new Error("snapshot boom");
       await inst.ensureReady(spec());
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.exitCode).toBe(0);
       expect(fake.destroyCalls).toBe(0);
       expect(fake.startCalls).toHaveLength(1);
@@ -264,7 +297,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       fake.snapshotResult = "hang";
       inst.promoteSnapshotMs = 50;
       await inst.ensureReady(spec());
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.exitCode).toBe(0);
       expect(fake.destroyCalls).toBe(0);
       expect((await inst.metrics()).promotionReason).toBe("snapshot_failed");
@@ -276,7 +309,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       const fake = setup(inst);
       fake.snapshotResult = { id: "", size: 0 };
       await inst.ensureReady(spec());
-      await inst.exec(HEAVY);
+      await inst.exec(HEAVY, AGENT);
       expect(fake.destroyCalls).toBe(0);
       expect((await inst.metrics()).promotionReason).toBe("snapshot_failed");
     });
@@ -287,7 +320,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       const fake = setup(inst);
       await inst.ensureReady(spec());
       fake.stateUnreadable = true;
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.exitCode).toBe(0);
       expect(fake.snapshotCalls).toHaveLength(0);
       expect((await inst.metrics()).promotionReason).toBe("state_unreadable");
@@ -299,7 +332,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       const fake = setup(inst);
       fake.failStartFor.add("standard-3");
       await inst.ensureReady(spec());
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.exitCode).toBe(0); // 「再起動した」エラーにならない
       const starts = fake.startCalls as Record<string, unknown>[];
       expect(starts).toHaveLength(3);
@@ -321,9 +354,18 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       expect(m.instance).toBe("standard-2");
       // 新しいコンテナで掃除が動く（baseline を取り直している）
       expect(inst.ctx.storage.kv.get("baseline")).toEqual(["1:1"]);
-      // 以降の重いコマンドでも再試行しない
-      await inst.exec(HEAVY);
-      expect(fake.snapshotCalls).toHaveLength(1);
+    });
+  });
+
+  it("昇格に失敗した判断は、上げなかった判断として記録する（to は null。上げた回数に数えない）", async () => {
+    await runInDO(sandboxStub("promote-start-fail-record"), async (inst) => {
+      const fake = setup(inst);
+      fake.failStartFor.add("standard-3");
+      await inst.ensureReady(spec());
+      await inst.exec(HEAVY, AGENT);
+      const m = await inst.metrics();
+      expect(m.scaleStats).toMatchObject({ decisions: 1, raised: 0 });
+      expect(m.scaleDecisions?.[0]).toMatchObject({ from: "standard-2", to: null });
     });
   });
 
@@ -332,7 +374,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       const fake = setup(inst);
       fake.noCertFor.add("standard-3");
       await inst.ensureReady(spec());
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.exitCode).toBe(0);
       expect(fake.startCalls).toHaveLength(3);
       expect(fake.currentInstance).toBe("standard-2");
@@ -347,7 +389,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       const fake = setup(inst);
       fake.mismatchFor.add("standard-3");
       await inst.ensureReady(spec());
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.exitCode).toBe(0);
       expect(fake.currentInstance).toBe("standard-2");
       const m = await inst.metrics();
@@ -362,15 +404,18 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       fake.failStartFor.add("standard-3");
       fake.failStartFor.add("standard-2");
       await inst.ensureReady(spec());
-      await expect(inst.exec(HEAVY)).rejects.toThrow(/restarted/);
+      await expect(inst.exec(HEAVY, AGENT)).rejects.toThrow(/restarted/);
       const last = fake.startCalls.at(-1) as Record<string, unknown>;
       expect(last).toMatchObject({ image: IMAGE });
       expect(last).not.toHaveProperty("containerSnapshot");
       const m = await inst.metrics();
       expect(m.promotionReason).toBe("fallback_failed");
       expect(m.promotedTo).toBeUndefined();
+      // 判断は上げられなかったものとして記録に残る（例外で落ちて記録が抜けない）
+      expect(m.scaleStats).toMatchObject({ decisions: 1, raised: 0 });
+      expect(m.scaleDecisions?.[0]).toMatchObject({ from: "standard-2", to: null });
       // 次の操作は普通に動く
-      const r = await inst.exec(LIGHT);
+      const r = await inst.exec(LIGHT, AGENT);
       expect(r.exitCode).toBe(0);
     });
   });
@@ -382,11 +427,27 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       fake.onSnapshot = async () => {
         await inst.terminate();
       };
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.terminated).toBe(true);
       expect(fake.running).toBe(false);
     });
   });
+
+  it("Clef の判断の最中に terminate されたら、昇格もコマンドの実行もせず terminated の結果を返す", async () => {
+    await runInDO(sandboxStub("promote-terminate-clef"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      fake.clef.answer = () => {
+        void inst.terminate();
+        return { heavy: 0.95, fast4: 0.1 };
+      };
+      const r = await inst.exec(HEAVY, AGENT);
+      expect(r.terminated).toBe(true);
+      expect(fake.snapshotCalls).toHaveLength(0);
+      expect(fake.events.some((e) => e.startsWith("exec:pnpm test"))).toBe(false);
+    });
+  });
+
   it("昇格の最中に別の exec が来ても、serial で待たされ、昇格後のコンテナ（standard-3）で走る", async () => {
     await runInDO(sandboxStub("promote-concurrent"), async (inst) => {
       const fake = setup(inst);
@@ -403,7 +464,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
         inSnapshot();
         await gate;
       };
-      const heavy = inst.exec(HEAVY);
+      const heavy = inst.exec(HEAVY, AGENT);
       await entered;
       const light = inst.exec(["echo", "concurrent"]);
       // 昇格の途中（スナップショット待ち）の間は、2 本目は走らない
@@ -435,7 +496,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
         terminating = inst.terminate();
         await new Promise((r) => setTimeout(r, 20));
       };
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       await terminating;
       expect(r.terminated).toBe(true);
       expect(fake.running).toBe(false);
@@ -455,7 +516,7 @@ describe("SandboxDO: 昇格の fail-soft", () => {
           await inst.terminate();
         }
       };
-      const r = await inst.exec(HEAVY);
+      const r = await inst.exec(HEAVY, AGENT);
       expect(r.terminated).toBe(true);
       expect(fake.running).toBe(false);
       expect(fake.startCalls.filter((c) => c.containerSnapshot)).toHaveLength(1);

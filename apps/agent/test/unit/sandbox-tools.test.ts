@@ -355,6 +355,16 @@ describe("bash", () => {
     expect(r.text).toMatch(/exit code: 0/i);
   });
 
+  it("子のコマンドには origin: agent_command を付ける（Sandbox が、実行の前に Clef で今の大きさで足りるかを判断する）。ほかのツールの exec には付けない", async () => {
+    const { sandbox, run } = setup(() => ({ stdout: "x\n" }));
+    await run("bash", { command: "make ci" });
+    expect(sandbox.calls[0]?.options.origin).toBe("agent_command");
+    await run("read_file", { path: "a.txt" });
+    await run("search", { pattern: "x" });
+    await run("list_files", {});
+    for (const c of sandbox.calls.slice(1)) expect(c.options.origin).toBeUndefined();
+  });
+
   it("出力の ANSI エスケープ（色など）はモデルに返す前に除く", async () => {
     const { run } = setup(() => ({
       stdout: "\u001b[32mPASS\u001b[0m a\n",

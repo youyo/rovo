@@ -356,7 +356,7 @@ describe("完了判定", () => {
     expect(r.verification.results.map((x) => x.durationMs)).toEqual([1200, 3400]);
   });
 
-  it("検証コマンドは heavy: true を付けて実行する（argv が軽く見えても、実行の前に Sandbox を昇格させる）", async () => {
+  it("検証コマンドは origin: verification を付けて実行する（実行の前に、Clef が今の Sandbox の大きさで足りるかを判断する）", async () => {
     const fx = newFixture("verify-heavy-hint", [report("実装した")]);
     await fx.stub.start(
       makeSpec("verify-heavy-hint", {
@@ -368,11 +368,11 @@ describe("完了判定", () => {
       (c) => c.argv.join(" ") === "./scripts/check.sh" || c.argv.join(" ") === "npm test",
     );
     expect(verify).toHaveLength(2);
-    for (const c of verify) expect(c.options.heavy, c.argv.join(" ")).toBe(true);
-    // 検証以外の exec には付けない
+    for (const c of verify) expect(c.options.origin, c.argv.join(" ")).toBe("verification");
+    // 検証以外の exec（AgentDO 自身の git など）には付けない（Clef に聞かない）
     const other = fx.sandbox.calls.filter((c) => c.argv[0] === "git");
     expect(other.length).toBeGreaterThan(0);
-    for (const c of other) expect(c.options.heavy).toBeUndefined();
+    for (const c of other) expect(c.options.origin).toBeUndefined();
   });
 
   it("タイムアウトしたコマンドにも durationMs が入る", async () => {

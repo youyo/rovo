@@ -2,7 +2,7 @@
 // deploy/{gateway,agent,web}.wrangler.jsonc を生成する。生成物はコミットする（デプロイの時に terraform を読まない）。
 //
 //   node scripts/deploy-config.mjs [generate] [--check] [--no-terraform]
-//     既定        terraform の非秘密の出力 3 つを `terraform -chdir=infra output -raw <名前>` で読み、infra.json に保存して生成する
+//     既定        terraform の非秘密の出力 4 つを `terraform -chdir=infra output -raw <名前>` で読み、infra.json に保存して生成する
 //     --no-terraform  terraform を呼ばず、保存済みの infra.json から作り直す
 //     --check     terraform を呼ばず、作り直した結果と既存のファイルを比べる。差分があれば 1（下流の CI 用）。ファイルは書かない
 //   node scripts/deploy-config.mjs tfvars        Terraform の変数（account_id / name_prefix / worker_names）を JSON で出す

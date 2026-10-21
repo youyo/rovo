@@ -216,6 +216,7 @@ apps/agent    ──service binding──▶     search / fetch / browse
 - **非信頼データの目印は呼び出し元が付ける。** 目印で囲むのは gateway の MCP ツールと agent の Pi ツールで、既存の方式に合わせる。web は 8.7 の JSON（content は生の Markdown）を返すだけにする。
 - **source.via は agents の `WebFetchVia` に合わせる。** fetch は `direct`、browse は `rendered`。
 - **AI_GATEWAY_ID が空なら、websearch も AI.run も呼ばない（fail-closed）。**
+- **web の AI_GATEWAY_ID は web 専用の Gateway（byok_only なし）。** Web Search API は provider のキーが無いとクレジットで払うので、byok_only の Gateway（Claude 用）では `web_search_byok_not_configured`（400）で断られる。再試行しても直らない設定・資格情報のエラー（`WebSearchError` の `retryable === false` で、`web_search_byok_not_configured` / `web_search_payment_required` / `web_search_gateway_not_configured` / `web_search_unauthorized` / `web_search_unsupported_runtime`、または status 401 / 402 / 403）は `search_failed` ではなく `misconfigured` にする。gateway と agent のツールはこれを `retry_after_seconds` なし・「運用者の設定の問題」の固定の文言で返す。5xx・429・retryable なものは従来どおり `search_failed` → `upstream_unavailable`。
 - **agents の Pi アダプタ（webSearchTool / webFetchTool）は使わない。** replay が safe なため。使うのは createAIWebSearch / createDirectWebFetch だけ。
 
 ### robots.txt

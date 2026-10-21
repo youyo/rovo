@@ -65,10 +65,11 @@ resource "cloudflare_workers_kv_namespace" "oauth" {
 }
 
 # ---- AI Gateway -------------------------------------------------------------
-# 認証は付ける（BYOK の前提）。agent と web は AI バインディングと AI_GATEWAY_ID だけで呼び、
+# 認証は付ける（BYOK の前提）。agent と web は AI バインディングと AI_GATEWAY_ID だけで呼び（web は下の web 専用の Gateway）、
 # バインディングからの呼び出しは認証済みとして扱われるので、gateway token の secret は要らない。
 # Anthropic の API キーは Terraform に入れず、AI Gateway の画面で BYOK として登録する。
 # byok_only: キーが無いときに Unified Billing（Cloudflare のクレジット）へ流さず、400 で止める。
+# （Claude 用。web の Web Search 用の Gateway は下の cloudflare_ai_gateway.web で、byok_only にしない）
 # キャッシュは切る（TTL 0。モデルの応答を使い回さない）。レート制限は切る（0 = 無効）。
 # 費用の上限は gateway の MONTHLY_BUDGET_USD / TASK_BUDGET_USD が担う。
 
@@ -78,6 +79,27 @@ resource "cloudflare_ai_gateway" "this" {
 
   authentication             = true
   byok_only                  = true
+  collect_logs               = var.ai_gateway_collect_logs
+  log_classification         = var.ai_gateway_log_classification
+  cache_ttl                  = 0
+  cache_invalidate_on_update = false
+  rate_limiting_interval     = 0
+  rate_limiting_limit        = 0
+}
+
+# web 専用の AI Gateway。Web Search API（env.AI.websearch。provider ceramic）は、Gateway に provider のキーが
+# 無いときは AI Gateway のクレジットで払う。byok_only の Gateway では「キーが無いのでクレジットへは流さない」と
+# 400（web_search_byok_not_configured）で断られ、web_search が必ず失敗する。そのため、byok_only にした上の
+# Gateway（Claude 用。agent と gateway が使う）とは分け、こちらは byok_only = false にする。
+# web が呼ぶのは Web Search API と Clef（Workers AI。キーは要らない）だけで、Claude は呼ばない。
+# 認証・ログ・キャッシュ・レート制限は上の Gateway と揃える。
+
+resource "cloudflare_ai_gateway" "web" {
+  account_id = var.account_id
+  id         = "${var.name_prefix}-web-gateway"
+
+  authentication             = true
+  byok_only                  = false
   collect_logs               = var.ai_gateway_collect_logs
   log_classification         = var.ai_gateway_log_classification
   cache_ttl                  = 0

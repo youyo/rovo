@@ -277,6 +277,10 @@ describe("AgentDO: web_search / web_fetch", () => {
     const seen = fx.modelCalls.toolResults.at(-1)?.join("\n") ?? "";
     expect(seen).toContain("fetch_failed");
     expect(seen).toContain("misconfigured");
+    // 設定の誤りは一時的な障害に見せない（再試行を促さず、運用者の設定の問題と分かる）
+    expect(seen).toMatch(/misconfigured on the operator side/);
+    const misconfiguredLine = seen.split("\n").find((l) => l.includes("misconfigured")) ?? "";
+    expect(misconfiguredLine).not.toMatch(/retry once later/);
     expect(seen).not.toContain("evil.example");
     expect(done(await fx.stub.getResult()).usage.web).toEqual({ search: 1, fetch: 1, browse: 0 });
   });

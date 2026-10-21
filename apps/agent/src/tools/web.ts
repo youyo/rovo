@@ -188,6 +188,11 @@ export function formatWebError(tool: string, e: unknown): WebToolResult {
     case "upstream_error":
       text = "the web research service failed; you may retry once later";
       break;
+    case "misconfigured":
+      // 運用者の設定・資格情報の誤り。再試行を促さない
+      text =
+        "the web research service is misconfigured on the operator side; retrying will not help (the operator must fix the configuration)";
+      break;
     default:
       text = "the web research service is not available";
   }

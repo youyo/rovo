@@ -174,12 +174,21 @@ describe("mapWebError", () => {
     for (const c of ["too_large", "too_many_redirects"]) {
       expect(mapWebError(err(`${c}: whatever`))).toMatchObject({ code: "invalid_input" });
     }
-    for (const c of ["misconfigured", "not_implemented"]) {
-      expect(mapWebError(err(`${c}: AI_GATEWAY_ID is required.`))).toEqual({
-        code: "internal",
-        message: "web research service is not available",
-      });
-    }
+    expect(mapWebError(err("not_implemented: AI_GATEWAY_ID is required."))).toEqual({
+      code: "internal",
+      message: "web research service is not available",
+    });
+  });
+
+  it("misconfigured は運用者の設定の問題と分かる固定の文言にする。retry_after_seconds は付けず、上流の文字列は返さない", () => {
+    const m = mapWebError(err("misconfigured: web_search_byok_not_configured: evil.example"));
+    expect(m).toEqual({
+      code: "internal",
+      message:
+        "web research is misconfigured on the operator side; retrying will not help (the operator must fix the configuration)",
+    });
+    expect(m.retry_after_seconds).toBeUndefined();
+    expect(JSON.stringify(m)).not.toContain("evil.example");
   });
 
   it("上流の詳細（取得先が決めうる文字列）は返さない", () => {

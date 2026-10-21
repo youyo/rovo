@@ -82,7 +82,7 @@ mise run byok -- anthropic
 
 1. **前提の確認**（欠けていたら何も実行せずに止まる）: mise、Docker が動いている、`CLOUDFLARE_API_TOKEN`（Terraform 用）、`wrangler login` 済み、`rovo.config.json` が正しい。
 2. **`terraform init` / `apply`**（`infra/`）。変数（`account_id` / `name_prefix` / `worker_names`）は `rovo.config.json` から渡すので、tfvars は要らない。apply の確認は対話（`--yes` で省く）。**初回は Logpush のジョブの作成が `401 Unauthorized` で失敗することがある**（Logpush 用トークンを作った直後のため）。そのときは `mise run setup` をもう一度実行すると通る。state は `infra/backend.tf` を足さない限りローカルに置かれる（`infra/README.md`）。
-3. **`deploy:config`**: `deploy.example/` の雛形に、`rovo.config.json` と Terraform の非秘密の出力（`kv_namespace_id` / `archive_bucket_name` / `ai_gateway_id`）を埋めて、`deploy/{gateway,agent,web}.wrangler.jsonc` を生成する。
+3. **`deploy:config`**: `deploy.example/` の雛形に、`rovo.config.json` と Terraform の非秘密の出力（`kv_namespace_id` / `archive_bucket_name` / `ai_gateway_id` / `ai_web_gateway_id`）を埋めて、`deploy/{gateway,agent,web}.wrangler.jsonc` を生成する。
 4. **`deploy:all`**: web → agent → gateway の順にデプロイする（3）。
 5. **`deploy:secrets`**: 入っていない secret だけを入れる（下の「secret」）。
 6. **GitHub App の作成**（`githubApp` が空のとき。`--no-github-app` で飛ばせる）: 下の「GitHub App の自動作成」。
@@ -249,7 +249,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_USD_PER_1K_SEARCH` | gateway | 任意 | `0.25` | 同上 |
 | `WEB_USD_PER_1K_FETCH` | gateway | 任意 | `0` | 同上 |
 | `WEB_USD_PER_1K_BROWSE` | gateway | 任意 | `0.75` | 同上 |
-| `AI_GATEWAY_ID` | agent / web | 必須 | `<YOUR_AI_GATEWAY_ID>` | AI Gateway の ID。agent で空だと `start` が `ai_gateway_not_configured` で拒否される。web で空だと `websearch` も Clef も呼ばず、web 内部では `misconfigured` として失敗する（fail closed）。MCP のツールからは `internal`（`web research service is not available`）に見える |
+| `AI_GATEWAY_ID` | agent / web | 必須 | `<YOUR_AI_GATEWAY_ID>` | AI Gateway の ID。**agent は `ai_gateway_id`（Claude 用。byok_only）、web は `ai_web_gateway_id`（Web Search と Clef 用。byok_only なし）で、別の Gateway**（5）。agent で空だと `start` が `ai_gateway_not_configured` で拒否される。web で空だと `websearch` も Clef も呼ばず、web 内部では `misconfigured` として失敗する（fail closed）。MCP のツールからは `internal`（`web research service is not available`）に見える |
 | `TEST_UPSTREAM` | agent | 本番では不要 | （空） | `ENVIRONMENT=test` のときだけ有効。E2E 専用。本番では設定しない |
 | `WEB_SEARCH_LIMIT_PER_TASK` | agent | 任意 | `50` | 子の `web_search` のタスクごとの回数の上限 |
 | `WEB_FETCH_LIMIT_PER_TASK` | agent | 任意 | `100` | 子の `web_fetch` の同上 |
@@ -313,8 +313,8 @@ openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem | wrangler secret put GITH
 
 ## 7. AI Gateway の設定
 
-- AI Gateway を 1 つ作り、その ID を agent と web の `AI_GATEWAY_ID` に設定する（5）。`infra/` の Terraform が作る（認証あり、Require provider credentials あり、ログ収集あり、キャッシュとレート制限なし。`terraform output ai_gateway_id`）。BYOK はゲートウェイの認証が前提（認証が無いと、プロバイダー キーの画面で保存できない）。Anthropic の API キーは AI Gateway に保管する（BYOK）。**BYOK の登録は `mise run byok -- anthropic`（4。隠した入力）か AI Gateway の画面で行い、Terraform には入れない。** Worker・Sandbox にはキーを置かない。
-- agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼ぶ。バインディングからの呼び出しは認証済みとして扱われるので、`cf-aig-authorization` と gateway token の secret は要らない。
+- AI Gateway を 2 つ作る（`terraform output ai_gateway_id` は agent と gateway の `AI_GATEWAY_ID`、`terraform output ai_web_gateway_id` は web の `AI_GATEWAY_ID`。`deploy:config` が埋める）。**web 専用の Gateway を分ける理由**: Web Search API（`env.AI.websearch`）は、Gateway に provider のキーが無いと AI Gateway のクレジットで払う。byok_only の Gateway ではクレジットへ流さず `web_search_byok_not_configured`（400）で断られ、`web_search` が必ず失敗する。そこで、Claude 用の Gateway は byok_only のまま（キーだけで払う）にし、web 専用の Gateway は byok_only なし（ほかの設定は同じ）にする。web が呼ぶのは Web Search API と Clef（Workers AI。キーは要らない）だけで、Claude は呼ばない。以降の記述（認証あり・Require provider credentials あり・BYOK）は Claude 用の Gateway のこと。`infra/` の Terraform が作る（認証あり、Require provider credentials あり、ログ収集あり、キャッシュとレート制限なし。`terraform output ai_gateway_id`）。BYOK はゲートウェイの認証が前提（認証が無いと、プロバイダー キーの画面で保存できない）。Anthropic の API キーは AI Gateway に保管する（BYOK）。**BYOK の登録は `mise run byok -- anthropic`（4。隠した入力）か AI Gateway の画面で行い、Terraform には入れない。** Worker・Sandbox にはキーを置かない。
+- agent と web は `AI` バインディングと `AI_GATEWAY_ID`（それぞれ上の Gateway）だけで呼ぶ。バインディングからの呼び出しは認証済みとして扱われるので、`cf-aig-authorization` と gateway token の secret は要らない。
 - Require provider credentials（`byok_only`）をオンにしている。BYOK のキーが無い・外れたときに、Claude の呼び出しが Unified Billing（Cloudflare のクレジット）へ流れず、400 で止まる（Anthropic Console の利用上限が効く経路だけを使う）。Workers AI（Clef-flash）は対象外で、課金にも影響しない。
   - Anthropic のキーは、エイリアスを **`default`** にして登録する。AI バインディングの経路では `default` のキーだけが使われ、別名のキーは参照されない（byok_only なので 400 になる）。
   - **Web Search API（`env.AI.websearch()`。既定のプロバイダは Ceramic.ai）は、Unified Billing のクレジットで課金される（15.6）。byok_only で 400 になるかは未確認。** `web_search` が 400 で失敗したら、Ceramic.ai などのキーを BYOK で登録するか、byok_only を外す（外すと、Anthropic のキーが無いときに Claude の呼び出しもクレジットで支払われる。上限は読み込んだクレジットの額と `MONTHLY_BUDGET_USD`）。**【実機で確認して追記】**
@@ -475,6 +475,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 | `task_pr_ready` / `task_pr_merge` が `forbidden` | `task_pr_merge` は `merge_policy` が `human_review` のタスク。または App の権限が Pull requests / Contents の write でない、利用者に書き込み権限が無い（メッセージに GitHub の理由が入る） |
 | `task_pr_merge` が `merge_blocked` | ブランチ保護（必須レビュー・必須チェック・ruleset）に拒否された。メッセージの GitHub の理由を満たしてから再実行する |
 | `task_start` が `draft_pr_unsupported` で FAILED | Draft PR を作れないリポジトリ。`DRAFT_PR_FALLBACK=ready` にするか、リポジトリを変える |
+| `web_search` が `internal`（`web research is misconfigured on the operator side; retrying will not help ...`。再試行の目安〔`retry_after_seconds`〕は付かない） | web の AI Gateway が byok_only（`web_search_byok_not_configured`）、または Web Search の認証・クレジットの不足。`terraform apply` で `ai_web_gateway_id` を作り、`deploy:config` → `deploy:web` で web の `AI_GATEWAY_ID` をそれに向ける（web の Worker のログに上流のコードが出る） |
 | `web_search` / `web_fetch` が `internal`（`web research service is not available`） | 原因の候補は、web の `AI_GATEWAY_ID` が空（web 内部の名前は `misconfigured`。ツールの応答には出ない）。ほかに web 機能の無効・未実装も同じ応答になる |
 | `web_browse` が tools/list に出ない | 3 つの Worker の `WEB_BROWSE_ENABLED` が揃っていない |
 | デプロイで service binding が解決できない | 順序の誤り（web → agent → gateway） |

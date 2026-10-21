@@ -1,5 +1,5 @@
 // deploy:config の生成器の本体（純粋な関数）。入出力は deploy-config.mjs が行う。
-// 入力: rovo.config.json（秘密でない値だけ）+ infra.json（terraform の非秘密の出力 3 つ）+ deploy.example/ の雛形
+// 入力: rovo.config.json（秘密でない値だけ）+ infra.json（terraform の非秘密の出力 4 つ）+ deploy.example/ の雛形
 // 出力: deploy/{gateway,agent,web}.wrangler.jsonc の文字列
 // 雛形の <NAME> を値で置き換えるだけ（コメントは残る）。雛形にある値以外は書き出さない。
 import { readFileSync } from "node:fs";
@@ -50,7 +50,13 @@ export const DEFAULTS = {
 };
 
 /** terraform の非秘密の出力。`terraform output -raw <名前>` を名前指定で読む（-json は sensitive の値も出すので使わない）。 */
-export const INFRA_OUTPUTS = ["kv_namespace_id", "archive_bucket_name", "ai_gateway_id"];
+export const INFRA_OUTPUTS = [
+  "kv_namespace_id",
+  "archive_bucket_name",
+  "ai_gateway_id",
+  // web 専用の AI Gateway（byok_only なし）。Web Search API をクレジットで払うため、Claude 用の ai_gateway_id と分ける
+  "ai_web_gateway_id",
+];
 
 const TOP_KEYS = [
   "accountId",
@@ -381,8 +387,11 @@ export function checkInfra(infra) {
     (k) => !isObj(infra) || !isStr(infra[k]) || infra[k].trim() === "",
   );
   if (missing.length > 0) {
+    const hint = missing.includes("ai_web_gateway_id")
+      ? "。ai_web_gateway_id は web 専用の AI Gateway の出力で、古い infra.json には無い（infra/ を terraform apply してから deploy:config を実行する）"
+      : "";
     throw new Error(
-      `infra の値が無い: ${missing.join(", ")}（terraform apply のあと deploy:config で読む）`,
+      `infra の値が無い: ${missing.join(", ")}（terraform apply のあと deploy:config で読む）${hint}`,
     );
   }
 }
@@ -397,6 +406,7 @@ function placeholderValues(config, infra) {
     KV_NAMESPACE_ID: infra.kv_namespace_id,
     ARCHIVE_BUCKET_NAME: infra.archive_bucket_name,
     AI_GATEWAY_ID: infra.ai_gateway_id,
+    AI_WEB_GATEWAY_ID: infra.ai_web_gateway_id,
     ACCOUNT_ID: config.accountId,
     PUBLIC_BASE_URL: config.publicBaseUrl,
     GITHUB_APP_ID: config.githubApp.id,

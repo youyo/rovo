@@ -962,7 +962,11 @@ describe("web_search / web_fetch（Phase 5）", () => {
       ["invalid_url: port 8443 is not allowed", "invalid_input", "port 8443 is not allowed"],
       ["timeout: web_fetch timed out", "upstream_unavailable", ""],
       ["search_failed: web_search_rate_limited: slow down", "upstream_unavailable", ""],
-      ["misconfigured: AI_GATEWAY_ID is required.", "internal", ""],
+      [
+        "misconfigured: web_search_byok_not_configured: no key",
+        "internal",
+        "web research is misconfigured on the operator side; retrying will not help (the operator must fix the configuration)",
+      ],
       ["no code here", "internal", ""],
     ];
     for (const [message, code, text] of cases) {

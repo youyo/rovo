@@ -41,6 +41,7 @@ case "$*" in
   *"output -raw kv_namespace_id") printf 'kv-namespace-id-example' ;;
   *"output -raw archive_bucket_name") printf 'acme-archive' ;;
   *"output -raw ai_gateway_id") printf 'acme-gateway' ;;
+  *"output -raw ai_web_gateway_id") printf 'acme-web-gateway' ;;
   *"output -raw gateway_cloudflare_api_token") printf 'CFTOKEN-SENTINEL-ABC' ;;
   *) exit 9 ;;
 esac
@@ -118,11 +119,12 @@ export CLOUDFLARE_API_TOKEN="TFTOKEN-SENTINEL-XYZ"
 run "$work/bin" "$cfg_ok" --pem "$pem" --yes; rc=$?
 expect "(b1) 通しで成功する" 0 "$rc"
 seq="$(calls | sed -E "s#-chdir=[^ ]+ ##; s#-var-file=[^ ]+#-var-file=VARS#; s#-c $work/deploy/#-c DEPLOY/#" | grep -v '^docker\|whoami')"
-expect "(b2) 順序: init → apply → output ×3 → deploy web/agent/ダッシュボードのビルド/gateway → secret list ×2 → put ×5" "terraform init -input=false
+expect "(b2) 順序: init → apply → output ×4 → deploy web/agent/ダッシュボードのビルド/gateway → secret list ×2 → put ×5" "terraform init -input=false
 terraform apply -var-file=VARS -auto-approve
 terraform output -raw kv_namespace_id
 terraform output -raw archive_bucket_name
 terraform output -raw ai_gateway_id
+terraform output -raw ai_web_gateway_id
 web exec wrangler deploy -c DEPLOY/web.wrangler.jsonc
 agent exec wrangler deploy -c DEPLOY/agent.wrangler.jsonc
 dashboard exec vite build
@@ -217,6 +219,7 @@ terraform apply -var-file=VARS -auto-approve
 terraform output -raw kv_namespace_id
 terraform output -raw archive_bucket_name
 terraform output -raw ai_gateway_id
+terraform output -raw ai_web_gateway_id
 web exec wrangler deploy -c DEPLOY/web.wrangler.jsonc
 agent exec wrangler deploy -c DEPLOY/agent.wrangler.jsonc
 dashboard exec vite build

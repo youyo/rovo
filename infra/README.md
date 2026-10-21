@@ -9,7 +9,8 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 | R2 バケット `<name_prefix>-archive` と、日数で削除するライフサイクル | タスクのアーカイブ（deploy.md の 9） | gateway の `r2_buckets`（`LOGS`） |
 | R2 バケット `<name_prefix>-audit` と、日数で削除するライフサイクル | 監査ログの Logpush の宛先（deploy.md の 10） | wrangler 設定には書かない |
 | KV namespace `<name_prefix>-oauth` | gateway の OAuth の状態 | gateway の `kv_namespaces`（`OAUTH_KV`） |
-| AI Gateway `<name_prefix>-gateway` | agent と web の Claude / Web Search 呼び出し（deploy.md の 7） | agent と web の `AI_GATEWAY_ID` |
+| AI Gateway `<name_prefix>-gateway` | agent の Claude 呼び出し（deploy.md の 7）。byok_only | agent と gateway の `AI_GATEWAY_ID` |
+| AI Gateway `<name_prefix>-web-gateway` | web の Web Search / Clef 呼び出し。byok_only なし（Web Search API をクレジットで払うため） | web の `AI_GATEWAY_ID` |
 | API トークン（Logpush 用） | 権限は「Workers R2 Storage Bucket Item Write」だけ。対象は監査用バケットだけ | Logpush の宛先の資格情報 |
 | API トークン（gateway の読み取り用） | 権限は「AI Gateway Read」だけ。対象はこのアカウントだけ（`com.cloudflare.api.account.<account_id>`）。名前は `<name_prefix>-gateway-ai-gateway-read` | gateway の secret `CLOUDFLARE_API_TOKEN`（sensitive の output `gateway_cloudflare_api_token`。`mise run deploy:secrets` が流し込む） |
 | Logpush ジョブ | データセット `workers_trace_events` を監査用バケットへ送る。**filter で `ScriptName` を rovo の 3 つの Worker だけに絞る** | 各 Worker に `"logpush": true` |
@@ -28,7 +29,8 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 |---|---|
 | `kv_namespace_id` | gateway の `kv_namespaces[].id`（`deploy:config` が書く） |
 | `archive_bucket_name` | gateway の `r2_buckets[].bucket_name`（同上） |
-| `ai_gateway_id` | gateway・agent・web の `vars.AI_GATEWAY_ID`（同上） |
+| `ai_gateway_id` | agent・gateway の `vars.AI_GATEWAY_ID`（同上） |
+| `ai_web_gateway_id` | web の `vars.AI_GATEWAY_ID`（同上） |
 | `audit_bucket_name` | wrangler 設定には書かない（Logpush の宛先。確認用） |
 | `gateway_cloudflare_api_token`（**sensitive**） | gateway の secret `CLOUDFLARE_API_TOKEN`。`deploy:secrets` だけが `terraform output -raw` で読む。`deploy:config` は読まない（`terraform output -json` は sensitive の値も出すので使わない） |
 
@@ -48,7 +50,7 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 ## 既定の設定と理由
 
 - **R2 のライフサイクル**: アーカイブ 90 日、監査 365 日で削除（変数 `archive_retention_days` / `audit_retention_days`。1 以上の整数）。対象はバケット全体（prefix なし）。Cloudflare の API は秒で受けるので、日数 × 86400 を渡している。
-- **AI Gateway**: 認証あり（BYOK の前提。agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼び、バインディングからの呼び出しは認証済みとして扱われるので、gateway token は要らない）、Require provider credentials（`byok_only`。BYOK のキーが無いときに Unified Billing〔Cloudflare のクレジット〕へ流さず、400 で止める）、ログ収集あり（`ai_gateway_collect_logs`。誰がいくら使ったかの集計に使う）、ログ分類なし（`ai_gateway_log_classification`。有効にすると User Insights のタスクとモデルの分析が出るが、Cloudflare が保存されたプロンプトと応答〔対象リポジトリのコードを含む〕を分類する。ログ収集が前提。Beta。User Insights は追加費用なしとされているが、ログ分類個別の料金は明記されていない）、キャッシュなし（TTL 0。モデルの応答を使い回さない）、レート制限なし（0 = 無効）。費用の上限は Gateway 側ではなく、gateway の `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` が担う。費用の上限を Gateway 側にも持ちたい場合は、AI Gateway の画面で spend limits を足す。
+- **AI Gateway**: 認証あり（BYOK の前提。agent と web は `AI` バインディングと `AI_GATEWAY_ID` だけで呼び、バインディングからの呼び出しは認証済みとして扱われるので、gateway token は要らない）、Require provider credentials（`byok_only`。BYOK のキーが無いときに Unified Billing〔Cloudflare のクレジット〕へ流さず、400 で止める）、ログ収集あり（`ai_gateway_collect_logs`。誰がいくら使ったかの集計に使う）、ログ分類なし（`ai_gateway_log_classification`。有効にすると User Insights のタスクとモデルの分析が出るが、Cloudflare が保存されたプロンプトと応答〔対象リポジトリのコードを含む〕を分類する。ログ収集が前提。Beta。User Insights は追加費用なしとされているが、ログ分類個別の料金は明記されていない）、キャッシュなし（TTL 0。モデルの応答を使い回さない）、レート制限なし（0 = 無効）。**web 専用の Gateway（`<name_prefix>-web-gateway`）を分ける理由**: Web Search API は、Gateway に provider のキーが無いとクレジットで払う。byok_only の Gateway では `web_search_byok_not_configured`（400）で断られ、`web_search` が必ず失敗する。そのため web 専用の Gateway だけ byok_only を付けない（ほかの設定は同じ。Claude 用の Gateway は byok_only のまま）。既存のデプロイは `terraform apply` で Gateway が増える（既存の Gateway は変わらない）。そのあと `mise run deploy:config` と web のデプロイで web の `AI_GATEWAY_ID` を切り替える。費用の上限は Gateway 側ではなく、gateway の `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` が担う。費用の上限を Gateway 側にも持ちたい場合は、AI Gateway の画面で spend limits を足す。
 - **Logpush のフィールド**: `Event`, `EventTimestampMs`, `Exceptions`, `Logs`, `Outcome`, `ScriptName`（監査行は `Logs` に入る。API がアルファベット順に並べ替えるので、その順で書く）。時刻は RFC 3339。宛先のパスは `workers_trace_events/{DATE}/`。
 - **gateway の読み取り用トークン**: 権限は「AI Gateway Read」（scope は `com.cloudflare.api.account`）だけ。権限グループは名前の完全一致で検索する（見つからなければ plan で止まる）。名前が変わったときは `ai_gateway_read_permission_group_id` で ID を指定する。resources はアカウント単位 `com.cloudflare.api.account.<account_id>` = `*`（実アカウントの権限グループの scope に合わせた形）。TTL は付けない（期限切れで BYOK の判定が黙って止まるのを避ける。ローテーションは `terraform apply -replace=cloudflare_api_token.ai_gateway_read` のあと `mise run deploy:secrets -- --rotate cloudflare-token`）。
 - **Worker の名前**: `worker_names`（既定 `rovo-gateway` / `rovo-agent` / `rovo-web`）。各 wrangler 設定の `name` と一致させる。名前を変えたときは、この変数も変える（合わないと、そのログは送られない）。

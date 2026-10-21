@@ -254,7 +254,7 @@ Phase 5（Web Research Service: `web_search` / `web_fetch`）のコードが揃�
 ## 前提
 
 - Phase 4 までの受入試験が済んでいる
-- web → agent → gateway の順にデプロイ済み。web の `AI_GATEWAY_ID`（Web Search API と Clef-flash を通す AI Gateway）が設定されている
+- web → agent → gateway の順にデプロイ済み。web の `AI_GATEWAY_ID`（Web Search API と Clef-flash を通す、byok_only なしの web 専用 AI Gateway。`ai_web_gateway_id`）が設定されている
 - Claude Code と Cowork の両方から MCP に接続できる
 
 ## 11. 本物の Web Search API と Clef-flash で動く

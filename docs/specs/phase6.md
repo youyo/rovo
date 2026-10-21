@@ -140,7 +140,7 @@
 | `credential_revoke_given_up` | gateway（TaskDO） | 失効を諦めた。reason: `attempts_exhausted`（`REVOKE_MAX_ATTEMPTS`）/ `not_retryable`（403 など）/ `setup_failure`（App の設定が失われた・復号できない） | する（`attempts_exhausted` と `not_retryable` は既存の `warning`: `token_revoke_failed`。`setup_failure` は warning が無い経路なので `audit`） |
 | `sandbox_privileged_op` | agent（SandboxDO が監査ログを出し、AgentDO が events に積む） | `op`: terminate / destroy / set_deadline / extend_deadline（固定の値）。destroy は `reason`: `reap_failed` / `exec_timeout` | する（`audit`: `{code:"sandbox_privileged_op", op}`。`destroy` は AgentDO が呼ばないので監査ログだけ） |
 | `outbound_denied` | agent（OutboundGateway） | 既存の違反コード（`host_not_allowed` など）を `reason` に、宛先の分類を `dest`（github / registry / other）に。`taskId`、`caller`: `child` | しない |
-| `web_blocked` | web | `kind`: search / fetch / browse。`reason`: 拒否は `bot_challenge` / `robots_disallowed` / `robots_unreachable` / `redirect_policy` / `private_address`、web_browse の判定不能は `invalid_status` / `invalid_final_url` / `invalid_redirect_chain` / `invalid_result` / `dns_check_failed`、本文（検索結果全体）の判定は block が `injection_rule`(決定論ルール) / `model_score`(モデル)、unknown が `evaluator_failed` / `state_truncated` / `model_not_performed` / `unknown`。`host` は fetch / browse のみ(ホスト名だけ。search は結果が複数なので出さない)。`requestId` は search のみ(AI Gateway の request id)。`caller` / `userId` / `taskId` は呼び出し元 | しない |
+| `web_blocked` | web | `kind`: search / fetch / browse。`reason`: 拒否は `bot_challenge` / `robots_disallowed` / `robots_unreachable` / `redirect_policy` / `private_address`、web_fetch / web_browse の判定不能は `dns_check_failed`、web_browse だけの判定不能は `invalid_status` / `invalid_final_url` / `invalid_redirect_chain` / `invalid_result`、本文（検索結果全体）の判定は block が `injection_rule`(決定論ルール) / `model_score`(モデル)、unknown が `evaluator_failed` / `state_truncated` / `model_not_performed` / `unknown`。`host` は fetch / browse のみ(ホスト名だけ。search は結果が複数なので出さない)。`requestId` は search のみ(AI Gateway の request id)。`caller` / `userId` / `taskId` は呼び出し元 | しない |
 | `task_cancelled` | gateway | `caller`: cancel の主体（今は `parent` だけ。reason は `parent_requested`）。変化があったときだけ（終端への再 cancel では出さない） | する（既存の `cancelled`） |
 | `agent_cancelled` | agent（AgentDO） | cancel を受理した最初の 1 回。`caller`: `parent`。reason: `stop_intent_recorded`（停止の意図を記録した）/ `not_started`（start より先の cancel。tombstone だけ）/ `already_terminal` | する（`audit`: `{code:"agent_cancelled"}`。`stop_intent_recorded` のときだけ。タスクが無い・終端済みのときは積まない） |
 | `task_ended_by_limit` | gateway / agent | `budget_exceeded` / `deadline` / `input_timeout` | する（既存の `status_changed` の reason） |
@@ -455,7 +455,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 ## M5（web）で決めたこと（2026-10-19）
 - イベントは `web_blocked` の 1 つ。`packages/audit` の `AUDIT_EVENTS` に追加した。共通フィールドだけを使い、イベント固有のフィールドは足していない。
-- 出す条件は、blocked(robots / redirect_policy / bot_challenge / private_address)、web_browse の unknown、本文の判定が block / unknown のとき。`http_error` と allow / caution は出さない。
+- 出す条件は、blocked(robots / redirect_policy / bot_challenge / private_address)、web_fetch の dns_check_failed と web_browse の unknown、本文の判定が block / unknown のとき。`http_error` と allow / caution は出さない。
 - `safety.reason` は複数の理由を連結した文字列で `audit()` の固定コード形式に合わないため、web で固定コード(`injection_rule` / `model_score` / `evaluator_failed` / `state_truncated` / `model_not_performed` / `unknown`)に丸めてから渡す。
 - 既存の `web_research`(観測用、全 verdict)は変更せず併存する。`web_blocked` は `audit()` 経由の別ログで、同じ事象は 2 行出る。
 - web は状態を持たないので、test シンクは作らない。unit で console.log を捕捉して検証した。E2E は M5 では書いていない。

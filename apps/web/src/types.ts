@@ -82,10 +82,10 @@ export type BlockedReason =
   | "robots_disallowed"
   | "robots_unreachable"
   | "redirect_policy"
-  /** web_browse: 事前の DoH で、private / link-local などのアドレスに解決された */
+  /** web_fetch / web_browse: 事前の DoH で、private / link-local などのアドレスに解決された */
   | "private_address";
 
-/** web_browse が判定できなかった理由（固定のコード。上流の文字列は含めない） */
+/** web_fetch / web_browse が判定できなかった理由（固定のコード。上流の文字列は含めない） */
 export type UnknownReason =
   | "invalid_status"
   | "invalid_final_url"
@@ -93,14 +93,22 @@ export type UnknownReason =
   | "invalid_result"
   | "dns_check_failed";
 
+/**
+ * web_fetch の結果（web_browse も同じ形）。
+ * - "ok": 取得でき、評価まで進んだ（safety.verdict が block / unknown のときは content が null）
+ * - "blocked": 取得結果を返さない（bot チャレンジ・robots・redirect / ダウングレード・private への解決）
+ * - "http_error": 取得先が 4xx / 5xx を返した（本文は返さず、評価もしない。http_status を付ける）
+ * - "unknown": 取得結果を判定できなかった（fail-closed。DoH の検査に失敗したなど。本文は返さず、評価もしない）
+ */
 export type FetchResult = {
   source: FetchSource;
-  /** 生の Markdown（目印では囲まない。囲むのは呼び出し元）。block / unknown / blocked のときは null */
+  /** 生の Markdown（目印では囲まない。囲むのは呼び出し元）。ok 以外、block / unknown のときは null */
   content: string | null;
   safety: Safety;
-  /** "blocked": 取得できなかった（bot チャレンジ・robots・redirect の拒否）。それ以外は "ok" */
-  status: "ok" | "blocked";
+  status: "ok" | "blocked" | "http_error" | "unknown";
   blocked_reason?: BlockedReason;
+  http_status?: number;
+  unknown_reason?: UnknownReason;
   title?: string;
   /** 本文が上限で切り詰められた */
   truncated?: boolean;
@@ -126,15 +134,5 @@ export type SearchResult = {
   };
 };
 
-/**
- * web_browse の結果。FetchResult と同じ形に、status を足したもの。
- * - "ok": 取得でき、評価まで進んだ（safety.verdict が block / unknown のときは content が null）
- * - "blocked": 取得結果を返さない（bot チャレンジ・robots・redirect / ダウングレード・private への解決）
- * - "http_error": 取得先が 4xx / 5xx を返した（1003 などのエラーページを含む）。本文は返さず、評価もしない
- * - "unknown": 取得結果を判定できなかった（fail-closed）。本文は返さず、評価もしない
- */
-export type BrowseResult = Omit<FetchResult, "status"> & {
-  status: "ok" | "blocked" | "http_error" | "unknown";
-  http_status?: number;
-  unknown_reason?: UnknownReason;
-};
+/** web_browse の結果。web_fetch と同じ形 */
+export type BrowseResult = FetchResult;

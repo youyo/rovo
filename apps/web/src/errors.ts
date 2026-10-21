@@ -4,6 +4,8 @@ export type WebResearchErrorCode =
   | "not_implemented"
   | "invalid_url"
   | "search_failed"
+  // 検索プロバイダが 5xx を返した。message は固定の形 "provider=<名前> status=<番号>" だけ（上流の本文は載せない）
+  | "search_provider_error"
   | "timeout"
   | "too_large"
   | "too_many_redirects"

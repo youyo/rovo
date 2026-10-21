@@ -1,4 +1,4 @@
-import { checkResolution, isIpLiteralHost } from "./dns-check";
+import { preflightHost } from "./dns-check";
 import { WebResearchError } from "./errors";
 import { createRobotsChecker, type RobotsCache } from "./robots";
 import type { BlockedReason, UnknownReason } from "./types";
@@ -276,12 +276,9 @@ export async function browsePage(
   if (!checked.ok) throw new WebResearchError("invalid_url", checked.message);
   const requested = checked.url;
 
-  // 補助: 解決先が private なら取得しない。検査できなかったときも取得しない（fail-closed）
-  if (!isIpLiteralHost(requested.hostname)) {
-    const resolution = await checkResolution(requested.hostname, deps.fetch);
-    if (resolution === "private") return blocked("private_address");
-    if (resolution === "failed") return unknown("dns_check_failed");
-  }
+  // 補助: 解決先が private なら取得しない。検査できなかったときも取得しない（fail-closed）。web_fetch と同じ検査
+  const pre = await preflightHost(requested.hostname, deps.fetch);
+  if (pre) return pre;
 
   // robots.txt（指定された URL のオリジンだけ。リダイレクト先とサブリソースは確認できない）
   const robots = createRobotsChecker({

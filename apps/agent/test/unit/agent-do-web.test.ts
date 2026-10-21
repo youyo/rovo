@@ -285,6 +285,58 @@ describe("AgentDO: web_search / web_fetch", () => {
     expect(done(await fx.stub.getResult()).usage.web).toEqual({ search: 1, fetch: 1, browse: 0 });
   });
 
+  it("検索プロバイダの 5xx は、provider と status を伝える（上流の本文は渡さない）。再試行は 1 回までと促す", async () => {
+    const web = fakeWeb({
+      async search() {
+        throw new Error("search_provider_error: provider=ceramic status=502");
+      },
+    });
+    const fx = newFixture("web-search-5xx", [search(), report()], { web: web.port });
+    expect(await run(fx, "web-search-5xx")).toBe("completed");
+    const seen = fx.modelCalls.toolResults.at(-1)?.join("\n") ?? "";
+    expect(seen).toContain("search provider (ceramic) returned HTTP 502");
+    expect(seen).toMatch(/retry once/);
+    expect((await toolEnds(fx))[0]?.isError).toBe(true);
+  });
+
+  it("web_fetch の http_error は、HTTP ステータスを伝え、本文が無いことと、同じ要求を繰り返さないことを伝える", async () => {
+    const web = fakeWeb({
+      async fetchUrl(req) {
+        return {
+          source: { url: req.url, final_url: req.url, retrieved_at: "t", via: "direct" },
+          content: null,
+          safety: safety("unknown"),
+          status: "http_error",
+          http_status: 404,
+        } satisfies WebFetchResponse;
+      },
+    });
+    const fx = newFixture("web-fetch-404", [fetchUrl(), report()], { web: web.port });
+    expect(await run(fx, "web-fetch-404")).toBe("completed");
+    const seen = fx.modelCalls.toolResults[1]?.join("\n") ?? "";
+    expect(seen).toMatch(/\[web_fetch\] The page answered with an error \(HTTP 404\)/);
+    expect(seen).toMatch(/no content/i);
+    expect((await toolEnds(fx))[0]?.isError).toBe(false);
+  });
+
+  it("web_fetch の unknown（dns_check_failed）は理由を伝え、本文が withheld であることを伝える", async () => {
+    const web = fakeWeb({
+      async fetchUrl(req) {
+        return {
+          source: { url: req.url, final_url: req.url, retrieved_at: "t", via: "direct" },
+          content: null,
+          safety: safety("unknown"),
+          status: "unknown",
+          unknown_reason: "dns_check_failed",
+        } satisfies WebFetchResponse;
+      },
+    });
+    const fx = newFixture("web-fetch-dns", [fetchUrl(), report()], { web: web.port });
+    expect(await run(fx, "web-fetch-dns")).toBe("completed");
+    const seen = fx.modelCalls.toolResults[1]?.join("\n") ?? "";
+    expect(seen).toMatch(/\[web_fetch\] The page could not be judged \(reason: dns_check_failed\)/);
+  });
+
   it("tool_end の summary（親の task_wait に流れる）に、Web 由来の本文を載せない", async () => {
     const web = fakeWeb({
       async fetchUrl(req) {

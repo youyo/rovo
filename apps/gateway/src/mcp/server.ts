@@ -70,12 +70,14 @@ const WEB_NOTICE = [
 const WEB_SEARCH_DESCRIPTION = [
   "Web を検索する。入力は {query, limit?}（query は 1〜1024 文字、limit は 1〜10 で既定 5）。応答は {results: [{url, title, content, safety}], metadata: {request_id, provider, dropped_urls}}。content は検索結果の説明文（description、600 文字まで）。",
   "private なアドレスなどを指す URL は結果から除かれる（dropped_urls）。検索結果全体で safety は 1 つの判定になる。",
+  "検索プロバイダが 5xx を返したときは upstream_unavailable（retry_after_seconds 後に再試行できる）で、message に provider 名と HTTP ステータス（例: the search provider (ceramic) returned HTTP 502）が入る。一時的なこともあるが、同じ検索語で繰り返し失敗するなら語を変える（語の種類によってプロバイダが失敗することがある）。",
   WEB_NOTICE,
 ].join("\n");
 
 const WEB_FETCH_DESCRIPTION = [
-  "Web ページを取得して Markdown で返す（JS は実行しない）。入力は {url}（http / https の公開ホスト。ポートは 80 / 443 のみ）。応答は {source: {url, final_url, retrieved_at, via, converted_by?}, status, blocked_reason?, title?, content, truncated?, safety}。",
-  "status が blocked のときは取得できていない（blocked_reason: bot_challenge / robots_disallowed / robots_unreachable / redirect_policy）。robots.txt で許可されていないページ、redirect で private なアドレスに向かうページは取得しない。本文は 50,000 文字で切り詰められる（truncated）。",
+  "Web ページを取得して Markdown で返す（JS は実行しない）。入力は {url}（http / https の公開ホスト。ポートは 80 / 443 のみ）。応答は {source: {url, final_url, retrieved_at, via, converted_by?}, status, blocked_reason?, http_status?, unknown_reason?, title?, content, truncated?, safety}。",
+  "status: ok=取得でき、safety で評価した / blocked=取得結果を返さない（blocked_reason: bot_challenge / robots_disallowed / robots_unreachable / redirect_policy / private_address。robots.txt で許可されていないページ、ホスト名が private なアドレスに解決されるページ、redirect で private なアドレスに向かうページを含む） / http_error=取得先が 4xx / 5xx を返した（http_status。本文は返さない。web_browse と同じ） / unknown=取得結果を判定できなかった（unknown_reason: dns_check_failed など。ホスト名を解決できなかった場合を含む。本文は返さない）。",
+  "blocked / http_error / unknown では content は null。本文は 50,000 文字で切り詰められる（truncated）。",
   WEB_NOTICE,
 ].join("\n");
 

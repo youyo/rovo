@@ -39,21 +39,17 @@ export interface WebFetchResponse {
   };
   content: string | null;
   safety: WebSafety;
-  status: "ok" | "blocked";
+  /** ok / blocked（取得結果を返さない）/ http_error（取得先が 4xx / 5xx。http_status）/ unknown（判定できなかった。unknown_reason） */
+  status: "ok" | "blocked" | "http_error" | "unknown";
   blocked_reason?: string;
+  http_status?: number;
+  unknown_reason?: string;
   title?: string;
   truncated?: boolean;
 }
 
-/**
- * web_browse の結果。WebFetchResponse に status を足したもの（http_error: 取得先が 4xx / 5xx、unknown: 判定できなかった）。
- * 理由は固定のコードだけで、取得先の文字列は含まれない。
- */
-export interface WebBrowseResponse extends Omit<WebFetchResponse, "status"> {
-  status: "ok" | "blocked" | "http_error" | "unknown";
-  http_status?: number;
-  unknown_reason?: string;
-}
+/** web_browse の結果。web_fetch と同じ形（理由は固定のコードだけで、取得先の文字列は含まれない） */
+export type WebBrowseResponse = WebFetchResponse;
 
 export interface WebPort {
   search(req: {

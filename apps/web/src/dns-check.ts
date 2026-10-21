@@ -1,3 +1,4 @@
+import type { BlockedReason, UnknownReason } from "./types";
 import { isForbiddenHost } from "./url-policy";
 
 /**
@@ -77,4 +78,25 @@ export async function checkResolution(
   // 禁止範囲の判定は URL の host と同じ関数を使う（IPv4-mapped / NAT64 などの形も同じ規則で拒否する）
   if (ips.some((ip) => isForbiddenHost(ip))) return "private";
   return "public";
+}
+
+/** 取得の前の DoH 検査の結果。null は通してよい（IP リテラル・公開アドレスに解決された） */
+export type HostPreflight =
+  | { kind: "blocked"; reason: Extract<BlockedReason, "private_address"> }
+  | { kind: "unknown"; reason: Extract<UnknownReason, "dns_check_failed"> }
+  | null;
+
+/**
+ * web_fetch と web_browse が、robots.txt や本文の取得より前に行う共通の検査。
+ * private に解決される名前は blocked（private_address）、検査できなかった名前は unknown（dns_check_failed。fail-closed）。
+ */
+export async function preflightHost(
+  hostname: string,
+  fetchImpl: typeof fetch,
+): Promise<HostPreflight> {
+  if (isIpLiteralHost(hostname)) return null;
+  const resolution = await checkResolution(hostname, fetchImpl);
+  if (resolution === "private") return { kind: "blocked", reason: "private_address" };
+  if (resolution === "failed") return { kind: "unknown", reason: "dns_check_failed" };
+  return null;
 }

@@ -96,6 +96,9 @@ export type WebToolError = {
 
 const MAX_PASSTHROUGH = 200;
 
+/** web が返す、検索プロバイダの 5xx の固定の形（"provider=<名前> status=<番号>"）。これに合わないものは使わない。 */
+const PROVIDER_ERROR_DETAIL = /^provider=([a-z0-9_-]{1,40}) status=([1-5]\d\d)$/;
+
 /**
  * web の RPC のエラーを MCP のエラーに写す。RPC 越しに届くのは message だけなので、先頭の "code: " で分類する。
  * 呼び出し側（親）が入力した値に関する検査のメッセージ（invalid_request / invalid_url）だけを返し、
@@ -122,6 +125,17 @@ export function mapWebError(e: unknown): WebToolError {
       return { code: "invalid_input", message: "the page is too large to fetch" };
     case "too_many_redirects":
       return { code: "invalid_input", message: "the page redirected too many times" };
+    case "search_provider_error": {
+      // 検索プロバイダが 5xx を返した。provider 名と status 番号（固定の形のものだけ）を伝え、原因を切り分けられるようにする。
+      // 一時的なこともあるので再試行は禁止しない（retry_after_seconds を付ける）が、同じ語で繰り返すなら語を変えるよう添える
+      const pm = PROVIDER_ERROR_DETAIL.exec(detail);
+      if (!pm) return unavailable;
+      return {
+        code: "upstream_unavailable",
+        message: `the search provider (${pm[1]}) returned HTTP ${pm[2]}; this may be temporary, so you can retry later (if it keeps failing for the same query, try a different query)`,
+        retry_after_seconds: WEB_UPSTREAM_RETRY_AFTER_SECONDS,
+      };
+    }
     case "search_failed":
     case "timeout":
     case "unavailable":

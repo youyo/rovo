@@ -271,27 +271,56 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
 
   const budget = toBudgetMe(await env.USER_DO.getByName(String(session.uid)).dashboardBudget());
 
-  // モデル別の費用（月・全員分）。見えないタスクだけが使うモデルの名前は出さず、"other" にまとめる
+  // consult（D9）: 対象のリポジトリが無いので、見えるリポジトリの集合では絞らない（全員分。「自分」では所有者で絞る）
+  const consultOwner = scope === "me" ? { ownerId: session.uid } : {};
+  const consultList = await directory.listConsults({
+    from,
+    to,
+    ...consultOwner,
+    limit: LIMITS.overviewConsults,
+  });
+  const consultSummary = await directory.summarizeConsults({ from: monthStart, to: monthEnd });
+  if (!consultList.ok || !consultSummary.ok) return errorJson(503, "unavailable");
+
+  // モデル別の費用（月・全員分）。タスク分は、見えないタスクだけが使うモデルの名前を出さず "other" にまとめる。
+  // consult 分は consult のモデルの名前のまま出す（consult は権限の対象外。タスクの費用には混ぜない）
   const known = new Set(visibleModels.models);
-  const byModel = new Map<string, number>();
-  for (const m of summary.models) {
-    const name = known.has(m.model) ? m.model : OTHER_MODEL;
-    byModel.set(name, (byModel.get(name) ?? 0) + m.cost_micro);
-  }
-  const ranked = [...byModel.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  const models = ranked
+  const costs = new Map<string, { task: number; consult: number }>();
+  const add = (name: string, key: "task" | "consult", micro: number) => {
+    const cur = costs.get(name) ?? { task: 0, consult: 0 };
+    cur[key] += micro;
+    costs.set(name, cur);
+  };
+  for (const m of summary.models)
+    add(known.has(m.model) ? m.model : OTHER_MODEL, "task", m.cost_micro);
+  for (const m of consultSummary.models) add(m.model, "consult", m.cost_micro);
+  const ranked = [...costs.entries()]
     .filter(([name]) => name !== OTHER_MODEL)
-    .slice(0, LIMITS.models - 1)
-    .map(([model, micro]) => ({ model, task_cost_usd: usd(micro), consult_cost_usd: 0 }));
-  const shownMicro = models.reduce((sum, m) => sum + Math.round(m.task_cost_usd * 1_000_000), 0);
-  const totalMicro = summary.visible.cost_micro + summary.hidden.cost_micro;
-  if (totalMicro - shownMicro > 0 || byModel.has(OTHER_MODEL)) {
+    .sort(
+      (a, b) => b[1].task + b[1].consult - (a[1].task + a[1].consult) || a[0].localeCompare(b[0]),
+    );
+  const shown = ranked.slice(0, LIMITS.models - 1);
+  const other = {
+    task: costs.get(OTHER_MODEL)?.task ?? 0,
+    consult: costs.get(OTHER_MODEL)?.consult ?? 0,
+  };
+  for (const [, c] of ranked.slice(LIMITS.models - 1)) {
+    other.task += c.task;
+    other.consult += c.consult;
+  }
+  const models = shown.map(([model, c]) => ({
+    model,
+    task_cost_usd: usd(c.task),
+    consult_cost_usd: usd(c.consult),
+  }));
+  if (other.task > 0 || other.consult > 0 || costs.has(OTHER_MODEL)) {
     models.push({
       model: OTHER_MODEL,
-      task_cost_usd: usd(totalMicro - shownMicro),
-      consult_cost_usd: 0,
+      task_cost_usd: usd(other.task),
+      consult_cost_usd: usd(other.consult),
     });
   }
+  const totalMicro = summary.visible.cost_micro + summary.hidden.cost_micro;
 
   const dto: OverviewDto = {
     generated_at: iso(at),
@@ -299,14 +328,23 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
     scope,
     viewer: { login: session.login },
     tasks: rows.map(snapshotToVisibleTask),
-    // consult の索引（M3b。DirectoryDO の consult_index）が入るまでは空。入ったらここで Directory から取る
-    consults: [],
+    consults: consultList.rows.map((r) => ({
+      consult_id: r.consult_id,
+      owner_login: r.owner_login,
+      at: iso(r.at),
+      model: r.model,
+      cost_usd: usd(r.cost_micro),
+      estimated: r.estimated,
+    })),
     budget,
     month: {
       period: { start: iso(monthStart), end: iso(monthEnd) },
       task_cost_usd: usd(totalMicro),
-      // consult を含む実績も M3b から。それまではタスクの費用だけ（推定の分は無い）
-      budget_actual: { spent_usd: usd(totalMicro), estimated_usd: 0 },
+      // 予算の実績 = タスクの費用 + consult の費用。estimated は consult の見積もりで閉じた分だけ（タスク側の見積もりは索引に無い）
+      budget_actual: {
+        spent_usd: usd(totalMicro + consultSummary.cost_micro),
+        estimated_usd: usd(consultSummary.estimated_micro),
+      },
       hidden_tasks: { count: summary.hidden.count, cost_usd: usd(summary.hidden.cost_micro) },
     },
     models,

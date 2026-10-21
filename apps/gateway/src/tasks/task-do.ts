@@ -29,7 +29,7 @@ import {
   resolveGitHubBaseUrls,
 } from "../github";
 import { agentModelsOf, defaultModelOf, effortOf } from "../models";
-import { sandboxInstanceName } from "../sandbox-instance";
+import { type PublicPromotion, sandboxInstanceName, sanitizePromotions } from "../sandbox-instance";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { addColumnIfMissing } from "./sql-schema";
@@ -252,8 +252,18 @@ export type ResultView = {
     sandbox_promoted_at?: number;
     /** 昇格した時点までの Sandbox の時間（ms。sandbox_runtime_ms のうち昇格前の分） */
     sandbox_runtime_ms_before_promotion?: number;
-    /** 昇格を見送った・失敗した理由の固定コード（fixed_instance / already_large / state_unreadable / snapshot_unsupported / snapshot_failed / start_failed / cert_missing / workspace_mismatch / fallback_failed）。昇格が成功したとき・設定で無効のときは付かない */
+    /** 昇格を見送った・失敗した理由の固定コード（fixed_instance / already_large / state_unreadable / snapshot_unsupported / snapshot_failed / start_failed / cert_missing / workspace_mismatch / fallback_failed）。最後に残したもの（あとで昇格が成功しても消さない）。設定で無効のときは付かない */
     sandbox_promotion_reason?: string;
+    /** 成功した昇格の履歴（古い順）。trigger は agent（子が sandbox_scale_up で頼んだ）/ rule（重いコマンドの規則＝保険）/ verification（検証コマンド）、rule_match は規則で上がったときだけ（固定の表の名前。コマンドの文字列は入らない）、runtime_ms_before はその昇格までの Sandbox の累計時間（ms）。昇格していなければ付かない。子の自由文（reason）は残らない */
+    sandbox_promotions?: {
+      to: string;
+      at: number;
+      trigger: string;
+      runtime_ms_before: number;
+      rule_match?: string;
+    }[];
+    /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。0 なら、規則（保険）が要らなかった = 不要だったかもしれない昇格。子が上げていなければ付かない */
+    sandbox_heavy_commands_after_agent_scale_up?: number;
   };
 };
 
@@ -2686,6 +2696,10 @@ export class TaskDO extends DurableObject<Env> {
               ...(up.sandbox_promotion_reason !== undefined
                 ? { promotionReason: up.sandbox_promotion_reason }
                 : {}),
+              ...(up.sandbox_promotions !== undefined ? { promotions: up.sandbox_promotions } : {}),
+              ...(up.sandbox_heavy_commands_after_agent_scale_up !== undefined
+                ? { heavyCommandsAfterAgentScaleUp: up.sandbox_heavy_commands_after_agent_scale_up }
+                : {}),
             }
           : null,
       },
@@ -3138,8 +3152,11 @@ function sandboxPromotionUsage(sb: UsageDto["sandbox"]): {
   sandbox_promoted_at?: number;
   sandbox_runtime_ms_before_promotion?: number;
   sandbox_promotion_reason?: string;
+  sandbox_promotions?: PublicPromotion[];
+  sandbox_heavy_commands_after_agent_scale_up?: number;
 } {
   const promotedTo = sandboxInstanceName(sb?.promotedTo);
+  const promotions = sanitizePromotions(sb?.promotions, "camel");
   const reason = isSandboxPromotionReason(sb?.promotionReason) ? sb?.promotionReason : undefined;
   const ms = (v: unknown) =>
     typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
@@ -3152,6 +3169,10 @@ function sandboxPromotionUsage(sb: UsageDto["sandbox"]): {
         }
       : {}),
     ...(reason !== undefined ? { sandbox_promotion_reason: reason } : {}),
+    ...(promotions.length > 0 ? { sandbox_promotions: promotions } : {}),
+    ...(typeof sb?.heavyCommandsAfterAgentScaleUp === "number"
+      ? { sandbox_heavy_commands_after_agent_scale_up: ms(sb.heavyCommandsAfterAgentScaleUp) }
+      : {}),
   };
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ALLOWED_MODEL_IDS,
   computeCostUsd,
+  DEFAULT_AGENT_MAX_SANDBOX_INSTANCE,
   DEFAULT_HEAVY_SANDBOX_INSTANCE,
   DEFAULT_MODEL,
   DEFAULT_MODEL_ORDER,
@@ -9,6 +10,8 @@ import {
   EFFORTS,
   effortFor,
   isSandboxPromotionReason,
+  isSandboxPromotionTrigger,
+  isSandboxRuleMatch,
   isSelectableSandboxInstance,
   listSandboxInstances,
   MODEL_CATALOG_IDS,
@@ -17,11 +20,14 @@ import {
   pickDefaultModel,
   piModelId,
   providerOf,
+  resolveAgentMaxSandboxInstance,
   resolveEfforts,
   resolveHeavySandboxInstance,
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
   SANDBOX_PROMOTION_REASONS,
+  SANDBOX_PROMOTION_TRIGGERS,
+  SANDBOX_RULE_MATCHES,
   SELECTABLE_SANDBOX_INSTANCES,
   sandboxInstanceSpec,
   sandboxUsdPerHour,
@@ -492,6 +498,7 @@ describe("Sandbox のインスタンス（D13）", () => {
         default: i.name === DEFAULT_SANDBOX_INSTANCE,
         selectable: i.name !== "lite",
         promotion_target: i.name === DEFAULT_HEAVY_SANDBOX_INSTANCE,
+        agent_max: i.name === DEFAULT_AGENT_MAX_SANDBOX_INSTANCE,
       });
     }
     expect(list.filter((i) => i.default).map((i) => i.name)).toEqual(["standard-2"]);
@@ -552,5 +559,59 @@ describe("Sandbox のインスタンス（D13）", () => {
     for (const v of ["", "toString", "SNAPSHOT_FAILED", undefined, 3]) {
       expect(isSandboxPromotionReason(v), String(v)).toBe(false);
     }
+  });
+});
+
+describe("子が自分で Sandbox を大きくするツール（sandbox_scale_up）の設定", () => {
+  it("子が選べる上限の既定は standard-4", () => {
+    expect(DEFAULT_AGENT_MAX_SANDBOX_INSTANCE).toBe("standard-4");
+  });
+
+  it("resolveAgentMaxSandboxInstance: 未設定・空・off / none は無効（null。ツールを子に見せない）。選べる 4 種類だけ有効。不正な値は無効にして ignored に返す", () => {
+    expect(resolveAgentMaxSandboxInstance(undefined)).toEqual({ instance: null });
+    expect(resolveAgentMaxSandboxInstance("")).toEqual({ instance: null });
+    expect(resolveAgentMaxSandboxInstance("off")).toEqual({ instance: null });
+    expect(resolveAgentMaxSandboxInstance(" None ")).toEqual({ instance: null });
+    expect(resolveAgentMaxSandboxInstance(" standard-4 ")).toEqual({ instance: "standard-4" });
+    expect(resolveAgentMaxSandboxInstance("standard-3")).toEqual({ instance: "standard-3" });
+    expect(resolveAgentMaxSandboxInstance("lite")).toEqual({ instance: null, ignored: "lite" });
+    expect(resolveAgentMaxSandboxInstance("standard-9")).toEqual({
+      instance: null,
+      ignored: "standard-9",
+    });
+    expect(resolveAgentMaxSandboxInstance("toString")).toEqual({
+      instance: null,
+      ignored: "toString",
+    });
+  });
+
+  it("listSandboxInstances: 子の上限に agent_max が付く（引数で変えられる。null なら付かない）", () => {
+    const names = (max?: Parameters<typeof listSandboxInstances>[2]) =>
+      listSandboxInstances("standard-2", "standard-3", max)
+        .filter((i) => i.agent_max)
+        .map((i) => i.name);
+    expect(names()).toEqual(["standard-4"]);
+    expect(names("standard-3")).toEqual(["standard-3"]);
+    expect(names(null)).toEqual([]);
+  });
+
+  it("昇格の引き金は固定の 3 値", () => {
+    expect([...SANDBOX_PROMOTION_TRIGGERS]).toEqual(["agent", "rule", "verification"]);
+    expect(isSandboxPromotionTrigger("agent")).toBe(true);
+    expect(isSandboxPromotionTrigger("rule")).toBe(true);
+    expect(isSandboxPromotionTrigger("verification")).toBe(true);
+    expect(isSandboxPromotionTrigger("npm test")).toBe(false);
+    expect(isSandboxPromotionTrigger(undefined)).toBe(false);
+  });
+
+  it("規則で上がったときに一致した表の名前は固定の一覧だけ（argv の文字列は入らない）", () => {
+    expect(SANDBOX_RULE_MATCHES).toContain("vitest");
+    expect(SANDBOX_RULE_MATCHES).toContain("go test");
+    expect(SANDBOX_RULE_MATCHES).toContain("pnpm run");
+    expect(new Set(SANDBOX_RULE_MATCHES).size).toBe(SANDBOX_RULE_MATCHES.length);
+    expect(isSandboxRuleMatch("vitest")).toBe(true);
+    expect(isSandboxRuleMatch("rm -rf /")).toBe(false);
+    expect(isSandboxRuleMatch(1)).toBe(false);
+    expect(isSandboxRuleMatch("toString")).toBe(false);
   });
 });

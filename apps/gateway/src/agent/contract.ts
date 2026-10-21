@@ -5,7 +5,12 @@
  * （AgentDO の実際のメソッドの型との比較）が検出する（どちらも typecheck で検査）。
  */
 
-import type { SandboxPromotionReason } from "@rovo/models";
+import type {
+  SandboxInstance,
+  SandboxPromotionReason,
+  SandboxPromotionTrigger,
+  SandboxRuleMatch,
+} from "@rovo/models";
 
 export type AgentPhase =
   | "starting"
@@ -134,14 +139,24 @@ export interface SandboxUsageDto {
   cacheBuildMs?: number;
   /** 最初にコンテナを起動した大きさ（standard-2 など）。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
-  /** 重いコマンドの初回に昇格した先の大きさ。昇格していなければ無い */
+  /** 昇格した最終の大きさ（子の要求・規則・検証のどれでも）。昇格していなければ無い */
   promotedTo?: string;
-  /** 昇格した時刻（epoch ms） */
+  /** 最初の昇格の時刻（epoch ms） */
   promotedAt?: number;
-  /** 昇格した時点までの Sandbox の累計時間（ms）。runtimeMs のうち、これまでが instance の単価、残りが promotedTo の単価 */
+  /** 最初の昇格までの Sandbox の累計時間（ms）。区間ごとの時間は promotions の runtimeMsBefore から導く */
   runtimeMsBeforePromotion?: number;
-  /** 昇格を見送った・失敗した理由の固定コード（packages/models の SANDBOX_PROMOTION_REASONS）。昇格が成功したとき・設定で無効のときは無い */
+  /** 昇格を見送った・失敗した理由の固定コード（packages/models の SANDBOX_PROMOTION_REASONS）。最後に残したもの。設定で無効のときは無い */
   promotionReason?: SandboxPromotionReason;
+  /** 成功した昇格だけの履歴（古い順）。trigger は固定の 3 値、ruleMatch は規則で上がったときだけ（固定の表の名前） */
+  promotions?: {
+    to: SandboxInstance;
+    at: number;
+    trigger: SandboxPromotionTrigger;
+    runtimeMsBefore: number;
+    ruleMatch?: SandboxRuleMatch;
+  }[];
+  /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。子が上げていなければ無い */
+  heavyCommandsAfterAgentScaleUp?: number;
 }
 
 export interface WebUsageDto {

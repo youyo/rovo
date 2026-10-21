@@ -1,5 +1,11 @@
 import type { GitCredential, SandboxMetrics } from "../../src/agent/types";
-import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "../../src/sandbox-port";
+import type {
+  ExecOptions,
+  ExecResult,
+  SandboxPort,
+  SandboxScaleUpResult,
+  WorkspaceSpec,
+} from "../../src/sandbox-port";
 
 export type ExecHandler = (
   argv: string[],
@@ -27,6 +33,11 @@ export class FakeSandbox implements SandboxPort {
   /** metrics() の戻り値。undefined なら読めない実装の再現（undefined を返す）。metricsError を立てると例外 */
   metricsValue: SandboxMetrics | undefined;
   metricsError: Error | undefined;
+
+  /** scaleUp（sandbox_scale_up の本体）で受け取った大きさ（古い順）。子の自由文（reason）は渡らない */
+  readonly scaleUpCalls: unknown[] = [];
+  /** scaleUp の戻り値を先頭から順に使う（空なら、頼まれた大きさに上がったことにする）。Error を入れると、その例外を投げる */
+  scaleUpResults: (SandboxScaleUpResult | Error)[] = [];
 
   /** extendDeadline で受け取った期限（古い順） */
   readonly extended: number[] = [];
@@ -62,6 +73,20 @@ export class FakeSandbox implements SandboxPort {
     this.order.push("credential");
     this.credentials.push(credential);
     this.credentialAlive = true;
+  }
+
+  async scaleUp(instance: string): Promise<SandboxScaleUpResult> {
+    this.order.push("scale_up");
+    this.scaleUpCalls.push(instance);
+    const r = this.scaleUpResults.shift();
+    if (r instanceof Error) throw r;
+    return (
+      r ?? {
+        outcome: "scaled",
+        from: "standard-2",
+        to: instance as "standard-3",
+      }
+    );
   }
 
   async metrics(): Promise<SandboxMetrics | undefined> {

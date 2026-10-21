@@ -1,3 +1,4 @@
+import type { SandboxInstance, SandboxPromotionReason } from "@rovo/models";
 import type { GitCredential, SandboxMetrics } from "./agent/types";
 import type { DepsSpec } from "./deps-cache";
 
@@ -51,6 +52,30 @@ export interface WorkspaceSpec {
   instance?: string;
 }
 
+/**
+ * 子が sandbox_scale_up で頼んだ結果（固定の値だけ。子の自由文は Sandbox に渡さない）。上げる方向だけ。
+ * - scaled: 上げた
+ * - unchanged: 今の大きさと同じか小さい指定なので何もしなかった（エラーではない）。instance は今の大きさ
+ * - rejected: 運用者が決めた上限を超える（above_limit）、選べない大きさ（invalid_instance）。何もしなかった
+ * - fixed: task_start で大きさを明示したタスクなので固定。何もしなかった
+ * - unavailable: 設定で無効（disabled）
+ * - failed: 昇格を試みたが見送り・失敗した（理由は promotion の理由コード）。instance は今の大きさ（小さいまま、または元の大きさに戻した）
+ * - terminated: タスクが終端になった
+ */
+export type SandboxScaleUpResult =
+  | { outcome: "scaled"; from: SandboxInstance; to: SandboxInstance }
+  | { outcome: "unchanged"; instance: SandboxInstance }
+  | {
+      outcome: "rejected";
+      code: "above_limit" | "invalid_instance";
+      instance: SandboxInstance;
+      max: SandboxInstance;
+    }
+  | { outcome: "fixed"; instance: SandboxInstance }
+  | { outcome: "unavailable"; code: "disabled" }
+  | { outcome: "failed"; code: SandboxPromotionReason; instance: SandboxInstance }
+  | { outcome: "terminated" };
+
 /** AgentDO から見た Sandbox。Unit では fake に差し替え、E2E では SandboxDO（実コンテナ）を使う。 */
 export interface SandboxPort {
   /**
@@ -90,4 +115,9 @@ export interface SandboxPort {
    * 無い実装、または読めない（undefined / 例外）ときは、usage に sandbox を載せない。
    */
   metrics?(): Promise<SandboxMetrics | undefined>;
+  /**
+   * 子の要求で Sandbox を大きくする（sandbox_scale_up の本体）。上げる方向だけ。exec と同じ直列の中で、実行中のコマンドの後に動く。
+   * 無い実装、または上限の設定が無いときは、ツールを子に見せない。
+   */
+  scaleUp?(instance: string): Promise<SandboxScaleUpResult>;
 }

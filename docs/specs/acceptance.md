@@ -45,6 +45,7 @@
 | 23 | プロバイダーキーで使えるモデルが決まる・Workers AI のモデル（D10b） | ○（偽の Cloudflare API・偽の AI バインディング・台本） | ○ | 小 | ○ | ○ | 実際の `provider_configs` の応答と、Workers AI の tool calling・usage を確かめる。OpenAI のキーが無い今は `gpt-6-*` が `available: false` |
 | 24 | 依存関係のキャッシュ（D14） | ○（実コンテナの E2E でスナップショットの作成・復元まで。偽の npm・偽の git） | ○（本番のイメージ参照・スナップショットの有効化・時間の短縮） | ○ | ○ | ○ | 同じ lockfile で 2 回続けて実行し、2 回目が `hit` になり、導入の時間ぶん減ることを確かめる |
 | 25 | Sandbox の昇格（重いコマンドの初回に大きい Sandbox へ） | ○（実コンテナの E2E でスナップショット・昇格先の起動・作業ツリーの保持・作り直しまで。fail-soft は Unit で container の API を差し替え） | ○（本番の `standard-3` の起動・按分された推定費用・スナップショットの保管） | ○ | ○ | ○ | 重いテストを流すタスクで `usage.sandbox_promoted_to` が付き、作業ツリーが残り、速くなることを確かめる |
+| 26 | 子が自分で Sandbox を大きくする（sandbox_scale_up） | ○（実コンテナの E2E で 2 → 3 → 4 の 2 回の昇格・作業ツリーの保持・規則との関係・作り直しまで。入口の判定・上限・fail-soft・serial は Unit で container の API を差し替え） | ○（実際のモデルの判断・本番のスナップショットでの 2 回目の昇格・上限・振り返りの項目） | ○ | ○ | ○ | 重いテストを流すタスクで子が自分で上げ（`trigger: agent`）、3 → 4 の 2 回目も動き、`usage.sandbox_promotions` と按分が読めることを確かめる |
 
 環境の準備が要る個別の項目（節をまたぐ）:
 
@@ -659,3 +660,28 @@ DNS rebinding の名前は、ユーザーが管理するドメインの DNS で�
 | 実施者 | 日付 | 環境 | 結果 | 備考 |
 |---|---|---|---|---|
 | youyo | 2026-10-21 | Claude Code、本番（既定 standard-2・昇格先 standard-3） | 昇格する・作業ツリーが残る・一度だけ・依存キャッシュと両立: 合格 | rovo の gateway の vitest を 2 回流すタスク（haiku）。重いテストの開始から約 8 秒で昇格（`sandbox_runtime_ms_before_promotion` 11557）。昇格前のローカルの commit と未 add のファイルが PR の差分に残った。2 回目は昇格せず。`deps_cache` は `hit`。vitest の 1 回目は昇格なし 174 秒 → 昇格あり 127 秒、`sandbox_runtime_ms` の合計は 446 秒 → 301 秒。按分（`task_summary` の `sandbox_usd_estimate`）は未確認。初回は deploy の設定に `SANDBOX_HEAVY_INSTANCE` が入っておらず昇格しなかった（`deploy:config` で作り直して解消） |
+
+## 26. 子が自分で Sandbox を大きくする（sandbox_scale_up。2026-10-21）
+
+子（Sandbox で動く LLM）が、重い処理の前に自分で `sandbox_scale_up({ instance, reason })` を呼んで Sandbox を大きくすることの本番での確認（design 15.8 の「子の自己昇格」）。自動テスト（`test:unit` の agent の `sandbox-do-scale-up` / `agent-do-scale-up` / `heavy-command`、gateway の `agent-events` / `task-summary` / `task-sandbox-instance` / `mcp`、`test:deploy:config`、`test:e2e:docker` の `sandbox-do.e2e`）は通っている。ここでは、実際のモデルが正しく判断するか、本番のスナップショットで 2 回目の昇格が動くか、振り返りの項目が実データで読めるかを確かめる。
+
+前提: agent と gateway の `SANDBOX_AGENT_MAX_INSTANCE` が `standard-4`（`sandbox.agentMaxInstance` の既定）、`SANDBOX_HEAVY_INSTANCE` が `standard-3`、`SANDBOX_INSTANCE` が `standard-2`。25 節が済んでいること。
+
+- [ ] **子がツールで上げる**: `sandbox_instance` を省略し、重いテストを流すタスクを実行する。子がテストの前に `sandbox_scale_up` を呼び、`task_result` の `usage.sandbox_promotions` に `trigger: "agent"` の要素が付き、`rule_match` は付かない。`usage.sandbox_promoted_to` が最終の大きさ、`sandbox_promoted_at` と `sandbox_runtime_ms_before_promotion` が最初の昇格のものになる。ログに `sandbox_promoted: standard-2 -> standard-3 (agent)` が 1 行出る
+- [ ] **表にないコマンドで子が判断する**: `make ci` や独自のシェルスクリプト（`heavy-command.ts` の表に一致しない重い処理）を流すタスクで、子が中身を読んで、そのコマンドの前に自分で上げる（`trigger: "agent"`）。軽い編集・調べものだけのタスクでは呼ばない
+- [ ] **子が上げ忘れたら規則が拾う**: 子がツールを呼ばないまま重いコマンド（`vitest` など）を流したタスクで、規則が昇格し、`usage.sandbox_promotions` が `trigger: "rule"` と `rule_match`（表の名前。コマンドの文字列は入らない）になる。それまでに `agent` の要素が無いことが「子の見逃し」を表す。検証コマンドだけで上がったときは `trigger: "verification"`
+- [ ] **3 → 4（2 回目の昇格）**: 子が `standard-3` に上げた後で `standard-4` を頼み（または規則で `standard-3` に上がった後に子が頼み）、本番のスナップショットで 2 回目も成功する（`usage.sandbox_promotions` が 2 件、`sandbox_promoted_to` が `standard-4`、ログに `standard-3 -> standard-4 (agent)`、`sandbox_promotion_reason` が付かない）。スナップショットの名前は `promote-<task_id>-<回数>` で、回数ごとに別になる
+- [ ] **上限**: `SANDBOX_AGENT_MAX_INSTANCE` を `standard-3` にして再デプロイし、子が `standard-4` を頼むと拒否され（子には上限を伝える結果が返り）、大きさは変わらない。`sandbox_instances_list` の `agent_max` が `standard-3` だけ `true`
+- [ ] **上げるだけ**: 子が今と同じか小さい大きさを頼んでも何も起きず、エラーにならず、今の大きさが返る（スナップショットも取られない）
+- [ ] **固定（fixed_instance）**: `sandbox_instance: standard-1` を明示したタスクでは、ツールが「固定されている」を返して何もしない。子へのプロンプトにツールの説明が出ない
+- [ ] **無効にする**: `sandbox.agentMaxInstance` を `null` にして再デプロイすると、子のツール一覧に `sandbox_scale_up` が出ない。`sandbox_instances_list` の `agent_max` がどれも `false`。規則による自動の昇格は残る
+- [ ] **実行中のコマンドと競合しない**: 子の長いコマンドの実行中に頼んでも、コマンドが終わってから上がる。上がった後のコンテナでバックグラウンドのプロセスは止まっているが、作業ツリー（未 commit の変更を含む）は残る
+- [ ] **使えないとき（fail-soft）**: スナップショットが使えない状態では、ツールは失敗の理由コード（`snapshot_failed` など）を返し、タスクは失敗せず今の大きさで進む。`usage.sandbox_promotion_reason` に固定のコードが付く
+- [ ] **振り返りの項目**: 子が上げたタスクの `usage.sandbox_heavy_commands_after_agent_scale_up`（その後に規則で重いと判定されたコマンドの本数）が付く。0 なら不要だったかもしれない昇格。`task_summary` の `sandbox.promotions` と `sandbox_segments`（大きさごとの区間）が付き、`sandbox_usd_estimate` が区間ごとの合計（各区間の時間 × その大きさの単価）になっている
+- [ ] 監査ログ・R2 のアーカイブ・`task_summary`・`usage` に、子が書いた理由（`reason`）の文が残っていない。`tool_start` の `summary` は `instance=<大きさ>` だけ。トークンや入力の文面が増えていない
+
+### 26 の結果
+
+| 実施者 | 日付 | 環境 | 結果 | 備考 |
+|---|---|---|---|---|
+| （未実施） | | | | 自動テストは `mise run test` で通っている。本番の確認はデプロイ後に行う |

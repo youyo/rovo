@@ -1,0 +1,179 @@
+import { env, runInDurableObject } from "cloudflare:test";
+
+// sandbox-do-promote.test.ts と sandbox-do-scale-up.test.ts が共有する、コンテナの fake と補助。
+// vitest 上では ctx.container が無いので maybeContainer を fake に差し替える（snapshotContainer と containerSnapshot での起動に対応）。
+
+export const SHA = "a".repeat(40);
+export const CA_CERT = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
+export const IMAGE = `registry.cloudflare.com/acct/rovo-agent-sandboxdo-workspace@sha256:${"b".repeat(64)}`;
+export const HEAVY = ["pnpm", "test"];
+export const LIGHT = ["ls", "-la"];
+
+// biome-ignore lint/suspicious/noExplicitAny: private メンバーを差し替えるテスト
+export type Inst = any;
+export const runInDO = runInDurableObject as unknown as (
+  stub: unknown,
+  fn: (inst: Inst) => Promise<void>,
+) => Promise<void>;
+export const sandboxStub = (name: string) =>
+  (env.SANDBOX_DO as DurableObjectNamespace).getByName(name);
+
+export const spec = (extra: Record<string, unknown> = {}) => ({
+  repository: "acme/hello",
+  baseSha: SHA,
+  initialSha: SHA,
+  branch: "agent/task-x",
+  deadlineAt: Date.now() + 3_600_000,
+  ...extra,
+});
+
+type Reply = { code?: number; out?: string } | undefined;
+
+/** コンテナの fake。操作の順序を events に残す（start / snapshot / destroy / exec） */
+export class FakeContainer {
+  running = false;
+  images = { workspace: IMAGE };
+  startCalls: Record<string, unknown>[] = [];
+  snapshotCalls: unknown[] = [];
+  destroyCalls = 0;
+  intercepts = 0;
+  inactivityMs: number[] = [];
+  execLog: string[][] = [];
+  events: string[] = [];
+  /** 今動いているコンテナの大きさ */
+  currentInstance = "";
+  /** この大きさの containerSnapshot 起動は同期的に投げる */
+  failStartFor = new Set<string>();
+  /** この大きさのコンテナでは CA 証明書が読めない */
+  noCertFor = new Set<string>();
+  /** この大きさのコンテナでは、作業ツリーの状態が元と違う */
+  mismatchFor = new Set<string>();
+  /** 作業ツリーの状態の読み取りを失敗させる */
+  stateUnreadable = false;
+  /** true にすると、同じ名前のスナップショットの 2 回目は失敗する（名前の重複の扱いが未確認なので、2 回目の昇格が名前で落ちないことを確かめる） */
+  rejectDuplicateSnapshotNames = false;
+  numberedSnapshotIds = false;
+  /** 取ったスナップショットの名前 */
+  snapshotNames = new Set<string>();
+  /** snapshotContainer の結果 */
+  snapshotResult: { id: string; size: number } | Error | "hang" = { id: "snap-promote", size: 1 };
+  /** undefined にすると、snapshotContainer が無いランタイムを模せる */
+  snapshotContainer: ((options?: { name?: string }) => Promise<unknown>) | undefined = (o) =>
+    this.snap(o);
+  /** 追加の応答 */
+  handler: (argv: string[]) => Reply = () => undefined;
+  /** snapshotContainer の途中で呼ばれる */
+  onSnapshot: (() => Promise<void>) | undefined;
+  /** destroy の途中で呼ばれる（止まる前） */
+  onDestroy: (() => Promise<void>) | undefined;
+  /** exec の応答の前に呼ばれる */
+  onExec: ((argv: string[]) => Promise<void>) | undefined;
+
+  start(options: Record<string, unknown>) {
+    this.startCalls.push(options);
+    const instance = String(options.instance);
+    this.events.push(
+      `start:${options.containerSnapshot ? "snapshot" : "image"}:${instance}${
+        options.containerSnapshot ? `:${(options.containerSnapshot as { id: string }).id}` : ""
+      }`,
+    );
+    if (options.containerSnapshot && options.image) throw new TypeError("both image and snapshot");
+    if (options.containerSnapshot && this.failStartFor.has(instance)) {
+      throw new Error("start boom");
+    }
+    this.running = true;
+    this.currentInstance = instance;
+  }
+  async destroy() {
+    this.destroyCalls += 1;
+    this.events.push("destroy");
+    await this.onDestroy?.();
+    this.running = false;
+  }
+  async setInactivityTimeout(ms: number) {
+    this.inactivityMs.push(ms);
+  }
+  async interceptOutboundHttps() {
+    this.intercepts += 1;
+  }
+  async interceptAllOutboundHttp() {}
+  async exec(argv: string[]) {
+    this.execLog.push(argv);
+    this.events.push(`exec:${argv.join(" ")}`);
+    await this.onExec?.(argv);
+    const stream = (t: string) =>
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          if (t) c.enqueue(new TextEncoder().encode(t));
+          c.close();
+        },
+      });
+    let reply: Reply = this.handler(argv);
+    if (reply === undefined) {
+      if (argv[0] === "test" && argv[2] === CA_CERT) {
+        reply = { code: this.noCertFor.has(this.currentInstance) ? 1 : 0 };
+      } else if (argv[0] === "bash" && argv[3] === "rovo-baseline") reply = { out: "1:1\n" };
+      else if (argv[0] === "bash" && argv[3] === "rovo-reaper") reply = { out: "clean\n" };
+      else if (argv[0] === "bash" && argv[3] === "rovo-promote-state") {
+        if (this.stateUnreadable) reply = { code: 1 };
+        else {
+          const dirty = this.mismatchFor.has(this.currentInstance) ? "?? other.txt" : " M a.ts";
+          reply = { out: `${"c".repeat(40)}\n${dirty}\nhash-of-diff  -\n` };
+        }
+      } else if (argv[0] === "git" && argv.includes("rev-parse") && argv.includes("--verify")) {
+        reply = { code: 1 }; // 最初の起動: 作業ツリーが無い → clone へ
+      } else reply = {};
+    }
+    return {
+      stdout: stream(reply.out ?? ""),
+      stderr: stream(""),
+      exitCode: Promise.resolve(reply.code ?? 0),
+    };
+  }
+  private async snap(options?: { name?: string }) {
+    if (options === undefined) throw new TypeError("options is required");
+    this.snapshotCalls.push(options);
+    this.events.push("snapshot");
+    if (!this.running) throw new Error("container is not running");
+    if (this.rejectDuplicateSnapshotNames && options.name && this.snapshotNames.has(options.name)) {
+      throw new Error("snapshot name already exists");
+    }
+    if (options.name) this.snapshotNames.add(options.name);
+    await this.onSnapshot?.();
+    if (this.snapshotResult === "hang") return new Promise<never>(() => {});
+    if (this.snapshotResult instanceof Error) throw this.snapshotResult;
+    // numberedSnapshotIds のときは、スナップショットごとに別の id（昇格のたびに別のスナップショットから起動することを確かめられる）
+    const id = this.numberedSnapshotIds
+      ? `${this.snapshotResult.id}-${this.snapshotCalls.length}`
+      : this.snapshotResult.id;
+    return { ...this.snapshotResult, id, ...(options.name ? { name: options.name } : {}) };
+  }
+  /** 元のコマンド（重い・軽い）を実行した位置。ユーザーのコマンドは cwd を持つ（内部の exec と見分ける） */
+  indexOfEvent(prefix: string): number {
+    return this.events.findIndex((e) => e.startsWith(prefix));
+  }
+}
+
+export function setup(inst: Inst, vars: Record<string, string> = {}) {
+  const fake = new FakeContainer();
+  inst.maybeContainer = () => fake;
+  inst.depsCacheEnabled = () => false;
+  inst.env = { ...inst.env, SANDBOX_HEAVY_INSTANCE: "standard-3", ...vars };
+  return fake;
+}
+
+/** console.warn の行を集める（理由コードのログ） */
+export async function capturingWarn<T>(
+  fn: () => Promise<T>,
+): Promise<{ value: T; lines: string[] }> {
+  const lines: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => {
+    lines.push(a.map(String).join(" "));
+  };
+  try {
+    return { value: await fn(), lines };
+  } finally {
+    console.warn = orig;
+  }
+}

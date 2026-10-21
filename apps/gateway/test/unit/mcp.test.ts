@@ -1990,6 +1990,49 @@ describe("sandbox_instances_list / task_start の sandbox_instance", () => {
     }
   });
 
+  it("sandbox_instances_list: 子が sandbox_scale_up で選べる上限に agent_max が付く（デプロイの SANDBOX_AGENT_MAX_INSTANCE。未設定・空・不正なら付かない）", async () => {
+    const u = await user("alice");
+    for (const [raw, expected] of [
+      ["standard-4", "standard-4"],
+      ["standard-3", "standard-3"],
+      [undefined, undefined],
+      ["", undefined],
+      ["off", undefined],
+      ["lite", undefined],
+      ["basic", undefined],
+    ] as const) {
+      const client = await connect(createApiApp(), u.props, {
+        ...env,
+        SANDBOX_AGENT_MAX_INSTANCE: raw,
+      } as unknown as Env);
+      const out = body(await client.callTool({ name: "sandbox_instances_list", arguments: {} }));
+      const instances = out.instances as Record<string, unknown>[];
+      const maxes = instances.filter((i) => i.agent_max === true).map((i) => i.name);
+      expect(maxes, String(raw)).toEqual(expected === undefined ? [] : [expected]);
+      expect(instances.every((i) => typeof i.agent_max === "boolean")).toBe(true);
+      await client.close();
+    }
+  });
+
+  it("説明: 子の自己昇格（sandbox_scale_up）と usage の履歴（sandbox_promotions・trigger・rule_match・重いコマンドの本数）を task_result / sandbox_instances_list / instructions に書く。子の自由文は残さないことも書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tools = await list(client);
+    const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    expect(desc("sandbox_instances_list")).toContain("agent_max");
+    expect(desc("sandbox_instances_list")).toContain("sandbox_scale_up");
+    for (const key of [
+      "sandbox_promotions",
+      "trigger",
+      "rule_match",
+      "sandbox_heavy_commands_after_agent_scale_up",
+    ]) {
+      expect(desc("task_result"), key).toContain(key);
+    }
+    expect(client.getInstructions() ?? "").toContain("sandbox_scale_up");
+    await client.close();
+  });
+
   it("説明: sandbox_instances_list は promotion_target と昇格（小さく始めて重いコマンドの初回に大きくなる）を、task_result は usage の昇格の項目を説明する。instructions にも書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);

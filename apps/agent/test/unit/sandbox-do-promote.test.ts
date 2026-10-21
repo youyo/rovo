@@ -1,4 +1,3 @@
-import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 // Sandbox の昇格（小さく始めて、重いコマンドの初回に大きい Sandbox へ）の SandboxDO 側。
@@ -6,165 +5,17 @@ import { describe, expect, it } from "vitest";
 // 昇格が成功する通常の経路は Docker の E2E（sandbox-do.e2e.test.ts。ローカルの wrangler dev も snapshotContainer に対応している）でも確かめる。
 // ここでは container の API を差し替えて、順序と fail-soft の各経路（見送り・昇格先の起動の失敗・元の大きさでの起動し直し・terminate）を確かめる。
 // 本番の確認は docs/specs/acceptance.md。
-
-const SHA = "a".repeat(40);
-const CA_CERT = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
-const IMAGE = `registry.cloudflare.com/acct/rovo-agent-sandboxdo-workspace@sha256:${"b".repeat(64)}`;
-const HEAVY = ["pnpm", "test"];
-const LIGHT = ["ls", "-la"];
-
-// biome-ignore lint/suspicious/noExplicitAny: private メンバーを差し替えるテスト
-type Inst = any;
-const runInDO = runInDurableObject as unknown as (
-  stub: unknown,
-  fn: (inst: Inst) => Promise<void>,
-) => Promise<void>;
-const sandboxStub = (name: string) => (env.SANDBOX_DO as DurableObjectNamespace).getByName(name);
-
-const spec = (extra: Record<string, unknown> = {}) => ({
-  repository: "acme/hello",
-  baseSha: SHA,
-  initialSha: SHA,
-  branch: "agent/task-x",
-  deadlineAt: Date.now() + 3_600_000,
-  ...extra,
-});
-
-type Reply = { code?: number; out?: string } | undefined;
-
-/** コンテナの fake。操作の順序を events に残す（start / snapshot / destroy / exec） */
-class FakeContainer {
-  running = false;
-  images = { workspace: IMAGE };
-  startCalls: Record<string, unknown>[] = [];
-  snapshotCalls: unknown[] = [];
-  destroyCalls = 0;
-  intercepts = 0;
-  inactivityMs: number[] = [];
-  execLog: string[][] = [];
-  events: string[] = [];
-  /** 今動いているコンテナの大きさ */
-  currentInstance = "";
-  /** この大きさの containerSnapshot 起動は同期的に投げる */
-  failStartFor = new Set<string>();
-  /** この大きさのコンテナでは CA 証明書が読めない */
-  noCertFor = new Set<string>();
-  /** この大きさのコンテナでは、作業ツリーの状態が元と違う */
-  mismatchFor = new Set<string>();
-  /** 作業ツリーの状態の読み取りを失敗させる */
-  stateUnreadable = false;
-  /** snapshotContainer の結果 */
-  snapshotResult: { id: string; size: number } | Error | "hang" = { id: "snap-promote", size: 1 };
-  /** undefined にすると、snapshotContainer が無いランタイムを模せる */
-  snapshotContainer: ((options?: { name?: string }) => Promise<unknown>) | undefined = (o) =>
-    this.snap(o);
-  /** 追加の応答 */
-  handler: (argv: string[]) => Reply = () => undefined;
-  /** snapshotContainer の途中で呼ばれる */
-  onSnapshot: (() => Promise<void>) | undefined;
-  /** destroy の途中で呼ばれる（止まる前） */
-  onDestroy: (() => Promise<void>) | undefined;
-  /** exec の応答の前に呼ばれる */
-  onExec: ((argv: string[]) => Promise<void>) | undefined;
-
-  start(options: Record<string, unknown>) {
-    this.startCalls.push(options);
-    const instance = String(options.instance);
-    this.events.push(
-      `start:${options.containerSnapshot ? "snapshot" : "image"}:${instance}${
-        options.containerSnapshot ? `:${(options.containerSnapshot as { id: string }).id}` : ""
-      }`,
-    );
-    if (options.containerSnapshot && options.image) throw new TypeError("both image and snapshot");
-    if (options.containerSnapshot && this.failStartFor.has(instance)) {
-      throw new Error("start boom");
-    }
-    this.running = true;
-    this.currentInstance = instance;
-  }
-  async destroy() {
-    this.destroyCalls += 1;
-    this.events.push("destroy");
-    await this.onDestroy?.();
-    this.running = false;
-  }
-  async setInactivityTimeout(ms: number) {
-    this.inactivityMs.push(ms);
-  }
-  async interceptOutboundHttps() {
-    this.intercepts += 1;
-  }
-  async interceptAllOutboundHttp() {}
-  async exec(argv: string[]) {
-    this.execLog.push(argv);
-    this.events.push(`exec:${argv.join(" ")}`);
-    await this.onExec?.(argv);
-    const stream = (t: string) =>
-      new ReadableStream<Uint8Array>({
-        start(c) {
-          if (t) c.enqueue(new TextEncoder().encode(t));
-          c.close();
-        },
-      });
-    let reply: Reply = this.handler(argv);
-    if (reply === undefined) {
-      if (argv[0] === "test" && argv[2] === CA_CERT) {
-        reply = { code: this.noCertFor.has(this.currentInstance) ? 1 : 0 };
-      } else if (argv[0] === "bash" && argv[3] === "rovo-baseline") reply = { out: "1:1\n" };
-      else if (argv[0] === "bash" && argv[3] === "rovo-reaper") reply = { out: "clean\n" };
-      else if (argv[0] === "bash" && argv[3] === "rovo-promote-state") {
-        if (this.stateUnreadable) reply = { code: 1 };
-        else {
-          const dirty = this.mismatchFor.has(this.currentInstance) ? "?? other.txt" : " M a.ts";
-          reply = { out: `${"c".repeat(40)}\n${dirty}\nhash-of-diff  -\n` };
-        }
-      } else if (argv[0] === "git" && argv.includes("rev-parse") && argv.includes("--verify")) {
-        reply = { code: 1 }; // 最初の起動: 作業ツリーが無い → clone へ
-      } else reply = {};
-    }
-    return {
-      stdout: stream(reply.out ?? ""),
-      stderr: stream(""),
-      exitCode: Promise.resolve(reply.code ?? 0),
-    };
-  }
-  private async snap(options?: { name?: string }) {
-    if (options === undefined) throw new TypeError("options is required");
-    this.snapshotCalls.push(options);
-    this.events.push("snapshot");
-    if (!this.running) throw new Error("container is not running");
-    await this.onSnapshot?.();
-    if (this.snapshotResult === "hang") return new Promise<never>(() => {});
-    if (this.snapshotResult instanceof Error) throw this.snapshotResult;
-    return { ...this.snapshotResult, ...(options.name ? { name: options.name } : {}) };
-  }
-  /** 元のコマンド（重い・軽い）を実行した位置。ユーザーのコマンドは cwd を持つ（内部の exec と見分ける） */
-  indexOfEvent(prefix: string): number {
-    return this.events.findIndex((e) => e.startsWith(prefix));
-  }
-}
-
-function setup(inst: Inst, vars: Record<string, string> = {}) {
-  const fake = new FakeContainer();
-  inst.maybeContainer = () => fake;
-  inst.depsCacheEnabled = () => false;
-  inst.env = { ...inst.env, SANDBOX_HEAVY_INSTANCE: "standard-3", ...vars };
-  return fake;
-}
-
-/** console.warn の行を集める（理由コードのログ） */
-async function capturingWarn<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
-  const lines: string[] = [];
-  const orig = console.warn;
-  console.warn = (...a: unknown[]) => {
-    lines.push(a.map(String).join(" "));
-  };
-  try {
-    return { value: await fn(), lines };
-  } finally {
-    console.warn = orig;
-  }
-}
+import {
+  CA_CERT,
+  capturingWarn,
+  HEAVY,
+  IMAGE,
+  LIGHT,
+  runInDO,
+  sandboxStub,
+  setup,
+  spec,
+} from "./support/sandbox-promote-fake";
 
 describe("SandboxDO: 重いコマンドの初回に大きい Sandbox へ昇格する", () => {
   it("スナップショット → 停止 → containerSnapshot で昇格先を起動 → 確認 → 元のコマンド、の順に進む", async () => {

@@ -1,4 +1,7 @@
-import type { ExecResult, WorkspaceSpec } from "../../src/sandbox-port";
+import type { ExecResult, SandboxScaleUpResult, WorkspaceSpec } from "../../src/sandbox-port";
+
+type ScaleUpResult = SandboxScaleUpResult;
+
 import { e2eLog } from "./e2e-log";
 import { TEST_GIT_TOKEN } from "./fake-upstream";
 
@@ -56,6 +59,8 @@ export function sandboxClient(baseUrl: string, name: string) {
     /** 実行時間・作り直し・起動のやり直しのカウンタ（SandboxDO.metrics）。 */
     metrics: () =>
       op("metrics") as Promise<{ runtimeMs: number; restarts: number; bootRetries: number }>,
+    /** 子の要求で Sandbox を大きくする（sandbox_scale_up の本体。SandboxDO.scaleUp）。 */
+    scaleUp: (instance: unknown) => op("scale-up", { instance }) as Promise<ScaleUpResult>,
     /** この Sandbox（と、そのタスクの OutboundGateway）が出した監査イベント（ENVIRONMENT=test のときだけ）。 */
     audit: async () => ((await op("audit")) as { records: Record<string, unknown>[] }).records,
     status: () =>

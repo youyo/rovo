@@ -18,7 +18,11 @@
     ],
     "efforts": {}
   },
-  "sandbox": { "instance": "standard-2", "heavyInstance": "standard-3" },
+  "sandbox": {
+    "instance": "standard-2",
+    "heavyInstance": "standard-3",
+    "agentMaxInstance": "standard-4"
+  },
   "depsCache": { "enabled": true },
   "webBrowseEnabled": false,
   "vars": { "gateway": {}, "agent": {}, "web": {} }

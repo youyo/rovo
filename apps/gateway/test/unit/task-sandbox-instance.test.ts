@@ -175,3 +175,67 @@ describe("task_result の usage.sandbox_promoted_*（昇格）", () => {
     expect(Object.keys(usage).filter((k) => k.startsWith("sandbox_promot"))).toEqual([]);
   });
 });
+
+describe("task_result の usage.sandbox_promotions（昇格の履歴）と子が上げたあとの重いコマンドの本数", () => {
+  it("agent が報告した履歴を、公開用の形（snake_case・固定の値だけ）で返す。sandbox_promoted_to は最終の大きさ", async () => {
+    const usage = await usageWith({
+      runtimeMs: 90_000,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      promotedTo: "standard-4",
+      promotedAt: 1_700_000_000_000,
+      runtimeMsBeforePromotion: 30_000,
+      promotions: [
+        {
+          to: "standard-3",
+          at: 1_700_000_000_000,
+          trigger: "rule",
+          runtimeMsBefore: 30_000,
+          ruleMatch: "vitest",
+        },
+        { to: "standard-4", at: 1_700_000_050_000, trigger: "agent", runtimeMsBefore: 60_000.5 },
+      ],
+      heavyCommandsAfterAgentScaleUp: 1,
+    });
+    expect(usage).toMatchObject({
+      sandbox_promoted_to: "standard-4",
+      sandbox_promoted_at: 1_700_000_000_000,
+      sandbox_runtime_ms_before_promotion: 30_000,
+      sandbox_heavy_commands_after_agent_scale_up: 1,
+    });
+    expect(usage.sandbox_promotions).toEqual([
+      {
+        to: "standard-3",
+        at: 1_700_000_000_000,
+        trigger: "rule",
+        runtime_ms_before: 30_000,
+        rule_match: "vitest",
+      },
+      { to: "standard-4", at: 1_700_000_050_000, trigger: "agent", runtime_ms_before: 60_000 },
+    ]);
+  });
+
+  it("表に無い値は捨てる。履歴が無い・昇格していないタスクには付かない", async () => {
+    const bad = await usageWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      promotions: [
+        { to: "evil", at: 1, trigger: "agent", runtimeMsBefore: 1 },
+        { to: "standard-3", at: 1, trigger: "me", runtimeMsBefore: 1 },
+        { to: "standard-3", at: 1, trigger: "rule", runtimeMsBefore: 1, ruleMatch: "any command" },
+      ],
+      heavyCommandsAfterAgentScaleUp: "many",
+    });
+    // 規則名が表に無い rule の昇格は、規則名だけ外して残す
+    expect(bad.sandbox_promotions).toEqual([
+      { to: "standard-3", at: 1, trigger: "rule", runtime_ms_before: 1 },
+    ]);
+    expect(JSON.stringify(bad)).not.toContain("any command");
+    expect(bad).not.toHaveProperty("sandbox_heavy_commands_after_agent_scale_up");
+    const none = await usageWith({ runtimeMs: 1, restarts: 0, bootRetries: 0 });
+    expect(none).not.toHaveProperty("sandbox_promotions");
+    expect(none).not.toHaveProperty("sandbox_heavy_commands_after_agent_scale_up");
+  });
+});

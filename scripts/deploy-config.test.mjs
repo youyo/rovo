@@ -222,6 +222,60 @@ describe("sandbox.heavyInstance（重いコマンドの初回の昇格先）", (
   });
 });
 
+describe("sandbox.agentMaxInstance（子が sandbox_scale_up で選べる上限）", () => {
+  const gen = (patch) =>
+    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
+  it("既定は standard-4。agent の SANDBOX_AGENT_MAX_INSTANCE と gateway の同名の var に反映される（他の sandbox の設定だけ書いても落ちない）", () => {
+    assert.equal(DEFAULTS.sandbox.agentMaxInstance, "standard-4");
+    for (const patch of [
+      {},
+      { sandbox: {} },
+      { sandbox: { instance: "standard-1" } },
+      { sandbox: { heavyInstance: null } },
+    ]) {
+      const o = gen(patch);
+      assert.equal(parseJsonc(o.agent).vars.SANDBOX_AGENT_MAX_INSTANCE, "standard-4");
+      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_AGENT_MAX_INSTANCE, "standard-4");
+    }
+  });
+  it("選べる 4 種類のどれかにできる。昇格先（heavyInstance）より小さくてもよい", () => {
+    for (const name of ["standard-1", "standard-2", "standard-3", "standard-4"]) {
+      const o = gen({ sandbox: { agentMaxInstance: name } });
+      assert.equal(parseJsonc(o.agent).vars.SANDBOX_AGENT_MAX_INSTANCE, name);
+      assert.equal(parseJsonc(o.gateway).vars.SANDBOX_AGENT_MAX_INSTANCE, name);
+    }
+    const o = gen({ sandbox: { heavyInstance: "standard-4", agentMaxInstance: "standard-3" } });
+    assert.equal(parseJsonc(o.agent).vars.SANDBOX_AGENT_MAX_INSTANCE, "standard-3");
+    assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, "standard-4");
+  });
+  it("null で無効（空文字になる = ツールを子に見せない）。agent と gateway の両方。heavyInstance には影響しない", () => {
+    const o = gen({ sandbox: { agentMaxInstance: null } });
+    assert.equal(parseJsonc(o.agent).vars.SANDBOX_AGENT_MAX_INSTANCE, "");
+    assert.equal(parseJsonc(o.gateway).vars.SANDBOX_AGENT_MAX_INSTANCE, "");
+    assert.equal(parseJsonc(o.agent).vars.SANDBOX_HEAVY_INSTANCE, "standard-3");
+  });
+  it("web には出さない（Sandbox を持たない）", () => {
+    assert.equal(parseJsonc(gen({}).web).vars.SANDBOX_AGENT_MAX_INSTANCE, undefined);
+  });
+  it("生成物に未置換の雛形（<SANDBOX_AGENT_MAX_INSTANCE>）が残らない", () => {
+    const o = gen({});
+    for (const app of ["agent", "gateway"])
+      assert.ok(!o[app].includes("<SANDBOX_AGENT_MAX_INSTANCE>"));
+  });
+  it("lite・名前にない値・型の誤り・空文字・未知のキーはエラー", () => {
+    const bad = (sandbox) => validateConfig({ ...productionLike(), sandbox }).errors;
+    for (const v of ["lite", "basic", "standard-9", 3, true, "", "off"]) {
+      assert.ok(
+        bad({ agentMaxInstance: v }).some((e) => e.includes("sandbox.agentMaxInstance")),
+        String(v),
+      );
+    }
+    assert.ok(
+      bad({ agentMaxInstanse: "standard-3" }).some((e) => e.includes("sandbox.agentMaxInstanse")),
+    );
+  });
+});
+
 describe("concurrency.maxTasks（利用者ごとの同時実行数）", () => {
   const gen = (patch) =>
     generateAll(validated({ ...productionLike(), ...patch }), infra, templates);

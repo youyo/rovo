@@ -37,6 +37,13 @@ export interface AgentPiHooks {
   /** web_browse の本体（既定は無効。有効のときだけ Pi のツールとして登録する） */
   webBrowse(args: { url: string }): Promise<{ text: string; isError: boolean }>;
   webBrowseEnabled(): boolean;
+  /**
+   * sandbox_scale_up の本体。子の自由文（reason）は受け取らない（呼び出し側のツールが捨てる）。
+   * 結果は固定の文（非信頼データを含まない）。上げる方向だけ。
+   */
+  sandboxScaleUp?(args: { instance: string }): Promise<{ text: string; isError: boolean }>;
+  /** sandbox_scale_up を子に見せるか（env の SANDBOX_AGENT_MAX_INSTANCE が有効なときだけ。無効・不正なら登録しない） */
+  sandboxScaleUpEnabled?(): boolean;
   /** システムプロンプトの section（key → 本文。本文が undefined なら出さない） */
   sections(): { key: string; text: string | undefined }[];
 }
@@ -175,6 +182,37 @@ export function createAgentExtension(
     },
   });
 
+  // Sandbox の副作用（コンテナの作り直し）があるので replay は safe にしない。有効なときだけ登録する（無効のときはモデルにツールの存在を見せない）。
+  // reason は子が「なぜ大きくするか」を自分で整理するための欄で、どこにも保存しない（受け取って捨てる）。
+  const sandboxScaleUp = defineTool({
+    name: "sandbox_scale_up",
+    description:
+      "Make the sandbox (the container your commands run in) larger. Call it BEFORE you start heavy work: running tests, a build, a type check, " +
+      "or a large dependency install. Decide by what the command really does, not only by its name; a Makefile target or a custom script can be heavy too. " +
+      "You can only scale up, never down: asking for the current size or a smaller one does nothing and returns the current size. " +
+      "The largest size you may choose is set by the operator; a larger request is rejected and the answer tells you the limit. " +
+      "A larger size helps only when the work runs in parallel (several test workers, a parallel build). " +
+      "The call takes tens of seconds and restarts the container: processes you left running in the background (a dev server, for example) are stopped; " +
+      "the files in the workspace are kept. Do not retry or cancel it because it looks slow. If it fails you stay at the current size and can continue.",
+    parameters: Type.Object({
+      instance: Type.String({
+        description: "The size to scale up to: standard-1, standard-2, standard-3 or standard-4",
+      }),
+      reason: Type.String({
+        description:
+          "One short sentence: what heavy work you are about to run. It is not recorded anywhere; it is only for your own planning",
+      }),
+    }),
+    replay: "unsafe",
+    async execute(args) {
+      const r = (await hooks.sandboxScaleUp?.({ instance: args.instance })) ?? {
+        text: "Scaling up is not available in this deployment.",
+        isError: true,
+      };
+      return { output: [{ type: "text" as const, text: r.text }], isError: r.isError };
+    },
+  });
+
   return defineExtension({
     name: "rovo",
     tools: [
@@ -184,6 +222,7 @@ export function createAgentExtension(
       webSearch,
       webFetch,
       ...(hooks.webBrowseEnabled() ? [webBrowse] : []),
+      ...(hooks.sandboxScaleUpEnabled?.() === true ? [sandboxScaleUp] : []),
     ],
     sections: SECTION_KEYS.map((key) =>
       section(key, () => hooks.sections().find((s) => s.key === key)?.text),

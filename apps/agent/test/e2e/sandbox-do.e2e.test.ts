@@ -141,6 +141,88 @@ describe("Sandbox の昇格（重いコマンドの初回に大きい Sandbox �
     expect(restarted.instance).toBe("standard-2");
     expect(restarted.promotedTo).toBe(before.promotedTo);
   }, 280_000);
+
+  it("子の要求（sandbox_scale_up）で 2 → 3 → 4 と 2 回上がる。同じ・小さい指定は何もしない。作業ツリーと傍受は残り、規則は何もしない。作り直しは最終の大きさで起動する", async () => {
+    type Up = {
+      promotedTo?: string;
+      promotedAt?: number;
+      promotions?: { to: string; at: number; trigger: string; runtimeMsBefore: number }[];
+      heavyCommandsAfterAgentScaleUp?: number;
+      promotionReason?: string;
+    };
+    const c = client("scale-up-twice");
+    await c.ensureReady(specFor("scale-up-twice"));
+    await c.writeFile("/workspace/keep.txt", "uncommitted\n");
+    const headBefore = (await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim();
+    const statusBefore = (await c.exec(["git", "status", "--porcelain"])).stdout;
+
+    // 同じ・小さい指定は何もしない（今の大きさを返す）
+    expect(await c.scaleUp("standard-2")).toEqual({ outcome: "unchanged", instance: "standard-2" });
+    expect(await c.scaleUp("standard-1")).toEqual({ outcome: "unchanged", instance: "standard-2" });
+    // 選べない大きさは拒否
+    expect(await c.scaleUp("lite")).toMatchObject({
+      outcome: "rejected",
+      code: "invalid_instance",
+    });
+    expect(((await promoMetrics(c)) as unknown as Up).promotedTo).toBeUndefined();
+
+    // 1 回目: 2 → 3
+    expect(await c.scaleUp("standard-3")).toEqual({
+      outcome: "scaled",
+      from: "standard-2",
+      to: "standard-3",
+    });
+    expect((await c.readFile("/workspace/keep.txt")).content).toBe("uncommitted\n");
+    // 2 回目: 3 → 4（スナップショットの名前が 1 回目と違うので、同名で失敗しない）
+    expect(await c.scaleUp("standard-4")).toEqual({
+      outcome: "scaled",
+      from: "standard-3",
+      to: "standard-4",
+    });
+
+    // 作業ツリー（HEAD も未 commit の変更も）と、HTTPS の傍受の CA が残っている
+    expect((await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim()).toBe(headBefore);
+    expect((await c.exec(["git", "status", "--porcelain"])).stdout).toBe(statusBefore);
+    expect((await c.readFile("/workspace/keep.txt")).content).toBe("uncommitted\n");
+    expect((await c.exec(["git", "ls-remote", "origin", "HEAD"])).exitCode).toBe(0);
+
+    const m = (await promoMetrics(c)) as unknown as Promo & Up;
+    expect(m.instance).toBe("standard-2");
+    expect(m.promotedTo).toBe("standard-4");
+    expect(m.promotions?.map((p) => [p.to, p.trigger])).toEqual([
+      ["standard-3", "agent"],
+      ["standard-4", "agent"],
+    ]);
+    expect(m.promotedAt).toBe(m.promotions?.[0]?.at);
+    expect(m.promotionReason).toBeUndefined();
+    expect(m.restarts).toBe(0);
+
+    // 規則（重いコマンド）は、子がすでに上げているので何もしない。数えるだけ
+    const r = await c.exec(HEAVY);
+    expect(r.exitCode).toBe(0);
+    const after = (await promoMetrics(c)) as unknown as Promo & Up;
+    expect(after.promotions).toHaveLength(2);
+    expect(after.promotionReason).toBeUndefined();
+    expect(after.heavyCommandsAfterAgentScaleUp).toBe(1);
+    expect(after.restarts).toBe(0);
+
+    // 落ちて作り直されたら、最終の大きさ（standard-4）で起動する
+    await c.destroy();
+    await c.ensureReady(specFor("scale-up-twice"));
+    const restarted = (await promoMetrics(c)) as unknown as Promo & Up;
+    expect(restarted.restarts).toBe(1);
+    expect(restarted.instance).toBe("standard-2");
+    expect(restarted.promotedTo).toBe("standard-4");
+  }, 400_000);
+
+  it("task_start で大きさを明示したタスク（固定）では、sandbox_scale_up は何もしない", async () => {
+    const c = client("scale-up-fixed");
+    await c.ensureReady(specFor("scale-up-fixed", { instance: "standard-1" }));
+    expect(await c.scaleUp("standard-4")).toEqual({ outcome: "fixed", instance: "standard-1" });
+    const m = await promoMetrics(c);
+    expect(m.instance).toBe("standard-1");
+    expect(m.promotedTo).toBeUndefined();
+  }, 120_000);
 });
 
 describe("依存関係のキャッシュ（D14）", () => {

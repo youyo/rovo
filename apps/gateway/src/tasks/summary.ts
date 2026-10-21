@@ -13,7 +13,7 @@ import {
   type SandboxPromotionReason,
   sandboxUsdPerHour,
 } from "@rovo/models";
-import { sandboxInstanceName } from "../sandbox-instance";
+import { type PublicPromotion, sandboxInstanceName, sanitizePromotions } from "../sandbox-instance";
 
 /**
  * 単価（USD）。vars で上書きできる。既定値は Cloudflare の公式料金表（取得日 2026-10-19）から取った。出典は phase6.md。
@@ -89,14 +89,18 @@ export type SummaryInput = {
       bootRetries: number;
       /** agent が報告した、最初に起動した大きさ。分かれば、その単価（sandboxUsdPerHour）で推定する */
       instance?: SandboxInstance;
-      /** 重いコマンドの初回に昇格した先。昇格前の時間（runtimeMsBeforePromotion）は instance の単価、残りはこの単価で按分する */
+      /** 昇格した最終の大きさ。promotions が無いとき（古い agent）は、昇格前の時間（runtimeMsBeforePromotion）を instance の単価、残りをこの単価で按分する */
       promotedTo?: SandboxInstance;
-      /** 昇格した時刻（epoch ms） */
+      /** 最初の昇格の時刻（epoch ms） */
       promotedAt?: number;
-      /** 昇格した時点までの Sandbox の累計時間（ms） */
+      /** 最初の昇格までの Sandbox の累計時間（ms） */
       runtimeMsBeforePromotion?: number;
       /** 昇格を見送った・失敗した理由（固定コード） */
       promotionReason?: SandboxPromotionReason;
+      /** 成功した昇格の履歴（公開用の形に検証済みのもの。古い順）。あれば、区間ごとに按分する */
+      promotions?: PublicPromotion[];
+      /** 子が上げたあと、規則で重いと判定されたコマンドを実行した本数 */
+      heavyCommandsAfterAgentScaleUp?: number;
     } | null;
   };
   questions: number;
@@ -138,9 +142,19 @@ export type TaskSummary = {
     promoted_at?: number;
     /** 昇格した時点までの Sandbox の時間（ms）。runtime_ms のうち、これまでが instance の単価、残りが promoted_to の単価 */
     runtime_ms_before_promotion?: number;
-    /** 昇格を見送った・失敗した理由（固定コード）。昇格が成功したときは無い */
+    /** 昇格を見送った・失敗した理由（固定コード）。最後に残したもの */
     promotion_reason?: SandboxPromotionReason;
+    /** 成功した昇格の履歴（古い順）。trigger は agent（子が頼んだ）/ rule（重いコマンドの規則＝保険）/ verification。rule_match は規則で上がったときだけ（固定の表の名前）。昇格していなければ無い */
+    promotions?: PublicPromotion[];
+    /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数（0 なら不要だった昇格の候補）。子が上げていなければ無い */
+    heavy_commands_after_agent_scale_up?: number;
   };
+  /** 昇格したタスクだけ: 大きさごとの区間（その大きさで動かした時間 × 単価）。sandbox_usd_estimate はこの合計 */
+  sandbox_segments?: {
+    instance: SandboxInstance | null;
+    runtime_ms: number;
+    usd_per_hour: number;
+  }[];
   /** 推定。単価（unit_prices）をかけた値で、タスクの予算には含めない */
   sandbox_usd_estimate: number;
   web: { search: number; fetch: number; browse: number };
@@ -189,14 +203,46 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
     sandboxUsdPerHour:
       instance !== undefined ? sandboxUsdPerHour(instance) : i.prices.sandboxUsdPerHour,
   };
-  // 昇格したタスクは、昇格前の時間を元の大きさの単価、昇格後の時間を昇格先の単価で按分する（昇格前の時間は 0〜累計に収める）
-  const promotedTo = sandboxInstanceName(sb?.promotedTo);
+  // 昇格したタスクは、大きさごとの区間（その大きさで動かした時間）に、その大きさの単価をかけて足す。
+  // 履歴（promotions）があればその境界で区間に分け、無ければ（古い agent）最初の昇格の時間だけで 2 区間に分ける。境界は 0〜累計に収め、前の境界より戻さない
+  const promotions = sanitizePromotions(sb?.promotions, "snake");
+  const promotedTo = sandboxInstanceName(sb?.promotedTo) ?? promotions.at(-1)?.to;
+  const startRate = p.sandboxUsdPerHour;
+  const legacyBefore = Math.min(runtimeMs, Math.floor(nn(sb?.runtimeMsBeforePromotion ?? 0)));
+  const steps: { to: SandboxInstance; before: number }[] =
+    promotions.length > 0
+      ? promotions.map((x) => ({ to: x.to, before: x.runtime_ms_before }))
+      : promotedTo !== undefined
+        ? [{ to: promotedTo, before: legacyBefore }]
+        : [];
+  const segments: { instance: SandboxInstance | null; runtime_ms: number; usd_per_hour: number }[] =
+    [];
+  let boundary = 0;
+  let size: SandboxInstance | null = instance ?? null;
+  for (const step of steps) {
+    const next = Math.max(boundary, Math.min(runtimeMs, step.before));
+    segments.push({
+      instance: size,
+      runtime_ms: next - boundary,
+      usd_per_hour: size !== null ? sandboxUsdPerHour(size) : startRate,
+    });
+    boundary = next;
+    size = step.to;
+  }
+  segments.push({
+    instance: size,
+    runtime_ms: runtimeMs - boundary,
+    usd_per_hour: size !== null ? sandboxUsdPerHour(size) : startRate,
+  });
+  // 従来の項目: 最初の昇格までの時間（0〜累計）、最終の大きさの単価
   const beforeMs =
-    promotedTo !== undefined
-      ? Math.min(runtimeMs, Math.floor(nn(sb?.runtimeMsBeforePromotion ?? 0)))
-      : runtimeMs;
+    steps.length > 0 ? Math.max(0, Math.min(runtimeMs, steps[0]?.before ?? 0)) : runtimeMs;
   const promotedRate = promotedTo !== undefined ? sandboxUsdPerHour(promotedTo) : undefined;
   const promotedAt = Math.floor(nn(sb?.promotedAt ?? 0));
+  const heavyAfterAgent =
+    typeof sb?.heavyCommandsAfterAgentScaleUp === "number"
+      ? Math.floor(nn(sb.heavyCommandsAfterAgentScaleUp))
+      : undefined;
   const promotionReason = isSandboxPromotionReason(sb?.promotionReason)
     ? sb?.promotionReason
     : undefined;
@@ -233,10 +279,14 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
           }
         : {}),
       ...(promotionReason !== undefined ? { promotion_reason: promotionReason } : {}),
+      ...(promotions.length > 0 ? { promotions } : {}),
+      ...(heavyAfterAgent !== undefined
+        ? { heavy_commands_after_agent_scale_up: heavyAfterAgent }
+        : {}),
     },
+    ...(steps.length > 0 ? { sandbox_segments: segments } : {}),
     sandbox_usd_estimate: usd(
-      (beforeMs / 3_600_000) * p.sandboxUsdPerHour +
-        ((runtimeMs - beforeMs) / 3_600_000) * (promotedRate ?? p.sandboxUsdPerHour),
+      segments.reduce((sum, seg) => sum + (seg.runtime_ms / 3_600_000) * seg.usd_per_hour, 0),
     ),
     web,
     web_usd_estimate: usd(
@@ -307,6 +357,7 @@ export const USAGE_PUBLIC_KEYS = [
   "sandbox_boot_retries",
   "sandbox_promoted_at",
   "sandbox_runtime_ms_before_promotion",
+  "sandbox_heavy_commands_after_agent_scale_up",
 ] as const;
 
 export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], number>> & {
@@ -316,6 +367,8 @@ export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], num
   sandbox_promoted_to?: SandboxInstance;
   /** 昇格を見送った・失敗した理由（固定コードだけ。最後に報告された値を覚える） */
   sandbox_promotion_reason?: SandboxPromotionReason;
+  /** 成功した昇格の履歴（固定の値だけに検証したもの。昇格は増えるだけなので、長い方を覚える） */
+  sandbox_promotions?: PublicPromotion[];
 };
 
 export function parseUsagePublic(json: string | null | undefined): UsagePublic {
@@ -333,9 +386,24 @@ export function parseUsagePublic(json: string | null | undefined): UsagePublic {
     if (promotedTo !== undefined) out.sandbox_promoted_to = promotedTo;
     const reason = (v as Record<string, unknown>).sandbox_promotion_reason;
     if (isSandboxPromotionReason(reason)) out.sandbox_promotion_reason = reason;
+    const promotions = sanitizePromotions(
+      (v as Record<string, unknown>).sandbox_promotions,
+      "snake",
+    );
+    if (promotions.length > 0) out.sandbox_promotions = promotions;
     return out;
   } catch {
     return {};
+  }
+}
+
+/** usage イベントの sandbox_promotions（JSON 文字列）を、検証した履歴の配列にする。壊れていれば空 */
+function parsePromotionsPayload(v: unknown): PublicPromotion[] {
+  if (typeof v !== "string") return [];
+  try {
+    return sanitizePromotions(JSON.parse(v), "snake");
+  } catch {
+    return [];
   }
 }
 
@@ -357,5 +425,8 @@ export function mergeUsagePublic(
   if (isSandboxPromotionReason(payload.sandbox_promotion_reason)) {
     out.sandbox_promotion_reason = payload.sandbox_promotion_reason;
   }
+  // 履歴は JSON 文字列で届く（payload はプリミティブだけ）。検証して、長い方（新しい方）を覚える
+  const incoming = parsePromotionsPayload(payload.sandbox_promotions);
+  if (incoming.length > (out.sandbox_promotions?.length ?? 0)) out.sandbox_promotions = incoming;
   return out;
 }

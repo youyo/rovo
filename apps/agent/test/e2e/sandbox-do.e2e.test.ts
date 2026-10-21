@@ -191,7 +191,8 @@ describe("Sandbox の昇格（コマンドの前に Clef が上げると判断�
     expect(m.scaleDecisions?.[0]).toMatchObject({
       from: "standard-2",
       to: "standard-3",
-      cmd: "bash",
+      // `bash -c "echo started; true"` は、bash ではなくコマンド文字列の先頭の語を残す
+      cmd: "echo",
       exitCode: 0,
     });
     // 昇格はコンテナの作り直し（restarts）に数えない

@@ -14,7 +14,7 @@ import {
 
 // Sandbox の大きさを上げるかの判断（Workers AI の決定モデル Clef）。純粋関数と、偽の AI.run を差し込んだ判定のテスト。
 // 実験で調整した既定の閾値: 重い確率 < 0.5 は上げない / 重い → 4 vCPU で速い確率 >= 0.4 なら standard-4、そうでなければ standard-3 /
-// flash の確率が曖昧な帯（重い 0.3〜0.7、または 4 の確率 0.2〜0.5）のときだけ clef で聞き直す。
+// flash の確率が曖昧な帯（重い 0.2〜0.7、または 4 の確率 0.2〜0.5）のときだけ clef で聞き直す。
 
 type Probs = { heavy: number; fast4: number; choice?: [number, number, number] };
 
@@ -112,10 +112,10 @@ describe("isAmbiguous: flash の確率が曖昧か", () => {
     max: "standard-4" as "standard-3" | "standard-4",
     thresholds: DEFAULT_CLEF_THRESHOLDS,
   };
-  it("重い確率が 0.3〜0.7 なら曖昧", () => {
-    expect(isAmbiguous({ heavy: 0.3, fast4: 0 }, ctx)).toBe(true);
+  it("重い確率が 0.2〜0.7 なら曖昧", () => {
+    expect(isAmbiguous({ heavy: 0.2, fast4: 0 }, ctx)).toBe(true);
     expect(isAmbiguous({ heavy: 0.7, fast4: 0.9 }, ctx)).toBe(true);
-    expect(isAmbiguous({ heavy: 0.29, fast4: 0.3 }, ctx)).toBe(false);
+    expect(isAmbiguous({ heavy: 0.19, fast4: 0.3 }, ctx)).toBe(false);
     expect(isAmbiguous({ heavy: 0.71, fast4: 0.9 }, ctx)).toBe(false);
   });
   it("重いと判断し、standard-4 に届きうるときだけ、4 vCPU の確率 0.2〜0.5 が曖昧", () => {
@@ -276,7 +276,7 @@ describe("decideSandboxSize", () => {
   });
   it("重い確率が曖昧なら clef で聞き直し、その答えを使う", async () => {
     const { ai, calls } = fakeAi({
-      [CLEF_FLASH.id]: [response({ heavy: 0.5, fast4: 0.9 })],
+      [CLEF_FLASH.id]: [response({ heavy: 0.3, fast4: 0.9 })],
       [CLEF_FULL.id]: [response({ heavy: 0.1, fast4: 0.1 })],
     });
     const r = await decideSandboxSize(deps(ai), input());
@@ -358,4 +358,51 @@ describe("decideSandboxSize", () => {
       expect(calls).toHaveLength(0);
     });
   });
+});
+
+describe("帯の中は flash と clef の重い確率の大きいほうで決める", () => {
+  it("clef が低くても flash が 0.5 以上なら上げる。clef が失敗したら flash だけで決める", async () => {
+    const a = fakeAi({
+      [CLEF_FLASH.id]: [response({ heavy: 0.58, fast4: 0.63 })],
+      [CLEF_FULL.id]: [response({ heavy: 0.15, fast4: 0.16 })],
+    });
+    const r = await decideSandboxSize(deps(a.ai), input());
+    expect(r).toMatchObject({ ok: true, target: "standard-3", model: "clef" });
+    const b = fakeAi({
+      [CLEF_FLASH.id]: [response({ heavy: 0.28, fast4: 0.1 })],
+      [CLEF_FULL.id]: [new Error("x"), new Error("x"), new Error("x")],
+    });
+    expect(await decideSandboxSize(deps(b.ai), input())).toMatchObject({
+      target: null,
+      clefFailed: true,
+    });
+  });
+});
+
+// 実際の Clef（2026-10-22 に実測）の確率をそのまま入れた偽の AI.run で、期待する判断を固定する。
+// [コマンド, flash の重い・4 vCPU, clef の重い・4 vCPU（聞き直すときだけ）, 上げるか]
+describe("実 Clef で測った 10 コマンドの確率フィクスチャ", () => {
+  const table: [string, [number, number], [number, number] | null, boolean][] = [
+    ["ls -la", [0.08, 0.13], null, false],
+    ["git status", [0.07, 0.11], null, false],
+    ["cat package.json", [0.2, 0.23], [0.02, 0.13], false],
+    ["pnpm test (maxWorkers 4)", [0.42, 0.5], [0.76, 0.53], true],
+    ["pnpm test (maxWorkers 2)", [0.28, 0.06], [0.64, 0.05], true],
+    ["pnpm test (singleWorker)", [0.34, 0.08], [0.53, 0.06], true],
+    ["make -j4", [0.58, 0.63], [0.15, 0.16], true],
+    ["pytest -n auto", [0.57, 0.54], [0.76, 0.68], true],
+    ["pnpm build", [0.53, 0.12], [0.29, 0.05], true],
+    ["cargo build --release", [0.82, 0.66], null, true],
+  ];
+  for (const [cmd, f, c, up] of table) {
+    it(`${cmd}: ${up ? "上げる" : "上げない"}`, async () => {
+      const { ai } = fakeAi({
+        [CLEF_FLASH.id]: [response({ heavy: f[0], fast4: f[1] })],
+        [CLEF_FULL.id]: c ? [response({ heavy: c[0], fast4: c[1] })] : [],
+      });
+      const r = await decideSandboxSize(deps(ai), input());
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.target !== null).toBe(up);
+    });
+  }
 });

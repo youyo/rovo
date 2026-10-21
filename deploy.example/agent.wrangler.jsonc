@@ -64,7 +64,7 @@
     // 「今の大きさで足りるか」を判断し、足りなければ今のコンテナのスナップショットを取り、同じスナップショットから大きい大きさで起動し直す（2 → 3 → 4 と何回でも。上げるだけ）。
     // task_start で sandbox_instance を明示したタスクは固定で、Clef も呼ばない。Clef やスナップショットが失敗しても、タスクは失敗しない（今の大きさのまま続ける）。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
     "SANDBOX_MAX_INSTANCE": "<SANDBOX_MAX_INSTANCE>",
-    // Clef の判断の閾値（任意。空は既定）。`heavy=0.5,four=0.4,heavy_band=0.3-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする。
+    // Clef の判断の閾値（任意。空は既定）。`heavy=0.5,four=0.4,heavy_band=0.2-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする。
     // 実験で調整した既定値を env で変えられるようにしてある。変えるなら rovo.config.json の vars.agent.SANDBOX_CLEF_THRESHOLDS に書く。docs/deploy.md の 11。
     "SANDBOX_CLEF_THRESHOLDS": "",
     // 依存関係のキャッシュ（D14。Containers のスナップショット。public beta）を使うか。rovo.config.json の depsCache.enabled（既定 true）。

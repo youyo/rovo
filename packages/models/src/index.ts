@@ -449,4 +449,5 @@ export {
   type SelectableSandboxInstance,
   sandboxInstanceSpec,
   sandboxUsdPerHour,
+  selectableSandboxInstancesUpTo,
 } from "./sandbox";

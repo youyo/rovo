@@ -2026,6 +2026,8 @@ describe("sandbox_instances_list / task_start の sandbox_instance", () => {
       "trigger",
       "rule_match",
       "sandbox_heavy_commands_after_agent_scale_up",
+      "sandbox_heavy_commands_covered_by_agent",
+      "sandbox_promotion_failures",
     ]) {
       expect(desc("task_result"), key).toContain(key);
     }

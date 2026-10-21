@@ -157,6 +157,10 @@ export interface SandboxUsageDto {
   }[];
   /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。子が上げていなければ無い */
   heavyCommandsAfterAgentScaleUp?: number;
+  /** そのうち、子が規則の昇格先以上に上げていたために、規則が昇格しなくて済んだ本数（子の見立ての的中）。子が上げていなければ無い */
+  heavyCommandsCoveredByAgent?: number;
+  /** 昇格の試みが見送り・失敗になった記録（固定の trigger と理由コード。古い順、最大 8 件）。子が先に上げていて規則が見送った場合は入らない */
+  promotionFailures?: { trigger: SandboxPromotionTrigger; reason: SandboxPromotionReason }[];
 }
 
 export interface WebUsageDto {

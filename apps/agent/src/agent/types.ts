@@ -208,6 +208,19 @@ export interface SandboxMetrics {
   promotions?: SandboxPromotionRecord[];
   /** 子が sandbox_scale_up で上げたあと、タスクの終了までに規則（heavy-command.ts の表）で重いと判定されたコマンドを実行した本数。子が上げていなければ 0。検証コマンドの heavy フラグは数えない */
   heavyCommandsAfterAgentScaleUp?: number;
+  /**
+   * heavyCommandsAfterAgentScaleUp のうち、実行の時点で「子が sandbox_scale_up で上げた大きさ」が規則の昇格先以上だったために、
+   * 規則が昇格しなくて済んだ本数（子の見立てが当たった数）。子が上げていなければ無い。規則の昇格を無効にしているデプロイでは 0
+   */
+  heavyCommandsCoveredByAgent?: number;
+  /** 昇格の試みが見送り・失敗になった記録（固定の trigger と理由コード。1 件ずつ、古い順。最大 8 件）。子が先に上げていて規則が見送った場合は入れない */
+  promotionFailures?: SandboxPromotionFailure[];
+}
+
+/** 昇格の試みの見送り・失敗 1 件。値はどちらも固定の値 */
+export interface SandboxPromotionFailure {
+  trigger: SandboxPromotionTrigger;
+  reason: SandboxPromotionReason;
 }
 
 /** 成功した昇格 1 回分。値はすべて固定の値か数値（子の自由文・argv の文字列は入らない） */

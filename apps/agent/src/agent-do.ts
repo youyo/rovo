@@ -13,6 +13,7 @@ import type { AuditFields } from "@rovo/audit";
 import {
   computeCostUsd,
   type Effort,
+  isSandboxPromotionReason,
   isSandboxPromotionTrigger,
   isSandboxRuleMatch,
   isSelectableSandboxInstance,
@@ -20,6 +21,7 @@ import {
   resolveHeavySandboxInstance,
   SANDBOX_INSTANCES,
   type SandboxInstance,
+  selectableSandboxInstancesUpTo,
 } from "@rovo/models";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
@@ -46,6 +48,7 @@ import {
   isTerminal,
   type ResultDto,
   type SandboxMetrics,
+  type SandboxPromotionFailure,
   type SandboxPromotionRecord,
   type StartResult,
   type TaskSpec,
@@ -215,7 +218,7 @@ function scaleUpMessage(r: SandboxScaleUpResult): { text: string; isError: boole
         text:
           r.code === "above_limit"
             ? `Rejected: the largest size you may choose is ${r.max}. The sandbox stays ${r.instance}. Continue with it, or ask for ${r.max} or smaller.`
-            : `Rejected: instance must be one of standard-1, standard-2, standard-3, standard-4. The sandbox stays ${r.instance}.`,
+            : `Rejected: instance must be one of ${selectableSandboxInstancesUpTo(r.max).join(", ")}. The sandbox stays ${r.instance}.`,
         isError: true,
       };
     case "fixed":
@@ -244,14 +247,30 @@ function sanitizePromotions(v: unknown): SandboxPromotionRecord[] {
     const r = x as Record<string, unknown>;
     if (typeof r.to !== "string" || !Object.hasOwn(SANDBOX_INSTANCES, r.to)) continue;
     if (!isSandboxPromotionTrigger(r.trigger)) continue;
-    if (r.ruleMatch !== undefined && !isSandboxRuleMatch(r.ruleMatch)) continue;
+    // 表に無い規則名は rule_match だけ落とす（要素ごと捨てると、按分の区間がずれる）
     out.push({
       to: r.to as SandboxInstance,
       at: finiteCount(r.at),
       trigger: r.trigger,
       runtimeMsBefore: finiteCount(r.runtimeMsBefore),
-      ...(r.trigger === "rule" && r.ruleMatch !== undefined ? { ruleMatch: r.ruleMatch } : {}),
+      ...(r.trigger === "rule" && isSandboxRuleMatch(r.ruleMatch)
+        ? { ruleMatch: r.ruleMatch }
+        : {}),
     });
+  }
+  return out;
+}
+
+/** SandboxDO が報告した昇格の失敗の内訳を、固定の値（trigger と理由コード）だけの形に絞る。表に無い要素は捨て、8 件までにする */
+function sanitizePromotionFailures(v: unknown): SandboxPromotionFailure[] {
+  if (!Array.isArray(v)) return [];
+  const out: SandboxPromotionFailure[] = [];
+  for (const x of v) {
+    if (out.length >= 8) break;
+    if (typeof x !== "object" || x === null) continue;
+    const r = x as Record<string, unknown>;
+    if (!isSandboxPromotionTrigger(r.trigger) || !isSandboxPromotionReason(r.reason)) continue;
+    out.push({ trigger: r.trigger, reason: r.reason });
   }
   return out;
 }
@@ -286,6 +305,8 @@ export class AgentDO extends DurableObject<Env> {
   private sandboxStopping: Promise<{ stopped: boolean }> | undefined;
   /** 進行中の Sandbox の起動（ensureSandboxReady）。同時の呼び出しは 1 つを共有する。 */
   private booting: Promise<void> | undefined;
+  /** start の入力に sandbox_instance があった（ツールの登録を spec の保存より前に決めるための印。保存済みの spec があればそちらを見る） */
+  private incomingSandboxInstance: string | undefined;
   /** 確定を求められた終端（完了・失敗）。確定のトランザクションで停止の意図と合わせて判定する。 */
   private requests: TerminalRequest[] = [];
   /** トークンの受け渡しを 1 つずつ行うための鎖（新しい期限のものだけを採用する判定を直列にする） */
@@ -704,6 +725,9 @@ export class AgentDO extends DurableObject<Env> {
   // ---- RPC ----
 
   async start(input: TaskSpec): Promise<StartResult> {
+    // 子のツールは lifecycle.start() の中（spec を保存する前）で作られる。task_start で大きさを固定したタスクかどうかを、その時点で見られるようにしておく
+    if (typeof input?.sandboxInstance === "string")
+      this.incomingSandboxInstance = input.sandboxInstance;
     await this.lifecycle.start();
     if (this.store.meta("tombstone")) {
       this.audit("start_cancelled_by_tombstone", { caller: "parent" });
@@ -1950,6 +1974,21 @@ export class AgentDO extends DurableObject<Env> {
             finiteCount(m.heavyCommandsAfterAgentScaleUp),
           )
         : undefined;
+    // 子の見立ての的中の本数（増えるだけ）。子が上げていなければ無い
+    const covered =
+      typeof m.heavyCommandsCoveredByAgent === "number" ||
+      prev?.heavyCommandsCoveredByAgent !== undefined
+        ? Math.max(
+            prev?.heavyCommandsCoveredByAgent ?? 0,
+            finiteCount(m.heavyCommandsCoveredByAgent),
+          )
+        : undefined;
+    // 昇格の失敗の内訳（追記されるだけなので、読めたものが長ければそれを採る）
+    const reportedFailures = sanitizePromotionFailures(m.promotionFailures);
+    const failures =
+      reportedFailures.length >= (prev?.promotionFailures?.length ?? 0)
+        ? reportedFailures
+        : prev?.promotionFailures;
     const next: SandboxMetrics = {
       runtimeMs: Math.max(prev?.runtimeMs ?? 0, finiteCount(m.runtimeMs)),
       restarts: Math.max(prev?.restarts ?? 0, finiteCount(m.restarts)),
@@ -1968,6 +2007,8 @@ export class AgentDO extends DurableObject<Env> {
       ...(promotionReason !== undefined ? { promotionReason } : {}),
       ...(promotions !== undefined && promotions.length > 0 ? { promotions } : {}),
       ...(heavyAfter !== undefined ? { heavyCommandsAfterAgentScaleUp: heavyAfter } : {}),
+      ...(covered !== undefined ? { heavyCommandsCoveredByAgent: covered } : {}),
+      ...(failures !== undefined && failures.length > 0 ? { promotionFailures: failures } : {}),
     };
     if (!prev) return next;
     const counters =
@@ -1979,7 +2020,8 @@ export class AgentDO extends DurableObject<Env> {
       next.instance !== prev.instance ||
       next.promotedTo !== prev.promotedTo ||
       next.promotionReason !== prev.promotionReason ||
-      (next.promotions?.length ?? 0) !== (prev.promotions?.length ?? 0);
+      (next.promotions?.length ?? 0) !== (prev.promotions?.length ?? 0) ||
+      (next.promotionFailures?.length ?? 0) !== (prev.promotionFailures?.length ?? 0);
     return final || counters ? next : prev;
   }
 
@@ -2112,8 +2154,13 @@ export class AgentDO extends DurableObject<Env> {
         ),
       webBrowseEnabled: () => this.webBrowseEnabled(),
       sandboxScaleUp: (args) => this.sandboxScaleUpCall(args.instance),
+      sandboxScaleUpChoices: () => {
+        const max = this.sandboxScaleUpPrompt();
+        return max === null ? [] : selectableSandboxInstancesUpTo(max);
+      },
       sandboxScaleUpEnabled: () => {
-        const max = this.sandboxScaleUpMax();
+        // task_start で大きさを固定したタスクでは登録しない（ツールが何もしないのに見えると混乱する）
+        const max = this.sandboxScaleUpPrompt();
         const raw = (this.env as unknown as { SANDBOX_AGENT_MAX_INSTANCE?: string })
           .SANDBOX_AGENT_MAX_INSTANCE;
         const ignored = resolveAgentMaxSandboxInstance(raw).ignored;
@@ -2235,7 +2282,7 @@ export class AgentDO extends DurableObject<Env> {
 
   /** この子に sandbox_scale_up の説明を出すか（上限の設定が有効で、task_start で大きさを明示していない） */
   private sandboxScaleUpPrompt(): SandboxInstance | null {
-    if (this.spec()?.sandboxInstance !== undefined) return null;
+    if ((this.spec()?.sandboxInstance ?? this.incomingSandboxInstance) !== undefined) return null;
     return this.sandboxScaleUpMax();
   }
 

@@ -29,7 +29,13 @@ import {
   resolveGitHubBaseUrls,
 } from "../github";
 import { agentModelsOf, defaultModelOf, effortOf } from "../models";
-import { type PublicPromotion, sandboxInstanceName, sanitizePromotions } from "../sandbox-instance";
+import {
+  type PublicPromotion,
+  type PublicPromotionFailure,
+  sandboxInstanceName,
+  sanitizePromotionFailures,
+  sanitizePromotions,
+} from "../sandbox-instance";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { addColumnIfMissing } from "./sql-schema";
@@ -264,6 +270,10 @@ export type ResultView = {
     }[];
     /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。0 なら、規則（保険）が要らなかった = 不要だったかもしれない昇格。子が上げていなければ付かない */
     sandbox_heavy_commands_after_agent_scale_up?: number;
+    /** そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（子の見立ての的中）。子が上げていなければ付かない */
+    sandbox_heavy_commands_covered_by_agent?: number;
+    /** 昇格の試みが見送り・失敗になった記録（古い順、最大 8 件）。trigger は agent / rule / verification、reason は sandbox_promotion_reason と同じ固定コード。子が先に上げていて規則が見送った場合は入らない（的中として数える）。無ければ付かない */
+    sandbox_promotion_failures?: { trigger: string; reason: string }[];
   };
 };
 
@@ -2700,6 +2710,12 @@ export class TaskDO extends DurableObject<Env> {
               ...(up.sandbox_heavy_commands_after_agent_scale_up !== undefined
                 ? { heavyCommandsAfterAgentScaleUp: up.sandbox_heavy_commands_after_agent_scale_up }
                 : {}),
+              ...(up.sandbox_heavy_commands_covered_by_agent !== undefined
+                ? { heavyCommandsCoveredByAgent: up.sandbox_heavy_commands_covered_by_agent }
+                : {}),
+              ...(up.sandbox_promotion_failures !== undefined
+                ? { promotionFailures: up.sandbox_promotion_failures }
+                : {}),
             }
           : null,
       },
@@ -3154,10 +3170,13 @@ function sandboxPromotionUsage(sb: UsageDto["sandbox"]): {
   sandbox_promotion_reason?: string;
   sandbox_promotions?: PublicPromotion[];
   sandbox_heavy_commands_after_agent_scale_up?: number;
+  sandbox_heavy_commands_covered_by_agent?: number;
+  sandbox_promotion_failures?: PublicPromotionFailure[];
 } {
   const promotedTo = sandboxInstanceName(sb?.promotedTo);
   const promotions = sanitizePromotions(sb?.promotions, "camel");
   const reason = isSandboxPromotionReason(sb?.promotionReason) ? sb?.promotionReason : undefined;
+  const failures = sanitizePromotionFailures(sb?.promotionFailures);
   const ms = (v: unknown) =>
     typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
   return {
@@ -3173,6 +3192,10 @@ function sandboxPromotionUsage(sb: UsageDto["sandbox"]): {
     ...(typeof sb?.heavyCommandsAfterAgentScaleUp === "number"
       ? { sandbox_heavy_commands_after_agent_scale_up: ms(sb.heavyCommandsAfterAgentScaleUp) }
       : {}),
+    ...(typeof sb?.heavyCommandsCoveredByAgent === "number"
+      ? { sandbox_heavy_commands_covered_by_agent: ms(sb.heavyCommandsCoveredByAgent) }
+      : {}),
+    ...(failures.length > 0 ? { sandbox_promotion_failures: failures } : {}),
   };
 }
 

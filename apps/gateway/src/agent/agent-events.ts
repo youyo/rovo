@@ -1,6 +1,10 @@
 import { SANDBOX_OPS } from "@rovo/audit";
 import { isSandboxPromotionReason } from "@rovo/models";
-import { sandboxInstanceName, sanitizePromotions } from "../sandbox-instance";
+import {
+  sandboxInstanceName,
+  sanitizePromotionFailures,
+  sanitizePromotions,
+} from "../sandbox-instance";
 import type { TaskStatus } from "../tasks/state";
 import type { AgentEventDto, AgentPhase, SandboxUsageDto } from "./contract";
 
@@ -91,6 +95,7 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
   const reason = isSandboxPromotionReason(s.promotionReason) ? s.promotionReason : undefined;
   // 昇格の履歴（trigger・規則名つき）。payload はプリミティブだけなので JSON 文字列にする（question の options と同じ）。固定の値だけを通す
   const promotions = sanitizePromotions(s.promotions, "camel");
+  const failures = sanitizePromotionFailures(s.promotionFailures);
   return {
     sandbox_runtime_ms: n(s.runtimeMs),
     sandbox_restarts: count(s.restarts),
@@ -112,6 +117,12 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
     ...(typeof s.heavyCommandsAfterAgentScaleUp === "number"
       ? { sandbox_heavy_commands_after_agent_scale_up: n(s.heavyCommandsAfterAgentScaleUp) }
       : {}),
+    // そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（子の見立ての的中）
+    ...(typeof s.heavyCommandsCoveredByAgent === "number"
+      ? { sandbox_heavy_commands_covered_by_agent: n(s.heavyCommandsCoveredByAgent) }
+      : {}),
+    // 昇格の見送り・失敗の内訳（固定の trigger と理由コードだけ。JSON 文字列）
+    ...(failures.length > 0 ? { sandbox_promotion_failures: JSON.stringify(failures) } : {}),
   };
 }
 

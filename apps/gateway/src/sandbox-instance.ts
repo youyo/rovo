@@ -1,4 +1,5 @@
 import {
+  isSandboxPromotionReason,
   isSandboxPromotionTrigger,
   isSandboxRuleMatch,
   resolveAgentMaxSandboxInstance,
@@ -6,6 +7,7 @@ import {
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
   type SandboxInstance,
+  type SandboxPromotionReason,
   type SandboxPromotionTrigger,
   type SandboxRuleMatch,
 } from "@rovo/models";
@@ -59,8 +61,28 @@ export type PublicPromotion = {
   rule_match?: SandboxRuleMatch;
 };
 
+/** 昇格の試みが見送り・失敗になった記録 1 件の公開用の形（usage.sandbox_promotion_failures[] / task_summary の sandbox.promotion_failures[]）。値はどちらも固定の値 */
+export type PublicPromotionFailure = {
+  trigger: SandboxPromotionTrigger;
+  reason: SandboxPromotionReason;
+};
+
 /** 公開する履歴の上限（昇格は上げる方向だけなので、実際は 4 件以内） */
 export const MAX_PUBLIC_PROMOTIONS = 8;
+
+/** 失敗の内訳を公開用の形に絞る。固定の trigger と理由コードの要素だけ通し、他のキー・値は捨てる。MAX_PUBLIC_PROMOTIONS 件まで */
+export function sanitizePromotionFailures(v: unknown): PublicPromotionFailure[] {
+  if (!Array.isArray(v)) return [];
+  const out: PublicPromotionFailure[] = [];
+  for (const x of v) {
+    if (out.length >= MAX_PUBLIC_PROMOTIONS) break;
+    if (typeof x !== "object" || x === null) continue;
+    const r = x as Record<string, unknown>;
+    if (!isSandboxPromotionTrigger(r.trigger) || !isSandboxPromotionReason(r.reason)) continue;
+    out.push({ trigger: r.trigger, reason: r.reason });
+  }
+  return out;
+}
 
 const count0 = (v: unknown): number =>
   typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;

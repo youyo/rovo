@@ -31,6 +31,7 @@ import {
   SELECTABLE_SANDBOX_INSTANCES,
   sandboxInstanceSpec,
   sandboxUsdPerHour,
+  selectableSandboxInstancesUpTo,
   supportedEfforts,
   thinkingOffFor,
 } from "../src";
@@ -440,6 +441,16 @@ describe("Sandbox のインスタンス（D13）", () => {
     expect(DEFAULT_SANDBOX_INSTANCE).toBe("standard-2");
     expect(sandboxInstanceSpec("standard-2")).toEqual({ vcpu: 1, memoryGiB: 6, diskGB: 12 });
     expect(sandboxInstanceSpec("lite")).toEqual({ vcpu: 1 / 16, memoryGiB: 0.25, diskGB: 2 });
+  });
+
+  it("selectableSandboxInstancesUpTo: 選べる名前を、上限（含む）までだけ小さい順に返す。上限より大きい名前を含めない", () => {
+    expect(selectableSandboxInstancesUpTo("standard-1")).toEqual(["standard-1"]);
+    expect(selectableSandboxInstancesUpTo("standard-3")).toEqual([
+      "standard-1",
+      "standard-2",
+      "standard-3",
+    ]);
+    expect(selectableSandboxInstancesUpTo("standard-4")).toEqual([...SELECTABLE_SANDBOX_INSTANCES]);
   });
 
   it("resolveSandboxInstance: 未設定・空は既定。不正な値は既定に戻して ignored に返す", () => {

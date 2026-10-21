@@ -56,7 +56,7 @@ export function loadConfig(env: ConfigEnv): WebConfig {
   if (gatewayId === "") {
     throw new WebResearchError("misconfigured", "AI_GATEWAY_ID is required.");
   }
-  const providerRaw = (env.WEB_SEARCH_PROVIDER ?? "").trim() || "ceramic";
+  const providerRaw = (env.WEB_SEARCH_PROVIDER ?? "").trim() || "linkup";
   if (!PROVIDERS.includes(providerRaw as WebSearchProvider)) {
     throw new WebResearchError(
       "misconfigured",

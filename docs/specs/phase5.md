@@ -87,7 +87,7 @@ apps/agent    ──service binding──▶     search / fetch / browse
 
 - 評価器はインターフェース `SafetyEvaluator` で抽象化し、既定の実装は Clef-flash にする（15.5）。
 - 本文の切り詰めによる見逃しを防ぐため、返す本文（最大 50,000 文字）の全体を評価する。
-  - 本文をチャンク（約 40,000 文字）に分け、すべてのチャンクを評価する。
+  - 本文をチャンク（約 20,000 トークン）に分け、すべてのチャンクを評価する。
   - 評価していない部分が残る場合は、`unknown` にする。
 - 質問（`noul`）
   - `prompt_injection`
@@ -96,6 +96,7 @@ apps/agent    ──service binding──▶     search / fetch / browse
   - `tool_execution_inducement`
   - `credential_exfiltration`
   - `suspicious_external_transmission`
+  - `evaluator_manipulation`（評価器を狙った文）
   - それぞれ `criteria.true` と `criteria.false` で意味を定義する。評価の指示は questions にだけ書き、本文は state にだけ入れる。
 - Policy Engine
   - 決定論ルール: 「ignore previous instructions」などの既知の表現、隠し文字（ゼロ幅文字、制御文字）、HTML コメントの中の命令などを検出する。
@@ -189,8 +190,14 @@ apps/agent    ──service binding──▶     search / fetch / browse
 
 - **チャンクはトークン数の見積もりで分割する。** Clef は窓を超えた分を、何も言わずに切り詰めるため。
   - 見積もりには UTF-8 のバイト数を上限として使う。
-  - 1チャンクは questions の分を引いて約 10,000 トークン以下にする。
-  - 各チャンクの末尾に乱数の sentinel を付け、「state はこの sentinel で終わっているか」を問う `noul` を足す。確率が低ければ、切り詰められたとみなして unknown にする。
+  - 1チャンクは約 20,000 トークン（UTF-8 のバイト数）以下にする。最悪ケース（1.0 tokens / バイト）でも、質問の分（7 問で約 1,350）と検査の余裕（64）を足して窓に収まる。
+  - **sentinel（末尾の目印と `state_ends_with_marker` の質問）は使わない**（2026-10-22 に実機で変更）。
+    - 実測: Workers AI は、窓を超える入力を黙って切り詰めず、エラーにする（REST は 422 `Request requires 28330 tokens; the maximum is 24576`、binding の `AI.run` も例外 `3030: Request requires 27845 tokens; the maximum is 24576` / `5021`）。切り詰めは起きないので、sentinel で検知する必要がない。
+    - 実測: sentinel の確率は、切り詰められていない通常の本文でも約 2.7% の呼び出しで 0.5 未満になり（質問を contains に言い換えても直らない）、`state_truncated` → unknown になった。チャンクの多い長い日本語ページは、本番で 2/2 件が unknown（本文が返らない）だった。
+    - 代わりの検知: `AI.run` の例外 → そのチャンクは未完了（unknown。fail-closed）。加えて `usage.input_tokens >= 窓 - 64` なら `state_truncated`（未完了）。
+  - 質問に「評価器を狙った文」（`evaluator_manipulation`）を 7 問目として足した。評価器を狙った文の検出が 16/20 → 20/20（block 7 → 16/20）、希釈 31 → 39/40、通常 100 件で新たな誤検知 0（最大 0.35）。
+  - 決定論ルールは、返す範囲（切り詰め後の本文と title）に対応する生のテキストにだけかける（Clef の評価範囲と揃える）。返さない末尾の語句や隠し文字では止めない。
+  - 英語の `credential_exfiltration` ルールは、日本語版と同様に宛先（URL・メールアドレス・webhook などの語）を条件にする。changelog の「correctly send API key」を block にしていた誤検知の修正。
   - usage.input_tokens と見積もりの突き合わせでも検知する。
   - 窓の大きい `@cf/cloudflare/clef`（65,536 トークン）にも差し替えられるようにする。
 - **search の description は簡易な方式にする。**

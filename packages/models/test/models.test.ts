@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   ALLOWED_MODEL_IDS,
   computeCostUsd,
+  DEFAULT_HEAVY_SANDBOX_INSTANCE,
   DEFAULT_MODEL,
   DEFAULT_MODEL_ORDER,
   DEFAULT_SANDBOX_INSTANCE,
   EFFORTS,
   effortFor,
+  isSandboxPromotionReason,
   isSelectableSandboxInstance,
   listSandboxInstances,
   MODEL_CATALOG_IDS,
@@ -16,8 +18,10 @@ import {
   piModelId,
   providerOf,
   resolveEfforts,
+  resolveHeavySandboxInstance,
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
+  SANDBOX_PROMOTION_REASONS,
   SELECTABLE_SANDBOX_INSTANCES,
   sandboxInstanceSpec,
   sandboxUsdPerHour,
@@ -487,6 +491,7 @@ describe("Sandbox のインスタンス（D13）", () => {
         usd_per_hour: sandboxUsdPerHour(i.name as "lite"),
         default: i.name === DEFAULT_SANDBOX_INSTANCE,
         selectable: i.name !== "lite",
+        promotion_target: i.name === DEFAULT_HEAVY_SANDBOX_INSTANCE,
       });
     }
     expect(list.filter((i) => i.default).map((i) => i.name)).toEqual(["standard-2"]);
@@ -500,5 +505,52 @@ describe("Sandbox のインスタンス（D13）", () => {
     ).toEqual(["standard-4"]);
     const lite = listSandboxInstances("lite").find((i) => i.name === "lite");
     expect(lite).toMatchObject({ default: true, selectable: false });
+  });
+
+  it("昇格先（重いコマンドの初回に大きくする先）の既定は standard-3", () => {
+    expect(DEFAULT_HEAVY_SANDBOX_INSTANCE).toBe("standard-3");
+  });
+
+  it("resolveHeavySandboxInstance: 未設定・空・off / none は無効（null）。選べる 4 種類だけ有効。不正な値は無効にして ignored に返す", () => {
+    expect(resolveHeavySandboxInstance(undefined)).toEqual({ instance: null });
+    expect(resolveHeavySandboxInstance("  ")).toEqual({ instance: null });
+    expect(resolveHeavySandboxInstance("off")).toEqual({ instance: null });
+    expect(resolveHeavySandboxInstance(" NONE ")).toEqual({ instance: null });
+    expect(resolveHeavySandboxInstance(" standard-3 ")).toEqual({ instance: "standard-3" });
+    expect(resolveHeavySandboxInstance("standard-4")).toEqual({ instance: "standard-4" });
+    // lite はメモリ不足で落ちるので昇格先にしない
+    expect(resolveHeavySandboxInstance("lite")).toEqual({ instance: null, ignored: "lite" });
+    expect(resolveHeavySandboxInstance("toString")).toEqual({
+      instance: null,
+      ignored: "toString",
+    });
+  });
+
+  it("listSandboxInstances: 昇格先に promotion_target が付く（引数で変えられる。null なら付かない）", () => {
+    const names = (heavy?: Parameters<typeof listSandboxInstances>[1]) =>
+      listSandboxInstances("standard-2", heavy)
+        .filter((i) => i.promotion_target)
+        .map((i) => i.name);
+    expect(names()).toEqual(["standard-3"]);
+    expect(names("standard-4")).toEqual(["standard-4"]);
+    expect(names(null)).toEqual([]);
+  });
+
+  it("昇格の見送り・失敗の理由は固定コード（公開してよい値の一覧）", () => {
+    expect([...SANDBOX_PROMOTION_REASONS]).toEqual([
+      "fixed_instance",
+      "already_large",
+      "state_unreadable",
+      "snapshot_unsupported",
+      "snapshot_failed",
+      "start_failed",
+      "cert_missing",
+      "workspace_mismatch",
+      "fallback_failed",
+    ]);
+    expect(isSandboxPromotionReason("snapshot_unsupported")).toBe(true);
+    for (const v of ["", "toString", "SNAPSHOT_FAILED", undefined, 3]) {
+      expect(isSandboxPromotionReason(v), String(v)).toBe(false);
+    }
   });
 });

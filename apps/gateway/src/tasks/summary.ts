@@ -6,7 +6,13 @@
  * Sandbox と Web の金額は単価をかけた「推定」で、Claude の金額（AI Gateway の usage に基づく）とは別に持つ。
  */
 
-import { DEFAULT_SANDBOX_INSTANCE, type SandboxInstance, sandboxUsdPerHour } from "@rovo/models";
+import {
+  DEFAULT_SANDBOX_INSTANCE,
+  isSandboxPromotionReason,
+  type SandboxInstance,
+  type SandboxPromotionReason,
+  sandboxUsdPerHour,
+} from "@rovo/models";
 import { sandboxInstanceName } from "../sandbox-instance";
 
 /**
@@ -81,8 +87,16 @@ export type SummaryInput = {
       runtimeMs: number;
       restarts: number;
       bootRetries: number;
-      /** agent が報告した、実際に起動した大きさ。分かれば、その単価（sandboxUsdPerHour）で推定する */
+      /** agent が報告した、最初に起動した大きさ。分かれば、その単価（sandboxUsdPerHour）で推定する */
       instance?: SandboxInstance;
+      /** 重いコマンドの初回に昇格した先。昇格前の時間（runtimeMsBeforePromotion）は instance の単価、残りはこの単価で按分する */
+      promotedTo?: SandboxInstance;
+      /** 昇格した時刻（epoch ms） */
+      promotedAt?: number;
+      /** 昇格した時点までの Sandbox の累計時間（ms） */
+      runtimeMsBeforePromotion?: number;
+      /** 昇格を見送った・失敗した理由（固定コード） */
+      promotionReason?: SandboxPromotionReason;
     } | null;
   };
   questions: number;
@@ -116,8 +130,16 @@ export type TaskSummary = {
     runtime_ms: number;
     restarts: number;
     boot_retries: number;
-    /** 実際に起動した大きさ。報告が無い（起動しなかった・古い agent）ときは無い */
+    /** 最初に起動した大きさ。報告が無い（起動しなかった・古い agent）ときは無い */
     instance?: SandboxInstance;
+    /** 昇格した先の大きさ（重いコマンドの初回に大きくした）。昇格していなければ無い */
+    promoted_to?: SandboxInstance;
+    /** 昇格した時刻（epoch ms） */
+    promoted_at?: number;
+    /** 昇格した時点までの Sandbox の時間（ms）。runtime_ms のうち、これまでが instance の単価、残りが promoted_to の単価 */
+    runtime_ms_before_promotion?: number;
+    /** 昇格を見送った・失敗した理由（固定コード）。昇格が成功したときは無い */
+    promotion_reason?: SandboxPromotionReason;
   };
   /** 推定。単価（unit_prices）をかけた値で、タスクの予算には含めない */
   sandbox_usd_estimate: number;
@@ -126,6 +148,8 @@ export type TaskSummary = {
   web_usd_estimate: number;
   unit_prices: {
     sandbox_usd_per_hour: number;
+    /** 昇格したタスクだけ: 昇格先の大きさの単価（sandbox_usd_per_hour は昇格前の大きさの単価） */
+    sandbox_promoted_usd_per_hour?: number;
     web_usd_per_1k_search: number;
     web_usd_per_1k_fetch: number;
     web_usd_per_1k_browse: number;
@@ -165,6 +189,17 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
     sandboxUsdPerHour:
       instance !== undefined ? sandboxUsdPerHour(instance) : i.prices.sandboxUsdPerHour,
   };
+  // 昇格したタスクは、昇格前の時間を元の大きさの単価、昇格後の時間を昇格先の単価で按分する（昇格前の時間は 0〜累計に収める）
+  const promotedTo = sandboxInstanceName(sb?.promotedTo);
+  const beforeMs =
+    promotedTo !== undefined
+      ? Math.min(runtimeMs, Math.floor(nn(sb?.runtimeMsBeforePromotion ?? 0)))
+      : runtimeMs;
+  const promotedRate = promotedTo !== undefined ? sandboxUsdPerHour(promotedTo) : undefined;
+  const promotedAt = Math.floor(nn(sb?.promotedAt ?? 0));
+  const promotionReason = isSandboxPromotionReason(sb?.promotionReason)
+    ? sb?.promotionReason
+    : undefined;
   return {
     version: 1,
     task_id: i.taskId,
@@ -190,8 +225,19 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
       restarts: Math.floor(nn(sb?.restarts ?? 0)),
       boot_retries: Math.floor(nn(sb?.bootRetries ?? 0)),
       ...(instance !== undefined ? { instance } : {}),
+      ...(promotedTo !== undefined
+        ? {
+            promoted_to: promotedTo,
+            ...(promotedAt > 0 ? { promoted_at: promotedAt } : {}),
+            runtime_ms_before_promotion: beforeMs,
+          }
+        : {}),
+      ...(promotionReason !== undefined ? { promotion_reason: promotionReason } : {}),
     },
-    sandbox_usd_estimate: usd((runtimeMs / 3_600_000) * p.sandboxUsdPerHour),
+    sandbox_usd_estimate: usd(
+      (beforeMs / 3_600_000) * p.sandboxUsdPerHour +
+        ((runtimeMs - beforeMs) / 3_600_000) * (promotedRate ?? p.sandboxUsdPerHour),
+    ),
     web,
     web_usd_estimate: usd(
       (web.search / 1000) * p.webUsdPer1kSearch +
@@ -200,6 +246,7 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
     ),
     unit_prices: {
       sandbox_usd_per_hour: p.sandboxUsdPerHour,
+      ...(promotedRate !== undefined ? { sandbox_promoted_usd_per_hour: promotedRate } : {}),
       web_usd_per_1k_search: p.webUsdPer1kSearch,
       web_usd_per_1k_fetch: p.webUsdPer1kFetch,
       web_usd_per_1k_browse: p.webUsdPer1kBrowse,
@@ -258,11 +305,17 @@ export const USAGE_PUBLIC_KEYS = [
   "sandbox_runtime_ms",
   "sandbox_restarts",
   "sandbox_boot_retries",
+  "sandbox_promoted_at",
+  "sandbox_runtime_ms_before_promotion",
 ] as const;
 
 export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], number>> & {
   /** 実際に起動した大きさ（表にある名前だけ。数値ではないので単調増加の対象外で、最後に報告された値を覚える） */
   sandbox_instance?: SandboxInstance;
+  /** 昇格した先の大きさ（表にある名前だけ。最後に報告された値を覚える） */
+  sandbox_promoted_to?: SandboxInstance;
+  /** 昇格を見送った・失敗した理由（固定コードだけ。最後に報告された値を覚える） */
+  sandbox_promotion_reason?: SandboxPromotionReason;
 };
 
 export function parseUsagePublic(json: string | null | undefined): UsagePublic {
@@ -276,6 +329,10 @@ export function parseUsagePublic(json: string | null | undefined): UsagePublic {
     }
     const instance = sandboxInstanceName((v as Record<string, unknown>).sandbox_instance);
     if (instance !== undefined) out.sandbox_instance = instance;
+    const promotedTo = sandboxInstanceName((v as Record<string, unknown>).sandbox_promoted_to);
+    if (promotedTo !== undefined) out.sandbox_promoted_to = promotedTo;
+    const reason = (v as Record<string, unknown>).sandbox_promotion_reason;
+    if (isSandboxPromotionReason(reason)) out.sandbox_promotion_reason = reason;
     return out;
   } catch {
     return {};
@@ -295,5 +352,10 @@ export function mergeUsagePublic(
   // 後から大きさの無い usage が届いても、報告済みの大きさは忘れない
   const instance = sandboxInstanceName(payload.sandbox_instance);
   if (instance !== undefined) out.sandbox_instance = instance;
+  const promotedTo = sandboxInstanceName(payload.sandbox_promoted_to);
+  if (promotedTo !== undefined) out.sandbox_promoted_to = promotedTo;
+  if (isSandboxPromotionReason(payload.sandbox_promotion_reason)) {
+    out.sandbox_promotion_reason = payload.sandbox_promotion_reason;
+  }
   return out;
 }

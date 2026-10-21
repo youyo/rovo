@@ -302,3 +302,58 @@ describe("usage の依存関係のキャッシュ（D14）", () => {
     }
   });
 });
+
+describe("usage の Sandbox の昇格（重いコマンドの初回に大きい Sandbox へ）", () => {
+  const base = { costUsd: 1 };
+  const usage = (sandbox: Record<string, unknown>) =>
+    payloadOf(mapAgentEvent(ev("usage", { ...base, sandbox: { runtimeMs: 100, ...sandbox } })));
+
+  it("昇格した大きさ・時刻・昇格までの時間を sandbox_promoted_* に写す。sandbox_instance は最初の大きさのまま", () => {
+    const p = usage({
+      instance: "standard-2",
+      promotedTo: "standard-3",
+      promotedAt: 1_700_000_000_000,
+      runtimeMsBeforePromotion: 30_500.9,
+    });
+    expect(p).toMatchObject({
+      sandbox_instance: "standard-2",
+      sandbox_promoted_to: "standard-3",
+      sandbox_promoted_at: 1_700_000_000_000,
+      sandbox_runtime_ms_before_promotion: 30_500,
+    });
+    expect(p).not.toHaveProperty("sandbox_promotion_reason");
+  });
+
+  it("見送り・失敗の理由は固定コードだけを sandbox_promotion_reason に写す", () => {
+    for (const reason of [
+      "fixed_instance",
+      "already_large",
+      "state_unreadable",
+      "snapshot_unsupported",
+      "snapshot_failed",
+      "start_failed",
+      "cert_missing",
+      "workspace_mismatch",
+      "fallback_failed",
+    ]) {
+      const p = usage({ promotionReason: reason });
+      expect(p.sandbox_promotion_reason, reason).toBe(reason);
+      expect(p).not.toHaveProperty("sandbox_promoted_to");
+    }
+  });
+
+  it("表に無い値・壊れた値は公開しない（任意の文字列を流さない）", () => {
+    for (const bad of ["evil", "SNAPSHOT_FAILED", "x".repeat(500), 1, null, {}]) {
+      const p = usage({ promotedTo: bad, promotionReason: bad, promotedAt: bad });
+      expect(p).not.toHaveProperty("sandbox_promoted_to");
+      expect(p).not.toHaveProperty("sandbox_promotion_reason");
+      expect(p).not.toHaveProperty("sandbox_promoted_at");
+    }
+  });
+
+  it("昇格していない usage には sandbox_promoted_* を付けない（昇格前の時間は昇格したときだけ付く）", () => {
+    const p = usage({ instance: "standard-2", runtimeMsBeforePromotion: 5 });
+    expect(Object.keys(p).filter((k) => k.startsWith("sandbox_promot"))).toEqual([]);
+    expect(p).not.toHaveProperty("sandbox_runtime_ms_before_promotion");
+  });
+});

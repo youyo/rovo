@@ -1966,6 +1966,65 @@ describe("sandbox_instances_list / task_start の sandbox_instance", () => {
     }
   });
 
+  it("sandbox_instances_list: 重いコマンドの初回の昇格先に promotion_target が付く（デプロイの SANDBOX_HEAVY_INSTANCE。未設定・空・不正なら付かない）", async () => {
+    const u = await user("alice");
+    for (const [raw, expected] of [
+      ["standard-3", "standard-3"],
+      ["standard-4", "standard-4"],
+      [undefined, undefined],
+      ["", undefined],
+      ["off", undefined],
+      ["lite", undefined],
+      ["basic", undefined],
+    ] as const) {
+      const client = await connect(createApiApp(), u.props, {
+        ...env,
+        SANDBOX_HEAVY_INSTANCE: raw,
+      } as unknown as Env);
+      const out = body(await client.callTool({ name: "sandbox_instances_list", arguments: {} }));
+      const instances = out.instances as Record<string, unknown>[];
+      const targets = instances.filter((i) => i.promotion_target === true).map((i) => i.name);
+      expect(targets, String(raw)).toEqual(expected === undefined ? [] : [expected]);
+      expect(instances.every((i) => typeof i.promotion_target === "boolean")).toBe(true);
+      await client.close();
+    }
+  });
+
+  it("説明: sandbox_instances_list は promotion_target と昇格（小さく始めて重いコマンドの初回に大きくなる）を、task_result は usage の昇格の項目を説明する。instructions にも書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tools = await list(client);
+    const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    expect(desc("sandbox_instances_list")).toContain("promotion_target");
+    expect(desc("sandbox_instances_list")).toContain("昇格");
+    for (const key of [
+      "sandbox_promoted_to",
+      "sandbox_promoted_at",
+      "sandbox_runtime_ms_before_promotion",
+      "sandbox_promotion_reason",
+    ]) {
+      expect(desc("task_result"), key).toContain(key);
+    }
+    for (const code of [
+      "fixed_instance",
+      "already_large",
+      "state_unreadable",
+      "snapshot_unsupported",
+      "snapshot_failed",
+      "start_failed",
+      "cert_missing",
+      "workspace_mismatch",
+      "fallback_failed",
+    ]) {
+      expect(desc("task_result"), code).toContain(code);
+    }
+    expect(client.getInstructions() ?? "").toContain("昇格");
+    // task_start の説明には、大きさを明示したら昇格もしないことを書く（数値は書かない）
+    expect(desc("task_start")).toContain("昇格");
+    expect(desc("task_start")).not.toMatch(/standard-\d/);
+    await client.close();
+  });
+
   it("task_start は sandbox_instance を受け取り、説明は sandbox_instances_list へ案内する（数値は書かない）。lite は invalid_input", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);

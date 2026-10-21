@@ -1,4 +1,9 @@
-import { resolveSandboxInstance, SANDBOX_INSTANCES, type SandboxInstance } from "@rovo/models";
+import {
+  resolveHeavySandboxInstance,
+  resolveSandboxInstance,
+  SANDBOX_INSTANCES,
+  type SandboxInstance,
+} from "@rovo/models";
 
 /**
  * agent が報告した Sandbox の大きさ（usage の instance）を、packages/models の表にある名前に絞る。
@@ -16,4 +21,14 @@ export function sandboxInstanceName(v: unknown): SandboxInstance | undefined {
  */
 export function defaultSandboxInstanceOf(env: { SANDBOX_INSTANCE?: string }): SandboxInstance {
   return resolveSandboxInstance(env.SANDBOX_INSTANCE).instance;
+}
+
+/**
+ * 重いコマンド（テスト・ビルドなど）の初回に、Sandbox が自動で昇格する先（env の SANDBOX_HEAVY_INSTANCE。agent と同じ値をデプロイの設定が両方へ入れる）。
+ * 未設定・空・off / none・不正な値は null（昇格しない。sandbox_instances_list に promotion_target を付けない）。agent と同じ resolveHeavySandboxInstance で解く。
+ */
+export function heavySandboxInstanceOf(env: {
+  SANDBOX_HEAVY_INSTANCE?: string;
+}): SandboxInstance | null {
+  return resolveHeavySandboxInstance(env.SANDBOX_HEAVY_INSTANCE).instance;
 }

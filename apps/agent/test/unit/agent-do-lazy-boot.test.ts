@@ -321,6 +321,78 @@ describe("sandbox_instance（明示した大きさ）", () => {
   });
 });
 
+describe("sandbox の昇格（usage とプロンプト）", () => {
+  it("昇格した大きさ・時刻・昇格までの時間・見送りの理由が usage.sandbox に載る。起動した大きさ（instance）は最初のまま", async () => {
+    const a = newFixture("promo-usage-a", [call("write_note", { text: "a" }), report()]);
+    a.sandbox.metricsValue = {
+      runtimeMs: 90_000,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      promotedTo: "standard-3",
+      promotedAt: 1_700_000_000_000,
+      runtimeMsBeforePromotion: 30_000,
+    };
+    await a.stub.start(noVerify("promo-usage-a"));
+    expect(await waitForTerminal(a)).toBe("completed");
+    expect(done(await a.stub.getResult()).usage.sandbox).toMatchObject({
+      instance: "standard-2",
+      promotedTo: "standard-3",
+      promotedAt: 1_700_000_000_000,
+      runtimeMsBeforePromotion: 30_000,
+    });
+
+    const b = newFixture("promo-usage-b", [call("write_note", { text: "a" }), report()]);
+    b.sandbox.metricsValue = {
+      runtimeMs: 10,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      promotionReason: "snapshot_unsupported",
+    };
+    await b.stub.start(noVerify("promo-usage-b"));
+    expect(await waitForTerminal(b)).toBe("completed");
+    const sb = done(await b.stub.getResult()).usage.sandbox;
+    expect(sb?.promotionReason).toBe("snapshot_unsupported");
+    expect(sb).not.toHaveProperty("promotedTo");
+  });
+
+  const testing = async (name: string, vars: Record<string, string>, over = {}) => {
+    const fx = newFixture(name, [call("gate")]);
+    await fx.stub.start(noVerify(name, over));
+    await fx.gate.waitEntered();
+    const s = await runInDO<{ key: string; text: string | undefined }[]>(fx.stub, (inst) => {
+      inst.env = { ...inst.env, ...vars };
+      return inst.promptSections();
+    });
+    fx.gate.release();
+    await waitForTerminal(fx); // テストの終了後にタスクが動き続けて、ログが環境の破棄と競合しないようにする
+    return s.find((x) => x.key === "testing")?.text ?? "";
+  };
+
+  it("プロンプト: 昇格が有効なら、重いコマンドの初回に Sandbox が大きくなり数十秒かかることを伝える", async () => {
+    const t = await testing("promo-prompt-on", { SANDBOX_HEAVY_INSTANCE: "standard-3" });
+    expect(t).toContain("scaled up");
+    expect(t).toContain("tens of seconds");
+    // 昇格するとプロセスは引き継がれない（dev server などは止まる）
+    expect(t).toContain("background");
+    expect(t).toContain("stopped");
+  });
+
+  it("プロンプト: 昇格しない（無効・大きさを明示した）なら書かない", async () => {
+    expect(await testing("promo-prompt-off", { SANDBOX_HEAVY_INSTANCE: "" })).not.toContain(
+      "scaled up",
+    );
+    expect(
+      await testing(
+        "promo-prompt-fixed",
+        { SANDBOX_HEAVY_INSTANCE: "standard-3" },
+        { sandboxInstance: "standard-1" },
+      ),
+    ).not.toContain("scaled up");
+  });
+});
+
 describe("子のシステムプロンプト", () => {
   const sections = async (name: string) => {
     const fx = newFixture(name, [call("gate")]);

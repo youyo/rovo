@@ -136,6 +136,7 @@ AI Gateway にプロバイダーのキーを、エイリアス `default` で登�
 | `concurrency.maxTasks` | | 2 | `MAX_CONCURRENT_TASKS`。利用者ごとに同時に実行できるタスクの上限（1 以上の整数。それ以外・未知のキーはエラー） |
 | `models.default` / `.list` / `.efforts` | | 雛形のとおり | `AGENT_MODEL` / `AGENT_MODELS`（配列かカンマ区切り）/ `MODEL_EFFORTS`（`{モデルの id: レベル}` か文字列）。**gateway と agent の同名の var に同じ値が入る** |
 | `sandbox.instance` | | `standard-2` | agent の `SANDBOX_INSTANCE` と、gateway の `SANDBOX_USD_PER_HOUR`（その大きさの上限側の単価を計算して入れる。`vars.gateway.SANDBOX_USD_PER_HOUR` を書けばそれを優先）。5 種類以外はエラー（11） |
+| `sandbox.heavyInstance` | | `standard-3` | agent と gateway の `SANDBOX_HEAVY_INSTANCE`。重いコマンド（テスト・型検査・ビルドなど）の初回に Sandbox が昇格する先。`standard-1`〜`standard-4` のどれか、または `null`（昇格しない）。`lite`・その他の値・未知のキーはエラー（11） |
 | `depsCache.enabled` | | `true` | agent の `DEPS_CACHE_ENABLED`。依存関係のキャッシュ（Containers のスナップショット。public beta）を使うか。`false` で無効（17） |
 | `webBrowseEnabled` | | `false` | `WEB_BROWSE_ENABLED`。**3 つの Worker に同じ値が入る**（12） |
 | `vars.gateway` / `.agent` / `.web` | | `{}` | 雛形にあるほかの var（上限・単価・`SAFETY_*` など）の上書き。雛形に無い名前、専用の項目で設定する名前、secret は拒否する |
@@ -241,6 +242,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_BROWSE_DAILY_LIMIT` | gateway | 任意 | `50` | 親の `web_browse` の同上 |
 | `WEB_BROWSE_ENABLED` | gateway / agent / web | 任意 | `"false"` | `"true"` のときだけ `web_browse` が有効。3 つの Worker で揃える（12） |
 | `SANDBOX_INSTANCE` | gateway | 任意 | `standard-2` | `sandbox_instances_list` の `default`（`task_start` で `sandbox_instance` を省略したときの大きさ）。agent の同名の var と同じ値にする。`deploy:config` が `sandbox.instance` から両方に入れる。単価の計算には使わない |
+| `SANDBOX_HEAVY_INSTANCE` | gateway | 任意 | `standard-3` | `sandbox_instances_list` の `promotion_target`（重いコマンドの初回に Sandbox が自動で昇格する先）。agent の同名の var と同じ値にする。空・`off`・不正な値は昇格先なし。`deploy:config` が `sandbox.heavyInstance` から両方に入れる（11） |
 | `SANDBOX_USD_PER_HOUR` | gateway | 任意 | `0.1291`（`standard-2`） | 推定費用の単価（11）。`deploy:config` が `sandbox.instance` から計算する。agent が使った大きさを報告したタスクは、その大きさの単価（表の値）で計算するので、この値は大きさが分からないタスク（Sandbox を起動しなかった・古い agent）にだけ効く |
 | `WEB_USD_PER_1K_SEARCH` | gateway | 任意 | `0.25` | 同上 |
 | `WEB_USD_PER_1K_FETCH` | gateway | 任意 | `0` | 同上 |
@@ -251,6 +253,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_FETCH_LIMIT_PER_TASK` | agent | 任意 | `100` | 子の `web_fetch` の同上 |
 | `WEB_BROWSE_LIMIT_PER_TASK` | agent | 任意 | `20` | 子の `web_browse` の同上 |
 | `SANDBOX_INSTANCE` | agent | 任意 | `standard-2` | Sandbox コンテナの大きさ（`lite` / `standard-1` / `standard-2` / `standard-3` / `standard-4`）。不正な値は `standard-2` に戻る（警告のログ）。性能と上限の費用は 11。`rovo.config.json` の `sandbox.instance` で設定する |
+| `SANDBOX_HEAVY_INSTANCE` | agent | 任意 | （空 = 昇格しない。`deploy:config` は `standard-3` を入れる） | 重いコマンド（テスト・型検査・ビルドなど）の初回に Sandbox が昇格する先（`standard-1`〜`standard-4`）。空・`off`・`none`・不正な値（`lite` を含む。警告のログ）は昇格しない。`task_start` で `sandbox_instance` を明示したタスクは、この設定にかかわらず昇格しない。スナップショットが使えなくても失敗はしない（小さいまま続ける）。`rovo.config.json` の `sandbox.heavyInstance` で設定する（11） |
 | `DEPS_CACHE_ENABLED` | agent | 任意 | `true` | 依存関係のキャッシュ（17）を使うか。`false` / `0` / `off` で無効（`task_result` の `usage.deps_cache` は `disabled`）。それ以外・未設定は有効。スナップショットが使えなくても失敗はしない（image から普通に起動する）。`rovo.config.json` の `depsCache.enabled` で設定する |
 | `WEB_SEARCH_PROVIDER` | web | 任意 | `ceramic` | 検索プロバイダ（`ceramic` / `exa` / `linkup`）。変えたら単価も合わせる |
 | `SAFETY_BLOCK_THRESHOLD` | web | 任意 | `0.8` | Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block。**仮の値**で、受入で調整する |
@@ -387,7 +390,17 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 | `standard-3` | 2 | 8 GiB | 16 GB | 0.2201 | 並列のテスト、大きめのビルド |
 | `standard-4` | 4 | 12 GiB | 20 GB | 0.4011 | 重いビルド。費用も最大 |
 
-**タスクごとの大きさ**: `rovo.config.json` の `sandbox.instance` は既定で、`task_start` の `sandbox_instance`（`standard-1` / `standard-2` / `standard-3` / `standard-4`。`lite` は選べない）でタスクごとに変えられる。呼び出し元の AI は `sandbox_instances_list` で選べる大きさと単価を確かめて選ぶ（重いテストを流すタスクだけ大きくする）。指定したタスクは、その間ずっとその大きさで動く（動いているコンテナの大きさは変えられない）。依存キャッシュを作るコンテナの大きさは、指定に依らず既定のまま。`task_result` の `usage.sandbox_instance` に実際に起動した大きさが出て、`task_summary` の `sandbox_usd_estimate` もその大きさの単価で計算される。
+**タスクごとの大きさ**: `rovo.config.json` の `sandbox.instance` は既定で、`task_start` の `sandbox_instance`（`standard-1` / `standard-2` / `standard-3` / `standard-4`。`lite` は選べない）でタスクごとに変えられる。呼び出し元の AI は `sandbox_instances_list` で選べる大きさと単価を確かめて選ぶ。指定したタスクは、その間ずっとその大きさで動き、下の昇格もしない（動いているコンテナの大きさは変えられない）。省略したタスクは既定の大きさで小さく始まり、重いコマンドの初回に自動で昇格する。依存キャッシュを作るコンテナの大きさは、指定に依らず既定のまま（昇格もしない）。`task_result` の `usage.sandbox_instance` に最初に起動した大きさが出る。
+
+**小さく始めて、重いコマンドの初回に大きくなる（昇格。`sandbox.heavyInstance`）**: 動いているコンテナの大きさは変えられないので、子が重いコマンド（テスト・型検査・ビルドなど）を実行する前に、今のコンテナのスナップショット（Containers の `snapshotContainer`。依存キャッシュ（17）と同じ仕組み）を取り、コンテナを止め、同じスナップショットから大きい大きさ（既定 `standard-3`）で起動し直す。スナップショットは大きさに結び付かないので、小さいコンテナで作ったものを大きいコンテナで戻せる（`node_modules` のネイティブのバイナリも動く）。作業ツリー（HEAD と未 commit の変更）がそのまま残っていることを確かめてから、元のコマンドを実行する。**一度昇格したら戻さない**（コンテナが落ちて作り直されても昇格先で起動する）。昇格の間（数十秒）は、そのコマンドの開始が遅れる。
+
+- **重いコマンドの判定**: argv のパターンだけで決める（`apps/agent/src/heavy-command.ts` の 1 か所）。`vitest` / `jest` / `mocha` / `pytest` / `tox` / `rspec` / `playwright test` / `tsc`（バージョン表示を除く）、`go test|build|vet`、`cargo test|build|check|clippy`、`node --test`、`mvn` / `gradle` の test・build、`make`（目標なし・`test` / `build` / `check` / `all`）、`npm|pnpm|yarn|bun` の `test` と `run <test|build|typecheck|e2e ほか（`test:unit` のように `:` で続く名前を含む）>`（`pnpm build` のように script 名を直接書く形も）、`mise run <同上>`、`npx` / `pnpm exec` / `uv run` / `python -m pytest` などのラッパー越し、`bash -lc "..."` の中身（`&&` `;` `|` で区切った各コマンド）。`npm ci` / `install` や `lint` は重いコマンドとはみなさない（依存キャッシュと、軽い処理）。誤検知は「数十秒早く昇格する」、見逃しは「小さいまま遅く動く」だけで、結果は変わらない。検証コマンド（`verification_commands`）は、パターンに関係なく、実行の前に昇格する。
+- **昇格しない場合**: `task_start` で `sandbox_instance` を明示したタスク（固定）、`sandbox.heavyInstance` が `null`（`SANDBOX_HEAVY_INSTANCE` が空）、すでに昇格先以上の大きさで起動している（例: 既定を `standard-4` にしている）。昇格を試みるのはタスクごとに 1 回だけ。
+- **失敗しても止まらない（fail-soft）**: スナップショットに対応しない環境・失敗した・時間切れ（2 分）→ 昇格せず小さいまま続ける。スナップショットのあと昇格先の起動・確認（CA 証明書、作業ツリーの HEAD と未 commit の変更が元と同じこと）に失敗 → 同じスナップショットで元の大きさに起動し直す（作業ツリーは失わない）。それも失敗 → image から起動し直し（作業ツリーは最後に push したチェックポイントから作り直され、子には「再起動した」と伝わる）、既存の起動の失敗の扱い（3 回で `sandbox_setup_failed`）に乗る。見送り・失敗の理由は固定コードで `usage.sandbox_promotion_reason` とログ（`sandbox_promotion_skipped` / `sandbox_promotion_failed`）に残る。
+- **結果に出る項目**: `task_result` の `usage.sandbox_promoted_to`（昇格した先）、`usage.sandbox_promoted_at`（昇格した時刻。epoch ms）、`usage.sandbox_runtime_ms_before_promotion`（昇格した時点までの Sandbox の時間。ms）、`usage.sandbox_promotion_reason`（`fixed_instance` / `already_large` / `state_unreadable` / `snapshot_unsupported` / `snapshot_failed` / `start_failed` / `cert_missing` / `workspace_mismatch` / `fallback_failed`。昇格が成功したとき・設定で無効のときは付かない）。`usage.sandbox_instance` は昇格しても最初の大きさのまま。同じ項目が `task_wait` の usage イベントと、`task_summary` の `sandbox` にも出る。
+- **推定費用の按分**: `task_summary` の `sandbox_usd_estimate` は、昇格前の時間（`runtime_ms_before_promotion`）を最初の大きさ（`instance`）の単価、残りの時間を昇格先（`promoted_to`）の単価で計算する（`unit_prices.sandbox_promoted_usd_per_hour` に昇格先の単価）。Sandbox の費用は予算に含めない扱いは変わらない。
+- **なぜ `standard-3` か**: 本番で rovo のリポジトリの gateway の vitest を回したベンチマークは、`standard-1` 316.6 秒 / `standard-2` 161.1 秒 / `standard-3` 84.3 秒 / `standard-4` 94.7 秒。Sandbox の費用は `standard-1`〜`standard-3` がほぼ同じ（時間が半分になる分、単価が倍になる）で、`standard-4` だけ約 1.7 倍。4 vCPU にしても速くならない。使い分けの軸は「作業の段階」ではなく「重いコマンドかどうか」（子が TDD の途中に回すテストが時間の大半を占める）。
+- **残るもの**: 昇格のスナップショットはタスクごとに 1 つ残る（一覧・削除の API が無い。30 日で期限切れになる。保管の費用は Cloudflare の Containers の料金表を確認する）。無効にするには `sandbox.heavyInstance` を `null` にして `deploy:config` を再生成し、agent と gateway を再デプロイする。
 
 **Sandbox は必要になるまで起動しない**: 子が最初に Sandbox を使うツール（ファイルの読み書き・コマンドの実行・git）を呼んだときに起動する。`web_search` / `web_fetch` だけで進むタスク（検証コマンドも無い）は起動せず、`sandbox_runtime_ms` は 0 で、`usage.sandbox_instance` も付かない。起動の失敗は 3 回で `sandbox_setup_failed`。この変更でデプロイ手順・secret は増えない（gateway に `SANDBOX_INSTANCE` の var が増えるが、`deploy:config` が入れる。手書きの設定を使っているなら 11 の表のとおり足す）。
 

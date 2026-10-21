@@ -128,3 +128,50 @@ describe("task_result の usage.sandbox_instance（実際に使った大きさ�
     ).not.toHaveProperty("sandbox_instance");
   });
 });
+
+describe("task_result の usage.sandbox_promoted_*（昇格）", () => {
+  it("agent が報告した昇格先・時刻・昇格までの時間を返す。sandbox_instance は最初の大きさ", async () => {
+    const usage = await usageWith({
+      runtimeMs: 90_000,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      promotedTo: "standard-3",
+      promotedAt: 1_700_000_000_000,
+      runtimeMsBeforePromotion: 30_000.7,
+    });
+    expect(usage).toMatchObject({
+      sandbox_instance: "standard-2",
+      sandbox_promoted_to: "standard-3",
+      sandbox_promoted_at: 1_700_000_000_000,
+      sandbox_runtime_ms_before_promotion: 30_000,
+    });
+    expect(usage).not.toHaveProperty("sandbox_promotion_reason");
+  });
+
+  it("見送り・失敗の理由は固定コードだけ返す。昇格していなければ昇格先は付けない", async () => {
+    const usage = await usageWith({
+      runtimeMs: 10,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      promotionReason: "snapshot_unsupported",
+    });
+    expect(usage.sandbox_promotion_reason).toBe("snapshot_unsupported");
+    expect(usage).not.toHaveProperty("sandbox_promoted_to");
+    const bad = await usageWith({
+      runtimeMs: 10,
+      restarts: 0,
+      bootRetries: 0,
+      promotedTo: "evil",
+      promotionReason: "evil",
+    });
+    expect(bad).not.toHaveProperty("sandbox_promoted_to");
+    expect(bad).not.toHaveProperty("sandbox_promotion_reason");
+  });
+
+  it("起動しなかった（sandbox の報告が無い）タスクには付かない", async () => {
+    const usage = await usageWith(undefined);
+    expect(Object.keys(usage).filter((k) => k.startsWith("sandbox_promot"))).toEqual([]);
+  });
+});

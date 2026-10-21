@@ -10,7 +10,12 @@ import {
 } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { AuditFields } from "@rovo/audit";
-import { computeCostUsd, type Effort, isSelectableSandboxInstance } from "@rovo/models";
+import {
+  computeCostUsd,
+  type Effort,
+  isSelectableSandboxInstance,
+  resolveHeavySandboxInstance,
+} from "@rovo/models";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
 import { agentModels, aiGatewayRejection, defaultModel, modelEffort } from "./agent/config";
@@ -1838,6 +1843,17 @@ export class AgentDO extends DurableObject<Env> {
     const cacheBuildMs = Math.max(prev?.cacheBuildMs ?? 0, finiteCount(m.cacheBuildMs));
     // 実際に起動した大きさ（起動のたびに同じ値。最後に読めたものを残す）
     const instance = typeof m.instance === "string" ? m.instance : prev?.instance;
+    // 昇格（重いコマンドの初回に大きい Sandbox へ）。昇格したら戻さないので、読めた値を残す。理由は最後に読めたもの
+    const promotedTo = typeof m.promotedTo === "string" ? m.promotedTo : prev?.promotedTo;
+    const promotedAt =
+      promotedTo === undefined
+        ? undefined
+        : finiteCount(m.promotedAt) || prev?.promotedAt || undefined;
+    const runtimeMsBeforePromotion =
+      promotedTo === undefined
+        ? undefined
+        : finiteCount(m.runtimeMsBeforePromotion) || prev?.runtimeMsBeforePromotion || 0;
+    const promotionReason = m.promotionReason ?? prev?.promotionReason;
     const next: SandboxMetrics = {
       runtimeMs: Math.max(prev?.runtimeMs ?? 0, finiteCount(m.runtimeMs)),
       restarts: Math.max(prev?.restarts ?? 0, finiteCount(m.restarts)),
@@ -1846,6 +1862,14 @@ export class AgentDO extends DurableObject<Env> {
       ...(depsMissReason !== undefined ? { depsMissReason } : {}),
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
       ...(instance !== undefined ? { instance } : {}),
+      ...(promotedTo !== undefined
+        ? {
+            promotedTo,
+            ...(promotedAt !== undefined ? { promotedAt } : {}),
+            ...(runtimeMsBeforePromotion !== undefined ? { runtimeMsBeforePromotion } : {}),
+          }
+        : {}),
+      ...(promotionReason !== undefined ? { promotionReason } : {}),
     };
     if (!prev) return next;
     const counters =
@@ -1854,7 +1878,9 @@ export class AgentDO extends DurableObject<Env> {
       next.depsCache !== prev.depsCache ||
       next.depsMissReason !== prev.depsMissReason ||
       next.cacheBuildMs !== prev.cacheBuildMs ||
-      next.instance !== prev.instance;
+      next.instance !== prev.instance ||
+      next.promotedTo !== prev.promotedTo ||
+      next.promotionReason !== prev.promotionReason;
     return final || counters ? next : prev;
   }
 
@@ -2016,7 +2042,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "testing",
-        text: "A full test run in the sandbox can take minutes. While you iterate (TDD), run only the tests related to the files you changed (for example `vitest run <file>`), not the whole suite. Run the whole suite once, right before report_completion. Keep the trailing newline at the end of every file you edit or create: a file ends with exactly one newline character.",
+        text: `A full test run in the sandbox can take minutes. While you iterate (TDD), run only the tests related to the files you changed (for example \`vitest run <file>\`), not the whole suite. Run the whole suite once, right before report_completion. Keep the trailing newline at the end of every file you edit or create: a file ends with exactly one newline character.${this.promotionEnabled() ? " The sandbox starts small and is scaled up to a larger one before the first heavy command (tests, a build, a type check); that first command can take tens of seconds longer than usual, and later heavy commands run faster. Scaling up restarts the container: processes you left running in the background (a dev server, for example) are stopped, so start them again if you still need them. Do not retry or cancel it because it looks slow." : ""}`,
       },
       {
         key: "untrusted_data",
@@ -2054,6 +2080,13 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /** web_browse を有効にするか。WEB_BROWSE_ENABLED が "true" のときだけ（既定は無効）。 */
+  /** 重いコマンドの初回に Sandbox が大きくなりうるか（設定で有効で、task_start で大きさを明示していない） */
+  private promotionEnabled(): boolean {
+    if (this.spec()?.sandboxInstance !== undefined) return false;
+    const raw = (this.env as unknown as { SANDBOX_HEAVY_INSTANCE?: string }).SANDBOX_HEAVY_INSTANCE;
+    return resolveHeavySandboxInstance(raw).instance !== null;
+  }
+
   private webBrowseEnabled(): boolean {
     const o = this.overrides().webBrowseEnabled;
     if (o !== undefined) return o;
@@ -2415,7 +2448,12 @@ export class AgentDO extends DurableObject<Env> {
         }
         // 1 本ごとの所要時間（開始から終了まで。タイムアウトも含む）を、テストで差し替えられる時計で計る
         const startedAt = this.now();
-        const r = await sb.exec(cmd.argv, { cwd, timeoutMs: (cmd.timeoutSeconds ?? 600) * 1000 });
+        // heavy: 検証コマンドは重いものとして扱う（実行の前に、小さい Sandbox を大きくする。昇格済み・無効なら何もしない）
+        const r = await sb.exec(cmd.argv, {
+          cwd,
+          timeoutMs: (cmd.timeoutSeconds ?? 600) * 1000,
+          heavy: true,
+        });
         const durationMs = Math.max(0, this.now() - startedAt);
         results.push({
           argv: cmd.argv,

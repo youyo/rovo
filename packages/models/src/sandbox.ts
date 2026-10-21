@@ -37,6 +37,60 @@ export function isSelectableSandboxInstance(v: unknown): v is SelectableSandboxI
   return (SELECTABLE_SANDBOX_INSTANCES as readonly unknown[]).includes(v);
 }
 
+/**
+ * 重いコマンド（テスト・ビルドなど）の初回に昇格する先の既定（standard-3）。小さく始めて、重いコマンドの前に大きくする。
+ * 本番のベンチマーク（rovo のリポジトリの gateway の vitest）は standard-1 317 秒 / standard-2 161 秒 / standard-3 84 秒 / standard-4 95 秒で、
+ * Sandbox の費用は standard-1〜3 がほぼ同じ（時間が半分になる分、単価が倍になる）、standard-4 だけ約 1.7 倍。
+ * 4 vCPU にしても速くならないので、昇格先は standard-3 にする。
+ */
+export const DEFAULT_HEAVY_SANDBOX_INSTANCE: SelectableSandboxInstance = "standard-3";
+
+/**
+ * env SANDBOX_HEAVY_INSTANCE を解く。未設定・空・off / none は無効（instance: null。昇格しない）。
+ * タスクが選べる 4 種類（lite を除く）だけ有効で、それ以外は無効にして、受け付けなかった値を ignored に返す（起動はエラーにしない。
+ * デプロイ設定の生成器は不正な値をエラーにする）。
+ */
+export function resolveHeavySandboxInstance(raw: string | undefined): {
+  instance: SelectableSandboxInstance | null;
+  ignored?: string;
+} {
+  const v = (raw ?? "").trim();
+  const lower = v.toLowerCase();
+  if (v === "" || lower === "off" || lower === "none") return { instance: null };
+  if (isSelectableSandboxInstance(v)) return { instance: v };
+  return { instance: null, ignored: v };
+}
+
+/**
+ * Sandbox の昇格を見送った・失敗した理由の固定コード（usage.sandbox_promotion_reason。任意の文字列・例外の文面は公開しない）。
+ * - fixed_instance: task_start で sandbox_instance を明示した（そのタスクの間は固定）
+ * - already_large: 起動した大きさがすでに昇格先以上
+ * - state_unreadable: 作業ツリーの状態を読めなかった（昇格前後の比較ができない）
+ * - snapshot_unsupported: スナップショットに対応しないランタイム（snapshotContainer が無い）
+ * - snapshot_failed: スナップショットの取得に失敗・時間切れ
+ * - start_failed: 昇格先の起動に失敗した（同じスナップショットから元の大きさで起動し直した）
+ * - cert_missing: 昇格先で HTTPS 傍受の CA 証明書が読めなかった（同上）
+ * - workspace_mismatch: 昇格先で作業ツリー（HEAD・未 commit の変更）が元と違った（同上）
+ * - fallback_failed: 元の大きさでの起動し直しにも失敗した（image からの再起動 = 作業ツリーの作り直しに乗せる）
+ */
+export const SANDBOX_PROMOTION_REASONS = [
+  "fixed_instance",
+  "already_large",
+  "state_unreadable",
+  "snapshot_unsupported",
+  "snapshot_failed",
+  "start_failed",
+  "cert_missing",
+  "workspace_mismatch",
+  "fallback_failed",
+] as const;
+
+export type SandboxPromotionReason = (typeof SANDBOX_PROMOTION_REASONS)[number];
+
+export function isSandboxPromotionReason(v: unknown): v is SandboxPromotionReason {
+  return (SANDBOX_PROMOTION_REASONS as readonly unknown[]).includes(v);
+}
+
 export function sandboxInstanceSpec(instance: SandboxInstance): {
   vcpu: number;
   memoryGiB: number;
@@ -93,10 +147,13 @@ export type SandboxInstanceInfo = {
   default: boolean;
   /** task_start の sandbox_instance に指定できるか（lite は false） */
   selectable: boolean;
+  /** 重いコマンド（テスト・ビルドなど）の初回に、自動で大きくなる先か（昇格を無効にしているデプロイでは、どれも false） */
+  promotion_target: boolean;
 };
 
 export function listSandboxInstances(
   defaultInstance: SandboxInstance = DEFAULT_SANDBOX_INSTANCE,
+  heavyInstance: SandboxInstance | null = DEFAULT_HEAVY_SANDBOX_INSTANCE,
 ): SandboxInstanceInfo[] {
   return (Object.keys(SANDBOX_INSTANCES) as SandboxInstance[]).map((name) => {
     const s = sandboxInstanceSpec(name);
@@ -108,6 +165,7 @@ export function listSandboxInstances(
       usd_per_hour: sandboxUsdPerHour(name),
       default: name === defaultInstance,
       selectable: isSelectableSandboxInstance(name),
+      promotion_target: name === heavyInstance,
     };
   });
 }

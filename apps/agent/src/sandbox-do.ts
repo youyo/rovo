@@ -2,10 +2,16 @@ import { DurableObject } from "cloudflare:workers";
 import { posix } from "node:path";
 import { Files } from "@cloudflare/sandbox";
 import type { AuditFields, AuditRecord } from "@rovo/audit";
-import { resolveSandboxInstance, type SandboxInstance } from "@rovo/models";
+import {
+  resolveHeavySandboxInstance,
+  resolveSandboxInstance,
+  SANDBOX_INSTANCES,
+  type SandboxInstance,
+  type SandboxPromotionReason,
+} from "@rovo/models";
 import type { GitCredential, SandboxMetrics } from "./agent/types";
 import { appendTestAudit, emitAudit, readTestAudit } from "./audit-adapter";
-import { PROCESS_SCRIPT } from "./container-scripts";
+import { PROCESS_SCRIPT, PROMOTE_STATE_SCRIPT } from "./container-scripts";
 import { decryptString, encryptString, importEncryptionKey } from "./crypto";
 import {
   DEPS_BUILD_TIMEOUT_MS,
@@ -24,6 +30,7 @@ import {
   parseDepsSpec,
 } from "./deps-cache";
 import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./deps-scripts";
+import { isHeavyCommand } from "./heavy-command";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
 import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
@@ -87,6 +94,11 @@ const BOOT_POLL_MS = 500;
 const MAX_TASK_MS = 2 * 60 * 60_000;
 const MAX_INPUT_PAUSE_MS = 24 * 60 * 60_000;
 
+/** 昇格のためのスナップショット（実行中のコンテナのディスクの保存）を待つ上限。超えたら昇格を諦めて小さいまま続ける */
+const PROMOTE_SNAPSHOT_MS = 2 * 60_000;
+/** 昇格の前後で作業ツリーの状態を読む（HEAD・差分・追跡されていないファイル）のに許す時間 */
+const PROMOTE_STATE_TIMEOUT_MS = 60_000;
+
 /** 依存関係のキャッシュの ensure（作成を待つことがある）を待つ上限。作成の時間切れ + 余裕 */
 const DEPS_ENSURE_WAIT_MS = DEPS_BUILD_TIMEOUT_MS + 60_000;
 /** 退避した node_modules を作業ツリーへ戻す（同じファイルシステム内の mv）のに許す時間 */
@@ -124,6 +136,11 @@ async function withDeadline<T>(promise: Promise<T>, until: number): Promise<T | 
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/** 昇格のスナップショットの名前（人が見分けるための名前。識別は id で行う）。DO の名前（= タスク ID）から作る。 */
+function promoteSnapshotName(taskId: string | undefined): string {
+  return `promote-${(taskId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}`;
 }
 
 interface RawResult {
@@ -182,6 +199,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private bootDestroyMs = BOOT_DESTROY_MS;
   /** 依存関係のキャッシュの ensure を待つ上限（ms）。テストで短くする。 */
   private depsEnsureWaitMs = DEPS_ENSURE_WAIT_MS;
+  /** 昇格のスナップショットを待つ上限（ms）。テストで短くする。 */
+  private promoteSnapshotMs = PROMOTE_SNAPSHOT_MS;
   /** キャッシュを作る処理（builder として使われたとき）。同時の依頼は 1 つを共有する。 */
   private depsBuilding?: Promise<DepsBuildResult>;
 
@@ -330,6 +349,37 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   /** AgentDO が usage イベントに載せる値。読み取りだけで書き込まない。 */
   async metrics(): Promise<SandboxMetrics> {
+    const depsCache = this.ctx.storage.kv.get<DepsCacheStatus>("deps_cache");
+    const cacheBuildMs = this.num("cache_build_ms");
+    const instance = this.ctx.storage.kv.get<SandboxInstance>("instance");
+    const promotedTo = this.ctx.storage.kv.get<SandboxInstance>("promoted_to");
+    const promotionReason = this.ctx.storage.kv.get<SandboxPromotionReason>("promotion_reason");
+    const depsMissReason =
+      depsCache === "miss"
+        ? this.ctx.storage.kv.get<DepsMissReason>("deps_miss_reason")
+        : undefined;
+    return {
+      runtimeMs: this.runtimeTotal(),
+      restarts: Math.max(0, this.num("starts") - 1),
+      bootRetries: this.num("boot_retries"),
+      ...(depsCache !== undefined ? { depsCache } : {}),
+      ...(depsMissReason !== undefined ? { depsMissReason } : {}),
+      ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
+      ...(instance !== undefined ? { instance } : {}),
+      // 昇格（重いコマンドの初回に大きい Sandbox へ）。昇格した後は promotedTo と、その時点までの時間（費用の按分に使う）
+      ...(promotedTo !== undefined
+        ? {
+            promotedTo,
+            promotedAt: this.num("promoted_at"),
+            runtimeMsBeforePromotion: this.num("rt_before_promotion"),
+          }
+        : {}),
+      ...(promotionReason !== undefined ? { promotionReason } : {}),
+    };
+  }
+
+  /** Sandbox を動かした累計の時間（ms）。実行中の区間は現在までを足す。 */
+  private runtimeTotal(): number {
     const since = this.ctx.storage.kv.get<number>("rt_since");
     let open = 0;
     if (since !== undefined) {
@@ -338,22 +388,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         : Math.max(since, this.num("rt_seen"));
       open = Math.max(0, end - since);
     }
-    const depsCache = this.ctx.storage.kv.get<DepsCacheStatus>("deps_cache");
-    const cacheBuildMs = this.num("cache_build_ms");
-    const instance = this.ctx.storage.kv.get<SandboxInstance>("instance");
-    const depsMissReason =
-      depsCache === "miss"
-        ? this.ctx.storage.kv.get<DepsMissReason>("deps_miss_reason")
-        : undefined;
-    return {
-      runtimeMs: this.num("rt_total") + open,
-      restarts: Math.max(0, this.num("starts") - 1),
-      bootRetries: this.num("boot_retries"),
-      ...(depsCache !== undefined ? { depsCache } : {}),
-      ...(depsMissReason !== undefined ? { depsMissReason } : {}),
-      ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
-      ...(instance !== undefined ? { instance } : {}),
-    };
+    return this.num("rt_total") + open;
   }
 
   /** E2E 専用: 失敗した E2E の診断（ready になった時刻、start の回数、restarts / bootRetries など）。test 以外は例外。 */
@@ -506,6 +541,10 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       if (this.terminated()) return TERMINATED_RESULT;
       this.requireSpec();
       await this.runningOrThrowRestarted();
+      // 重いコマンド（テスト・ビルドなど）の初回に、大きい Sandbox へ昇格する（fail-soft。昇格しなくてもコマンドは動く）
+      if (options.heavy === true || isHeavyCommand(argv)) {
+        if ((await this.maybePromote()) === "terminated") return TERMINATED_RESULT;
+      }
       return this.runExec(argv, { ...options, cwd });
     });
   }
@@ -749,7 +788,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         // scheduling_policy=durable_object では wrangler の instance_type は効かず、start() の instance が大きさを決める
         // （指定しないと lite = 1/16 vCPU・256 MiB で、npm ci が遅くメモリ不足で落ちる）。不正な値は既定に戻す（D13）。
         // タスクが明示した大きさ（spec.instance。検証済みで standard-1〜4）があればそれ、無ければ env の既定
-        const explicit = spec.instance as SandboxInstance | undefined;
+        // 昇格した後（重いコマンドの初回に大きくした）は、作り直しも昇格先で起動する（小さく戻さない）
+        const explicit = (spec.instance ?? this.promotedTo()) as SandboxInstance | undefined;
         const { instance, ignored } =
           explicit !== undefined
             ? { instance: explicit, ignored: undefined }
@@ -781,8 +821,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           });
         }
         this.recordStart();
-        // 実際に start() に渡した大きさ（usage.sandbox.instance として gateway へ。単価の計算に使う）
-        this.ctx.storage.kv.put("instance", instance);
+        // 最初に start() に渡した大きさ（usage.sandbox.instance として gateway へ。単価の計算に使う）。昇格した後の作り直しでは上書きしない
+        if (this.promotedTo() === undefined) this.ctx.storage.kv.put("instance", instance);
         started = true;
       }
       // DO だけが再起動してコンテナが生きている場合も、傍受は登録し直す（同じ宛先の再登録はハンドラを置き換える）。
@@ -891,6 +931,258 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     await this.preparePackageManager(spec.deadlineAt);
     await this.armAlarm();
     return started;
+  }
+
+  // ---- 昇格（小さく始めて、重いコマンドの初回に大きい Sandbox へ。docs/deploy.md の 11）----
+  //
+  // 動いているコンテナの大きさは変えられない。重いコマンド（テスト・ビルドなど。heavy-command.ts）の前に、今のコンテナの
+  // スナップショットを取り、止めて、同じスナップショットから大きい大きさで起動し直す（スナップショットはイメージの版に
+  // 結び付き、大きさには結び付かない。node_modules のネイティブのバイナリも動く）。作業ツリー（HEAD と未 commit の変更）が
+  // そのまま残っていることを確かめてから、元のコマンドを実行する。一度昇格したら戻さない（作り直しも昇格先で起動する）。
+  //
+  // fail-soft（コマンドは必ず動く。理由は固定コードで promotion_reason に残し、ログにも出す）:
+  //  - スナップショットが使えない・失敗 → 昇格せず小さいまま続ける（snapshot_unsupported / snapshot_failed / state_unreadable）
+  //  - 昇格先の起動・確認に失敗 → 同じスナップショットで元の大きさに起動し直す。作業ツリーは失わない（start_failed / cert_missing / workspace_mismatch）
+  //  - それも失敗 → image からの起動（作業ツリーの作り直し）に乗せる。呼び出し側へは「再起動した」例外（fallback_failed）
+  // 試みるのはタスクごとに 1 回だけ。task_start で大きさを明示したタスク・設定で無効・すでに昇格先以上なら昇格しない。
+
+  private promotedTo(): SandboxInstance | undefined {
+    const v = this.ctx.storage.kv.get<string>("promoted_to");
+    return v !== undefined && Object.hasOwn(SANDBOX_INSTANCES, v)
+      ? (v as SandboxInstance)
+      : undefined;
+  }
+
+  /** 最初に起動した大きさ（起動の記録が無ければ env の既定） */
+  private startedInstance(): SandboxInstance {
+    const v = this.ctx.storage.kv.get<string>("instance");
+    if (v !== undefined && Object.hasOwn(SANDBOX_INSTANCES, v)) return v as SandboxInstance;
+    return resolveSandboxInstance(this.env.SANDBOX_INSTANCE).instance;
+  }
+
+  /** 昇格の理由を固定コードで残す（usage.sandbox_promotion_reason と、ログの sandbox_promotion_skipped / _failed） */
+  private recordPromotionReason(reason: SandboxPromotionReason, kind: "skipped" | "failed"): void {
+    this.ctx.storage.kv.put("promotion_reason", reason);
+    console.warn(`[sandbox-promote] sandbox_promotion_${kind}: ${reason}`);
+  }
+
+  /** 作業ツリーの状態の指紋（HEAD・追跡ファイルの差分・追跡されていないファイルのハッシュ）。読めなければ undefined */
+  private async workspaceState(): Promise<string | undefined> {
+    const r = await this.rawExec(
+      ["bash", "-c", PROMOTE_STATE_SCRIPT, "rovo-promote-state", WORKSPACE],
+      { timeoutMs: PROMOTE_STATE_TIMEOUT_MS, cwd: "/" },
+    );
+    return r.exitCode === 0 && r.stdout.trim() !== "" ? r.stdout : undefined;
+  }
+
+  /**
+   * 重いコマンドの前に、必要なら昇格する。exec の serial の中（コンテナが動いている状態）で呼ぶ。
+   * 昇格の失敗では投げない。投げるのは、元の大きさでも起動し直せずに image から起動し直したとき（「再起動した」）と、期限切れだけ。
+   * terminate された場合は、起動したコンテナを残さず "terminated" を返す。
+   */
+  private async maybePromote(): Promise<"done" | "skipped" | "terminated"> {
+    const kv = this.ctx.storage.kv;
+    if (kv.get<boolean>("promotion_attempted") === true) return "skipped";
+    const heavy = resolveHeavySandboxInstance(
+      (this.env as unknown as { SANDBOX_HEAVY_INSTANCE?: string }).SANDBOX_HEAVY_INSTANCE,
+    );
+    if (heavy.ignored !== undefined) {
+      console.warn(
+        `[sandbox-promote] SANDBOX_HEAVY_INSTANCE=${JSON.stringify(heavy.ignored.slice(0, 40))} is not supported; promotion is disabled`,
+      );
+    }
+    // 設定で無効: 何も記録しない（理由も残さない）
+    const target = heavy.instance;
+    if (target === null) return "skipped";
+    kv.put("promotion_attempted", true);
+    const spec = this.requireSpec();
+    const skip = (reason: SandboxPromotionReason) => {
+      this.recordPromotionReason(reason, "skipped");
+      return "skipped" as const;
+    };
+    // 明示した大きさ（task_start の sandbox_instance）は、そのタスクの間は固定
+    if (spec.instance !== undefined) return skip("fixed_instance");
+    const current = this.startedInstance();
+    if (SANDBOX_INSTANCES[current].vcpu >= SANDBOX_INSTANCES[target].vcpu) {
+      return skip("already_large");
+    }
+    const container = this.container();
+    // スナップショットに対応しないランタイム（ローカルの wrangler dev など）。コンテナには触らない
+    if (typeof container.snapshotContainer !== "function") return skip("snapshot_unsupported");
+    const before = await this.workspaceState();
+    if (this.terminated()) return "terminated";
+    if (before === undefined) return skip("state_unreadable");
+    const g = ++this.gen;
+    this.readyGen = -1;
+    try {
+      return await this.promote(g, target, current, before, spec);
+    } catch (e) {
+      if (this.terminated()) {
+        await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
+        return "terminated";
+      }
+      throw e;
+    }
+  }
+
+  private async promote(
+    g: number,
+    target: SandboxInstance,
+    current: SandboxInstance,
+    before: string,
+    spec: WorkspaceSpec,
+  ): Promise<"done" | "skipped"> {
+    const container = this.container();
+    const kv = this.ctx.storage.kv;
+    /** terminate・期限切れ・世代の変化なら投げる（昇格をそれ以上進めない） */
+    const alive = () => {
+      if (this.gen !== g) throw new Error("promotion was superseded");
+      this.requireSpec();
+    };
+
+    // (a) 今のコンテナのスナップショット。失敗しても、コンテナは触っていないので小さいまま続ける
+    let snapshotId: string | undefined;
+    try {
+      const snapshot = await withDeadline(
+        container.snapshotContainer?.({ name: promoteSnapshotName(this.ctx.id.name) }) ??
+          Promise.reject(new Error("snapshot is not supported")),
+        Date.now() + this.promoteSnapshotMs,
+      );
+      if (snapshot !== "timeout" && typeof snapshot?.id === "string" && snapshot.id !== "") {
+        snapshotId = snapshot.id;
+      }
+    } catch {
+      // snapshot_failed として扱う（例外の文面は残さない）
+    }
+    alive();
+    if (snapshotId === undefined) {
+      this.recordPromotionReason("snapshot_failed", "skipped");
+      if (container.running) this.readyGen = g;
+      else await this.runningOrThrowRestarted();
+      return "skipped";
+    }
+
+    // (b) 止める。止まったことを確かめる（止まらなければ、起動し直しに乗せる）
+    try {
+      await this.destroyContainer(this.bootDestroyMs);
+    } catch {
+      alive();
+      return this.promotionFallbackFailed();
+    }
+    alive();
+    const ranMs = this.num("rt_total");
+
+    // (c)(d)(e) 同じスナップショットから起動し、確認する。成功なら undefined、失敗なら理由
+    const startFromSnapshot = async (
+      instance: SandboxInstance,
+    ): Promise<SandboxPromotionReason | undefined> => {
+      const fail = async (reason: SandboxPromotionReason) => {
+        await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
+        return reason;
+      };
+      alive();
+      try {
+        container.start({
+          containerSnapshot: { id: snapshotId as string },
+          enableInternet: false,
+          instance,
+          env: BASE_ENV,
+        });
+      } catch {
+        return "start_failed";
+      }
+      this.openRuntime();
+      try {
+        if (!(await this.waitContainerReady(g, spec))) return await fail("start_failed");
+        // HTTPS 傍受の CA 証明書が読めること（無ければ git / npm が失敗する）
+        const cert = await this.rawExec(["test", "-r", CA_CERT], { timeoutMs: 10_000, cwd: "/" });
+        alive();
+        if (cert.exitCode !== 0) return await fail("cert_missing");
+        // 作業ツリー（HEAD と未 commit の変更）がそのまま残っていること
+        const after = await this.workspaceState();
+        alive();
+        if (after !== before) return await fail("workspace_mismatch");
+        await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+        // 信頼できる状態（ユーザーのコードを動かす前）で、残してよいプロセスを記録し直す
+        const list = await this.rawExec(["bash", "-c", PROCESS_SCRIPT, "rovo-baseline", "list"], {
+          timeoutMs: REAPER_TIMEOUT_MS,
+        });
+        alive();
+        if (list.exitCode !== 0) return await fail("start_failed");
+        kv.put("baseline", list.stdout.split("\n").filter(Boolean));
+        return undefined;
+      } catch (e) {
+        // terminate・期限切れ・世代の変化はそのまま伝える。それ以外（傍受の登録の失敗など）は起動の失敗
+        if (this.gen !== g || this.terminated()) throw e;
+        return await fail("start_failed");
+      }
+    };
+
+    const failure = await startFromSnapshot(target);
+    if (failure === undefined) {
+      kv.put("promoted_to", target);
+      kv.put("promoted_at", Date.now());
+      kv.put("rt_before_promotion", ranMs);
+      this.readyGen = g;
+      await this.armAlarm();
+      console.log(`[sandbox-promote] sandbox_promoted: ${current} -> ${target}`);
+      return "done";
+    }
+    // 昇格先が使えない: 同じスナップショットで元の大きさに起動し直す（作業ツリーを失わない）
+    this.recordPromotionReason(failure, "failed");
+    const back = await startFromSnapshot(current);
+    if (back === undefined) {
+      this.readyGen = g;
+      await this.armAlarm();
+      return "skipped";
+    }
+    return this.promotionFallbackFailed();
+  }
+
+  /** 元の大きさでも起動し直せなかった: image からの起動（作業ツリーの作り直し）に乗せる。「再起動した」例外になる */
+  private async promotionFallbackFailed(): Promise<"skipped"> {
+    this.recordPromotionReason("fallback_failed", "failed");
+    await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
+    await this.runningOrThrowRestarted();
+    return "skipped";
+  }
+
+  /** 起動したコンテナの傍受を登録し、exec が応答するまで待つ（boot と同じ。期限は 1 回の起動の待ち）。応答すれば true */
+  private async waitContainerReady(g: number, spec: WorkspaceSpec): Promise<boolean> {
+    const container = this.container();
+    const until = Date.now() + this.bootAttemptMs;
+    const props: OutboundGatewayProps = {
+      repo: parseRepository(spec.repository),
+      task: spec.branch,
+      taskId: this.ctx.id.name ?? "",
+    };
+    const gateway = this.ctx.exports.OutboundGateway({ props });
+    const intercepted = await this.raceUntil(
+      g,
+      until,
+      Promise.all([
+        container.interceptOutboundHttps("*", gateway),
+        container.interceptAllOutboundHttp(gateway),
+      ]),
+    );
+    this.assertBootCurrent(g);
+    if (intercepted.timedOut) return false;
+    for (;;) {
+      const probe = await this.raceUntil(
+        g,
+        until,
+        (async () => {
+          const p = await container.exec(["true"]);
+          return (await p.exitCode) === 0;
+        })().catch(() => false),
+      );
+      this.assertBootCurrent(g);
+      if (!probe.timedOut && probe.value === true) return true;
+      if (probe.timedOut || Date.now() >= until) return false;
+      await sleep(BOOT_POLL_MS);
+      this.assertBootCurrent(g);
+      if (Date.now() >= until) return false;
+    }
   }
 
   // ---- 依存関係のキャッシュ（D14。docs/specs/design.md 15.8）----

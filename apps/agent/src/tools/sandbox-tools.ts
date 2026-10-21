@@ -323,6 +323,8 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
           cwd,
           timeoutMs: Math.min(seconds * 1000, remaining),
           maxOutputBytes: BASH_MAX_OUTPUT_BYTES,
+          // 子のコマンド: 実行の前に Clef が、今の Sandbox の大きさで足りるかを判断する（sandbox-scale-decision.ts）
+          origin: "agent_command",
         });
         const parts = [`exit code: ${r.exitCode}`];
         if (r.timedOut) {

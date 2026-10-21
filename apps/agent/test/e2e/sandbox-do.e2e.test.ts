@@ -59,53 +59,117 @@ afterAll(async () => {
   if (persistDir) rmSync(persistDir, { recursive: true, force: true });
 });
 
-describe("Sandbox の昇格（重いコマンドの初回に大きい Sandbox へ）", () => {
+describe("Sandbox の昇格（コマンドの前に Clef が上げると判断したら大きい Sandbox へ）", () => {
   type Promo = {
     instance?: string;
     promotedTo?: string;
     promotedAt?: number;
     runtimeMsBeforePromotion?: number;
     promotionReason?: string;
+    promotions?: { to: string; at: number; trigger: string; runtimeMsBefore: number }[];
+    scaleStats?: { decisions: number; raised: number; clefFailures: number; slowNotRaised: number };
+    scaleDecisions?: { from: string; to: string | null; cmd: string; exitCode?: number }[];
     restarts: number;
     runtimeMs: number;
   };
   const promoMetrics = (c: ReturnType<typeof sandboxClient>) => c.metrics() as Promise<Promo>;
-  /** 重いコマンドとして判定される（vitest を呼ぶ）が、実際には何もせず成功する */
-  const HEAVY = ["bash", "-c", "echo started; vitest --version >/dev/null 2>&1; true"];
+  /** 子のコマンド（Clef の判断の対象になる）。実際には軽い */
+  const AGENT = { origin: "agent_command" };
+  const CMD = ["bash", "-c", "echo started; true"];
 
-  it("軽いコマンドでは昇格しない。起動した大きさは standard-2 のまま", async () => {
+  /**
+   * Clef の応答（answers.<id> が score / choice / noul）。実際の Clef は呼ばず、wrangler dev の SandboxDO に仕込む（ENVIRONMENT=test）。
+   * 判断（state の組み立て・確率 → 大きさ）以降の手順（スナップショット・昇格・作業ツリーの確認）は本物のコンテナで通す。
+   */
+  const clef = (heavy: number, fast4: number) => ({
+    answers: {
+      weight: {
+        type: "score",
+        score: heavy >= 0.5 ? 2 : 0,
+        probabilities: {
+          "0": (1 - heavy) / 2,
+          "1": (1 - heavy) / 2,
+          "2": heavy / 2,
+          "3": heavy / 2,
+        },
+        confidence: 0.9,
+      },
+      size: {
+        type: "choice",
+        choice: "standard-3",
+        probabilities: { "standard-2": 0.2, "standard-3": 0.5, "standard-4": 0.3 },
+        confidence: 0.8,
+      },
+      beyond2: { type: "noul", noul: fast4 },
+    },
+    usage: { input_tokens: 900 },
+  });
+
+  it("Clef が軽いと判断したコマンドでは昇格しない。起動した大きさは standard-2 のまま。判断は記録に残る", async () => {
     const c = client("promote-light");
     await c.ensureReady(specFor("promote-light"));
-    expect((await c.exec(["echo", "light"])).stdout.trim()).toBe("light");
+    await c.setClef([clef(0.02, 0.02)]);
+    expect((await c.exec(["echo", "light"], AGENT)).stdout.trim()).toBe("light");
     const m = await promoMetrics(c);
     expect(m.instance).toBe("standard-2");
     expect(m.promotedTo).toBeUndefined();
     expect(m.promotionReason).toBeUndefined();
+    expect(m.scaleStats).toMatchObject({ decisions: 1, raised: 0 });
+    expect(m.scaleDecisions?.[0]).toMatchObject({
+      from: "standard-2",
+      to: null,
+      cmd: "echo",
+      exitCode: 0,
+    });
   }, 120_000);
 
-  it("task_start で大きさを明示したタスクは、重いコマンドでも昇格しない（fixed_instance）", async () => {
+  it("origin の無い exec（Sandbox 自身の内部の exec）は、Clef に聞かず昇格しない", async () => {
+    const c = client("promote-internal");
+    await c.ensureReady(specFor("promote-internal"));
+    await c.setClef([clef(0.95, 0.1)]);
+    expect((await c.exec(CMD)).exitCode).toBe(0);
+    const m = await promoMetrics(c);
+    expect(m.promotedTo).toBeUndefined();
+    expect(m.scaleStats).toBeUndefined();
+  }, 120_000);
+
+  it("task_start で大きさを明示したタスクは、Clef が重いと判断する状況でも昇格しない（fixed_instance）", async () => {
     const c = client("promote-fixed");
     await c.ensureReady(specFor("promote-fixed", { instance: "standard-1" }));
-    const r = await c.exec(HEAVY);
+    await c.setClef([clef(0.95, 0.9)]);
+    const r = await c.exec(CMD, AGENT);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("started");
     const m = await promoMetrics(c);
     expect(m.instance).toBe("standard-1");
     expect(m.promotedTo).toBeUndefined();
     expect(m.promotionReason).toBe("fixed_instance");
+    expect(m.scaleStats).toBeUndefined();
   }, 120_000);
 
-  it("重いコマンドの初回に昇格する。コマンドは動き、作業ツリー（未 commit の変更）と傍受は残る。2 本目では何も起きず、作り直しは昇格先で起動する", async () => {
+  it("Clef が上げると判断したら昇格する。コマンドは動き、作業ツリー（未 commit の変更）と傍受は残る。state にはコンテナ内で集めたリポジトリの設定が入る。作り直しは昇格先で起動する", async () => {
     const c = client("promote-heavy");
     await c.ensureReady(specFor("promote-heavy"));
     await c.writeFile("/workspace/keep.txt", "uncommitted\n");
+    // コンテナ内のスクリプトが集めるリポジトリの事実（設定ファイルの生のテキスト）
+    await c.writeFile(
+      "/workspace/vitest.config.ts",
+      "export default { test: { maxWorkers: 2 } }\n",
+    );
     const headBefore = (await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim();
     const statusBefore = (await c.exec(["git", "status", "--porcelain"])).stdout;
     expect(statusBefore).toContain("keep.txt");
 
-    const r = await c.exec(HEAVY);
+    await c.setClef([clef(0.95, 0.1)]); // 重い・4 vCPU までは要らない → standard-3
+    const r = await c.exec(CMD, AGENT);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("started");
+
+    // Clef に渡した state: 本物のコンテナの中で集めた設定ファイルと、今の大きさ
+    const state = (await c.clefState()) as Record<string, unknown>;
+    expect(String(state.repository_facts)).toContain("maxWorkers: 2");
+    expect(String(state.repository_facts)).toContain("vitest.config.ts");
+    expect(state.current_sandbox).toBe("standard-2 (1 vCPU, 6 GiB)");
 
     // 作業ツリーはそのまま（HEAD も未 commit の変更も、ファイルの中身も）
     expect((await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim()).toBe(headBefore);
@@ -118,19 +182,28 @@ describe("Sandbox の昇格（重いコマンドの初回に大きい Sandbox �
     expect(m.instance).toBe("standard-2");
     // ローカルの wrangler dev（workerd + Docker）は snapshotContainer と containerSnapshot での起動に対応しているので、実際に昇格する
     expect(m.promotedTo).toBe("standard-3");
+    expect(m.promotions?.map((p) => [p.to, p.trigger])).toEqual([["standard-3", "clef"]]);
     expect(typeof m.promotedAt).toBe("number");
     expect(m.runtimeMsBeforePromotion ?? -1).toBeGreaterThanOrEqual(0);
     expect(m.runtimeMsBeforePromotion ?? 0).toBeLessThanOrEqual(m.runtimeMs);
     expect(m.promotionReason).toBeUndefined();
+    expect(m.scaleStats).toMatchObject({ decisions: 1, raised: 1, clefFailures: 0 });
+    expect(m.scaleDecisions?.[0]).toMatchObject({
+      from: "standard-2",
+      to: "standard-3",
+      cmd: "bash",
+      exitCode: 0,
+    });
     // 昇格はコンテナの作り直し（restarts）に数えない
     expect(m.restarts).toBe(0);
 
-    // 2 本目の重いコマンドでは、もう何も起きない
+    // 同じ判断（standard-3 で足りる）では、もう昇格しない
     const before = await promoMetrics(c);
-    expect((await c.exec(HEAVY)).exitCode).toBe(0);
+    expect((await c.exec(CMD, AGENT)).exitCode).toBe(0);
     const after = await promoMetrics(c);
     expect(after.promotedTo).toBe(before.promotedTo);
-    expect(after.promotionReason).toBe(before.promotionReason);
+    expect(after.promotions).toHaveLength(1);
+    expect(after.scaleStats).toMatchObject({ decisions: 2, raised: 1 });
     expect(after.restarts).toBe(0);
 
     // コンテナが落ちて作り直されたら、作業ツリーは push 済みの状態から作り直される（昇格済みなら昇格先の大きさで起動する）
@@ -142,43 +215,24 @@ describe("Sandbox の昇格（重いコマンドの初回に大きい Sandbox �
     expect(restarted.promotedTo).toBe(before.promotedTo);
   }, 280_000);
 
-  it("子の要求（sandbox_scale_up）で 2 → 3 → 4 と 2 回上がる。同じ・小さい指定は何もしない。作業ツリーと傍受は残り、規則は何もしない。作り直しは最終の大きさで起動する", async () => {
-    type Up = {
-      promotedTo?: string;
-      promotedAt?: number;
-      promotions?: { to: string; at: number; trigger: string; runtimeMsBefore: number }[];
-      heavyCommandsAfterAgentScaleUp?: number;
-      promotionReason?: string;
-    };
-    const c = client("scale-up-twice");
-    await c.ensureReady(specFor("scale-up-twice"));
+  it("2 → 3 → 4 と何回でも上がる（上げるだけ）。作業ツリーと傍受は残り、standard-4 が上限なら以降は Clef に聞かない。作り直しは最終の大きさで起動する", async () => {
+    const c = client("promote-twice");
+    await c.ensureReady(specFor("promote-twice"));
     await c.writeFile("/workspace/keep.txt", "uncommitted\n");
     const headBefore = (await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim();
     const statusBefore = (await c.exec(["git", "status", "--porcelain"])).stdout;
 
-    // 同じ・小さい指定は何もしない（今の大きさを返す）
-    expect(await c.scaleUp("standard-2")).toEqual({ outcome: "unchanged", instance: "standard-2" });
-    expect(await c.scaleUp("standard-1")).toEqual({ outcome: "unchanged", instance: "standard-2" });
-    // 選べない大きさは拒否
-    expect(await c.scaleUp("lite")).toMatchObject({
-      outcome: "rejected",
-      code: "invalid_instance",
-    });
-    expect(((await promoMetrics(c)) as unknown as Up).promotedTo).toBeUndefined();
-
     // 1 回目: 2 → 3
-    expect(await c.scaleUp("standard-3")).toEqual({
-      outcome: "scaled",
-      from: "standard-2",
-      to: "standard-3",
-    });
-    expect((await c.readFile("/workspace/keep.txt")).content).toBe("uncommitted\n");
+    await c.setClef([clef(0.95, 0.1)]);
+    expect((await c.exec(CMD, AGENT)).exitCode).toBe(0);
+    expect(((await promoMetrics(c)) as Promo).promotedTo).toBe("standard-3");
+    // 軽いコマンドでは上げない（下げもしない）
+    await c.setClef([clef(0.02, 0.02)]);
+    expect((await c.exec(["echo", "light"], AGENT)).exitCode).toBe(0);
+    expect(((await promoMetrics(c)) as Promo).promotedTo).toBe("standard-3");
     // 2 回目: 3 → 4（スナップショットの名前が 1 回目と違うので、同名で失敗しない）
-    expect(await c.scaleUp("standard-4")).toEqual({
-      outcome: "scaled",
-      from: "standard-3",
-      to: "standard-4",
-    });
+    await c.setClef([clef(0.95, 0.9)]);
+    expect((await c.exec(CMD, AGENT)).exitCode).toBe(0);
 
     // 作業ツリー（HEAD も未 commit の変更も）と、HTTPS の傍受の CA が残っている
     expect((await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim()).toBe(headBefore);
@@ -186,42 +240,41 @@ describe("Sandbox の昇格（重いコマンドの初回に大きい Sandbox �
     expect((await c.readFile("/workspace/keep.txt")).content).toBe("uncommitted\n");
     expect((await c.exec(["git", "ls-remote", "origin", "HEAD"])).exitCode).toBe(0);
 
-    const m = (await promoMetrics(c)) as unknown as Promo & Up;
+    const m = await promoMetrics(c);
     expect(m.instance).toBe("standard-2");
     expect(m.promotedTo).toBe("standard-4");
     expect(m.promotions?.map((p) => [p.to, p.trigger])).toEqual([
-      ["standard-3", "agent"],
-      ["standard-4", "agent"],
+      ["standard-3", "clef"],
+      ["standard-4", "clef"],
     ]);
     expect(m.promotedAt).toBe(m.promotions?.[0]?.at);
     expect(m.promotionReason).toBeUndefined();
+    expect(m.scaleStats).toMatchObject({ decisions: 3, raised: 2 });
     expect(m.restarts).toBe(0);
 
-    // 規則（重いコマンド）は、子がすでに上げているので何もしない。数えるだけ
-    const r = await c.exec(HEAVY);
-    expect(r.exitCode).toBe(0);
-    const after = (await promoMetrics(c)) as unknown as Promo & Up;
-    expect(after.promotions).toHaveLength(2);
-    expect(after.promotionReason).toBeUndefined();
-    expect(after.heavyCommandsAfterAgentScaleUp).toBe(1);
-    expect(after.restarts).toBe(0);
+    // standard-4 が上限: Clef に聞かない（判断が増えない）
+    expect((await c.exec(CMD, AGENT)).exitCode).toBe(0);
+    expect(((await promoMetrics(c)) as Promo).scaleStats?.decisions).toBe(3);
 
     // 落ちて作り直されたら、最終の大きさ（standard-4）で起動する
     await c.destroy();
-    await c.ensureReady(specFor("scale-up-twice"));
-    const restarted = (await promoMetrics(c)) as unknown as Promo & Up;
+    await c.ensureReady(specFor("promote-twice"));
+    const restarted = await promoMetrics(c);
     expect(restarted.restarts).toBe(1);
     expect(restarted.instance).toBe("standard-2");
     expect(restarted.promotedTo).toBe("standard-4");
   }, 400_000);
 
-  it("task_start で大きさを明示したタスク（固定）では、sandbox_scale_up は何もしない", async () => {
-    const c = client("scale-up-fixed");
-    await c.ensureReady(specFor("scale-up-fixed", { instance: "standard-1" }));
-    expect(await c.scaleUp("standard-4")).toEqual({ outcome: "fixed", instance: "standard-1" });
+  it("Clef の応答が想定外でも（数回再試行して）コマンドは動く。今の大きさのまま、失敗として集計に残る", async () => {
+    const c = client("promote-clef-fail");
+    await c.ensureReady(specFor("promote-clef-fail"));
+    await c.setClef([{ answers: {} }]);
+    const r = await c.exec(CMD, AGENT);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("started");
     const m = await promoMetrics(c);
-    expect(m.instance).toBe("standard-1");
     expect(m.promotedTo).toBeUndefined();
+    expect(m.scaleStats).toMatchObject({ decisions: 1, raised: 0, clefFailures: 1 });
   }, 120_000);
 });
 

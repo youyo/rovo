@@ -1,4 +1,3 @@
-import type { SandboxInstance, SandboxPromotionReason } from "@rovo/models";
 import type { GitCredential, SandboxMetrics } from "./agent/types";
 import type { DepsSpec } from "./deps-cache";
 
@@ -10,10 +9,11 @@ export interface ExecOptions {
   /** 既定 64KiB。超えた分は捨て、末尾を残す。 */
   maxOutputBytes?: number;
   /**
-   * 重いコマンドとして扱う（argv のパターンに関係なく、Sandbox の昇格の引き金にする）。検証コマンドの実行の前に付ける。
-   * 付けなくても、argv が重いコマンド（テスト・ビルドなど。heavy-command.ts）なら昇格する。
+   * このコマンドの出自。あれば、実行の前に Clef が「今の Sandbox の大きさで足りるか」を判断し、足りなければ大きい Sandbox へ昇格する
+   * （sandbox-scale-decision.ts。fail-soft）。子が実行するコマンド（bash ツール）は agent_command、検証コマンドは verification。
+   * 無ければ Sandbox 自身の内部の exec（git・ファイルの確認など）として、判断しない。コマンドの重さの規則ではなく、誰のコマンドかの区別。
    */
-  heavy?: boolean;
+  origin?: "agent_command" | "verification";
 }
 
 export interface ExecResult {
@@ -45,36 +45,12 @@ export interface WorkspaceSpec {
   deps?: DepsSpec | null;
   /**
    * コンテナの大きさ（task_start の sandbox_instance。standard-1〜4）。**あれば利用者が明示した**ので、このタスクの間はずっとこの大きさで
-   * 起動する（env の SANDBOX_INSTANCE より優先。重いコマンドの初回の昇格もしない）。無ければ env の既定から始めて、重いコマンドの初回に
-   * 昇格先（env の SANDBOX_HEAVY_INSTANCE）へ昇格する。ensureReady の同一性（conflict）の判定には含めない。
+   * 起動する（env の SANDBOX_INSTANCE より優先。Clef による昇格もしない）。無ければ env の既定から始めて、コマンドの前に Clef が
+   * 上げると判断したら上限（env の SANDBOX_MAX_INSTANCE）までの大きさへ昇格する。ensureReady の同一性（conflict）の判定には含めない。
    * 依存関係のキャッシュを作るコンテナ（deps-<key>）には使わない（常に既定のまま）。
    */
   instance?: string;
 }
-
-/**
- * 子が sandbox_scale_up で頼んだ結果（固定の値だけ。子の自由文は Sandbox に渡さない）。上げる方向だけ。
- * - scaled: 上げた
- * - unchanged: 今の大きさと同じか小さい指定なので何もしなかった（エラーではない）。instance は今の大きさ
- * - rejected: 運用者が決めた上限を超える（above_limit）、選べない大きさ（invalid_instance）。何もしなかった
- * - fixed: task_start で大きさを明示したタスクなので固定。何もしなかった
- * - unavailable: 設定で無効（disabled）
- * - failed: 昇格を試みたが見送り・失敗した（理由は promotion の理由コード）。instance は今の大きさ（小さいまま、または元の大きさに戻した）
- * - terminated: タスクが終端になった
- */
-export type SandboxScaleUpResult =
-  | { outcome: "scaled"; from: SandboxInstance; to: SandboxInstance }
-  | { outcome: "unchanged"; instance: SandboxInstance }
-  | {
-      outcome: "rejected";
-      code: "above_limit" | "invalid_instance";
-      instance: SandboxInstance;
-      max: SandboxInstance;
-    }
-  | { outcome: "fixed"; instance: SandboxInstance }
-  | { outcome: "unavailable"; code: "disabled" }
-  | { outcome: "failed"; code: SandboxPromotionReason; instance: SandboxInstance }
-  | { outcome: "terminated" };
 
 /** AgentDO から見た Sandbox。Unit では fake に差し替え、E2E では SandboxDO（実コンテナ）を使う。 */
 export interface SandboxPort {
@@ -115,9 +91,4 @@ export interface SandboxPort {
    * 無い実装、または読めない（undefined / 例外）ときは、usage に sandbox を載せない。
    */
   metrics?(): Promise<SandboxMetrics | undefined>;
-  /**
-   * 子の要求で Sandbox を大きくする（sandbox_scale_up の本体）。上げる方向だけ。exec と同じ直列の中で、実行中のコマンドの後に動く。
-   * 無い実装、または上限の設定が無いときは、ツールを子に見せない。
-   */
-  scaleUp?(instance: string): Promise<SandboxScaleUpResult>;
 }

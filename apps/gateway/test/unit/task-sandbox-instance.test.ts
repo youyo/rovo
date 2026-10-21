@@ -224,7 +224,7 @@ describe("task_result の usage.sandbox_promotions（昇格の履歴）と子が
       promotions: [
         { to: "evil", at: 1, trigger: "agent", runtimeMsBefore: 1 },
         { to: "standard-3", at: 1, trigger: "me", runtimeMsBefore: 1 },
-        { to: "standard-3", at: 1, trigger: "rule", runtimeMsBefore: 1, ruleMatch: "any command" },
+        { to: "standard-3", at: 1, trigger: "rule", runtimeMsBefore: 1, ruleMatch: "Any;Command" },
       ],
       heavyCommandsAfterAgentScaleUp: "many",
     });
@@ -232,7 +232,7 @@ describe("task_result の usage.sandbox_promotions（昇格の履歴）と子が
     expect(bad.sandbox_promotions).toEqual([
       { to: "standard-3", at: 1, trigger: "rule", runtime_ms_before: 1 },
     ]);
-    expect(JSON.stringify(bad)).not.toContain("any command");
+    expect(JSON.stringify(bad)).not.toContain("Any;Command");
     expect(bad).not.toHaveProperty("sandbox_heavy_commands_after_agent_scale_up");
     const none = await usageWith({ runtimeMs: 1, restarts: 0, bootRetries: 0 });
     expect(none).not.toHaveProperty("sandbox_promotions");
@@ -280,5 +280,179 @@ describe("task_result の usage: 的中の本数と昇格の失敗の内訳", ()
     });
     expect(bad).not.toHaveProperty("sandbox_heavy_commands_covered_by_agent");
     expect(bad).not.toHaveProperty("sandbox_promotion_failures");
+  });
+});
+
+describe("task_result の usage: Clef による昇格の判断の集計と記録（sandbox_scale_*）", () => {
+  const decision = (over: Record<string, unknown> = {}) => ({
+    at: 1_700_000_000_000,
+    from: "standard-2",
+    to: "standard-3",
+    heavy: 0.95,
+    fast4: 0.1,
+    choice: [0.2, 0.5, 0.3],
+    model: "flash",
+    clefMs: 380,
+    cmdMs: 41_000,
+    exitCode: 0,
+    cmd: "pnpm",
+    ...over,
+  });
+
+  it("agent が報告した集計と判断ごとの記録を、公開用の形（snake_case・固定の値と数値だけ）で返す", async () => {
+    const usage = await usageWith({
+      runtimeMs: 90_000,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      scaleStats: { decisions: 55, raised: 2, clefFailures: 1, slowNotRaised: 3 },
+      scaleDecisions: [
+        decision(),
+        {
+          at: 1_700_000_000_000,
+          from: "standard-2",
+          to: null,
+          failed: true,
+          clefMs: 15_000,
+          cmd: "ls",
+        },
+      ],
+    });
+    expect(usage).toMatchObject({
+      sandbox_scale_decisions: 55,
+      sandbox_scale_raised: 2,
+      sandbox_scale_clef_failures: 1,
+      sandbox_scale_slow_not_raised: 3,
+    });
+    expect(usage.sandbox_scale_log).toEqual([
+      {
+        at: 1_700_000_000_000,
+        from: "standard-2",
+        to: "standard-3",
+        heavy: 0.95,
+        fast4: 0.1,
+        choice: [0.2, 0.5, 0.3],
+        model: "flash",
+        clef_ms: 380,
+        cmd_ms: 41_000,
+        exit_code: 0,
+        cmd: "pnpm",
+      },
+      {
+        at: 1_700_000_000_000,
+        from: "standard-2",
+        to: null,
+        failed: true,
+        clef_ms: 15_000,
+        cmd: "ls",
+      },
+    ]);
+  });
+
+  it("表に無い大きさ・範囲外の確率・余計なキーは捨てる。cmd は先頭の語の安全な文字だけ。記録は最後の 50 件まで", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => decision({ at: i + 1 }));
+    const usage = await usageWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      scaleStats: { decisions: 60, raised: 0, clefFailures: 0, slowNotRaised: 0 },
+      scaleDecisions: [decision({ from: "evil" }), ...many],
+    });
+    const log = usage.sandbox_scale_log as Record<string, unknown>[];
+    expect(log).toHaveLength(50);
+    expect(log[0]?.at).toBe(11);
+    expect(log.at(-1)?.at).toBe(60);
+
+    const bad = await usageWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      scaleDecisions: [
+        decision({
+          to: "evil",
+          heavy: 7,
+          fast4: -1,
+          model: "x",
+          cmd: "rm -rf /; echo $SECRET",
+          argv: ["secret"],
+          reason: "free text",
+        }),
+      ],
+    });
+    expect(bad.sandbox_scale_log).toEqual([
+      {
+        at: 1_700_000_000_000,
+        from: "standard-2",
+        to: null,
+        choice: [0.2, 0.5, 0.3],
+        clef_ms: 380,
+        cmd_ms: 41_000,
+        exit_code: 0,
+        cmd: "rm",
+      },
+    ]);
+    expect(JSON.stringify(bad)).not.toContain("secret");
+    expect(JSON.stringify(bad)).not.toContain("SECRET");
+    expect(JSON.stringify(bad)).not.toContain("free text");
+  });
+
+  it("Clef を呼ばなかったタスク（報告が無い・空）には付かない", async () => {
+    const none = await usageWith({ runtimeMs: 1, restarts: 0, bootRetries: 0 });
+    for (const k of [
+      "sandbox_scale_decisions",
+      "sandbox_scale_raised",
+      "sandbox_scale_clef_failures",
+      "sandbox_scale_slow_not_raised",
+      "sandbox_scale_log",
+    ]) {
+      expect(none, k).not.toHaveProperty(k);
+    }
+    const empty = await usageWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      scaleStats: { decisions: 0, raised: 0, clefFailures: 0, slowNotRaised: 0 },
+      scaleDecisions: [],
+    });
+    expect(empty).not.toHaveProperty("sandbox_scale_decisions");
+    expect(empty).not.toHaveProperty("sandbox_scale_log");
+  });
+
+  it("古いタスクの記録（trigger の agent / rule / verification と rule_match）は読めるまま。rule_match は安全な短い名前だけ通す", async () => {
+    const usage = await usageWith({
+      runtimeMs: 90_000,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      promotedTo: "standard-3",
+      promotions: [
+        {
+          to: "standard-3",
+          at: 1,
+          trigger: "rule",
+          runtimeMsBefore: 1,
+          ruleMatch: "python -m pytest",
+        },
+        {
+          to: "standard-3",
+          at: 2,
+          trigger: "rule",
+          runtimeMsBefore: 2,
+          ruleMatch: "Any;Command $(x)",
+        },
+        { to: "standard-4", at: 3, trigger: "clef", runtimeMsBefore: 3, ruleMatch: "vitest" },
+      ],
+    });
+    expect(usage.sandbox_promotions).toEqual([
+      {
+        to: "standard-3",
+        at: 1,
+        trigger: "rule",
+        runtime_ms_before: 1,
+        rule_match: "python -m pytest",
+      },
+      { to: "standard-3", at: 2, trigger: "rule", runtime_ms_before: 2 },
+      { to: "standard-4", at: 3, trigger: "clef", runtime_ms_before: 3 },
+    ]);
   });
 });

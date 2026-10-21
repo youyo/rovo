@@ -370,8 +370,8 @@ describe("sandbox の昇格（usage とプロンプト）", () => {
     return s.find((x) => x.key === "testing")?.text ?? "";
   };
 
-  it("プロンプト: 昇格が有効なら、重いコマンドの初回に Sandbox が大きくなり数十秒かかることを伝える", async () => {
-    const t = await testing("promo-prompt-on", { SANDBOX_HEAVY_INSTANCE: "standard-3" });
+  it("プロンプト: 昇格が有効なら、必要なときに Sandbox が自動で大きくなり数十秒かかることを伝える", async () => {
+    const t = await testing("promo-prompt-on", { SANDBOX_MAX_INSTANCE: "standard-3" });
     expect(t).toContain("scaled up");
     expect(t).toContain("tens of seconds");
     // 昇格するとプロセスは引き継がれない（dev server などは止まる）
@@ -380,13 +380,13 @@ describe("sandbox の昇格（usage とプロンプト）", () => {
   });
 
   it("プロンプト: 昇格しない（無効・大きさを明示した）なら書かない", async () => {
-    expect(await testing("promo-prompt-off", { SANDBOX_HEAVY_INSTANCE: "" })).not.toContain(
+    expect(await testing("promo-prompt-off", { SANDBOX_MAX_INSTANCE: "" })).not.toContain(
       "scaled up",
     );
     expect(
       await testing(
         "promo-prompt-fixed",
-        { SANDBOX_HEAVY_INSTANCE: "standard-3" },
+        { SANDBOX_MAX_INSTANCE: "standard-3" },
         { sandboxInstance: "standard-1" },
       ),
     ).not.toContain("scaled up");

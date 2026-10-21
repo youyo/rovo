@@ -10,6 +10,8 @@
  * （env / time / timeout / npx / pnpm exec / uv run など）を外して、先頭のコマンドを表と照合する。
  */
 
+import type { SandboxRuleMatch } from "@rovo/models";
+
 /** 引数なしでも重いコマンド（テストランナー・型検査・ビルド） */
 const HEAVY_PROGRAMS: ReadonlySet<string> = new Set([
   "vitest",
@@ -81,6 +83,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
 ]);
 
 const PACKAGE_MANAGERS: ReadonlySet<string> = new Set(["npm", "pnpm", "yarn", "bun"]);
+const PYTHON_MODULES: ReadonlySet<string> = new Set(["pytest", "unittest", "tox", "nose"]);
 const SHELLS: ReadonlySet<string> = new Set(["bash", "sh", "zsh", "dash", "ash", "ksh"]);
 
 const MAX_DEPTH = 8;
@@ -140,30 +143,30 @@ function isHeavyScript(name: string | undefined): boolean {
   return name !== undefined && HEAVY_SCRIPT.test(name);
 }
 
-/** npm / pnpm / yarn / bun の呼び出し（先頭の npm などは外した残り） */
-function packageManagerHeavy(pm: string, rest: string[], depth: number): boolean {
+/** npm / pnpm / yarn / bun の呼び出し（先頭の npm などは外した残り）。重ければ一致した表の名前 */
+function packageManagerHeavy(pm: string, rest: string[], depth: number): string | undefined {
   let args = afterFlags(rest);
   // yarn workspace <名前> <コマンド>
   if (pm === "yarn" && (args[0] === "workspace" || args[0] === "workspaces")) {
     args = afterFlags(args.slice(args[0] === "workspace" ? 2 : 1));
   }
   const sub = args[0];
-  if (sub === undefined) return false;
-  if (sub === "test" || sub === "t" || sub === "tst") return true;
+  if (sub === undefined) return undefined;
+  if (sub === "test" || sub === "t" || sub === "tst") return `${pm} test`;
   if (sub === "run" || sub === "run-script" || sub === "r" || sub === "rum") {
-    return isHeavyScript(afterFlags(args.slice(1))[0]);
+    return isHeavyScript(afterFlags(args.slice(1))[0]) ? `${pm} run` : undefined;
   }
   // 実行系: npm exec -- vitest / pnpm exec vitest / pnpm dlx tsc / yarn dlx jest
   if (sub === "exec" || sub === "dlx" || sub === "x") {
     return simpleHeavy(dropFlags(args.slice(1)), depth + 1);
   }
   // pnpm / yarn / bun は `pnpm build` のように script 名を直接書ける
-  return pm !== "npm" && isHeavyScript(sub);
+  return pm !== "npm" && isHeavyScript(sub) ? `${pm} run` : undefined;
 }
 
-/** 1 つの単純なコマンド（区間のトークン列）が重いか */
-function simpleHeavy(input: string[], depth: number): boolean {
-  if (depth > MAX_DEPTH) return false;
+/** 1 つの単純なコマンド（区間のトークン列）が重いか。重ければ一致した表の名前 */
+function simpleHeavy(input: string[], depth: number): string | undefined {
+  if (depth > MAX_DEPTH) return undefined;
   let tokens = input;
   // 先頭の環境変数と、ラッパーを外す
   for (let guard = 0; guard < MAX_DEPTH && tokens.length > 0; guard++) {
@@ -197,59 +200,86 @@ function simpleHeavy(input: string[], depth: number): boolean {
     break;
   }
   const head = tokens[0];
-  if (head === undefined) return false;
+  if (head === undefined) return undefined;
   const name = basename(head);
   const args = tokens.slice(1);
 
   if (SHELLS.has(name)) {
     const script = shellScript(args);
-    return script !== undefined && scriptHeavy(script, depth + 1);
+    return script === undefined ? undefined : scriptHeavy(script, depth + 1);
   }
   if (HEAVY_PROGRAMS.has(name)) {
     if (name === "tsc" || name === "tsgo") {
       // バージョンやヘルプの表示は重くない
-      return !args.some((a) => ["-v", "--version", "-h", "--help", "--init"].includes(a));
+      return args.some((a) => ["-v", "--version", "-h", "--help", "--init"].includes(a))
+        ? undefined
+        : name;
     }
-    return true;
+    return name;
   }
   if (name === "make" || name === "gmake") {
     const target = afterFlags(args)[0];
-    return target === undefined || HEAVY_MAKE_TARGET.test(target);
+    return target === undefined || HEAVY_MAKE_TARGET.test(target) ? "make" : undefined;
   }
   if (name === "mise" || name === "task" || name === "just") {
     // mise run <タスク> / mise r <タスク>
     if (name === "mise" && (args[0] === "run" || args[0] === "r")) {
-      return isHeavyScript(afterFlags(args.slice(1))[0]);
+      return isHeavyScript(afterFlags(args.slice(1))[0]) ? "mise run" : undefined;
     }
-    return false;
+    return undefined;
   }
-  if (name === "node") return args.includes("--test");
+  if (name === "node") return args.includes("--test") ? "node --test" : undefined;
   if (/^python[0-9.]*$/.test(name)) {
     const m = args.indexOf("-m");
     const mod = m === -1 ? undefined : args[m + 1];
-    return mod === "pytest" || mod === "unittest" || mod === "tox" || mod === "nose";
+    return mod !== undefined && PYTHON_MODULES.has(mod) ? `python -m ${mod}` : undefined;
   }
-  if (name === "bun" && args[0] === "test") return true;
+  if (name === "bun" && args[0] === "test") return "bun test";
   if (PACKAGE_MANAGERS.has(name)) return packageManagerHeavy(name, args, depth);
   const subs = HEAVY_SUBCOMMANDS[name];
   if (subs !== undefined) {
     const sub = afterFlags(args)[0];
-    return sub !== undefined && subs.has(sub);
+    return sub !== undefined && subs.has(sub) ? `${name} ${sub}` : undefined;
   }
-  return false;
+  return undefined;
 }
 
-function scriptHeavy(script: string, depth: number): boolean {
-  return segments(script).some((tokens) => simpleHeavy(tokens, depth));
+function scriptHeavy(script: string, depth: number): string | undefined {
+  for (const tokens of segments(script)) {
+    const match = simpleHeavy(tokens, depth);
+    if (match !== undefined) return match;
+  }
+  return undefined;
 }
 
 /**
- * argv が重いコマンド（テスト・型検査・ビルド）か。シェル（`bash -lc "..."` など）は中身も見る。
- * 配列でない・文字列でない要素を含む入力は、例外にせず false。
+ * 一致した表の名前の一覧（固定。packages/models の SANDBOX_RULE_MATCHES と同じ。heavy-command.test.ts が突き合わせる）。
+ * 規則で昇格したときに usage.sandbox_promotions[].rule_match へ残す。argv の文字列そのものは残さない。
  */
-export function isHeavyCommand(argv: readonly string[]): boolean {
+export const HEAVY_MATCH_LABELS: readonly string[] = [
+  ...HEAVY_PROGRAMS,
+  ...Object.entries(HEAVY_SUBCOMMANDS).flatMap(([prog, subs]) =>
+    [...subs].map((sub) => `${prog} ${sub}`),
+  ),
+  "make",
+  "mise run",
+  "node --test",
+  ...[...PYTHON_MODULES].map((m) => `python -m ${m}`),
+  ...[...PACKAGE_MANAGERS].flatMap((pm) => [`${pm} test`, `${pm} run`]),
+];
+
+/**
+ * argv が重いコマンド（テスト・型検査・ビルド）なら、一致した表の名前（HEAVY_MATCH_LABELS のどれか）。そうでなければ undefined。
+ * シェル（`bash -lc "..."` など）は中身も見る。配列でない・文字列でない要素を含む入力は、例外にせず undefined。
+ */
+export function heavyCommandMatch(argv: readonly string[]): SandboxRuleMatch | undefined {
   if (!Array.isArray(argv) || argv.length === 0 || argv.some((a) => typeof a !== "string")) {
-    return false;
+    return undefined;
   }
-  return simpleHeavy([...argv], 0);
+  return simpleHeavy([...argv], 0) as SandboxRuleMatch | undefined;
+}
+
+/** argv が重いコマンド（テスト・型検査・ビルド）か。 */
+export function isHeavyCommand(argv: readonly string[]): boolean {
+  return heavyCommandMatch(argv) !== undefined;
 }

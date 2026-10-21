@@ -1,6 +1,6 @@
 import { SANDBOX_OPS } from "@rovo/audit";
 import { isSandboxPromotionReason } from "@rovo/models";
-import { sandboxInstanceName } from "../sandbox-instance";
+import { sandboxInstanceName, sanitizePromotions } from "../sandbox-instance";
 import type { TaskStatus } from "../tasks/state";
 import type { AgentEventDto, AgentPhase, SandboxUsageDto } from "./contract";
 
@@ -89,6 +89,8 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
   const instance = sandboxInstanceName(s.instance);
   const promotedTo = sandboxInstanceName(s.promotedTo);
   const reason = isSandboxPromotionReason(s.promotionReason) ? s.promotionReason : undefined;
+  // 昇格の履歴（trigger・規則名つき）。payload はプリミティブだけなので JSON 文字列にする（question の options と同じ）。固定の値だけを通す
+  const promotions = sanitizePromotions(s.promotions, "camel");
   return {
     sandbox_runtime_ms: n(s.runtimeMs),
     sandbox_restarts: count(s.restarts),
@@ -105,6 +107,11 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
         }
       : {}),
     ...(reason !== undefined ? { sandbox_promotion_reason: reason } : {}),
+    ...(promotions.length > 0 ? { sandbox_promotions: JSON.stringify(promotions) } : {}),
+    // 子が上げたあとに規則で重いと判定されたコマンドの本数（子が上げていなければ agent は報告しない）
+    ...(typeof s.heavyCommandsAfterAgentScaleUp === "number"
+      ? { sandbox_heavy_commands_after_agent_scale_up: n(s.heavyCommandsAfterAgentScaleUp) }
+      : {}),
   };
 }
 

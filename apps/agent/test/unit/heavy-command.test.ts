@@ -1,5 +1,6 @@
+import { SANDBOX_RULE_MATCHES } from "@rovo/models";
 import { describe, expect, it } from "vitest";
-import { isHeavyCommand } from "../../src/heavy-command";
+import { HEAVY_MATCH_LABELS, heavyCommandMatch, isHeavyCommand } from "../../src/heavy-command";
 
 // 重いコマンド（テスト・ビルドなど）の判定。昇格（小さい Sandbox → 大きい Sandbox）の引き金になる。
 // 誤検知は「数十秒早く昇格する」、見逃しは「小さいまま遅く動く」だけで、どちらも結果は変わらない（fail-soft）。
@@ -161,5 +162,47 @@ describe("isHeavyCommand: 重くないコマンド", () => {
   it("引数が文字列でない・配列でない入力でも例外にしない", () => {
     expect(isHeavyCommand(undefined as unknown as string[])).toBe(false);
     expect(isHeavyCommand([1, 2] as unknown as string[])).toBe(false);
+  });
+});
+
+// 規則で上がったときに usage へ残す「一致した表の名前」（argv の文字列そのものは残さない）。
+describe("heavyCommandMatch: 一致した表の名前", () => {
+  const cases: [string[], string | undefined][] = [
+    [["vitest", "run", "src/secret-name.test.ts"], "vitest"],
+    [["/usr/local/bin/jest", "--ci"], "jest"],
+    [["tsc", "--noEmit"], "tsc"],
+    [["go", "test", "./..."], "go test"],
+    [["cargo", "build", "--release"], "cargo build"],
+    [["playwright", "test"], "playwright test"],
+    [["npm", "test"], "npm test"],
+    [["pnpm", "run", "build:web"], "pnpm run"],
+    [["pnpm", "build"], "pnpm run"],
+    [["pnpm", "--filter", "x", "exec", "vitest"], "vitest"],
+    [["yarn", "test"], "yarn test"],
+    [["make"], "make"],
+    [["gmake", "test"], "make"],
+    [["mise", "run", "test:unit"], "mise run"],
+    [["node", "--test"], "node --test"],
+    [["python3", "-m", "pytest"], "python -m pytest"],
+    [["bun", "test"], "bun test"],
+    [["env", "FOO=1", "timeout", "10", "vitest"], "vitest"],
+    [["bash", "-lc", "cd app && pnpm exec vitest run my-private-file"], "vitest"],
+    [["bash", "-lc", "echo hi"], undefined],
+    [["ls", "-la"], undefined],
+    [[], undefined],
+  ];
+  for (const [argv, label] of cases) {
+    it(JSON.stringify(argv), () => expect(heavyCommandMatch(argv)).toBe(label));
+  }
+
+  it("isHeavyCommand と一致する（見つかれば重い）", () => {
+    for (const [argv, label] of cases) expect(isHeavyCommand(argv)).toBe(label !== undefined);
+  });
+
+  it("返す名前の一覧は packages/models の固定の表（SANDBOX_RULE_MATCHES）と同じ。表の名前以外は返らない", () => {
+    expect([...HEAVY_MATCH_LABELS].sort()).toEqual([...SANDBOX_RULE_MATCHES].sort());
+    for (const [, label] of cases) {
+      if (label !== undefined) expect(SANDBOX_RULE_MATCHES).toContain(label);
+    }
   });
 });

@@ -1,4 +1,9 @@
-import type { SandboxPromotionReason } from "@rovo/models";
+import type {
+  SandboxInstance,
+  SandboxPromotionReason,
+  SandboxPromotionTrigger,
+  SandboxRuleMatch,
+} from "@rovo/models";
 import type { DepsMissReason, DepsSpec } from "../deps-cache";
 
 /** AgentDO の公開 RPC の型（戻り値は DTO。Pi の EntryRecord は返さない）。 */
@@ -191,14 +196,31 @@ export interface SandboxMetrics {
   cacheBuildMs?: number;
   /** 最初にコンテナを start() した大きさ。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
-  /** 重いコマンドの初回に昇格した先の大きさ。昇格していなければ無い。一度昇格したら戻さない（作り直しも昇格先で起動する） */
+  /** 昇格した最終の大きさ（子が頼んだ・重いコマンドの規則・検証のどれでも）。昇格していなければ無い。上げる方向だけで、戻さない（作り直しも最終の大きさで起動する） */
   promotedTo?: string;
-  /** 昇格した時刻（epoch ms）。昇格していなければ無い */
+  /** 最初の昇格の時刻（epoch ms）。昇格していなければ無い */
   promotedAt?: number;
-  /** 昇格した時点までの Sandbox の累計時間（ms）。runtimeMs のうち、これまでが instance の単価、残りが promotedTo の単価。昇格していなければ無い */
+  /** 最初の昇格までの Sandbox の累計時間（ms）。昇格していなければ無い。区間ごとの時間は promotions の runtimeMsBefore から導く */
   runtimeMsBeforePromotion?: number;
-  /** 昇格を見送った・失敗した理由の固定コード（packages/models の SANDBOX_PROMOTION_REASONS）。昇格が成功したときは無い。設定で無効のときも無い */
+  /** 昇格を見送った・失敗した理由の固定コード（packages/models の SANDBOX_PROMOTION_REASONS）。最後に残したもので、あとで昇格が成功しても消さない。設定で無効のときは無い */
   promotionReason?: SandboxPromotionReason;
+  /** 成功した昇格だけを時系列に並べたもの（見送り・失敗は promotionReason）。子が頼んだ・規則・検証のどれかは trigger で分かる */
+  promotions?: SandboxPromotionRecord[];
+  /** 子が sandbox_scale_up で上げたあと、タスクの終了までに規則（heavy-command.ts の表）で重いと判定されたコマンドを実行した本数。子が上げていなければ 0。検証コマンドの heavy フラグは数えない */
+  heavyCommandsAfterAgentScaleUp?: number;
+}
+
+/** 成功した昇格 1 回分。値はすべて固定の値か数値（子の自由文・argv の文字列は入らない） */
+export interface SandboxPromotionRecord {
+  /** 昇格した先の大きさ */
+  to: SandboxInstance;
+  /** 昇格した時刻（epoch ms） */
+  at: number;
+  trigger: SandboxPromotionTrigger;
+  /** この昇格までの Sandbox の累計時間（ms）。1 つ前の昇格（無ければ起動）からこの昇格までが、1 つ前の大きさの区間 */
+  runtimeMsBefore: number;
+  /** trigger が rule のときだけ: 一致した重いコマンドの表の名前（固定の一覧） */
+  ruleMatch?: SandboxRuleMatch;
 }
 
 export interface WebUsage {

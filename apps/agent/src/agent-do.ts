@@ -13,8 +13,13 @@ import type { AuditFields } from "@rovo/audit";
 import {
   computeCostUsd,
   type Effort,
+  isSandboxPromotionTrigger,
+  isSandboxRuleMatch,
   isSelectableSandboxInstance,
+  resolveAgentMaxSandboxInstance,
   resolveHeavySandboxInstance,
+  SANDBOX_INSTANCES,
+  type SandboxInstance,
 } from "@rovo/models";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
@@ -41,6 +46,7 @@ import {
   isTerminal,
   type ResultDto,
   type SandboxMetrics,
+  type SandboxPromotionRecord,
   type StartResult,
   type TaskSpec,
   type UsageDto,
@@ -65,7 +71,7 @@ import {
   type ScriptStep,
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
-import type { ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import type { ExecResult, SandboxPort, SandboxScaleUpResult, WorkspaceSpec } from "./sandbox-port";
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createSandboxTools } from "./tools";
 import { createToolContext } from "./tools/context";
@@ -180,6 +186,74 @@ const BG: any = Object.freeze({
 /** 末尾 n 文字（書記素単位。サロゲートペアや結合文字の途中で切らない）。親に返す文字列なので ANSI も除く。 */
 function tail(text: string, n = OUTPUT_TAIL): string {
   return tailChars(stripAnsi(text), n);
+}
+
+/** sandbox_scale_up の tool_start の summary。大きさ（表にある名前）だけで、reason など子の自由文は載せない */
+function summarizeScaleUpArgs(args: unknown): string {
+  const instance =
+    typeof args === "object" && args !== null ? (args as { instance?: unknown }).instance : args;
+  return typeof instance === "string" && Object.hasOwn(SANDBOX_INSTANCES, instance)
+    ? `instance=${instance}`
+    : "instance=(invalid)";
+}
+
+/** sandbox_scale_up の結果を、子に返す固定の文にする（値はすべて Sandbox が返した固定の値） */
+function scaleUpMessage(r: SandboxScaleUpResult): { text: string; isError: boolean } {
+  switch (r.outcome) {
+    case "scaled":
+      return {
+        text: `The sandbox is now ${r.to} (was ${r.from}). Processes you left running in the background were stopped; the files in the workspace are unchanged. Continue.`,
+        isError: false,
+      };
+    case "unchanged":
+      return {
+        text: `No change: the sandbox is already ${r.instance}, which is the same size or larger than requested. You can only scale up. Continue.`,
+        isError: false,
+      };
+    case "rejected":
+      return {
+        text:
+          r.code === "above_limit"
+            ? `Rejected: the largest size you may choose is ${r.max}. The sandbox stays ${r.instance}. Continue with it, or ask for ${r.max} or smaller.`
+            : `Rejected: instance must be one of standard-1, standard-2, standard-3, standard-4. The sandbox stays ${r.instance}.`,
+        isError: true,
+      };
+    case "fixed":
+      return {
+        text: `The sandbox size is fixed for this task by the parent (${r.instance}). You cannot change it; continue.`,
+        isError: false,
+      };
+    case "unavailable":
+      return { text: "Scaling up is not available in this deployment.", isError: true };
+    case "failed":
+      return {
+        text: `Scaling up did not happen (${r.code}); the sandbox stays ${r.instance} and your work is unchanged. Continue with the current size; do not retry.`,
+        isError: false,
+      };
+    case "terminated":
+      return { text: "The task has ended.", isError: true };
+  }
+}
+
+/** SandboxDO が報告した昇格の履歴を、固定の値だけの形に絞る（表に無い大きさ・引き金・規則名の要素は捨てる） */
+function sanitizePromotions(v: unknown): SandboxPromotionRecord[] {
+  if (!Array.isArray(v)) return [];
+  const out: SandboxPromotionRecord[] = [];
+  for (const x of v.slice(0, 8)) {
+    if (typeof x !== "object" || x === null) continue;
+    const r = x as Record<string, unknown>;
+    if (typeof r.to !== "string" || !Object.hasOwn(SANDBOX_INSTANCES, r.to)) continue;
+    if (!isSandboxPromotionTrigger(r.trigger)) continue;
+    if (r.ruleMatch !== undefined && !isSandboxRuleMatch(r.ruleMatch)) continue;
+    out.push({
+      to: r.to as SandboxInstance,
+      at: finiteCount(r.at),
+      trigger: r.trigger,
+      runtimeMsBefore: finiteCount(r.runtimeMsBefore),
+      ...(r.trigger === "rule" && r.ruleMatch !== undefined ? { ruleMatch: r.ruleMatch } : {}),
+    });
+  }
+  return out;
 }
 
 function summarizeArgs(args: unknown): string {
@@ -427,6 +501,15 @@ export class AgentDO extends DurableObject<Env> {
         : {}),
       ...(raw.metrics
         ? { metrics: () => raw.metrics?.() as Promise<SandboxMetrics | undefined> }
+        : {}),
+      // 子の要求で大きくする。Sandbox が起動していなければ先に起動する（exec と同じ。起動した後の大きさから上げる）
+      ...(raw.scaleUp
+        ? {
+            scaleUp: async (instance: string) => {
+              await ready();
+              return raw.scaleUp?.(instance) as Promise<SandboxScaleUpResult>;
+            },
+          }
         : {}),
     };
   }
@@ -1854,6 +1937,19 @@ export class AgentDO extends DurableObject<Env> {
         ? undefined
         : finiteCount(m.runtimeMsBeforePromotion) || prev?.runtimeMsBeforePromotion || 0;
     const promotionReason = m.promotionReason ?? prev?.promotionReason;
+    // 成功した昇格の履歴。時系列に追記されるだけなので、読めたものが長ければそれを採る。表に無い値の要素は捨てる
+    const reported = sanitizePromotions(m.promotions);
+    const promotions =
+      reported.length >= (prev?.promotions?.length ?? 0) ? reported : prev?.promotions;
+    // 子が上げたあとの重いコマンドの本数（増えるだけ）。子が上げていなければ無い
+    const heavyAfter =
+      typeof m.heavyCommandsAfterAgentScaleUp === "number" ||
+      prev?.heavyCommandsAfterAgentScaleUp !== undefined
+        ? Math.max(
+            prev?.heavyCommandsAfterAgentScaleUp ?? 0,
+            finiteCount(m.heavyCommandsAfterAgentScaleUp),
+          )
+        : undefined;
     const next: SandboxMetrics = {
       runtimeMs: Math.max(prev?.runtimeMs ?? 0, finiteCount(m.runtimeMs)),
       restarts: Math.max(prev?.restarts ?? 0, finiteCount(m.restarts)),
@@ -1870,6 +1966,8 @@ export class AgentDO extends DurableObject<Env> {
           }
         : {}),
       ...(promotionReason !== undefined ? { promotionReason } : {}),
+      ...(promotions !== undefined && promotions.length > 0 ? { promotions } : {}),
+      ...(heavyAfter !== undefined ? { heavyCommandsAfterAgentScaleUp: heavyAfter } : {}),
     };
     if (!prev) return next;
     const counters =
@@ -1880,7 +1978,8 @@ export class AgentDO extends DurableObject<Env> {
       next.cacheBuildMs !== prev.cacheBuildMs ||
       next.instance !== prev.instance ||
       next.promotedTo !== prev.promotedTo ||
-      next.promotionReason !== prev.promotionReason;
+      next.promotionReason !== prev.promotionReason ||
+      (next.promotions?.length ?? 0) !== (prev.promotions?.length ?? 0);
     return final || counters ? next : prev;
   }
 
@@ -1952,7 +2051,11 @@ export class AgentDO extends DurableObject<Env> {
         this.emit("tool_start", {
           callId: call.id,
           name: call.name,
-          summary: summarizeArgs(call.arguments),
+          // sandbox_scale_up は大きさだけ（reason は子の自由文なので、events にも R2 のアーカイブにも残さない）
+          summary:
+            call.name === "sandbox_scale_up"
+              ? summarizeScaleUpArgs(call.arguments)
+              : summarizeArgs(call.arguments),
         });
         return undefined;
       },
@@ -2008,6 +2111,19 @@ export class AgentDO extends DurableObject<Env> {
           (r) => formatWebBrowse(r),
         ),
       webBrowseEnabled: () => this.webBrowseEnabled(),
+      sandboxScaleUp: (args) => this.sandboxScaleUpCall(args.instance),
+      sandboxScaleUpEnabled: () => {
+        const max = this.sandboxScaleUpMax();
+        const raw = (this.env as unknown as { SANDBOX_AGENT_MAX_INSTANCE?: string })
+          .SANDBOX_AGENT_MAX_INSTANCE;
+        const ignored = resolveAgentMaxSandboxInstance(raw).ignored;
+        if (ignored !== undefined) {
+          console.warn(
+            `[sandbox-promote] SANDBOX_AGENT_MAX_INSTANCE=${JSON.stringify(ignored.slice(0, 40))} is not supported; sandbox_scale_up is disabled`,
+          );
+        }
+        return max !== null;
+      },
       sections: () => this.promptSections(),
     };
   }
@@ -2042,7 +2158,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "testing",
-        text: `A full test run in the sandbox can take minutes. While you iterate (TDD), run only the tests related to the files you changed (for example \`vitest run <file>\`), not the whole suite. Run the whole suite once, right before report_completion. Keep the trailing newline at the end of every file you edit or create: a file ends with exactly one newline character.${this.promotionEnabled() ? " The sandbox starts small and is scaled up to a larger one before the first heavy command (tests, a build, a type check); that first command can take tens of seconds longer than usual, and later heavy commands run faster. Scaling up restarts the container: processes you left running in the background (a dev server, for example) are stopped, so start them again if you still need them. Do not retry or cancel it because it looks slow." : ""}`,
+        text: `A full test run in the sandbox can take minutes. While you iterate (TDD), run only the tests related to the files you changed (for example \`vitest run <file>\`), not the whole suite. Run the whole suite once, right before report_completion. Keep the trailing newline at the end of every file you edit or create: a file ends with exactly one newline character.${this.scalingPrompt()}`,
       },
       {
         key: "untrusted_data",
@@ -2085,6 +2201,63 @@ export class AgentDO extends DurableObject<Env> {
     if (this.spec()?.sandboxInstance !== undefined) return false;
     const raw = (this.env as unknown as { SANDBOX_HEAVY_INSTANCE?: string }).SANDBOX_HEAVY_INSTANCE;
     return resolveHeavySandboxInstance(raw).instance !== null;
+  }
+
+  /**
+   * testing の節の、Sandbox の大きさの説明。ツール（sandbox_scale_up）があれば、いつ呼ぶか・上限・上げるだけ・数十秒かかる・中断しない・
+   * 呼ばなくても規則で上がる（保険）。ツールが無く規則の昇格だけなら、従来の説明。どちらも無ければ（無効・大きさを明示した）何も書かない。
+   */
+  private scalingPrompt(): string {
+    const max = this.sandboxScaleUpPrompt();
+    const auto = this.promotionEnabled();
+    if (max !== null) {
+      return (
+        " You can make the sandbox larger yourself with sandbox_scale_up. The sandbox starts small. Before you start heavy work (running the tests or a build, a type check, a large dependency install), call sandbox_scale_up once with the size you need; do not call it for light work (reading, editing, small commands). " +
+        "Judge by what the command really does, not only by its name: a make target or a custom script can be heavy too, so read it first if you are unsure. " +
+        `The largest size you may choose is ${max}; a larger request is rejected. You can only scale up, never down: asking for the current size or a smaller one does nothing. A larger size helps only when the work runs in parallel (several test workers, a parallel build), so do not pick ${max} by reflex. ` +
+        "The call takes tens of seconds and restarts the container: processes you left running in the background (a dev server, for example) are stopped, so start them again if you still need them; the files in the workspace are kept. Do not retry or cancel it because it looks slow. If it fails you stay at the current size and can continue." +
+        (auto
+          ? " If you forget, the first heavy command (tests, a build, a type check) makes the sandbox scaled up automatically, once, as a safety net; calling the tool yourself before the command is better, because you choose the size."
+          : "")
+      );
+    }
+    return auto
+      ? " The sandbox starts small and is scaled up to a larger one before the first heavy command (tests, a build, a type check); that first command can take tens of seconds longer than usual, and later heavy commands run faster. Scaling up restarts the container: processes you left running in the background (a dev server, for example) are stopped, so start them again if you still need them. Do not retry or cancel it because it looks slow."
+      : "";
+  }
+
+  /** 子が sandbox_scale_up で選べる上限（env の SANDBOX_AGENT_MAX_INSTANCE）。無効・不正は null（ツールを子に見せない） */
+  private sandboxScaleUpMax(): SandboxInstance | null {
+    const raw = (this.env as unknown as { SANDBOX_AGENT_MAX_INSTANCE?: string })
+      .SANDBOX_AGENT_MAX_INSTANCE;
+    return resolveAgentMaxSandboxInstance(raw).instance;
+  }
+
+  /** この子に sandbox_scale_up の説明を出すか（上限の設定が有効で、task_start で大きさを明示していない） */
+  private sandboxScaleUpPrompt(): SandboxInstance | null {
+    if (this.spec()?.sandboxInstance !== undefined) return null;
+    return this.sandboxScaleUpMax();
+  }
+
+  /**
+   * sandbox_scale_up の本体。結果は固定の文（Sandbox が返した固定の値から作る。子の自由文も例外の文面も含めない）。
+   * 失敗してもタスクは続く（今の大きさのまま）。
+   */
+  private async sandboxScaleUpCall(instance: string): Promise<{ text: string; isError: boolean }> {
+    const sb = this.lazySandbox();
+    if (!sb.scaleUp)
+      return { text: "Scaling up is not available in this deployment.", isError: true };
+    let r: SandboxScaleUpResult;
+    try {
+      r = await sb.scaleUp(instance);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return {
+        text: `Scaling up was interrupted: ${tail(maskSecrets(stripAnsi(msg)), 200)}. Continue with the current size; the files in the workspace are kept unless the message says the workspace was recreated.`,
+        isError: true,
+      };
+    }
+    return scaleUpMessage(r);
   }
 
   private webBrowseEnabled(): boolean {

@@ -347,3 +347,172 @@ describe("usage_public に昇格の項目を覚える", () => {
     expect(up).not.toHaveProperty("sandbox_promotion_reason");
   });
 });
+
+describe("Sandbox の複数回の昇格（trigger つきの履歴）と費用の按分（区間ごと）", () => {
+  const HOUR = 3_600_000;
+  const P3 = {
+    to: "standard-3",
+    at: 1_700_000_000_000,
+    trigger: "rule",
+    runtime_ms_before: HOUR / 4,
+    rule_match: "vitest",
+  } as const;
+  const P4 = {
+    to: "standard-4",
+    at: 1_700_000_900_000,
+    trigger: "agent",
+    runtime_ms_before: HOUR / 2,
+  } as const;
+  const twice = (over: Record<string, unknown> = {}) =>
+    input({
+      usage: {
+        ...input().usage,
+        sandbox: {
+          runtimeMs: HOUR,
+          restarts: 0,
+          bootRetries: 0,
+          instance: "standard-2",
+          promotedTo: "standard-4",
+          promotedAt: P3.at,
+          runtimeMsBeforePromotion: HOUR / 4,
+          promotions: [P3, P4],
+          heavyCommandsAfterAgentScaleUp: 2,
+          ...over,
+        },
+      } as SummaryInput["usage"],
+    });
+
+  it("区間ごとに「その区間の時間 × その大きさの単価」を足す（2 → 3 → 4）。最終の大きさ・最初の昇格の時刻と時間は従来の項目のまま", () => {
+    const s = buildTaskSummary(twice());
+    const expected =
+      0.25 * sandboxUsdPerHour("standard-2") +
+      0.25 * sandboxUsdPerHour("standard-3") +
+      0.5 * sandboxUsdPerHour("standard-4");
+    expect(s.sandbox_usd_estimate).toBeCloseTo(expected, 9);
+    expect(s.sandbox).toMatchObject({
+      instance: "standard-2",
+      promoted_to: "standard-4",
+      promoted_at: P3.at,
+      runtime_ms_before_promotion: HOUR / 4,
+      heavy_commands_after_agent_scale_up: 2,
+    });
+    expect(s.sandbox.promotions).toEqual([P3, P4]);
+    expect(s.unit_prices.sandbox_usd_per_hour).toBe(sandboxUsdPerHour("standard-2"));
+    expect(s.unit_prices.sandbox_promoted_usd_per_hour).toBe(sandboxUsdPerHour("standard-4"));
+    // 区間ごとの内訳（時間と単価）
+    expect(s.sandbox_segments).toEqual([
+      {
+        instance: "standard-2",
+        runtime_ms: HOUR / 4,
+        usd_per_hour: sandboxUsdPerHour("standard-2"),
+      },
+      {
+        instance: "standard-3",
+        runtime_ms: HOUR / 4,
+        usd_per_hour: sandboxUsdPerHour("standard-3"),
+      },
+      {
+        instance: "standard-4",
+        runtime_ms: HOUR / 2,
+        usd_per_hour: sandboxUsdPerHour("standard-4"),
+      },
+    ]);
+  });
+
+  it("単一の昇格は従来と同じ金額。履歴が無く promoted_to だけの古い報告も従来の按分に落ちる", () => {
+    const one = buildTaskSummary(twice({ promotions: [P3], promotedTo: "standard-3" }));
+    expect(one.sandbox_usd_estimate).toBeCloseTo(
+      0.25 * sandboxUsdPerHour("standard-2") + 0.75 * sandboxUsdPerHour("standard-3"),
+      9,
+    );
+    const legacy = buildTaskSummary(
+      twice({
+        promotions: undefined,
+        promotedTo: "standard-3",
+        heavyCommandsAfterAgentScaleUp: undefined,
+      }),
+    );
+    expect(legacy.sandbox_usd_estimate).toBeCloseTo(one.sandbox_usd_estimate, 9);
+    expect(legacy.sandbox).not.toHaveProperty("promotions");
+    expect(legacy.sandbox).not.toHaveProperty("heavy_commands_after_agent_scale_up");
+  });
+
+  it("境界は累計の時間に収め、順序が逆でも負の区間を作らない（多く数えすぎない）", () => {
+    const s = buildTaskSummary(
+      twice({
+        promotions: [
+          { ...P3, runtime_ms_before: HOUR / 2 },
+          { ...P4, runtime_ms_before: HOUR / 4 }, // 前より小さい → 前の境界にそろえる
+        ],
+      }),
+    );
+    const total = (s.sandbox_segments ?? []).reduce((a, x) => a + x.runtime_ms, 0);
+    expect(total).toBe(HOUR);
+    for (const seg of s.sandbox_segments ?? []) expect(seg.runtime_ms).toBeGreaterThanOrEqual(0);
+    const over = buildTaskSummary(twice({ promotions: [{ ...P3, runtime_ms_before: 10 * HOUR }] }));
+    expect(over.sandbox_usd_estimate).toBeCloseTo(sandboxUsdPerHour("standard-2"), 9);
+  });
+
+  it("表に無い大きさ・引き金・規則名の要素は捨てる。子の自由文や argv に当たる項目は summary に出ない", () => {
+    const s = buildTaskSummary(
+      twice({
+        promotions: [
+          P3,
+          { to: "evil", at: 1, trigger: "agent", runtime_ms_before: 1 },
+          { to: "standard-4", at: 1, trigger: "x", runtime_ms_before: 1 },
+          { ...P4, rule_match: "any command", reason: "free text", argv: ["secret"] },
+        ],
+      }),
+    );
+    expect(s.sandbox.promotions).toEqual([P3, { ...P4 }]);
+    const json = JSON.stringify(s);
+    expect(json).not.toContain("free text");
+    expect(json).not.toContain("secret");
+    expect(json).not.toContain("any command");
+  });
+
+  it("昇格していないタスクには promotions・heavy_commands_after_agent_scale_up・区間の内訳を付けない", () => {
+    const s = buildTaskSummary(input());
+    expect(s.sandbox).not.toHaveProperty("promotions");
+    expect(s.sandbox).not.toHaveProperty("heavy_commands_after_agent_scale_up");
+    expect(s).not.toHaveProperty("sandbox_segments");
+  });
+
+  it("usage_public: sandbox_promotions（JSON 文字列）は検証して配列で覚える。長い方を採り、短い（古い）報告で巻き戻さない", () => {
+    let up = mergeUsagePublic(
+      {},
+      {
+        sandbox_runtime_ms: 100,
+        sandbox_promoted_to: "standard-3",
+        sandbox_promotions: JSON.stringify([P3]),
+        sandbox_heavy_commands_after_agent_scale_up: 1,
+      },
+    );
+    expect(up.sandbox_promotions).toEqual([P3]);
+    up = mergeUsagePublic(up, {
+      sandbox_promotions: JSON.stringify([P3, P4]),
+      sandbox_heavy_commands_after_agent_scale_up: 3,
+    });
+    expect(up.sandbox_promotions).toEqual([P3, P4]);
+    // 古い報告・項目の無い報告・壊れた報告では変わらない
+    up = mergeUsagePublic(up, { sandbox_promotions: JSON.stringify([P3]) });
+    up = mergeUsagePublic(up, { sandbox_runtime_ms: 200 });
+    up = mergeUsagePublic(up, { sandbox_promotions: "not json" });
+    up = mergeUsagePublic(up, { sandbox_heavy_commands_after_agent_scale_up: 2 });
+    expect(up.sandbox_promotions).toEqual([P3, P4]);
+    expect(up.sandbox_heavy_commands_after_agent_scale_up).toBe(3);
+    expect(parseUsagePublic(JSON.stringify(up))).toEqual(up);
+  });
+
+  it("usage_public の parse: 表に無い要素は捨てる。配列でない値は無視する", () => {
+    const up = parseUsagePublic(
+      JSON.stringify({
+        sandbox_promotions: [P3, { to: "evil", at: 1, trigger: "agent", runtime_ms_before: 1 }],
+      }),
+    );
+    expect(up.sandbox_promotions).toEqual([P3]);
+    expect(parseUsagePublic(JSON.stringify({ sandbox_promotions: "x" }))).not.toHaveProperty(
+      "sandbox_promotions",
+    );
+  });
+});

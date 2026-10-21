@@ -62,6 +62,118 @@ export function resolveHeavySandboxInstance(raw: string | undefined): {
 }
 
 /**
+ * 子が sandbox_scale_up で選べる上限の既定（standard-4）。子は「これから重い処理を流す」と判断したら、コマンドの前に自分で大きくできる。
+ * 運用者が上限を決める（LLM に全権は渡さない）。上げる方向だけで、下げる機能は無い。
+ */
+export const DEFAULT_AGENT_MAX_SANDBOX_INSTANCE: SelectableSandboxInstance = "standard-4";
+
+/**
+ * env SANDBOX_AGENT_MAX_INSTANCE を解く。未設定・空・off / none は無効（instance: null。子に sandbox_scale_up を見せない）。
+ * タスクが選べる 4 種類（lite を除く）だけ有効で、それ以外は無効にして、受け付けなかった値を ignored に返す
+ * （起動はエラーにしない。デプロイ設定の生成器は不正な値をエラーにする）。
+ */
+export function resolveAgentMaxSandboxInstance(raw: string | undefined): {
+  instance: SelectableSandboxInstance | null;
+  ignored?: string;
+} {
+  return resolveHeavySandboxInstance(raw);
+}
+
+/**
+ * 昇格の引き金（usage.sandbox_promotions[].trigger。固定の値）。
+ * - agent: 子が sandbox_scale_up で頼んだ
+ * - rule: 重いコマンドの規則（apps/agent の heavy-command.ts）に一致した（保険）
+ * - verification: 検証コマンド（heavy: true）の実行の前
+ */
+export const SANDBOX_PROMOTION_TRIGGERS = ["agent", "rule", "verification"] as const;
+export type SandboxPromotionTrigger = (typeof SANDBOX_PROMOTION_TRIGGERS)[number];
+
+export function isSandboxPromotionTrigger(v: unknown): v is SandboxPromotionTrigger {
+  return (SANDBOX_PROMOTION_TRIGGERS as readonly unknown[]).includes(v);
+}
+
+/**
+ * 規則（重いコマンドの表）で昇格したときに、一致した表の名前（usage.sandbox_promotions[].rule_match）。固定の一覧だけで、
+ * argv の文字列そのものは入れない。apps/agent の heavy-command.ts の HEAVY_MATCH_LABELS と同じ（heavy-command.test.ts が突き合わせる）。
+ */
+export const SANDBOX_RULE_MATCHES = [
+  "vitest",
+  "jest",
+  "mocha",
+  "ava",
+  "karma",
+  "pytest",
+  "py.test",
+  "tox",
+  "nosetests",
+  "rspec",
+  "phpunit",
+  "tsc",
+  "tsgo",
+  "webpack",
+  "go test",
+  "go build",
+  "go vet",
+  "cargo test",
+  "cargo build",
+  "cargo check",
+  "cargo clippy",
+  "cargo bench",
+  "cargo nextest",
+  "deno test",
+  "deno check",
+  "deno compile",
+  "dotnet test",
+  "dotnet build",
+  "mvn test",
+  "mvn verify",
+  "mvn package",
+  "mvn compile",
+  "mvnw test",
+  "mvnw verify",
+  "mvnw package",
+  "mvnw compile",
+  "gradle test",
+  "gradle build",
+  "gradle check",
+  "gradle assemble",
+  "gradlew test",
+  "gradlew build",
+  "gradlew check",
+  "gradlew assemble",
+  "swift test",
+  "swift build",
+  "rake test",
+  "rake spec",
+  "playwright test",
+  "cypress run",
+  "vite build",
+  "next build",
+  "nuxt build",
+  "astro build",
+  "make",
+  "mise run",
+  "node --test",
+  "python -m pytest",
+  "python -m unittest",
+  "python -m tox",
+  "python -m nose",
+  "npm test",
+  "npm run",
+  "pnpm test",
+  "pnpm run",
+  "yarn test",
+  "yarn run",
+  "bun test",
+  "bun run",
+] as const;
+export type SandboxRuleMatch = (typeof SANDBOX_RULE_MATCHES)[number];
+
+export function isSandboxRuleMatch(v: unknown): v is SandboxRuleMatch {
+  return (SANDBOX_RULE_MATCHES as readonly unknown[]).includes(v);
+}
+
+/**
  * Sandbox の昇格を見送った・失敗した理由の固定コード（usage.sandbox_promotion_reason。任意の文字列・例外の文面は公開しない）。
  * - fixed_instance: task_start で sandbox_instance を明示した（そのタスクの間は固定）
  * - already_large: 起動した大きさがすでに昇格先以上
@@ -149,11 +261,14 @@ export type SandboxInstanceInfo = {
   selectable: boolean;
   /** 重いコマンド（テスト・ビルドなど）の初回に、自動で大きくなる先か（昇格を無効にしているデプロイでは、どれも false） */
   promotion_target: boolean;
+  /** 子が sandbox_scale_up で選べる上限か（ツールを無効にしているデプロイでは、どれも false。上限以下の大きさは子が選べる） */
+  agent_max: boolean;
 };
 
 export function listSandboxInstances(
   defaultInstance: SandboxInstance = DEFAULT_SANDBOX_INSTANCE,
   heavyInstance: SandboxInstance | null = DEFAULT_HEAVY_SANDBOX_INSTANCE,
+  agentMaxInstance: SandboxInstance | null = DEFAULT_AGENT_MAX_SANDBOX_INSTANCE,
 ): SandboxInstanceInfo[] {
   return (Object.keys(SANDBOX_INSTANCES) as SandboxInstance[]).map((name) => {
     const s = sandboxInstanceSpec(name);
@@ -166,6 +281,7 @@ export function listSandboxInstances(
       default: name === defaultInstance,
       selectable: isSelectableSandboxInstance(name),
       promotion_target: name === heavyInstance,
+      agent_max: name === agentMaxInstance,
     };
   });
 }

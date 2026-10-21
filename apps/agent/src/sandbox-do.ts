@@ -3,13 +3,17 @@ import { posix } from "node:path";
 import { Files } from "@cloudflare/sandbox";
 import type { AuditFields, AuditRecord } from "@rovo/audit";
 import {
+  isSelectableSandboxInstance,
+  resolveAgentMaxSandboxInstance,
   resolveHeavySandboxInstance,
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
   type SandboxInstance,
   type SandboxPromotionReason,
+  type SandboxPromotionTrigger,
+  type SandboxRuleMatch,
 } from "@rovo/models";
-import type { GitCredential, SandboxMetrics } from "./agent/types";
+import type { GitCredential, SandboxMetrics, SandboxPromotionRecord } from "./agent/types";
 import { appendTestAudit, emitAudit, readTestAudit } from "./audit-adapter";
 import { PROCESS_SCRIPT, PROMOTE_STATE_SCRIPT } from "./container-scripts";
 import { decryptString, encryptString, importEncryptionKey } from "./crypto";
@@ -30,10 +34,16 @@ import {
   parseDepsSpec,
 } from "./deps-cache";
 import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./deps-scripts";
-import { isHeavyCommand } from "./heavy-command";
+import { heavyCommandMatch } from "./heavy-command";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
-import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import type {
+  ExecOptions,
+  ExecResult,
+  SandboxPort,
+  SandboxScaleUpResult,
+  WorkspaceSpec,
+} from "./sandbox-port";
 import { TailBuffer } from "./tail-buffer";
 import {
   isInsideWorkspace,
@@ -138,9 +148,12 @@ async function withDeadline<T>(promise: Promise<T>, until: number): Promise<T | 
   }
 }
 
-/** 昇格のスナップショットの名前（人が見分けるための名前。識別は id で行う）。DO の名前（= タスク ID）から作る。 */
-function promoteSnapshotName(taskId: string | undefined): string {
-  return `promote-${(taskId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}`;
+/**
+ * 昇格のスナップショットの名前（人が見分けるための名前。識別は id で行う）。DO の名前（= タスク ID）と、何回目の昇格か（seq）から作る。
+ * 昇格は子の要求で何回も起きるので、同じ名前を使い回さない（同名の扱いに依存しない）。
+ */
+function promoteSnapshotName(taskId: string | undefined, seq: number): string {
+  return `promote-${(taskId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}-${seq}`;
 }
 
 interface RawResult {
@@ -201,6 +214,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private depsEnsureWaitMs = DEPS_ENSURE_WAIT_MS;
   /** 昇格のスナップショットを待つ上限（ms）。テストで短くする。 */
   private promoteSnapshotMs = PROMOTE_SNAPSHOT_MS;
+  /** 直近の runPromotion が残した見送り・失敗の理由（子への scaleUp の結果に使う。永続しない） */
+  private lastPromotionReason?: SandboxPromotionReason;
   /** キャッシュを作る処理（builder として使われたとき）。同時の依頼は 1 つを共有する。 */
   private depsBuilding?: Promise<DepsBuildResult>;
 
@@ -353,6 +368,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const cacheBuildMs = this.num("cache_build_ms");
     const instance = this.ctx.storage.kv.get<SandboxInstance>("instance");
     const promotedTo = this.ctx.storage.kv.get<SandboxInstance>("promoted_to");
+    const promotions = this.ctx.storage.kv.get<SandboxPromotionRecord[]>("promotions");
     const promotionReason = this.ctx.storage.kv.get<SandboxPromotionReason>("promotion_reason");
     const depsMissReason =
       depsCache === "miss"
@@ -375,6 +391,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           }
         : {}),
       ...(promotionReason !== undefined ? { promotionReason } : {}),
+      // 成功した昇格の履歴（trigger・規則の表の名前つき）と、子が上げたあとの重いコマンドの本数（保険がどのくらい要ったかの振り返り用）
+      ...(promotions !== undefined && promotions.length > 0 ? { promotions } : {}),
+      ...(this.ctx.storage.kv.get<boolean>("agent_scaled") === true
+        ? { heavyCommandsAfterAgentScaleUp: this.num("heavy_after_agent") }
+        : {}),
     };
   }
 
@@ -541,9 +562,20 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       if (this.terminated()) return TERMINATED_RESULT;
       this.requireSpec();
       await this.runningOrThrowRestarted();
-      // 重いコマンド（テスト・ビルドなど）の初回に、大きい Sandbox へ昇格する（fail-soft。昇格しなくてもコマンドは動く）
-      if (options.heavy === true || isHeavyCommand(argv)) {
-        if ((await this.maybePromote()) === "terminated") return TERMINATED_RESULT;
+      // 重いコマンド（テスト・ビルドなど）の初回に、大きい Sandbox へ昇格する（保険。fail-soft。昇格しなくてもコマンドは動く）
+      const match = heavyCommandMatch(argv);
+      if (match !== undefined && this.ctx.storage.kv.get<boolean>("agent_scaled") === true) {
+        // 子が自分で上げたあとに、規則で重いと判定されたコマンド（保険が要ったかの振り返り用。検証の heavy フラグだけのものは数えない）
+        this.ctx.storage.kv.put("heavy_after_agent", this.num("heavy_after_agent") + 1);
+      }
+      if (options.heavy === true || match !== undefined) {
+        const trigger = options.heavy === true ? "verification" : "rule";
+        if (
+          (await this.maybePromote(trigger, trigger === "rule" ? match : undefined)) ===
+          "terminated"
+        ) {
+          return TERMINATED_RESULT;
+        }
       }
       return this.runExec(argv, { ...options, cwd });
     });
@@ -933,7 +965,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     return started;
   }
 
-  // ---- 昇格（小さく始めて、重いコマンドの初回に大きい Sandbox へ。docs/deploy.md の 11）----
+  // ---- 昇格（小さく始めて、子の要求か重いコマンドの初回に大きい Sandbox へ。docs/deploy.md の 11）----
+  //
+  // 引き金は 3 つ（usage.sandbox_promotions[].trigger）: 子が sandbox_scale_up で頼んだ（agent。上方向なら何回でも。scaleUp）、
+  // 重いコマンドの規則（rule。保険で最多 1 回。maybePromote）、検証コマンド（verification。同じく保険）。手順はどれも runPromotion を使う。
+  // 上げる方向だけで、下げる機能は無い。規則は、子がすでに規則の昇格先以上に上げていれば何もしない。
   //
   // 動いているコンテナの大きさは変えられない。重いコマンド（テスト・ビルドなど。heavy-command.ts）の前に、今のコンテナの
   // スナップショットを取り、止めて、同じスナップショットから大きい大きさで起動し直す（スナップショットはイメージの版に
@@ -944,13 +980,18 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   //  - スナップショットが使えない・失敗 → 昇格せず小さいまま続ける（snapshot_unsupported / snapshot_failed / state_unreadable）
   //  - 昇格先の起動・確認に失敗 → 同じスナップショットで元の大きさに起動し直す。作業ツリーは失わない（start_failed / cert_missing / workspace_mismatch）
   //  - それも失敗 → image からの起動（作業ツリーの作り直し）に乗せる。呼び出し側へは「再起動した」例外（fallback_failed）
-  // 試みるのはタスクごとに 1 回だけ。task_start で大きさを明示したタスク・設定で無効・すでに昇格先以上なら昇格しない。
+  // 規則の昇格を試みるのはタスクごとに 1 回だけ（子の要求は何回でも）。task_start で大きさを明示したタスク・設定で無効・すでに昇格先以上なら昇格しない。
 
   private promotedTo(): SandboxInstance | undefined {
     const v = this.ctx.storage.kv.get<string>("promoted_to");
     return v !== undefined && Object.hasOwn(SANDBOX_INSTANCES, v)
       ? (v as SandboxInstance)
       : undefined;
+  }
+
+  /** 今の大きさ（昇格していれば最終の大きさ。していなければ最初に起動した大きさ） */
+  private currentInstance(): SandboxInstance {
+    return this.promotedTo() ?? this.startedInstance();
   }
 
   /** 最初に起動した大きさ（起動の記録が無ければ env の既定） */
@@ -962,6 +1003,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   /** 昇格の理由を固定コードで残す（usage.sandbox_promotion_reason と、ログの sandbox_promotion_skipped / _failed） */
   private recordPromotionReason(reason: SandboxPromotionReason, kind: "skipped" | "failed"): void {
+    this.lastPromotionReason = reason;
     this.ctx.storage.kv.put("promotion_reason", reason);
     console.warn(`[sandbox-promote] sandbox_promotion_${kind}: ${reason}`);
   }
@@ -976,11 +1018,14 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /**
-   * 重いコマンドの前に、必要なら昇格する。exec の serial の中（コンテナが動いている状態）で呼ぶ。
+   * 重いコマンドの前に、必要なら昇格する（規則・検証。保険）。exec の serial の中（コンテナが動いている状態）で呼ぶ。
    * 昇格の失敗では投げない。投げるのは、元の大きさでも起動し直せずに image から起動し直したとき（「再起動した」）と、期限切れだけ。
    * terminate された場合は、起動したコンテナを残さず "terminated" を返す。
    */
-  private async maybePromote(): Promise<"done" | "skipped" | "terminated"> {
+  private async maybePromote(
+    trigger: Exclude<SandboxPromotionTrigger, "agent">,
+    ruleMatch?: SandboxRuleMatch,
+  ): Promise<"done" | "skipped" | "terminated"> {
     const kv = this.ctx.storage.kv;
     if (kv.get<boolean>("promotion_attempted") === true) return "skipped";
     const heavy = resolveHeavySandboxInstance(
@@ -1002,10 +1047,89 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     };
     // 明示した大きさ（task_start の sandbox_instance）は、そのタスクの間は固定
     if (spec.instance !== undefined) return skip("fixed_instance");
-    const current = this.startedInstance();
+    const current = this.currentInstance();
     if (SANDBOX_INSTANCES[current].vcpu >= SANDBOX_INSTANCES[target].vcpu) {
+      // 子がすでに昇格先以上に上げていた（昇格が成功している）。見送りの理由は残さない（promoted_to があるのに already_large、にしない）
+      if (this.promotedTo() !== undefined) return "skipped";
       return skip("already_large");
     }
+    return this.runPromotion(target, trigger, ruleMatch);
+  }
+
+  /**
+   * 子の要求（sandbox_scale_up）で大きくする。exec と同じ serial の中で動く（実行中のコマンドが終わってから）。
+   * 上げる方向だけ: 今の大きさと同じか小さい指定は何もしない。上限（SANDBOX_AGENT_MAX_INSTANCE）を超える指定は拒否する。
+   * 子の自由文（reason）は受け取らない。失敗では投げず、理由コードを結果で返す（投げるのは exec と同じ「再起動した」・期限切れだけ）。
+   */
+  async scaleUp(instance: unknown): Promise<SandboxScaleUpResult> {
+    if (this.terminated()) return { outcome: "terminated" };
+    this.requireSpec();
+    return this.serial(async () => {
+      if (this.terminated()) return { outcome: "terminated" } as const;
+      const spec = this.requireSpec();
+      const max = resolveAgentMaxSandboxInstance(
+        (this.env as unknown as { SANDBOX_AGENT_MAX_INSTANCE?: string }).SANDBOX_AGENT_MAX_INSTANCE,
+      );
+      if (max.ignored !== undefined) {
+        console.warn(
+          `[sandbox-promote] SANDBOX_AGENT_MAX_INSTANCE=${JSON.stringify(max.ignored.slice(0, 40))} is not supported; sandbox_scale_up is disabled`,
+        );
+      }
+      if (max.instance === null) return { outcome: "unavailable", code: "disabled" } as const;
+      await this.runningOrThrowRestarted();
+      const current = this.currentInstance();
+      // 明示した大きさ（task_start の sandbox_instance）は、そのタスクの間は固定
+      if (spec.instance !== undefined) return { outcome: "fixed", instance: current } as const;
+      if (!isSelectableSandboxInstance(instance)) {
+        return {
+          outcome: "rejected",
+          code: "invalid_instance",
+          instance: current,
+          max: max.instance,
+        } as const;
+      }
+      if (SANDBOX_INSTANCES[instance].vcpu > SANDBOX_INSTANCES[max.instance].vcpu) {
+        return {
+          outcome: "rejected",
+          code: "above_limit",
+          instance: current,
+          max: max.instance,
+        } as const;
+      }
+      if (SANDBOX_INSTANCES[instance].vcpu <= SANDBOX_INSTANCES[current].vcpu) {
+        return { outcome: "unchanged", instance: current } as const;
+      }
+      this.lastPromotionReason = undefined;
+      const result = await this.runPromotion(instance, "agent");
+      if (result === "terminated") return { outcome: "terminated" } as const;
+      if (result === "done") {
+        this.ctx.storage.kv.put("agent_scaled", true);
+        return { outcome: "scaled", from: current, to: instance } as const;
+      }
+      return {
+        outcome: "failed",
+        code: this.lastPromotionReason ?? "snapshot_failed",
+        instance: this.currentInstance(),
+      } as const;
+    });
+  }
+
+  /**
+   * target へ昇格する本体（規則・検証・子の要求で共通）。呼び出し側が、設定・固定・今の大きさとの比較を済ませている。
+   * 昇格の失敗では投げない（理由は promotion_reason と lastPromotionReason）。
+   */
+  private async runPromotion(
+    target: SandboxInstance,
+    trigger: SandboxPromotionTrigger,
+    ruleMatch?: SandboxRuleMatch,
+  ): Promise<"done" | "skipped" | "terminated"> {
+    this.lastPromotionReason = undefined;
+    const spec = this.requireSpec();
+    const current = this.currentInstance();
+    const skip = (reason: SandboxPromotionReason) => {
+      this.recordPromotionReason(reason, "skipped");
+      return "skipped" as const;
+    };
     const container = this.container();
     // スナップショットに対応しないランタイム（ローカルの wrangler dev など）。コンテナには触らない
     if (typeof container.snapshotContainer !== "function") return skip("snapshot_unsupported");
@@ -1015,7 +1139,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const g = ++this.gen;
     this.readyGen = -1;
     try {
-      return await this.promote(g, target, current, before, spec);
+      return await this.promote(g, target, current, before, spec, trigger, ruleMatch);
     } catch (e) {
       if (this.terminated()) {
         await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
@@ -1031,6 +1155,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     current: SandboxInstance,
     before: string,
     spec: WorkspaceSpec,
+    trigger: SandboxPromotionTrigger,
+    ruleMatch?: SandboxRuleMatch,
   ): Promise<"done" | "skipped"> {
     const container = this.container();
     const kv = this.ctx.storage.kv;
@@ -1042,9 +1168,12 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
     // (a) 今のコンテナのスナップショット。失敗しても、コンテナは触っていないので小さいまま続ける
     let snapshotId: string | undefined;
+    // 何回目の昇格か（スナップショットの名前に入れる。失敗した試みも数える）
+    const seq = this.num("promote_seq") + 1;
+    kv.put("promote_seq", seq);
     try {
       const snapshot = await withDeadline(
-        container.snapshotContainer?.({ name: promoteSnapshotName(this.ctx.id.name) }) ??
+        container.snapshotContainer?.({ name: promoteSnapshotName(this.ctx.id.name, seq) }) ??
           Promise.reject(new Error("snapshot is not supported")),
         Date.now() + this.promoteSnapshotMs,
       );
@@ -1120,12 +1249,24 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
     const failure = await startFromSnapshot(target);
     if (failure === undefined) {
+      const at = Date.now();
       kv.put("promoted_to", target);
-      kv.put("promoted_at", Date.now());
-      kv.put("rt_before_promotion", ranMs);
+      // 最初の昇格の時刻とそれまでの時間（usage.sandbox_promoted_at / sandbox_runtime_ms_before_promotion）。2 回目以降は promotions だけに足す
+      if (kv.get<number>("promoted_at") === undefined) {
+        kv.put("promoted_at", at);
+        kv.put("rt_before_promotion", ranMs);
+      }
+      const record: SandboxPromotionRecord = {
+        to: target,
+        at,
+        trigger,
+        runtimeMsBefore: ranMs,
+        ...(trigger === "rule" && ruleMatch !== undefined ? { ruleMatch } : {}),
+      };
+      kv.put("promotions", [...(kv.get<SandboxPromotionRecord[]>("promotions") ?? []), record]);
       this.readyGen = g;
       await this.armAlarm();
-      console.log(`[sandbox-promote] sandbox_promoted: ${current} -> ${target}`);
+      console.log(`[sandbox-promote] sandbox_promoted: ${current} -> ${target} (${trigger})`);
       return "done";
     }
     // 昇格先が使えない: 同じスナップショットで元の大きさに起動し直す（作業ツリーを失わない）

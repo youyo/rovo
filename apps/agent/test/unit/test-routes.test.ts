@@ -22,6 +22,7 @@ describe("テストルートは ENVIRONMENT=test 限定", () => {
     "/test/agent/debug",
     "/test/sandbox/exec",
     "/test/sandbox/seed-workspace",
+    "/test/sandbox/scale-up",
   ])("production では %s は 404（handleTestRoute は何も処理しない）", async (path) => {
     expect(await handleTestRoute(post(path, { name: "x" }), production)).toBeUndefined();
     const res = await worker.fetch(post(path, { name: "x" }) as never, production);

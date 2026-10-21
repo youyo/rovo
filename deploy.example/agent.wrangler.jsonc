@@ -63,6 +63,9 @@
     // 小さく始めて、重いコマンドの前に今のコンテナのスナップショットを取り、同じスナップショットから大きい大きさで起動し直す。
     // task_start で sandbox_instance を明示したタスクは昇格しない。スナップショットが使えなくても失敗しない（小さいまま続ける）。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
     "SANDBOX_HEAVY_INSTANCE": "<SANDBOX_HEAVY_INSTANCE>",
+    // 子が sandbox_scale_up で自分で選べる大きさの上限（standard-1〜standard-4。空は無効で、ツールを子に見せない）。rovo.config.json の sandbox.agentMaxInstance（既定 standard-4）。
+    // 子は重い処理の前に自分で Sandbox を大きくできる（上げる方向だけ。昇格と同じ手順）。上限を超える指定は拒否される。task_start で sandbox_instance を明示したタスクは固定。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
+    "SANDBOX_AGENT_MAX_INSTANCE": "<SANDBOX_AGENT_MAX_INSTANCE>",
     // 依存関係のキャッシュ（D14。Containers のスナップショット。public beta）を使うか。rovo.config.json の depsCache.enabled（既定 true）。
     // 使えない・失敗してもタスクは今までどおり動く（fail-soft）。docs/deploy.md の 5。
     "DEPS_CACHE_ENABLED": "<DEPS_CACHE_ENABLED>",

@@ -357,3 +357,86 @@ describe("usage の Sandbox の昇格（重いコマンドの初回に大きい 
     expect(p).not.toHaveProperty("sandbox_runtime_ms_before_promotion");
   });
 });
+
+describe("usage の Sandbox の昇格の履歴（sandbox_promotions）と、子が上げたあとの重いコマンドの本数", () => {
+  const usage = (sandbox: Record<string, unknown>) =>
+    payloadOf(mapAgentEvent(ev("usage", { costUsd: 1, sandbox: { runtimeMs: 100, ...sandbox } })));
+  const promotionsOf = (p: Record<string, unknown>) =>
+    JSON.parse(String(p.sandbox_promotions)) as Record<string, unknown>[];
+  const heavyKey = "sandbox_heavy_commands_after_agent_scale_up";
+
+  it("成功した昇格を JSON 文字列の配列にして sandbox_promotions に写す（payload はプリミティブだけ）。キーは公開用の snake_case", () => {
+    const p = usage({
+      promotedTo: "standard-4",
+      promotions: [
+        {
+          to: "standard-3",
+          at: 1_700_000_000_000,
+          trigger: "rule",
+          runtimeMsBefore: 30_500.9,
+          ruleMatch: "vitest",
+        },
+        { to: "standard-4", at: 1_700_000_050_000, trigger: "agent", runtimeMsBefore: 60_000 },
+      ],
+      heavyCommandsAfterAgentScaleUp: 2,
+    });
+    expect(typeof p.sandbox_promotions).toBe("string");
+    expect(promotionsOf(p)).toEqual([
+      {
+        to: "standard-3",
+        at: 1_700_000_000_000,
+        trigger: "rule",
+        runtime_ms_before: 30_500,
+        rule_match: "vitest",
+      },
+      { to: "standard-4", at: 1_700_000_050_000, trigger: "agent", runtime_ms_before: 60_000 },
+    ]);
+    expect(p[heavyKey]).toBe(2);
+  });
+
+  it("表に無い大きさ・引き金の要素は捨てる。規則名は trigger が rule で表にある名前のときだけ（無ければ規則名だけ外す）。argv の文字列などは通さない", () => {
+    const p = usage({
+      promotions: [
+        { to: "evil", at: 1, trigger: "agent", runtimeMsBefore: 1 },
+        { to: "standard-3", at: 1, trigger: "me", runtimeMsBefore: 1 },
+        { to: "standard-3", at: 1, trigger: "rule", runtimeMsBefore: 1, ruleMatch: "any command" },
+        { to: "standard-3", at: 1, trigger: "agent", runtimeMsBefore: 1, ruleMatch: "vitest" },
+        { to: "standard-4", at: 2, trigger: "verification", runtimeMsBefore: 2, argv: ["x"] },
+        "evil",
+        null,
+      ],
+    });
+    // 規則名が表に無い rule の昇格は、昇格そのもの（費用の按分に要る）は残し、規則名だけ外す
+    expect(promotionsOf(p)).toEqual([
+      { to: "standard-3", at: 1, trigger: "rule", runtime_ms_before: 1 },
+      { to: "standard-3", at: 1, trigger: "agent", runtime_ms_before: 1 },
+      { to: "standard-4", at: 2, trigger: "verification", runtime_ms_before: 2 },
+    ]);
+    expect(String(p.sandbox_promotions)).not.toContain("any command");
+    expect(String(p.sandbox_promotions)).not.toContain("argv");
+  });
+
+  it("履歴が無い・配列でない・全部不正なら付けない。本数は数値のときだけ付く（整数に切り捨て）", () => {
+    for (const bad of [undefined, null, "x", {}, [], [{ to: "evil" }]]) {
+      expect(usage({ promotions: bad }), JSON.stringify(bad)).not.toHaveProperty(
+        "sandbox_promotions",
+      );
+    }
+    expect(usage({})).not.toHaveProperty(heavyKey);
+    expect(usage({ heavyCommandsAfterAgentScaleUp: "3" })).not.toHaveProperty(heavyKey);
+    expect(usage({ heavyCommandsAfterAgentScaleUp: 0 })[heavyKey]).toBe(0);
+    expect(usage({ heavyCommandsAfterAgentScaleUp: 3.9 })[heavyKey]).toBe(3);
+  });
+
+  it("履歴は 8 件まで（payload を肥大させない）", () => {
+    const p = usage({
+      promotions: Array.from({ length: 20 }, (_, i) => ({
+        to: "standard-3",
+        at: i + 1,
+        trigger: "agent",
+        runtimeMsBefore: i,
+      })),
+    });
+    expect(promotionsOf(p)).toHaveLength(8);
+  });
+});

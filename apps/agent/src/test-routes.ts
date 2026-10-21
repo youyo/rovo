@@ -20,6 +20,7 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
     path?: string;
     content?: string;
     credential?: { token: string; expiresAt: number };
+    instance?: string;
   };
   const sandbox = env.SANDBOX_DO.getByName(body.name);
   try {
@@ -54,6 +55,8 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
         return Response.json(await sandbox.status());
       case "metrics":
         return Response.json(await sandbox.metrics());
+      case "scale-up":
+        return Response.json(await sandbox.scaleUp(body.instance));
       case "audit":
         return Response.json({ records: await sandbox.testAudit() });
       default:

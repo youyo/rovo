@@ -55,12 +55,9 @@
     "WEB_BROWSE_ENABLED": "false",
     // task_start で sandbox_instance を省略したときの Sandbox の大きさ（sandbox_instances_list の default）。agent の同名の var と同じ値にする（deploy:config は rovo.config.json の sandbox.instance から両方を決める）
     "SANDBOX_INSTANCE": "standard-2",
-    // 重いコマンド（テスト・ビルドなど）の初回に Sandbox が自動で昇格する先の大きさ（sandbox_instances_list の promotion_target）。agent の同名の var と同じ値にする
-    // （deploy:config は rovo.config.json の sandbox.heavyInstance から両方を決める）。空・"off" は昇格しない。
-    "SANDBOX_HEAVY_INSTANCE": "standard-3",
-    // 子が sandbox_scale_up で自分で選べる大きさの上限（sandbox_instances_list の agent_max）。agent の同名の var と同じ値にする
-    // （deploy:config は rovo.config.json の sandbox.agentMaxInstance から両方を決める）。空・"off" は子がツールを使えない。
-    "SANDBOX_AGENT_MAX_INSTANCE": "standard-4",
+    // Clef が Sandbox を自動で上げる上限の大きさ（sandbox_instances_list の auto_scale_max）。agent の同名の var と同じ値にする
+    // （deploy:config は rovo.config.json の sandbox.maxInstance から両方を決める）。空・"off" は昇格しない。
+    "SANDBOX_MAX_INSTANCE": "standard-4",
     // 要約（task_summary / summary.json）の「推定」金額の単価（USD）。Cloudflare の公式料金表（取得日 2026-10-19）の既定値で、
     // 料金改定や agent の SANDBOX_INSTANCE の変更に合わせて下流が上書きする（deploy:config は sandbox.instance から計算する）。タスクの予算（$10）には含めない。出典は docs/specs/phase6.md。
     // Sandbox: Containers の standard-2（既定の SANDBOX_INSTANCE。1 vCPU・6 GiB・12 GB）を CPU 100% 稼働で 1 時間（月の無料枠は差し引かない上限側の推定）。

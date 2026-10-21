@@ -9,7 +9,6 @@ import type {
   SandboxInstance,
   SandboxPromotionReason,
   SandboxPromotionTrigger,
-  SandboxRuleMatch,
 } from "@rovo/models";
 
 export type AgentPhase =
@@ -139,7 +138,7 @@ export interface SandboxUsageDto {
   cacheBuildMs?: number;
   /** 最初にコンテナを起動した大きさ（standard-2 など）。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
-  /** 昇格した最終の大きさ（子の要求・規則・検証のどれでも）。昇格していなければ無い */
+  /** 昇格した最終の大きさ（Clef が上げると判断した先）。昇格していなければ無い */
   promotedTo?: string;
   /** 最初の昇格の時刻（epoch ms） */
   promotedAt?: number;
@@ -147,19 +146,36 @@ export interface SandboxUsageDto {
   runtimeMsBeforePromotion?: number;
   /** 昇格を見送った・失敗した理由の固定コード（packages/models の SANDBOX_PROMOTION_REASONS）。最後に残したもの。設定で無効のときは無い */
   promotionReason?: SandboxPromotionReason;
-  /** 成功した昇格だけの履歴（古い順）。trigger は固定の 3 値、ruleMatch は規則で上がったときだけ（固定の表の名前） */
+  /** 成功した昇格だけの履歴（古い順）。trigger は clef（古い agent は agent / rule / verification） */
   promotions?: {
     to: SandboxInstance;
     at: number;
     trigger: SandboxPromotionTrigger;
     runtimeMsBefore: number;
-    ruleMatch?: SandboxRuleMatch;
   }[];
-  /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。子が上げていなければ無い */
-  heavyCommandsAfterAgentScaleUp?: number;
-  /** そのうち、子が規則の昇格先以上に上げていたために、規則が昇格しなくて済んだ本数（子の見立ての的中）。子が上げていなければ無い */
-  heavyCommandsCoveredByAgent?: number;
-  /** 昇格の試みが見送り・失敗になった記録（固定の trigger と理由コード。古い順、最大 8 件）。子が先に上げていて規則が見送った場合は入らない */
+  /** Clef の判断の集計。Clef を呼んだタスクだけ。agent は終端の確定のときだけ付ける */
+  scaleStats?: {
+    decisions: number;
+    raised: number;
+    clefFailures: number;
+    slowNotRaised: number;
+  };
+  /** Clef の判断ごとの記録（古い順、直近 50 件まで）。agent は終端の確定のときだけ付ける。コマンドは argv[0] の basename だけ */
+  scaleDecisions?: {
+    at: number;
+    from: SandboxInstance;
+    to: SandboxInstance | null;
+    heavy?: number;
+    fast4?: number;
+    choice?: number[];
+    model?: "flash" | "clef";
+    failed?: true;
+    clefMs: number;
+    cmdMs?: number;
+    exitCode?: number;
+    cmd: string;
+  }[];
+  /** 昇格の試みが見送り・失敗になった記録（固定の trigger と理由コード。古い順、最大 8 件）。Clef の失敗（判断できなかった）は入らない（scaleStats.clefFailures） */
   promotionFailures?: { trigger: SandboxPromotionTrigger; reason: SandboxPromotionReason }[];
 }
 

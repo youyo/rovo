@@ -101,13 +101,17 @@ run = "node --test scripts/deps-scripts.test.mjs"
 description = "Sandbox の昇格の作業ツリーの指紋（apps/agent/src/container-scripts.ts の PROMOTE_STATE_SCRIPT）のテスト。一時ディレクトリの中で本物の git と bash を動かす。Docker も Cloudflare も使わない"
 run = "node --test scripts/promote-state.test.mjs"
 
+[tasks."test:scale-facts"]
+description = "Sandbox の昇格の判断（Clef）に渡すリポジトリの事実を集めるスクリプト（apps/agent/src/container-scripts.ts の SCALE_FACTS_SCRIPT）のテスト。一時ディレクトリの中だけで本物の node を動かす。Docker も Cloudflare も使わない"
+run = "node --test scripts/scale-facts.test.mjs"
+
 [tasks."test:pm-prepare"]
 description = "pnpm / yarn の本体の用意スクリプト（apps/agent/container/pm-prepare.mjs。イメージのビルド時と clone のあとに呼ぶ）のテスト。偽の corepack と偽の npm を PATH に置き、一時ディレクトリの中だけで動かす。Docker もネットワークも使わない"
 run = "node --test scripts/pm-prepare.test.mjs"
 
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + pnpm / yarn の本体の用意スクリプト）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:promote-state", "test:pm-prepare"]
+description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + 昇格の判断に渡す事実の収集スクリプト + pnpm / yarn の本体の用意スクリプト）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:promote-state", "test:scale-facts", "test:pm-prepare"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"

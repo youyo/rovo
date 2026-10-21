@@ -460,7 +460,7 @@ describe("Sandbox の複数回の昇格（trigger つきの履歴）と費用の
           P3,
           { to: "evil", at: 1, trigger: "agent", runtime_ms_before: 1 },
           { to: "standard-4", at: 1, trigger: "x", runtime_ms_before: 1 },
-          { ...P4, rule_match: "any command", reason: "free text", argv: ["secret"] },
+          { ...P4, rule_match: "Any;Command", reason: "free text", argv: ["secret"] },
         ],
       }),
     );
@@ -468,7 +468,7 @@ describe("Sandbox の複数回の昇格（trigger つきの履歴）と費用の
     const json = JSON.stringify(s);
     expect(json).not.toContain("free text");
     expect(json).not.toContain("secret");
-    expect(json).not.toContain("any command");
+    expect(json).not.toContain("Any;Command");
   });
 
   it("昇格していないタスクには promotions・heavy_commands_after_agent_scale_up・区間の内訳を付けない", () => {
@@ -555,6 +555,64 @@ describe("Sandbox の複数回の昇格（trigger つきの履歴）と費用の
     up = mergeUsagePublic(up, { sandbox_promotion_failures: "not json" });
     expect(up.sandbox_heavy_commands_covered_by_agent).toBe(3);
     expect(up.sandbox_promotion_failures).toEqual([F1, F2]);
+    expect(parseUsagePublic(JSON.stringify(up))).toEqual(up);
+  });
+});
+
+describe("Clef による昇格の判断の集計（sandbox_scale_*）を summary と usage_public に残す", () => {
+  it("summary.sandbox.scale に集計を入れる（snake_case）。判断ごとの記録は summary に入れない。無ければ付けない", () => {
+    const base = input();
+    const s = buildTaskSummary({
+      ...base,
+      usage: {
+        ...base.usage,
+        sandbox: {
+          runtimeMs: 1000,
+          restarts: 0,
+          bootRetries: 0,
+          scaleStats: { decisions: 12.8, raised: 2, clefFailures: 1, slowNotRaised: 3 },
+        },
+      } as SummaryInput["usage"],
+    });
+    expect(s.sandbox.scale).toEqual({
+      decisions: 12,
+      raised: 2,
+      clef_failures: 1,
+      slow_not_raised: 3,
+    });
+    expect(buildTaskSummary(base).sandbox).not.toHaveProperty("scale");
+    const zero = buildTaskSummary({
+      ...base,
+      usage: {
+        ...base.usage,
+        sandbox: {
+          runtimeMs: 1,
+          restarts: 0,
+          bootRetries: 0,
+          scaleStats: { decisions: 0, raised: 0, clefFailures: 0, slowNotRaised: 0 },
+        },
+      } as SummaryInput["usage"],
+    });
+    expect(zero.sandbox).not.toHaveProperty("scale");
+  });
+
+  it("usage_public: 数値の集計は増えるだけ（小さい値で巻き戻さない）。parse で読み戻せる", () => {
+    let up = mergeUsagePublic(
+      {},
+      {
+        sandbox_scale_decisions: 5,
+        sandbox_scale_raised: 1,
+        sandbox_scale_clef_failures: 0,
+        sandbox_scale_slow_not_raised: 2,
+      },
+    );
+    up = mergeUsagePublic(up, { sandbox_scale_decisions: 3, sandbox_scale_raised: 2 });
+    expect(up).toMatchObject({
+      sandbox_scale_decisions: 5,
+      sandbox_scale_raised: 2,
+      sandbox_scale_clef_failures: 0,
+      sandbox_scale_slow_not_raised: 2,
+    });
     expect(parseUsagePublic(JSON.stringify(up))).toEqual(up);
   });
 });

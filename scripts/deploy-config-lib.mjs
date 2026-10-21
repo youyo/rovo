@@ -7,8 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // Sandbox の大きさと単価の表は packages/models が 1 か所で持つ（依存のないファイルを Node の型除去で読む）
 import {
-  DEFAULT_AGENT_MAX_SANDBOX_INSTANCE,
-  DEFAULT_HEAVY_SANDBOX_INSTANCE,
+  DEFAULT_MAX_SANDBOX_INSTANCE,
   DEFAULT_SANDBOX_INSTANCE,
   isSelectableSandboxInstance,
   SANDBOX_INSTANCES,
@@ -37,12 +36,10 @@ export const DEFAULTS = {
     ],
     efforts: "",
   },
-  // heavyInstance: 重いコマンド（テスト・ビルドなど）の初回に昇格する先。null で無効（昇格しない）
-  // agentMaxInstance: 子が sandbox_scale_up で自分で選べる上限。null で無効（ツールを子に見せない）
+  // maxInstance: Clef（Workers AI の決定モデル）が Sandbox を自動で上げる上限。null で無効（Clef を呼ばず、昇格しない）
   sandbox: {
     instance: DEFAULT_SANDBOX_INSTANCE,
-    heavyInstance: DEFAULT_HEAVY_SANDBOX_INSTANCE,
-    agentMaxInstance: DEFAULT_AGENT_MAX_SANDBOX_INSTANCE,
+    maxInstance: DEFAULT_MAX_SANDBOX_INSTANCE,
   },
   // 依存関係のキャッシュ（D14。Containers のスナップショット）。public beta の機能なので、止められるようにしてある
   depsCache: { enabled: true },
@@ -284,9 +281,16 @@ export function validateConfig(raw, templates = loadTemplates()) {
 
   const sb = isObj(raw.sandbox) ? raw.sandbox : {};
   if (raw.sandbox !== undefined && !isObj(raw.sandbox)) errors.push("sandbox: オブジェクトにする");
-  for (const k of Object.keys(sb))
-    if (k !== "instance" && k !== "heavyInstance" && k !== "agentMaxInstance")
+  for (const k of Object.keys(sb)) {
+    if (k === "heavyInstance" || k === "agentMaxInstance") {
+      // 重いコマンドの規則と子の sandbox_scale_up は無くなった（Clef に一本化）。上限は maxInstance 1 つ
+      errors.push(
+        `sandbox.${k}: 廃止した（Sandbox の昇格は Clef に一本化した）。上限は sandbox.maxInstance（standard-1〜standard-4 か null。既定 ${DEFAULT_MAX_SANDBOX_INSTANCE}）で設定する`,
+      );
+    } else if (k !== "instance" && k !== "maxInstance") {
       errors.push(`sandbox.${k}: 未知のキー`);
+    }
+  }
   const sandboxInstance = sb.instance ?? DEFAULT_SANDBOX_INSTANCE;
   if (!isStr(sandboxInstance) || !Object.hasOwn(SANDBOX_INSTANCES, sandboxInstance)) {
     errors.push(
@@ -294,21 +298,12 @@ export function validateConfig(raw, templates = loadTemplates()) {
     );
   }
 
-  // 昇格先: 省略は既定、null は無効。タスクが選べる 4 種類（lite を除く）のどれか
-  const sandboxHeavyInstance =
-    sb.heavyInstance === undefined ? DEFAULTS.sandbox.heavyInstance : sb.heavyInstance;
-  if (sandboxHeavyInstance !== null && !isSelectableSandboxInstance(sandboxHeavyInstance)) {
+  // Clef による昇格の上限: 省略は既定、null は無効。タスクが選べる 4 種類（lite を除く）のどれか
+  const sandboxMaxInstance =
+    sb.maxInstance === undefined ? DEFAULTS.sandbox.maxInstance : sb.maxInstance;
+  if (sandboxMaxInstance !== null && !isSelectableSandboxInstance(sandboxMaxInstance)) {
     errors.push(
-      `sandbox.heavyInstance: standard-1 / standard-2 / standard-3 / standard-4 のどれか、または null（昇格しない）にする（既定 ${DEFAULT_HEAVY_SANDBOX_INSTANCE}）`,
-    );
-  }
-
-  // 子が選べる上限: 省略は既定、null は無効（ツールを子に見せない）。昇格先より小さくてもよい
-  const sandboxAgentMaxInstance =
-    sb.agentMaxInstance === undefined ? DEFAULTS.sandbox.agentMaxInstance : sb.agentMaxInstance;
-  if (sandboxAgentMaxInstance !== null && !isSelectableSandboxInstance(sandboxAgentMaxInstance)) {
-    errors.push(
-      `sandbox.agentMaxInstance: standard-1 / standard-2 / standard-3 / standard-4 のどれか、または null（子が自分で大きくするツールを使わせない）にする（既定 ${DEFAULT_AGENT_MAX_SANDBOX_INSTANCE}）`,
+      `sandbox.maxInstance: standard-1 / standard-2 / standard-3 / standard-4 のどれか、または null（Clef による昇格をしない）にする（既定 ${DEFAULT_MAX_SANDBOX_INSTANCE}）`,
     );
   }
 
@@ -369,8 +364,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
       models: { default: modelDefault.trim(), list: modelList, efforts },
       sandbox: {
         instance: sandboxInstance,
-        heavyInstance: sandboxHeavyInstance,
-        agentMaxInstance: sandboxAgentMaxInstance,
+        maxInstance: sandboxMaxInstance,
       },
       depsCache: { enabled: depsCacheEnabled },
       webBrowseEnabled: web,
@@ -422,10 +416,8 @@ function placeholderValues(config, infra) {
     AGENT_MODELS: config.models.list.join(","),
     MODEL_EFFORTS: config.models.efforts,
     SANDBOX_INSTANCE: config.sandbox.instance,
-    // 昇格先（agent と gateway の同名の var）。null は空文字 = 昇格しない
-    SANDBOX_HEAVY_INSTANCE: config.sandbox.heavyInstance ?? "",
-    // 子が sandbox_scale_up で選べる上限（agent と gateway の同名の var）。null は空文字 = ツールを子に見せない
-    SANDBOX_AGENT_MAX_INSTANCE: config.sandbox.agentMaxInstance ?? "",
+    // Clef が Sandbox を自動で上げる上限（agent と gateway の同名の var）。null は空文字 = Clef を呼ばず、昇格しない
+    SANDBOX_MAX_INSTANCE: config.sandbox.maxInstance ?? "",
     // 推定費用の単価は instance から決める（vars.gateway.SANDBOX_USD_PER_HOUR を書けば、renderOne の上書きがそれを優先する）
     SANDBOX_USD_PER_HOUR: String(sandboxUsdPerHour(config.sandbox.instance)),
     DEPS_CACHE_ENABLED: String(config.depsCache.enabled),

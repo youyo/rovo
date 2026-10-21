@@ -32,9 +32,12 @@ import { agentModelsOf, defaultModelOf, effortOf } from "../models";
 import {
   type PublicPromotion,
   type PublicPromotionFailure,
+  type PublicScaleDecision,
   sandboxInstanceName,
   sanitizePromotionFailures,
   sanitizePromotions,
+  sanitizeScaleDecisions,
+  sanitizeScaleStats,
 } from "../sandbox-instance";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
@@ -272,8 +275,18 @@ export type ResultView = {
     sandbox_heavy_commands_after_agent_scale_up?: number;
     /** そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（子の見立ての的中）。子が上げていなければ付かない */
     sandbox_heavy_commands_covered_by_agent?: number;
-    /** 昇格の試みが見送り・失敗になった記録（古い順、最大 8 件）。trigger は agent / rule / verification、reason は sandbox_promotion_reason と同じ固定コード。子が先に上げていて規則が見送った場合は入らない（的中として数える）。無ければ付かない */
+    /** 昇格の試みが見送り・失敗になった記録（古い順、最大 8 件）。trigger は clef（古いタスクは agent / rule / verification）、reason は sandbox_promotion_reason と同じ固定コード。Clef の失敗（判断できなかった）は入らない（sandbox_scale_clef_failures）。無ければ付かない */
     sandbox_promotion_failures?: { trigger: string; reason: string }[];
+    /** Clef が Sandbox の大きさを判断した回数（コマンドの前に「今の大きさで足りるか」を聞いた回数）。Clef を呼ばなかったタスクには付かない */
+    sandbox_scale_decisions?: number;
+    /** そのうち、上げた（昇格に成功した）回数 */
+    sandbox_scale_raised?: number;
+    /** Clef が失敗した（再試行しても判断できず、今の大きさのまま実行した）回数 */
+    sandbox_scale_clef_failures?: number;
+    /** 上げなかったのに長くかかった（60 秒超）コマンドの数。Clef の見落としの候補 */
+    sandbox_scale_slow_not_raised?: number;
+    /** Clef の判断ごとの記録（古い順、直近 50 件まで）。from は判断したときの大きさ、to は上げた先（上げなかった・昇格に失敗した・Clef が失敗したときは null）、heavy / fast4 / choice は確率、model は答えを使ったモデル（flash / clef）、clef_ms は Clef の所要、cmd_ms / exit_code はそのコマンドの実行時間と終了コード、cmd は argv[0] の basename だけ（argv の全体は残らない）。Clef の精度の振り返り用 */
+    sandbox_scale_log?: PublicScaleDecision[];
   };
 };
 
@@ -2716,6 +2729,16 @@ export class TaskDO extends DurableObject<Env> {
               ...(up.sandbox_promotion_failures !== undefined
                 ? { promotionFailures: up.sandbox_promotion_failures }
                 : {}),
+              ...(up.sandbox_scale_decisions !== undefined && up.sandbox_scale_decisions > 0
+                ? {
+                    scaleStats: {
+                      decisions: up.sandbox_scale_decisions,
+                      raised: up.sandbox_scale_raised ?? 0,
+                      clefFailures: up.sandbox_scale_clef_failures ?? 0,
+                      slowNotRaised: up.sandbox_scale_slow_not_raised ?? 0,
+                    },
+                  }
+                : {}),
             }
           : null,
       },
@@ -3139,6 +3162,7 @@ function shapeUsage(u: UsageDto): ResultView["usage"] {
     ...sandboxRuntimeUsage(u.sandbox),
     ...sandboxInstanceUsage(u.sandbox),
     ...sandboxPromotionUsage(u.sandbox),
+    ...sandboxScaleUsage(u.sandbox),
     ...depsUsage(u.sandbox),
   };
 }
@@ -3177,6 +3201,7 @@ function sandboxPromotionUsage(sb: UsageDto["sandbox"]): {
   const promotions = sanitizePromotions(sb?.promotions, "camel");
   const reason = isSandboxPromotionReason(sb?.promotionReason) ? sb?.promotionReason : undefined;
   const failures = sanitizePromotionFailures(sb?.promotionFailures);
+  const legacy = sb as Record<string, unknown> | undefined;
   const ms = (v: unknown) =>
     typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
   return {
@@ -3189,13 +3214,40 @@ function sandboxPromotionUsage(sb: UsageDto["sandbox"]): {
       : {}),
     ...(reason !== undefined ? { sandbox_promotion_reason: reason } : {}),
     ...(promotions.length > 0 ? { sandbox_promotions: promotions } : {}),
-    ...(typeof sb?.heavyCommandsAfterAgentScaleUp === "number"
-      ? { sandbox_heavy_commands_after_agent_scale_up: ms(sb.heavyCommandsAfterAgentScaleUp) }
+    // 古い agent の報告（子の sandbox_scale_up と規則があった頃の本数）。今の agent は報告しない
+    ...(typeof legacy?.heavyCommandsAfterAgentScaleUp === "number"
+      ? { sandbox_heavy_commands_after_agent_scale_up: ms(legacy.heavyCommandsAfterAgentScaleUp) }
       : {}),
-    ...(typeof sb?.heavyCommandsCoveredByAgent === "number"
-      ? { sandbox_heavy_commands_covered_by_agent: ms(sb.heavyCommandsCoveredByAgent) }
+    ...(typeof legacy?.heavyCommandsCoveredByAgent === "number"
+      ? { sandbox_heavy_commands_covered_by_agent: ms(legacy.heavyCommandsCoveredByAgent) }
       : {}),
     ...(failures.length > 0 ? { sandbox_promotion_failures: failures } : {}),
+  };
+}
+
+/**
+ * usage.sandbox の Clef の判断の集計と記録。集計は数値だけ、記録は公開用の形（固定の値と数値だけ。argv・自由文は入らない）。
+ * Clef を呼ばなかったタスク（無い・0 回）には何も付けない。
+ */
+function sandboxScaleUsage(sb: UsageDto["sandbox"]): {
+  sandbox_scale_decisions?: number;
+  sandbox_scale_raised?: number;
+  sandbox_scale_clef_failures?: number;
+  sandbox_scale_slow_not_raised?: number;
+  sandbox_scale_log?: PublicScaleDecision[];
+} {
+  const stats = sanitizeScaleStats(sb?.scaleStats);
+  const log = sanitizeScaleDecisions(sb?.scaleDecisions);
+  return {
+    ...(stats !== undefined
+      ? {
+          sandbox_scale_decisions: stats.decisions,
+          sandbox_scale_raised: stats.raised,
+          sandbox_scale_clef_failures: stats.clef_failures,
+          sandbox_scale_slow_not_raised: stats.slow_not_raised,
+        }
+      : {}),
+    ...(log.length > 0 ? { sandbox_scale_log: log } : {}),
   };
 }
 

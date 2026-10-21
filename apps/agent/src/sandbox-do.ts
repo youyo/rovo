@@ -3,24 +3,23 @@ import { posix } from "node:path";
 import { Files } from "@cloudflare/sandbox";
 import type { AuditFields, AuditRecord } from "@rovo/audit";
 import {
-  isSelectableSandboxInstance,
-  resolveAgentMaxSandboxInstance,
-  resolveHeavySandboxInstance,
+  resolveMaxSandboxInstance,
   resolveSandboxInstance,
   SANDBOX_INSTANCES,
   type SandboxInstance,
   type SandboxPromotionReason,
   type SandboxPromotionTrigger,
-  type SandboxRuleMatch,
 } from "@rovo/models";
 import type {
   GitCredential,
   SandboxMetrics,
   SandboxPromotionFailure,
   SandboxPromotionRecord,
+  SandboxScaleDecision,
+  SandboxScaleStats,
 } from "./agent/types";
 import { appendTestAudit, emitAudit, readTestAudit } from "./audit-adapter";
-import { PROCESS_SCRIPT, PROMOTE_STATE_SCRIPT } from "./container-scripts";
+import { PROCESS_SCRIPT, PROMOTE_STATE_SCRIPT, SCALE_FACTS_SCRIPT } from "./container-scripts";
 import { decryptString, encryptString, importEncryptionKey } from "./crypto";
 import {
   DEPS_BUILD_TIMEOUT_MS,
@@ -39,16 +38,15 @@ import {
   parseDepsSpec,
 } from "./deps-cache";
 import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./deps-scripts";
-import { heavyCommandMatch } from "./heavy-command";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
-import type {
-  ExecOptions,
-  ExecResult,
-  SandboxPort,
-  SandboxScaleUpResult,
-  WorkspaceSpec,
-} from "./sandbox-port";
+import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import {
+  buildDecisionState,
+  decideSandboxSize,
+  type RecentCommand,
+  resolveClefThresholds,
+} from "./sandbox-scale-decision";
 import { TailBuffer } from "./tail-buffer";
 import {
   isInsideWorkspace,
@@ -116,6 +114,22 @@ const PROMOTE_STATE_TIMEOUT_MS = 60_000;
 /** usage.sandbox_promotion_failures に残す最大の件数（超えた分は捨てる） */
 const MAX_PROMOTION_FAILURES = 8;
 
+// ---- Clef による昇格の判断（sandbox-scale-decision.ts）----
+/** 判断の記録（usage.sandbox_scale_decisions）に残す最大の件数。超えたら古い方から捨てる（集計は捨てずに数え続ける） */
+const MAX_SCALE_DECISIONS = 50;
+/** リポジトリの事実（設定ファイルの生のテキスト）の最大の文字数と、集めるのに許す時間 */
+const SCALE_FACTS_MAX_CHARS = 6_000;
+const SCALE_FACTS_TIMEOUT_MS = 10_000;
+/** 事実を覚えておく時間（子が設定ファイルを書き換えたときに作り直す）と、覚えておく cwd の数 */
+const SCALE_FACTS_TTL_MS = 10 * 60_000;
+const SCALE_FACTS_KEEP = 3;
+/** state に入れる直近のコマンドの数 */
+const RECENT_COMMANDS_KEEP = 3;
+/** 「上げなかったのに長くかかった」とみなすコマンドの実行時間（ms） */
+const SLOW_COMMAND_MS = 60_000;
+/** 判断の記録の cmd（argv[0] の basename）の最大の文字数 */
+const SCALE_CMD_CHARS = 24;
+
 /** 依存関係のキャッシュの ensure（作成を待つことがある）を待つ上限。作成の時間切れ + 余裕 */
 const DEPS_ENSURE_WAIT_MS = DEPS_BUILD_TIMEOUT_MS + 60_000;
 /** 退避した node_modules を作業ツリーへ戻す（同じファイルシステム内の mv）のに許す時間 */
@@ -162,6 +176,15 @@ async function withDeadline<T>(promise: Promise<T>, until: number): Promise<T | 
 function promoteSnapshotName(taskId: string | undefined, seq: number): string {
   return `promote-${(taskId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}-${seq}`;
 }
+
+/** 判断の記録の cmd: argv[0] の basename を短く切ったもの（argv の全体は残さない） */
+function scaleCmd(argv: readonly string[]): string {
+  const first = argv[0] ?? "";
+  return first.slice(first.lastIndexOf("/") + 1).slice(0, SCALE_CMD_CHARS);
+}
+
+/** 確率を小数 2 桁にする（記録を小さくする） */
+const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 interface RawResult {
   exitCode: number;
@@ -221,8 +244,10 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private depsEnsureWaitMs = DEPS_ENSURE_WAIT_MS;
   /** 昇格のスナップショットを待つ上限（ms）。テストで短くする。 */
   private promoteSnapshotMs = PROMOTE_SNAPSHOT_MS;
-  /** 直近の runPromotion が残した見送り・失敗の理由（子への scaleUp の結果に使う。永続しない） */
-  private lastPromotionReason?: SandboxPromotionReason;
+  /** 「上げなかったのに長くかかった」とみなす実行時間（ms）。テストで短くする。 */
+  private slowCommandMs = SLOW_COMMAND_MS;
+  /** 設定の警告を 1 回だけ出すための印（永続しない） */
+  private warnedScaleConfig = new Set<string>();
   /** キャッシュを作る処理（builder として使われたとき）。同時の依頼は 1 つを共有する。 */
   private depsBuilding?: Promise<DepsBuildResult>;
 
@@ -378,6 +403,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const promotions = this.ctx.storage.kv.get<SandboxPromotionRecord[]>("promotions");
     const promotionReason = this.ctx.storage.kv.get<SandboxPromotionReason>("promotion_reason");
     const failures = this.ctx.storage.kv.get<SandboxPromotionFailure[]>("promotion_failures");
+    const scaleStats = this.ctx.storage.kv.get<SandboxScaleStats>("scale_stats");
+    const scaleLog = this.ctx.storage.kv.get<SandboxScaleDecision[]>("scale_log");
     const depsMissReason =
       depsCache === "miss"
         ? this.ctx.storage.kv.get<DepsMissReason>("deps_miss_reason")
@@ -399,14 +426,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           }
         : {}),
       ...(promotionReason !== undefined ? { promotionReason } : {}),
-      // 成功した昇格の履歴（trigger・規則の表の名前つき）と、子が上げたあとの重いコマンドの本数（保険がどのくらい要ったかの振り返り用）
+      // 成功した昇格の履歴（trigger つき）
       ...(promotions !== undefined && promotions.length > 0 ? { promotions } : {}),
-      ...(this.ctx.storage.kv.get<boolean>("agent_scaled") === true
-        ? {
-            heavyCommandsAfterAgentScaleUp: this.num("heavy_after_agent"),
-            heavyCommandsCoveredByAgent: this.num("heavy_covered"),
-          }
-        : {}),
+      // Clef の判断の集計と、判断ごとの記録（直近 50 件）。Clef を呼んだタスクだけ
+      ...(scaleStats !== undefined && scaleStats.decisions > 0 ? { scaleStats } : {}),
+      ...(scaleLog !== undefined && scaleLog.length > 0 ? { scaleDecisions: scaleLog } : {}),
       // 見送り・失敗の内訳（昇格の試みごとに 1 件。promotionReason は最後の理由だけ）
       ...(failures !== undefined && failures.length > 0 ? { promotionFailures: failures } : {}),
     };
@@ -575,25 +599,20 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       if (this.terminated()) return TERMINATED_RESULT;
       this.requireSpec();
       await this.runningOrThrowRestarted();
-      // 重いコマンド（テスト・ビルドなど）の初回に、大きい Sandbox へ昇格する（保険。fail-soft。昇格しなくてもコマンドは動く）
-      const match = heavyCommandMatch(argv);
-      if (match !== undefined && this.ctx.storage.kv.get<boolean>("agent_scaled") === true) {
-        // 子が自分で上げたあとに、規則で重いと判定されたコマンド（保険が要ったかの振り返り用。検証の heavy フラグだけのものは数えない）
-        this.ctx.storage.kv.put("heavy_after_agent", this.num("heavy_after_agent") + 1);
-        if (this.coveredByAgent()) {
-          this.ctx.storage.kv.put("heavy_covered", this.num("heavy_covered") + 1);
-        }
+      // 子のコマンドと検証コマンド（origin 付き）の前に、Clef が「今の大きさで足りるか」を判断し、足りなければ大きい Sandbox へ昇格する
+      // （fail-soft。判断・昇格に失敗しても、今の大きさでコマンドは動く）。Sandbox 自身の内部の exec（origin なし）は判断しない。
+      let pending = false;
+      if (options.origin !== undefined) {
+        const decided = await this.maybeScale(argv, cwd);
+        if (decided === "terminated") return TERMINATED_RESULT;
+        pending = decided === "recorded";
       }
-      if (options.heavy === true || match !== undefined) {
-        const trigger = options.heavy === true ? "verification" : "rule";
-        if (
-          (await this.maybePromote(trigger, trigger === "rule" ? match : undefined)) ===
-          "terminated"
-        ) {
-          return TERMINATED_RESULT;
-        }
+      const startedAt = Date.now();
+      const result = await this.runExec(argv, { ...options, cwd });
+      if (options.origin !== undefined) {
+        this.finishCommand(argv, result, Date.now() - startedAt, pending);
       }
-      return this.runExec(argv, { ...options, cwd });
+      return result;
     });
   }
 
@@ -694,6 +713,21 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       expired: spec ? Date.now() >= spec.deadlineAt : false,
       hasSpec: spec !== undefined,
     };
+  }
+
+  /**
+   * E2E 専用: Clef の応答を仕込む（AI.run の代わりに、この応答を順に返し、最後の 1 つは使い回す）。実際の Clef は呼ばない。
+   * 判断のあとの手順（スナップショット・昇格・作業ツリーの確認）と state の組み立て（リポジトリの事実の収集）は、本物のコンテナで通す。
+   */
+  async setClefForTest(responses: unknown[]): Promise<void> {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("only available in test");
+    this.ctx.storage.kv.put("test_clef", { responses });
+  }
+
+  /** E2E 専用: 直近に Clef（の fake）へ渡した state（JSON の文字列）。無ければ undefined */
+  async lastClefStateForTest(): Promise<string | undefined> {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("only available in test");
+    return this.ctx.storage.kv.get<string>("test_clef_state");
   }
 
   /** E2E 専用: コンテナだけを落とす（DO の状態は残す）。 */
@@ -981,22 +1015,24 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     return started;
   }
 
-  // ---- 昇格（小さく始めて、子の要求か重いコマンドの初回に大きい Sandbox へ。docs/deploy.md の 11）----
+  // ---- 昇格（小さく始めて、コマンドの前に Clef が上げると判断したら大きい Sandbox へ。docs/deploy.md の 11）----
   //
-  // 引き金は 3 つ（usage.sandbox_promotions[].trigger）: 子が sandbox_scale_up で頼んだ（agent。上方向なら何回でも。scaleUp）、
-  // 重いコマンドの規則（rule。保険で最多 1 回。maybePromote）、検証コマンド（verification。同じく保険）。手順はどれも runPromotion を使う。
-  // 上げる方向だけで、下げる機能は無い。規則は、子がすでに規則の昇格先以上に上げていれば何もしない。
+  // 判断は Clef（Workers AI の決定モデル。sandbox-scale-decision.ts）だけが行う。子のコマンド（bash ツール）と検証コマンド
+  // （exec の options.origin）の前に、コマンド・cwd・今の大きさ・リポジトリの事実・直近のコマンドを渡して「今の大きさで足りるか」を聞き、
+  // 足りなければ上限（env SANDBOX_MAX_INSTANCE）までの大きさへ上げる。コマンドの種類を表で判定する規則は持たない。
+  // 上げる方向だけで、下げない。何回でも上げられる（2 → 3 → 4）。手順は runPromotion。
   //
-  // 動いているコンテナの大きさは変えられない。重いコマンド（テスト・ビルドなど。heavy-command.ts）の前に、今のコンテナの
-  // スナップショットを取り、止めて、同じスナップショットから大きい大きさで起動し直す（スナップショットはイメージの版に
-  // 結び付き、大きさには結び付かない。node_modules のネイティブのバイナリも動く）。作業ツリー（HEAD と未 commit の変更）が
-  // そのまま残っていることを確かめてから、元のコマンドを実行する。一度昇格したら戻さない（作り直しも昇格先で起動する）。
+  // 動いているコンテナの大きさは変えられない。コマンドの前に、今のコンテナのスナップショットを取り、止めて、
+  // 同じスナップショットから大きい大きさで起動し直す（スナップショットはイメージの版に結び付き、大きさには結び付かない。
+  // node_modules のネイティブのバイナリも動く）。作業ツリー（HEAD と未 commit の変更）がそのまま残っていることを確かめてから、
+  // 元のコマンドを実行する。一度上げたら戻さない（作り直しも最終の大きさで起動する）。
   //
   // fail-soft（コマンドは必ず動く。理由は固定コードで promotion_reason に残し、ログにも出す）:
+  //  - Clef の失敗（例外・時間切れ・想定外の応答。数回再試行する）→ 今の大きさのまま実行する。判断の記録に failed を残す
   //  - スナップショットが使えない・失敗 → 昇格せず小さいまま続ける（snapshot_unsupported / snapshot_failed / state_unreadable）
   //  - 昇格先の起動・確認に失敗 → 同じスナップショットで元の大きさに起動し直す。作業ツリーは失わない（start_failed / cert_missing / workspace_mismatch）
   //  - それも失敗 → image からの起動（作業ツリーの作り直し）に乗せる。呼び出し側へは「再起動した」例外（fallback_failed）
-  // 規則の昇格を試みるのはタスクごとに 1 回だけ（子の要求は何回でも）。task_start で大きさを明示したタスク・設定で無効・すでに昇格先以上なら昇格しない。
+  // task_start で大きさを明示したタスク・設定で無効・今の大きさがすでに上限なら Clef を呼ばない。
 
   private promotedTo(): SandboxInstance | undefined {
     const v = this.ctx.storage.kv.get<string>("promoted_to");
@@ -1023,7 +1059,6 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     kind: "skipped" | "failed",
     trigger: SandboxPromotionTrigger,
   ): void {
-    this.lastPromotionReason = reason;
     this.ctx.storage.kv.put("promotion_reason", reason);
     // 内訳（usage.sandbox_promotion_failures）。試みごとに 1 件、最大 MAX_PROMOTION_FAILURES 件（超えた分は捨てる）
     const failures = this.ctx.storage.kv.get<SandboxPromotionFailure[]>("promotion_failures") ?? [];
@@ -1031,35 +1066,6 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       this.ctx.storage.kv.put("promotion_failures", [...failures, { trigger, reason }]);
     }
     console.warn(`[sandbox-promote] sandbox_promotion_${kind}: ${reason}`);
-  }
-
-  /**
-   * 規則の昇格が要らなかったか（子の見立てが当たったか）。子が sandbox_scale_up で上げた大きさが規則の昇格先以上で、
-   * 規則・検証による昇格がまだ起きていないときで、かつ規則の試行がまだ残っていたとき
-   * （試行を失敗・見送りで使い切ったあとは、規則はもう動けないので数えない）。
-   * 子が先に上げていて規則が見送った分岐も promotion_attempted を立てるので、その見送りで使った試行は
-   * promotion_skipped_for_agent で区別し、以降の重いコマンドも数え続ける。
-   * 規則の昇格を無効にしているデプロイでは false（防ぐ対象が無い）。
-   */
-  private coveredByAgent(): boolean {
-    const target = resolveHeavySandboxInstance(
-      (this.env as unknown as { SANDBOX_HEAVY_INSTANCE?: string }).SANDBOX_HEAVY_INSTANCE,
-    ).instance;
-    if (target === null) return false;
-    const agentTo = this.ctx.storage.kv.get<string>("agent_scaled_to");
-    if (agentTo === undefined || !Object.hasOwn(SANDBOX_INSTANCES, agentTo)) return false;
-    const ruleDone = (this.ctx.storage.kv.get<SandboxPromotionRecord[]>("promotions") ?? []).some(
-      (p) => p.trigger !== "agent",
-    );
-    const kv = this.ctx.storage.kv;
-    const ruleCouldStillAct =
-      kv.get<boolean>("promotion_attempted") !== true ||
-      kv.get<boolean>("promotion_skipped_for_agent") === true;
-    return (
-      !ruleDone &&
-      ruleCouldStillAct &&
-      SANDBOX_INSTANCES[agentTo as SandboxInstance].vcpu >= SANDBOX_INSTANCES[target].vcpu
-    );
   }
 
   /** 作業ツリーの状態の指紋（HEAD・追跡ファイルの差分・追跡されていないファイルのハッシュ）。読めなければ undefined */
@@ -1072,117 +1078,228 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /**
-   * 重いコマンドの前に、必要なら昇格する（規則・検証。保険）。exec の serial の中（コンテナが動いている状態）で呼ぶ。
-   * 昇格の失敗では投げない。投げるのは、元の大きさでも起動し直せずに image から起動し直したとき（「再起動した」）と、期限切れだけ。
-   * terminate された場合は、起動したコンテナを残さず "terminated" を返す。
+   * コマンドの前に、Clef が上げると判断したら昇格する。exec の serial の中（コンテナが動いている状態）で呼ぶ。
+   * 戻り値: "recorded" = 判断して記録した（コマンドの実行後に所要時間と終了コードを足す）/ "none" = 判断しなかった / "terminated" = 終端になった。
+   * Clef の失敗・昇格の失敗では投げない。投げるのは、元の大きさでも起動し直せずに image から起動し直したとき（「再起動した」）と、期限切れだけ。
    */
-  private async maybePromote(
-    trigger: Exclude<SandboxPromotionTrigger, "agent">,
-    ruleMatch?: SandboxRuleMatch,
-  ): Promise<"done" | "skipped" | "terminated"> {
+  private async maybeScale(
+    argv: string[],
+    cwd: string,
+  ): Promise<"recorded" | "none" | "terminated"> {
     const kv = this.ctx.storage.kv;
-    if (kv.get<boolean>("promotion_attempted") === true) return "skipped";
-    const heavy = resolveHeavySandboxInstance(
-      (this.env as unknown as { SANDBOX_HEAVY_INSTANCE?: string }).SANDBOX_HEAVY_INSTANCE,
+    const spec = this.requireSpec();
+    const max = resolveMaxSandboxInstance(
+      (this.env as unknown as { SANDBOX_MAX_INSTANCE?: string }).SANDBOX_MAX_INSTANCE,
     );
-    if (heavy.ignored !== undefined) {
-      console.warn(
-        `[sandbox-promote] SANDBOX_HEAVY_INSTANCE=${JSON.stringify(heavy.ignored.slice(0, 40))} is not supported; promotion is disabled`,
+    if (max.ignored !== undefined) {
+      this.warnOnce(
+        "max",
+        `[sandbox-promote] SANDBOX_MAX_INSTANCE=${JSON.stringify(max.ignored.slice(0, 40))} is not supported; scaling up is disabled`,
       );
     }
     // 設定で無効: 何も記録しない（理由も残さない）
-    const target = heavy.instance;
-    if (target === null) return "skipped";
-    kv.put("promotion_attempted", true);
-    const spec = this.requireSpec();
-    const skip = (reason: SandboxPromotionReason) => {
-      this.recordPromotionReason(reason, "skipped", trigger);
-      return "skipped" as const;
-    };
-    // 明示した大きさ（task_start の sandbox_instance）は、そのタスクの間は固定
-    if (spec.instance !== undefined) return skip("fixed_instance");
-    const current = this.currentInstance();
-    if (SANDBOX_INSTANCES[current].vcpu >= SANDBOX_INSTANCES[target].vcpu) {
-      // 子がすでに昇格先以上に上げていた（昇格が成功している）。見送りの理由は残さない（promoted_to があるのに already_large、にしない）
-      if (this.promotedTo() !== undefined) {
-        // 試行はここで使うが、子のおかげで要らなかっただけ。的中の判定（coveredByAgent）が以降も数え続けられるよう印を残す
-        kv.put("promotion_skipped_for_agent", true);
-        return "skipped";
+    if (max.instance === null) return "none";
+    // 明示した大きさ（task_start の sandbox_instance）は、そのタスクの間は固定。Clef は呼ばない。理由は 1 回だけ残す
+    if (spec.instance !== undefined) {
+      if (kv.get<boolean>("scale_fixed_noted") !== true) {
+        kv.put("scale_fixed_noted", true);
+        this.recordPromotionReason("fixed_instance", "skipped", "clef");
       }
-      return skip("already_large");
+      return "none";
     }
-    return this.runPromotion(target, trigger, ruleMatch);
+    const current = this.currentInstance();
+    // 今の大きさがすでに上限なら、聞いても上げられないので呼ばない
+    if (SANDBOX_INSTANCES[current].vcpu >= SANDBOX_INSTANCES[max.instance].vcpu) return "none";
+    const gatewayId = (this.env as unknown as { AI_GATEWAY_ID?: string }).AI_GATEWAY_ID ?? "";
+    const ai = this.scaleAi(gatewayId);
+    if (ai === undefined) {
+      // Clef を呼べない（AI Gateway の ID が空・AI バインディングが無い）。今の大きさのまま実行する
+      this.warnOnce(
+        "gateway",
+        "[sandbox-promote] AI_GATEWAY_ID is empty or the AI binding is missing; scaling up by Clef is disabled",
+      );
+      return "none";
+    }
+    const thresholds = resolveClefThresholds(
+      (this.env as unknown as { SANDBOX_CLEF_THRESHOLDS?: string }).SANDBOX_CLEF_THRESHOLDS,
+    );
+    if (thresholds.ignored !== undefined) {
+      this.warnOnce(
+        "thresholds",
+        `[sandbox-promote] SANDBOX_CLEF_THRESHOLDS=${JSON.stringify(thresholds.ignored.slice(0, 80))} is not supported; using the defaults`,
+      );
+    }
+    const facts = await this.scaleFacts(cwd);
+    if (this.terminated()) return "terminated";
+    const state = buildDecisionState({
+      argv,
+      cwd,
+      current,
+      max: max.instance,
+      facts,
+      recent: kv.get<RecentCommand[]>("recent_cmds") ?? [],
+    });
+    const decision = await decideSandboxSize(
+      {
+        ai: ai.ai,
+        gatewayId: ai.gatewayId,
+        // userId は SandboxDO に無い（WorkspaceSpec に入れない）ので、caller と taskId だけ
+        metadata: { caller: "sandbox_scale", taskId: this.ctx.id.name ?? "" },
+        thresholds: thresholds.thresholds,
+      },
+      { state, current, max: max.instance },
+    );
+    // Clef を待つ間に terminate / 期限切れになっていないか
+    if (this.terminated()) return "terminated";
+    this.requireSpec();
+    const base = {
+      at: Date.now(),
+      from: current,
+      clefMs: Math.round(decision.ms),
+      cmd: scaleCmd(argv),
+    };
+    if (!decision.ok) {
+      // Clef の失敗。例外の文面は残さず、固定のコードだけ。今の大きさのまま実行する
+      console.warn(`[sandbox-promote] sandbox_scale_decision_failed: ${decision.reason}`);
+      this.recordScaleDecision({ ...base, to: null, failed: true });
+      return "recorded";
+    }
+    const detail: Partial<SandboxScaleDecision> = {
+      ...(decision.probs !== undefined
+        ? {
+            heavy: round2(decision.probs.heavy),
+            fast4: round2(decision.probs.fast4),
+            ...(decision.probs.choice !== undefined
+              ? { choice: decision.probs.choice.map(round2) }
+              : {}),
+          }
+        : {}),
+      model: decision.model,
+    };
+    let to: SandboxInstance | null = null;
+    if (decision.target !== null) {
+      let r: "done" | "skipped" | "terminated";
+      try {
+        r = await this.runPromotion(decision.target, "clef");
+      } catch (e) {
+        // 元の大きさでも起動し直せず「再起動した」例外になった。判断は上げられなかったものとして記録してから伝える
+        this.recordScaleDecision({ ...base, ...detail, to: null });
+        throw e;
+      }
+      if (r === "terminated") return "terminated";
+      if (r === "done") to = decision.target;
+    }
+    this.recordScaleDecision({ ...base, ...detail, to });
+    return "recorded";
+  }
+
+  /** Clef を呼ぶ AI。ENVIRONMENT=test のときだけ、E2E が仕込んだ応答（kv の test_clef）を使う。呼べなければ undefined */
+  private scaleAi(gatewayId: string): { ai: Ai; gatewayId: string } | undefined {
+    if (this.env.ENVIRONMENT === "test") {
+      const fake = this.ctx.storage.kv.get<{ responses: unknown[] }>("test_clef");
+      if (fake !== undefined && fake.responses.length > 0) {
+        const ai = {
+          run: async (_model: string, input: { state?: unknown }) => {
+            // Clef に渡した state（リポジトリの事実の収集を含む）を E2E が確かめられるように残す
+            this.ctx.storage.kv.put("test_clef_state", String(input?.state ?? ""));
+            // 最後の 1 つは使い回す
+            const stored = this.ctx.storage.kv.get<{ responses: unknown[] }>("test_clef") ?? fake;
+            const next =
+              stored.responses.length > 1 ? stored.responses.shift() : stored.responses[0];
+            this.ctx.storage.kv.put("test_clef", stored);
+            return next;
+          },
+        } as unknown as Ai;
+        return { ai, gatewayId: "test" };
+      }
+    }
+    const ai = (this.env as unknown as { AI?: Ai }).AI;
+    return gatewayId !== "" && ai !== undefined ? { ai, gatewayId } : undefined;
+  }
+
+  private warnOnce(key: string, message: string): void {
+    if (this.warnedScaleConfig.has(key)) return;
+    this.warnedScaleConfig.add(key);
+    console.warn(message);
   }
 
   /**
-   * 子の要求（sandbox_scale_up）で大きくする。exec と同じ serial の中で動く（実行中のコマンドが終わってから）。
-   * 上げる方向だけ: 今の大きさと同じか小さい指定は何もしない。上限（SANDBOX_AGENT_MAX_INSTANCE）を超える指定は拒否する。
-   * 子の自由文（reason）は受け取らない。失敗では投げず、理由コードを結果で返す（投げるのは exec と同じ「再起動した」・期限切れだけ）。
+   * コマンドの cwd のリポジトリの事実（設定ファイルの生のテキスト）。コンテナ内のスクリプトで集め（container-scripts.ts の
+   * SCALE_FACTS_SCRIPT）、cwd ごとに最大 3 つ、10 分だけ storage に覚える。集められなかったら空で、覚えない（次回また試す）。
+   * 事実の収集だけで、判断はしない。リポジトリの中身は非信頼のデータで、Clef には state にだけ入れる（質問には混ぜない）。
    */
-  async scaleUp(instance: unknown): Promise<SandboxScaleUpResult> {
-    if (this.terminated()) return { outcome: "terminated" };
-    this.requireSpec();
-    return this.serial(async () => {
-      if (this.terminated()) return { outcome: "terminated" } as const;
-      const spec = this.requireSpec();
-      const max = resolveAgentMaxSandboxInstance(
-        (this.env as unknown as { SANDBOX_AGENT_MAX_INSTANCE?: string }).SANDBOX_AGENT_MAX_INSTANCE,
-      );
-      if (max.ignored !== undefined) {
-        console.warn(
-          `[sandbox-promote] SANDBOX_AGENT_MAX_INSTANCE=${JSON.stringify(max.ignored.slice(0, 40))} is not supported; sandbox_scale_up is disabled`,
-        );
-      }
-      if (max.instance === null) return { outcome: "unavailable", code: "disabled" } as const;
-      await this.runningOrThrowRestarted();
-      const current = this.currentInstance();
-      // 明示した大きさ（task_start の sandbox_instance）は、そのタスクの間は固定
-      if (spec.instance !== undefined) return { outcome: "fixed", instance: current } as const;
-      if (!isSelectableSandboxInstance(instance)) {
-        return {
-          outcome: "rejected",
-          code: "invalid_instance",
-          instance: current,
-          max: max.instance,
-        } as const;
-      }
-      if (SANDBOX_INSTANCES[instance].vcpu > SANDBOX_INSTANCES[max.instance].vcpu) {
-        return {
-          outcome: "rejected",
-          code: "above_limit",
-          instance: current,
-          max: max.instance,
-        } as const;
-      }
-      if (SANDBOX_INSTANCES[instance].vcpu <= SANDBOX_INSTANCES[current].vcpu) {
-        return { outcome: "unchanged", instance: current } as const;
-      }
-      this.lastPromotionReason = undefined;
-      const result = await this.runPromotion(instance, "agent");
-      if (result === "terminated") return { outcome: "terminated" } as const;
-      if (result === "done") {
-        this.ctx.storage.kv.put("agent_scaled", true);
-        this.ctx.storage.kv.put("agent_scaled_to", instance);
-        return { outcome: "scaled", from: current, to: instance } as const;
-      }
-      return {
-        outcome: "failed",
-        code: this.lastPromotionReason ?? "snapshot_failed",
-        instance: this.currentInstance(),
-      } as const;
+  private async scaleFacts(cwd: string): Promise<string> {
+    const kv = this.ctx.storage.kv;
+    const now = Date.now();
+    const entries = kv.get<{ cwd: string; at: number; text: string }[]>("scale_facts") ?? [];
+    const hit = entries.find((e) => e.cwd === cwd && now - e.at < SCALE_FACTS_TTL_MS);
+    if (hit) return hit.text;
+    const r = await this.rawExec(
+      ["node", "-e", SCALE_FACTS_SCRIPT, cwd, String(SCALE_FACTS_MAX_CHARS)],
+      { timeoutMs: SCALE_FACTS_TIMEOUT_MS, cwd: "/" },
+    );
+    if (r.exitCode !== 0) return "";
+    const text = r.stdout.slice(0, SCALE_FACTS_MAX_CHARS);
+    kv.put(
+      "scale_facts",
+      [...entries.filter((e) => e.cwd !== cwd), { cwd, at: now, text }].slice(-SCALE_FACTS_KEEP),
+    );
+    return text;
+  }
+
+  /** 判断を記録に足す（最大 MAX_SCALE_DECISIONS 件。超えたら古い方から捨てる）。集計は捨てずに数える */
+  private recordScaleDecision(d: SandboxScaleDecision): void {
+    const kv = this.ctx.storage.kv;
+    const log = [...(kv.get<SandboxScaleDecision[]>("scale_log") ?? []), d];
+    kv.put("scale_log", log.slice(-MAX_SCALE_DECISIONS));
+    const prev = kv.get<SandboxScaleStats>("scale_stats");
+    kv.put("scale_stats", {
+      decisions: (prev?.decisions ?? 0) + 1,
+      raised: (prev?.raised ?? 0) + (d.to !== null ? 1 : 0),
+      clefFailures: (prev?.clefFailures ?? 0) + (d.failed === true ? 1 : 0),
+      slowNotRaised: prev?.slowNotRaised ?? 0,
     });
   }
 
   /**
-   * target へ昇格する本体（規則・検証・子の要求で共通）。呼び出し側が、設定・固定・今の大きさとの比較を済ませている。
-   * 昇格の失敗では投げない（理由は promotion_reason と lastPromotionReason）。
+   * 子のコマンド・検証コマンドの実行後。直近のコマンド（次の判断の state）に足し、直前の判断の記録に実行時間と終了コードを足す。
+   * 上げなかったのに（Clef が失敗したときは数えない）長くかかったコマンドは、集計に数える（Clef の見落としの振り返り用）。
+   */
+  private finishCommand(argv: string[], result: ExecResult, ms: number, pending: boolean): void {
+    const kv = this.ctx.storage.kv;
+    const recent = kv.get<RecentCommand[]>("recent_cmds") ?? [];
+    kv.put(
+      "recent_cmds",
+      [
+        ...recent,
+        {
+          command: maskSecrets(argv.join(" ")).slice(0, 200),
+          seconds: Math.round(ms / 100) / 10,
+          exitCode: result.exitCode,
+        },
+      ].slice(-RECENT_COMMANDS_KEEP),
+    );
+    if (!pending) return;
+    const log = kv.get<SandboxScaleDecision[]>("scale_log");
+    const last = log?.at(-1);
+    if (!log || !last) return;
+    last.cmdMs = ms;
+    last.exitCode = result.exitCode;
+    kv.put("scale_log", log);
+    if (last.to === null && last.failed !== true && ms > this.slowCommandMs) {
+      const stats = kv.get<SandboxScaleStats>("scale_stats");
+      if (stats) kv.put("scale_stats", { ...stats, slowNotRaised: stats.slowNotRaised + 1 });
+    }
+  }
+
+  /**
+   * target へ昇格する本体。呼び出し側が、設定・固定・今の大きさとの比較を済ませている。
+   * 昇格の失敗では投げない（理由は promotion_reason と promotion_failures）。
    */
   private async runPromotion(
     target: SandboxInstance,
     trigger: SandboxPromotionTrigger,
-    ruleMatch?: SandboxRuleMatch,
   ): Promise<"done" | "skipped" | "terminated"> {
-    this.lastPromotionReason = undefined;
     const spec = this.requireSpec();
     const current = this.currentInstance();
     const skip = (reason: SandboxPromotionReason) => {
@@ -1198,7 +1315,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const g = ++this.gen;
     this.readyGen = -1;
     try {
-      return await this.promote(g, target, current, before, spec, trigger, ruleMatch);
+      return await this.promote(g, target, current, before, spec, trigger);
     } catch (e) {
       if (this.terminated()) {
         await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
@@ -1215,7 +1332,6 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     before: string,
     spec: WorkspaceSpec,
     trigger: SandboxPromotionTrigger,
-    ruleMatch?: SandboxRuleMatch,
   ): Promise<"done" | "skipped"> {
     const container = this.container();
     const kv = this.ctx.storage.kv;
@@ -1320,7 +1436,6 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         at,
         trigger,
         runtimeMsBefore: ranMs,
-        ...(trigger === "rule" && ruleMatch !== undefined ? { ruleMatch } : {}),
       };
       kv.put("promotions", [...(kv.get<SandboxPromotionRecord[]>("promotions") ?? []), record]);
       this.readyGen = g;

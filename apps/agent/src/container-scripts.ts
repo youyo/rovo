@@ -95,3 +95,94 @@ git status --porcelain --untracked-files=normal | sha256sum
 git diff HEAD | sha256sum
 git ls-files -z --others --exclude-standard | xargs -0 -r sha256sum | sha256sum
 `;
+
+/**
+ * Sandbox の昇格の判断（Clef。docs/specs/design.md）に渡す「リポジトリの事実」を集める node のスクリプト（`node -e <script> <cwd> [最大文字数]`）。
+ * コマンドの cwd と、その上の git のルート（.git のあるディレクトリ）から、決まったファイル（package.json・テストランナーの設定・Makefile・
+ * Cargo や Gradle や Bazel の設定など）を生のテキストのまま読んで、標準出力へ出す。ロックファイルなどの有無も 1 行で出す。
+ *
+ * これは事実の収集だけで、判断はしない（どのファイルが大事か・重いかは Clef が決める。ファイルの一覧は「何を読むか」で、
+ * 「何が重いか」の規則ではない）。リポジトリの中身は非信頼のデータで、Clef の質問の側には混ぜず state にだけ入れる。
+ * 読むのは通常のファイルだけ（シンボリックリンクは辿らない）。package.json は packageManager / workspaces / scripts だけにする。
+ * 1 ファイル 1,500 文字、全体は引数（既定 6,000 文字）までに切り詰める。失敗しても終了コードは 0（事実が無いだけ）。
+ */
+export const SCALE_FACTS_SCRIPT = `
+const fs = require("fs");
+const path = require("path");
+const start = path.resolve(process.argv[1] || "/workspace");
+const limit = Number(process.argv[2]) > 0 ? Number(process.argv[2]) : 6000;
+const PER_FILE = 1500;
+const FILES = [
+  "package.json", "pnpm-workspace.yaml", "lerna.json", "turbo.json", "nx.json",
+  "vitest.config.ts", "vitest.config.mts", "vitest.config.cts", "vitest.config.js", "vitest.config.mjs", "vitest.config.cjs",
+  "vitest.workspace.ts", "vitest.workspace.js", "vitest.workspace.json",
+  "jest.config.js", "jest.config.ts", "jest.config.cjs", "jest.config.mjs", "jest.config.json",
+  "playwright.config.ts", "playwright.config.js", "playwright.config.mjs",
+  ".mocharc.json", ".mocharc.js", ".mocharc.cjs", ".mocharc.yml", ".mocharc.yaml",
+  "cypress.config.ts", "cypress.config.js",
+  "pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini",
+  "Cargo.toml", ".cargo/config.toml", ".cargo/config",
+  "Makefile", "makefile", "GNUmakefile", "justfile",
+  "gradle.properties", ".bazelrc",
+];
+const PRESENT = [
+  "pnpm-lock.yaml", "yarn.lock", "package-lock.json", "bun.lockb", "bun.lock", "uv.lock", "poetry.lock", "Pipfile.lock",
+  "Cargo.lock", "go.mod", "go.sum", "Gemfile.lock", "composer.lock", "gradlew", "mvnw", "pom.xml", "build.gradle",
+  "build.gradle.kts", "WORKSPACE", "MODULE.bazel",
+];
+const isFile = (p) => { try { return fs.lstatSync(p).isFile(); } catch (e) { return false; } };
+const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } };
+const head = (p, n) => {
+  const fd = fs.openSync(p, "r");
+  try {
+    const b = Buffer.alloc(n);
+    const k = fs.readSync(fd, b, 0, n, 0);
+    return b.toString("utf8", 0, k);
+  } finally {
+    fs.closeSync(fd);
+  }
+};
+let root;
+let up = start;
+for (let i = 0; i < 8; i++) {
+  if (fs.existsSync(path.join(up, ".git"))) { root = up; break; }
+  const parent = path.dirname(up);
+  if (parent === up) break;
+  up = parent;
+}
+const dirs = [];
+if (isDir(start)) dirs.push(start);
+if (root !== undefined && !dirs.includes(root)) dirs.push(root);
+const base = root !== undefined ? root : start;
+let out = "";
+const share = Math.floor(limit / Math.max(dirs.length, 1));
+for (const dir of dirs) {
+  const label = path.relative(base, dir) || ".";
+  let part = "# " + label + ": files present: ";
+  const present = PRESENT.filter((f) => isFile(path.join(dir, f)));
+  part += (present.length > 0 ? present.join(", ") : "(none)") + "\\n";
+  for (const f of FILES) {
+    const p = path.join(dir, f);
+    if (!isFile(p)) continue;
+    let text;
+    try {
+      text = head(p, 8192);
+      if (f === "package.json") {
+        try {
+          const j = JSON.parse(text.length >= 8192 ? "" : text);
+          const pick = {};
+          for (const k of ["packageManager", "workspaces", "scripts"]) if (j[k] !== undefined) pick[k] = j[k];
+          text = JSON.stringify(pick, null, 1);
+        } catch (e) {
+          // 壊れている・大きすぎる: 先頭を生のまま渡す
+        }
+      }
+    } catch (e) {
+      continue;
+    }
+    part += "## " + (label === "." ? "" : label + "/") + f + "\\n" + text.slice(0, PER_FILE) + "\\n";
+  }
+  out += part.slice(0, share);
+}
+process.stdout.write(out.slice(0, limit));
+`;

@@ -59,13 +59,14 @@
     // Sandbox コンテナの大きさ（lite / standard-1 / standard-2 / standard-3 / standard-4）。rovo.config.json の sandbox.instance。
     // gateway の SANDBOX_USD_PER_HOUR（推定費用の単価）もこの大きさから計算して合わせる。docs/deploy.md の 5。
     "SANDBOX_INSTANCE": "<SANDBOX_INSTANCE>",
-    // 重いコマンド（テスト・ビルドなど）の初回に昇格する先の大きさ（standard-1〜standard-4。空は昇格しない）。rovo.config.json の sandbox.heavyInstance（既定 standard-3）。
-    // 小さく始めて、重いコマンドの前に今のコンテナのスナップショットを取り、同じスナップショットから大きい大きさで起動し直す。
-    // task_start で sandbox_instance を明示したタスクは昇格しない。スナップショットが使えなくても失敗しない（小さいまま続ける）。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
-    "SANDBOX_HEAVY_INSTANCE": "<SANDBOX_HEAVY_INSTANCE>",
-    // 子が sandbox_scale_up で自分で選べる大きさの上限（standard-1〜standard-4。空は無効で、ツールを子に見せない）。rovo.config.json の sandbox.agentMaxInstance（既定 standard-4）。
-    // 子は重い処理の前に自分で Sandbox を大きくできる（上げる方向だけ。昇格と同じ手順）。上限を超える指定は拒否される。task_start で sandbox_instance を明示したタスクは固定。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
-    "SANDBOX_AGENT_MAX_INSTANCE": "<SANDBOX_AGENT_MAX_INSTANCE>",
+    // Sandbox を自動で上げる上限の大きさ（standard-1〜standard-4。空は無効で、Clef を呼ばず昇格しない）。rovo.config.json の sandbox.maxInstance（既定 standard-4）。
+    // Sandbox は小さく始まり、子のコマンド（と検証コマンド）の前に Clef（Workers AI の決定モデル。既存の ai バインディングと AI_GATEWAY_ID を使う）が
+    // 「今の大きさで足りるか」を判断し、足りなければ今のコンテナのスナップショットを取り、同じスナップショットから大きい大きさで起動し直す（2 → 3 → 4 と何回でも。上げるだけ）。
+    // task_start で sandbox_instance を明示したタスクは固定で、Clef も呼ばない。Clef やスナップショットが失敗しても、タスクは失敗しない（今の大きさのまま続ける）。gateway の同名の var と同じ値にする。docs/deploy.md の 11。
+    "SANDBOX_MAX_INSTANCE": "<SANDBOX_MAX_INSTANCE>",
+    // Clef の判断の閾値（任意。空は既定）。`heavy=0.5,four=0.4,heavy_band=0.3-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする。
+    // 実験で調整した既定値を env で変えられるようにしてある。変えるなら rovo.config.json の vars.agent.SANDBOX_CLEF_THRESHOLDS に書く。docs/deploy.md の 11。
+    "SANDBOX_CLEF_THRESHOLDS": "",
     // 依存関係のキャッシュ（D14。Containers のスナップショット。public beta）を使うか。rovo.config.json の depsCache.enabled（既定 true）。
     // 使えない・失敗してもタスクは今までどおり動く（fail-soft）。docs/deploy.md の 5。
     "DEPS_CACHE_ENABLED": "<DEPS_CACHE_ENABLED>",

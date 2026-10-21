@@ -1,17 +1,27 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  type ConsultIndexRow,
+  type ConsultIndexSnapshot,
+  ConsultIndexSnapshotSchema,
+  type ListConsultsQuery,
+  type ListConsultsResult,
   type ListTasksQuery,
   type ListTasksResult,
+  MAX_CONSULT_LIMIT,
   MAX_LIST_LIMIT,
   MAX_REPO_IDS,
+  type SummarizeConsultsResult,
   type SummarizeQuery,
   type SummarizeResult,
   type TaskIndexRow,
   type TaskIndexSnapshot,
   TaskIndexSnapshotSchema,
+  type UpsertConsultResult,
   type UpsertTaskResult,
   type VisibleModelsResult,
 } from "./types";
+
+type ConsultDbRow = Omit<ConsultIndexRow, "estimated"> & { estimated: number };
 
 /** TaskIndexRow の列（task_index の列と同じ名前。pr_draft / pr_merged は 0/1 で持つ） */
 type DbRow = Omit<TaskIndexSnapshot, "pr_draft" | "pr_merged"> & {
@@ -102,6 +112,124 @@ export class DirectoryDO extends DurableObject<Env> {
       "CREATE INDEX IF NOT EXISTS task_index_created ON task_index (created_at DESC, task_id)",
     );
     sql.exec("CREATE INDEX IF NOT EXISTS task_index_repo ON task_index (repository_id)");
+    // consult の索引（D9）。リポジトリが無いので権限の列は無い。本文は持たない
+    sql.exec(`CREATE TABLE IF NOT EXISTS consult_index (
+      consult_id TEXT PRIMARY KEY,
+      owner_id INTEGER NOT NULL,
+      owner_login TEXT NOT NULL,
+      at INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      cost_micro INTEGER NOT NULL,
+      estimated INTEGER NOT NULL,
+      revision INTEGER NOT NULL
+    )`);
+    sql.exec("CREATE INDEX IF NOT EXISTS consult_index_at ON consult_index (at DESC, consult_id)");
+  }
+
+  /**
+   * 1 件の consult を保存する（UserDO の outbox から）。revision が保存済みより大きいときだけ反映する（冪等）。
+   */
+  upsertConsult(snapshot: ConsultIndexSnapshot, revision: number): UpsertConsultResult {
+    const parsed = ConsultIndexSnapshotSchema.safeParse(snapshot);
+    if (!parsed.success || !Number.isSafeInteger(revision) || revision < 1) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const s = parsed.data;
+    return this.ctx.storage.transactionSync((): UpsertConsultResult => {
+      const sql = this.ctx.storage.sql;
+      const stored = sql
+        .exec<{ revision: number }>(
+          "SELECT revision FROM consult_index WHERE consult_id = ?",
+          s.consult_id,
+        )
+        .toArray()[0];
+      if (stored && stored.revision >= revision) {
+        return { ok: true, applied: false, revision: stored.revision };
+      }
+      sql.exec(
+        `INSERT OR REPLACE INTO consult_index
+           (consult_id, owner_id, owner_login, at, model, cost_micro, estimated, revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        s.consult_id,
+        s.owner_id,
+        s.owner_login,
+        s.at,
+        s.model,
+        s.cost_micro,
+        s.estimated ? 1 : 0,
+        revision,
+      );
+      return { ok: true, applied: true, revision };
+    });
+  }
+
+  /** タイムラインの灰の点。at が [from, to) の consult を新しい順に。全員分（ownerId で自分に絞れる） */
+  listConsults(query: ListConsultsQuery): ListConsultsResult {
+    if (
+      !Number.isSafeInteger(query?.from) ||
+      !Number.isSafeInteger(query.to) ||
+      !Number.isSafeInteger(query.limit) ||
+      query.limit < 1 ||
+      (query.ownerId !== undefined && !Number.isSafeInteger(query.ownerId))
+    ) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const owner = query.ownerId ?? null;
+    const rows = this.ctx.storage.sql
+      .exec<ConsultDbRow>(
+        `SELECT * FROM consult_index WHERE at >= ? AND at < ? AND (? IS NULL OR owner_id = ?)
+         ORDER BY at DESC, consult_id DESC LIMIT ?`,
+        query.from,
+        query.to,
+        owner,
+        owner,
+        Math.min(query.limit, MAX_CONSULT_LIMIT),
+      )
+      .toArray()
+      .map((r) => ({ ...r, estimated: r.estimated === 1 }));
+    return { ok: true, rows };
+  }
+
+  /** 月などの consult の集計（at が [from, to)）。全員分の合計と、モデル別の費用 */
+  summarizeConsults(query: { from: number; to: number }): SummarizeConsultsResult {
+    if (!Number.isSafeInteger(query?.from) || !Number.isSafeInteger(query.to)) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const sql = this.ctx.storage.sql;
+    const total = sql
+      .exec<{ n: number; c: number; e: number }>(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(cost_micro), 0) AS c,
+                COALESCE(SUM(CASE WHEN estimated = 1 THEN cost_micro ELSE 0 END), 0) AS e
+         FROM consult_index WHERE at >= ? AND at < ?`,
+        query.from,
+        query.to,
+      )
+      .one();
+    const models = sql
+      .exec<{ model: string; c: number }>(
+        `SELECT model, SUM(cost_micro) AS c FROM consult_index
+         WHERE at >= ? AND at < ? GROUP BY model ORDER BY model`,
+        query.from,
+        query.to,
+      )
+      .toArray()
+      .map((m) => ({ model: m.model, cost_micro: m.c }));
+    return {
+      ok: true,
+      count: total.n,
+      cost_micro: total.c,
+      estimated_micro: total.e,
+      models,
+    };
+  }
+
+  /** テスト専用: 1 件の consult の行（revision つき）。ENVIRONMENT=test のときだけ。 */
+  testGetConsult(consultId: string): ConsultIndexRow | null {
+    if (this.env.ENVIRONMENT !== "test") throw new Error("test only");
+    const row = this.ctx.storage.sql
+      .exec<ConsultDbRow>("SELECT * FROM consult_index WHERE consult_id = ?", consultId)
+      .toArray()[0];
+    return row ? { ...row, estimated: row.estimated === 1 } : null;
   }
 
   /**

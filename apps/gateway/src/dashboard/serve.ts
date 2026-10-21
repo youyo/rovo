@@ -1,4 +1,5 @@
 import { isTaskId } from "../tasks/ulid";
+import { handleReadApi } from "./api";
 import { handleLogout, handleMe, startDashboardLogin } from "./auth";
 import { fetchSiteGate, jsonResponse } from "./guard";
 
@@ -41,7 +42,7 @@ function plain(status: number, extra: HeadersInit = {}): Response {
 
 /**
  * `/dashboard/api` と配下。入口で Sec-Fetch-Site を検査し（ルートの有無を漏らさないよう、ルーティングより前）、
- * そのあと /me・/logout だけを扱う。M5 で読み取り API を足すまで、それ以外は JSON の 404。CORS ヘッダは出さない。
+ * そのあと /me・/logout と読み取り API（api.ts）を扱う。それ以外は JSON の 404。CORS ヘッダは出さない。
  */
 async function handleApi(request: Request, env: Env, pathname: string): Promise<Response> {
   const blocked = fetchSiteGate(request, env);
@@ -56,6 +57,9 @@ async function handleApi(request: Request, env: Env, pathname: string): Promise<
       if (method === "POST") return await handleLogout(request, env);
       return jsonResponse(405, { error: "method_not_allowed" }, { allow: "POST" });
     }
+    // 読み取り API（overview・tasks/:id・events・budget）。認可・出力の検証は api.ts
+    const read = await handleReadApi(request, env, pathname);
+    if (read) return read;
   } catch (error) {
     // UserDO などの障害。内容（スタック・トークン）は出さない
     console.error("dashboard_api_error", error instanceof Error ? error.name : typeof error);

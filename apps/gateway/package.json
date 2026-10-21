@@ -6,6 +6,7 @@
   "scripts": {},
   "dependencies": {
     "@rovo/audit": "workspace:*",
+    "@rovo/dashboard-contract": "workspace:*",
     "@rovo/models": "workspace:*",
     "@cloudflare/workers-oauth-provider": "^1.2.3",
     "@modelcontextprotocol/server": "^2.3.1",

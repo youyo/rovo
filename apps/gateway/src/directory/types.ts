@@ -134,3 +134,7 @@ export type SummarizeConsultsResult =
       models: { model: string; cost_micro: number }[];
     }
   | { ok: false; code: "invalid_input" };
+
+export type VisibleModelsResult =
+  | { ok: true; models: string[] }
+  | { ok: false; code: "invalid_input" | "too_many_repo_ids" };

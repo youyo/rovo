@@ -21,6 +21,8 @@ export interface FakeRepository {
   id: number;
   fullName: string;
   push: boolean;
+  /** 指定すると、このログイン名のユーザーにだけ見える（/user/installations/:id/repositories と push 権限）。省略は全員に見える */
+  visibleTo?: string[];
 }
 
 export interface RecordedRequest {
@@ -388,7 +390,12 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
       login: who.login,
       canPush: (fullName) =>
         [...state.installations.values()].some((repos) =>
-          repos.some((r) => r.push && r.fullName.toLowerCase() === fullName.toLowerCase()),
+          repos.some(
+            (r) =>
+              r.push &&
+              r.fullName.toLowerCase() === fullName.toLowerCase() &&
+              (r.visibleTo === undefined || r.visibleTo.includes(who.login)),
+          ),
         ),
     };
   }
@@ -462,8 +469,12 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
 
     m = /^\/user\/installations\/(\d+)\/repositories$/.exec(path);
     if (m) {
-      const repos = state.installations.get(Number(m[1]));
-      if (!repos) return sendJson(res, 404, { message: "Not Found" });
+      const all = state.installations.get(Number(m[1]));
+      if (!all) return sendJson(res, 404, { message: "Not Found" });
+      // visibleTo を持つリポジトリは、そのユーザーにだけ見える
+      const repos = all.filter(
+        (r) => r.visibleTo === undefined || r.visibleTo.includes(user.login),
+      );
       const { slice, headers } = paginate(repos, url, req);
       return sendJson(
         res,

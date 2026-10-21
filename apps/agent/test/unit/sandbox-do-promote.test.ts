@@ -62,6 +62,10 @@ class FakeContainer {
   handler: (argv: string[]) => Reply = () => undefined;
   /** snapshotContainer の途中で呼ばれる */
   onSnapshot: (() => Promise<void>) | undefined;
+  /** destroy の途中で呼ばれる（止まる前） */
+  onDestroy: (() => Promise<void>) | undefined;
+  /** exec の応答の前に呼ばれる */
+  onExec: ((argv: string[]) => Promise<void>) | undefined;
 
   start(options: Record<string, unknown>) {
     this.startCalls.push(options);
@@ -81,6 +85,7 @@ class FakeContainer {
   async destroy() {
     this.destroyCalls += 1;
     this.events.push("destroy");
+    await this.onDestroy?.();
     this.running = false;
   }
   async setInactivityTimeout(ms: number) {
@@ -93,6 +98,7 @@ class FakeContainer {
   async exec(argv: string[]) {
     this.execLog.push(argv);
     this.events.push(`exec:${argv.join(" ")}`);
+    await this.onExec?.(argv);
     const stream = (t: string) =>
       new ReadableStream<Uint8Array>({
         start(c) {
@@ -528,6 +534,83 @@ describe("SandboxDO: 昇格の fail-soft", () => {
       const r = await inst.exec(HEAVY);
       expect(r.terminated).toBe(true);
       expect(fake.running).toBe(false);
+    });
+  });
+  it("昇格の最中に別の exec が来ても、serial で待たされ、昇格後のコンテナ（standard-3）で走る", async () => {
+    await runInDO(sandboxStub("promote-concurrent"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      let inSnapshot: () => void = () => {};
+      const entered = new Promise<void>((r) => {
+        inSnapshot = r;
+      });
+      fake.onSnapshot = async () => {
+        inSnapshot();
+        await gate;
+      };
+      const heavy = inst.exec(HEAVY);
+      await entered;
+      const light = inst.exec(["echo", "concurrent"]);
+      // 昇格の途中（スナップショット待ち）の間は、2 本目は走らない
+      await new Promise((r) => setTimeout(r, 50));
+      expect(fake.events.some((e) => e.startsWith("exec:echo concurrent"))).toBe(false);
+      release();
+      const [r1, r2] = await Promise.all([heavy, light]);
+      expect(r1.exitCode).toBe(0);
+      expect(r2.exitCode).toBe(0);
+      const ev = fake.events;
+      const started = ev.findIndex((e) => e.startsWith("start:snapshot:standard-3"));
+      const echo = ev.findIndex((e) => e.startsWith("exec:echo concurrent"));
+      const pnpm = ev.findIndex((e) => e.startsWith("exec:pnpm test"));
+      expect(started).toBeGreaterThan(-1);
+      expect(pnpm).toBeGreaterThan(started);
+      expect(echo).toBeGreaterThan(pnpm);
+      expect(fake.currentInstance).toBe("standard-3");
+    });
+  });
+
+  it("元のコンテナの destroy の最中に terminate されたら、昇格先を起動せず、コンテナを残さず terminated で終わる", async () => {
+    await runInDO(sandboxStub("promote-terminate-destroy"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      let terminating: Promise<unknown> | undefined;
+      fake.onDestroy = async () => {
+        // 昇格の destroy の最初の 1 回だけ、その最中に terminate を呼ぶ
+        fake.onDestroy = undefined;
+        terminating = inst.terminate();
+        await new Promise((r) => setTimeout(r, 20));
+      };
+      const r = await inst.exec(HEAVY);
+      await terminating;
+      expect(r.terminated).toBe(true);
+      expect(fake.running).toBe(false);
+      expect(fake.startCalls.filter((c) => c.containerSnapshot)).toHaveLength(0);
+      expect(inst.status().terminated).toBe(true);
+    });
+  });
+
+  it("昇格先の起動待ちの最中に terminate されたら、起動したコンテナを残さず terminated で終わる", async () => {
+    await runInDO(sandboxStub("promote-terminate-starting"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      fake.onExec = async (argv) => {
+        // 昇格先の exec の応答待ち（waitContainerReady の probe）の最中に terminate
+        if (argv.length === 1 && argv[0] === "true" && fake.currentInstance === "standard-3") {
+          fake.onExec = undefined;
+          await inst.terminate();
+        }
+      };
+      const r = await inst.exec(HEAVY);
+      expect(r.terminated).toBe(true);
+      expect(fake.running).toBe(false);
+      expect(fake.startCalls.filter((c) => c.containerSnapshot)).toHaveLength(1);
+      // 元の大きさへの起動し直しもしない
+      expect(fake.startCalls.filter((c) => c.instance === "standard-2")).toHaveLength(1);
+      expect(inst.status().terminated).toBe(true);
     });
   });
 });

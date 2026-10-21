@@ -374,6 +374,9 @@ describe("sandbox の昇格（usage とプロンプト）", () => {
     const t = await testing("promo-prompt-on", { SANDBOX_HEAVY_INSTANCE: "standard-3" });
     expect(t).toContain("scaled up");
     expect(t).toContain("tens of seconds");
+    // 昇格するとプロセスは引き継がれない（dev server などは止まる）
+    expect(t).toContain("background");
+    expect(t).toContain("stopped");
   });
 
   it("プロンプト: 昇格しない（無効・大きさを明示した）なら書かない", async () => {

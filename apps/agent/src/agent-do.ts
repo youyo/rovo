@@ -2042,7 +2042,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "testing",
-        text: `A full test run in the sandbox can take minutes. While you iterate (TDD), run only the tests related to the files you changed (for example \`vitest run <file>\`), not the whole suite. Run the whole suite once, right before report_completion. Keep the trailing newline at the end of every file you edit or create: a file ends with exactly one newline character.${this.promotionEnabled() ? " The sandbox starts small and is scaled up to a larger one before the first heavy command (tests, a build, a type check); that first command can take tens of seconds longer than usual, and later heavy commands run faster. Do not retry or cancel it because it looks slow." : ""}`,
+        text: `A full test run in the sandbox can take minutes. While you iterate (TDD), run only the tests related to the files you changed (for example \`vitest run <file>\`), not the whole suite. Run the whole suite once, right before report_completion. Keep the trailing newline at the end of every file you edit or create: a file ends with exactly one newline character.${this.promotionEnabled() ? " The sandbox starts small and is scaled up to a larger one before the first heavy command (tests, a build, a type check); that first command can take tens of seconds longer than usual, and later heavy commands run faster. Scaling up restarts the container: processes you left running in the background (a dev server, for example) are stopped, so start them again if you still need them. Do not retry or cancel it because it looks slow." : ""}`,
       },
       {
         key: "untrusted_data",

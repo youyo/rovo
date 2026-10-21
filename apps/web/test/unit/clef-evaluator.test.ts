@@ -19,7 +19,8 @@ type RunArgs = [
 function answers(score: number, over: Record<string, number> = {}) {
   const out: Record<string, { noul: number }> = {};
   for (const c of CATEGORIES) out[c] = { noul: over[c] ?? score };
-  return { answers: out };
+  // 実機の応答は usage を必ず含む（usage が無い応答は未完了になる）
+  return { answers: out, usage: { input_tokens: 100 } };
 }
 
 function fakeAi(handler: (state: string, call: number) => unknown) {
@@ -214,6 +215,13 @@ describe("createClefEvaluator", () => {
     expect(
       (await createClefEvaluator({ ai: ok.ai, gatewayId: "gw" }).evaluate("hello", CTX)).complete,
     ).toBe(true);
+  });
+
+  it("usage.input_tokens が無い応答は、窓を確かめられないので未完了にする（fail-closed）", async () => {
+    const { ai } = fakeAi(() => ({ answers: answers(0.01).answers }));
+    const r = await createClefEvaluator({ ai, gatewayId: "gw" }).evaluate("hello", CTX);
+    expect(r.complete).toBe(false);
+    expect(r.failure).toBe("unexpected_response");
   });
 
   it("AI_GATEWAY_ID が空なら AI.run を呼ばず、未完了にする（fail-closed）", async () => {

@@ -223,12 +223,12 @@ export function createClefEvaluator(options: ClefEvaluatorOptions): SafetyEvalua
         { gateway: { id: gatewayId, metadata } },
       );
       const parsed = parseAnswers(response);
-      if (!parsed) return { ok: false, reason: "unexpected_response" };
+      // usage が無いと窓に収まったかを確かめられない（sentinel は無い）ので、評価できていないとみなす
+      if (!parsed || parsed.inputTokens === undefined) {
+        return { ok: false, reason: "unexpected_response" };
+      }
       // 窓を超える入力は AI.run が例外にする（下の catch。未完了）。念のため、入力が窓いっぱいに達していたら評価できていないとみなす
-      if (
-        parsed.inputTokens !== undefined &&
-        parsed.inputTokens >= CLEF_CONTEXT_TOKENS - CONTEXT_MARGIN_TOKENS
-      ) {
+      if (parsed.inputTokens >= CLEF_CONTEXT_TOKENS - CONTEXT_MARGIN_TOKENS) {
         return { ok: false, reason: "state_truncated" };
       }
       return {

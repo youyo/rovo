@@ -35,6 +35,8 @@ function envFor(over: Record<string, unknown> = {}): Env {
 function clefAnswers(score: number) {
   return {
     answers: Object.fromEntries(CATEGORIES.map((c) => [c, { noul: score }])),
+    // 実機の応答は usage を必ず含む（無いと評価は未完了になる）
+    usage: { input_tokens: 100 },
   };
 }
 

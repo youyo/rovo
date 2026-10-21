@@ -5,7 +5,7 @@ import { type BrowserLike, browsePage } from "./browse";
 import { isBrowseEnabled, loadConfig } from "./config";
 import { WebResearchError } from "./errors";
 import { fetchPage } from "./fetch-proxy";
-import { MAX_CONTENT_CHARS, normalizeContent } from "./normalizer";
+import { coveringRawPrefix, MAX_CONTENT_CHARS, normalizeContent } from "./normalizer";
 import {
   decide,
   type PolicyDecision,
@@ -244,7 +244,7 @@ export function createWebResearchService(
   /**
    * 取得した本文と title を評価して、返してよいものだけを返す（web_fetch と web_browse で共用）。
    * - 評価の対象と返却の対象は同じ: 切り詰めた（50,000 文字）後の本文と、200 文字に切った後の title。
-   * - 決定論ルールは生の本文・生の title（隠し文字を含む）にかける。block ならモデルには渡さない。
+   * - 決定論ルールは、返す範囲に対応する生の本文・生の title（隠し文字を含む）にかける。block ならモデルには渡さない。
    * - block / unknown のときは、本文も title も返さない。
    */
   async function assessContent(
@@ -267,8 +267,14 @@ export function createWebResearchService(
       ? normalizeContent(input.title, { maxChars: MAX_TITLE_CHARS }).text.trim()
       : "";
     const evalPrefix = title ? `title: ${title}\n\n` : "";
-    const rawTitle = input.title ? `title: ${input.title.slice(0, 2000)}\n\n` : "";
-    const findings = runDeterministicRules(rawTitle + input.content);
+    // 決定論ルールは、返す範囲（切り詰め後の本文と title）に対応する生のテキスト（隠し文字を含む）にかける。
+    // Clef が評価する範囲と揃え、返さない末尾の語句で止めない
+    const rawTitle = input.title
+      ? `title: ${coveringRawPrefix(input.title, { maxChars: MAX_TITLE_CHARS })}\n\n`
+      : "";
+    const findings = runDeterministicRules(
+      rawTitle + coveringRawPrefix(input.content, { maxChars: MAX_CONTENT_CHARS }),
+    );
     const model = findings.some((f) => f.verdict === "block")
       ? null
       : await evaluateSafely(ctx.evaluator, evalPrefix + normalized.text, ctx.ctx, {

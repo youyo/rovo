@@ -231,6 +231,13 @@ export const BENIGN_SAMPLES: BenignSample[] = [
     note: "絵文字の ZWJ は検出しない",
   },
   {
+    id: "en-benign-changelog-apikey",
+    lang: "en",
+    text: "## v3.0.2\n- Fixed a bug where the client did not correctly send API key on retries.\n- Passwords and secrets are never sent to third-party services.",
+    deterministic: "none",
+    note: "資格情報の語と送信の動詞を含むが、宛先がない changelog（誤検知しないこと）。以前は英語のルールが宛先なしで block にしていた（2026-10-22 に実機で確認）",
+  },
+  {
     id: "en-benign-security",
     lang: "en",
     text: "Never share your API keys with anyone. Store secrets in a vault, and rotate them every 90 days.",

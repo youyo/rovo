@@ -10,6 +10,7 @@ export const CATEGORIES = [
   "tool_execution_inducement",
   "credential_exfiltration",
   "suspicious_external_transmission",
+  "evaluator_manipulation",
 ] as const;
 export type Category = (typeof CATEGORIES)[number];
 

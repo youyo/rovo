@@ -130,6 +130,18 @@ describe("文字列の上限と形式", () => {
     expect(ok(VisibleTaskDtoSchema, { ...row, owner_login: "bad login" })).toBe(false);
     expect(ok(VisibleTaskDtoSchema, { ...row, model: "m".repeat(101) })).toBe(false);
   });
+  it("model は実在のカタログのキー（Workers AI の `workers-ai/@cf/...` を含む）を通し、空白・制御文字・スクリプトの断片は通さない", () => {
+    for (const good of [
+      "anthropic/claude-sonnet-5-5",
+      "workers-ai/@cf/openai/gpt-oss-120b",
+      "openai/gpt-6-sol",
+    ]) {
+      expect(ok(VisibleTaskDtoSchema, { ...row, model: good }), good).toBe(true);
+    }
+    for (const bad of ["", "@leading", "a b", "a<script>", "a\nb", "a‮b"]) {
+      expect(ok(VisibleTaskDtoSchema, { ...row, model: bad }), JSON.stringify(bad)).toBe(false);
+    }
+  });
   it("status は 9 状態だけ", () => {
     expect(ok(VisibleTaskDtoSchema, { ...row, status: "UNKNOWN" })).toBe(false);
   });

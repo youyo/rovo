@@ -52,8 +52,11 @@ export const repositorySchema = z
   .max(LIMITS.repository)
   .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/);
 
-/** モデル ID（任意の文字列を通さない。英数字で始まり、`._:/-` を許す）。 */
-export const modelIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/);
+/**
+ * モデル ID（任意の文字列を通さない。英数字で始まり、`._:/@-` を許す）。
+ * `@` は Workers AI のカタログのキー（`workers-ai/@cf/openai/gpt-oss-120b`）に要る。
+ */
+export const modelIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$/);
 
 export const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const effortSchema = z.enum(EFFORTS);

@@ -246,6 +246,9 @@ importers:
       '@rovo/audit':
         specifier: workspace:*
         version: link:../../packages/audit
+      '@rovo/dashboard-contract':
+        specifier: workspace:*
+        version: link:../../packages/dashboard-contract
       '@rovo/models':
         specifier: workspace:*
         version: link:../../packages/models

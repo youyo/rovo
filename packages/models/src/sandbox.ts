@@ -37,6 +37,13 @@ export function isSelectableSandboxInstance(v: unknown): v is SelectableSandboxI
   return (SELECTABLE_SANDBOX_INSTANCES as readonly unknown[]).includes(v);
 }
 
+/** 選べる大きさのうち、max（含む）までの名前を小さい順に返す。上限より大きい名前は含めない（子に見せる説明の組み立て用） */
+export function selectableSandboxInstancesUpTo(max: SandboxInstance): SelectableSandboxInstance[] {
+  return SELECTABLE_SANDBOX_INSTANCES.filter(
+    (name) => SANDBOX_INSTANCES[name].vcpu <= SANDBOX_INSTANCES[max].vcpu,
+  );
+}
+
 /**
  * 重いコマンド（テスト・ビルドなど）の初回に昇格する先の既定（standard-3）。小さく始めて、重いコマンドの前に大きくする。
  * 本番のベンチマーク（rovo のリポジトリの gateway の vitest）は standard-1 317 秒 / standard-2 161 秒 / standard-3 84 秒 / standard-4 95 秒で、

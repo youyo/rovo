@@ -239,3 +239,46 @@ describe("task_result の usage.sandbox_promotions（昇格の履歴）と子が
     expect(none).not.toHaveProperty("sandbox_heavy_commands_after_agent_scale_up");
   });
 });
+
+describe("task_result の usage: 的中の本数と昇格の失敗の内訳", () => {
+  it("agent が報告した値を、公開用の形（固定の値だけ）で返す", async () => {
+    const usage = await usageWith({
+      runtimeMs: 90_000,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      heavyCommandsAfterAgentScaleUp: 3,
+      heavyCommandsCoveredByAgent: 2.8,
+      promotionFailures: [
+        { trigger: "rule", reason: "snapshot_failed" },
+        { trigger: "agent", reason: "start_failed", text: "secret-text" },
+        { trigger: "me", reason: "start_failed" },
+        { trigger: "rule", reason: "anything" },
+      ],
+    });
+    expect(usage).toMatchObject({
+      sandbox_heavy_commands_after_agent_scale_up: 3,
+      sandbox_heavy_commands_covered_by_agent: 2,
+    });
+    expect(usage.sandbox_promotion_failures).toEqual([
+      { trigger: "rule", reason: "snapshot_failed" },
+      { trigger: "agent", reason: "start_failed" },
+    ]);
+    expect(JSON.stringify(usage)).not.toContain("secret-text");
+  });
+
+  it("無ければ付かない", async () => {
+    const none = await usageWith({ runtimeMs: 1, restarts: 0, bootRetries: 0 });
+    expect(none).not.toHaveProperty("sandbox_heavy_commands_covered_by_agent");
+    expect(none).not.toHaveProperty("sandbox_promotion_failures");
+    const bad = await usageWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      heavyCommandsCoveredByAgent: "many",
+      promotionFailures: [{ trigger: "x", reason: "y" }],
+    });
+    expect(bad).not.toHaveProperty("sandbox_heavy_commands_covered_by_agent");
+    expect(bad).not.toHaveProperty("sandbox_promotion_failures");
+  });
+});

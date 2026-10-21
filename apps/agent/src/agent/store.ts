@@ -42,7 +42,9 @@ export function sameUsage(a: UsageDto, b: UsageDto): boolean {
     a.sandbox?.runtimeMsBeforePromotion === b.sandbox?.runtimeMsBeforePromotion &&
     a.sandbox?.promotionReason === b.sandbox?.promotionReason &&
     JSON.stringify(a.sandbox?.promotions) === JSON.stringify(b.sandbox?.promotions) &&
-    a.sandbox?.heavyCommandsAfterAgentScaleUp === b.sandbox?.heavyCommandsAfterAgentScaleUp
+    a.sandbox?.heavyCommandsAfterAgentScaleUp === b.sandbox?.heavyCommandsAfterAgentScaleUp &&
+    a.sandbox?.heavyCommandsCoveredByAgent === b.sandbox?.heavyCommandsCoveredByAgent &&
+    JSON.stringify(a.sandbox?.promotionFailures) === JSON.stringify(b.sandbox?.promotionFailures)
   );
 }
 

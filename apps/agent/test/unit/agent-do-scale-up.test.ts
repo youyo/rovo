@@ -1,6 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides } from "../../src/agent/deps";
+import { sameUsage, ZERO_USAGE } from "../../src/agent/store";
 import type { SandboxScaleUpResult } from "../../src/sandbox-port";
 import {
   allEvents,
@@ -258,7 +259,6 @@ describe("AgentDO: usage の昇格の履歴", () => {
         // 不正（表に無い大きさ・引き金・表に無い規則名）は捨てる
         { to: "standard-9", at: 1, trigger: "agent", runtimeMsBefore: 1 },
         { to: "standard-4", at: 1, trigger: "me", runtimeMsBefore: 1 },
-        { to: "standard-4", at: 1, trigger: "rule", runtimeMsBefore: 1, ruleMatch: "rm -rf /" },
       ] as never,
       heavyCommandsAfterAgentScaleUp: 3,
     };
@@ -290,5 +290,185 @@ describe("AgentDO: usage の昇格の履歴", () => {
     const sb = done(await fx.stub.getResult()).usage.sandbox;
     expect(sb).not.toHaveProperty("promotions");
     expect(sb).not.toHaveProperty("heavyCommandsAfterAgentScaleUp");
+  });
+});
+
+describe("AgentDO: usage の昇格の履歴（不明な規則名・的中・失敗の内訳）", () => {
+  it("表に無い規則名の要素は捨てずに残し、rule_match だけ落とす（要素が欠けると按分の区間がずれる）", async () => {
+    const fx = newFixture("up-usage-rule", [boot(), report()]);
+    fx.sandbox.metricsValue = {
+      runtimeMs: 90_000,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      promotedTo: "standard-4",
+      promotedAt: 1,
+      runtimeMsBeforePromotion: 10_000,
+      promotions: [
+        {
+          to: "standard-3",
+          at: 1,
+          trigger: "rule",
+          runtimeMsBefore: 10_000,
+          ruleMatch: "rm -rf /",
+        },
+        { to: "standard-4", at: 2, trigger: "agent", runtimeMsBefore: 60_000 },
+      ] as never,
+    };
+    expect(await start(fx, "up-usage-rule")).toBe("completed");
+    const sb = done(await fx.stub.getResult()).usage.sandbox;
+    expect(sb?.promotions).toEqual([
+      { to: "standard-3", at: 1, trigger: "rule", runtimeMsBefore: 10_000 },
+      { to: "standard-4", at: 2, trigger: "agent", runtimeMsBefore: 60_000 },
+    ]);
+    expect(JSON.stringify(sb)).not.toContain("rm -rf");
+  });
+
+  it("子の見立ての的中の本数と、昇格の失敗の内訳が usage.sandbox に載る。固定の値以外の要素は捨て、8 件を超える分も捨てる", async () => {
+    const fx = newFixture("up-usage-fail", [boot(), report()]);
+    const good = { trigger: "rule", reason: "snapshot_failed" };
+    fx.sandbox.metricsValue = {
+      runtimeMs: 10,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+      heavyCommandsAfterAgentScaleUp: 3,
+      heavyCommandsCoveredByAgent: 2,
+      promotionFailures: [
+        good,
+        { trigger: "agent", reason: "start_failed", text: SECRET },
+        { trigger: "me", reason: "start_failed" },
+        { trigger: "rule", reason: `rm -rf / ${SECRET}` },
+        { trigger: "verification" },
+        "x",
+        ...Array.from({ length: 10 }, () => ({ trigger: "agent", reason: "fallback_failed" })),
+      ] as never,
+    };
+    expect(await start(fx, "up-usage-fail")).toBe("completed");
+    const sb = done(await fx.stub.getResult()).usage.sandbox;
+    expect(sb?.heavyCommandsCoveredByAgent).toBe(2);
+    expect(sb?.promotionFailures).toHaveLength(8);
+    expect(sb?.promotionFailures?.slice(0, 2)).toEqual([
+      good,
+      { trigger: "agent", reason: "start_failed" },
+    ]);
+    expect(JSON.stringify(sb)).not.toContain(SECRET);
+  });
+
+  it("的中も失敗も無ければ付かない", async () => {
+    const fx = newFixture("up-usage-nofail", [boot(), report()]);
+    fx.sandbox.metricsValue = {
+      runtimeMs: 10,
+      restarts: 0,
+      bootRetries: 0,
+      instance: "standard-2",
+    };
+    expect(await start(fx, "up-usage-nofail")).toBe("completed");
+    const sb = done(await fx.stub.getResult()).usage.sandbox;
+    expect(sb).not.toHaveProperty("promotionFailures");
+    expect(sb).not.toHaveProperty("heavyCommandsCoveredByAgent");
+  });
+});
+
+describe("AgentDO: sandbox_scale_up の登録（task_start で大きさを固定したタスクと選べる名前）", () => {
+  it("task_start で sandbox_instance を明示したタスクでは、ツールを登録しない（呼んでも Sandbox に届かない）", async () => {
+    const fx = newFixture("up-fixed-tool", [boot(), scale(), report()]);
+    expect(
+      await start(
+        fx,
+        "up-fixed-tool",
+        { SANDBOX_AGENT_MAX_INSTANCE: "standard-4" },
+        {
+          sandboxInstance: "standard-1",
+        },
+      ),
+    ).toBe("completed");
+    expect(fx.sandbox.scaleUpCalls).toEqual([]);
+    expect((fx.modelCalls.toolResults[2] ?? []).join("\n")).toMatch(
+      /not found|unknown tool|not available/i,
+    );
+    const enabled = await runInDO(fx.stub, (inst) => inst.piHooks().sandboxScaleUpEnabled());
+    expect(enabled).toBe(false);
+  });
+
+  it("instance 引数の説明には、上限までの名前だけを並べる（上限より大きい名前を書かない）", async () => {
+    const { createAgentExtension } = await import("../../src/pi/extension");
+    const base = {
+      beforeTool: async () => undefined,
+      afterTool: async () => {},
+      afterTools: async () => {},
+      onYield: async () => undefined,
+      reportCompletion: async () => ({ text: "", isError: false, terminate: false }),
+      askParent: async () => ({ text: "", isError: false, terminate: false }),
+      webSearch: async () => ({ text: "", isError: false }),
+      webFetch: async () => ({ text: "", isError: false }),
+      webBrowse: async () => ({ text: "", isError: false }),
+      webBrowseEnabled: () => false,
+      sandboxScaleUpEnabled: () => true,
+      sections: () => [],
+    };
+    const descOf = (choices: string[]) => {
+      const ext = createAgentExtension([], { ...base, sandboxScaleUpChoices: () => choices });
+      const tool = (
+        ext as unknown as {
+          tools: {
+            name: string;
+            parameters: { properties: { instance: { description: string } } };
+          }[];
+        }
+      ).tools.find((t) => t.name === "sandbox_scale_up");
+      return tool?.parameters.properties.instance.description ?? "";
+    };
+    const d3 = descOf(["standard-1", "standard-2", "standard-3"]);
+    expect(d3).toContain("standard-3");
+    expect(d3).not.toContain("standard-4");
+    const d1 = descOf(["standard-1"]);
+    expect(d1).toContain("standard-1");
+    expect(d1).not.toContain("standard-2");
+  });
+
+  it("AgentDO が渡す選べる名前は SANDBOX_AGENT_MAX_INSTANCE までで作る", async () => {
+    for (const [max, expected] of [
+      ["standard-3", ["standard-1", "standard-2", "standard-3"]],
+      ["standard-2", ["standard-1", "standard-2"]],
+      ["standard-4", ["standard-1", "standard-2", "standard-3", "standard-4"]],
+    ] as const) {
+      const fx = newFixture(`up-choices-${max}`, [boot(), report()]);
+      expect(await start(fx, `up-choices-${max}`, { SANDBOX_AGENT_MAX_INSTANCE: max })).toBe(
+        "completed",
+      );
+      const choices = await runInDO(fx.stub, (inst) => inst.piHooks().sandboxScaleUpChoices());
+      expect(choices).toEqual(expected);
+    }
+  });
+
+  it("上限に収まらない名前を頼まれたときの拒否の文も、上限までの名前だけを並べる", async () => {
+    const fx = newFixture("up-reject-text", [boot(), scale("standard-9"), report()]);
+    fx.sandbox.scaleUpResults = [
+      { outcome: "rejected", code: "invalid_instance", instance: "standard-2", max: "standard-3" },
+    ];
+    expect(await start(fx, "up-reject-text")).toBe("completed");
+    const seen = (fx.modelCalls.toolResults[2] ?? []).join("\n");
+    expect(seen).toContain("standard-1, standard-2, standard-3");
+    expect(seen).not.toContain("standard-4");
+  });
+});
+
+describe("sameUsage: 的中の本数・失敗の内訳の違いも別の usage として扱う（usage イベントを出し直す）", () => {
+  const base = { ...ZERO_USAGE, sandbox: { runtimeMs: 1, restarts: 0, bootRetries: 0 } };
+  it("本数が違う・内訳が違うと同じではない。同じなら同じ", () => {
+    const a = { ...base, sandbox: { ...base.sandbox, heavyCommandsCoveredByAgent: 1 } };
+    expect(
+      sameUsage(a, { ...base, sandbox: { ...base.sandbox, heavyCommandsCoveredByAgent: 1 } }),
+    ).toBe(true);
+    expect(
+      sameUsage(a, { ...base, sandbox: { ...base.sandbox, heavyCommandsCoveredByAgent: 2 } }),
+    ).toBe(false);
+    const f = { trigger: "rule", reason: "snapshot_failed" } as const;
+    const b = { ...base, sandbox: { ...base.sandbox, promotionFailures: [f] } };
+    expect(sameUsage(b, { ...base, sandbox: { ...base.sandbox, promotionFailures: [f] } })).toBe(
+      true,
+    );
+    expect(sameUsage(b, base)).toBe(false);
   });
 });

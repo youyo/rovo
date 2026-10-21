@@ -559,3 +559,152 @@ describe("SandboxDO.scaleUp: serial（実行中のコマンドと競合させな
     });
   });
 });
+
+describe("SandboxDO: 子の見立ての的中（heavyCommandsCoveredByAgent）", () => {
+  it("子が規則の昇格先以上に上げたあと、規則で重いと判定されたコマンドは的中として数える。軽いコマンド・検証の heavy フラグだけのものは数えない", async () => {
+    await runInDO(sandboxStub("covered-hit"), async (inst) => {
+      setup(inst, AGENT_MAX);
+      await inst.ensureReady(spec());
+      await inst.scaleUp("standard-4");
+      await inst.exec(LIGHT);
+      await inst.exec(["vitest", "run"]);
+      await inst.exec(["pnpm", "test"]);
+      await inst.exec(["./scripts/check.sh"], { heavy: true });
+      const m = await inst.metrics();
+      expect(m.heavyCommandsAfterAgentScaleUp).toBe(2);
+      expect(m.heavyCommandsCoveredByAgent).toBe(2);
+    });
+  });
+
+  it("子が上げたが規則の昇格先に届かなかったときは的中ではない。規則が拾い、promotions は agent → rule の順になる", async () => {
+    await runInDO(sandboxStub("covered-short"), async (inst) => {
+      const fake = setup(inst, { ...AGENT_MAX, SANDBOX_HEAVY_INSTANCE: "standard-4" });
+      await inst.ensureReady(spec());
+      await inst.scaleUp("standard-3");
+      await inst.exec(HEAVY);
+      expect(fake.currentInstance).toBe("standard-4");
+      const m = await inst.metrics();
+      expect(m.promotions.map((p: { trigger: string }) => p.trigger)).toEqual(["agent", "rule"]);
+      expect(m.heavyCommandsAfterAgentScaleUp).toBe(1);
+      expect(m.heavyCommandsCoveredByAgent).toBe(0);
+      expect(m.promotionFailures).toBeUndefined();
+    });
+  });
+
+  it("子が上げていなければ付かない（規則だけで上がったタスク）", async () => {
+    await runInDO(sandboxStub("covered-none"), async (inst) => {
+      setup(inst, AGENT_MAX);
+      await inst.ensureReady(spec());
+      await inst.exec(HEAVY);
+      await inst.exec(HEAVY);
+      const m = await inst.metrics();
+      expect(m).not.toHaveProperty("heavyCommandsCoveredByAgent");
+      expect(m).not.toHaveProperty("heavyCommandsAfterAgentScaleUp");
+    });
+  });
+
+  it("規則の昇格を無効にしているデプロイでは、的中として数えない（防ぐ対象が無い）", async () => {
+    await runInDO(sandboxStub("covered-disabled"), async (inst) => {
+      setup(inst, { ...AGENT_MAX, SANDBOX_HEAVY_INSTANCE: "off" });
+      await inst.ensureReady(spec());
+      await inst.scaleUp("standard-4");
+      await inst.exec(HEAVY);
+      const m = await inst.metrics();
+      expect(m.heavyCommandsAfterAgentScaleUp).toBe(1);
+      expect(m.heavyCommandsCoveredByAgent).toBe(0);
+    });
+  });
+
+  it("規則がすでに昇格したあとで子が上げた場合は、以降のコマンドを的中として数えない（規則が昇格しなくて済んだわけではない）", async () => {
+    await runInDO(sandboxStub("covered-after-rule"), async (inst) => {
+      setup(inst, AGENT_MAX);
+      await inst.ensureReady(spec());
+      await inst.exec(HEAVY); // 規則で standard-3
+      await inst.scaleUp("standard-4");
+      await inst.exec(HEAVY);
+      const m = await inst.metrics();
+      expect(m.heavyCommandsAfterAgentScaleUp).toBe(1);
+      expect(m.heavyCommandsCoveredByAgent).toBe(0);
+    });
+  });
+});
+
+describe("SandboxDO: 昇格の失敗の内訳（promotionFailures）", () => {
+  it("規則の昇格がスナップショットの失敗で見送られたら { trigger: rule, reason: snapshot_failed } を 1 件足す。promotionReason は最後の理由のまま", async () => {
+    await runInDO(sandboxStub("fail-rule-snap"), async (inst) => {
+      const fake = setup(inst, AGENT_MAX);
+      fake.snapshotResult = new Error("boom");
+      await inst.ensureReady(spec());
+      await inst.exec(HEAVY);
+      const m = await inst.metrics();
+      expect(m.promotionFailures).toEqual([{ trigger: "rule", reason: "snapshot_failed" }]);
+      expect(m.promotionReason).toBe("snapshot_failed");
+    });
+  });
+
+  it("子の要求の失敗は trigger agent で足す。何度失敗しても 1 回ごとに 1 件、最大 8 件で、超えた分は捨てる", async () => {
+    await runInDO(sandboxStub("fail-agent-max"), async (inst) => {
+      const fake = setup(inst, AGENT_MAX);
+      fake.snapshotResult = new Error("boom");
+      await inst.ensureReady(spec());
+      await inst.scaleUp("standard-3");
+      expect((await inst.metrics()).promotionFailures).toEqual([
+        { trigger: "agent", reason: "snapshot_failed" },
+      ]);
+      for (let i = 0; i < 11; i++) await inst.scaleUp("standard-3");
+      const m = await inst.metrics();
+      expect(m.promotionFailures).toHaveLength(8);
+      expect(m.promotionFailures.every((f: { trigger: string }) => f.trigger === "agent")).toBe(
+        true,
+      );
+    });
+  });
+
+  it("検証コマンド（heavy）の見送りは trigger verification。task_start で大きさを固定したタスクは fixed_instance", async () => {
+    await runInDO(sandboxStub("fail-verification-fixed"), async (inst) => {
+      setup(inst, AGENT_MAX);
+      await inst.ensureReady(spec({ instance: "standard-1" }));
+      await inst.exec(["./scripts/check.sh"], { heavy: true });
+      expect((await inst.metrics()).promotionFailures).toEqual([
+        { trigger: "verification", reason: "fixed_instance" },
+      ]);
+    });
+  });
+
+  it("昇格先の起動の失敗と、元の大きさでの起動し直しの失敗は、それぞれ 1 件ずつ足す", async () => {
+    await runInDO(sandboxStub("fail-start-fallback"), async (inst) => {
+      const fake = setup(inst, AGENT_MAX);
+      fake.failStartFor.add("standard-3");
+      fake.failStartFor.add("standard-2");
+      await inst.ensureReady(spec());
+      await expect(inst.scaleUp("standard-3")).rejects.toThrow(/restarted/);
+      expect((await inst.metrics()).promotionFailures).toEqual([
+        { trigger: "agent", reason: "start_failed" },
+        { trigger: "agent", reason: "fallback_failed" },
+      ]);
+    });
+  });
+
+  it("子が先に昇格先以上へ上げていて規則が見送るのは失敗ではない。足さない", async () => {
+    await runInDO(sandboxStub("fail-not-for-covered"), async (inst) => {
+      setup(inst, AGENT_MAX);
+      await inst.ensureReady(spec());
+      await inst.scaleUp("standard-3");
+      await inst.exec(HEAVY);
+      const m = await inst.metrics();
+      expect(m).not.toHaveProperty("promotionFailures");
+      expect(m.heavyCommandsCoveredByAgent).toBe(1);
+    });
+  });
+
+  it("失敗が無ければ付かない。拒否（上限超え・不正な名前）や何もしない要求も足さない", async () => {
+    await runInDO(sandboxStub("fail-none"), async (inst) => {
+      setup(inst, { SANDBOX_AGENT_MAX_INSTANCE: "standard-3" });
+      await inst.ensureReady(spec());
+      await inst.scaleUp("standard-4");
+      await inst.scaleUp("lite");
+      await inst.scaleUp("standard-2");
+      expect(await inst.metrics()).not.toHaveProperty("promotionFailures");
+    });
+  });
+});

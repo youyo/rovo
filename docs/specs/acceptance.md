@@ -673,10 +673,14 @@ DNS rebinding の名前は、ユーザーが管理するドメインの DNS で�
 - [ ] **3 → 4（2 回目の昇格）**: 子が `standard-3` に上げた後で `standard-4` を頼み（または規則で `standard-3` に上がった後に子が頼み）、本番のスナップショットで 2 回目も成功する（`usage.sandbox_promotions` が 2 件、`sandbox_promoted_to` が `standard-4`、ログに `standard-3 -> standard-4 (agent)`、`sandbox_promotion_reason` が付かない）。スナップショットの名前は `promote-<task_id>-<回数>` で、回数ごとに別になる
 - [ ] **上限**: `SANDBOX_AGENT_MAX_INSTANCE` を `standard-3` にして再デプロイし、子が `standard-4` を頼むと拒否され（子には上限を伝える結果が返り）、大きさは変わらない。`sandbox_instances_list` の `agent_max` が `standard-3` だけ `true`
 - [ ] **上げるだけ**: 子が今と同じか小さい大きさを頼んでも何も起きず、エラーにならず、今の大きさが返る（スナップショットも取られない）
-- [ ] **固定（fixed_instance）**: `sandbox_instance: standard-1` を明示したタスクでは、ツールが「固定されている」を返して何もしない。子へのプロンプトにツールの説明が出ない
+- [ ] **固定（fixed_instance）**: `sandbox_instance: standard-1` を明示したタスクでは、`sandbox_scale_up` が子のツール一覧に出ない（呼べない）。子へのプロンプトにもツールの説明が出ない
 - [ ] **無効にする**: `sandbox.agentMaxInstance` を `null` にして再デプロイすると、子のツール一覧に `sandbox_scale_up` が出ない。`sandbox_instances_list` の `agent_max` がどれも `false`。規則による自動の昇格は残る
 - [ ] **実行中のコマンドと競合しない**: 子の長いコマンドの実行中に頼んでも、コマンドが終わってから上がる。上がった後のコンテナでバックグラウンドのプロセスは止まっているが、作業ツリー（未 commit の変更を含む）は残る
 - [ ] **使えないとき（fail-soft）**: スナップショットが使えない状態では、ツールは失敗の理由コード（`snapshot_failed` など）を返し、タスクは失敗せず今の大きさで進む。`usage.sandbox_promotion_reason` に固定のコードが付く
+- [ ] **的中（covered_by_agent）**: 子が `standard-3` 以上に上げたあとで `vitest` など規則に当たる重いコマンドを流したタスクの `usage.sandbox_heavy_commands_covered_by_agent` が、そのコマンドの本数（`sandbox_heavy_commands_after_agent_scale_up` 以下）になる。子が上げていないタスクには付かない。`SANDBOX_HEAVY_INSTANCE` を空にしたデプロイでは 0。規則で先に上がったタスクの、その後のコマンドは数えない
+- [ ] **上げ不足と見逃しの区別**: `SANDBOX_HEAVY_INSTANCE` を `standard-4` にして、子が `standard-3` に上げたあとで重いコマンドを流すと、規則が追加で上げ、`usage.sandbox_promotions` が `agent` → `rule` の順になる（上げ不足）。子がツールを呼ばなかったタスクは `rule` だけ（見逃し）。どちらも `sandbox_heavy_commands_covered_by_agent` は 0 か付かない
+- [ ] **失敗の内訳（sandbox_promotion_failures）**: スナップショットが使えない状態で、子の要求と規則の昇格がそれぞれ失敗したタスクの `usage.sandbox_promotion_failures` に `{trigger: "agent", reason: "snapshot_failed"}` と `{trigger: "rule", reason: "snapshot_failed"}` が 1 件ずつ付く。`sandbox_promotion_reason` は最後の理由のまま。子が先に上げていて規則が見送ったタスクには入らない。8 件を超えない。`task_summary` の `sandbox.promotion_failures` / `heavy_commands_covered_by_agent` にも同じ値が出る
+- [ ] **ツールの引数の説明**: `SANDBOX_AGENT_MAX_INSTANCE` を `standard-3` にしたとき、子に見えるツールの `instance` の説明に `standard-4` が並ばない
 - [ ] **振り返りの項目**: 子が上げたタスクの `usage.sandbox_heavy_commands_after_agent_scale_up`（その後に規則で重いと判定されたコマンドの本数）が付く。0 なら不要だったかもしれない昇格。`task_summary` の `sandbox.promotions` と `sandbox_segments`（大きさごとの区間）が付き、`sandbox_usd_estimate` が区間ごとの合計（各区間の時間 × その大きさの単価）になっている
 - [ ] 監査ログ・R2 のアーカイブ・`task_summary`・`usage` に、子が書いた理由（`reason`）の文が残っていない。`tool_start` の `summary` は `instance=<大きさ>` だけ。トークンや入力の文面が増えていない
 

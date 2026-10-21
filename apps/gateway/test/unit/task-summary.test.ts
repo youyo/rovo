@@ -515,4 +515,46 @@ describe("Sandbox の複数回の昇格（trigger つきの履歴）と費用の
       "sandbox_promotions",
     );
   });
+
+  it("task_summary: 的中の本数（heavy_commands_covered_by_agent）と失敗の内訳（promotion_failures）を通す。固定の値だけ。無ければ付けない", () => {
+    const s = buildTaskSummary(
+      twice({
+        heavyCommandsCoveredByAgent: 1.7,
+        promotionFailures: [
+          { trigger: "rule", reason: "snapshot_failed" },
+          { trigger: "evil", reason: "snapshot_failed" },
+          { trigger: "agent", reason: "free text" },
+        ],
+      }),
+    );
+    expect(s.sandbox.heavy_commands_covered_by_agent).toBe(1);
+    expect(s.sandbox.promotion_failures).toEqual([{ trigger: "rule", reason: "snapshot_failed" }]);
+    const none = buildTaskSummary(twice());
+    expect(none.sandbox).not.toHaveProperty("heavy_commands_covered_by_agent");
+    expect(none.sandbox).not.toHaveProperty("promotion_failures");
+  });
+
+  it("usage_public: 的中の本数は大きい方を覚える。失敗の内訳（JSON 文字列）は検証して、長い方を覚える。短い報告・壊れた報告で巻き戻さない", () => {
+    const F1 = { trigger: "rule", reason: "snapshot_failed" } as const;
+    const F2 = { trigger: "agent", reason: "start_failed" } as const;
+    let up = mergeUsagePublic(
+      {},
+      {
+        sandbox_heavy_commands_covered_by_agent: 1,
+        sandbox_promotion_failures: JSON.stringify([F1]),
+      },
+    );
+    up = mergeUsagePublic(up, {
+      sandbox_heavy_commands_covered_by_agent: 3,
+      sandbox_promotion_failures: JSON.stringify([F1, F2, { trigger: "x", reason: "y" }]),
+    });
+    up = mergeUsagePublic(up, {
+      sandbox_heavy_commands_covered_by_agent: 2,
+      sandbox_promotion_failures: JSON.stringify([F1]),
+    });
+    up = mergeUsagePublic(up, { sandbox_promotion_failures: "not json" });
+    expect(up.sandbox_heavy_commands_covered_by_agent).toBe(3);
+    expect(up.sandbox_promotion_failures).toEqual([F1, F2]);
+    expect(parseUsagePublic(JSON.stringify(up))).toEqual(up);
+  });
 });

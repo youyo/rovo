@@ -13,7 +13,12 @@ import {
   type SandboxPromotionTrigger,
   type SandboxRuleMatch,
 } from "@rovo/models";
-import type { GitCredential, SandboxMetrics, SandboxPromotionRecord } from "./agent/types";
+import type {
+  GitCredential,
+  SandboxMetrics,
+  SandboxPromotionFailure,
+  SandboxPromotionRecord,
+} from "./agent/types";
 import { appendTestAudit, emitAudit, readTestAudit } from "./audit-adapter";
 import { PROCESS_SCRIPT, PROMOTE_STATE_SCRIPT } from "./container-scripts";
 import { decryptString, encryptString, importEncryptionKey } from "./crypto";
@@ -108,6 +113,8 @@ const MAX_INPUT_PAUSE_MS = 24 * 60 * 60_000;
 const PROMOTE_SNAPSHOT_MS = 2 * 60_000;
 /** 昇格の前後で作業ツリーの状態を読む（HEAD・差分・追跡されていないファイル）のに許す時間 */
 const PROMOTE_STATE_TIMEOUT_MS = 60_000;
+/** usage.sandbox_promotion_failures に残す最大の件数（超えた分は捨てる） */
+const MAX_PROMOTION_FAILURES = 8;
 
 /** 依存関係のキャッシュの ensure（作成を待つことがある）を待つ上限。作成の時間切れ + 余裕 */
 const DEPS_ENSURE_WAIT_MS = DEPS_BUILD_TIMEOUT_MS + 60_000;
@@ -370,6 +377,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const promotedTo = this.ctx.storage.kv.get<SandboxInstance>("promoted_to");
     const promotions = this.ctx.storage.kv.get<SandboxPromotionRecord[]>("promotions");
     const promotionReason = this.ctx.storage.kv.get<SandboxPromotionReason>("promotion_reason");
+    const failures = this.ctx.storage.kv.get<SandboxPromotionFailure[]>("promotion_failures");
     const depsMissReason =
       depsCache === "miss"
         ? this.ctx.storage.kv.get<DepsMissReason>("deps_miss_reason")
@@ -394,8 +402,13 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       // 成功した昇格の履歴（trigger・規則の表の名前つき）と、子が上げたあとの重いコマンドの本数（保険がどのくらい要ったかの振り返り用）
       ...(promotions !== undefined && promotions.length > 0 ? { promotions } : {}),
       ...(this.ctx.storage.kv.get<boolean>("agent_scaled") === true
-        ? { heavyCommandsAfterAgentScaleUp: this.num("heavy_after_agent") }
+        ? {
+            heavyCommandsAfterAgentScaleUp: this.num("heavy_after_agent"),
+            heavyCommandsCoveredByAgent: this.num("heavy_covered"),
+          }
         : {}),
+      // 見送り・失敗の内訳（昇格の試みごとに 1 件。promotionReason は最後の理由だけ）
+      ...(failures !== undefined && failures.length > 0 ? { promotionFailures: failures } : {}),
     };
   }
 
@@ -567,6 +580,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       if (match !== undefined && this.ctx.storage.kv.get<boolean>("agent_scaled") === true) {
         // 子が自分で上げたあとに、規則で重いと判定されたコマンド（保険が要ったかの振り返り用。検証の heavy フラグだけのものは数えない）
         this.ctx.storage.kv.put("heavy_after_agent", this.num("heavy_after_agent") + 1);
+        if (this.coveredByAgent()) {
+          this.ctx.storage.kv.put("heavy_covered", this.num("heavy_covered") + 1);
+        }
       }
       if (options.heavy === true || match !== undefined) {
         const trigger = options.heavy === true ? "verification" : "rule";
@@ -1002,10 +1018,39 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /** 昇格の理由を固定コードで残す（usage.sandbox_promotion_reason と、ログの sandbox_promotion_skipped / _failed） */
-  private recordPromotionReason(reason: SandboxPromotionReason, kind: "skipped" | "failed"): void {
+  private recordPromotionReason(
+    reason: SandboxPromotionReason,
+    kind: "skipped" | "failed",
+    trigger: SandboxPromotionTrigger,
+  ): void {
     this.lastPromotionReason = reason;
     this.ctx.storage.kv.put("promotion_reason", reason);
+    // 内訳（usage.sandbox_promotion_failures）。試みごとに 1 件、最大 MAX_PROMOTION_FAILURES 件（超えた分は捨てる）
+    const failures = this.ctx.storage.kv.get<SandboxPromotionFailure[]>("promotion_failures") ?? [];
+    if (failures.length < MAX_PROMOTION_FAILURES) {
+      this.ctx.storage.kv.put("promotion_failures", [...failures, { trigger, reason }]);
+    }
     console.warn(`[sandbox-promote] sandbox_promotion_${kind}: ${reason}`);
+  }
+
+  /**
+   * 規則の昇格が要らなかったか（子の見立てが当たったか）。子が sandbox_scale_up で上げた大きさが規則の昇格先以上で、
+   * 規則・検証による昇格がまだ起きていないとき。規則の昇格を無効にしているデプロイでは false（防ぐ対象が無い）。
+   */
+  private coveredByAgent(): boolean {
+    const target = resolveHeavySandboxInstance(
+      (this.env as unknown as { SANDBOX_HEAVY_INSTANCE?: string }).SANDBOX_HEAVY_INSTANCE,
+    ).instance;
+    if (target === null) return false;
+    const agentTo = this.ctx.storage.kv.get<string>("agent_scaled_to");
+    if (agentTo === undefined || !Object.hasOwn(SANDBOX_INSTANCES, agentTo)) return false;
+    const ruleDone = (this.ctx.storage.kv.get<SandboxPromotionRecord[]>("promotions") ?? []).some(
+      (p) => p.trigger !== "agent",
+    );
+    return (
+      !ruleDone &&
+      SANDBOX_INSTANCES[agentTo as SandboxInstance].vcpu >= SANDBOX_INSTANCES[target].vcpu
+    );
   }
 
   /** 作業ツリーの状態の指紋（HEAD・追跡ファイルの差分・追跡されていないファイルのハッシュ）。読めなければ undefined */
@@ -1042,7 +1087,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     kv.put("promotion_attempted", true);
     const spec = this.requireSpec();
     const skip = (reason: SandboxPromotionReason) => {
-      this.recordPromotionReason(reason, "skipped");
+      this.recordPromotionReason(reason, "skipped", trigger);
       return "skipped" as const;
     };
     // 明示した大きさ（task_start の sandbox_instance）は、そのタスクの間は固定
@@ -1104,6 +1149,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       if (result === "terminated") return { outcome: "terminated" } as const;
       if (result === "done") {
         this.ctx.storage.kv.put("agent_scaled", true);
+        this.ctx.storage.kv.put("agent_scaled_to", instance);
         return { outcome: "scaled", from: current, to: instance } as const;
       }
       return {
@@ -1127,7 +1173,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const spec = this.requireSpec();
     const current = this.currentInstance();
     const skip = (reason: SandboxPromotionReason) => {
-      this.recordPromotionReason(reason, "skipped");
+      this.recordPromotionReason(reason, "skipped", trigger);
       return "skipped" as const;
     };
     const container = this.container();
@@ -1185,7 +1231,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     }
     alive();
     if (snapshotId === undefined) {
-      this.recordPromotionReason("snapshot_failed", "skipped");
+      this.recordPromotionReason("snapshot_failed", "skipped", trigger);
       if (container.running) this.readyGen = g;
       else await this.runningOrThrowRestarted();
       return "skipped";
@@ -1196,7 +1242,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       await this.destroyContainer(this.bootDestroyMs);
     } catch {
       alive();
-      return this.promotionFallbackFailed();
+      return this.promotionFallbackFailed(trigger);
     }
     alive();
     const ranMs = this.num("rt_total");
@@ -1270,19 +1316,19 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       return "done";
     }
     // 昇格先が使えない: 同じスナップショットで元の大きさに起動し直す（作業ツリーを失わない）
-    this.recordPromotionReason(failure, "failed");
+    this.recordPromotionReason(failure, "failed", trigger);
     const back = await startFromSnapshot(current);
     if (back === undefined) {
       this.readyGen = g;
       await this.armAlarm();
       return "skipped";
     }
-    return this.promotionFallbackFailed();
+    return this.promotionFallbackFailed(trigger);
   }
 
   /** 元の大きさでも起動し直せなかった: image からの起動（作業ツリーの作り直し）に乗せる。「再起動した」例外になる */
-  private async promotionFallbackFailed(): Promise<"skipped"> {
-    this.recordPromotionReason("fallback_failed", "failed");
+  private async promotionFallbackFailed(trigger: SandboxPromotionTrigger): Promise<"skipped"> {
+    this.recordPromotionReason("fallback_failed", "failed", trigger);
     await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
     await this.runningOrThrowRestarted();
     return "skipped";

@@ -440,3 +440,51 @@ describe("usage の Sandbox の昇格の履歴（sandbox_promotions）と、子�
     expect(promotionsOf(p)).toHaveLength(8);
   });
 });
+
+describe("usage の的中の本数（sandbox_heavy_commands_covered_by_agent）と昇格の失敗の内訳（sandbox_promotion_failures）", () => {
+  const usage = (sandbox: Record<string, unknown>) =>
+    payloadOf(mapAgentEvent(ev("usage", { costUsd: 1, sandbox: { runtimeMs: 100, ...sandbox } })));
+  const coveredKey = "sandbox_heavy_commands_covered_by_agent";
+  const failuresOf = (p: Record<string, unknown>) =>
+    JSON.parse(String(p.sandbox_promotion_failures)) as Record<string, unknown>[];
+
+  it("的中の本数は数値のときだけ付く（整数に切り捨て）。0 も付く。無ければ付けない", () => {
+    expect(usage({ heavyCommandsCoveredByAgent: 2.9 })[coveredKey]).toBe(2);
+    expect(usage({ heavyCommandsCoveredByAgent: 0 })[coveredKey]).toBe(0);
+    expect(usage({})).not.toHaveProperty(coveredKey);
+    expect(usage({ heavyCommandsCoveredByAgent: "3" })).not.toHaveProperty(coveredKey);
+    expect(usage({ heavyCommandsCoveredByAgent: -1 })[coveredKey]).toBe(0);
+  });
+
+  it("失敗の内訳は JSON 文字列の配列にして写す。固定の trigger と理由コード以外の要素・キーは捨て、8 件まで", () => {
+    const p = usage({
+      promotionFailures: [
+        { trigger: "rule", reason: "snapshot_failed" },
+        { trigger: "agent", reason: "start_failed", text: "secret-text" },
+        { trigger: "me", reason: "start_failed" },
+        { trigger: "rule", reason: "rm -rf /" },
+        { trigger: "verification" },
+        "x",
+        null,
+        ...Array.from({ length: 12 }, () => ({ trigger: "agent", reason: "fallback_failed" })),
+      ],
+    });
+    expect(typeof p.sandbox_promotion_failures).toBe("string");
+    const f = failuresOf(p);
+    expect(f).toHaveLength(8);
+    expect(f.slice(0, 2)).toEqual([
+      { trigger: "rule", reason: "snapshot_failed" },
+      { trigger: "agent", reason: "start_failed" },
+    ]);
+    expect(String(p.sandbox_promotion_failures)).not.toContain("secret-text");
+    expect(String(p.sandbox_promotion_failures)).not.toContain("rm -rf");
+  });
+
+  it("無い・配列でない・全部不正なら付けない", () => {
+    for (const bad of [undefined, null, "x", {}, [], [{ trigger: "evil", reason: "x" }]]) {
+      expect(usage({ promotionFailures: bad }), JSON.stringify(bad)).not.toHaveProperty(
+        "sandbox_promotion_failures",
+      );
+    }
+  });
+});

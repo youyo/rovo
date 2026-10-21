@@ -13,7 +13,13 @@ import {
   type SandboxPromotionReason,
   sandboxUsdPerHour,
 } from "@rovo/models";
-import { type PublicPromotion, sandboxInstanceName, sanitizePromotions } from "../sandbox-instance";
+import {
+  type PublicPromotion,
+  type PublicPromotionFailure,
+  sandboxInstanceName,
+  sanitizePromotionFailures,
+  sanitizePromotions,
+} from "../sandbox-instance";
 
 /**
  * 単価（USD）。vars で上書きできる。既定値は Cloudflare の公式料金表（取得日 2026-10-19）から取った。出典は phase6.md。
@@ -101,6 +107,10 @@ export type SummaryInput = {
       promotions?: PublicPromotion[];
       /** 子が上げたあと、規則で重いと判定されたコマンドを実行した本数 */
       heavyCommandsAfterAgentScaleUp?: number;
+      /** そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数 */
+      heavyCommandsCoveredByAgent?: number;
+      /** 昇格の試みの見送り・失敗の内訳（固定の trigger と理由コード） */
+      promotionFailures?: PublicPromotionFailure[];
     } | null;
   };
   questions: number;
@@ -148,6 +158,10 @@ export type TaskSummary = {
     promotions?: PublicPromotion[];
     /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数（0 なら不要だった昇格の候補）。子が上げていなければ無い */
     heavy_commands_after_agent_scale_up?: number;
+    /** 上の本数のうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（子の見立ての的中）。子が上げていなければ無い */
+    heavy_commands_covered_by_agent?: number;
+    /** 昇格の試みが見送り・失敗になった記録（固定の trigger と理由コード。古い順、最大 8 件）。無ければ無い */
+    promotion_failures?: PublicPromotionFailure[];
   };
   /** 昇格したタスクだけ: 大きさごとの区間（その大きさで動かした時間 × 単価）。sandbox_usd_estimate はこの合計 */
   sandbox_segments?: {
@@ -243,6 +257,11 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
     typeof sb?.heavyCommandsAfterAgentScaleUp === "number"
       ? Math.floor(nn(sb.heavyCommandsAfterAgentScaleUp))
       : undefined;
+  const coveredByAgent =
+    typeof sb?.heavyCommandsCoveredByAgent === "number"
+      ? Math.floor(nn(sb.heavyCommandsCoveredByAgent))
+      : undefined;
+  const promotionFailures = sanitizePromotionFailures(sb?.promotionFailures);
   const promotionReason = isSandboxPromotionReason(sb?.promotionReason)
     ? sb?.promotionReason
     : undefined;
@@ -283,6 +302,8 @@ export function buildTaskSummary(i: SummaryInput): TaskSummary {
       ...(heavyAfterAgent !== undefined
         ? { heavy_commands_after_agent_scale_up: heavyAfterAgent }
         : {}),
+      ...(coveredByAgent !== undefined ? { heavy_commands_covered_by_agent: coveredByAgent } : {}),
+      ...(promotionFailures.length > 0 ? { promotion_failures: promotionFailures } : {}),
     },
     ...(steps.length > 0 ? { sandbox_segments: segments } : {}),
     sandbox_usd_estimate: usd(
@@ -358,6 +379,7 @@ export const USAGE_PUBLIC_KEYS = [
   "sandbox_promoted_at",
   "sandbox_runtime_ms_before_promotion",
   "sandbox_heavy_commands_after_agent_scale_up",
+  "sandbox_heavy_commands_covered_by_agent",
 ] as const;
 
 export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], number>> & {
@@ -369,6 +391,8 @@ export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], num
   sandbox_promotion_reason?: SandboxPromotionReason;
   /** 成功した昇格の履歴（固定の値だけに検証したもの。昇格は増えるだけなので、長い方を覚える） */
   sandbox_promotions?: PublicPromotion[];
+  /** 昇格の見送り・失敗の内訳（固定の trigger と理由コードだけに検証したもの。増えるだけなので、長い方を覚える） */
+  sandbox_promotion_failures?: PublicPromotionFailure[];
 };
 
 export function parseUsagePublic(json: string | null | undefined): UsagePublic {
@@ -391,9 +415,23 @@ export function parseUsagePublic(json: string | null | undefined): UsagePublic {
       "snake",
     );
     if (promotions.length > 0) out.sandbox_promotions = promotions;
+    const failures = sanitizePromotionFailures(
+      (v as Record<string, unknown>).sandbox_promotion_failures,
+    );
+    if (failures.length > 0) out.sandbox_promotion_failures = failures;
     return out;
   } catch {
     return {};
+  }
+}
+
+/** usage イベントの sandbox_promotion_failures（JSON 文字列）を、検証した配列にする。壊れていれば空 */
+function parseFailuresPayload(v: unknown): PublicPromotionFailure[] {
+  if (typeof v !== "string") return [];
+  try {
+    return sanitizePromotionFailures(JSON.parse(v));
+  } catch {
+    return [];
   }
 }
 
@@ -428,5 +466,9 @@ export function mergeUsagePublic(
   // 履歴は JSON 文字列で届く（payload はプリミティブだけ）。検証して、長い方（新しい方）を覚える
   const incoming = parsePromotionsPayload(payload.sandbox_promotions);
   if (incoming.length > (out.sandbox_promotions?.length ?? 0)) out.sandbox_promotions = incoming;
+  const failures = parseFailuresPayload(payload.sandbox_promotion_failures);
+  if (failures.length > (out.sandbox_promotion_failures?.length ?? 0)) {
+    out.sandbox_promotion_failures = failures;
+  }
   return out;
 }

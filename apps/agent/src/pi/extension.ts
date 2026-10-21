@@ -44,6 +44,8 @@ export interface AgentPiHooks {
   sandboxScaleUp?(args: { instance: string }): Promise<{ text: string; isError: boolean }>;
   /** sandbox_scale_up を子に見せるか（env の SANDBOX_AGENT_MAX_INSTANCE が有効なときだけ。無効・不正なら登録しない） */
   sandboxScaleUpEnabled?(): boolean;
+  /** sandbox_scale_up の instance 引数として子に見せる名前（運用者の上限までの小さい順。上限より大きい名前は含めない） */
+  sandboxScaleUpChoices?(): readonly string[];
   /** システムプロンプトの section（key → 本文。本文が undefined なら出さない） */
   sections(): { key: string; text: string | undefined }[];
 }
@@ -69,6 +71,12 @@ function textOf(output: unknown): string {
       c && typeof c === "object" && "text" in c ? String((c as { text: unknown }).text) : "",
     )
     .join("");
+}
+
+/** 選べる名前を "a, b or c" の形にする（1 つだけならその名前） */
+export function choicesText(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "(none)";
+  return `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`;
 }
 
 export function createAgentExtension(
@@ -196,7 +204,7 @@ export function createAgentExtension(
       "the files in the workspace are kept. Do not retry or cancel it because it looks slow. If it fails you stay at the current size and can continue.",
     parameters: Type.Object({
       instance: Type.String({
-        description: "The size to scale up to: standard-1, standard-2, standard-3 or standard-4",
+        description: `The size to scale up to: ${choicesText(hooks.sandboxScaleUpChoices?.() ?? [])}`,
       }),
       reason: Type.String({
         description:

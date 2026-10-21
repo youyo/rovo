@@ -5,6 +5,8 @@
  * （AgentDO の実際のメソッドの型との比較）が検出する（どちらも typecheck で検査）。
  */
 
+import type { SandboxPromotionReason } from "@rovo/models";
+
 export type AgentPhase =
   | "starting"
   | "running"
@@ -130,8 +132,16 @@ export interface SandboxUsageDto {
     | "invalid_deps";
   /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms。runtimeMs にも含む） */
   cacheBuildMs?: number;
-  /** 実際にコンテナを起動した大きさ（standard-2 など）。一度も起動していなければ無い（Sandbox が必要になるまで起動しない） */
+  /** 最初にコンテナを起動した大きさ（standard-2 など）。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
+  /** 重いコマンドの初回に昇格した先の大きさ。昇格していなければ無い */
+  promotedTo?: string;
+  /** 昇格した時刻（epoch ms） */
+  promotedAt?: number;
+  /** 昇格した時点までの Sandbox の累計時間（ms）。runtimeMs のうち、これまでが instance の単価、残りが promotedTo の単価 */
+  runtimeMsBeforePromotion?: number;
+  /** 昇格を見送った・失敗した理由の固定コード（packages/models の SANDBOX_PROMOTION_REASONS）。昇格が成功したとき・設定で無効のときは無い */
+  promotionReason?: SandboxPromotionReason;
 }
 
 export interface WebUsageDto {

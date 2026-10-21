@@ -59,6 +59,90 @@ afterAll(async () => {
   if (persistDir) rmSync(persistDir, { recursive: true, force: true });
 });
 
+describe("Sandbox の昇格（重いコマンドの初回に大きい Sandbox へ）", () => {
+  type Promo = {
+    instance?: string;
+    promotedTo?: string;
+    promotedAt?: number;
+    runtimeMsBeforePromotion?: number;
+    promotionReason?: string;
+    restarts: number;
+    runtimeMs: number;
+  };
+  const promoMetrics = (c: ReturnType<typeof sandboxClient>) => c.metrics() as Promise<Promo>;
+  /** 重いコマンドとして判定される（vitest を呼ぶ）が、実際には何もせず成功する */
+  const HEAVY = ["bash", "-c", "echo started; vitest --version >/dev/null 2>&1; true"];
+
+  it("軽いコマンドでは昇格しない。起動した大きさは standard-2 のまま", async () => {
+    const c = client("promote-light");
+    await c.ensureReady(specFor("promote-light"));
+    expect((await c.exec(["echo", "light"])).stdout.trim()).toBe("light");
+    const m = await promoMetrics(c);
+    expect(m.instance).toBe("standard-2");
+    expect(m.promotedTo).toBeUndefined();
+    expect(m.promotionReason).toBeUndefined();
+  }, 120_000);
+
+  it("task_start で大きさを明示したタスクは、重いコマンドでも昇格しない（fixed_instance）", async () => {
+    const c = client("promote-fixed");
+    await c.ensureReady(specFor("promote-fixed", { instance: "standard-1" }));
+    const r = await c.exec(HEAVY);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("started");
+    const m = await promoMetrics(c);
+    expect(m.instance).toBe("standard-1");
+    expect(m.promotedTo).toBeUndefined();
+    expect(m.promotionReason).toBe("fixed_instance");
+  }, 120_000);
+
+  it("重いコマンドの初回に昇格する。コマンドは動き、作業ツリー（未 commit の変更）と傍受は残る。2 本目では何も起きず、作り直しは昇格先で起動する", async () => {
+    const c = client("promote-heavy");
+    await c.ensureReady(specFor("promote-heavy"));
+    await c.writeFile("/workspace/keep.txt", "uncommitted\n");
+    const headBefore = (await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim();
+    const statusBefore = (await c.exec(["git", "status", "--porcelain"])).stdout;
+    expect(statusBefore).toContain("keep.txt");
+
+    const r = await c.exec(HEAVY);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("started");
+
+    // 作業ツリーはそのまま（HEAD も未 commit の変更も、ファイルの中身も）
+    expect((await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim()).toBe(headBefore);
+    expect((await c.exec(["git", "status", "--porcelain"])).stdout).toBe(statusBefore);
+    expect((await c.readFile("/workspace/keep.txt")).content).toBe("uncommitted\n");
+    // 新しいコンテナ（昇格した場合）でも、HTTPS の傍受の CA が効いてリモートへの通信が通る
+    expect((await c.exec(["git", "ls-remote", "origin", "HEAD"])).exitCode).toBe(0);
+
+    const m = await promoMetrics(c);
+    expect(m.instance).toBe("standard-2");
+    // ローカルの wrangler dev（workerd + Docker）は snapshotContainer と containerSnapshot での起動に対応しているので、実際に昇格する
+    expect(m.promotedTo).toBe("standard-3");
+    expect(typeof m.promotedAt).toBe("number");
+    expect(m.runtimeMsBeforePromotion ?? -1).toBeGreaterThanOrEqual(0);
+    expect(m.runtimeMsBeforePromotion ?? 0).toBeLessThanOrEqual(m.runtimeMs);
+    expect(m.promotionReason).toBeUndefined();
+    // 昇格はコンテナの作り直し（restarts）に数えない
+    expect(m.restarts).toBe(0);
+
+    // 2 本目の重いコマンドでは、もう何も起きない
+    const before = await promoMetrics(c);
+    expect((await c.exec(HEAVY)).exitCode).toBe(0);
+    const after = await promoMetrics(c);
+    expect(after.promotedTo).toBe(before.promotedTo);
+    expect(after.promotionReason).toBe(before.promotionReason);
+    expect(after.restarts).toBe(0);
+
+    // コンテナが落ちて作り直されたら、作業ツリーは push 済みの状態から作り直される（昇格済みなら昇格先の大きさで起動する）
+    await c.destroy();
+    await c.ensureReady(specFor("promote-heavy"));
+    const restarted = await promoMetrics(c);
+    expect(restarted.restarts).toBe(1);
+    expect(restarted.instance).toBe("standard-2");
+    expect(restarted.promotedTo).toBe(before.promotedTo);
+  }, 280_000);
+});
+
 describe("依存関係のキャッシュ（D14）", () => {
   const depsSpec = (task: string): WorkspaceSpec => ({
     repository: "acme/deps",

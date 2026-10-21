@@ -44,6 +44,7 @@
 | 22 | モデルの選択・予算・consult（D10） | ○（偽の AgentDO・台本） | ○ | 小 | ○ | ○ | 実 Anthropic でキャッシュの効き（2 回目の `cache_read`）と単価を確かめる。OpenAI は BYOK の登録後（任意） |
 | 23 | プロバイダーキーで使えるモデルが決まる・Workers AI のモデル（D10b） | ○（偽の Cloudflare API・偽の AI バインディング・台本） | ○ | 小 | ○ | ○ | 実際の `provider_configs` の応答と、Workers AI の tool calling・usage を確かめる。OpenAI のキーが無い今は `gpt-6-*` が `available: false` |
 | 24 | 依存関係のキャッシュ（D14） | ○（実コンテナの E2E でスナップショットの作成・復元まで。偽の npm・偽の git） | ○（本番のイメージ参照・スナップショットの有効化・時間の短縮） | ○ | ○ | ○ | 同じ lockfile で 2 回続けて実行し、2 回目が `hit` になり、導入の時間ぶん減ることを確かめる |
+| 25 | Sandbox の昇格（重いコマンドの初回に大きい Sandbox へ） | ○（実コンテナの E2E でスナップショット・昇格先の起動・作業ツリーの保持・作り直しまで。fail-soft は Unit で container の API を差し替え） | ○（本番の `standard-3` の起動・按分された推定費用・スナップショットの保管） | ○ | ○ | ○ | 重いテストを流すタスクで `usage.sandbox_promoted_to` が付き、作業ツリーが残り、速くなることを確かめる |
 
 環境の準備が要る個別の項目（節をまたぐ）:
 
@@ -633,3 +634,22 @@ DNS rebinding の名前は、ユーザーが管理するドメインの DNS で�
 3. 結果を Phase 5 の結果表に、ケース名・観測した事実（届いた / 届かない / 判定不能）・判断を書く。
 4. 一時 Worker・DNS の記録・受け口のログを削除する。有効化した設定を元に戻す。削除したことを備考に書く。
 5. 残存リスクを受け入れるかの判断を記録する（D5。受け入れなければ有効にしない。コードは残して既定で無効のまま）。
+
+## 25. Sandbox の昇格（小さく始めて、重いコマンドの初回に大きく。2026-10-21）
+
+重いコマンド（テスト・型検査・ビルドなど）の初回に、Sandbox が `standard-2` から `standard-3` へ昇格することの本番での確認（design 15.8 の昇格）。自動テスト（`test:unit` の agent の `heavy-command` / `sandbox-do-promote`、gateway の `agent-events` / `task-summary` / `mcp`、`test:e2e:docker` の実コンテナでの昇格）は済み。ここでは、本番の Containers（実際の `standard-3` の起動、スナップショットの保管）でだけ確かめられることを見る。
+
+前提: agent と gateway の `SANDBOX_HEAVY_INSTANCE` が `standard-3`（`sandbox.heavyInstance` の既定）、`SANDBOX_INSTANCE` が `standard-2`。スナップショットが使えるアカウント。テストに十数秒以上かかるリポジトリ。
+
+- [ ] **昇格する**: `sandbox_instance` を省略し、重いテストを流すタスクを実行する。`task_result` の `usage.sandbox_instance` が `standard-2`、`usage.sandbox_promoted_to` が `standard-3`、`sandbox_promoted_at` と `sandbox_runtime_ms_before_promotion` が付く。`sandbox_promotion_reason` は付かない。子の最初のテストの前に数十秒の間が空く（`task_wait` のイベントの間隔で確かめる）
+- [ ] **作業ツリーが残る**: 昇格の前に子が行った未 commit の編集とローカルの commit が、昇格後もそのまま残っている（子の最終的な PR の差分に含まれる。「再起動した」エラーが子に返っていない）
+- [ ] **速くなる**: 同じタスクで、昇格したときの `sandbox_runtime_ms` の合計が、`sandbox_instance: standard-2` を明示した（昇格しない）場合と同程度か短い。`sandbox_usd_estimate` が、昇格前後の時間でそれぞれの単価に按分されている（`unit_prices.sandbox_promoted_usd_per_hour` が `standard-3` の単価）
+- [ ] **一度だけ**: 2 本目以降の重いコマンドでは昇格しない（`sandbox_runtime_ms_before_promotion` が変わらない）。ログに `sandbox_promoted: standard-2 -> standard-3` が 1 回だけ出る
+- [ ] **検証コマンド**: 子が重いコマンドを一度も流さずに完了したタスクでも、検証コマンドの実行の前に昇格する
+- [ ] **固定**: `sandbox_instance: standard-1` を明示したタスクは昇格せず、`usage.sandbox_promotion_reason` が `fixed_instance`
+- [ ] **無効にする**: `sandbox.heavyInstance` を `null` にして再デプロイすると、昇格せず、`sandbox_promotion_reason` も付かない。`sandbox_instances_list` の `promotion_target` がどれも `false`
+- [ ] **使えないとき（fail-soft）**: スナップショットが使えない状態では、タスクは失敗せず小さいまま進み、`usage.sandbox_promotion_reason` が `snapshot_unsupported` / `snapshot_failed`（ログに `sandbox_promotion_skipped: <理由>`）
+- [ ] **昇格先の起動に失敗したとき**: 昇格先の大きさを一時的に使えない状態にして、同じスナップショットから元の大きさで起動し直され、作業ツリーが残り、`sandbox_promotion_reason` が `start_failed` 等になる（再現が難しければログの確認で足りる）
+- [ ] **依存キャッシュと両立する**: `usage.deps_cache` が `hit` のタスクで昇格しても、`node_modules` が使える（昇格後の最初のテストが `npm ci` なしで通る）
+- [ ] 監査ログ・R2 のアーカイブ・`task_summary` に、トークンや入力の文面が増えていない（`sandbox_promotion_reason` は固定の 9 値）
+- [ ] **スナップショットの残り方**: 昇格のたびにスナップショットが 1 つ残る。保管の費用と、30 日の期限切れを Cloudflare の画面・料金表で確かめ、備考に書く

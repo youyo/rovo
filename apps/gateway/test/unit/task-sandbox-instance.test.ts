@@ -240,6 +240,51 @@ describe("task_result の usage.sandbox_promotions（昇格の履歴）と子が
   });
 });
 
+describe("task_wait の usage イベント: 昇格の履歴・失敗の内訳は配列で出す（task_result の usage と同じ形）", () => {
+  it("sandbox_promotions / sandbox_promotion_failures は JSON 文字列ではなく配列。ほかの項目はそのまま", async () => {
+    const id = newTaskId();
+    const stub = taskStub(id);
+    const owner = newUserId();
+    const created = await stub.ensureCreated(sampleInput(id, owner));
+    if (!created.ok) throw new Error("create");
+    const agent = fakeAgent(id);
+    await stub.advance();
+    await agent.setUsage(0.1, {
+      sandbox: {
+        runtimeMs: 90_000,
+        restarts: 0,
+        bootRetries: 0,
+        instance: "standard-2",
+        promotedTo: "standard-3",
+        promotedAt: 1_700_000_000_000,
+        runtimeMsBeforePromotion: 30_000,
+        promotions: [
+          { to: "standard-3", at: 1_700_000_000_000, trigger: "clef", runtimeMsBefore: 30_000 },
+        ],
+        promotionFailures: [{ trigger: "clef", reason: "snapshot_failed" }],
+      },
+    } as never);
+    await stub.advance();
+    const w = await createTaskService(env).wait(
+      { githubUserId: owner, login: "alice" },
+      {
+        task_id: id,
+        timeout_seconds: 0,
+      },
+    );
+    if (!w.ok) throw new Error("wait");
+    const usage = w.value.events.filter((e) => e.type === "usage").at(-1)?.payload;
+    expect(usage?.sandbox_promotions).toEqual([
+      { to: "standard-3", at: 1_700_000_000_000, trigger: "clef", runtime_ms_before: 30_000 },
+    ]);
+    expect(usage?.sandbox_promotion_failures).toEqual([
+      { trigger: "clef", reason: "snapshot_failed" },
+    ]);
+    expect(usage?.sandbox_instance).toBe("standard-2");
+    expect(usage?.sandbox_promoted_to).toBe("standard-3");
+  });
+});
+
 describe("task_result の usage: 的中の本数と昇格の失敗の内訳", () => {
   it("agent が報告した値を、公開用の形（固定の値だけ）で返す", async () => {
     const usage = await usageWith({

@@ -50,3 +50,47 @@ describe("scaleCmd: 判断の記録の cmd（コマンドの先頭の語だけ�
     expect(scaleCmd(["bash", "-c", "(cd x && make)"])).toMatch(/^[A-Za-z0-9._+-]*$/);
   });
 });
+
+/** [argv の bash -c の文字列, 期待する cmd, 出力に含まれてはいけない文字列] */
+const SAFE_TABLE: [string, string, string[]][] = [
+  ["VAR=$(cat /etc/secret) pnpm test", "pnpm", ["secret"]],
+  ["A=`x y` pnpm test", "pnpm", ["y"]],
+  ["TOKEN=$(echo sk-abc def) pnpm test", "pnpm", ["def", "sk-abc"]],
+  ["TOKEN=$(echo $(echo a b) c d) pnpm test", "pnpm", ["d"]],
+  ["VAR=$(cat unclosed pnpm test", "bash", ["unclosed", "cat"]],
+  ["A=`unclosed pnpm test", "bash", ["unclosed"]],
+  ["timeout sk-secret pnpm test", "bash", ["sk-secret"]],
+  ["timeout -k ghp_xxx 5 pnpm test", "bash", ["ghp_xxx"]],
+  ["time -p ghp_xxx", "bash", ["ghp_xxx"]],
+  ["nice -n SECRET pnpm", "bash", ["SECRET"]],
+  ["env -Z SECRET pnpm", "bash", ["SECRET"]],
+  ["TOKEN=abc\nghp_second", "bash", ["ghp_second"]],
+  ["TOKEN=abc; ghp_second", "bash", ["ghp_second"]],
+  ["\nghp_second", "bash", ["ghp_second"]],
+  ["--token=xxx", "bash", ["xxx"]],
+  [">secret.txt echo hi", "bash", ["secret"]],
+  ["2>&1 secret", "bash", ["secret"]],
+  // 秘密らしい形の固定文字列はリポジトリの点検（scan:secrets）に拾われるので、実行時に組み立てる
+  [`${"sk"}-${"a1".repeat(20)} run`, "bash", ["sk-"]],
+  [`${"AKIA"}${"A1".repeat(8)} run`, "bash", ["AKIA"]],
+  ['curl -H "Authorization: Bearer sk-secret" https://x', "curl", ["sk-secret", "Bearer"]],
+  ['FOO="a b" pnpm test', "pnpm", ["a b"]],
+  ["cat x | grep SECRET", "cat", ["SECRET"]],
+  ["cat <<EOF\nSECRET\nEOF", "cat", ["SECRET"]],
+  ["$(echo sk-abc) x", "echo", ["sk-abc"]],
+  ['echo "unclosed SECRET', "bash", ["SECRET"]],
+  ["echo 'unclosed SECRET", "bash", ["SECRET"]],
+  ["'unclosed SECRET", "bash", ["SECRET"]],
+  ["9lives run", "bash", ["9lives"]],
+  ["-weird SECRET", "bash", ["weird"]],
+];
+
+describe("scaleCmd: 秘密の断片を cmd に残さない（迷ったら bash に戻す）", () => {
+  for (const [script, expected, forbidden] of SAFE_TABLE) {
+    it(JSON.stringify(script), () => {
+      const out = scaleCmd(["bash", "-c", script]);
+      expect(out).toBe(expected);
+      for (const f of forbidden) expect(out).not.toContain(f);
+    });
+  }
+});

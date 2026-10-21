@@ -181,15 +181,18 @@ function wrapFreeText(e: TaskEvent, fields: readonly string[]): PublicTaskEvent 
  */
 const USAGE_ARRAY_FIELDS = ["sandbox_promotions", "sandbox_promotion_failures"] as const;
 
-function expandUsageArrays(e: TaskEvent): PublicTaskEvent {
+export function expandUsageArrays(e: TaskEvent): PublicTaskEvent {
   const payload: Record<string, PublicEventValue> = { ...e.payload };
   for (const f of USAGE_ARRAY_FIELDS) {
     const v = e.payload[f];
     if (typeof v !== "string") continue;
     try {
       const parsed: unknown = JSON.parse(v);
-      if (Array.isArray(parsed))
-        payload[f] = parsed as Record<string, string | number | boolean | null>[];
+      // 要素がすべてオブジェクトの配列だけ通す（それ以外はキーを外す）
+      const ok =
+        Array.isArray(parsed) &&
+        parsed.every((x) => typeof x === "object" && x !== null && !Array.isArray(x));
+      if (ok) payload[f] = parsed as Record<string, string | number | boolean | null>[];
       else delete payload[f];
     } catch {
       delete payload[f];

@@ -79,6 +79,25 @@ export type ConsultScriptStep = {
   fail?: { code: "model_rejected" | "model_error" };
 };
 
+const STATE_KEY = "fake-agent-state";
+const PROGRAM_KEY = "fake-agent-program";
+
+/** storage に保存する状態（DO が作り直されても台本・イベント・呼び出しの記録を失わないため）。 */
+type Saved = {
+  spec: string | undefined;
+  tombstone: boolean;
+  phase: AgentPhase | undefined;
+  phaseSeq: number;
+  events: AgentEventDto[];
+  usage: UsageDto;
+  stale: boolean;
+  getEventsFails: number;
+  callCounts: FakeCalls;
+  pendingQuestion: string | undefined;
+  seenSteers: string[];
+  consultScripts: [string, ConsultScriptStep][];
+};
+
 const TERMINAL: readonly AgentPhase[] = ["completed", "failed", "budget_exceeded", "cancelled"];
 
 const ZERO_USAGE: UsageDto = {
@@ -95,6 +114,56 @@ const ZERO_USAGE: UsageDto = {
  * 本物と同じ規則だけを持つ: start の冪等と conflict、cancel の tombstone、イベントの seq、phase の終端。
  */
 export class FakeAgentDO extends DurableObject {
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env as never);
+    // wrangler dev は idle な DO を数秒で捨てる（TaskDO の取り込み間隔 10 秒の間にも作り直される）。
+    // メモリだけに状態を置くと、待っている間に phase・events・台本が消えて、タスクが完了しなくなる。
+    // 本物の AgentDO と同じく状態は storage に持ち、作り直されたら読み戻す。
+    ctx.blockConcurrencyWhile(async () => {
+      const saved = await ctx.storage.get<Saved>(STATE_KEY);
+      const program = await ctx.storage.get<FakeProgram>(PROGRAM_KEY);
+      if (saved) this.restore(saved, program ?? {});
+    });
+  }
+
+  private save(): void {
+    const saved: Saved = {
+      spec: this.spec,
+      tombstone: this.tombstone,
+      phase: this.phase,
+      phaseSeq: this.phaseSeq,
+      events: this.events,
+      usage: this.usage,
+      stale: this.stale,
+      getEventsFails: this.getEventsFails,
+      callCounts: this.callCounts,
+      pendingQuestion: this.pendingQuestion,
+      seenSteers: [...this.seenSteers],
+      consultScripts: [...this.consultScripts],
+    };
+    // 出力ゲートが書き込みの完了まで応答を止めるので、await しなくても「応答が返った = 永続化済み」。
+    void this.ctx.storage.put(STATE_KEY, saved);
+    // 台本（getResult の結果など）は大きくなりうる（Unit に 数十 MB の結果を渡すものがある）。
+    // storage の 1 値の上限を超えたら保存を諦める（そういう台本は DO が作り直されない Unit だけで使う）
+    void this.ctx.storage.put(PROGRAM_KEY, this.program).catch(() => {});
+  }
+
+  private restore(saved: Saved, program: FakeProgram): void {
+    this.program = program;
+    this.spec = saved.spec;
+    this.tombstone = saved.tombstone;
+    this.phase = saved.phase;
+    this.phaseSeq = saved.phaseSeq;
+    this.events = saved.events;
+    this.usage = saved.usage;
+    this.stale = saved.stale;
+    this.getEventsFails = saved.getEventsFails;
+    this.callCounts = saved.callCounts;
+    this.pendingQuestion = saved.pendingQuestion;
+    this.seenSteers = new Set(saved.seenSteers);
+    this.consultScripts = new Map(saved.consultScripts);
+  }
+
   private program: FakeProgram = {};
   private spec: string | undefined;
   private tombstone = false;
@@ -130,7 +199,10 @@ export class FakeAgentDO extends DurableObject {
   /** E2E 用: consult の台本を置く（withTestScripts が consult の直前に呼ぶ）。最初の 1 手だけ使う。 */
   setScript(key: string, script: ConsultScriptStep[]): void {
     const first = script[0];
-    if (first) this.consultScripts.set(key, first);
+    if (first) {
+      this.consultScripts.set(key, first);
+      this.save();
+    }
   }
 
   /** E2E 用の診断（/__test/agent/diagnostics の結果）。本物の AgentDO.testDiagnostics の代わり。 */
@@ -141,6 +213,7 @@ export class FakeAgentDO extends DurableObject {
   /** E2E 用: 終端にする（/__test/agent/finish）。結果を渡せば getResult がそれを返す。 */
   testFinish(phase: "completed" | "failed", result?: ResultDto): void {
     if (result !== undefined) this.program = { ...this.program, result };
+    this.save();
     this.setPhase(phase);
   }
 
@@ -155,6 +228,7 @@ export class FakeAgentDO extends DurableObject {
     };
     this.stale = p.staleOnce === true;
     this.getEventsFails = p.getEventsFailures ?? 0;
+    this.save();
   }
 
   calls(): FakeCalls {
@@ -172,6 +246,7 @@ export class FakeAgentDO extends DurableObject {
   ask(questionId: string, message: string, options: string[] = []): void {
     this.append("question", { question_id: questionId, message, options: JSON.stringify(options) });
     this.pendingQuestion = questionId;
+    this.save();
     this.setPhase("input_required");
   }
 
@@ -189,18 +264,21 @@ export class FakeAgentDO extends DurableObject {
     );
     this.phase = next;
     this.phaseSeq = seq;
+    this.save();
     return seq;
   }
 
   /** 累計の usage を更新し、usage イベントを積む。 */
   setUsage(costUsd: number, extra: Partial<UsageDto> = {}): number {
     this.usage = { ...this.usage, ...extra, costUsd };
+    this.save();
     return this.append("usage", this.usage);
   }
 
   private append(type: string, data: unknown): number {
     const seq = this.events.length + 1;
     this.events.push({ seq, ts: Date.now(), type, data: JSON.stringify(data) });
+    this.save();
     return seq;
   }
 
@@ -214,6 +292,7 @@ export class FakeAgentDO extends DurableObject {
     this.callCounts.start++;
     this.callCounts.specs.push(spec);
     const step = this.program.start?.shift() ?? "accept";
+    this.save();
     if (step === "throw") throw new Error("fake agent: start failed");
     const result = this.applyStart(spec, step);
     if (step === "lose") throw new Error("fake agent: start response lost");
@@ -231,6 +310,7 @@ export class FakeAgentDO extends DurableObject {
     const already = this.spec !== undefined;
     if (!already) {
       this.spec = canonical;
+      this.save();
       this.setPhase("starting");
       if (this.program.autoRun !== false) this.setPhase("running");
     }
@@ -240,8 +320,10 @@ export class FakeAgentDO extends DurableObject {
   async cancel(): Promise<CancelResult> {
     this.callCounts.cancel++;
     const step = this.program.cancel?.shift() ?? "stopped";
+    this.save();
     if (step === "throw") throw new Error("fake agent: cancel failed");
     this.tombstone = true;
+    this.save();
     if (this.spec !== undefined && !this.isTerminal()) this.setPhase("cancelled", "cancel");
     if (step === "lose") throw new Error("fake agent: cancel response lost");
     // 契約: stopped:true なら、以後イベントは追加されない。finalSeq は最後のイベントの seq。
@@ -252,18 +334,21 @@ export class FakeAgentDO extends DurableObject {
 
   async getEvents(afterSeq: number, limit: number): Promise<EventsPage> {
     this.callCounts.getEvents++;
+    this.save();
     const failAfter = this.program.getEventsFailAfter;
     if (failAfter !== undefined && this.callCounts.getEvents > failAfter) {
       throw new Error("fake agent: getEvents failed (after)");
     }
     if (this.getEventsFails > 0) {
       this.getEventsFails--;
+      this.save();
       throw new Error("fake agent: getEvents failed");
     }
     // 古いページの再配送: afterSeq を無視して先頭から返す
     let from = afterSeq;
     if (this.stale) {
       this.stale = false;
+      this.save();
       from = 0;
     }
     const delay = this.program.getEventsDelayMs ?? 0;
@@ -289,9 +374,11 @@ export class FakeAgentDO extends DurableObject {
   async setGitCredential(c: GitCredential): Promise<{ ok: boolean }> {
     this.callCounts.setGitCredential++;
     const step = this.program.setGitCredential?.shift() ?? "ok";
+    this.save();
     if (step === "throw") throw new Error("fake agent: setGitCredential failed");
     if (step === "not_ok") return { ok: false };
     this.callCounts.credentials.push(c);
+    this.save();
     if (step === "lose") throw new Error("fake agent: setGitCredential response lost");
     return { ok: true };
   }
@@ -299,9 +386,11 @@ export class FakeAgentDO extends DurableObject {
   async answer(questionId: string, answer: string): Promise<{ ok: boolean; ignored?: boolean }> {
     this.callCounts.answer++;
     const step = this.program.answer?.shift() ?? "ok";
+    this.save();
     if (step === "throw") throw new Error("fake agent: answer failed");
     if (step === "not_ok") return { ok: false };
     this.callCounts.answers.push({ questionId, answer });
+    this.save();
     if (step === "ignored") return { ok: true, ignored: true };
     // 本物と同じ規則: 未回答の質問と一致すれば回答して running に戻る。それ以外（回答済み・終端・不明）は ignored
     if (this.tombstone || this.isTerminal() || this.pendingQuestion !== questionId) {
@@ -309,6 +398,7 @@ export class FakeAgentDO extends DurableObject {
       return { ok: true, ignored: true };
     }
     this.pendingQuestion = undefined;
+    this.save();
     this.append("answered", { question_id: questionId });
     this.setPhase("running");
     if (step === "lose") throw new Error("fake agent: answer response lost");
@@ -318,12 +408,15 @@ export class FakeAgentDO extends DurableObject {
   async steer(steerId: string, message: string): Promise<{ ok: boolean; ignored?: boolean }> {
     this.callCounts.steer++;
     const step = this.program.steer?.shift() ?? "ok";
+    this.save();
     if (step === "throw") throw new Error("fake agent: steer failed");
     if (step === "not_ok") return { ok: false };
     this.callCounts.steers.push({ steerId, message });
+    this.save();
     if (step === "ignored") return { ok: true, ignored: true };
     if (!this.seenSteers.has(steerId) && !this.tombstone && !this.isTerminal()) {
       this.seenSteers.add(steerId);
+      this.save();
       this.append("steer_accepted", { steer_id: steerId });
     }
     if (step === "lose") throw new Error("fake agent: steer response lost");
@@ -337,6 +430,7 @@ export class FakeAgentDO extends DurableObject {
    */
   async consult(req: ConsultRequest): Promise<ConsultResult> {
     this.callCounts.consults.push(req);
+    this.save();
     const step = this.consultScripts.get(req.messages[0]?.content ?? "");
     if (step?.fail) {
       return {
@@ -366,6 +460,7 @@ export class FakeAgentDO extends DurableObject {
 
   async getResult(): Promise<ResultDto> {
     this.callCounts.getResult++;
+    this.save();
     if (this.program.result) return this.program.result;
     const phase = this.phase;
     if (phase === undefined || !this.isTerminal()) return { status: "not_ready" };

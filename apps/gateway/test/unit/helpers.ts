@@ -1,3 +1,4 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { ulid } from "../../src/tasks/ulid";
 import type { FakeAgentDO } from "../support/fake-agent-do";
@@ -44,6 +45,23 @@ export function sampleInput(
     constraints: ["do not merge"],
     ...overrides,
   };
+}
+
+/**
+ * 最初の DO 呼び出しの初期化（モジュール読み込み・SQLite のスキーマ作成など）を済ませておくための、使い捨てのタスクを作る。
+ * setup.ts の beforeAll が呼ぶ。作ったタスクの ID を返す。
+ *
+ * TaskDO は作成の 10 秒後に alarm を置く。alarm が残ると、ファイルの開始から 10 秒後に、そのときに走っている別のテストの
+ * 最中に発火し、偽 GitHub（全テストで共有）へ準備のリクエストを送って、そのテストが張った「1 回だけ失敗させる障害」を
+ * 先に消費してしまう。このタスクは初期化のためだけで、進める必要はないので、alarm は消しておく。
+ */
+export async function warmUpTaskDo(): Promise<string> {
+  const id = newTaskId();
+  const created = await taskStub(id).ensureCreated(sampleInput(id, newUserId()));
+  if (!created.ok) throw new Error("warm-up: ensureCreated");
+  await fakeAgent(id).getEvents(0, 1);
+  await runInDurableObject(taskStub(id), (_i, state) => state.storage.deleteAlarm());
+  return id;
 }
 
 export const FP = "f".repeat(64);

@@ -44,8 +44,8 @@
 | 22 | モデルの選択・予算・consult（D10） | ○（偽の AgentDO・台本） | ○ | 小 | ○ | ○ | 実 Anthropic でキャッシュの効き（2 回目の `cache_read`）と単価を確かめる。OpenAI は BYOK の登録後（任意） |
 | 23 | プロバイダーキーで使えるモデルが決まる・Workers AI のモデル（D10b） | ○（偽の Cloudflare API・偽の AI バインディング・台本） | ○ | 小 | ○ | ○ | 実際の `provider_configs` の応答と、Workers AI の tool calling・usage を確かめる。OpenAI のキーが無い今は `gpt-6-*` が `available: false` |
 | 24 | 依存関係のキャッシュ（D14） | ○（実コンテナの E2E でスナップショットの作成・復元まで。偽の npm・偽の git） | ○（本番のイメージ参照・スナップショットの有効化・時間の短縮） | ○ | ○ | ○ | 同じ lockfile で 2 回続けて実行し、2 回目が `hit` になり、導入の時間ぶん減ることを確かめる |
-| 25 | Sandbox の昇格（重いコマンドの初回に大きい Sandbox へ） | ○（実コンテナの E2E でスナップショット・昇格先の起動・作業ツリーの保持・作り直しまで。fail-soft は Unit で container の API を差し替え） | ○（本番の `standard-3` の起動・按分された推定費用・スナップショットの保管） | ○ | ○ | ○ | 重いテストを流すタスクで `usage.sandbox_promoted_to` が付き、作業ツリーが残り、速くなることを確かめる |
-| 26 | 子が自分で Sandbox を大きくする（sandbox_scale_up） | ○（実コンテナの E2E で 2 → 3 → 4 の 2 回の昇格・作業ツリーの保持・規則との関係・作り直しまで。入口の判定・上限・fail-soft・serial は Unit で container の API を差し替え） | ○（実際のモデルの判断・本番のスナップショットでの 2 回目の昇格・上限・振り返りの項目） | ○ | ○ | ○ | 重いテストを流すタスクで子が自分で上げ（`trigger: agent`）、3 → 4 の 2 回目も動き、`usage.sandbox_promotions` と按分が読めることを確かめる |
+| 25 | Sandbox の昇格（重いコマンドの初回に大きい Sandbox へ。2026-10-22 に規則を Clef に置き換え。26 を参照） | ○（実コンテナの E2E でスナップショット・昇格先の起動・作業ツリーの保持・作り直しまで。fail-soft は Unit で container の API を差し替え） | ○（本番の `standard-3` の起動・按分された推定費用・スナップショットの保管） | ○ | ○ | ○ | 規則の頃の確認の結果を残している（昇格の手順そのものは今も同じ）。重いテストを流すタスクで `usage.sandbox_promoted_to` が付き、作業ツリーが残り、速くなることを確かめた |
+| 26 | Clef による Sandbox の昇格（旧: 規則と sandbox_scale_up を置き換えた。2026-10-22） | ○（実コンテナの E2E で、Clef の応答を仕込んで 2 → 3 → 4 の昇格・作業ツリーの保持・コンテナ内でのリポジトリの設定の収集・作り直し・Clef の失敗の fail-soft まで。確率 → 大きさ・再試行・上限・固定・origin は Unit で AI.run と container の API を差し替え） | ○（実際の Clef の判断の精度・遅延・本番のスナップショットでの 2 回目の昇格・上限・振り返りの項目） | ○ | ○ | ○ | 重いテストを流すタスクで Clef が上げ（`trigger: clef`）、3 → 4 の 2 回目も動き、`usage.sandbox_scale_log` と按分が読めることを確かめる |
 
 環境の準備が要る個別の項目（節をまたぐ）:
 
@@ -638,6 +638,8 @@ DNS rebinding の名前は、ユーザーが管理するドメインの DNS で�
 
 ## 25. Sandbox の昇格（小さく始めて、重いコマンドの初回に大きく。2026-10-21）
 
+> 2026-10-22 に、重いコマンドの規則による昇格と子の `sandbox_scale_up` を、Clef による判断に置き換えた（26 節）。この節は規則の頃の確認の記録として残す（昇格の手順そのもの・作業ツリーの保持・依存キャッシュとの両立は、今も同じ）。以降の確認は 26 節で行う。
+
 重いコマンド（テスト・型検査・ビルドなど）の初回に、Sandbox が `standard-2` から `standard-3` へ昇格することの本番での確認（design 15.8 の昇格）。自動テスト（`test:unit` の agent の `heavy-command` / `sandbox-do-promote`、gateway の `agent-events` / `task-summary` / `mcp`、`test:e2e:docker` の実コンテナでの昇格）は済み。ここでは、本番の Containers（実際の `standard-3` の起動、スナップショットの保管）でだけ確かめられることを見る。
 
 前提: agent と gateway の `SANDBOX_HEAVY_INSTANCE` が `standard-3`（`sandbox.heavyInstance` の既定）、`SANDBOX_INSTANCE` が `standard-2`。スナップショットが使えるアカウント。テストに十数秒以上かかるリポジトリ。
@@ -661,28 +663,28 @@ DNS rebinding の名前は、ユーザーが管理するドメインの DNS で�
 |---|---|---|---|---|
 | youyo | 2026-10-21 | Claude Code、本番（既定 standard-2・昇格先 standard-3） | 昇格する・作業ツリーが残る・一度だけ・依存キャッシュと両立: 合格 | rovo の gateway の vitest を 2 回流すタスク（haiku）。重いテストの開始から約 8 秒で昇格（`sandbox_runtime_ms_before_promotion` 11557）。昇格前のローカルの commit と未 add のファイルが PR の差分に残った。2 回目は昇格せず。`deps_cache` は `hit`。vitest の 1 回目は昇格なし 174 秒 → 昇格あり 127 秒、`sandbox_runtime_ms` の合計は 446 秒 → 301 秒。按分（`task_summary` の `sandbox_usd_estimate`）は未確認。初回は deploy の設定に `SANDBOX_HEAVY_INSTANCE` が入っておらず昇格しなかった（`deploy:config` で作り直して解消） |
 
-## 26. 子が自分で Sandbox を大きくする（sandbox_scale_up。2026-10-21）
+## 26. Clef による Sandbox の昇格（2026-10-22。旧: 規則と sandbox_scale_up を置き換えた）
 
-子（Sandbox で動く LLM）が、重い処理の前に自分で `sandbox_scale_up({ instance, reason })` を呼んで Sandbox を大きくすることの本番での確認（design 15.8 の「子の自己昇格」）。自動テスト（`test:unit` の agent の `sandbox-do-scale-up` / `agent-do-scale-up` / `heavy-command`、gateway の `agent-events` / `task-summary` / `task-sandbox-instance` / `mcp`、`test:deploy:config`、`test:e2e:docker` の `sandbox-do.e2e`）は通っている。ここでは、実際のモデルが正しく判断するか、本番のスナップショットで 2 回目の昇格が動くか、振り返りの項目が実データで読めるかを確かめる。
+コマンドの前に Clef（Workers AI の決定モデル `@cf/cloudflare/clef-flash`。曖昧なときだけ `@cf/cloudflare/clef`）が「今の Sandbox の大きさで足りるか」を判断し、足りなければ上限まで（2 → 3 → 4 と何回でも。上げるだけ）大きい Sandbox へ昇格することの本番での確認（design 15.8 の昇格）。規則（`heavy-command.ts` の表）・子の `sandbox_scale_up`・検証コマンドの強制昇格は削除した。自動テスト（`test:unit` の agent の `sandbox-scale-decision` / `sandbox-do-promote` / `sandbox-do-clef-scale` / `agent-do-scale-usage`、`test:scale-facts`、gateway の `agent-events` / `task-summary` / `task-sandbox-instance` / `mcp`、`test:deploy:config`、`test:e2e:docker` の `sandbox-do.e2e`）は通っている。E2E では実際の Clef は呼ばず、応答を仕込んでいる。ここでは、実際の Clef が正しく判断するか（精度・遅延）、本番のスナップショットで 2 回目の昇格が動くか、デプロイ設定が揃っているかを見る。
 
-前提: agent と gateway の `SANDBOX_AGENT_MAX_INSTANCE` が `standard-4`（`sandbox.agentMaxInstance` の既定）、`SANDBOX_HEAVY_INSTANCE` が `standard-3`、`SANDBOX_INSTANCE` が `standard-2`。25 節が済んでいること。
+前提: agent と gateway の `SANDBOX_MAX_INSTANCE` が `standard-4`（`sandbox.maxInstance` の既定）、`SANDBOX_INSTANCE` が `standard-2`、agent の `AI_GATEWAY_ID` と `ai` バインディングが有効。25 節が済んでいること。旧 `SANDBOX_HEAVY_INSTANCE` / `SANDBOX_AGENT_MAX_INSTANCE` を取り除き、`deploy:config` を作り直してから `deploy:config:check` が通ること。
 
-- [ ] **子がツールで上げる**: `sandbox_instance` を省略し、重いテストを流すタスクを実行する。子がテストの前に `sandbox_scale_up` を呼び、`task_result` の `usage.sandbox_promotions` に `trigger: "agent"` の要素が付き、`rule_match` は付かない。`usage.sandbox_promoted_to` が最終の大きさ、`sandbox_promoted_at` と `sandbox_runtime_ms_before_promotion` が最初の昇格のものになる。ログに `sandbox_promoted: standard-2 -> standard-3 (agent)` が 1 行出る
-- [ ] **表にないコマンドで子が判断する**: `make ci` や独自のシェルスクリプト（`heavy-command.ts` の表に一致しない重い処理）を流すタスクで、子が中身を読んで、そのコマンドの前に自分で上げる（`trigger: "agent"`）。軽い編集・調べものだけのタスクでは呼ばない
-- [ ] **子が上げ忘れたら規則が拾う**: 子がツールを呼ばないまま重いコマンド（`vitest` など）を流したタスクで、規則が昇格し、`usage.sandbox_promotions` が `trigger: "rule"` と `rule_match`（表の名前。コマンドの文字列は入らない）になる。それまでに `agent` の要素が無いことが「子の見逃し」を表す。検証コマンドだけで上がったときは `trigger: "verification"`
-- [ ] **3 → 4（2 回目の昇格）**: 子が `standard-3` に上げた後で `standard-4` を頼み（または規則で `standard-3` に上がった後に子が頼み）、本番のスナップショットで 2 回目も成功する（`usage.sandbox_promotions` が 2 件、`sandbox_promoted_to` が `standard-4`、ログに `standard-3 -> standard-4 (agent)`、`sandbox_promotion_reason` が付かない）。スナップショットの名前は `promote-<task_id>-<回数>` で、回数ごとに別になる
-- [ ] **上限**: `SANDBOX_AGENT_MAX_INSTANCE` を `standard-3` にして再デプロイし、子が `standard-4` を頼むと拒否され（子には上限を伝える結果が返り）、大きさは変わらない。`sandbox_instances_list` の `agent_max` が `standard-3` だけ `true`
-- [ ] **上げるだけ**: 子が今と同じか小さい大きさを頼んでも何も起きず、エラーにならず、今の大きさが返る（スナップショットも取られない）
-- [ ] **固定（fixed_instance）**: `sandbox_instance: standard-1` を明示したタスクでは、`sandbox_scale_up` が子のツール一覧に出ない（呼べない）。子へのプロンプトにもツールの説明が出ない
-- [ ] **無効にする**: `sandbox.agentMaxInstance` を `null` にして再デプロイすると、子のツール一覧に `sandbox_scale_up` が出ない。`sandbox_instances_list` の `agent_max` がどれも `false`。規則による自動の昇格は残る
-- [ ] **実行中のコマンドと競合しない**: 子の長いコマンドの実行中に頼んでも、コマンドが終わってから上がる。上がった後のコンテナでバックグラウンドのプロセスは止まっているが、作業ツリー（未 commit の変更を含む）は残る
-- [ ] **使えないとき（fail-soft）**: スナップショットが使えない状態では、ツールは失敗の理由コード（`snapshot_failed` など）を返し、タスクは失敗せず今の大きさで進む。`usage.sandbox_promotion_reason` に固定のコードが付く
-- [ ] **的中（covered_by_agent）**: 子が `standard-3` 以上に上げたあとで `vitest` など規則に当たる重いコマンドを流したタスクの `usage.sandbox_heavy_commands_covered_by_agent` が、そのコマンドの本数（`sandbox_heavy_commands_after_agent_scale_up` 以下）になる。子が上げていないタスクには付かない。`SANDBOX_HEAVY_INSTANCE` を空にしたデプロイでは 0。規則で先に上がったタスクの、その後のコマンドは数えない。規則・検証の昇格が先に失敗・見送りになって試行を使い切ったあとで子が上げたタスクも数えない（規則の試行が残っていたときだけ数える）。子が先に上げていて規則が見送ったあとの重いコマンドは数え続ける
-- [ ] **上げ不足と見逃しの区別**: `SANDBOX_HEAVY_INSTANCE` を `standard-4` にして、子が `standard-3` に上げたあとで重いコマンドを流すと、規則が追加で上げ、`usage.sandbox_promotions` が `agent` → `rule` の順になる（上げ不足）。子がツールを呼ばなかったタスクは `rule` だけ（見逃し）。どちらも `sandbox_heavy_commands_covered_by_agent` は 0 か付かない
-- [ ] **失敗の内訳（sandbox_promotion_failures）**: スナップショットが使えない状態で、子の要求と規則の昇格がそれぞれ失敗したタスクの `usage.sandbox_promotion_failures` に `{trigger: "agent", reason: "snapshot_failed"}` と `{trigger: "rule", reason: "snapshot_failed"}` が 1 件ずつ付く。`sandbox_promotion_reason` は最後の理由のまま。子が先に上げていて規則が見送ったタスクには入らない。8 件を超えない。`task_summary` の `sandbox.promotion_failures` / `heavy_commands_covered_by_agent` にも同じ値が出る
-- [ ] **ツールの引数の説明**: `SANDBOX_AGENT_MAX_INSTANCE` を `standard-3` にしたとき、子に見えるツールの `instance` の説明に `standard-4` が並ばない
-- [ ] **振り返りの項目**: 子が上げたタスクの `usage.sandbox_heavy_commands_after_agent_scale_up`（その後に規則で重いと判定されたコマンドの本数）が付く。0 なら不要だったかもしれない昇格。`task_summary` の `sandbox.promotions` と `sandbox_segments`（大きさごとの区間）が付き、`sandbox_usd_estimate` が区間ごとの合計（各区間の時間 × その大きさの単価）になっている
-- [ ] 監査ログ・R2 のアーカイブ・`task_summary`・`usage` に、子が書いた理由（`reason`）の文が残っていない。`tool_start` の `summary` は `instance=<大きさ>` だけ。トークンや入力の文面が増えていない
+- [ ] **Clef が上げる**: `sandbox_instance` を省略し、重いテストを流すタスクを実行する。子のテストの前に数秒〜数十秒の間が空き、`task_result` の `usage.sandbox_promotions` に `trigger: "clef"` の要素が付く。`usage.sandbox_promoted_to` が最終の大きさ、`sandbox_promoted_at` と `sandbox_runtime_ms_before_promotion` が最初の昇格のものになる。ログに `sandbox_promoted: standard-2 -> standard-3 (clef)` が出る。`usage.sandbox_scale_log` の該当の判断に、確率（`heavy` / `fast4` / `choice`）・`model`・`clef_ms`・`cmd_ms`・`exit_code`・`cmd`（先頭の語）が付く
+- [ ] **表にないコマンドも判断できる**: `make ci` や独自のシェルスクリプトで重い処理を流すタスクで、Clef がそのコマンド（と並列の手がかり）から上げる。軽い編集・調べものだけのタスクでは上げない（`sandbox_scale_raised` が 0）
+- [ ] **並列の手がかりが効く**: `vitest` の `maxWorkers` が 4 以上・`make -j4` などのリポジトリで `standard-4` が選ばれ、`maxWorkers: 2` や共有ランタイム（`@cloudflare/vitest-pool-workers` の `singleWorker`）のリポジトリでは `standard-3` で止まることが多い（実験では 3 と 4 の選び分けが 52 件中 46〜49 件。実際のタスクで、`sandbox_scale_log` の `heavy` / `fast4` と実行時間から精度を見る）
+- [ ] **3 → 4（2 回目の昇格）**: `standard-3` に上がった後に、4 vCPU でも速いコマンドで `standard-4` に上がり、本番のスナップショットで 2 回目も成功する（`usage.sandbox_promotions` が 2 件、`sandbox_promoted_to` が `standard-4`、ログに `standard-3 -> standard-4 (clef)`、`sandbox_promotion_reason` が付かない）。スナップショットの名前は `promote-<task_id>-<回数>` で、回数ごとに別になる。`standard-4` に上がった後は Clef を呼ばない（`sandbox_scale_decisions` が増えない）
+- [ ] **上限**: `SANDBOX_MAX_INSTANCE` を `standard-3` にして再デプロイすると、`standard-4` に上がらない。`sandbox_instances_list` の `auto_scale_max` が `standard-3` だけ `true`。子に見える state の大きさの一覧にも `standard-4` が出ない
+- [ ] **上げるだけ**: 軽いコマンドの前に Clef が呼ばれても、今の大きさから下がらず、スナップショットも取られない
+- [ ] **固定（fixed_instance）**: `sandbox_instance: standard-1` を明示したタスクは、Clef を呼ばず昇格せず、`usage.sandbox_promotion_reason` が `fixed_instance`（1 回だけ）。`sandbox_scale_decisions` は付かない
+- [ ] **無効にする**: `sandbox.maxInstance` を `null` にして再デプロイすると、Clef を呼ばず昇格せず、`sandbox_promotion_reason` も付かない。`sandbox_instances_list` の `auto_scale_max` がどれも `false`
+- [ ] **Clef が失敗しても止まらない（fail-soft）**: AI Gateway を一時的に止める・`AI_GATEWAY_ID` を空にするなどで Clef が失敗しても、タスクは失敗せず今の大きさで進む。失敗は数回再試行される（1 回 5 秒・最大 3 回・合計 20 秒）。`usage.sandbox_scale_clef_failures` が付き、`sandbox_scale_log` に `failed: true` の判断が残る。`sandbox_promotion_failures` には混ざらない。ログに `sandbox_scale_decision_failed: <固定のコード>` が出て、例外の文面は出ない
+- [ ] **使えないとき（スナップショット）**: スナップショットが使えない状態では、タスクは失敗せず今の大きさで進み、`usage.sandbox_promotion_reason` が `snapshot_unsupported` / `snapshot_failed`、`sandbox_promotion_failures` に `{trigger: "clef", reason: ...}` が 1 件付く
+- [ ] **判断の対象**: 子の `bash` ツールと検証コマンドの前だけ Clef に聞く。AgentDO の git・ファイルの確認などの内部の `exec` では聞かない（`sandbox_scale_decisions` が、子のコマンドの数より増えない）。検証コマンドだけで上がることもある
+- [ ] **実行中のコマンドと競合しない**: 子の長いコマンドの実行中に次のコマンドが来ても、昇格はコマンドの前に行われ、作業ツリー（未 commit の変更を含む）は残る。上がった後のコンテナでバックグラウンドのプロセスは止まっている
+- [ ] **振り返りの項目**: `usage.sandbox_scale_decisions`（判断の回数）・`sandbox_scale_raised`（上げた回数）・`sandbox_scale_clef_failures`・`sandbox_scale_slow_not_raised`（上げなかったのに 60 秒を超えたコマンドの数）が付く。`usage.sandbox_scale_log` は直近 50 件で、`to` / `heavy` / `fast4` / `choice` / `model` / `clef_ms` / `cmd_ms` / `exit_code` / `cmd` が読める。`task_summary` の `sandbox.scale` に集計だけが出て、`sandbox_segments` と `sandbox_usd_estimate` が区間ごとの合計になっている。公開の usage イベント（`task_wait`）には集計の数値だけで、記録の一覧は載らない
+- [ ] **Clef の遅延**: `sandbox_scale_log` の `clef_ms` が通常 1 秒前後（flash の往復は中央値 約 350 ms・p95 約 1 秒）。聞き直し（`model: "clef"`）の割合が多すぎない
+- [ ] **古いタスクの記録が読める**: デプロイ前に完了した（`trigger` が `agent` / `rule` / `verification`、`rule_match` や `sandbox_heavy_commands_*` が付いた）タスクの `task_result` と `task_summary` が、そのまま読める
+- [ ] 監査ログ・R2 のアーカイブ・`task_summary`・`usage` に、コマンドの argv の全体・リポジトリの内容・例外の文面が残っていない（`cmd` は argv[0] の basename だけ）。トークンや入力の文面が増えていない。TaskDO の storage が大きく増えていない（記録の一覧は `task_result` の usage だけ）
 
 ### 26 の結果
 

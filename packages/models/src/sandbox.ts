@@ -48,6 +48,11 @@ export function selectableSandboxInstancesUpTo(max: SandboxInstance): Selectable
  * Clef による昇格の上限の既定（standard-4）。Sandbox は小さく始めて、コマンドの前に Clef（Workers AI の決定モデル）が
  * 「この大きさで足りるか」を判断し、足りなければ上限まで（2 → 3 → 4 と何回でも）上げる。上げるだけで、下げない。
  * 運用者が上限を決める（env SANDBOX_MAX_INSTANCE）。
+ *
+ * standard-4 が速くなるかは負荷の並列の仕方による。本番のベンチマーク（2026-10-22）で、CPU だけの並列処理は standard-3 で 2.0 倍、
+ * standard-4 で 3.5〜3.9 倍速くなった。一方、1 つの workerd を共有する gateway の vitest は standard-3 で 1.42 倍、standard-4 でも
+ * 1.48 倍で頭打ちだった。以前ここに書いていた「4 vCPU にしても速くならない」は、この vitest 固有の結果で、一般には当てはまらない。
+ * 並列の手がかり（ワーカー数など）を見て 3 と 4 を選ぶのは Clef の仕事で、CPU は使った分だけ課金されるので、4 に上げ損ねる損は小さい。
  */
 export const DEFAULT_MAX_SANDBOX_INSTANCE: SelectableSandboxInstance = "standard-4";
 

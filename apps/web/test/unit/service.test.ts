@@ -47,9 +47,9 @@ function makeEnv(over: Record<string, unknown> = {}, ai?: Ai): TestEnv {
 const CTX = { caller: "child" as const, userId: "u1", taskId: "t1" };
 
 describe("loadConfig", () => {
-  it("既定値: provider は ceramic、閾値は block 0.8 / caution 0.4", () => {
+  it("既定値: provider は linkup、閾値は block 0.8 / caution 0.4", () => {
     const c = loadConfig({ ENVIRONMENT: "test", AI_GATEWAY_ID: "gw" } as unknown as Env);
-    expect(c.provider).toBe("ceramic");
+    expect(c.provider).toBe("linkup");
     expect(c.thresholds).toEqual({ block: 0.8, caution: 0.4 });
     expect(c.gatewayId).toBe("gw");
   });

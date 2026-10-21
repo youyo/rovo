@@ -244,7 +244,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `SANDBOX_INSTANCE` | gateway | 任意 | `standard-2` | `sandbox_instances_list` の `default`（`task_start` で `sandbox_instance` を省略したときの大きさ）。agent の同名の var と同じ値にする。`deploy:config` が `sandbox.instance` から両方に入れる。単価の計算には使わない |
 | `SANDBOX_MAX_INSTANCE` | gateway | 任意 | `standard-4` | `sandbox_instances_list` の `auto_scale_max`（Clef が Sandbox を自動で上げる上限）。agent の同名の var と同じ値にする。空・`off`・不正な値は上限なし（どれも `false`）。`deploy:config` が `sandbox.maxInstance` から両方に入れる。**旧 `SANDBOX_HEAVY_INSTANCE` / `SANDBOX_AGENT_MAX_INSTANCE` は廃止**（取り除く）（11） |
 | `SANDBOX_USD_PER_HOUR` | gateway | 任意 | `0.1291`（`standard-2`） | 推定費用の単価（11）。`deploy:config` が `sandbox.instance` から計算する。agent が使った大きさを報告したタスクは、その大きさの単価（表の値）で計算するので、この値は大きさが分からないタスク（Sandbox を起動しなかった・古い agent）にだけ効く |
-| `WEB_USD_PER_1K_SEARCH` | gateway | 任意 | `0.25` | 同上 |
+| `WEB_USD_PER_1K_SEARCH` | gateway | 任意 | `5.00` | 同上 |
 | `WEB_USD_PER_1K_FETCH` | gateway | 任意 | `0` | 同上 |
 | `WEB_USD_PER_1K_BROWSE` | gateway | 任意 | `0.75` | 同上 |
 | `AI_GATEWAY_ID` | agent / web | 必須 | `<YOUR_AI_GATEWAY_ID>` | AI Gateway の ID。**agent は `ai_gateway_id`（Claude 用。byok_only）、web は `ai_web_gateway_id`（Web Search と Clef 用。byok_only なし）で、別の Gateway**（5）。agent で空だと `start` が `ai_gateway_not_configured` で拒否される。web で空だと `websearch` も Clef も呼ばず、web 内部では `misconfigured` として失敗する（fail closed）。MCP のツールからは `internal`（`web research service is not available`）に見える |
@@ -256,10 +256,12 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `SANDBOX_MAX_INSTANCE` | agent | 任意 | （空 = Clef を呼ばず昇格しない。`deploy:config` は `standard-4` を入れる） | Sandbox を自動で上げる上限（`standard-1`〜`standard-4`）。Sandbox は小さく始まり、子のコマンド（と検証コマンド）の前に Clef が「今の大きさで足りるか」を判断し、足りなければ 2 → 3 → 4 と上がる（上げるだけ）。空・`off`・`none`・不正な値（`lite` を含む。警告のログ）は無効。`task_start` で `sandbox_instance` を明示したタスクは、この設定にかかわらず固定で、Clef も呼ばない。Clef やスナップショットが失敗してもタスクは失敗しない（今の大きさのまま続ける）。既存の `ai` バインディングと `AI_GATEWAY_ID` を使い、新しいバインディングも secret も要らない。`rovo.config.json` の `sandbox.maxInstance` で設定する（11） |
 | `SANDBOX_CLEF_THRESHOLDS` | agent | 任意 | （空 = 既定の閾値。`deploy:config` は空を入れる） | Clef の判断の閾値。`heavy=0.5,four=0.4,heavy_band=0.2-0.7,four_band=0.2-0.5` の形で、書いたキーだけ上書きする（`heavy`: 重い確率がこれ未満なら上げない / `four`: 重いとき、4 vCPU で速い確率がこれ以上なら `standard-4` / `heavy_band`・`four_band`: flash の確率がこの帯なら clef で聞き直す）。実験で調整した既定値を変えられるようにしてある。不正な値は既定に戻して警告のログ。変えるなら `rovo.config.json` の `vars.agent.SANDBOX_CLEF_THRESHOLDS` に書く（11） |
 | `DEPS_CACHE_ENABLED` | agent | 任意 | `true` | 依存関係のキャッシュ（17）を使うか。`false` / `0` / `off` で無効（`task_result` の `usage.deps_cache` は `disabled`）。それ以外・未設定は有効。スナップショットが使えなくても失敗はしない（image から普通に起動する）。`rovo.config.json` の `depsCache.enabled` で設定する |
-| `WEB_SEARCH_PROVIDER` | web | 任意 | `ceramic` | 検索プロバイダ（`ceramic` / `exa` / `linkup`）。変えたら単価も合わせる |
+| `WEB_SEARCH_PROVIDER` | web | 任意 | `linkup` | 検索プロバイダ（`ceramic` / `exa` / `linkup`）。変えたら単価も合わせる（linkup $5.00・exa $7.00・ceramic $0.25 / 1,000 回）。選び方は下の「検索プロバイダの選び方」 |
 | `SAFETY_BLOCK_THRESHOLD` | web | 任意 | `0.8` | Policy Engine の閾値（0〜1）。モデルのスコアがこれ以上なら block。**仮の値**で、受入で調整する |
 | `SAFETY_CAUTION_THRESHOLD` | web | 任意 | `0.4` | 同上。caution |
 | `TEST_FAKE_BASE` | web | 本番では不要 | （空） | `ENVIRONMENT=test` のときだけ有効。E2E 専用。本番では設定しない |
+
+> **検索プロバイダの選び方**（`WEB_SEARCH_PROVIDER`。2026-10-22 の本番での比較、29 語 × 3 プロバイダ）: 既定は **linkup**。29/29 成功・日本語だけの検索語 6/6・関連 1.41/2・Zero Data Retention あり・$5.00 / 1,000 回。**exa** は質が最良（関連 1.97）だが、Zero Data Retention がなく（Cloudflare の providers の表）$7.00 / 1,000 回。検索語を保持させたくないなら linkup、質を優先して保持を許せるなら exa。**ceramic** は安い（$0.25）が、日本語だけの検索語のほとんどと「the」「a」で HTTP 502 になる（成功率 76%、日本語だけは 1/6）ので、日本語で使うなら選ばない。Tavily は Web Search API のプロバイダでなく、規約で検索語の学習利用と取り消せないライセンスがあるので採らない。変えるときは `WEB_USD_PER_1K_SEARCH` も合わせる。
 
 > **キャッシュの注意**: ツール呼び出しごとの認可の結果は、UserDO に最大 5 分（`membership_cache` の TTL）キャッシュされる。`ALLOWED_USER_IDS` から ID を外しても、team から外しても、再デプロイ後 TTL が切れるまでは、そのユーザーは有効なままになる（最大 5 分）。
 
@@ -315,7 +317,7 @@ openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem | wrangler secret put GITH
 - agent と web は `AI` バインディングと `AI_GATEWAY_ID`（それぞれ上の Gateway）だけで呼ぶ。バインディングからの呼び出しは認証済みとして扱われるので、`cf-aig-authorization` と gateway token の secret は要らない。
 - Require provider credentials（`byok_only`）をオンにしている。BYOK のキーが無い・外れたときに、Claude の呼び出しが Unified Billing（Cloudflare のクレジット）へ流れず、400 で止まる（Anthropic Console の利用上限が効く経路だけを使う）。Workers AI（Clef-flash）は対象外で、課金にも影響しない。
   - Anthropic のキーは、エイリアスを **`default`** にして登録する。AI バインディングの経路では `default` のキーだけが使われ、別名のキーは参照されない（byok_only なので 400 になる）。
-  - **Web Search API（`env.AI.websearch()`。既定のプロバイダは Ceramic.ai）は、Unified Billing のクレジットで課金される（15.6）。byok_only で 400 になるかは未確認。** `web_search` が 400 で失敗したら、Ceramic.ai などのキーを BYOK で登録するか、byok_only を外す（外すと、Anthropic のキーが無いときに Claude の呼び出しもクレジットで支払われる。上限は読み込んだクレジットの額と `MONTHLY_BUDGET_USD`）。**【実機で確認して追記】**
+  - **Web Search API（`env.AI.websearch()`。既定のプロバイダは Linkup）は、Unified Billing のクレジットで課金される（15.6）。byok_only で 400 になるかは未確認。** `web_search` が 400 で失敗したら、Linkup などのキーを BYOK で登録するか、byok_only を外す（外すと、Anthropic のキーが無いときに Claude の呼び出しもクレジットで支払われる。上限は読み込んだクレジットの額と `MONTHLY_BUDGET_USD`）。**【実機で確認して追記】**
 - **プロバイダーキーの有無で使えるモデルを決める（D10b）**: byok_only なので、Anthropic / OpenAI のキーが AI Gateway に登録されていないと、そのプロバイダーのモデルは 400 で失敗する。gateway が Cloudflare API の List provider keys（`GET /accounts/{account_id}/ai-gateway/gateways/{AI_GATEWAY_ID}/provider_configs`）で登録済みのキーを読み、**alias が `default` のキーがあるプロバイダー**のモデルだけを `models_list` で `available: true` にする（キーが無いモデルは `available: false`・`unavailable_reason: "no_provider_key"` で、`task_start` / `consult` は `model_unavailable` で拒否する）。Workers AI のモデルはキー不要で常に available。どちらのキーも無ければ Workers AI のモデルだけが使え、`model` を省略したときの既定は `workers-ai/@cf/openai/gpt-oss-120b`（`AGENT_MODELS` に入っていること）。結果は 5 分キャッシュする（KV）。API が失敗したときは直前のキャッシュ（24 時間まで）を使い、無ければ判定せず従来どおり `AGENT_MODELS` だけで決める。キーを登録・削除しても、反映まで最大 5 分かかる。
   - **`CLOUDFLARE_API_TOKEN` は Terraform が作る**: `infra/` の `cloudflare_api_token.ai_gateway_read`（権限グループ「AI Gateway Read」だけ。対象はこのアカウント〔`com.cloudflare.api.account.<account_id>`〕だけ）。値は sensitive の output `gateway_cloudflare_api_token` で、`deploy:secrets` が `terraform output -raw` で `wrangler secret put` に流す（画面にも引数にも出さない）。値は Terraform の state に平文で残る（Logpush 用トークンと同じ扱い。`infra/README.md`）。手で作るなら、Cloudflare ダッシュボードの「アカウント API トークン」で Account / AI Gateway / Read だけのカスタムトークンを作り、`wrangler secret put CLOUDFLARE_API_TOKEN` で gateway に入れる。**`CLOUDFLARE_ACCOUNT_ID`** と `AI_GATEWAY_ID` は gateway の vars に `deploy:config` が入れる（`CLOUDFLARE_ACCOUNT_ID` は秘密ではないが、公開の upstream には書かない）。
   - **Workers AI のモデルと料金**: 許可リストに入れたのは、Workers の**無料プランでも使える**モデルだけ（`gpt-oss-120b`・`gpt-oss-20b`・`qwen3.8-27b`・`nemotron-3-120b-a12b`・`glm-4.7-flash`・`gemma-4-26b-a4b-it`）。kimi-k2.7-code・glm-5.2 / 5.3 / 5.3-flash・deepseek-v4 は有料プラン専用なので入れていない（無料プランの運用者が選んでも失敗しないように）。Workers AI の課金は Neurons で、無料枠は **1 日 1 万 Neuron**（超えると、無料プランでは当日はそのモデルの呼び出しが失敗する）。rovo の予算（`budget_status`）は pi-ai のカタログの USD 単価で管理するので、実際の Neuron の使用量とは一致しない（Cloudflare の画面で見る）。Workers AI は顧客データを学習に使わない（Workers AI の docs の Data usage）。Workers AI のモデルは AI バインディング（`env.AI.run`）経由で AI Gateway を通り、BYOK のキーは要らない。
@@ -375,7 +377,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 | 変数 | 既定値 | 内容 |
 |---|---|---|
 | `SANDBOX_USD_PER_HOUR` | 0.1291 | Sandbox コンテナの 1 時間あたり。既定の大きさ `standard-2`（1 vCPU、6 GiB、12 GB）で CPU を 100% 稼働とみなした値。`deploy:config` を使うなら `sandbox.instance` から自動で計算される。`SANDBOX_INSTANCE` を手で変えたら、下の表の値に合わせるか上書きする |
-| `WEB_USD_PER_1K_SEARCH` | 0.25 | `web_search` 1,000 回あたり。既定のプロバイダ（ceramic）の値。`WEB_SEARCH_PROVIDER` を変えたら上書きする |
+| `WEB_USD_PER_1K_SEARCH` | 5.00 | `web_search` 1,000 回あたり。既定のプロバイダ（linkup）の値。`WEB_SEARCH_PROVIDER` を変えたら上書きする |
 | `WEB_USD_PER_1K_FETCH` | 0 | `web_fetch` 1,000 回あたり |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | `web_browse` 1,000 回あたり（1 回 30 秒を上限としたブラウザ時間） |
 

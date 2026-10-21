@@ -63,8 +63,8 @@
     // Sandbox: Containers の standard-2（既定の SANDBOX_INSTANCE。1 vCPU・6 GiB・12 GB）を CPU 100% 稼働で 1 時間（月の無料枠は差し引かない上限側の推定）。
     // 未設定・不正なら packages/models が決める standard-2 の値。agent の SANDBOX_INSTANCE を変えたら、packages/models の sandboxUsdPerHour と同じ値にする
     "SANDBOX_USD_PER_HOUR": "0.1291",
-    // Web（子が使った分）: 1,000 回あたり。search は Web Search API の ceramic、browse は Browser Run 30 秒/回の上限側の推定
-    "WEB_USD_PER_1K_SEARCH": "0.25",
+    // Web（子が使った分）: 1,000 回あたり。search は Web Search API の linkup（既定のプロバイダ）、browse は Browser Run 30 秒/回の上限側の推定
+    "WEB_USD_PER_1K_SEARCH": "5.00",
     "WEB_USD_PER_1K_FETCH": "0",
     "WEB_USD_PER_1K_BROWSE": "0.75",
     // タスク 1 件に予約する予算（USD）。月額の枠（MONTHLY_BUDGET_USD、既定 100）からこの額を予約し、子エージェントの上限（budgetUsd）にも同じ値を渡す。

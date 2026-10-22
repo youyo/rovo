@@ -316,6 +316,13 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 **決定（2026-10-21）: 案 B。** 既存の Terraform 管理の読み取りトークン（`cloudflare_api_token.ai_gateway_read`）に Analytics の Read を足す。**名前は変えず**（再作成で値が変わるのを避ける）、コメントで実態を書く。取れない項目は「取得できない」と表示する。却下: 案 A（要件の主目的のコンテナの稼働が出ない）、案 C（別 secret が増える）。権限の名前は M9 の最初に Cloudflare のドキュメントで確かめる。
 
+**追加（2026-10-22）: 推定の金額（`cost_estimate`）。** 金額が出るのが AI Gateway の費用とクレジット残高だけだったので、ほかの使用量にも推定の金額を付ける（gateway と契約。画面の表示は別のタスク）。
+- 出し方: 項目ごとに **公開の単価 × 使用量**（`apps/gateway/src/dashboard/cloudflare-pricing.ts`。単価・出典 URL・確認日はこのファイルの定数だけ）。対象は Workers のリクエスト、コンテナの vCPU 秒とメモリ GiB 秒、Workers AI の Neuron。コンテナのディスク（GB 秒）は使用量を GraphQL で取っていないので、いまは推定が常に null。
+- **無料枠を引く前**（`basis: "before_free_tier"`、金額の項目名は `estimated_usd_before_free_tier`）: プランに含まれる分（Workers の月 1,000 万リクエスト、Containers の月 25 GiB 時間 / 375 vCPU 分 / 200 GB 時間、Workers AI の 1 日 1 万 Neurons）は引かず、月額（$5）も足さず、期間（`1h` / `24h` / `7d`）を月や日に按分もしない。請求額ではなく上限側の推定。ただし Workers の CPU 時間・Durable Objects・KV・D1・R2・ログ・コンテナの egress は対象外で、vCPU は割り当ての秒数（課金は実使用）なので上限側にずれる。
+- **合計**（`total_estimated_usd_before_free_tier`）: 取れた項目の和で、**AI Gateway の費用（`items.ai_gateway.cost_usd`。Cloudflare の集計値）を含む**。クレジット残高は含めない。取れない項目（forbidden / unavailable / not_configured / empty、ディスク）は推定を null にして合計に含めず、`excluded_items` に項目名を出し、1 つでもあれば `partial: true`。1 つも取れなければ合計も null（0 USD と見せない）。
+- 契約: `cost_estimate` は optional（古い gateway・古い応答・fixtures でもスキーマを通る。既存の項目は変えない）。`pricing_checked_at` は単価を確認した日（未確認は null）。
+- 単価の出典（2026-10-22 に確認。Cloudflare の公式ドキュメント）: Workers `https://developers.cloudflare.com/workers/platform/pricing/`（$0.30 / 100 万リクエスト）、Containers `https://developers.cloudflare.com/containers/platform/pricing/`（vCPU $0.000020 / 秒、メモリ $0.0000025 / GiB 秒、ディスク $0.00000007 / GB 秒）、Workers AI `https://developers.cloudflare.com/workers-ai/platform/pricing/`（$0.011 / 1,000 Neurons）。単価が変わったら、定数・出典・確認日を一緒に直す。
+
 ### D14. 構造化イベント（agent → gateway → 詳細）
 
 - agent に足す新しいイベントの型（名前は仮。`step` 系にまとめるか個別にするかは M7 の最初に決める）。いずれも**マスク済み**（`maskSecrets`）で、**制御文字・ANSI を除き、マルチバイトで切らない**（作業中の「子の出力の整形」を使う）。

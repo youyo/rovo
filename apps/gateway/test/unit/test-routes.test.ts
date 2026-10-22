@@ -74,6 +74,39 @@ describe("E2E 用テストルート /__test/agent/set-script", () => {
   });
 });
 
+describe("E2E 用テストルート /__test/agent/emit（偽の子エージェントにイベントを積ませる）", () => {
+  it("ENVIRONMENT が test 以外なら 404（Worker 全体でも、本物の AgentDO は呼ばれない）", async () => {
+    const res = await SELF.fetch(
+      `${env.PUBLIC_BASE_URL}/__test/agent/emit`,
+      post({ task_id: "T1", type: "command", data: { command: "ls" } }),
+    );
+    expect(res.status).toBe(404);
+    for (const environment of ["production", "", undefined]) {
+      const r = await createDefaultApp().request(
+        "/__test/agent/emit",
+        post({ task_id: "T1", type: "command", data: {} }),
+        withEnv(environment),
+      );
+      expect(r.status).toBe(404);
+    }
+  });
+
+  it("test でも不正な入力は 400", async () => {
+    const app = createDefaultApp();
+    for (const body of [
+      {},
+      { task_id: "bad id!", type: "command", data: {} },
+      { task_id: "T1", type: "", data: {} },
+      { task_id: "T1", type: "command" },
+      { task_id: "T1", type: "command", data: "x" },
+    ]) {
+      expect((await app.request("/__test/agent/emit", post(body), withEnv("test"))).status).toBe(
+        400,
+      );
+    }
+  });
+});
+
 describe("withTestScripts（TaskDO が子エージェントを呼ぶ前に台本を渡す）", () => {
   const spec = { taskId: "T", instructions: "scenario:wt" } as TaskSpec;
 

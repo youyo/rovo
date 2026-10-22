@@ -17,6 +17,7 @@ import { DIRECTORY_NAME, type TaskIndexRow, type TaskIndexSnapshot } from "../di
 import type { DashboardDetailResult } from "../tasks/task-do";
 import { isTaskId } from "../tasks/ulid";
 import { type DashboardSession, requireSession } from "./auth";
+import { toEventDto } from "./events";
 import { jsonResponse } from "./guard";
 
 /**
@@ -409,13 +410,26 @@ async function handleTaskEvents(request: Request, env: Env, taskId: string): Pro
   // 5 秒ごとのポーリングなので、GitHub の取り直しはしない（30 秒のキャッシュ。D6）
   const read = await readAuthorizedTask(env, auth.session, taskId, { fresh: false });
   if (!read.ok) return read.response;
-  // 骨組み: 認可の経路だけを先に通す。イベントの中身（TaskDO の読み取りと整形）は M7
+  // 照合に使った repository_id を渡す。TaskDO が今の値と突き合わせて、食い違えば not_found（照合と読み取りの間に変わらない保証）
+  const repositoryId = read.detail.view.repository_id;
+  if (repositoryId === null) return errorJson(404, "not_found");
+  const result = await env.TASK_DO.getByName(taskId).dashboardEvents(repositoryId, {
+    ...(cursor !== undefined ? { cursor } : {}),
+    ...(before !== undefined ? { before } : {}),
+    limit: LIMITS.eventsPerPage,
+  });
+  if (!result.ok) return errorJson(404, "not_found");
+  // 最後の層: 保存された行をもう一度マスク・整形して契約の DTO にする（契約に合わない行は落とす）
+  const events = result.events.flatMap((row) => {
+    const dto = toEventDto(row);
+    return dto === null ? [] : [dto];
+  });
   const page: TaskEventsPageDto = {
     task_id: read.detail.view.task_id,
-    events: [],
-    oldest_seq: null,
-    newest_seq: null,
-    has_older: false,
+    events,
+    oldest_seq: events[0]?.seq ?? null,
+    newest_seq: events[events.length - 1]?.seq ?? null,
+    has_older: result.has_older,
   };
   return validated(TaskEventsPageDtoSchema, "TaskEventsPageDto", page);
 }

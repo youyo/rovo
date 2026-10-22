@@ -113,6 +113,30 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ ok: true });
   });
 
+  // 偽の子エージェント（E2E の偽 AgentDO）にイベントを 1 つ積ませる。構造化イベント（command など）の台本に使う。
+  // 本物の AgentDO には emit が無いので、gateway 単体の E2E（偽の agent Worker）だけで使う
+  app.post("/__test/agent/emit", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const body = (await c.req.json().catch(() => ({}))) as {
+      task_id?: unknown;
+      type?: unknown;
+      data?: unknown;
+    };
+    const id =
+      typeof body.task_id === "string" && TASK_ID_RE.test(body.task_id) ? body.task_id : undefined;
+    if (!id) return c.json({ error: "task_id is required" }, 400);
+    if (typeof body.type !== "string" || body.type === "" || body.type.length > 64) {
+      return c.json({ error: "type is required" }, 400);
+    }
+    if (typeof body.data !== "object" || body.data === null) {
+      return c.json({ error: "data must be an object" }, 400);
+    }
+    const agent = c.env.AGENT_DO.getByName(id) as unknown as {
+      emit(type: string, data: unknown): Promise<number>;
+    };
+    return c.json({ ok: true, seq: await agent.emit(body.type, body.data) });
+  });
+
   // TaskDO の回答・steer の配送状態（pending / delivered / skipped）
   app.post("/__test/task/deliveries", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();

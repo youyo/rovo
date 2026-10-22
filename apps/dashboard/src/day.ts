@@ -33,6 +33,20 @@ export function shiftDay(day: DayKey, delta: -1 | 1, nowMs: number): DayKey {
   return key < keyOf(new Date(nowMs)) ? key : null;
 }
 
+/**
+ * タスクが始まったローカルの日（started_at、無ければ created_at）。今日・未来・壊れた日時は null（今日）。
+ * `/dashboard/tasks/<ULID>` を開いたとき、一覧で表示する日を決めるのに使う。
+ */
+export function dayOfTask(
+  task: { created_at: string; started_at: string | null },
+  nowMs: number,
+): DayKey {
+  const ms = Date.parse(task.started_at ?? task.created_at);
+  if (Number.isNaN(ms)) return null;
+  const key = keyOf(new Date(ms));
+  return key < keyOf(new Date(nowMs)) ? key : null;
+}
+
 /** 取得する範囲。過去の日はローカル 0 時〜翌日 0 時、今日は 0 時〜いま（D18）。 */
 export function dayRange(day: DayKey, nowMs: number): { from: number; to: number } {
   if (day === null) return localDayRange(nowMs);

@@ -126,16 +126,11 @@ describe("コンソールの見出し（今の表の情報をここに出す）"
     expect(c.querySelector("[data-pr]")?.textContent).toContain("まだありません");
   });
 
-  it("「詳細を開く」リンクは detailHref を渡したときだけ（一覧のコンソール用）", () => {
+  it("個別ページへの「詳細を開く」リンクは出さない（一覧がそのまま詳細）", () => {
     expect([...mount().querySelectorAll("a")].some((a) => a.textContent === "詳細を開く")).toBe(
       false,
     );
-    document.body.innerHTML = "";
-    const c = mount(taskDetailRunningFixture, taskEventsFixture.events, {
-      detailHref: "/dashboard/tasks/ABC",
-    });
-    const link = [...c.querySelectorAll("a")].find((a) => a.textContent === "詳細を開く");
-    expect(link?.getAttribute("href")).toBe("/dashboard/tasks/ABC");
+    expect(mount().querySelector(".con-open")).toBeNull();
   });
 
   it("費用の内訳（トークン）と設定は、見出しの「設定」に畳んである（情報を消さない）", () => {

@@ -38,13 +38,14 @@
 - 運用の状況（費用・タスク・コンテナの稼働）を、Cloudflare のダッシュボードを渡り歩かずに見たい。**読み取り専用**（操作は MCP のまま）。
 - 閲覧者: 組織の全員が全員のタスクを見てよい。ただし**閲覧者が GitHub で見られるリポジトリのタスクだけ**（private の名前・内容を権限の無い人に見せない。閲覧者の GitHub トークンで確かめる）。費用などの集計は全員分でよい。自分のタスクだけに簡単に絞り込める。
 - 画面: 別の SPA（React）。Workers の static assets で gateway から `/dashboard` 配下に配信する。ビルドはデプロイの中で自動で、**デプロイの手順・secret を増やさない**（OSS として誰でもデプロイできる簡単さを崩さない）。過去分（索引を作る前のタスク）は出さない。
-- `task_start` の応答に、そのタスクの詳細ページの URL（`dashboard_url`）を入れる。`task_status` / `task_result` にも入れる。
+- `task_start` の応答に、そのタスクをダッシュボードで開く URL（`dashboard_url`。一覧の画面でそのタスクを選んだ状態になる）を入れる。`task_status` / `task_result` にも入れる。
 
 ## 画面（見本から）
 
-- 骨格（一覧と詳細で同じ）: 上にヘッダ（全員 / 自分、その日の要約）と今日のタイムラインの細い帯。左にタスクのレール（1 行 1 タスク、状態の印 ・ – ✕ ● ? と走行中の脈動）。中央にコンソール。下に tmux 風のステータスバー（今月の予算・全員の実績・モデル別・Cloudflare・クレジット）、「内訳」で詳しい表の引き出しを開く。広い画面はビューポートの高さいっぱいで、スクロールするのはレールとコンソールの中だけ。720px 以下は縦に積み、ページ全体がスクロールする。
-- 日付の前後送り（一覧）: ヘッダの日付の要約の両側に「◀ 前の日」「次の日 ▶」を置く（360px 前後の狭い画面では矢印だけ。名前は `aria-label`）。今日を見ているときは「次の日」を無効にし（未来へは行けない）、今日以外では「今日へ」を出す。見ている日は URL のクエリ `?day=YYYY-MM-DD`（ブラウザのローカルの暦日）が持ち、無い・不正・今日や未来の値は今日として扱う。共有した URL で同じ日が開き、全員 / 自分（`scope`）とは独立に両立する。前後送りは履歴に積む（戻るで元の日へ）。範囲は、過去の日が**その日のローカル 0 時〜翌日 0 時**（夏時間の日も gateway の上限 36 時間に収まる）、今日は従来どおり 0 時〜いま。今日を見ている画面は日付が変わると新しい今日に追従し、過去の日を開いている画面はその日のまま。自動更新の間隔は今日と同じ（終わった日の値は変わりにくいが、前日に始まって走り続けるタスクがあり得る。間隔を分けるより単純さを取る）。過去の日はタイムラインの帯の見出しと空の文言を「この日のタイムライン」「この日のタスクはありません」にし、いまを示す破線とラベルは今日のときだけ出す。ログイン後の戻り先はパスだけなので、未ログインで日付つきの URL を開くとログイン後は今日に戻る。
-- コンソール: 見出し（題名・モデルと選ばれ方・所要・費用・Draft PR）→ 準備→実行→検証→完了の帯（止まった段階は失敗色）→ 画面（構造化イベントを時刻つきの行で、コマンドは `$ コマンド`、実行中は `output.running` の経過時間と点滅カーソル。`prefers-reduced-motion` では点滅しない）。新しい行で末尾へ追従し、利用者が上にスクロールしている間は追従しない。一覧のコンソールは、最新の走行中のタスク（なければ最新のタスク）。
+- 個別ページは無い（2026-10-23）: タスクの詳細は一覧の右のコンソールだけで、「詳細を開く」リンクも戻るリンクも置かない。`/dashboard/tasks/<ULID>` は残し（MCP の `dashboard_url` と mod のリンクの行き先）、開くと一覧の画面でそのタスクを選んだ状態になる（コンソールに出し、レールで選択）。表示する日はそのタスクが始まったローカルの暦日（`started_at`、無ければ `created_at`。詳細 API の `task` から取り、今日・取れないときは今日）。URL は `/dashboard?day=` に置き換えない: リロードや共有でも同じタスクが開き、履歴（戻る）に余計な項目が積まれないため。この画面で日付を前後送りすると一覧の URL（`/dashboard/?day=`）に変わり選択は外れ、戻るで元のタスクの表示に戻る。レール・タイムラインのリンクは `/dashboard/tasks/<ULID>` への通常のリンク（全リロード）のままで、同じ日の中で選ぶ。
+- 骨格: 上にヘッダ（全員 / 自分、その日の要約）と今日のタイムラインの細い帯。左にタスクのレール（1 行 1 タスク、状態の印 ・ – ✕ ● ? と走行中の脈動）。中央にコンソール。下に tmux 風のステータスバー（今月の予算・全員の実績・モデル別・Cloudflare・クレジット）、「内訳」で詳しい表の引き出しを開く。広い画面はビューポートの高さいっぱいで、スクロールするのはレールとコンソールの中だけ。720px 以下は縦に積み、ページ全体がスクロールする。
+- 日付の前後送り: ヘッダの日付の要約の両側に「◀ 前の日」「次の日 ▶」を置く（360px 前後の狭い画面では矢印だけ。名前は `aria-label`）。今日を見ているときは「次の日」を無効にし（未来へは行けない）、今日以外では「今日へ」を出す。見ている日は URL のクエリ `?day=YYYY-MM-DD`（ブラウザのローカルの暦日）が持ち、無い・不正・今日や未来の値は今日として扱う。共有した URL で同じ日が開き、全員 / 自分（`scope`）とは独立に両立する。前後送りは履歴に積む（戻るで元の日へ）。範囲は、過去の日が**その日のローカル 0 時〜翌日 0 時**（夏時間の日も gateway の上限 36 時間に収まる）、今日は従来どおり 0 時〜いま。今日を見ている画面は日付が変わると新しい今日に追従し、過去の日を開いている画面はその日のまま。自動更新の間隔は今日と同じ（終わった日の値は変わりにくいが、前日に始まって走り続けるタスクがあり得る。間隔を分けるより単純さを取る）。過去の日はタイムラインの帯の見出しと空の文言を「この日のタイムライン」「この日のタスクはありません」にし、いまを示す破線とラベルは今日のときだけ出す。ログイン後の戻り先はパスだけなので、未ログインで日付つきの URL を開くとログイン後は今日に戻る。
+- コンソール: 見出し（題名・モデルと選ばれ方・所要・費用・Draft PR）→ 準備→実行→検証→完了の帯（止まった段階は失敗色）→ 画面（構造化イベントを時刻つきの行で、コマンドは `$ コマンド`、実行中は `output.running` の経過時間と点滅カーソル。`prefers-reduced-motion` では点滅しない）。新しい行で末尾へ追従し、利用者が上にスクロールしている間は追従しない。コンソールは、タスクの URL ならそのタスク、`/dashboard` なら最新の走行中のタスク（なければ最新のタスク）。
 - 色: `:root` のトークンだけで持ち、`prefers-color-scheme` で切り替える。ライト `paper`（地 `#E3E6E9`、墨 `#1E2932`、藍 `#2D4BA0`、失敗 `#B83A1E`）、ダーク `indigo`（地 `#1B2238`、文字 `#DCE4EE`、白緑 `#7FD6B5`、失敗 `#FF8E72`）。文字のコントラストは全組み合わせで 4.5:1 以上（テストで計算して固定）。
 - 文字: 全体を M PLUS 1 Code（和文が半角 2 文字分の等幅で、コンソールの桁がずれない）。
 - 避けるもの: SaaS カード・影・グラデーション、クリーム＋テラコッタ、黒＋ネオン、全部大文字のラベル、「·」区切り、矢印付きリンク、**色だけの区別**（状態は形・文字でも区別する。アクセシビリティの受入条件にする）。
@@ -142,7 +143,7 @@ path:line は 2026-10-21 時点の origin/main（`c1ddb06`）。
 | B | `apps/gateway` の中に SPA を置く | package が増えない | gateway の依存（workerd 向け）に React / Vite が混ざる。型・lint・テストの設定が衝突する |
 | C | `apps/web` を SPA に転用し、Research Service を改名する | — | 名前の変更が多方面（`rovo-web`・service binding・docs・下流）に及ぶ。却下 |
 
-- **推奨: A**。`apps/dashboard` に React + Vite + TypeScript。ルーターは 2 ルート（一覧・詳細）だけなので、依存を増やさず自前の最小実装にする（M6 で決める）。状態管理ライブラリは入れない（`fetch` + `useReducer` + 小さなポーリングのフック）。チャートは SVG を自前で描く（見本のタイムラインは棒と点だけで、チャートライブラリの重さに見合わない）。
+- **推奨: A**。`apps/dashboard` に React + Vite + TypeScript。ルーターは 2 ルート（一覧・タスクを選んだ一覧）だけなので、依存を増やさず自前の最小実装にする（M6 で決める）。状態管理ライブラリは入れない（`fetch` + `useReducer` + 小さなポーリングのフック）。チャートは SVG を自前で描く（見本のタイムラインは棒と点だけで、チャートライブラリの重さに見合わない）。
 - 理由: 見本の見た目（形で区別する、影を使わない）はライブラリの既定と合わない。依存が少ないほど、OSS としてのサプライチェーンの点検（`pnpm audit`・`licenses`）が軽い。
 - フォントは **自前配信**（assets に同梱。見本の 3 書体はいずれも OFL と思われるが、**ライセンスは取り込み時に確認する**）。外部の Google Fonts に頼ると、CSP が緩くなり、閲覧が外部に漏れる。サブセット化して和文の容量を抑える。
 
@@ -274,7 +275,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 - `assets`: `{ "directory": "../dashboard/dist"（upstream の設定からの相対）, "binding": "ASSETS", "run_worker_first": true }`。`not_found_handling` は使わない（Worker が SPA のフォールバックを自分で決める）。
 - **推奨: `run_worker_first: true`** にして、Worker が `/dashboard/*` だけ `env.ASSETS.fetch` に渡す。それ以外は OAuthProvider（今までどおり）。理由: assets の自動配信に任せると、SPA のフォールバック設定（`not_found_handling: single-page-application`）が `/mcp` や `/.well-known/...` の GET を `index.html` で返しうる（OAuthProvider の経路を飲み込む）。Worker が 1 か所で決めれば、「未知の `/api/*` は JSON 404」「`/dashboard/` 以外の HTML は返さない」を 1 つのテストで固定できる。静的ファイルの取得が Worker の呼び出しとして課金対象になる点は許容する（アクセスは組織の内部だけ）。
-- SPA のフォールバック（Worker 内）: `GET /dashboard`・`/dashboard/` と `/dashboard/tasks/<ULID>` → `index.html`。`/dashboard/assets/*` はファイルがあればそれ、無ければ 404（`index.html` を返さない。壊れたスクリプトが HTML で返るのを避ける）。
+- SPA のフォールバック（Worker 内）: `GET /dashboard`・`/dashboard/` と `/dashboard/tasks/<ULID>`（一覧の画面でそのタスクを選んだ状態。個別ページではない）→ `index.html`。`/dashboard/assets/*` はファイルがあればそれ、無ければ 404（`index.html` を返さない。壊れたスクリプトが HTML で返るのを避ける）。
 - API のパス: `/dashboard/api/*`（SPA と同じ prefix。Cookie は `Path=/` の `__Host-` なので届く）。`GET` のみ（logout の `POST` を除く）。未知の `/dashboard/api/*` は JSON 404。
 - レスポンスヘッダ（HTML）: `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`（HTML）。`style-src 'self'` に合わせ、**`<style>` 要素とマークアップの `style` 属性を作らない**（動的な値は SVG の属性や CSS クラスで表す。ビルド成果物の検査で `<style` と `style=` が `dist` の HTML に無いことを確かめる）。assets のハッシュ付きファイルは `immutable`。
 - **API の JSON** にも `X-Content-Type-Options: nosniff` と `Cache-Control: no-store`（`Content-Type: application/json`）を付ける。**`Sec-Fetch-Site: cross-site`（および `same-site`）の API 呼び出しは 403** で拒否する（`same-origin` と、ヘッダの無い古いクライアントの扱いは M4 で決める。ヘッダが無い場合はナビゲーション以外の API では拒否を推奨）。CORS ヘッダは出さない。
@@ -349,7 +350,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 - `${PUBLIC_BASE_URL}/dashboard/tasks/<task_id>`。`PUBLIC_BASE_URL` は既に OAuthProvider の issuer に使っている（`index.ts:18`）。末尾の `/` は除く。
 - 付ける場所: `task_start` の応答（`StartValue`、`apps/gateway/src/tasks/service.ts:66`）、`task_status`（`StatusValue` = `TaskView` から `owner_id` を除いたもの、同 `:82`）、`task_result`（`ResultValue`、同 `:92`）。MCP のツールの説明文（`server.ts` の description）と、`START_NOTE` に 1 文足す。`task_wait` には付けない（応答が大きくなるだけ）。
-- 閲覧権限が無い人に URL を渡しても 404 になるだけで、URL 自体は秘密ではない。未ログインでアクセスすると、ログインに進み、**ログイン後に同じ詳細へ戻る**（戻り先は `/dashboard` か `/dashboard/tasks/<ULID>` の正規表現に一致するものだけ。オープンリダイレクトを防ぐ）。
+- 閲覧権限が無い人に URL を渡しても 404 になるだけで、URL 自体は秘密ではない。未ログインでアクセスすると、ログインに進み、**ログイン後に同じタスクを選んだ一覧へ戻る**（戻り先は `/dashboard` か `/dashboard/tasks/<ULID>` の正規表現に一致するものだけ。オープンリダイレクトを防ぐ）。
 - `PUBLIC_BASE_URL` が不正 / 空のとき: `dashboard_url` を**省略**する（`null` ではなくキーを付けない）。
 
 **決定（2026-10-21）: 推奨どおり**（D16）。

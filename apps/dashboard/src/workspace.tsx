@@ -11,16 +11,16 @@ import { type CloudflareDeps, useCloudflare } from "./use-cloudflare";
 import { type OverviewDeps, useOverview } from "./use-overview";
 
 /**
- * ログイン後の画面。一覧 /dashboard と詳細 /dashboard/tasks/:id で同じ骨格:
+ * ログイン後の画面（個別ページは無い）:
  * ヘッダ → 細いタイムライン帯 → 左のレール + 中央のコンソール → 下のステータスバー。
- * 一覧のコンソールは、走行中のタスクがあれば最新の走行中、なければ最新のタスク。詳細は URL のタスク。
+ * コンソールは、/dashboard/tasks/:id ならその URL のタスク。/dashboard は走行中のタスクがあれば最新の走行中、なければ最新のタスク。
  * 自動更新の入切は一覧・Cloudflare・コンソールで共有する（読み取り専用）。
  */
 export function Workspace(props: {
   route: Route;
   scope: Scope;
   onScopeChange: (scope: Scope) => void;
-  /** 表示する日（null = 今日）と、前後送り（一覧だけ） */
+  /** 表示する日（null = 今日）と、前後送り */
   day: DayKey;
   onDayChange: (move: -1 | 1 | "today") => void;
   onUnauthorized: () => void;
@@ -51,11 +51,11 @@ export function Workspace(props: {
 
   const header = (
     <Header
-      route={route}
       scope={scope}
       onScopeChange={props.onScopeChange}
       summary={data ? daySummary(data) : null}
-      {...(route.kind === "overview" ? { day, onDayChange: props.onDayChange } : {})}
+      day={day}
+      onDayChange={props.onDayChange}
     >
       {props.user}
     </Header>
@@ -84,7 +84,6 @@ export function Workspace(props: {
         autoRefresh={autoRefresh}
         onAutoRefreshChange={onAutoRefreshChange}
         onRefreshAlso={refresh}
-        detailHref={route.kind === "overview" ? `/dashboard/tasks/${consoleId}` : undefined}
       />
     );
 

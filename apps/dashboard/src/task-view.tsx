@@ -191,8 +191,6 @@ export function TaskView(props: {
   onAutoRefreshChange: (on: boolean) => void;
   onRefresh: () => void;
   onLoadOlder: () => void;
-  /** 一覧のコンソールのとき、詳細ページへのリンク先（無ければリンクを出さない） */
-  detailHref?: string;
 }) {
   const { detail, events } = props;
   const { task, settings, output } = detail;
@@ -239,11 +237,6 @@ export function TaskView(props: {
             <span className="soft">理由 {singleLine(task.reason)}</span>
           )}
           <span className="grow" />
-          {props.detailHref === undefined ? null : (
-            <a className="con-open" href={props.detailHref}>
-              詳細を開く
-            </a>
-          )}
           <PrInline task={task} />
         </div>
         <p className="now-line">

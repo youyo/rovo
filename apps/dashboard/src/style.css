@@ -169,9 +169,6 @@ fieldset {
 .grow {
   flex: 1 1 auto;
 }
-.back {
-  color: var(--link);
-}
 .seg {
   display: flex;
   gap: 18px;

@@ -213,10 +213,10 @@ describe("scanUnpushedForSecrets（commit ごと）", () => {
   });
 
   it("クォートされたパス（日本語の 8 進・引用符）を元に戻して報告する", async () => {
-    const quoted = '"\\346\\227\\245\\346\\234\\254 \\"q\\".txt"';
+    const quoted = '"b/\\346\\227\\245\\346\\234\\254 \\"q\\".txt"';
     const diff = section(
       SHA_A,
-      `diff --git a/x b/x\n--- /dev/null\n+++ b/${quoted}\n@@ -0,0 +1,1 @@\n+${GHP}\n`,
+      `diff --git a/x b/x\n--- /dev/null\n+++ ${quoted}\n@@ -0,0 +1,1 @@\n+${GHP}\n`,
     );
     const { git } = gitWith("", diff);
     expect(await scanUnpushedForSecrets(git, "HEAD", BASE)).toMatchObject({

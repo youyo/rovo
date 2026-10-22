@@ -317,6 +317,104 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
       expect(command("cd /workspace/ && git status")?.target).toBe("git status");
     });
 
+    it("cd <相対パス> && も /workspace からの相対パスとして、cd /workspace/<相対パス> && と同じに外す", () => {
+      const d = bash('{"command":"cd apps/agent && pnpm exec vitest run"}');
+      expect(d).toMatchObject({
+        what: "コマンドを実行した",
+        target: "pnpm exec vitest run",
+        where: "apps/agent",
+      });
+      expect(d?.target).not.toContain("cd apps/agent");
+      expect(command("cd apps/gateway && pnpm test")).toMatchObject({
+        target: "pnpm test",
+        where: "apps/gateway",
+      });
+      expect(command("cd a && ls")).toMatchObject({ target: "ls", where: "a" });
+      expect(command("cd apps/agent/ && ls")).toMatchObject({ target: "ls", where: "apps/agent" });
+      expect(command("cd a && cd b && ls")).toMatchObject({ target: "cd b && ls", where: "a" });
+      expect(command("cd .git/hooks && ls")).toMatchObject({ target: "ls", where: ".git/hooks" });
+      // 絶対パスで書いたときと同じ見せ方
+      for (const rest of ["apps/agent", "a", "apps/agent/"]) {
+        expect(command(`cd ${rest} && x`), rest).toEqual(command(`cd /workspace/${rest} && x`));
+        expect(bash(JSON.stringify({ command: `cd ${rest} && x` })), rest).toEqual(
+          bash(JSON.stringify({ command: `cd /workspace/${rest} && x` })),
+        );
+      }
+      // 切れた JSON でも外す（… は残る）
+      expect(bash('{"command":"cd apps/agent && pnpm exec vitest ru')).toMatchObject({
+        target: "pnpm exec vitest ru…",
+        where: "apps/agent",
+      });
+    });
+
+    it("先頭の ./ は 1 つだけ外す", () => {
+      expect(command("cd ./apps/agent && ls")).toMatchObject({ target: "ls", where: "apps/agent" });
+      expect(command("cd ./apps/agent/ && ls")).toMatchObject({
+        target: "ls",
+        where: "apps/agent",
+      });
+      expect(command("cd ./a && ls")).toMatchObject({ target: "ls", where: "a" });
+      expect(bash('{"command":"cd ./apps/agent && pnpm test"}')).toMatchObject({
+        target: "pnpm test",
+        where: "apps/agent",
+      });
+      // 2 つ目の ./ は外さない（. の区切りがあるので触らない）
+      for (const c of ["cd ././a && ls", "cd ./. && ls", "cd .//a && ls", "cd ./a/./b && ls"]) {
+        const d = command(c);
+        expect(d?.target, c).toBe(c);
+        expect(d, c).not.toHaveProperty("where");
+      }
+    });
+
+    it("cd . && は場所なしで前置きだけ外す（cd /workspace && と同じ）", () => {
+      for (const c of ["cd . && git status", "cd ./ && git status"]) {
+        const d = command(c);
+        expect(d?.target, c).toBe("git status");
+        expect(d, c).not.toHaveProperty("where");
+      }
+      const b = bash('{"command":"cd . && git status"}');
+      expect(b?.target).toBe("git status");
+      expect(b).not.toHaveProperty("where");
+      expect(command("cd . && git status")).toEqual(command("cd /workspace && git status"));
+    });
+
+    it("相対パスでも、..・~・$HOME・-・引用符・変な文字・空のコマンドはそのまま", () => {
+      for (const c of [
+        "cd .. && ls",
+        "cd ../apps && ls",
+        "cd apps/.. && ls",
+        "cd a/../b && ls",
+        "cd a/./b && ls",
+        "cd a//b && ls",
+        "cd ~ && ls",
+        "cd ~/apps && ls",
+        "cd ~user/apps && ls",
+        "cd $HOME && ls",
+        "cd $HOME/apps && ls",
+        "cd apps/$X && ls",
+        "cd - && ls",
+        "cd -P && ls",
+        "cd -apps && ls",
+        'cd "apps/agent" && ls',
+        "cd 'apps/agent' && ls",
+        'cd apps/"agent" && ls',
+        "cd 'my dir' && ls",
+        "cd a;b && ls",
+        "cd a`b` && ls",
+        "cd a&&b && ls",
+        "cd a &&",
+        "cd a && ",
+        "cd a; ls",
+        "cd /tmp && ls",
+        "cd /workspaces/a && ls",
+        "cd //workspace/a && ls",
+      ]) {
+        const d = command(c);
+        expect(d?.target, c).toBe(c.trim());
+        expect(d, c).not.toHaveProperty("where");
+      }
+    });
+
     it("前置きの無いコマンドはそのまま（場所も付けない）", () => {
       const d = bash('{"command":"pnpm test"}');
       expect(d?.target).toBe("pnpm test");
@@ -697,6 +795,60 @@ describe("nowSentence（「いまは X を実行しています」）", () => {
       target: "pnpm test",
       after: " を実行しています。",
     });
+  });
+  it("cd <相対パス> && も同じ見せ方にする（./ 付き・cd . && も）。..・~・$HOME・-・引用符つきは触らない", () => {
+    const expected = {
+      before: "いまは apps/agent で ",
+      prompt: "$ ",
+      target: "pnpm test",
+      after: " を実行しています。",
+    };
+    expect(sentence(now("tool", "$ cd apps/agent && pnpm test"), "RUNNING")).toEqual(expected);
+    expect(sentence(now("tool", "$ cd ./apps/agent && pnpm test"), "RUNNING")).toEqual(expected);
+    expect(sentence(now("command", "cd apps/agent && pnpm test"), "RUNNING")).toEqual({
+      before: "いまは apps/agent で ",
+      target: "pnpm test",
+      after: " を実行しています。",
+    });
+    expect(sentence(now("command", "cd ./apps/agent/ && pnpm test"), "RUNNING")).toEqual({
+      before: "いまは apps/agent で ",
+      target: "pnpm test",
+      after: " を実行しています。",
+    });
+    // cd . && は前置きだけ外す
+    expect(sentence(now("tool", "$ cd . && ls -la"), "RUNNING")).toEqual({
+      before: "いまは ",
+      prompt: "$ ",
+      target: "ls -la",
+      after: " を実行しています。",
+    });
+    expect(sentence(now("command", "cd . && ls"), "RUNNING")).toEqual({
+      before: "いまは ",
+      target: "ls",
+      after: " を実行しています。",
+    });
+    // 触らない形
+    for (const c of [
+      "cd a/../b && ls",
+      "cd .. && ls",
+      "cd ~ && ls",
+      "cd $HOME && ls",
+      "cd - && ls",
+      'cd "apps/agent" && ls',
+      "cd /tmp && ls",
+    ]) {
+      expect(sentence(now("command", c), "RUNNING"), c).toEqual({
+        before: "いまは ",
+        target: c,
+        after: " を実行しています。",
+      });
+      expect(sentence(now("tool", `$ ${c}`), "RUNNING"), c).toEqual({
+        before: "いまは ",
+        prompt: "$ ",
+        target: c,
+        after: " を実行しています。",
+      });
+    }
   });
   it("cd /workspace && は前置きだけ外す。場所は添えない。前置きの無い text はそのまま", () => {
     expect(sentence(now("tool", "$ cd /workspace && ls -la"), "RUNNING")).toEqual({

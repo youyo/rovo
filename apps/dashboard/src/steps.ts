@@ -17,7 +17,7 @@ export type Tone = "normal" | "fail";
 export type StepText = {
   what: string;
   target: string;
-  /** コマンドを実行した場所（`cd /workspace/<相対パス> && ` の前置きの <相対パス>）。画面では「<相対パス> で」と添える */
+  /** コマンドを実行した場所（`cd /workspace/<相対パス> && ` や `cd <相対パス> && ` の前置きの <相対パス>）。画面では「<相対パス> で」と添える */
   where?: string;
   note: string;
   tone: Tone;
@@ -172,13 +172,27 @@ function pickTarget(summary: string, keys: readonly string[]): string {
 
 /** 場所の 1 区切りに許す文字（素直なディレクトリ名だけ。空白・引用符・変数・シェルの記号は許さない） */
 const DIR_SEGMENT = /^[\p{L}\p{N}_.@+-]+$/u;
-const CD_PREFIX = /^cd\s+(\/workspace(?:\/\S*)?)\s+&&\s+(\S.*)$/;
+const CD_PREFIX = /^cd\s+(\S+)\s+&&\s+(\S.*)$/;
+const WORKSPACE = "/workspace";
 
-/** /workspace からの相対パス。/workspace 自身は ""。素直なパスでない（.. や // を含む・変な文字がある）ものは undefined */
-function relativeDir(abs: string): string | undefined {
-  const rest = abs.slice("/workspace".length);
+/**
+ * cd の行き先を /workspace からの相対パスにする。/workspace 自身・`.`・`./` は ""。
+ * `/workspace/...` の絶対パスと、`/` `~` `-` `$` で始まらない相対パス（/workspace からの相対として読む。先頭の `./` は 1 つだけ外す）を読む。
+ * 素直なパスでない（.. や // を含む・変な文字がある・/workspace の外・~ や $HOME や - など）ものは undefined
+ */
+function relativeDir(path: string): string | undefined {
+  let rest: string;
+  if (path === WORKSPACE || path.startsWith(`${WORKSPACE}/`)) {
+    rest = path.slice(WORKSPACE.length + 1);
+  } else if (/^[/~$-]/.test(path)) {
+    return undefined;
+  } else if (path === ".") {
+    return "";
+  } else {
+    rest = path.startsWith("./") ? path.slice(2) : path;
+  }
   if (rest === "") return "";
-  const parts = rest.slice(1).split("/");
+  const parts = rest.split("/");
   if (parts.at(-1) === "") parts.pop();
   for (const p of parts) {
     if (p === "." || p === ".." || !DIR_SEGMENT.test(p)) return undefined;
@@ -187,8 +201,9 @@ function relativeDir(abs: string): string | undefined {
 }
 
 /**
- * コマンドの先頭の `cd /workspace/<相対パス> && ` を外し、<相対パス> を場所として返す。
- * `cd /workspace && ` は前置きだけ外す（場所なし）。ほかの形（.. を含む・/workspace の外・引用符つきなど）は触らない。
+ * コマンドの先頭の `cd /workspace/<相対パス> && ` と `cd <相対パス> && `（/workspace からの相対。`./` 付きも）を外し、
+ * <相対パス> を場所として返す。`cd /workspace && ` と `cd . && ` は前置きだけ外す（場所なし）。
+ * ほかの形（.. を含む・/workspace の外・~ や $HOME や - ・引用符つきなど）は触らない。
  * text は sanitize 済みの 1 行。
  */
 function splitCommand(text: string): { command: string; where?: string } {
@@ -477,7 +492,7 @@ const NOW_WHERE = /^([\p{L}\p{N}_.@+-]+(?:\/[\p{L}\p{N}_.@+-]+)*) で (\S.*)$/u;
 
 /**
  * 「いまは X を実行しています。」。X（target）だけ強調できるように 3 つに分ける。now が null なら状態に応じた文。
- * コマンド（command・tool）は、タイムラインと同じ見せ方にする: `cd /workspace/<相対パス> && ` の前置きを外し、
+ * コマンド（command・tool）は、タイムラインと同じ見せ方にする: `cd /workspace/<相対パス> && ` や `cd <相対パス> && ` の前置きを外し、
  * 場所を「いまは <相対パス> で $ コマンド を実行しています。」と添える（gateway が添えた「<相対パス> で 」も読む）。
  */
 export function nowSentence(now: TaskDetailDto["now"], status: TaskStatusDto): NowSentence {

@@ -46,7 +46,12 @@ function setup(opts: { base?: string; withBase?: boolean } = {}) {
     };
   };
   const diffArgs = () => git.state.rangeArgs.filter((a) => !a.includes("--numstat"));
-  return { git, sandbox, results, events, commit, diffArgs };
+  /** 検査の git log の基準（--not の次の引数）。基準が無いとき（初回）は undefined */
+  const notOf = (argv: string[] | undefined) => {
+    const i = argv?.indexOf("--not") ?? -1;
+    return i >= 0 ? argv?.[i + 1] : undefined;
+  };
+  return { git, sandbox, results, events, commit, diffArgs, notOf };
 }
 
 describe("git_commit の push 前の秘密の検査", () => {
@@ -59,7 +64,7 @@ describe("git_commit の push 前の秘密の検査", () => {
       {
         ok: false,
         sha: t.git.head(),
-        error: "blocked: possible secret (github-token) in src/a.ts:2",
+        error: `blocked: possible secret (github-token) in src/a.ts:2 (commit ${t.git.head().slice(0, 7)})`,
       },
     ]);
     // commit は成功のまま（ローカルに残る）。子に返る文は file:line・category・やり直しの案内。値は出ない
@@ -85,7 +90,7 @@ describe("git_commit の push 前の秘密の検査", () => {
     t.git.stage(file("src/b.ts", "const b = 2;"));
     await t.commit();
     // 2 回目は、1 回目の push の SHA から HEAD まで
-    expect(t.diffArgs().at(-1)).toContain(`${pushedSha}..HEAD`);
+    expect(t.notOf(t.diffArgs().at(-1))).toBe(pushedSha);
     expect(t.git.state.pushes).toHaveLength(2);
   });
 
@@ -93,10 +98,10 @@ describe("git_commit の push 前の秘密の検査", () => {
     const t = setup({ base: "e".repeat(40) });
     t.git.stage(file("src/a.ts", "x"));
     await t.commit();
-    expect(t.diffArgs()[0]).toContain(`${"e".repeat(40)}..HEAD`);
+    expect(t.notOf(t.diffArgs()[0])).toBe("e".repeat(40));
   });
 
-  it("bash で作った commit の中の秘密も、範囲（last_pushed..HEAD）なので止まる", async () => {
+  it("bash で作った commit の中の秘密も、範囲（HEAD --not last_pushed）なので止まる", async () => {
     const t = setup();
     t.git.commitDirect(file("secrets.env", "A=1", `T=${GHP}`));
     t.git.stage(file("src/clean.ts", "const ok = true;"));
@@ -104,7 +109,9 @@ describe("git_commit の push 前の秘密の検査", () => {
     expect(t.git.state.pushes).toHaveLength(0);
     expect(t.results[0]).toMatchObject({
       ok: false,
-      error: "blocked: possible secret (github-token) in secrets.env:2",
+      error: expect.stringMatching(
+        /^blocked: possible secret \(github-token\) in secrets\.env:2 \(commit [0-9a-f]{7}\)$/,
+      ),
     });
     expect(r.text).not.toContain(GHP);
   });
@@ -127,6 +134,46 @@ describe("git_commit の push 前の秘密の検査", () => {
     expect(t.git.state.pushes).toHaveLength(1);
     expect(redo.text).toMatch(/pushed to the task branch/);
     expect(t.results.at(-1)).toEqual({ ok: true, sha: t.git.head() });
+  });
+
+  it("途中の commit で足して、後の commit で消した秘密も止まる（2 つの木の差分は空でも、push は両方の commit を送る）", async () => {
+    const t = setup();
+    t.git.stage(file("src/a.ts", "const a = 1;", `const t = "${GHP}";`));
+    await t.commit("leak");
+    const leak = t.git.head();
+    t.git.stage({ path: "src/a.ts", deleted: true });
+    const r = await t.commit("remove");
+    // 前提: last_pushed と HEAD の木の差分には、秘密が出ない
+    expect(t.git.treeDiff()).not.toContain(GHP);
+    expect(t.git.state.pushes).toHaveLength(0);
+    expect(t.results).toHaveLength(2);
+    expect(t.results[1]).toEqual({
+      ok: false,
+      sha: t.git.head(),
+      error: `blocked: possible secret (github-token) in src/a.ts:2 (commit ${leak.slice(0, 7)})`,
+    });
+    expect(r.text).toMatch(/not pushed/i);
+    expect(r.text).toContain("git reset --soft");
+    expect(r.text).not.toContain(GHP);
+  });
+
+  it("子に返る文のパスにトークンが入っていても、値は出ない（イベント・onPush と同じく maskSecrets を通す）", async () => {
+    const t = setup();
+    t.git.stage(file(`src/${GHP}.ts`, `const t = "${GHP}";`));
+    const r = await t.commit();
+    expect(t.git.state.pushes).toHaveLength(0);
+    expect(r.text).toMatch(/not pushed/i);
+    expect(r.text).toContain("github-token");
+    expect(r.text).not.toContain(GHP);
+    expect(JSON.stringify(t.results)).not.toContain(GHP);
+    expect(JSON.stringify(t.events)).not.toContain(GHP);
+    // バイナリ（鍵らしい拡張子）のパスでも同じ
+    const b = setup();
+    b.git.stage({ path: `keys/${GHP}.pem`, binary: true });
+    const rb = await b.commit();
+    expect(rb.text).toContain("keys/");
+    expect(rb.text).not.toContain(GHP);
+    expect(JSON.stringify(b.results)).not.toContain(GHP);
   });
 
   it("推測系（Authorization・token= など）は止めない", async () => {
@@ -204,7 +251,7 @@ describe("git_commit の push 前の秘密の検査", () => {
     t.git.stage(file("src/a.ts", "ok"));
     const inner = t.git.handler;
     t.sandbox.setHandler((argv, o) => {
-      if (argv[1] === "diff" && argv.some((a) => a.includes(".."))) {
+      if (argv.includes("log") && argv.includes("--not")) {
         throw new Error("exec rejected");
       }
       return inner(argv, o);
@@ -220,7 +267,9 @@ describe("git_commit の push 前の秘密の検査", () => {
     t.git.stage(file("src/a.ts", "ok"));
     await t.commit();
     expect(t.git.state.pushes).toHaveLength(1);
-    expect(t.diffArgs()[0]?.some((a) => a.endsWith("..HEAD"))).toBe(true);
+    // 基準が無いので --not を付けず、HEAD から辿れる全部の commit を見る
+    expect(t.diffArgs()[0]).toContain("HEAD");
+    expect(t.notOf(t.diffArgs()[0])).toBeUndefined();
   });
 
   it("push 自体が失敗した場合は、基準を進めない（次も同じ範囲）", async () => {
@@ -230,6 +279,6 @@ describe("git_commit の push 前の秘密の検査", () => {
     await t.commit();
     t.git.stage(file("src/b.ts", "two"));
     await t.commit();
-    expect(t.diffArgs()[1]).toContain(`${t.git.base}..HEAD`);
+    expect(t.notOf(t.diffArgs()[1])).toBe(t.git.base);
   });
 });

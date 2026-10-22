@@ -58,7 +58,9 @@ describe("git_commit の push 前の検査（本番のツール配線）", () =>
     ).toHaveLength(0);
     const events = await allEvents(asFx(stub));
     const failed = events.find((e) => e.type === "push_failed" && e.data.final !== true);
-    expect(failed?.data.message).toBe("blocked: possible secret (github-token) in src/a.ts:2");
+    expect(failed?.data.message).toBe(
+      `blocked: possible secret (github-token) in src/a.ts:2 (commit ${git.head().slice(0, 7)})`,
+    );
     expect(failed?.data.sha).toBe(git.head());
     const end = events.find((e) => e.type === "tool_end" && e.data.name === "git_commit");
     expect(end?.data.isError).toBe(false);
@@ -87,10 +89,11 @@ describe("git_commit の push 前の検査（本番のツール配線）", () =>
     );
     expect(await waitForTerminal(asFx(stub))).toBe("completed");
     const diffs = git.state.rangeArgs.filter((a) => !a.includes("--numstat"));
-    expect(diffs[0]).toContain(`${INITIAL}..HEAD`);
+    const notOf = (argv: string[] | undefined) => argv?.[(argv?.indexOf("--not") ?? -2) + 1];
+    expect(notOf(diffs[0])).toBe(INITIAL);
     const events = await allEvents(asFx(stub));
     const pushed = events.filter((e) => e.type === "pushed" && e.data.final !== true);
     expect(pushed.length).toBeGreaterThanOrEqual(2);
-    expect(diffs[1]).toContain(`${String(pushed[0]?.data.sha)}..HEAD`);
+    expect(notOf(diffs[1])).toBe(String(pushed[0]?.data.sha));
   });
 });

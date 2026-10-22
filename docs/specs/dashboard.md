@@ -328,10 +328,17 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 **追加（2026-10-22）: 推定の金額（`cost_estimate`）。** 金額が出るのが AI Gateway の費用とクレジット残高だけだったので、ほかの使用量にも推定の金額を付ける（gateway と契約。画面の表示は別のタスク）。
 - 出し方: 項目ごとに **公開の単価 × 使用量**（`apps/gateway/src/dashboard/cloudflare-pricing.ts`。単価・出典 URL・確認日はこのファイルの定数だけ）。対象は Workers のリクエスト、コンテナの vCPU 秒とメモリ GiB 秒、Workers AI の Neuron。コンテナのディスク（GB 秒）は使用量を GraphQL で取っていないので、いまは推定が常に null。
 - **無料枠を引く前**（`basis: "before_free_tier"`、金額の項目名は `estimated_usd_before_free_tier`）: プランに含まれる分（Workers の月 1,000 万リクエスト、Containers の月 25 GiB 時間 / 375 vCPU 分 / 200 GB 時間、Workers AI の 1 日 1 万 Neurons）は引かず、月額（$5）も足さず、期間（`1h` / `24h` / `7d`）を月や日に按分もしない。請求額ではなく上限側の推定。ただし Workers の CPU 時間・Durable Objects・KV・D1・R2・ログ・コンテナの egress は対象外で、vCPU は割り当ての秒数（課金は実使用）なので上限側にずれる。
-- **合計**（`total_estimated_usd_before_free_tier`）: 取れた項目の和で、**AI Gateway の費用（`items.ai_gateway.cost_usd`。Cloudflare の集計値）を含む**。クレジット残高は含めない。取れない項目（forbidden / unavailable / not_configured / empty、ディスク）は推定を null にして合計に含めず、`excluded_items` に項目名を出し、1 つでもあれば `partial: true`。1 つも取れなければ合計も null（0 USD と見せない）。
+- **合計**（`total_estimated_usd_before_free_tier`）は **Cloudflare の請求の推定**: Workers のリクエスト・コンテナの vCPU・メモリ・ディスク・Workers AI の取れた項目の和。**AI Gateway の費用は含めない**（下の注）。クレジット残高も含めない。取れない項目（forbidden / unavailable / not_configured / empty、ディスク）は推定を null にして合計に含めず、`excluded_items` に項目名を出し、1 つでもあれば `partial: true`。`excluded_items` と `partial` は Cloudflare の項目だけで判定する（AI Gateway が取れなくても partial にはならない）。1 つも取れなければ合計も null（0 USD と見せない）。
+- **AI Gateway の費用**（`items.ai_gateway.cost_usd`）は**別の項目**で、合計に含めない。AI Gateway の rovo の経路は **BYOK 専用**（`byok_only: true`）なので、ここに出るのは **モデルの費用**（Anthropic などに請求され、rovo の月の予算の「使った額」と同じお金）で、Cloudflare の請求ではない。ゲートウェイの Unified Billing のクレジットは、Web 検索などクレジットで払う分にだけ使われ、BYOK のモデル費用は含まない。
+- **クレジット残高**（`credit_balance`）は Unified Billing のクレジットの残高で、Web 検索などクレジットで払う分の範囲（BYOK のモデル費用は含まない）。合計には含めない。
+- **契約**: 既存の項目の名前・型・必須かどうかは変えない（`excluded_items` の列挙には `ai_gateway` を残す。古い応答との互換）。
 - 契約: `cost_estimate` は optional（古い gateway・古い応答・fixtures でもスキーマを通る。既存の項目は変えない）。`pricing_checked_at` は単価を確認した日（未確認は null）。
 - 単価の出典（2026-10-22 に確認。Cloudflare の公式ドキュメント）: Workers `https://developers.cloudflare.com/workers/platform/pricing/`（$0.30 / 100 万リクエスト）、Containers `https://developers.cloudflare.com/containers/platform/pricing/`（vCPU $0.000020 / 秒、メモリ $0.0000025 / GiB 秒、ディスク $0.00000007 / GB 秒）、Workers AI `https://developers.cloudflare.com/workers-ai/platform/pricing/`（$0.011 / 1,000 Neurons）。単価が変わったら、定数・出典・確認日を一緒に直す。
-- **画面の表示**（Cloudflare の欄。`cost_estimate` の表示）: 欄の頭に 1 行「推定 $x（無料枠を引く前）」を出し、`partial` のときは小さく「一部の項目は含まない」を添える。合計が null なら「推定できない（無料枠を引く前）」。各行の右に「推定 $x」を添える（Workers のリクエスト、コンテナの vCPU とメモリの合計、AI Gateway の費用、Workers AI）。コンテナは vCPU かメモリが null なら金額を出さず、ディスクが null のときは vCPU とメモリだけを足す。取れない項目（ok でない）と null の項目は金額を出さない。クレジット残高には出さない。金額は `formatUsd`、色・書体は既存のトークンで、360px でも横にはみ出さない。`cost_estimate` が無い古い応答では、合計の行を出さず件数だけを出す。
+- **画面の表示**（Cloudflare の欄。`cost_estimate` の表示）: 欄の頭は「Cloudflare の請求（推定）$x（無料枠を引く前）」の 1 行。`partial` のときは小さく「一部の項目は含まない」を添える。合計が null なら「Cloudflare の請求（推定）推定できない（無料枠を引く前）」。各行の右に「推定 $x」を添える（Workers のリクエスト、コンテナの vCPU とメモリの合計、Workers AI）。
+  - **AI Gateway の行**は金額を「モデルの費用 $x」と出し（「推定」とは付けない。合計の内訳に見せない）、行の下に注記「BYOK。Anthropic などに請求され、rovo の予算に含まれる（Cloudflare の請求の合計には含まない）」を添える。
+  - **クレジット残高の行**は金額の代わりに、行の下に注記「Unified Billing のクレジット（Web 検索など。BYOK のモデル費用は含まない）」を添える。
+  - 注記は行の下の 1 行（`flex-basis: 100%`）で折り返す。狭い幅（360px）でも横にはみ出さない。
+  - コンテナは vCPU かメモリが null なら金額を出さず、ディスクが null のときは vCPU とメモリだけを足す。取れない項目（ok でない）と null の項目は金額を出さない。金額は `formatUsd`、色・書体は既存のトークン。`cost_estimate` が無い古い応答では、合計の行を出さず件数だけを出す。
 
 ### D14. 構造化イベント（agent → gateway → 詳細）
 

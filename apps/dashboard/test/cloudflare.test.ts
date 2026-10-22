@@ -162,28 +162,38 @@ describe("推定の金額（cost_estimate）", () => {
           },
           ai_gateway: { cost_usd: 1.25 },
         },
-        total_estimated_usd_before_free_tier: 1.3392225,
+        total_estimated_usd_before_free_tier: 0.0892225,
         excluded_items: ["containers_disk"],
         partial: true,
         ...over,
       },
     }) satisfies CloudflareSummaryDto;
 
-  it("合計の見出しは「推定 $x（無料枠を引く前）」で、partial なら注記を添える", () => {
+  it("欄の頭は「Cloudflare の請求（推定）$x（無料枠を引く前）」で、partial なら注記を添える", () => {
     expect(cloudflareEstimateHead(withEstimate())).toEqual({
-      text: "推定 $1.34（無料枠を引く前）",
+      text: "Cloudflare の請求（推定）$0.0892（無料枠を引く前）",
       partial: true,
     });
     const full = withEstimate({ excluded_items: [], partial: false });
     expect(cloudflareEstimateHead(full)).toEqual({
-      text: "推定 $1.34（無料枠を引く前）",
+      text: "Cloudflare の請求（推定）$0.0892（無料枠を引く前）",
       partial: false,
     });
   });
 
+  it("合計は AI Gateway を含まない（Cloudflare の 5 項目の和。AI Gateway の 1.25 は含まれない）", () => {
+    const s = withEstimate({ total_estimated_usd_before_free_tier: 0.0892225 });
+    expect(cloudflareEstimateHead(s)?.text).toBe(
+      "Cloudflare の請求（推定）$0.0892（無料枠を引く前）",
+    );
+    expect(cloudflareEstimateHead(s)?.text).not.toContain("1.34");
+  });
+
   it("合計が null なら「推定できない」", () => {
     const s = withEstimate({ total_estimated_usd_before_free_tier: null });
-    expect(cloudflareEstimateHead(s)?.text).toBe("推定できない（無料枠を引く前）");
+    expect(cloudflareEstimateHead(s)?.text).toBe(
+      "Cloudflare の請求（推定）推定できない（無料枠を引く前）",
+    );
   });
 
   it("cost_estimate が無い（古い応答）ときは見出しを出さず、行の金額も出さない", () => {
@@ -195,9 +205,24 @@ describe("推定の金額（cost_estimate）", () => {
     const s = withEstimate();
     expect(rowOf(s, "workers").cost).toBe("推定 <$0.0001");
     expect(rowOf(s, "containers").cost).toBe("推定 $0.0806");
-    expect(rowOf(s, "ai_gateway").cost).toBe("推定 $1.25");
+    expect(rowOf(s, "ai_gateway").cost).toBe("モデルの費用 $1.25");
     expect(rowOf(s, "workers_ai").cost).toBe("推定 $0.0086");
     expect(rowOf(s, "credit_balance").cost).toBeNull();
+  });
+
+  it("AI Gateway の行はモデル費用（BYOK）と分かる注記、クレジット残高の行は Unified Billing の注記を持つ", () => {
+    const s = withEstimate();
+    expect(rowOf(s, "ai_gateway").note).toBe(
+      "BYOK。Anthropic などに請求され、rovo の予算に含まれる（Cloudflare の請求の合計には含まない）",
+    );
+    expect(rowOf(s, "credit_balance").note).toBe(
+      "Unified Billing のクレジット（Web 検索など。BYOK のモデル費用は含まない）",
+    );
+    // 注記は推定が無い古い応答でも出す（意味の説明なので）
+    expect(rowOf(summary, "credit_balance").note).toBe(
+      "Unified Billing のクレジット（Web 検索など。BYOK のモデル費用は含まない）",
+    );
+    expect(rowOf(summary, "workers").note).toBeNull();
   });
 
   it("null の項目は金額を出さない（取れない項目・使用量の無い項目）", () => {

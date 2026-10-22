@@ -11,8 +11,10 @@ import type { CloudflareCostEstimateDto } from "@rovo/dashboard-contract";
  * - **無料枠・プランに含まれる分（Workers Paid の月 1,000 万リクエスト、Containers の月 25 GiB 時間 / 375 vCPU 分 /
  *   200 GB 時間、Workers AI の 1 日 1 万 Neurons）は引かない**。月額（$5）も足さない。期間（1h / 24h / 7d）を
  *   月や日に按分もしない。つまり「無料枠を引く前の推定」で、請求額ではない（上限側）
- * - 合計は、取れた項目（AI Gateway の費用 `cost_usd` を含む）の和。取れなかった項目は推定を null にして合計に含めず、
- *   `excluded_items` に名前を出す
+ * - 合計は、**Cloudflare に払う分**（Workers のリクエスト・コンテナの vCPU・メモリ・ディスク・Workers AI）の、取れた項目の和。
+ *   **AI Gateway の費用は合計に含めない**（BYOK のモデルの費用は Anthropic などに払い、Cloudflare の請求ではない）。
+ *   AI Gateway の費用は `items.ai_gateway.cost_usd` の別の項目として返す。取れなかった項目は推定を null にして合計に含めず、
+ *   `excluded_items` に名前を出す。`excluded_items` と `partial` は Cloudflare の項目だけで判定する（AI Gateway は含めない）
  * - 対象は Workers の**リクエストだけ**（CPU 時間・Durable Objects・KV・D1・R2・Workers Logs・コンテナの egress などは
  *   含めない）。コンテナのディスクは使用量を取っていないので、いまは常に null（合計に含まれない）
  * - コンテナの vCPU は「割り当て（allocatedCpu）」の秒数で、Cloudflare の課金は vCPU を実使用（active usage）、
@@ -85,7 +87,7 @@ function line(quantity: number | null, unit: CostLine["unit"], unitPriceUsd: num
   };
 }
 
-/** 単価 × 使用量の推定と、AI Gateway の費用を含む合計を作る（無料枠を引く前）。 */
+/** 単価 × 使用量の推定と、Cloudflare に払う分の合計を作る（無料枠を引く前。AI Gateway は合計に含めない）。 */
 export function buildCostEstimate(input: CostInputs): CloudflareCostEstimateDto {
   const price = CLOUDFLARE_UNIT_PRICES_USD;
   const items: CloudflareCostEstimateDto["items"] = {
@@ -96,13 +98,13 @@ export function buildCostEstimate(input: CostInputs): CloudflareCostEstimateDto 
     workers_ai: line(input.neurons, "neuron", price.workers_ai_neuron),
     ai_gateway: { cost_usd: input.aiGatewayCostUsd },
   };
+  // 合計と excluded_items の対象（Cloudflare に払う分だけ。AI Gateway は別の項目で、ここには入れない）
   const amounts: [CloudflareCostEstimateDto["excluded_items"][number], number | null][] = [
     ["workers_requests", items.workers_requests.estimated_usd_before_free_tier],
     ["containers_vcpu", items.containers_vcpu.estimated_usd_before_free_tier],
     ["containers_memory", items.containers_memory.estimated_usd_before_free_tier],
     ["containers_disk", items.containers_disk.estimated_usd_before_free_tier],
     ["workers_ai", items.workers_ai.estimated_usd_before_free_tier],
-    ["ai_gateway", items.ai_gateway.cost_usd],
   ];
   const included = amounts.flatMap(([, v]) => (v === null ? [] : [v]));
   const excluded = amounts.flatMap(([k, v]) => (v === null ? [k] : []));

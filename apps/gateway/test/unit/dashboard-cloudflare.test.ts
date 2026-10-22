@@ -483,13 +483,13 @@ describe("接続先とトークンの扱い", () => {
 
 // --- 推定の金額（無料枠を引く前。単価 × 使用量。AI Gateway の費用を含む合計） ---
 
+// 合計（Cloudflare に払う分）の項目。AI Gateway は BYOK のモデル費用なので含まない（excluded_items にも出ない）
 const ALL_ITEMS = [
   "workers_requests",
   "containers_vcpu",
   "containers_memory",
   "containers_disk",
   "workers_ai",
-  "ai_gateway",
 ] as const;
 
 describe("単価の定数（cloudflare-pricing.ts）", () => {
@@ -517,7 +517,7 @@ describe("単価の定数（cloudflare-pricing.ts）", () => {
   });
 });
 
-describe("buildCostEstimate（単価 × 使用量・無料枠を引かない・合計）", () => {
+describe("buildCostEstimate（単価 × 使用量・無料枠を引かない・合計は Cloudflare の請求の推定）", () => {
   const full = {
     workersRequests: 150,
     vcpuSeconds: 4000,
@@ -527,7 +527,7 @@ describe("buildCostEstimate（単価 × 使用量・無料枠を引かない・�
     aiGatewayCostUsd: 1.25,
   };
 
-  it("項目ごとに単価 × 使用量。合計は取れた項目（AI Gateway を含む）の和。ディスクは使用量が無いので null", () => {
+  it("項目ごとに単価 × 使用量。合計は取れた Cloudflare の項目の和（AI Gateway は含まない）。ディスクは使用量が無いので null", () => {
     const e = buildCostEstimate(full);
     expect(e.basis).toBe("before_free_tier");
     expect(e.items.workers_requests).toEqual({
@@ -561,8 +561,8 @@ describe("buildCostEstimate（単価 × 使用量・無料枠を引かない・�
       estimated_usd_before_free_tier: 0.0085525,
     });
     expect(e.items.ai_gateway).toEqual({ cost_usd: 1.25 });
-    // 0.000045 + 0.08 + 0.000625 + 0.0085525 + 1.25
-    expect(e.total_estimated_usd_before_free_tier).toBeCloseTo(1.3392225, 9);
+    // 0.000045 + 0.08 + 0.000625 + 0.0085525（AI Gateway の 1.25 は合計に含まない）
+    expect(e.total_estimated_usd_before_free_tier).toBeCloseTo(0.0892225, 9);
     expect(e.excluded_items).toEqual(["containers_disk"]);
     expect(e.partial).toBe(true);
     expect(e.pricing_checked_at).toBe(CLOUDFLARE_PRICING_CHECKED_AT);
@@ -588,7 +588,7 @@ describe("buildCostEstimate（単価 × 使用量・無料枠を引かない・�
     expect(e.items.containers_disk.estimated_usd_before_free_tier).toBeCloseTo(0.07, 9);
     expect(e.excluded_items).toEqual([]);
     expect(e.partial).toBe(false);
-    expect(e.total_estimated_usd_before_free_tier).toBeCloseTo(1.3392225 + 0.07, 9);
+    expect(e.total_estimated_usd_before_free_tier).toBeCloseTo(0.0892225 + 0.07, 9);
   });
 
   it("使用量 0 は 0 USD（null ではない）。合計に含まれる", () => {
@@ -625,15 +625,43 @@ describe("buildCostEstimate（単価 × 使用量・無料枠を引かない・�
     expect(e.items.containers_vcpu.estimated_usd_before_free_tier).toBeNull();
     expect(e.items.containers_memory.estimated_usd_before_free_tier).toBeNull();
     expect(e.items.ai_gateway.cost_usd).toBeNull();
-    expect(e.excluded_items).toEqual([
-      "containers_vcpu",
-      "containers_memory",
-      "containers_disk",
-      "ai_gateway",
-    ]);
+    expect(e.excluded_items).toEqual(["containers_vcpu", "containers_memory", "containers_disk"]);
     expect(e.partial).toBe(true);
     // 残りの 2 項目（Workers のリクエスト・Workers AI）だけの和
     expect(e.total_estimated_usd_before_free_tier).toBeCloseTo(0.000045 + 0.0085525, 9);
+  });
+
+  it("AI Gateway の費用は合計・excluded_items・partial に影響しない（別の項目として出るだけ）", () => {
+    const withGw = buildCostEstimate({ ...full, diskGbSeconds: 1_000_000, aiGatewayCostUsd: 1.25 });
+    const noGw = buildCostEstimate({ ...full, diskGbSeconds: 1_000_000, aiGatewayCostUsd: null });
+    const hugeGw = buildCostEstimate({ ...full, diskGbSeconds: 1_000_000, aiGatewayCostUsd: 999 });
+    expect(withGw.items.ai_gateway).toEqual({ cost_usd: 1.25 });
+    expect(noGw.items.ai_gateway).toEqual({ cost_usd: null });
+    // AI Gateway が取れなくても、Cloudflare の項目が全部取れていれば partial にならない
+    expect(noGw.excluded_items).toEqual([]);
+    expect(noGw.partial).toBe(false);
+    expect(noGw.total_estimated_usd_before_free_tier).toBe(
+      withGw.total_estimated_usd_before_free_tier,
+    );
+    expect(hugeGw.total_estimated_usd_before_free_tier).toBe(
+      withGw.total_estimated_usd_before_free_tier,
+    );
+    // 合計 = Workers のリクエスト + コンテナ 3 項目 + Workers AI + ディスク(1,000,000 GB 秒 × 単価)
+    expect(withGw.total_estimated_usd_before_free_tier).toBeCloseTo(0.1592225, 9);
+  });
+
+  it("Cloudflare の項目が 1 つも取れず AI Gateway だけ取れたときは合計 null・partial true（AI Gateway の金額で合計にしない）", () => {
+    const e = buildCostEstimate({
+      workersRequests: null,
+      vcpuSeconds: null,
+      memoryGibSeconds: null,
+      diskGbSeconds: null,
+      neurons: null,
+      aiGatewayCostUsd: 1.25,
+    });
+    expect(e.total_estimated_usd_before_free_tier).toBeNull();
+    expect(e.partial).toBe(true);
+    expect(e.excluded_items).toEqual([...ALL_ITEMS]);
   });
 
   it("全項目が取れないときは合計も null（0 USD と見せない）", () => {
@@ -652,7 +680,7 @@ describe("buildCostEstimate（単価 × 使用量・無料枠を引かない・�
 });
 
 describe("推定の金額を DTO で返す（loadCloudflareSummary）", () => {
-  it("正常系: 項目ごとの推定と AI Gateway を含む合計。ディスクは取っていないので null で、合計に含まれない", async () => {
+  it("正常系: 項目ごとの推定。合計は AI Gateway を含まない。ディスクは取っていないので null で、合計に含まれない", async () => {
     const up = upstream();
     const dto = await loadCloudflareSummary(env(), "24h", { fetch: up.fetch, now: () => NOW });
     expect(CloudflareSummaryDtoSchema.parse(dto)).toEqual(dto);
@@ -669,7 +697,7 @@ describe("推定の金額を DTO で返す（loadCloudflareSummary）", () => {
     expect(est?.items.workers_ai.quantity).toBe(777.5);
     expect(est?.items.workers_ai.estimated_usd_before_free_tier).toBeCloseTo(0.0085525, 9);
     expect(est?.items.ai_gateway.cost_usd).toBe(1.25);
-    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(1.3392225, 9);
+    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(0.0892225, 9);
     expect(est?.excluded_items).toEqual(["containers_disk"]);
     expect(est?.partial).toBe(true);
     // 既存の項目は変わらない
@@ -703,7 +731,7 @@ describe("推定の金額を DTO で返す（loadCloudflareSummary）", () => {
     });
     expect(est?.excluded_items).toContain("workers_requests");
     expect(est?.partial).toBe(true);
-    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(1.3392225 - 0.000045, 9);
+    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(0.0892225 - 0.000045, 9);
     CloudflareSummaryDtoSchema.parse(dto);
   });
 
@@ -715,7 +743,7 @@ describe("推定の金額を DTO で返す（loadCloudflareSummary）", () => {
       expect(est?.items[k].estimated_usd_before_free_tier, k).toBeNull();
       expect(est?.excluded_items, k).toContain(k);
     }
-    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(0.000045 + 0.0085525 + 1.25, 9);
+    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(0.000045 + 0.0085525, 9);
   });
 
   it("AI Gateway が取れない（gateway id なし）と ai_gateway が null・合計に含まれない。Workers AI が empty なら workers_ai も null", async () => {
@@ -728,9 +756,9 @@ describe("推定の金額を DTO で返す（loadCloudflareSummary）", () => {
     expect(dto.ai_gateway).toEqual({ ok: false, reason: "not_configured" });
     expect(est?.items.ai_gateway.cost_usd).toBeNull();
     expect(est?.items.workers_ai.estimated_usd_before_free_tier).toBeNull();
-    expect(est?.excluded_items).toEqual(
-      expect.arrayContaining(["ai_gateway", "workers_ai", "containers_disk"]),
-    );
+    expect(est?.excluded_items).toEqual(expect.arrayContaining(["workers_ai", "containers_disk"]));
+    // AI Gateway は合計の項目ではないので、取れなくても excluded_items には出ない
+    expect(est?.excluded_items).not.toContain("ai_gateway");
     expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(0.000045 + 0.08 + 0.000625, 9);
   });
 

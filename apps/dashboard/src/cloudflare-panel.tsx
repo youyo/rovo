@@ -52,6 +52,11 @@ export function CloudflarePanel(props: { state: CloudflareState }) {
                   </a>
                 ) : null}
               </span>
+              {r.note !== null ? (
+                <span className="cf-note cf-basis" data-cf-note="">
+                  {r.note}
+                </span>
+              ) : null}
             </li>
           ))}
         </ul>

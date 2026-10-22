@@ -154,6 +154,9 @@ describe("git_commit の push 前の秘密の検査", () => {
     });
     expect(r.text).toMatch(/not pushed/i);
     expect(r.text).toContain("git reset --soft");
+    // 消す commit を積むだけでは送られる、という案内と、秘密のある commit の短い SHA
+    expect(r.text).toMatch(/only deletes it is NOT enough/);
+    expect(r.text).toContain(`commit ${leak.slice(0, 7)}`);
     expect(r.text).not.toContain(GHP);
   });
 

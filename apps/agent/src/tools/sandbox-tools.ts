@@ -495,18 +495,17 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
       v.status === "binary"
         ? "A binary file that may hold a key or credential"
         : `A possible secret (${v.category ?? "unknown"})`;
-    const where =
-      v.status === "secret" && v.path
-        ? ` at ${v.path}${v.line ? `:${v.line}` : ""}`
-        : v.status === "binary" && v.path
-          ? ` at ${v.path}`
-          : "";
-    return `${head}\n${what} was found${where} in the changes since the last push. Remove it, also from the git history (for example, redo the commit with git reset --soft <last pushed commit>), then call git_commit again. The next git_commit scans the whole range again, so a secret left in an earlier commit still blocks the push.`;
+    // パスにトークンが入っていることがある。イベントと同じく maskSecrets を通す（値は出さない）
+    const path = v.path ? maskSecrets(v.path) : undefined;
+    const line = v.status === "secret" && v.line ? `:${v.line}` : "";
+    const where = path ? ` at ${path}${line}` : "";
+    const commit = v.commit ? ` (commit ${v.commit.slice(0, 7)})` : "";
+    return `${head}\n${what} was found${where}${commit} in the commits that are not on the remote yet. Remove it from the git history: for example, redo the commits with git reset --soft <last pushed commit> and commit again. A new commit that only deletes it is NOT enough: every commit that is not on the remote is pushed, including the earlier one that holds the secret. Then call git_commit again (it scans every unpushed commit again).`;
   };
 
   /**
    * commit のたびの push（チェックポイント）。best-effort: 失敗しても git_commit は失敗にしない。
-   * push の直前に、最後に push できた SHA から HEAD までの追加行を検査し、確度の高い秘密があれば push しない（commit はローカルに残す）。
+   * push の直前に、リモートに無い commit（HEAD --not 最後に push できた SHA）の追加行を commit ごとに検査し、確度の高い秘密があれば push しない（commit はローカルに残す）。
    * 検査そのものの失敗も push しない（安全側）。結果の文面（モデルに返す）を返す。
    */
   const pushCheckpoint = async (sha: string): Promise<string> => {

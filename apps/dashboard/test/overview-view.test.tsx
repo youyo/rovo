@@ -49,6 +49,27 @@ describe("OverviewView（fixtures で一覧が出る）", () => {
     expect(c.textContent).toContain("5 件のタスクを実行し、2 件をマージしました。");
   });
 
+  it("PR の状態: 閉じた PR は「閉じた」の印と凡例になり、マージ件数に入らない。state=merged は数える。取れなかった(unknown)は「PR あり」", () => {
+    const withState = (state: "open" | "merged" | "closed" | "unknown"): OverviewDto => ({
+      ...overviewFixture,
+      tasks: overviewFixture.tasks.map((t) =>
+        t.status === "COMPLETED" && t.pr && !t.pr.merged ? { ...t, pr: { ...t.pr, state } } : t,
+      ),
+    });
+    const closed = mount(withState("closed"));
+    expect(closed.textContent).toContain("5 件のタスクを実行し、2 件をマージしました。");
+    expect(closed.querySelector('[data-mark="closed"]')).not.toBeNull();
+    expect(closed.querySelector('[aria-label="凡例"]')?.textContent).toContain("閉じた");
+    document.body.innerHTML = "";
+    // GitHub 上でマージされた（rovo の記録は未反映）PR は、マージ済みとして数える
+    const merged = mount(withState("merged"));
+    expect(merged.textContent).toContain("5 件のタスクを実行し、3 件をマージしました。");
+    document.body.innerHTML = "";
+    const unknown = mount(withState("unknown"));
+    expect(unknown.querySelector('[aria-label="凡例"]')?.textContent).toContain("PR あり");
+    expect(unknown.textContent).toContain("2 件をマージしました。");
+  });
+
   it("全員: owner_login ごとのレーン。自分: 自分だけ", () => {
     expect(lanesOf(mount(overviewFixture))).toEqual([
       "alice-example",

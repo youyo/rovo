@@ -11,12 +11,15 @@ import {
   admin,
   baseUrl,
   bodyOf,
+  completedResult,
   directoryRow,
   emitAgentEvent,
+  finishAgent,
   INSTALLATION_ID,
   login,
   newUser,
   startArgs,
+  waitForResult,
 } from "./helpers";
 
 // ダッシュボードの読み取り API（M5b）を、実 Worker（wrangler dev）+ 偽 GitHub で通しに確かめる。
@@ -331,4 +334,99 @@ describe("ダッシュボードの読み取り API（2 ユーザーの見え方�
     expect(noHeader.headers.get("access-control-allow-origin")).toBeNull();
     expect(noHeader.headers.get("x-content-type-options")).toBe("nosniff");
   }, 180_000);
+});
+
+// PR の状態（open / merged / closed）を、閲覧時に gateway が閲覧者のユーザートークンで GitHub（偽）から取る。
+// COMPLETED + 未マージの PR だけが対象。キャッシュは閲覧者ごと（UserDO）なので、閲覧者を替えて GitHub 側の変化を確かめる。
+describe("ダッシュボードの PR の状態（GitHub から取る）", () => {
+  it("overview・詳細に state が出る。GitHub 側で閉じると別の閲覧者には closed。GitHub の GraphQL が 500 でも 200 で state=unknown", async () => {
+    const [a, b, c] = [newUser("dash-pr-a"), newUser("dash-pr-b"), newUser("dash-pr-c")];
+    for (const u of [a, b, c]) await addMember(u);
+    await admin.setInstallation(INSTALLATION_ID, [WIDGETS]);
+    // 契約の PR の URL は github.com だけ。偽 GitHub の PR の URL の host を合わせる
+    await admin.app("setPrHost", "github.com");
+
+    // A のタスクを COMPLETED にする（PR は Draft のまま = 未マージの open）
+    const client = await login(a);
+    let taskId: string;
+    let head: string;
+    try {
+      taskId = (
+        bodyOf(
+          await client.callTool({ name: "task_start", arguments: startArgs("pr-state-task") }),
+        ) as { task_id: string }
+      ).task_id;
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const st = bodyOf(
+          await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+        );
+        if (st.status === "RUNNING") break;
+        if (Date.now() > deadline)
+          throw new Error(`RUNNING になりませんでした: ${JSON.stringify(st)}`);
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      const branch = `agent/task-${taskId}`;
+      const sha = await admin.app<string | null>("branch", "acme/widgets", branch);
+      if (!sha) throw new Error("作業ブランチがありません");
+      head = sha;
+      await finishAgent(taskId, "completed", completedResult(head));
+      await waitForResult(client, taskId);
+    } finally {
+      await client.close();
+    }
+    const cookies = {
+      a: await dashboardLogin(a),
+      b: await dashboardLogin(b),
+      c: await dashboardLogin(c),
+    };
+
+    // 索引に COMPLETED と PR が入るまで待つ
+    const find = async (cookie: string) => {
+      const dto = OverviewDtoSchema.parse((await dashboardGet(cookie, overviewPath())).json());
+      return dto.tasks.find((t) => t.task_id === taskId);
+    };
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const t = await find(cookies.a);
+      if (t?.status === "COMPLETED" && t.pr) break;
+      if (Date.now() > deadline) throw new Error("索引に COMPLETED と PR が入りませんでした");
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    // A: open（GitHub に聞いた結果。rovo の記録は未マージ）
+    const first = await find(cookies.a);
+    expect(first?.pr).toMatchObject({ merged: false, state: "open" });
+    expect(first?.pr?.url).toMatch(/^https:\/\/github\.com\/acme\/widgets\/pull\/\d+$/);
+    const detail = TaskDetailDtoSchema.parse(
+      (await dashboardGet(cookies.a, `/tasks/${taskId}`)).json(),
+    );
+    expect(detail.task.pr).toMatchObject({ merged: false, state: "open" });
+
+    // GitHub 側で人が閉じた → 初めて見る閲覧者 B（キャッシュなし）には closed。A は 30 秒のキャッシュで open のまま
+    await admin.app("closePull", "acme/widgets", first?.pr?.number);
+    expect((await find(cookies.b))?.pr).toMatchObject({ merged: false, state: "closed" });
+    expect((await find(cookies.a))?.pr?.state).toBe("open");
+
+    // GitHub の GraphQL が 500: C（キャッシュなし）にも 200 で、state=unknown。画面の他の部分（tasks・budget）は壊れない
+    await admin.app("setFault", { pattern: "^POST /graphql$", status: 500 });
+    try {
+      const res = await dashboardGet(cookies.c, overviewPath());
+      expect(res.status).toBe(200);
+      const dto = OverviewDtoSchema.parse(res.json());
+      const t = dto.tasks.find((x) => x.task_id === taskId);
+      expect(t).toMatchObject({ status: "COMPLETED", pr: { merged: false, state: "unknown" } });
+      expect(dto.budget.concurrency_limit).toBeGreaterThan(0);
+      const d = await dashboardGet(cookies.c, `/tasks/${taskId}`);
+      expect(d.status).toBe(200);
+      expect(TaskDetailDtoSchema.parse(d.json()).task.pr?.state).toBe("unknown");
+    } finally {
+      await admin.app("setFault", { pattern: "^POST /graphql$", status: null });
+    }
+
+    // 閲覧者のユーザートークンで GraphQL を呼んでいる（Installation Token ではない）
+    const gh = await admin.app<{ method: string; path: string; auth: string }[]>("requests");
+    const userGraphql = gh.filter((r) => r.path === "/graphql" && r.auth === "user");
+    expect(userGraphql.length).toBeGreaterThanOrEqual(2);
+  }, 240_000);
 });

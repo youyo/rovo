@@ -19,6 +19,9 @@ import {
   GitHubClient,
   GitHubError,
   type GitHubErrorCode,
+  MAX_PULL_STATE_BATCH,
+  type PullRef,
+  type PullStateValue,
   resolveGitHubBaseUrls,
   type StoredCredential,
   type TokenSet,
@@ -38,6 +41,17 @@ export const RESERVATION_RECLAIM_AFTER_MS = 10 * 60 * 1000;
 export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
 /** 閲覧者の見えるリポジトリの集合のキャッシュ時間（D6。権限の取り消しが一覧に反映されるまでの遅れの上限）。 */
 export const VISIBLE_CACHE_TTL_MS = 30 * 1000;
+/** PR の状態（ダッシュボード）のキャッシュ時間。open は変わりやすいので短く、merged / closed は変わりにくいので長く。 */
+export const PR_STATE_OPEN_TTL_MS = 30 * 1000;
+export const PR_STATE_FINAL_TTL_MS = 10 * 60 * 1000;
+/** 取得に失敗した（unknown）PR を、GitHub を叩き直さずに待つ時間。障害中に画面の更新のたびに叩かない */
+export const PR_STATE_FAILURE_TTL_MS = 10 * 1000;
+/** 1 回の dashboardPullStates で問い合わせる PR の上限。超える分は問い合わせず unknown */
+export const MAX_PR_STATE_REFS = 200;
+/** GraphQL の問い合わせを同時に進める本数 */
+const PR_STATE_CONCURRENCY = 3;
+/** PR の状態のキャッシュの最大件数（メモリのみ） */
+const PR_STATE_CACHE_MAX = 2_000;
 /** 見えるリポジトリの集合の上限（D5）。超えたら部分的な集合を使わず fail closed にする。 */
 export const MAX_VISIBLE_REPOSITORIES = 10_000;
 /** web の1日あたりの回数の既定値（ユーザーごと・UTC）。env の WEB_SEARCH_DAILY_LIMIT / WEB_FETCH_DAILY_LIMIT で変える。 */
@@ -261,6 +275,10 @@ export class UserDO extends DurableObject<Env> {
   private visibleGen = 0;
   /** 進行中の集合の取得。キーは世代（loginEpoch）。最新のものを 1 本だけ持ち、fresh でない呼び出しは束ねる。 */
   private visibleInflight = new Map<number, Promise<VisibleResult>>();
+  /** PR の状態のキャッシュ（メモリのみ。キーは "owner/name#番号" の小文字）。閲覧者のトークンで取った値で、この利用者の DO の中だけで使う */
+  private prStateCache = new Map<string, { state: PullStateValue; at: number; ttl: number }>();
+  /** 進行中の PR の状態の問い合わせ（キー別）。同じ PR の同時の呼び出しを 1 本に束ねる */
+  private prStateInflight = new Map<string, Promise<PullStateValue>>();
   /** 再試行間隔のジッター用の乱数（[0, 1)）。テストで差し替える。 */
   protected random: () => number = Math.random;
   /** 索引の配送を始める alarm が要るか（同期区間の中で立て、区間の後に requestConsultAlarm が消す） */
@@ -500,6 +518,132 @@ export class UserDO extends DurableObject<Env> {
     });
     this.visibleInflight.set(epoch, created);
     return created;
+  }
+
+  /**
+   * ダッシュボードの PR の状態（open / merged / closed。取れなければ unknown）を、閲覧者のユーザートークンで GitHub から取る。
+   * refs と同じ並びで返す。呼び出し側（gateway の読み取り API）は、**閲覧権限の判定に通ったタスクの PR だけ**を渡す。
+   *
+   * - 許可ルールを満たさない・資格が無い利用者は、GitHub を呼ばず全部 unknown（キャッシュも返さない）
+   * - 呼び出しを抑える: GraphQL で MAX_PULL_STATE_BATCH 件ずつにまとめ、同時 PR_STATE_CONCURRENCY 本まで。重複は 1 件に、
+   *   同じ PR の同時の呼び出しは 1 本に束ねる。上限 MAX_PR_STATE_REFS を超える分は問い合わせず unknown
+   * - キャッシュ（メモリのみ）: open 30 秒・merged / closed 10 分・取れなかったもの 10 秒
+   * - fail-soft: 401・403・404・レート制限・タイムアウトなどは例外にせず unknown（失敗の内容は返さない）
+   */
+  async dashboardPullStates(githubUserId: number, refs: PullRef[]): Promise<PullStateValue[]> {
+    const out: PullStateValue[] = refs.map(() => "unknown");
+    if (refs.length === 0) return out;
+    const allowed = await this.dashboardAllowed(githubUserId);
+    if (allowed !== "allowed") {
+      this.prStateCache.clear();
+      return out;
+    }
+    const epoch = this.loginEpoch;
+    const now = this.now();
+    const keyOf = (r: PullRef) => `${r.repository.toLowerCase()}#${r.number}`;
+
+    // 重複を除き、上限までを問い合わせの対象にする
+    const unique = new Map<string, PullRef>();
+    for (const r of refs) {
+      const k = keyOf(r);
+      if (!unique.has(k) && unique.size < MAX_PR_STATE_REFS) unique.set(k, r);
+    }
+    const result = new Map<string, Promise<PullStateValue> | PullStateValue>();
+    const misses: [string, PullRef][] = [];
+    for (const [k, r] of unique) {
+      const c = this.prStateCache.get(k);
+      if (c && now - c.at >= 0 && now - c.at < c.ttl) {
+        result.set(k, c.state);
+        continue;
+      }
+      const running = this.prStateInflight.get(k);
+      if (running) {
+        result.set(k, running);
+        continue;
+      }
+      misses.push([k, r]);
+    }
+
+    // 問い合わせる分を分割し、同時の本数を抑えて実行する（Promise は同期的に登録して、同時の呼び出しを束ねる）
+    let active = 0;
+    const waiting: (() => void)[] = [];
+    const limited = async <T>(fn: () => Promise<T>): Promise<T> => {
+      if (active >= PR_STATE_CONCURRENCY)
+        await new Promise<void>((resolve) => waiting.push(resolve));
+      active++;
+      try {
+        return await fn();
+      } finally {
+        active--;
+        waiting.shift()?.();
+      }
+    };
+    for (let i = 0; i < misses.length; i += MAX_PULL_STATE_BATCH) {
+      const chunk = misses.slice(i, i + MAX_PULL_STATE_BATCH);
+      const batch = limited(() =>
+        this.fetchPullStates(
+          epoch,
+          chunk.map(([, r]) => r),
+        ),
+      );
+      chunk.forEach(([k], j) => {
+        const p: Promise<PullStateValue> = batch
+          .then((states) => states[j] ?? "unknown")
+          .finally(() => {
+            if (this.prStateInflight.get(k) === p) this.prStateInflight.delete(k);
+          });
+        this.prStateInflight.set(k, p);
+        result.set(k, p);
+      });
+    }
+
+    const resolved = new Map<string, PullStateValue>();
+    for (const [k, v] of result) resolved.set(k, await v);
+    return refs.map((r) => resolved.get(keyOf(r)) ?? "unknown");
+  }
+
+  /** 1 回分の GraphQL。失敗は例外にせず全部 unknown（短くキャッシュ）。取得中に再ログインがあれば、結果はキャッシュしない */
+  private async fetchPullStates(epoch: number, refs: PullRef[]): Promise<PullStateValue[]> {
+    let states: PullStateValue[];
+    try {
+      const { client, credentials } = this.github();
+      states = await credentials.withToken((tok) => client.getPullStates(tok, refs));
+    } catch (e) {
+      // メッセージにトークン等が入りうるので、エラー名（と GitHubError のコード）だけを記録する
+      console.error(
+        "user_do_pull_states_error",
+        e instanceof GitHubError ? e.code : e instanceof Error ? e.name : typeof e,
+      );
+      states = refs.map(() => "unknown");
+    }
+    if (epoch === this.loginEpoch) {
+      const at = this.now();
+      refs.forEach((r, i) => {
+        const state = states[i] ?? "unknown";
+        const ttl =
+          state === "open"
+            ? PR_STATE_OPEN_TTL_MS
+            : state === "unknown"
+              ? PR_STATE_FAILURE_TTL_MS
+              : PR_STATE_FINAL_TTL_MS;
+        const k = `${r.repository.toLowerCase()}#${r.number}`;
+        this.prStateCache.delete(k); // 挿入順を新しく保つ（古い順に捨てるため）
+        this.prStateCache.set(k, { state, at, ttl });
+      });
+      this.trimPrStateCache(at);
+    }
+    return states;
+  }
+
+  private trimPrStateCache(now: number): void {
+    if (this.prStateCache.size <= PR_STATE_CACHE_MAX) return;
+    for (const [k, c] of this.prStateCache) {
+      if (now - c.at >= c.ttl || now - c.at < 0) this.prStateCache.delete(k);
+    }
+    for (const k of this.prStateCache.keys()) {
+      if (this.prStateCache.size <= PR_STATE_CACHE_MAX) break;
+      this.prStateCache.delete(k);
+    }
   }
 
   private dropVisible(): void {
@@ -1211,6 +1355,8 @@ export class UserDO extends DurableObject<Env> {
     this.memberInflight.clear();
     this.visibleInflight.clear();
     this.dropVisible();
+    this.prStateCache.clear();
+    this.prStateInflight.clear();
     this.ctx.storage.sql.exec("DELETE FROM membership_cache");
   }
 

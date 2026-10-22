@@ -30,6 +30,9 @@ export const TaskCostDtoSchema = z.strictObject({
 });
 export type TaskCostDto = z.infer<typeof TaskCostDtoSchema>;
 
+/** PR の状態の値（GitHub から閲覧時に取る。取れなければ "unknown"）。 */
+export const PR_STATES = ["open", "merged", "closed", "unknown"] as const;
+
 /** Draft PR。`url` は GitHub の PR の URL の形だけ。 */
 export const PrDtoSchema = z.strictObject({
   number: z.int().min(1),
@@ -38,6 +41,12 @@ export const PrDtoSchema = z.strictObject({
   draft: z.boolean().nullable(),
   /** rovo の task_pr_merge でマージ済みか（人が GitHub 上でマージした場合は付かない） */
   merged: z.boolean(),
+  /**
+   * GitHub での今の状態。閲覧時に gateway が閲覧者のトークンで取る（短いキャッシュあり）。
+   * 取れない（権限・レート制限・障害・タイムアウト）ときや、照会しない状態のタスクは "unknown"。
+   * `merged` が true なら常に "merged"（rovo の task_pr_merge の記録を優先する）。
+   */
+  state: z.enum(PR_STATES),
 });
 export type PrDto = z.infer<typeof PrDtoSchema>;
 

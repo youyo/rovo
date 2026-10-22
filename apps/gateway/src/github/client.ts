@@ -71,6 +71,18 @@ export interface UserPull {
   baseRepo: string | null;
 }
 
+/** PR の状態（ダッシュボード用）。取れなかったものは "unknown"。 */
+export type PullStateValue = "open" | "merged" | "closed" | "unknown";
+export interface PullRef {
+  /** owner/name */
+  repository: string;
+  number: number;
+}
+/** getPullStates の 1 回の GraphQL にまとめる PR の最大数（alias の数）。超える分は呼び出し側が分ける。 */
+export const MAX_PULL_STATE_BATCH = 40;
+/** PR の状態の 1 回の問い合わせを待つ上限（ms）。ダッシュボードの応答を遅らせないよう短くする */
+const PULL_STATE_TIMEOUT_MS = 8_000;
+
 /** GitHub のエラーメッセージを呼び出し元に返すときの上限。 */
 const MAX_GITHUB_MESSAGE = 300;
 
@@ -286,6 +298,60 @@ export class GitHubClient {
     };
   }
 
+  /**
+   * 複数の PR の状態を GraphQL の 1 回で取る（ダッシュボード。閲覧者のユーザートークン）。
+   * owner / name / 番号は変数で渡し、クエリの文字列には埋めない（クエリは件数だけで決まる定数）。
+   * 戻り値は refs と同じ並び。見えない・存在しない・形が想定外のものは "unknown"（そのほかの PR は取れる）。
+   * 要求全体の失敗（401・403・レート制限・5xx・タイムアウト・data なし）は GitHubError を投げる。
+   * owner/name の形でない・番号が正でないものは問い合わせず "unknown"。refs が MAX_PULL_STATE_BATCH を超えたら RangeError。
+   */
+  async getPullStates(accessToken: string, refs: PullRef[]): Promise<PullStateValue[]> {
+    if (refs.length > MAX_PULL_STATE_BATCH) throw new RangeError("too many pull requests");
+    const out: PullStateValue[] = refs.map(() => "unknown");
+    const asked: { at: number; owner: string; name: string; number: number }[] = [];
+    refs.forEach((ref, at) => {
+      const m = /^([^/\s]+)\/([^/\s]+)$/.exec(ref.repository);
+      if (!m || !Number.isSafeInteger(ref.number) || ref.number <= 0) return;
+      asked.push({ at, owner: m[1] as string, name: m[2] as string, number: ref.number });
+    });
+    if (asked.length === 0) return out;
+
+    const variables: Record<string, string | number> = {};
+    const decls: string[] = [];
+    const fields: string[] = [];
+    asked.forEach((a, i) => {
+      variables[`o${i}`] = a.owner;
+      variables[`n${i}`] = a.name;
+      variables[`p${i}`] = a.number;
+      decls.push(`$o${i}: String!, $n${i}: String!, $p${i}: Int!`);
+      fields.push(
+        `r${i}: repository(owner: $o${i}, name: $n${i}) { pullRequest(number: $p${i}) { state merged } }`,
+      );
+    });
+    const res = await this.send(
+      accessToken,
+      "POST",
+      "/graphql",
+      { query: `query(${decls.join(", ")}) { ${fields.join(" ")} }`, variables },
+      AbortSignal.timeout(PULL_STATE_TIMEOUT_MS),
+    );
+    if (!res.ok) this.throwIfError(res);
+    const body = (await this.json(res)) as { data?: unknown } | null;
+    const data = body?.data;
+    if (typeof data !== "object" || data === null) {
+      throw new GitHubError("upstream_unavailable", "unexpected GraphQL response");
+    }
+    asked.forEach((a, i) => {
+      const pull = (data as Record<string, { pullRequest?: unknown } | null | undefined>)[`r${i}`]
+        ?.pullRequest as { state?: unknown; merged?: unknown } | null | undefined;
+      if (typeof pull !== "object" || pull === null) return;
+      if (pull.merged === true || pull.state === "MERGED") out[a.at] = "merged";
+      else if (pull.state === "CLOSED") out[a.at] = "closed";
+      else if (pull.state === "OPEN") out[a.at] = "open";
+    });
+    return out;
+  }
+
   /** Draft の PR を Ready for review にする（GraphQL。REST には無い）。 */
   async markReadyForReview(accessToken: string, pullRequestNodeId: string): Promise<void> {
     const res = await this.send(accessToken, "POST", "/graphql", {
@@ -366,10 +432,12 @@ export class GitHubClient {
     method: string,
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<Response> {
     try {
       return await this.fetchImpl(`${this.apiBase}${path}`, {
         method,
+        ...(signal ? { signal } : {}),
         headers: {
           accept: "application/vnd.github+json",
           authorization: `Bearer ${accessToken}`,

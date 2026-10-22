@@ -1,6 +1,13 @@
 import { z } from "zod";
 import { dashboardUrl } from "../dashboard/url";
-import { type ModelEnv, resolveModel } from "../models";
+import {
+  type ModelChoice,
+  type ModelSelection,
+  resolveSelectThresholds,
+  type SelectDeps,
+  selectModel,
+} from "../model-selection";
+import { autoCandidates, type ModelEnv, resolveModel } from "../models";
 import type { ProviderKeysDeps } from "../provider-keys";
 import { maxConcurrentTasks } from "./budget";
 import { nextSteps, nextStepsAfterMerge, nextStepsAfterReady } from "./next-steps";
@@ -75,6 +82,10 @@ export type StartValue = {
   task_id: string;
   status: TaskStatus;
   draft_pr_url: string | null;
+  /** 実際に使うモデル（task_start の model。省略したときは rovo が選んだモデル） */
+  model: string;
+  /** モデルの選び方（mode: explicit | auto と、理由の固定コード）。記録が無いときは付かない */
+  model_selection?: ModelSelection;
   note: string;
 } & WithDashboardUrl;
 
@@ -268,7 +279,14 @@ export function checkStartInput(rawInput: unknown): ServiceResult<CheckedStartIn
 
 export function createTaskService(
   env: Pick<Env, "USER_DO" | "TASK_DO"> &
-    ModelEnv & { MAX_CONCURRENT_TASKS?: string; PUBLIC_BASE_URL?: string },
+    ModelEnv & {
+      MAX_CONCURRENT_TASKS?: string;
+      PUBLIC_BASE_URL?: string;
+      /** Workers AI（Clef によるモデルの自動選択）。無ければ選ばず既定のモデル */
+      AI?: unknown;
+      /** 自動選択の閾値の上書き（`up=0.5,band=0.3-0.7`） */
+      AUTO_MODEL_CLEF_THRESHOLDS?: string;
+    },
   overrides: Partial<TaskServiceDeps> = {},
   /** プロバイダーキーの取得（Unit が fetch / 時計を差し替える） */
   providerKeys?: ProviderKeysDeps,
@@ -282,6 +300,42 @@ export function createTaskService(
   const withDashboardUrl = (taskId: string): WithDashboardUrl => {
     const url = dashboardUrl(env, taskId);
     return url === undefined ? {} : { dashboard_url: url };
+  };
+
+  /** model を省略した task_start のモデルを Clef で選ぶ。例外は投げない（fallback は既定のモデル） */
+  const chooseModel = async (
+    input: TaskInput,
+    fallback: string,
+    userId: number,
+  ): Promise<ModelChoice> => {
+    const { thresholds, ignored } = resolveSelectThresholds(env.AUTO_MODEL_CLEF_THRESHOLDS);
+    if (ignored !== undefined) console.error("auto_model_thresholds_ignored", ignored.length);
+    const deps: SelectDeps = {
+      ai: env.AI as SelectDeps["ai"],
+      gatewayId: env.AI_GATEWAY_ID ?? "",
+      metadata: { caller: "model_select", userId: String(userId) },
+      thresholds,
+    };
+    try {
+      return await selectModel(deps, {
+        candidates: await autoCandidates(env, providerKeys),
+        fallback,
+        task: {
+          title: input.title,
+          instructions: input.instructions,
+          acceptance_criteria: input.acceptance_criteria,
+          verification_commands: input.verification_commands,
+          repository: input.repository,
+        },
+      });
+    } catch {
+      // 想定外の失敗でも task_start は止めない（例外の文面は残さない）
+      console.error("model_select_error");
+      return {
+        model: fallback,
+        selection: { mode: "auto", chosen: fallback, reason: "fallback_error" },
+      };
+    }
   };
 
   return {
@@ -302,6 +356,14 @@ export function createTaskService(
       // （env の AGENT_MODELS と、AI Gateway に登録されたキー。models_list で一覧を返す）
       const model = await resolveModel(env, input.model, providerKeys);
       if (!model.ok) return fail(model.code, model.message);
+      // 省略したときは Clef がタスクの内容から選ぶ（失敗・時間切れは既定のモデル。task_start は失敗させない）。TaskDO を作る前に決める
+      const choice: ModelChoice =
+        input.model !== undefined
+          ? {
+              model: model.model,
+              selection: { mode: "explicit", chosen: model.model, reason: "explicit" },
+            }
+          : await chooseModel(input, model.model, principal.githubUserId);
       // 省略時はサーバーで生成する（再試行の重複排除は保証しない）。':' を含むので利用者のキーと衝突しない。
       const requestKey = key ?? `auto:${ulid()}`;
 
@@ -323,7 +385,8 @@ export function createTaskService(
 
       const created = await deps.tasks(reserved.task_id).ensureCreated({
         ...input,
-        model: model.model,
+        model: choice.model,
+        model_selection: choice.selection,
         task_id: reserved.task_id,
         owner_id: principal.githubUserId,
         owner_login: principal.login,
@@ -355,6 +418,10 @@ export function createTaskService(
           task_id: created.task.task_id,
           status,
           draft_pr_url: created.task.draft_pr_url,
+          model: created.task.model,
+          ...(created.task.model_selection !== undefined
+            ? { model_selection: created.task.model_selection }
+            : {}),
           note: START_NOTE,
           ...withDashboardUrl(created.task.task_id),
         },

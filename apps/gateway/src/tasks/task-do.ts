@@ -30,6 +30,7 @@ import {
   renderReportBlock,
   resolveGitHubBaseUrls,
 } from "../github";
+import { type ModelSelection, modelSelectionSchema } from "../model-selection";
 import { agentModelsOf, defaultModelOf, effortOf } from "../models";
 import {
   type PublicPromotion,
@@ -138,6 +139,11 @@ export type EnsureCreatedInput = z.input<typeof taskInputSchema> & {
   /** M3 以降で渡される。GitHub の repository ID / Installation ID。 */
   repository_id?: number | null;
   installation_id?: number | null;
+  /**
+   * モデルの選び方の記録（gateway が task_start で model を決めたときの mode / reason など）。新しい RPC は作らず、作成時の入力に足す。
+   * 省略可（古い呼び出し・直接の作成）。chosen は model と一致していなければならない。
+   */
+  model_selection?: ModelSelection;
 };
 
 export type TaskView = {
@@ -153,6 +159,8 @@ export type TaskView = {
   model: string;
   /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値。考える量が多いほど出力トークン＝費用が増える） */
   effort: Effort;
+  /** モデルの選び方（task_start の mode: explicit | auto と、理由の固定コード）。記録の無いタスク（古いタスク）には付かない */
+  model_selection?: ModelSelection;
   /** task_start で明示した Sandbox の大きさ。省略したタスクは null（agent の既定。実際に使った大きさは task_result の usage.sandbox_instance） */
   sandbox_instance: string | null;
   created_at: string;
@@ -223,6 +231,8 @@ export type ResultView = {
   model: string;
   /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値） */
   effort: Effort;
+  /** モデルの選び方（task_start と同じ記録。無いタスクには付かない） */
+  model_selection?: ModelSelection;
   /** Draft PR の情報。PR が無い（作成前に失敗した、Phase 2 のタスク）なら null */
   pr: {
     number: number;
@@ -293,7 +303,7 @@ export type ResultView = {
 };
 
 /** 結果の組み立て途中の形（merge_policy は GitHub 側の情報と一緒に足す）。 */
-type ResultCore = Omit<ResultView, "merge_policy" | "model" | "effort">;
+type ResultCore = Omit<ResultView, "merge_policy" | "model" | "effort" | "model_selection">;
 
 /** task_pr_ready / task_pr_merge の入口で TaskDO が返す、対象と判定の結果。 */
 export type PrContextResult =
@@ -395,6 +405,8 @@ export type DashboardDetailResult =
       view: TaskIndexSnapshot;
       merge_policy: MergePolicy;
       sandbox_instance: string | null;
+      /** モデルの選び方の記録。無いタスクには付かない */
+      model_selection?: ModelSelection;
       /** 状態の遷移の記録に RUNNING / VERIFYING があるか（止まった段階の判定用。1 回の SQL で読む） */
       reached: { running: boolean; verifying: boolean };
     }
@@ -445,6 +457,8 @@ type TaskRow = {
   model: string | null;
   /** D10 の思考レベル。開始時の値。それより前のタスクは NULL（現在の設定から求める） */
   effort: string | null;
+  /** モデルの選び方の記録（JSON）。それより前のタスクは NULL */
+  model_selection: string | null;
   /** 明示した Sandbox の大きさ。NULL は省略（agent の既定） */
   sandbox_instance: string | null;
   created_at: number;
@@ -718,6 +732,8 @@ export class TaskDO extends DurableObject<Env> {
     addColumnIfMissing(this.ctx.storage.sql, "task", "model", "TEXT");
     // D10: 子のモデルの思考レベル（開始時の値。NULL は現在の設定から求める）
     addColumnIfMissing(this.ctx.storage.sql, "task", "effort", "TEXT");
+    // モデルの選び方の記録（task_start の mode / reason / scores。JSON。NULL は記録なし = 古いタスク）
+    addColumnIfMissing(this.ctx.storage.sql, "task", "model_selection", "TEXT");
     // task_start の sandbox_instance（明示した Sandbox の大きさ。NULL は省略 = agent の既定）
     addColumnIfMissing(this.ctx.storage.sql, "task", "sandbox_instance", "TEXT");
     // Phase 4: 子の質問と回答、親からの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
@@ -838,6 +854,7 @@ export class TaskDO extends DurableObject<Env> {
       merge_policy: policyOf(row),
       model: this.modelOf(row),
       effort: this.effortOfRow(row),
+      ...this.selectionOf(row),
       sandbox_instance: row.sandbox_instance ?? null,
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString(),
@@ -849,6 +866,17 @@ export class TaskDO extends DurableObject<Env> {
   /** 行のモデル（D10 より前のタスクは NULL。既定のモデルとして扱う）。 */
   private modelOf(row: Pick<TaskRow, "model">): string {
     return row.model ?? defaultModelOf(this.env);
+  }
+
+  /** 行のモデルの選び方の記録。無い・壊れているときは何も足さない（キー自体を付けない） */
+  private selectionOf(row: Pick<TaskRow, "model_selection">): { model_selection?: ModelSelection } {
+    if (row.model_selection === null) return {};
+    try {
+      const parsed = modelSelectionSchema.safeParse(JSON.parse(row.model_selection));
+      return parsed.success ? { model_selection: parsed.data } : {};
+    } catch {
+      return {};
+    }
   }
 
   /** 行の思考レベル（開始時に保存した値。無ければ現在の設定から求める）。 */
@@ -1048,10 +1076,28 @@ export class TaskDO extends DurableObject<Env> {
       return { ok: false, code: "invalid_input" };
     }
     const model = data.model ?? defaultModelOf(this.env);
+    // モデルの選び方の記録（任意）。形が違う・選んだモデルと食い違うものは受け付けない
+    let modelSelection: ModelSelection | undefined;
+    if (input.model_selection !== undefined) {
+      const sel = modelSelectionSchema.safeParse(input.model_selection);
+      if (!sel.success || sel.data.chosen !== model) return { ok: false, code: "invalid_input" };
+      modelSelection = sel.data;
+    }
     // 思考レベルはモデルごとに固定。開始時の値を保存する（あとで MODEL_EFFORTS を変えても、このタスクの表示は変わらない）
     const effort = effortOf(this.env, model);
     // await のあいだに他の呼び出しが進みうるので、状態の判定は await の後の同期区間で行う。
-    const fingerprint = await computeFingerprint(data);
+    // fingerprint は「利用者が入力したもの」で決める。rovo が選んだモデル（mode: auto）は入力ではないので含めない
+    // （同じ idempotency_key の再試行で Clef の答えが変わっても、同じタスクとして扱うため）。明示した model は従来どおり含める。
+    const { model: _chosen, ...withoutModel } = data;
+    const fingerprint = await computeFingerprint(
+      modelSelection?.mode === "auto" ? (withoutModel as typeof data) : data,
+    );
+    // この変更より前に model を省略して作られたタスク（fingerprint に既定のモデルが含まれている）の再試行も、同じタスクとして扱う
+    const before = this.getRow();
+    const legacyFingerprint =
+      before !== undefined && before.model_selection === null
+        ? await computeFingerprint({ ...data, model: before.model ?? model })
+        : undefined;
 
     const result = this.ctx.storage.transactionSync((): EnsureCreatedResult => {
       const existing = this.getRow();
@@ -1059,7 +1105,8 @@ export class TaskDO extends DurableObject<Env> {
         const same =
           existing.id === input.task_id &&
           existing.owner_id === input.owner_id &&
-          existing.fingerprint === fingerprint;
+          (existing.fingerprint === fingerprint ||
+            (legacyFingerprint !== undefined && existing.fingerprint === legacyFingerprint));
         return same
           ? { ok: true, created: false, task: this.view(existing) }
           : { ok: false, code: "conflict" };
@@ -1070,8 +1117,8 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO task (singleton, id, owner_id, owner_login, repository, repository_id,
            installation_id, base_ref, base_sha, title, instructions, acceptance_criteria,
-           constraints, verification_commands, fingerprint, merge_policy, model, effort, sandbox_instance, status, draft_pr_url, created_at, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
+           constraints, verification_commands, fingerprint, merge_policy, model, effort, model_selection, sandbox_instance, status, draft_pr_url, created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
         input.task_id,
         input.owner_id,
         input.owner_login,
@@ -1089,6 +1136,7 @@ export class TaskDO extends DurableObject<Env> {
         data.merge_policy,
         model,
         effort,
+        modelSelection === undefined ? null : JSON.stringify(modelSelection),
         data.sandbox_instance ?? null,
         at,
         at,
@@ -1198,6 +1246,7 @@ export class TaskDO extends DurableObject<Env> {
       view: this.buildIndexSnapshot(row, link),
       merge_policy: policyOf(row),
       sandbox_instance: row.sandbox_instance ?? null,
+      ...this.selectionOf(row),
       reached: this.reachedStatuses(),
     };
   }
@@ -1712,13 +1761,15 @@ export class TaskDO extends DurableObject<Env> {
     const merge_policy = row ? policyOf(row) : DEFAULT_MERGE_POLICY;
     const model = row ? this.modelOf(row) : defaultModelOf(this.env);
     const effort = row ? this.effortOfRow(row) : effortOf(this.env, model);
-    if (!gl) return { ...view, merge_policy, model, effort, pr: null };
+    const selection = row ? this.selectionOf(row) : {};
+    if (!gl) return { ...view, merge_policy, model, effort, ...selection, pr: null };
     const extra = (JSON.parse(gl.warnings) as string[]).filter((w) => !view.warnings.includes(w));
     return {
       ...view,
       merge_policy,
       model,
       effort,
+      ...selection,
       warnings: [...view.warnings, ...extra],
       pr:
         gl.pr_number !== null && gl.pr_url !== null

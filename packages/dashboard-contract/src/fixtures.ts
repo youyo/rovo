@@ -197,6 +197,7 @@ export const taskDetailRunningFixture: TaskDetailDto = {
     cache_build_ms: 0,
     sandbox_runtime_ms: 1_080_000,
     sandbox_instance: "standard-2",
+    model_selection: { mode: "auto", reason: "clef_flash" },
   },
   output: {
     tail: "RUN  v4.1.12\n ✓ test/a.test.ts (3 tests)\n ✓ test/b.test.ts (5 tests)\n",

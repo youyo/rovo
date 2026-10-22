@@ -15,6 +15,8 @@ export default defineConfig({
       // 本物のエントリ + 偽の AgentDO（test/support/fake-agent-do.ts）
       main: "./test/unit/worker-entry.ts",
       wrangler: { configPath: "./wrangler.jsonc" },
+      // ai バインディングは常にリモートに接続する設定で、接続が全テスト終了後も残る。Unit は偽の AI を差し込むので実 AI は呼ばない
+      remoteBindings: false,
       miniflare: {
         // wrangler.jsonc の AGENT_DO は別 Worker（script_name）を指す。Unit では agent を起動しないので、
         // 同じ Worker 内の、台本で制御できる偽の AgentDO に差し替える。
@@ -31,6 +33,8 @@ export default defineConfig({
           // D10: タスクごとに選べるモデル（Unit 用。wrangler.jsonc の既定は空 = AGENT_MODEL だけ）
           AGENT_MODELS:
             "anthropic/claude-sonnet-5-5,anthropic/claude-haiku-5-5,openai/gpt-6-sol,workers-ai/@cf/openai/gpt-oss-120b,workers-ai/@cf/openai/gpt-oss-20b",
+          // モデルの自動選択（Clef）は既定で止める（既存の Unit は「省略 = 既定」の前提）。有効にするテストは env を上書きして偽の AI を差し込む
+          AUTO_MODEL_CANDIDATES: "",
           // モデルごとの思考レベルの上書き（Unit 用。haiku の初期値 low を minimal に変える。wrangler.jsonc の既定は空）
           MODEL_EFFORTS: "anthropic/claude-haiku-5-5=minimal",
           GITHUB_APP_CLIENT_ID: "test-client-id",

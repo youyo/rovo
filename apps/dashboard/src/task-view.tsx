@@ -26,6 +26,25 @@ const MERGE_POLICY: Record<TaskDetailDto["settings"]["merge_policy"], string> = 
   agent_merge: "依頼した AI がマージしてよい",
 };
 
+/** モデルの選び方の理由のコード（gateway の model-selection.ts の reason）の日本語。知らないコードはそのまま出す */
+const MODEL_SELECTION_REASON: Record<string, string> = {
+  clef_flash: "Clef が内容から選んだ",
+  clef_cascade: "Clef が聞き直して選んだ",
+  single_candidate: "選べるモデルが 1 つだった",
+  no_candidates: "選べるモデルが無く既定のモデル",
+  fallback_unconfigured: "Clef を使えず既定のモデル",
+  fallback_timeout: "時間切れで既定のモデル",
+  fallback_error: "Clef の失敗で既定のモデル",
+  fallback_invalid: "Clef の答えが想定外で既定のモデル",
+};
+
+function modelSelectionText(
+  sel: NonNullable<TaskDetailDto["settings"]["model_selection"]>,
+): string {
+  if (sel.mode === "explicit") return "指定（依頼した側が選んだ）";
+  return `自動（${MODEL_SELECTION_REASON[sel.reason] ?? sel.reason}）`;
+}
+
 const DEPS_CACHE: Record<NonNullable<TaskDetailDto["settings"]["deps_cache"]>, string> = {
   hit: "再利用した",
   miss: "見つからなかった",
@@ -284,6 +303,12 @@ export function TaskView(props: {
             <h2 id="facts-h">設定</h2>
             <dl className="facts">
               <Fact k="モデル" v={model.name} title={model.full} />
+              {settings.model_selection === undefined ? null : (
+                <Fact
+                  k="モデルの選び方"
+                  v={singleLine(modelSelectionText(settings.model_selection))}
+                />
+              )}
               <Fact k="思考" v={task.effort} />
               <Fact k="マージの方針" v={MERGE_POLICY[settings.merge_policy]} />
               {settings.deps_cache === undefined ? null : (

@@ -176,6 +176,32 @@ describe("タスク詳細（実行中。値のある now / output）", () => {
     expect(pr.getAttribute("rel")).toBe("noopener noreferrer");
   });
 
+  it("設定に「モデルの選び方」を 1 行出す（自動なら理由つき）。旧い gateway のように無ければ出さない", async () => {
+    const { c } = await mount(server());
+    expect(text(c)).toContain("モデルの選び方");
+    expect(text(c)).toContain("自動（Clef が内容から選んだ）");
+    const failed = await mount(server({ detail: () => json(200, taskDetailFailedSetupFixture) }));
+    expect(text(failed.c)).not.toContain("モデルの選び方");
+  });
+
+  it("モデルの選び方: 指定したときは「指定」、知らない理由のコードはそのまま出す（自由文でも文字として）", async () => {
+    const variants: [TaskDetailDto["settings"]["model_selection"], string][] = [
+      [{ mode: "explicit", reason: "explicit" }, "指定（依頼した側が選んだ）"],
+      [{ mode: "auto", reason: "fallback_timeout" }, "自動（時間切れで既定のモデル）"],
+      [{ mode: "auto", reason: "some_future_code" }, "自動（some_future_code）"],
+    ];
+    for (const [sel, want] of variants) {
+      const dto = {
+        ...taskDetailRunningFixture,
+        settings: { ...taskDetailRunningFixture.settings, model_selection: sel },
+      };
+      const { c } = await mount(server({ detail: () => json(200, dto) }));
+      expect(text(c), want).toContain(want);
+      for (const r of roots.splice(0)) act(() => r.unmount());
+      document.body.innerHTML = "";
+    }
+  });
+
   it("DTO に無い数字（予約額・モデルの呼び出し回数）は出さない", async () => {
     const { c } = await mount(server());
     expect(text(c)).not.toContain("予約");

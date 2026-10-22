@@ -149,6 +149,10 @@ dir = "apps/dashboard"
 run = "pnpm exec playwright test"
 wait_for = ["test:e2e:gateway", "test:e2e:gateway:nologs", "test:e2e:gateway:userids"]
 
+[tasks."clef:model-experiment"]
+description = "モデルの自動選択の閾値の実験（実際の Clef に apps/gateway/test/fixtures/model-selection-samples.json の見本を投げて確率を JSON に書く）。使い方: mise run clef:model-experiment -- <出力パス>。接続は CLEF_PROXY_URL（AI バインディングを持つ wrangler dev --remote の Worker）か、CLOUDFLARE_API_TOKEN と CLOUDFLARE_ACCOUNT_ID（Workers AI の REST）。数セントかかる。CI では実行しない"
+run = "node scripts/clef-model-experiment.mjs"
+
 [tasks."test:e2e:docker"]
 description = "agent の E2E（Docker 必須）。wrangler dev で実コンテナを起動し、偽サーバーで外向き通信の許可・拒否と Gateway→Agent の DO RPC を検証"
 dir = "apps/agent"

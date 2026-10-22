@@ -1,0 +1,310 @@
+[
+  {
+    "id": "readme-line",
+    "expect": "haiku",
+    "task": {
+      "title": "README の末尾に 1 行足す",
+      "instructions": "README.md の末尾に、ライセンスは MIT です、という 1 行を追記してください。他の箇所は変更しないでください。",
+      "acceptance_criteria": ["README.md の末尾に 1 行追加されている", "他のファイルに変更がない"],
+      "verification_commands": [],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "typo",
+    "expect": "haiku",
+    "task": {
+      "title": "タイポの修正",
+      "instructions": "docs/deploy.md の「ダッシュボート」を「ダッシュボード」に直してください（全部で 3 か所）。文言以外は変えないでください。",
+      "acceptance_criteria": ["docs/deploy.md に「ダッシュボート」が残っていない"],
+      "verification_commands": [
+        {
+          "argv": ["grep", "-c", "ダッシュボート", "docs/deploy.md"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "bump-dep",
+    "expect": "haiku",
+    "task": {
+      "title": "依存のバージョンを 1 つ上げる",
+      "instructions": "apps/web の package.json で hono を 4.13.13 から 4.13.14 に上げ、pnpm-lock.yaml を更新してください。ほかの依存は触らないでください。",
+      "acceptance_criteria": ["hono が 4.13.14 になっている", "pnpm-lock.yaml が更新されている"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "typecheck"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "config-value",
+    "expect": "haiku",
+    "task": {
+      "title": "同時実行数の既定を 2 から 3 に変える",
+      "instructions": "wrangler.jsonc の MAX_CONCURRENT_TASKS の既定値を \"2\" から \"3\" に変更してください。README の同じ数字の記述も合わせて直してください。",
+      "acceptance_criteria": ["wrangler.jsonc と README の値が 3 になっている"],
+      "verification_commands": [],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "dashboard-url",
+    "expect": "sonnet",
+    "task": {
+      "title": "ダッシュボードの M10: task_start/status/result に dashboard_url を足す",
+      "instructions": "task_start・task_status・task_result の応答に dashboard_url（`${PUBLIC_BASE_URL}/dashboard/tasks/<task_id>`）を足してください。URL を作る純関数を dashboard/url.ts に置き、PUBLIC_BASE_URL が空・不正のときはキーを付けません。MCP の説明（server.ts の instructions と各ツールの description）も更新してください。Unit テストと E2E テストを書いてください。既存のテストは弱めないでください。",
+      "acceptance_criteria": [
+        "3 つの応答に dashboard_url が付く",
+        "PUBLIC_BASE_URL が不正なときはキーが付かない",
+        "Unit と E2E がある"
+      ],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test"]
+        },
+        {
+          "argv": ["pnpm", "lint"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "bug-redirect",
+    "expect": "sonnet",
+    "task": {
+      "title": "ログイン後のリダイレクト先が /dashboard にならない不具合の修正",
+      "instructions": "GitHub でログインしたあと、`?next=/dashboard/tasks/<id>` を付けていたのに、トップページに戻される。auth/callback.ts が state から next を取り出すところで、URL エンコードされた値をデコードしていないのが原因のはず。直して、next が同一オリジンの /dashboard 配下のときだけ受け付けるテスト（オープンリダイレクトにならないこと）を足してください。",
+      "acceptance_criteria": ["next が /dashboard 配下ならそこに戻る", "外部の URL は無視される"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test:unit"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "wait-elapsed",
+    "expect": "sonnet",
+    "task": {
+      "title": "task_wait のイベントに elapsed_ms を足す",
+      "instructions": "task_wait が返すイベントごとに、タスク作成からの経過時間 elapsed_ms を付けてください。TaskDO の events テーブルの created_at から求め、dashboardEvents の応答には付けません。型（TaskEvent）、公開用の変換（service.ts の wrapEvent）、MCP の説明、Unit テストと E2E テストを更新してください。",
+      "acceptance_criteria": ["task_wait の各イベントに elapsed_ms がある", "Unit と E2E が通る"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "consult-limit",
+    "expect": "sonnet",
+    "task": {
+      "title": "consult の system の長さの上限を検証する",
+      "instructions": "consult の入力の system が 20,000 文字を超えたら invalid_input にしてください。今は上限が無く、予約額に収まらない大きさでも AgentDO まで行ってから失敗します。validation.ts のスキーマに足し、MCP の説明にも上限を書き、境界値（20,000 と 20,001）のテストを書いてください。",
+      "acceptance_criteria": ["20,001 文字は invalid_input", "20,000 文字は通る"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test:unit"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "english-flag",
+    "expect": "sonnet",
+    "task": {
+      "title": "Add a --json flag to the list command",
+      "instructions": "The `list` subcommand prints a table. Add a `--json` flag that prints the same rows as a JSON array instead, with stable key names (id, name, status, created_at). Update the help text and the README usage section, and add tests for both output modes, including the empty list case.",
+      "acceptance_criteria": ["--json prints a valid JSON array", "empty list prints []"],
+      "verification_commands": [
+        {
+          "argv": ["go", "test", "./..."]
+        }
+      ],
+      "repository": "acme/tool"
+    }
+  },
+  {
+    "id": "sandbox-scale",
+    "expect": "opus",
+    "task": {
+      "title": "Sandbox の大きさを、コマンドの実行前に Clef で判断して昇格する仕組みを作る",
+      "instructions": "子のコマンド（と検証コマンド）の前に、Workers AI の決定モデル Clef に「今の大きさで足りるか」を聞いて、足りなければ大きい Sandbox に昇格する仕組みを作ってください。動いているコンテナの大きさは変えられないので、スナップショットを取って別の大きさで復元する必要があります。設計（どこで判断するか、DO のどこに状態を持つか）から決めてください。Clef が失敗・時間切れのときはそのまま実行する fail-soft、リトライ、判断の記録（確率）、昇格中にコマンドが来たときの直列化、費用の按分も必要です。実際の Clef の出力を fixture に固定したテストも書いてください。",
+      "acceptance_criteria": [
+        "重いコマンドの前に昇格する",
+        "Clef の失敗でコマンドが止まらない",
+        "昇格の履歴が task_result に出る",
+        "fixture テストがある"
+      ],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "prod-typeerror",
+    "expect": "opus",
+    "task": {
+      "title": "本番だけで起きる TypeError の原因を調べて直す",
+      "instructions": "デプロイ直後の数分間だけ、task_status が `TypeError: stub.dashboardRead is not a function` で 500 になる。ローカルと CI では再現しない。数分たつと直る。TaskDO に新しいメソッドを足したコミットのあとに起きているように見えるが、原因は分かっていない。原因を特定して（ログと Durable Objects のデプロイの仕組みを調べる必要があるかもしれない）、再発しない形に直してください。",
+      "acceptance_criteria": ["原因が説明されている", "再発しない"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "redos",
+    "expect": "opus",
+    "task": {
+      "title": "秘密のマスクの ReDoS を直す",
+      "instructions": "redact.ts の maskSecrets が、1MB 程度の入力（= の連続や長い英数字）で壊滅的なバックトラックを起こし、Worker が CPU 時間の上限で落ちる。すべてのパターンを見直して、最悪でも入力の長さに線形の時間で終わるようにしてください。既存の伏せる挙動は変えてはいけません（既存のテストが全部通ること）。回帰テストとして、病的な入力で時間が一定以内に終わることを確かめるテストを足してください。",
+      "acceptance_criteria": ["1MB の病的な入力が 100ms 以内に終わる", "既存の挙動が変わらない"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test:unit"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "outbox-redesign",
+    "expect": "opus",
+    "task": {
+      "title": "TaskDO から DirectoryDO への索引の配送を作り直す",
+      "instructions": "今の配送は alarm で全件を送り直していて、同じタスクの更新が順序を逆転して届くことがある。revision による冪等な適用に作り直してください。TaskDO の outbox の設計（再送、順序、障害時の挙動）、DirectoryDO 側の適用、既存のデータの移行まで含みます。DO の alarm と RPC の並行性に注意が必要です。まず設計を文章で書いてから実装してください。",
+      "acceptance_criteria": ["順序が逆転しても最新の状態に収束する", "移行が冪等"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "auth-migration",
+    "expect": "opus",
+    "task": {
+      "title": "認可を GitHub のチーム所属から別の仕組みに移行する",
+      "instructions": "gateway・agent・web・dashboard のすべてで使っている認可（ALLOWED_ORG と ALLOWED_TEAM による GitHub のチーム所属の確認）を、設定ファイルで宣言したロールのモデルに置き換えてください。全アプリにまたがるリファクタで、ログイン、MCP のツール呼び出し、ダッシュボードの閲覧権限、監査ログ、既存のセッションの扱い（移行期間中の互換）をすべて整合させる必要があります。セキュリティ上、fail closed を保ってください。",
+      "acceptance_criteria": [
+        "既存の利用者が移行後も入れる",
+        "権限の無い人は入れない",
+        "全アプリのテストが通る"
+      ],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "rename-fn",
+    "expect": "haiku",
+    "task": {
+      "title": "関数名の変更",
+      "instructions": "utils/date.ts の formatDt を formatDateTime に改名してください。呼び出し元（全部で 7 か所）も直してください。挙動は変えないでください。",
+      "acceptance_criteria": ["formatDt が残っていない"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "typecheck"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "vague-fix",
+    "expect": "sonnet",
+    "task": {
+      "title": "テストが落ちているので直す",
+      "instructions": "CI で test:unit が落ちています。直してください。",
+      "acceptance_criteria": ["test:unit が通る"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test:unit"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "dark-mode",
+    "expect": "sonnet",
+    "task": {
+      "title": "ダッシュボードにダークモードの切り替えを足す",
+      "instructions": "ダッシュボードのヘッダーにダークモードの切り替えボタンを足してください。選択は localStorage に保存し、初回は OS の設定に従います。色は CSS 変数に寄せ、既存の画面を壊さないでください。コンポーネントのテストを書いてください。",
+      "acceptance_criteria": ["切り替えで色が変わる", "再読み込みしても保持される"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "major-upgrade",
+    "expect": "opus",
+    "task": {
+      "title": "vitest を 3 から 4 に上げる",
+      "instructions": "vitest を 3.2 から 4.1 に上げてください。全パッケージのテストの設定、モックの API の変更、workerd 用のプラグインの互換性、CI の設定まで影響します。落ちるテストはテストを弱めずに原因を調べて直してください。",
+      "acceptance_criteria": ["全パッケージのテストが通る"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "flaky-e2e",
+    "expect": "opus",
+    "task": {
+      "title": "E2E が 10 回に 1 回だけ落ちる原因を調べる",
+      "instructions": "gateway の E2E の task-wait が 10 回に 1 回ほど、イベントの順序が入れ替わって落ちます。ローカルでは再現しにくく、CI でだけ起きます。DO の alarm と wait の long polling の競合を疑っていますが、確証はありません。原因を特定して直してください。",
+      "acceptance_criteria": ["100 回連続で通る"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test:e2e"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  },
+  {
+    "id": "long-log",
+    "expect": "sonnet",
+    "task": {
+      "title": "agent への配送の再試行の間隔を指数バックオフにする",
+      "instructions": "advance の再送が固定間隔で、agent が落ちている間ログが埋まります。再試行の間隔を指数バックオフ（上限 5 分）にしてください。Unit テストも足してください。以下は本番のログです。\n[2026-10-21T10:00:00.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 0) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:01:01.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 1) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:02:02.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 2) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:03:03.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 3) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:04:04.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 4) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:05:05.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 5) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:06:06.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 6) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:07:07.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 7) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:08:08.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 8) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:09:09.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 9) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:10:10.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 10) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:11:11.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 11) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:12:12.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 12) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:13:13.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 13) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:14:14.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 14) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:15:15.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 15) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:16:16.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 16) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:17:17.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 17) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:18:18.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 18) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:19:19.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 19) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:20:20.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 20) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:21:21.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 21) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:22:22.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 22) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:23:23.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 23) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:24:24.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 24) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:25:25.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 25) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:26:26.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 26) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:27:27.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 27) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:28:28.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 28) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:29:29.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 29) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:30:30.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 30) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:31:31.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 31) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:32:32.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 32) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:33:33.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 33) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:34:34.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 34) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:35:35.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 35) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:36:36.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 36) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:37:37.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 37) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:38:38.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 38) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:39:39.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 39) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:40:40.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 40) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:41:41.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 41) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:42:42.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 42) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:43:43.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 43) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:44:44.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 44) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:45:45.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 45) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:46:46.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 46) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:47:47.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 47) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:48:48.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 48) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:49:49.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 49) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:50:50.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 50) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:51:51.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 51) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:52:52.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 52) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:53:53.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 53) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:54:54.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 54) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:55:55.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 55) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:56:56.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 56) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:57:57.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 57) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:58:58.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 58) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:59:59.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 59) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:00:00.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 60) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:01:01.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 61) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:02:02.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 62) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:03:03.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 63) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:04:04.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 64) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:05:05.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 65) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:06:06.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 66) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:07:07.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 67) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:08:08.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 68) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:09:09.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 69) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:10:10.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 70) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:11:11.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 71) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:12:12.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 72) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:13:13.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 73) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:14:14.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 74) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:15:15.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 75) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:16:16.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 76) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:17:17.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 77) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:18:18.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 78) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:19:19.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 79) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:20:20.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 80) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:21:21.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 81) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:22:22.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 82) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:23:23.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 83) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:24:24.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 84) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:25:25.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 85) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:26:26.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 86) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:27:27.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 87) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:28:28.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 88) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:29:29.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 89) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:30:30.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 90) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:31:31.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 91) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:32:32.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 92) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:33:33.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 93) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:34:34.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 94) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:35:35.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 95) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:36:36.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 96) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:37:37.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 97) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:38:38.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 98) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:39:39.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 99) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:40:40.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 100) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:41:41.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 101) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:42:42.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 102) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:43:43.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 103) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:44:44.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 104) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:45:45.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 105) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:46:46.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 106) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:47:47.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 107) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:48:48.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 108) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:49:49.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 109) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:50:50.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 110) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:51:51.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 111) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:52:52.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 112) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:53:53.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 113) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:54:54.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 114) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:55:55.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 115) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:56:56.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 116) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:57:57.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 117) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:58:58.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 118) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:59:59.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 119) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:00:00.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 120) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:01:01.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 121) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:02:02.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 122) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:03:03.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 123) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:04:04.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 124) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:05:05.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 125) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:06:06.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 126) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:07:07.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 127) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:08:08.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 128) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:09:09.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 129) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:10:10.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 130) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:11:11.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 131) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:12:12.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 132) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:13:13.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 133) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:14:14.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 134) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:15:15.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 135) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:16:16.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 136) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2106:20)\n[2026-10-21T10:17:17.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 137) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2107:20)\n[2026-10-21T10:18:18.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 138) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2108:20)\n[2026-10-21T10:19:19.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 139) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2109:20)\n[2026-10-21T10:20:20.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 140) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2110:20)\n[2026-10-21T10:21:21.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 141) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2111:20)\n[2026-10-21T10:22:22.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 142) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2112:20)\n[2026-10-21T10:23:23.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 143) at AgentClient.start (agent-client.ts:43:11) at TaskDO.deliver (task-do.ts:2100:20)\n[2026-10-21T10:24:24.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 144) at AgentClient.start (agent-client.ts:44:11) at TaskDO.deliver (task-do.ts:2101:20)\n[2026-10-21T10:25:25.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 145) at AgentClient.start (agent-client.ts:45:11) at TaskDO.deliver (task-do.ts:2102:20)\n[2026-10-21T10:26:26.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 146) at AgentClient.start (agent-client.ts:46:11) at TaskDO.deliver (task-do.ts:2103:20)\n[2026-10-21T10:27:27.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 147) at AgentClient.start (agent-client.ts:40:11) at TaskDO.deliver (task-do.ts:2104:20)\n[2026-10-21T10:28:28.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 148) at AgentClient.start (agent-client.ts:41:11) at TaskDO.deliver (task-do.ts:2105:20)\n[2026-10-21T10:29:29.123Z] ERROR TaskDO.advance failed: Error: agent unreachable (attempt 149) at AgentClient.start (agent-client.ts:42:11) at TaskDO.deliver (task-do.ts:2106:20)\n以上。上限と、ジッタを入れるかどうかは任せます。",
+      "acceptance_criteria": ["間隔が 2 倍ずつ増え、5 分で頭打ちになる"],
+      "verification_commands": [
+        {
+          "argv": ["pnpm", "test:unit"]
+        }
+      ],
+      "repository": "acme/widgets"
+    }
+  }
+]

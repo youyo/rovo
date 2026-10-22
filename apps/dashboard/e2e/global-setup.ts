@@ -11,7 +11,7 @@ import {
   WIDGETS,
   waitForIndex,
 } from "./api";
-import { type E2eState, STATE_ENV } from "./state";
+import { type E2eState, LONG_STEPS, STATE_ENV } from "./state";
 
 /**
  * 悪意のある入力。題名・command・出力のどこに入っても、文字として出るだけで実行されない（D14）。
@@ -54,6 +54,8 @@ export default async function globalSetup() {
       { key: "xss", user: alice, repo: WIDGETS.fullName, title: XSS_PAYLOAD },
       { key: "secret", user: alice, repo: SECRET.fullName, title: secretTitle },
       { key: "bob", user: bob, repo: WIDGETS.fullName, title: "bob のタスク" },
+      // 画面が縦にあふれる長さの手順（自動スクロールの追従 / 停止を確かめる）。最後に作るので、alice の一覧のコンソールに出る
+      { key: "long", user: alice, repo: WIDGETS.fullName, title: "手順が長いタスク" },
     ];
     const tasks: Record<string, string> = {};
     for (const s of specs) {
@@ -90,6 +92,9 @@ export default async function globalSetup() {
     });
     await emit(baseUrl, id("grow"), "command", { command: "grow-first", exitCode: 0 });
     await emit(baseUrl, id("paused"), "command", { command: "paused-first", exitCode: 0 });
+    for (let i = 1; i <= LONG_STEPS; i++) {
+      await emit(baseUrl, id("long"), "command", { command: `long-step-${i}`, exitCode: 0 });
+    }
     await emit(baseUrl, id("xss"), "command", {
       command: XSS_PAYLOAD,
       exitCode: 0,

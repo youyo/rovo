@@ -105,7 +105,8 @@ export function useTaskDetail(id: string, autoRefresh: boolean, deps: TaskDetail
     };
 
     const poll = async (): Promise<PollOutcome> => {
-      const d = await fetchTaskDetail(id, fetchImpl());
+      // 開いた最初の取得（まだ詳細を 1 度も取れていない間）だけ fresh。以降のポーリングは付けない（D6）
+      const d = await fetchTaskDetail(id, fetchImpl(), { fresh: data.detail === null });
       if (!alive) return "ok";
       if (d.kind === "unauthorized" || d.kind === "not_found") {
         setState({ phase: d.kind });

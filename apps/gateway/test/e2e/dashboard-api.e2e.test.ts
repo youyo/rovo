@@ -162,14 +162,15 @@ describe("ダッシュボードの読み取り API（2 ユーザーの見え方�
     expect(aMe.tasks.map((t) => t.task_id)).toEqual([secretTask]);
   }, 180_000);
 
-  it("A の権限が GitHub 側で外れると、次の詳細・events は 404（古い集合で通さない）。一覧からも消える", async () => {
+  it("A の権限が GitHub 側で外れると、開いた最初の取得（?fresh=1）は 404（古い集合で通さない）。そのあとの events も一覧も反映される", async () => {
     const s = await setup();
     const { secretTask } = s.tasks;
-    expect((await dashboardGet(s.cookies.a, `/tasks/${secretTask}`)).status).toBe(200);
+    expect((await dashboardGet(s.cookies.a, `/tasks/${secretTask}?fresh=1`)).status).toBe(200);
     expect((await dashboardGet(s.cookies.a, `/tasks/${secretTask}/events`)).status).toBe(200);
 
     await s.install([]); // secret はだれにも見えなくなる
-    const detail = await dashboardGet(s.cookies.a, `/tasks/${secretTask}`);
+    // ポーリング（fresh なし）はキャッシュ（30 秒）の範囲で反映が遅れうる。開いた最初の取得（fresh=1）は厳密
+    const detail = await dashboardGet(s.cookies.a, `/tasks/${secretTask}?fresh=1`);
     expect(detail.status).toBe(404);
     expect(detail.whole).not.toContain(s.titles.secretTitle);
     // 詳細の取り直しで集合のキャッシュも更新されるので、events も、一覧もすぐに反映される

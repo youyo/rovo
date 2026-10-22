@@ -1,8 +1,8 @@
+import type { TaskDetailDto } from "@rovo/dashboard-contract";
 import { useCallback, useEffect, useState } from "react";
 import type { Scope } from "./api";
 import { AuthView } from "./auth-view";
 import { type DayKey, dayHref, dayOfTask, resolveDay, shiftDay } from "./day";
-import { fetchTaskDetail } from "./detail-api";
 import { Header } from "./header";
 import { parseRoute, type Route } from "./route";
 import { type AuthState, fetchMe, loginHref, logout } from "./session";
@@ -16,7 +16,8 @@ import { Workspace } from "./workspace";
  */
 export function App() {
   const [auth, setAuth] = useState<AuthState>({ state: "loading" });
-  const [scope, setScope] = useState<Scope>("all");
+  // 既定は「自分」（切り替えは使える）
+  const [scope, setScope] = useState<Scope>("me");
   const [route, setRoute] = useState<Route>(() =>
     parseRoute(typeof location === "undefined" ? "/dashboard/" : location.pathname),
   );
@@ -26,7 +27,6 @@ export function App() {
       ? undefined
       : resolveDay(typeof location === "undefined" ? "" : location.search, Date.now()),
   );
-  const taskId = route.kind === "task" ? route.id : null;
 
   useEffect(() => {
     let alive = true;
@@ -38,21 +38,11 @@ export function App() {
     };
   }, []);
 
-  // タスクの URL: そのタスクが始まった日を詳細から決める。取れないとき（404・失敗）は今日（コンソールが状態を出す）
-  const signedIn = auth.state === "signed-in";
-  const dayPending = day === undefined;
-  useEffect(() => {
-    if (!signedIn || !dayPending || taskId === null) return;
-    let alive = true;
-    void fetchTaskDetail(taskId).then((r) => {
-      if (!alive) return;
-      if (r.kind === "unauthorized") setAuth({ state: "signed-out" });
-      else setDay(r.kind === "ok" ? dayOfTask(r.data.task, Date.now()) : null);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [signedIn, dayPending, taskId]);
+  // タスクの URL: そのタスクが始まった日を、コンソールの最初の詳細の取得から決める（詳細を二重に取らない）。
+  // 取れないとき（404・失敗）は今日。一覧は日が決まるまで取りに行かないが、画面は止めない（コンソールと予算・Cloudflare は先に出る）
+  const onTaskSettled = useCallback((task: TaskDetailDto["task"] | null) => {
+    setDay((cur) => (cur === undefined ? (task ? dayOfTask(task, Date.now()) : null) : cur));
+  }, []);
 
   useEffect(() => {
     const onPop = () => {
@@ -91,21 +81,14 @@ export function App() {
 
   return (
     <main className="shell">
-      {auth.state === "signed-in" && day === undefined ? (
-        <>
-          <Header summary={null}>{user}</Header>
-          <div className="state">
-            <h1>ダッシュボード</h1>
-            <p role="status">読み込み中…</p>
-          </div>
-        </>
-      ) : auth.state === "signed-in" ? (
+      {auth.state === "signed-in" ? (
         <Workspace
           route={route}
           scope={scope}
           onScopeChange={setScope}
-          day={day ?? null}
+          day={day}
           onDayChange={onDayChange}
+          onTaskSettled={onTaskSettled}
           onUnauthorized={onUnauthorized}
           user={user}
         />

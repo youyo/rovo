@@ -1,3 +1,4 @@
+import type { TaskDetailDto } from "@rovo/dashboard-contract";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { Scope } from "./api";
 import type { DayKey } from "./day";
@@ -7,6 +8,7 @@ import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
 import { daySummary, pickConsoleTask } from "./rail";
 import type { Route } from "./route";
 import { TaskScreen } from "./task-screen";
+import { useBudget } from "./use-budget";
 import { type CloudflareDeps, useCloudflare } from "./use-cloudflare";
 import { type OverviewDeps, useOverview } from "./use-overview";
 
@@ -20,9 +22,11 @@ export function Workspace(props: {
   route: Route;
   scope: Scope;
   onScopeChange: (scope: Scope) => void;
-  /** 表示する日（null = 今日）と、前後送り */
-  day: DayKey;
+  /** 表示する日（null = 今日。undefined = まだ決まらない。タスクの URL で、詳細が届くまで）と、前後送り */
+  day: DayKey | undefined;
   onDayChange: (move: -1 | 1 | "today") => void;
+  /** コンソールの最初の詳細の取得が決着したとき（タスクの URL の日を決める） */
+  onTaskSettled?: (task: TaskDetailDto["task"] | null) => void;
   onUnauthorized: () => void;
   /** 利用者名とログアウト */
   user: ReactNode;
@@ -34,6 +38,8 @@ export function Workspace(props: {
   const { state, refresh } = useOverview(scope, day, autoRefresh, props.deps);
   // Cloudflare は一覧とは別の 60 秒間隔。失敗しても一覧は出す（401 だけは一覧と同じ扱い）
   const cloudflare = useCloudflare(autoRefresh, props.cloudflareDeps);
+  // 一覧が届くまでのステータスバーの予算（/budget。軽い）
+  const budget = useBudget(props.deps);
   const unauthorized = state.phase === "unauthorized" || cloudflare.phase === "unauthorized";
 
   useEffect(() => {
@@ -54,15 +60,16 @@ export function Workspace(props: {
       scope={scope}
       onScopeChange={props.onScopeChange}
       summary={data ? daySummary(data) : null}
-      day={day}
+      day={day ?? null}
       onDayChange={props.onDayChange}
     >
       {props.user}
     </Header>
   );
 
-  // 一覧の画面で、一覧がまだ・もう取れないとき: 状態だけを出す（コンソールに出すタスクが決まらない）
-  if (route.kind === "overview" && data === null) {
+  // 一覧の画面で、一覧が失敗・期限切れのとき: 状態を出す（コンソールに出すタスクが決まらない）。
+  // 取得中（loading）は画面全体を止めず、骨格を出して一覧の場所（レール）とコンソールの場所だけ「読み込み中」にする
+  if (route.kind === "overview" && data === null && state.phase !== "loading") {
     return (
       <>
         {header}
@@ -74,7 +81,13 @@ export function Workspace(props: {
   const consoleNode =
     consoleId === null ? (
       <section className="console console--empty" aria-label="コンソール">
-        <p className="soft">タスクを選ぶと、ここに進み具合が流れます。</p>
+        {data === null ? (
+          <p className="soft" role="status">
+            読み込み中…
+          </p>
+        ) : (
+          <p className="soft">タスクを選ぶと、ここに進み具合が流れます。</p>
+        )}
       </section>
     ) : (
       <TaskScreen
@@ -84,6 +97,7 @@ export function Workspace(props: {
         autoRefresh={autoRefresh}
         onAutoRefreshChange={onAutoRefreshChange}
         onRefreshAlso={refresh}
+        onSettled={props.onTaskSettled}
       />
     );
 
@@ -95,6 +109,7 @@ export function Workspace(props: {
         isToday={day === null}
         stale={state.phase === "ready" ? state.stale : false}
         cloudflare={cloudflare}
+        budget={budget}
         autoRefresh={autoRefresh}
         onAutoRefreshChange={onAutoRefreshChange}
         onRefresh={refresh}

@@ -29,7 +29,8 @@ function router(cf: Cf) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/dashboard/api/me") return json(200, { login: "alice-example" });
-    if (url.pathname === "/dashboard/api/overview") return json(200, overviewFixture);
+    if (url.pathname === "/dashboard/api/overview")
+      return json(200, { ...overviewFixture, scope: "me" });
     if (url.pathname === "/dashboard/api/cloudflare") return cf();
     return json(404, { error: "not_found" });
   });

@@ -29,8 +29,16 @@ function router(overview: Handler) {
   });
 }
 
-const byScope: Handler = (url) =>
+/** scope ごとに中身が違う応答（scope の切り替えの検証用） */
+const scoped: Handler = (url) =>
   json(200, url.searchParams.get("scope") === "me" ? overviewMeFixture : overviewFixture);
+
+/** 中身は同じで、scope だけ要求どおりに返す（scope の既定が me でも、全員分の中身で検証できる） */
+const byScope: Handler = (url) =>
+  json(200, {
+    ...overviewFixture,
+    scope: url.searchParams.get("scope") === "me" ? "me" : "all",
+  });
 
 const roots: { unmount: () => void }[] = [];
 let store: Map<string, string>;
@@ -70,13 +78,15 @@ const overviewCalls = (f: ReturnType<typeof router>) =>
     .filter((u) => u.pathname === "/dashboard/api/overview");
 
 describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
-  it("ログイン済みなら overview を取って一覧を出す。範囲はローカル日の 0 時〜いま、scope=all", async () => {
-    const f = router(byScope);
+  it("ログイン済みなら overview を取って一覧を出す。範囲はローカル日の 0 時〜いま、scope の既定は me（自分）", async () => {
+    const f = router(scoped);
     const c = await mount(f);
-    expect(c.querySelector(".day-summary")?.textContent).toMatch(/^\d+月\d+日 +5 件/);
-    expect(lanesOf(c)).toHaveLength(3);
+    expect(c.querySelector(".day-summary")?.textContent).toMatch(
+      new RegExp(`^\\d+月\\d+日 +${overviewMeFixture.tasks.length} 件`),
+    );
+    expect(lanesOf(c)).toEqual(["alice-example"]);
     const u = overviewCalls(f)[0] as URL;
-    expect(u.searchParams.get("scope")).toBe("all");
+    expect(u.searchParams.get("scope")).toBe("me");
     const from = Number(u.searchParams.get("from"));
     const to = Number(u.searchParams.get("to"));
     expect(to - from).toBeGreaterThan(0);
@@ -87,33 +97,34 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
     ]);
   });
 
-  it("「自分」に切り替えると scope=me で取り直し、レーンが自分だけになる。「全員」で戻る", async () => {
-    const f = router(byScope);
+  it("最初は「自分」。「全員」にすると scope=all で取り直し、他の人のレーンも出る。「自分」で戻る", async () => {
+    const f = router(scoped);
     const c = await mount(f);
     const btn = (label: string) =>
       [...c.querySelectorAll("button")].find((b) => b.textContent === label) as HTMLButtonElement;
-    expect(btn("全員").getAttribute("aria-pressed")).toBe("true");
-    await act(async () => {
-      btn("自分").click();
-    });
     expect(btn("自分").getAttribute("aria-pressed")).toBe("true");
-    expect(overviewCalls(f).at(-1)?.searchParams.get("scope")).toBe("me");
     expect(lanesOf(c)).toEqual(["alice-example"]);
     await act(async () => {
       btn("全員").click();
     });
+    expect(btn("全員").getAttribute("aria-pressed")).toBe("true");
+    expect(overviewCalls(f).at(-1)?.searchParams.get("scope")).toBe("all");
     expect(lanesOf(c)).toHaveLength(3);
+    await act(async () => {
+      btn("自分").click();
+    });
+    expect(lanesOf(c)).toEqual(["alice-example"]);
   });
 
   it("切り替えた直後は、新しい応答が来るまで前のスコープのデータを出さない（読み込み中に戻る）", async () => {
     const f = router((url) =>
-      url.searchParams.get("scope") === "me" ? new Promise<Response>(() => {}) : byScope(url),
+      url.searchParams.get("scope") === "all" ? new Promise<Response>(() => {}) : scoped(url),
     );
     const c = await mount(f);
-    expect(lanesOf(c)).toHaveLength(3);
-    const me = [...c.querySelectorAll("button")].find((b) => b.textContent === "自分");
+    expect(lanesOf(c)).toEqual(["alice-example"]);
+    const all = [...c.querySelectorAll("button")].find((b) => b.textContent === "全員");
     await act(async () => {
-      me?.click();
+      all?.click();
     });
     expect(lanesOf(c)).toHaveLength(0);
     expect(c.querySelector("a.rail-row")).toBeNull();
@@ -182,9 +193,9 @@ describe("App: 日付の前後送り", () => {
     history.replaceState(null, "", "/dashboard/");
     const f = router(byScope);
     const c = await mount(f);
-    const me = [...c.querySelectorAll("button")].find((b) => b.textContent === "自分");
+    const all = [...c.querySelectorAll("button")].find((b) => b.textContent === "全員");
     await act(async () => {
-      me?.click();
+      all?.click();
     });
     await act(async () => {
       dayBtn(c, "前の日")?.click();
@@ -198,7 +209,7 @@ describe("App: 日付の前後送り", () => {
     expect(Number(u.searchParams.get("to"))).toBe(
       new Date(y.getFullYear(), y.getMonth(), y.getDate() + 1).getTime(),
     );
-    expect(u.searchParams.get("scope")).toBe("me");
+    expect(u.searchParams.get("scope")).toBe("all");
     expect(dayBtn(c, "次の日")?.disabled).toBe(false);
     expect(dayBtn(c, "今日へ")).toBeDefined();
   });
@@ -246,7 +257,9 @@ describe("App: 日付の前後送り", () => {
 
   it("過去の日で空なら、文言がその日向けになる", async () => {
     history.replaceState(null, "", `/dashboard/?day=${ymd(daysAgo(1))}`);
-    const c = await mount(router(() => json(200, { ...overviewFixture, tasks: [], consults: [] })));
+    const c = await mount(
+      router(() => json(200, { ...overviewFixture, scope: "me", tasks: [], consults: [] })),
+    );
     expect(c.textContent).toContain("この日のタスクはありません");
   });
 });
@@ -297,7 +310,7 @@ describe("App: 自動更新（D15）", () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(c.textContent).toContain("更新できませんでした");
-    expect(lanesOf(c)).toHaveLength(3);
+    expect(lanesOf(c)).toEqual(["alice-example"]);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(9_000);
     });

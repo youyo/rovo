@@ -50,7 +50,10 @@ async function mount(path: string, opts: Opts = {}) {
       const o = opts.overview?.(url);
       return json(
         200,
-        o ?? (url.searchParams.get("scope") === "me" ? overviewMeFixture : overviewFixture),
+        o ?? {
+          ...overviewFixture,
+          scope: url.searchParams.get("scope") === "me" ? "me" : "all",
+        },
       );
     }
     const m = /^\/dashboard\/api\/tasks\/([^/]+)(\/events)?$/.exec(url.pathname);
@@ -107,18 +110,24 @@ describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
     expect(head.querySelector("button[aria-label='前の日']")).not.toBeNull();
   });
 
-  it("「自分」に切り替えると、要約もレールも自分の分になる", async () => {
-    const { c } = await mount("/dashboard/");
-    const me = [...c.querySelectorAll("fieldset.seg button")].find(
-      (b) => b.textContent === "自分",
-    ) as HTMLButtonElement;
+  it("最初は「自分」の分。「全員」に切り替えると、要約もレールも全員の分になる", async () => {
+    const { c } = await mount("/dashboard/", {
+      overview: (url) =>
+        url.searchParams.get("scope") === "me" ? overviewMeFixture : overviewFixture,
+    });
+    const btn = (label: string) =>
+      [...c.querySelectorAll("fieldset.seg button")].find(
+        (b) => b.textContent === label,
+      ) as HTMLButtonElement;
+    expect(btn("自分").getAttribute("aria-pressed")).toBe("true");
+    expect(c.querySelectorAll("a.rail-row")).toHaveLength(overviewMeFixture.tasks.length);
     await act(async () => {
-      me.click();
+      btn("全員").click();
       await settle();
     });
-    expect(me.getAttribute("aria-pressed")).toBe("true");
-    expect(c.querySelectorAll("a.rail-row")).toHaveLength(overviewMeFixture.tasks.length);
-    expect(text(c.querySelector(".day-summary"))).toContain(`${overviewMeFixture.tasks.length} 件`);
+    expect(btn("全員").getAttribute("aria-pressed")).toBe("true");
+    expect(c.querySelectorAll("a.rail-row")).toHaveLength(overviewFixture.tasks.length);
+    expect(text(c.querySelector(".day-summary"))).toContain(`${overviewFixture.tasks.length} 件`);
   });
 });
 
@@ -137,6 +146,7 @@ describe("一覧 /dashboard のコンソール", () => {
   it("走行中が無ければ最新のタスク", async () => {
     const finished: OverviewDto = {
       ...overviewFixture,
+      scope: "me",
       tasks: overviewFixture.tasks.map((t) =>
         t.status === "RUNNING" || t.status === "VERIFYING"
           ? { ...t, status: "FAILED", ended_at: "2026-10-21T05:59:00Z" }
@@ -154,7 +164,7 @@ describe("一覧 /dashboard のコンソール", () => {
   });
 
   it("タスクが無ければコンソールの場所に案内を出す（詳細は取りに行かない）", async () => {
-    const empty: OverviewDto = { ...overviewFixture, tasks: [], consults: [] };
+    const empty: OverviewDto = { ...overviewFixture, scope: "me", tasks: [], consults: [] };
     const { c, f } = await mount("/dashboard/", { overview: () => empty });
     expect(paths(f).some((p) => p.startsWith("/dashboard/api/tasks/"))).toBe(false);
     expect(text(c.querySelector(".console-col"))).toContain("タスクを選ぶと");

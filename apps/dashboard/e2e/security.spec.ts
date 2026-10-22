@@ -34,6 +34,8 @@ test("(6) 権限の無いタスクは、一覧の画面にもネットワーク�
   const api = collectApi(page);
   await loginAs(page, s.users.bob);
   await expect(rail(page, s.tasks.bob as string)).toBeVisible();
+  // 既定は「自分」。他人のタスクの権限を確かめるので「全員」にする
+  await page.getByRole("button", { name: "全員" }).click();
   // alice の widgets のタスクは見える（権限がある）
   await expect(rail(page, id("done"))).toBeVisible();
   // secret のタスクはレールにもタイムラインにもない

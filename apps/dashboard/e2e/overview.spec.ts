@@ -26,24 +26,29 @@ test("(1) 偽 GitHub でログインすると一覧が出る（127.0.0.1 の __H
   await expect(page.locator('[data-budget="all"]')).toBeVisible();
 });
 
-test("(2) 全員 / 自分の切り替え: 自分にすると他人のタスクが消える", async ({ page }) => {
+test("(2) 全員 / 自分の切り替え: 最初は「自分」で他人のタスクが無く、「全員」にすると出る", async ({
+  page,
+}) => {
   await loginAs(page, s.users.bob);
   const bobRow = rail(page, s.tasks.bob as string);
   const aliceRow = rail(page, s.tasks.done as string);
   const all = page.getByRole("button", { name: "全員" });
   const me = page.getByRole("button", { name: "自分" });
-  await expect(all).toHaveAttribute("aria-pressed", "true");
-  await expect(bobRow).toBeVisible();
-  await expect(aliceRow).toBeVisible();
-
-  await me.click();
+  // 既定は「自分」
   await expect(me).toHaveAttribute("aria-pressed", "true");
   await expect(all).toHaveAttribute("aria-pressed", "false");
-  await expect(aliceRow).toHaveCount(0);
   await expect(bobRow).toBeVisible();
+  await expect(aliceRow).toHaveCount(0);
 
   await all.click();
+  await expect(all).toHaveAttribute("aria-pressed", "true");
+  await expect(me).toHaveAttribute("aria-pressed", "false");
   await expect(aliceRow).toBeVisible();
+  await expect(bobRow).toBeVisible();
+
+  await me.click();
+  await expect(aliceRow).toHaveCount(0);
+  await expect(bobRow).toBeVisible();
 });
 
 test("(3) レールの行のリンクで詳細へ行ける", async ({ page }) => {

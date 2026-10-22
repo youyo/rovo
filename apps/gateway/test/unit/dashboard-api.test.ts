@@ -448,7 +448,7 @@ describe("overview の consult（D9。M3b の索引）", () => {
 });
 
 describe("tasks/:id", () => {
-  it("見えるタスクは TaskDetailDto。入力（instructions など）は返らない。最初に開くときは GitHub で取り直す（fresh）", async () => {
+  it("見えるタスクは TaskDetailDto。入力（instructions など）は返らない。?fresh=1 のとき（開いた最初の 1 回）だけ GitHub で取り直す", async () => {
     const repo = newRepoId();
     const v = newViewer([repo]);
     const t = await seedTask({
@@ -457,7 +457,7 @@ describe("tasks/:id", () => {
       instructions: "SECRET-INSTRUCTIONS-BODY",
       merge_policy: "agent_merge",
     });
-    const r = await api(v, `/tasks/${t.id}`);
+    const r = await api(v, `/tasks/${t.id}?fresh=1`);
     expect(r.status).toBe(200);
     const dto = TaskDetailDtoSchema.parse(r.json());
     expect(dto.task).toMatchObject({ task_id: t.id, title: "DETAIL-TITLE", status: "CREATING" });
@@ -466,6 +466,29 @@ describe("tasks/:id", () => {
     expect(dto.output).toEqual({ tail: null, redacted: true });
     expect(r.text).not.toContain("SECRET-INSTRUCTIONS-BODY");
     expect(r.text).not.toMatch(/instructions|git_token|ghs_|ghu_|"enc"/);
+    expect(v.visibleCalls).toEqual([{ fresh: true }]);
+  });
+
+  it("fresh の指定が無い（ポーリング）、または 1 以外の値のときは、キャッシュを使う（fresh でない）", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const t = await seedTask({ repository_id: repo });
+    for (const q of ["", "?fresh=0", "?fresh=true", "?fresh="]) {
+      expect((await api(v, `/tasks/${t.id}${q}`)).status, q).toBe(200);
+    }
+    expect(v.visibleCalls).toEqual([
+      { fresh: false },
+      { fresh: false },
+      { fresh: false },
+      { fresh: false },
+    ]);
+  });
+
+  it("fresh=1 でも権限の照合は変わらない（見えないタスクは 404、fresh の集合で判定）", async () => {
+    const v = newViewer([newRepoId()]);
+    const t = await seedTask({ repository_id: newRepoId() });
+    const r = await api(v, `/tasks/${t.id}?fresh=1`);
+    expect(r.status).toBe(404);
     expect(v.visibleCalls).toEqual([{ fresh: true }]);
   });
 

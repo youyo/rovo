@@ -75,11 +75,13 @@ async function get<T>(
   }
 }
 
+/** fresh: true は、開いた最初の取得だけに付ける（サーバーが GitHub で権限を取り直す。D6）。ポーリングには付けない。 */
 export function fetchTaskDetail(
   id: string,
   fetchImpl: typeof fetch = fetch,
+  opts: { fresh?: boolean } = {},
 ): Promise<DetailResult> {
-  return get(base(id), looksLikeDetail, fetchImpl);
+  return get(opts.fresh ? `${base(id)}?fresh=1` : base(id), looksLikeDetail, fetchImpl);
 }
 
 export function fetchTaskEvents(

@@ -37,6 +37,18 @@ describe("fetchTaskDetail", () => {
     expect(url).toBe(`/dashboard/api/tasks/${ID}`);
     expect(init.credentials).toBe("same-origin");
   });
+  it("fresh: true のときだけ ?fresh=1 を付ける（既定は付けない）", async () => {
+    const fetchImpl = f(() => json(200, taskDetailRunningFixture));
+    await fetchTaskDetail(ID, fetchImpl, { fresh: true });
+    await fetchTaskDetail(ID, fetchImpl, { fresh: false });
+    await fetchTaskDetail(ID, fetchImpl);
+    const urls = fetchImpl.mock.calls.map((c) => (c as unknown as [string])[0]);
+    expect(urls).toEqual([
+      `/dashboard/api/tasks/${ID}?fresh=1`,
+      `/dashboard/api/tasks/${ID}`,
+      `/dashboard/api/tasks/${ID}`,
+    ]);
+  });
   it("401 / 404 / その他", async () => {
     expect(
       await fetchTaskDetail(

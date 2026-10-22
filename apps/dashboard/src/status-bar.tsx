@@ -1,4 +1,4 @@
-import type { CloudflareSummaryDto, OverviewDto } from "@rovo/dashboard-contract";
+import type { BudgetMeDto, CloudflareSummaryDto, OverviewDto } from "@rovo/dashboard-contract";
 import { useId, useState } from "react";
 import { cloudflareRows } from "./cloudflare";
 import { CloudflarePanel } from "./cloudflare-panel";
@@ -166,6 +166,46 @@ export function StatusBar(props: {
         >
           内訳
         </button>
+      </section>
+    </div>
+  );
+}
+
+/**
+ * 一覧がまだ届かないときのステータスバー。予算（/budget）と Cloudflare の要約だけを出し、
+ * 一覧が要る項目（全員・モデル別・内訳）はその場所だけ「読み込み中…」にする。
+ */
+export function PendingStatusBar(props: {
+  budget: BudgetMeDto | null;
+  cloudflare?: CloudflareState;
+}) {
+  const { budget } = props;
+  const cf = cloudflareBar(props.cloudflare);
+  const limit = budget ? budgetLimit(budget) : null;
+  return (
+    <div className="bar-wrap">
+      <section className="statusbar" aria-label="費用と枠">
+        <Sb k="budget-me" strong>
+          {budget
+            ? `今月 ${formatUsd(budget.spent_usd)}${limit === null ? "" : ` / ${formatUsd(limit)}`}`
+            : "今月 読み込み中…"}
+        </Sb>
+        <Sb k="budget-left" alt>
+          {budget
+            ? `残り ${formatUsd(budget.remaining_usd)}  あと ${formatCount(budget.startable)} 件`
+            : "残り 読み込み中…"}
+        </Sb>
+        <Sb k="budget-all">全員 読み込み中…</Sb>
+        <Sb k="models" alt>
+          モデル別 読み込み中…
+        </Sb>
+        <span className="sb-grow" />
+        <Sb k="cloudflare">{cf.workers}</Sb>
+        {cf.credit === "" ? null : (
+          <Sb k="credit" alt>
+            {cf.credit}
+          </Sb>
+        )}
       </section>
     </div>
   );

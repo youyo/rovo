@@ -1,4 +1,4 @@
-import { cloudflareRows } from "./cloudflare";
+import { cloudflareEstimateHead, cloudflareRows } from "./cloudflare";
 import { isAllowedCloudflareUrl } from "./format";
 import type { CloudflareState } from "./use-cloudflare";
 
@@ -13,6 +13,14 @@ export function CloudflarePanel(props: { state: CloudflareState }) {
     <section className="panel" data-cloudflare="" aria-labelledby="cf-h">
       <h2 id="cf-h">Cloudflare</h2>
       <p className="caption">直近 24 時間</p>
+      {data !== null && cloudflareEstimateHead(data) !== null ? (
+        <p className="cf-total" data-cf-total="">
+          <span>{cloudflareEstimateHead(data)?.text}</span>
+          {cloudflareEstimateHead(data)?.partial ? (
+            <span className="cf-note">一部の項目は含まない</span>
+          ) : null}
+        </p>
+      ) : null}
       {state.phase === "failed" ? (
         <p className="soft" role="status">
           {data === null
@@ -32,6 +40,7 @@ export function CloudflarePanel(props: { state: CloudflareState }) {
               <span className="cf-name">{r.name}</span>
               <span className="cf-value">
                 <span className={r.ok ? "cf-text" : "cf-text cf-missing"}>{r.text}</span>
+                {r.cost !== null ? <span className="cf-cost">{r.cost}</span> : null}
                 {isAllowedCloudflareUrl(r.href) ? (
                   <a
                     href={r.href}

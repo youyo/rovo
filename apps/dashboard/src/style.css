@@ -930,6 +930,24 @@ fieldset {
 .cf-text {
   overflow-wrap: anywhere;
 }
+.cf-cost {
+  color: var(--dim);
+  font-size: var(--fs-small);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.cf-total {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin: 2px 0 6px;
+  font-variant-numeric: tabular-nums;
+}
+.cf-note {
+  color: var(--dim);
+  font-size: var(--fs-small);
+}
 .cf-missing {
   color: var(--dim);
 }

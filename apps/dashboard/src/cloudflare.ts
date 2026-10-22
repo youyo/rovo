@@ -38,6 +38,8 @@ export type CloudflareRow = {
   text: string;
   href: string;
   ariaLabel: string;
+  /** 推定の金額（無料枠を引く前）の表示。推定が無い・null の項目は null */
+  cost: string | null;
 };
 
 type Item<T> = { ok: true; value: T } | { ok: false; reason: Reason } | undefined;
@@ -48,16 +50,50 @@ function row<T>(
   open: string,
   item: Item<T>,
   fmt: (v: T) => string,
+  cost: number | null | undefined,
 ): CloudflareRow {
-  const base = { key, name, href: CLOUDFLARE_DASH_URL, ariaLabel: `${open} を Cloudflare で開く` };
+  const base = {
+    key,
+    name,
+    href: CLOUDFLARE_DASH_URL,
+    ariaLabel: `${open} を Cloudflare で開く`,
+    // 取れなかった項目（ok が false）と推定が null の項目は金額を出さない
+    cost: item?.ok && cost !== null && cost !== undefined ? `推定 ${formatUsd(cost)}` : null,
+  };
   // 契約で optional の項目が無いときは、一時的な取得失敗として扱う
   if (item === undefined) return { ...base, ok: false, text: reasonText("unavailable") };
   if (!item.ok) return { ...base, ok: false, text: reasonText(item.reason) };
   return { ...base, ok: true, text: fmt(item.value) };
 }
 
+/**
+ * コンテナの推定（vCPU + メモリ、取れていればディスクも足す）。vCPU かメモリが null なら金額は出さない
+ * （片方だけの合計を全体の金額に見せない）。ディスクが null のときは、足さずに vCPU + メモリだけにする。
+ */
+function containersCost(
+  e: NonNullable<CloudflareSummaryDto["cost_estimate"]>["items"],
+): number | null {
+  const v = e.containers_vcpu.estimated_usd_before_free_tier;
+  const m = e.containers_memory.estimated_usd_before_free_tier;
+  if (v === null || m === null) return null;
+  const d = e.containers_disk.estimated_usd_before_free_tier ?? 0;
+  return v + m + d;
+}
+
+/** 欄の頭の推定の合計。cost_estimate が無ければ null（件数だけ出す）。 */
+export function cloudflareEstimateHead(
+  s: CloudflareSummaryDto,
+): { text: string; partial: boolean } | null {
+  const e = s.cost_estimate;
+  if (e === undefined) return null;
+  const total = e.total_estimated_usd_before_free_tier;
+  const amount = total === null ? "推定できない" : `推定 ${formatUsd(total)}`;
+  return { text: `${amount}（無料枠を引く前）`, partial: e.partial };
+}
+
 /** 画面の行。リンクはどれも Cloudflare のトップ（DTO の open_url は使わない）。 */
 export function cloudflareRows(s: CloudflareSummaryDto): CloudflareRow[] {
+  const e = s.cost_estimate?.items;
   return [
     row(
       "workers",
@@ -65,6 +101,7 @@ export function cloudflareRows(s: CloudflareSummaryDto): CloudflareRow[] {
       "Workers",
       s.workers,
       (v) => `${formatCount(v.requests)} 件、エラー ${formatCount(v.errors)} 件`,
+      e?.workers_requests.estimated_usd_before_free_tier,
     ),
     row(
       "containers",
@@ -73,6 +110,7 @@ export function cloudflareRows(s: CloudflareSummaryDto): CloudflareRow[] {
       s.containers,
       (v) =>
         `CPU ${formatVcpuHours(v.vcpu_seconds)}、メモリ ${formatGibHours(v.memory_gib_seconds)}、稼働中 ${formatCount(v.running_instances)} 台`,
+      e === undefined ? undefined : containersCost(e),
     ),
     row(
       "ai_gateway",
@@ -81,10 +119,23 @@ export function cloudflareRows(s: CloudflareSummaryDto): CloudflareRow[] {
       s.ai_gateway,
       (v) =>
         `${formatCount(v.requests)} 件、エラー ${formatCount(v.errors)} 件、費用 ${formatUsd(v.cost_usd)}`,
+      e?.ai_gateway.cost_usd,
     ),
-    row("workers_ai", "Workers AI", "Workers AI", s.workers_ai, (v) => formatNeurons(v.neurons)),
-    row("credit_balance", "クレジット残高", "クレジット残高", s.credit_balance, (v) =>
-      formatUsd(v.balance_usd),
+    row(
+      "workers_ai",
+      "Workers AI",
+      "Workers AI",
+      s.workers_ai,
+      (v) => formatNeurons(v.neurons),
+      e?.workers_ai.estimated_usd_before_free_tier,
+    ),
+    row(
+      "credit_balance",
+      "クレジット残高",
+      "クレジット残高",
+      s.credit_balance,
+      (v) => formatUsd(v.balance_usd),
+      undefined,
     ),
   ];
 }

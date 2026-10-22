@@ -1256,7 +1256,7 @@ describe("Gateway → Web Research Service（Phase 5: 親の MCP ツール）", 
       "https://docs.example.com/guide",
       "https://docs.example.com/faq",
     ]);
-    expect(searched.view.metadata).toMatchObject({ provider: "ceramic", dropped_urls: 1 });
+    expect(searched.view.metadata).toMatchObject({ provider: "linkup", dropped_urls: 1 });
     expect(searched.view.metadata.request_id).toMatch(/^fake-search-/);
     const first = searched.view.results[0];
     expect(first?.title.startsWith(WEB_BEGIN)).toBe(true);
@@ -1445,7 +1445,7 @@ describe("Gateway → Web Research Service（Phase 5: web_fetch の取得先の�
     expect(failed.body).toMatchObject({
       code: "upstream_unavailable",
       retry_after_seconds: 30,
-      message: expect.stringContaining("search provider (ceramic) returned HTTP 502"),
+      message: expect.stringContaining("search provider (linkup) returned HTTP 502"),
     });
     expect(JSON.stringify(failed.body)).not.toContain("PROVIDER-BODY-TOKEN");
     await client.close();

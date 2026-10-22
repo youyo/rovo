@@ -23,3 +23,6 @@ infra/crash.log
 # Playwright（apps/dashboard の E2E）の成果物
 test-results/
 playwright-report/
+
+# Claude Code の mod（plugins/rovo）の型。エンジンが自動生成する
+plugins/*/.claude-plugin/types/

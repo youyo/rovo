@@ -216,6 +216,8 @@ export async function startGateway(project: TestProject, options: SetupOptions =
       CLOUDFLARE_ACCOUNT_ID: "e2e-account",
       CLOUDFLARE_API_TOKEN: FAKE_CLOUDFLARE_TOKEN,
       CLOUDFLARE_API_BASE: `${github.url}/client/v4`,
+      // M9: ダッシュボードの Cloudflare の概要の Workers の対象（偽の Cloudflare は名前を見ない）
+      WORKER_NAMES: "e2e-gateway-worker,e2e-agent-worker,e2e-web-worker",
       // モデルごとの思考レベルの上書き（models_list の effort / task_status の effort の確認用。haiku は off、sol は xhigh）
       MODEL_EFFORTS: "anthropic/claude-haiku-5-5=off,openai/gpt-6-sol=xhigh",
       TOKEN_ENC_KEY,

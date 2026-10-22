@@ -72,6 +72,9 @@
     // secret の CLOUDFLARE_API_TOKEN（権限は Account / AI Gateway / Read だけ）と合わせて設定する。どれかが空なら判定せず AGENT_MODELS だけで決める。
     "AI_GATEWAY_ID": "<AI_GATEWAY_ID>",
     "CLOUDFLARE_ACCOUNT_ID": "<ACCOUNT_ID>",
+    // ダッシュボードの Cloudflare の概要（Workers のリクエスト数）の対象にする rovo の Worker 名（rovo.config.json の workerNames の gateway・agent・web をカンマ区切りにしたもの。秘密ではない）。
+    // secret の CLOUDFLARE_API_TOKEN の権限は AI Gateway Read + Account Analytics Read（読み取りだけ。Terraform が作る）。空なら Workers の項目は「未設定」と表示される。
+    "WORKER_NAMES": "<WORKER_NAMES>",
     // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。models_list の effort と task_status / task_result に出る）。空なら upstream の既定。agent の同名の var と同じ値にする。
     "MODEL_EFFORTS": "<MODEL_EFFORTS>",
     "WEB_SEARCH_DAILY_LIMIT": "200",

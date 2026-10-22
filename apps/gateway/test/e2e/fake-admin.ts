@@ -29,6 +29,8 @@ export function fakeGitHubAdmin(url: string) {
     /** 偽の Cloudflare API（List provider keys）が返す、AI Gateway に BYOK 登録済みのキー（D10b。既定は anthropic と openai の default） */
     setProviderKeys: (keys: { provider_slug: string; alias: string }[]) =>
       post("provider-keys", { keys }),
+    /** 偽の Cloudflare の分析 API（M9）で、権限が無い応答にする項目（containers / workers / aiGateway / workersAi / credit。空で解除） */
+    setCloudflareForbidden: (items: string[]) => post("cloudflare-forbidden", { items }),
     revokeRefreshTokens: () => post("revoke-refresh-tokens"),
     setFault: (target: FaultTarget, status: number | null, count?: number) =>
       post("fault", { target, status, count }),

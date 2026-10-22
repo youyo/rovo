@@ -397,6 +397,12 @@ function placeholderValues(config, infra) {
     GATEWAY_WORKER_NAME: config.workerNames.gateway,
     AGENT_WORKER_NAME: config.workerNames.agent,
     WEB_WORKER_NAME: config.workerNames.web,
+    // gateway の Cloudflare の概要（Workers のリクエスト数）の対象。3 つの Worker をカンマ区切りで
+    WORKER_NAMES: [
+      config.workerNames.gateway,
+      config.workerNames.agent,
+      config.workerNames.web,
+    ].join(","),
     KV_NAMESPACE_ID: infra.kv_namespace_id,
     ARCHIVE_BUCKET_NAME: infra.archive_bucket_name,
     AI_GATEWAY_ID: infra.ai_gateway_id,

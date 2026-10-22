@@ -394,6 +394,34 @@ describe("詳細・Cloudflare・エラー", () => {
       ok(CloudflareSummaryDtoSchema, { ...s, credit_balance: { ok: true, reason: "forbidden" } }),
     ).toBe(false);
   });
+  it("M9 で足した workers / workers_ai / range は省略でき（既存の fixtures を壊さない）、出すなら形が固定", () => {
+    const s = clone(cloudflareSummaryFixture) as Record<string, unknown>;
+    expect(ok(CloudflareSummaryDtoSchema, s)).toBe(true);
+    const period = { start: "2026-10-21T00:00:00.000Z", end: "2026-10-22T00:00:00.000Z" };
+    const full = {
+      ...s,
+      range: "7d",
+      workers: { ok: true, value: { period, requests: 10, errors: 1 } },
+      workers_ai: { ok: true, value: { period, neurons: 12.5 } },
+    };
+    expect(ok(CloudflareSummaryDtoSchema, full)).toBe(true);
+    expect(ok(CloudflareSummaryDtoSchema, { ...full, range: "30d" })).toBe(false);
+    expect(
+      ok(CloudflareSummaryDtoSchema, {
+        ...full,
+        workers: { ok: true, value: { period, requests: -1, errors: 0 } },
+      }),
+    ).toBe(false);
+    expect(
+      ok(CloudflareSummaryDtoSchema, { ...full, workers_ai: { ok: false, reason: "oops" } }),
+    ).toBe(false);
+    expect(
+      ok(CloudflareSummaryDtoSchema, {
+        ...full,
+        workers: { ok: true, value: { period, requests: 1, errors: 0, url: "x" } },
+      }),
+    ).toBe(false);
+  });
   it("エラーの本文に理由を出せない（コードだけ）", () => {
     expect(ok(ErrorDtoSchema, { error: "not_found" })).toBe(true);
     expect(

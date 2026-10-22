@@ -163,6 +163,22 @@ describe("createPoller（D15）", () => {
     expect(c.count()).toBe(1);
   });
 
+  it("finished（終端になって追う期間が過ぎた）で止まる。可視状態が戻っても取らず、refresh で 1 回だけ取れる", async () => {
+    const env = makeEnv();
+    const c = controllable();
+    const p = createPoller({ run: c.run, deps: env.deps });
+    p.start();
+    await c.resolve(0, "ok");
+    await env.fire();
+    await c.resolve(1, "finished");
+    expect(env.pending()).toHaveLength(0);
+    env.setHidden(true);
+    env.setHidden(false);
+    expect(c.count()).toBe(2);
+    p.refresh();
+    expect(c.count()).toBe(3);
+  });
+
   it("404 も止まる", async () => {
     const env = makeEnv();
     const c = controllable();

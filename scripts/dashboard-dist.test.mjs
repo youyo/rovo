@@ -16,8 +16,12 @@ function walk(dir) {
 const files = walk(dist);
 const html = readFileSync(join(dist, "index.html"), "utf8");
 
-// dist 全体の容量の上限（M1 の実測は数十 KB。フォントの同梱〔M6b〕までは小さく保つ）
-const MAX_TOTAL_BYTES = 400 * 1024;
+// 容量の上限は 2 つに分ける。書体（woff2）は和文が大きい（Zen Kaku Gothic New は 1 太さで約 2.5MB の分割ファイル。3 書体の woff2 で約 4.3MB）が、
+// ブラウザは unicode-range で使う文字を含む分割だけを読む。JS/CSS/HTML の上限（M1 の実測は数十 KB）を緩めると
+// アプリ本体の肥大に気づけなくなるので、書体は別枠の上限にして、書体以外の上限は据え置く。
+const MAX_APP_BYTES = 400 * 1024;
+const MAX_FONT_BYTES = 6 * 1024 * 1024;
+const isFont = (f) => /\.(woff2?|ttf|otf)$/i.test(f);
 
 test("index.html が dist 直下にある（assets のパスは dist 直下から。Worker が /dashboard を剥がして渡す）", () => {
   assert.ok(statSync(join(dist, "index.html")).isFile());
@@ -82,7 +86,78 @@ test("JS に style 属性を文字列で組み立てる箇所が無い（位置�
   }
 });
 
-test("dist の容量が上限以内", () => {
-  const total = files.reduce((n, f) => n + statSync(f).size, 0);
-  assert.ok(total <= MAX_TOTAL_BYTES, `dist が ${total} バイト（上限 ${MAX_TOTAL_BYTES}）`);
+// CSS の @font-face の宣言（unicode-range で分割した和文だけで数百ブロック）も書体の枠に数える
+const FONT_FACE_RE = /@font-face\s*\{[^}]*\}/g;
+const fontFaceBytes = files
+  .filter((f) => f.endsWith(".css"))
+  .reduce(
+    (n, f) =>
+      n +
+      (readFileSync(f, "utf8").match(FONT_FACE_RE) ?? []).reduce(
+        (m, b) => m + Buffer.byteLength(b),
+        0,
+      ),
+    0,
+  );
+const fileBytes = (list) => list.reduce((n, f) => n + statSync(f).size, 0);
+
+test("書体以外の容量が上限以内（書体と @font-face は別枠）", () => {
+  const total = fileBytes(files.filter((f) => !isFont(f))) - fontFaceBytes;
+  assert.ok(total <= MAX_APP_BYTES, `書体以外が ${total} バイト（上限 ${MAX_APP_BYTES}）`);
+});
+
+test("書体の容量（woff2 と @font-face）が別枠の上限以内", () => {
+  const total = fileBytes(files.filter(isFont)) + fontFaceBytes;
+  assert.ok(fileBytes(files.filter(isFont)) > 0, "書体が同梱されていない");
+  assert.ok(total <= MAX_FONT_BYTES, `書体が ${total} バイト（上限 ${MAX_FONT_BYTES}）`);
+});
+
+const css = files
+  .filter((f) => f.endsWith(".css"))
+  .map((f) => readFileSync(f, "utf8"))
+  .join("\n");
+
+test("見本の 3 書体の @font-face がある（font-display: swap）", () => {
+  const faces = [...css.matchAll(/@font-face\s*\{[^}]*\}/g)].map((m) => m[0]);
+  for (const [family, weights] of [
+    ["Familjen Grotesk", [400, 500, 600, 700]],
+    ["Zen Kaku Gothic New", [400, 500, 700]],
+    ["JetBrains Mono", [400]],
+  ]) {
+    for (const w of weights) {
+      const hit = faces.filter(
+        (b) =>
+          new RegExp(`font-family:\\s*["']?${family}["']?`).test(b) &&
+          new RegExp(`font-weight:\\s*${w}\\b`).test(b),
+      );
+      assert.ok(hit.length > 0, `${family} ${w} の @font-face が無い`);
+      for (const b of hit) assert.match(b, /font-display:\s*swap/, `${family} ${w} が swap でない`);
+    }
+  }
+});
+
+test("和文は unicode-range で分割されている（使う範囲だけブラウザが読む）", () => {
+  const zen = [...css.matchAll(/@font-face\s*\{[^}]*Zen Kaku Gothic New[^}]*\}/g)].map((m) => m[0]);
+  assert.ok(zen.length >= 100, `Zen の分割が少ない: ${zen.length}`);
+  for (const b of zen) assert.match(b, /unicode-range:/);
+});
+
+test("書体は woff2 だけで、/dashboard/assets/ 配下の同一オリジンから読まれる", () => {
+  assert.ok(!files.some((f) => /\.(woff|ttf|otf)$/i.test(f)), "woff2 以外の書体が入っている");
+  for (const m of css.matchAll(/url\(\s*["']?([^"')\s]+)/gi)) {
+    assert.match(m[1], /^\/dashboard\/assets\/[A-Za-z0-9._-]+\.woff2$/, `font の参照: ${m[1]}`);
+  }
+});
+
+test("書体は data: に埋め込まない（CSP の font-src 'self'）", () => {
+  assert.doesNotMatch(css, /url\(\s*["']?data:/i);
+});
+
+test("書体の OFL のライセンスを同梱している", () => {
+  for (const name of ["Familjen-Grotesk", "Zen-Kaku-Gothic-New", "JetBrains-Mono"]) {
+    const path = join(dist, "assets", "licenses", `OFL-${name}.txt`);
+    const text = readFileSync(path, "utf8");
+    assert.match(text, /SIL OPEN FONT LICENSE Version 1\.1/);
+    assert.match(text, /Copyright/);
+  }
 });

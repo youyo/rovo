@@ -110,7 +110,7 @@ describe("完了時の作業ブランチの同期（--force-with-lease の push�
     setAgentTestOverrides("sp-sync-block", {
       sandbox: prod(git),
       pushRetryDelayMs: 0,
-      script: [report("done")],
+      script: [call("bash", { command: "true" }), report("done")],
     });
     const stub = env.AGENT_DO.getByName("sp-sync-block");
     await stub.start(
@@ -138,7 +138,7 @@ describe("完了時の作業ブランチの同期（--force-with-lease の push�
     setAgentTestOverrides("sp-sync-ok", {
       sandbox: prod(git),
       pushRetryDelayMs: 0,
-      script: [report("done")],
+      script: [call("bash", { command: "true" }), report("done")],
     });
     const stub = env.AGENT_DO.getByName("sp-sync-ok");
     await stub.start(
@@ -160,7 +160,7 @@ describe("完了時の作業ブランチの同期（--force-with-lease の push�
     setAgentTestOverrides("sp-sync-gitfail", {
       sandbox: prod(git),
       pushRetryDelayMs: 0,
-      script: [report("done")],
+      script: [call("bash", { command: "true" }), report("done")],
     });
     const stub = env.AGENT_DO.getByName("sp-sync-gitfail");
     await stub.start(

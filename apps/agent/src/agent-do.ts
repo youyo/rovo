@@ -3181,6 +3181,21 @@ export class AgentDO extends DurableObject<Env> {
       this.finishSync({ error: "the verified commit is not a valid sha" }, sha);
       return;
     }
+    // push の前に、送る commit（sha から辿れて、最後に push できた SHA から辿れないもの）を、git_commit の push と同じく
+    // commit ごとに検査する。強制 push はリモートに無い commit をすべて送るので、途中の commit の秘密も公開される。
+    // 見つかったら push せず、既存の push_failed と同じ経路（固定の文）で記録する。検査は決まった結果なので再試行しない
+    if (this.stopIntents().length > 0 || isTerminal(this.store.phase())) return;
+    const scan = await scanUnpushedForSecrets(
+      (argv, timeoutMs, maxOutputBytes) =>
+        sb.exec(["git", ...argv], { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes }),
+      sha,
+      this.lastPushedSha(),
+    );
+    if (this.stopIntents().length > 0 || isTerminal(this.store.phase())) return;
+    if (scan.status !== "clean" && scan.status !== "aborted") {
+      this.finishSync({ error: blockedMessage(scan) }, sha);
+      return;
+    }
     for (let attempt = 1; attempt <= MAX_SYNC_ATTEMPTS; attempt++) {
       if (this.stopIntents().length > 0 || isTerminal(this.store.phase())) return;
       try {

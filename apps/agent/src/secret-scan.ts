@@ -196,7 +196,8 @@ export async function scanRangeForSecrets(
   }
 }
 
-const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** git の rev に渡してよい SHA（16 進だけ。先頭が "-" のオプションにはならない） */
+const SHA_RE = /^[0-9a-f]{4,64}$/;
 /** log の出力で commit の区切りにする（先頭が制御文字の行。diff の行は " "・"+"・"-"・英字で始まるので、内容と混ざらない） */
 const COMMIT_MARK = "\u0001";
 

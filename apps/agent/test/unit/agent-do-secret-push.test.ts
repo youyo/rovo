@@ -97,3 +97,79 @@ describe("git_commit の push 前の検査（本番のツール配線）", () =>
     expect(notOf(diffs[1])).toBe(String(pushed[0]?.data.sha));
   });
 });
+
+describe("完了時の作業ブランチの同期（--force-with-lease の push）の前の検査", () => {
+  const notOf = (argv: string[] | undefined) => argv?.[(argv?.indexOf("--not") ?? -2) + 1];
+
+  it("送る commit に秘密があれば（足して消した commit でも）push せず、push_failed（final）と警告に出る。head_matches_verified が false になる側（pushedSha なし）", async () => {
+    const git = fakeGitRange({ base: INITIAL });
+    // 子が bash で積んだ commit: 途中で秘密を足し、次の commit で消している（HEAD の木には秘密が無い）
+    const leak = git.commitDirect(file("src/leak.ts", "const a = 1;", `const t = "${GHP}";`));
+    git.commitDirect({ path: "src/leak.ts", deleted: true });
+    expect(git.treeDiff()).not.toContain(GHP);
+    setAgentTestOverrides("sp-sync-block", {
+      sandbox: prod(git),
+      pushRetryDelayMs: 0,
+      script: [report("done")],
+    });
+    const stub = env.AGENT_DO.getByName("sp-sync-block");
+    await stub.start(
+      makeSpec("sp-sync-block", { verificationCommands: [], deadlineAt: Date.now() + 3_600_000 }),
+    );
+    // 終端の扱いは、今の push 失敗のときと同じ（completed のまま、警告が付く）
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    expect(git.state.pushes).toHaveLength(0);
+    const events = await allEvents(asFx(stub));
+    const failed = events.filter((e) => e.type === "push_failed" && e.data.final === true);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.data.message).toBe(
+      `blocked: possible secret (github-token) in src/leak.ts:2 (commit ${leak.slice(0, 7)})`,
+    );
+    expect(events.some((e) => e.type === "pushed" && e.data.final === true)).toBe(false);
+    const r = done(await stub.getResult());
+    expect("pushedSha" in r ? r.pushedSha : undefined).toBeUndefined();
+    expect(r.warnings.some((w) => /push_failed/.test(w))).toBe(true);
+    expect(JSON.stringify([r, events])).not.toContain(GHP);
+  });
+
+  it("秘密が無ければ今までどおり push する。検査の範囲は、送る SHA から、リモートに無い commit（initialSha より後）", async () => {
+    const git = fakeGitRange({ base: INITIAL });
+    git.commitDirect(file("src/ok.ts", "const ok = true;"));
+    setAgentTestOverrides("sp-sync-ok", {
+      sandbox: prod(git),
+      pushRetryDelayMs: 0,
+      script: [report("done")],
+    });
+    const stub = env.AGENT_DO.getByName("sp-sync-ok");
+    await stub.start(
+      makeSpec("sp-sync-ok", { verificationCommands: [], deadlineAt: Date.now() + 3_600_000 }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    expect(git.state.pushes).toHaveLength(1);
+    expect(git.state.pushes[0]?.some((a) => a.startsWith("--force-with-lease="))).toBe(true);
+    const scans = git.state.rangeArgs.filter((a) => !a.includes("--numstat"));
+    expect(scans.length).toBeGreaterThan(0);
+    expect(scans.every((a) => a.includes(git.head()) && notOf(a) === INITIAL)).toBe(true);
+    expect(done(await stub.getResult())).toMatchObject({ pushedSha: git.head() });
+  });
+
+  it("検査が git の失敗で終わったときも push しない（push_failed は固定の文）", async () => {
+    const git = fakeGitRange({ base: INITIAL });
+    git.commitDirect(file("src/ok.ts", "ok"));
+    git.state.rangeNumstat = { exitCode: 128, stderr: "fatal: bad object" };
+    setAgentTestOverrides("sp-sync-gitfail", {
+      sandbox: prod(git),
+      pushRetryDelayMs: 0,
+      script: [report("done")],
+    });
+    const stub = env.AGENT_DO.getByName("sp-sync-gitfail");
+    await stub.start(
+      makeSpec("sp-sync-gitfail", { verificationCommands: [], deadlineAt: Date.now() + 3_600_000 }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    expect(git.state.pushes).toHaveLength(0);
+    const events = await allEvents(asFx(stub));
+    const failed = events.find((e) => e.type === "push_failed" && e.data.final === true);
+    expect(failed?.data.message).toBe("blocked: could not scan the diff for secrets");
+  });
+});

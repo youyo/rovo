@@ -2442,7 +2442,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "procedure",
-        text: "Work in this order: 1) investigate the code, 2) implement, 3) run the tests, 4) commit with git_commit (uncommitted changes are not delivered), 5) call report_completion with a summary. Do not edit test configuration or delete tests to make checks pass.",
+        text: "Work in this order: 1) investigate the code, 2) write or update a test that captures the required behavior (for a bug fix, a test that reproduces the bug), 3) run that test and confirm it FAILS for the expected reason before changing the implementation, 4) implement the smallest change that makes it pass, 5) run the related tests and confirm they pass (refactor only while they stay green), 6) commit with git_commit (uncommitted changes are not delivered), 7) call report_completion with a summary. Do not write the implementation before the test. Never weaken assertions, skip or delete tests, or change test configuration to make checks pass. Do not edit test configuration or delete tests to make checks pass. Exception: for changes that do not alter behavior (documentation, comments, config values only, or research) you may skip the test-first steps, but then state in the report_completion summary, in one sentence, why you wrote no test. Otherwise the report_completion summary must include the Red evidence: the name of the test that failed before the implementation and a one-line reason it failed.",
       },
       {
         key: "testing",

@@ -223,6 +223,8 @@ export function newFixture(
     if (a0 === "git" && a1 === "diff" && argv.includes("-U0")) return { stdout: testDiff.value };
     if (a0 === "git" && a1 === "diff") return { stdout: " a.txt | 1 +\n" };
     if (a0 === "git" && a1 === "show") return { exitCode: 128, stderr: "fatal" };
+    // push 前の秘密の検査（git log -p / --numstat HEAD --not <last_pushed>）。送る commit は無い（clean）
+    if (a0 === "git" && a1 === "log") return {};
     verifyCalls.push(argv);
     clock.now += verifyAdvanceMs.shift() ?? 0;
     return verifyResults.shift() ?? {};

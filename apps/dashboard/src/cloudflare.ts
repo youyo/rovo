@@ -38,9 +38,18 @@ export type CloudflareRow = {
   text: string;
   href: string;
   ariaLabel: string;
-  /** 推定の金額（無料枠を引く前）の表示。推定が無い・null の項目は null */
+  /** 金額の表示。推定の金額（無料枠を引く前）か、AI Gateway のモデル費用（BYOK）。無い・null の項目は null */
   cost: string | null;
+  /** 行の意味の注記（合計とは別。AI Gateway・クレジット残高だけ）。無ければ null */
+  note: string | null;
 };
+
+/** AI Gateway の行の注記。モデル費用は BYOK で Anthropic などに請求され、Cloudflare の請求の合計には含まない */
+export const AI_GATEWAY_NOTE =
+  "BYOK。Anthropic などに請求され、rovo の予算に含まれる（Cloudflare の請求の合計には含まない）";
+/** クレジット残高の行の注記（Unified Billing のクレジットの範囲） */
+export const CREDIT_NOTE =
+  "Unified Billing のクレジット（Web 検索など。BYOK のモデル費用は含まない）";
 
 type Item<T> = { ok: true; value: T } | { ok: false; reason: Reason } | undefined;
 
@@ -51,6 +60,8 @@ function row<T>(
   item: Item<T>,
   fmt: (v: T) => string,
   cost: number | null | undefined,
+  costText: (usd: number) => string = (usd) => `推定 ${formatUsd(usd)}`,
+  note: string | null = null,
 ): CloudflareRow {
   const base = {
     key,
@@ -58,7 +69,8 @@ function row<T>(
     href: CLOUDFLARE_DASH_URL,
     ariaLabel: `${open} を Cloudflare で開く`,
     // 取れなかった項目（ok が false）と推定が null の項目は金額を出さない
-    cost: item?.ok && cost !== null && cost !== undefined ? `推定 ${formatUsd(cost)}` : null,
+    cost: item?.ok && cost !== null && cost !== undefined ? costText(cost) : null,
+    note,
   };
   // 契約で optional の項目が無いときは、一時的な取得失敗として扱う
   if (item === undefined) return { ...base, ok: false, text: reasonText("unavailable") };
@@ -87,8 +99,8 @@ export function cloudflareEstimateHead(
   const e = s.cost_estimate;
   if (e === undefined) return null;
   const total = e.total_estimated_usd_before_free_tier;
-  const amount = total === null ? "推定できない" : `推定 ${formatUsd(total)}`;
-  return { text: `${amount}（無料枠を引く前）`, partial: e.partial };
+  const amount = total === null ? "推定できない" : formatUsd(total);
+  return { text: `Cloudflare の請求（推定）${amount}（無料枠を引く前）`, partial: e.partial };
 }
 
 /** 画面の行。リンクはどれも Cloudflare のトップ（DTO の open_url は使わない）。 */
@@ -119,7 +131,10 @@ export function cloudflareRows(s: CloudflareSummaryDto): CloudflareRow[] {
       s.ai_gateway,
       (v) =>
         `${formatCount(v.requests)} 件、エラー ${formatCount(v.errors)} 件、費用 ${formatUsd(v.cost_usd)}`,
+      // 合計の内訳に見えないよう「推定」ではなく「モデルの費用」と出す（BYOK。注記も添える）
       e?.ai_gateway.cost_usd,
+      (usd) => `モデルの費用 ${formatUsd(usd)}`,
+      AI_GATEWAY_NOTE,
     ),
     row(
       "workers_ai",
@@ -136,6 +151,8 @@ export function cloudflareRows(s: CloudflareSummaryDto): CloudflareRow[] {
       s.credit_balance,
       (v) => formatUsd(v.balance_usd),
       undefined,
+      undefined,
+      CREDIT_NOTE,
     ),
   ];
 }

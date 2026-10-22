@@ -85,9 +85,11 @@ export const CloudflareCostLineSchema = z.strictObject({
 });
 
 /**
- * 推定の金額（USD）。Workers のリクエスト・コンテナの vCPU 秒 / メモリ GiB 秒 / ディスク・Workers AI の Neuron の
- * **単価 × 使用量**と、AI Gateway の費用（`ai_gateway.cost_usd`。Cloudflare の集計値）を足した合計。
- * 無料枠・プランに含まれる分は引かない。取得できない項目の推定は null で、合計に含まれない（`excluded_items` に出る）。
+ * 推定の金額（USD）。**Cloudflare の請求の推定**: Workers のリクエスト・コンテナの vCPU 秒 / メモリ GiB 秒 / ディスク・
+ * Workers AI の Neuron の **単価 × 使用量**。合計（`total_estimated_usd_before_free_tier`）もこの項目だけの和。
+ * AI Gateway の費用（`items.ai_gateway.cost_usd`）は BYOK のモデル費用（Anthropic などに請求され、rovo の予算に含まれる）で、
+ * Cloudflare の請求ではないので合計に含めない。無料枠・プランに含まれる分は引かない。
+ * 取得できない項目の推定は null で、合計に含まれない（`excluded_items` に出る）。
  */
 export const CloudflareCostEstimateSchema = z.strictObject({
   basis: z
@@ -103,24 +105,29 @@ export const CloudflareCostEstimateSchema = z.strictObject({
     containers_memory: CloudflareCostLineSchema,
     containers_disk: CloudflareCostLineSchema,
     workers_ai: CloudflareCostLineSchema,
+    // 合計に含まない別の項目（BYOK のモデル費用。Cloudflare の請求ではない）
     ai_gateway: z.strictObject({
       cost_usd: usdSchema
         .nullable()
         .describe(
-          "AI Gateway の費用（Cloudflare の集計値。単価 × 使用量ではない）。取得できなければ null",
+          "AI Gateway の費用（BYOK のモデル費用。Anthropic などに請求され、rovo の予算に含まれる。Cloudflare の請求ではないので合計に含まない。単価 × 使用量ではなく集計値）。取得できなければ null",
         ),
     }),
   }),
   total_estimated_usd_before_free_tier: usdSchema
     .nullable()
     .describe(
-      "取得できた項目（AI Gateway を含む）の合計。無料枠を引く前の推定。含まれない項目は excluded_items。1 つも取れなければ null",
+      "Cloudflare の請求の推定の合計（取れた Workers・コンテナ・Workers AI の和。AI Gateway とクレジット残高は含まない）。無料枠を引く前。含まれない項目は excluded_items。1 つも取れなければ null",
     ),
   excluded_items: z
     .array(z.enum(CLOUDFLARE_COST_ITEMS))
     .max(CLOUDFLARE_COST_ITEMS.length)
-    .describe("取得できず、合計に含まれていない項目"),
-  partial: z.boolean().describe("excluded_items がある（合計が一部の項目だけ）なら true"),
+    .describe(
+      "取得できず、合計に含まれていない項目（Cloudflare の請求の項目だけ。AI Gateway は含まない。ai_gateway は古い応答との互換のために列挙に残す）",
+    ),
+  partial: z
+    .boolean()
+    .describe("excluded_items がある（Cloudflare の請求の合計が一部の項目だけ）なら true"),
 });
 export type CloudflareCostEstimateDto = z.infer<typeof CloudflareCostEstimateSchema>;
 

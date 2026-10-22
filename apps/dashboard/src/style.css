@@ -951,6 +951,11 @@ fieldset {
   color: var(--dim);
   font-size: var(--fs-small);
 }
+/* 行の注記は 1 行ずつ下に回す（狭い幅でも折り返す。合計の行とは別に見える） */
+.cf-basis {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
 .cf-missing {
   color: var(--dim);
 }

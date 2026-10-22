@@ -417,7 +417,7 @@ export const cloudflareSummaryWithEstimateFixture: CloudflareSummaryDto = {
       },
       ai_gateway: { cost_usd: 1.25 },
     },
-    total_estimated_usd_before_free_tier: 1.3392225,
+    total_estimated_usd_before_free_tier: 0.0892225,
     excluded_items: ["containers_disk"],
     partial: true,
   },

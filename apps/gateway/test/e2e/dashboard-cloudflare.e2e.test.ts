@@ -49,7 +49,7 @@ describe("GET /dashboard/api/cloudflare", () => {
     expect(r.whole).not.toMatch(/visa|4242|topup|payment/i);
   });
 
-  it("正常: cost_estimate は偽 API の使用量 × 単価で、無料枠を引く前・AI Gateway を含む合計・disk は除外", async () => {
+  it("正常: cost_estimate は偽 API の使用量 × 単価で、無料枠を引く前。合計は Cloudflare の項目だけ（AI Gateway は別の項目・disk は除外）", async () => {
     const cookie = await viewer();
     const { r, dto } = await summary(cookie);
     expect(r.status).toBe(200);
@@ -105,10 +105,10 @@ describe("GET /dashboard/api/cloudflare", () => {
     });
     expect(est.items.workers_ai.estimated_usd_before_free_tier).toBeCloseTo(expected.workersAi, 9);
     expect(est.items.ai_gateway.cost_usd).toBeCloseTo(expected.aiGateway, 9);
-    // 合計は取れた項目の和（AI Gateway の費用を含む）
-    const total =
-      expected.workers + expected.vcpu + expected.memory + expected.workersAi + expected.aiGateway;
+    // 合計は Cloudflare に払う分の取れた項目の和（AI Gateway の費用は含まない）
+    const total = expected.workers + expected.vcpu + expected.memory + expected.workersAi;
     expect(est.total_estimated_usd_before_free_tier).toBeCloseTo(total, 9);
+    // AI Gateway は合計にも excluded_items にも含めない（取れていても partial の判定に影響しない）
     expect(est.excluded_items).toEqual(["containers_disk"]);
     expect(est.partial).toBe(true);
   });

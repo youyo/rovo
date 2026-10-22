@@ -155,6 +155,7 @@ export const overviewFixture: OverviewDto = {
     },
   ],
   budget: {
+    monthly_budget_usd: 49.9,
     remaining_usd: 38.5,
     spent_usd: 11.4,
     estimated_usd: 0.1,

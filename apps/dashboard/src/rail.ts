@@ -57,10 +57,12 @@ export function daySummary(data: OverviewDto): DaySummary {
 }
 
 /**
- * 自分の今月の上限（USD）。契約は上限そのものを持たないが、残りは「月の上限から実費と予約を引いた値」なので、
- * 使った額 + 予約 + 残りで上限に戻る。残りが 0 のときは負にしない丸めで上限を求められないので null。
+ * 自分の今月の上限（USD）。契約の monthly_budget_usd をそのまま使う。
+ * 上限を足す前の gateway の応答（項目が無い）では、残りが「上限から実費と予約を引いた値」であることを使い、
+ * 使った額 + 予約 + 残りで求める。残りが 0 のときは負にしない丸めで求められないので null。
  */
 export function budgetLimit(budget: OverviewDto["budget"]): number | null {
+  if (budget.monthly_budget_usd !== undefined) return budget.monthly_budget_usd;
   if (!(budget.remaining_usd > 0)) return null;
   return budget.spent_usd + budget.reserved_usd + budget.remaining_usd;
 }

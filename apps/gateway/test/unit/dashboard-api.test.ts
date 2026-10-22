@@ -311,6 +311,7 @@ describe("overview", () => {
     const v = newViewer([newRepoId()]);
     const dto = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
     expect(dto.budget).toEqual({
+      monthly_budget_usd: 100,
       remaining_usd: 77.5,
       spent_usd: 12.5,
       estimated_usd: 0.5,
@@ -870,12 +871,12 @@ describe("events（構造化イベントの中身）", () => {
 });
 
 describe("budget", () => {
-  it("視聴者本人の BudgetMeDto だけ（月額上限など他の項目は返さない）", async () => {
+  it("視聴者本人の BudgetMeDto だけ（月の上限は含み、期間などほかの項目は返さない）", async () => {
     const v = newViewer([newRepoId()]);
     const r = await api(v, "/budget");
     expect(r.status).toBe(200);
     expect(BudgetMeDtoSchema.parse(r.json()).startable).toBe(2);
-    expect(r.text).not.toContain("monthly_budget_usd");
+    expect(BudgetMeDtoSchema.parse(r.json()).monthly_budget_usd).toBe(100);
     expect(r.text).not.toContain("period");
   });
 

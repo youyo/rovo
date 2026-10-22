@@ -180,6 +180,10 @@ run = "pnpm exec vitest run --config vitest.e2e-net.config.ts"
 description = "Unit + infra + 偽 GitHub + E2E（Docker 必須。実ネットワーク版 test:e2e:net は含まない）"
 depends = ["test:unit", "test:infra", "test:fake-github", "test:e2e"]
 
+[tasks."test:plugin"]
+description = "Claude Code の mod（plugins/rovo）のテストと検査。claude の CLI が要る（CI には無いことがある）ので test の依存には入れない。手元で mod を変えたときに実行する"
+run = ["claude plugin test plugins/rovo", "claude plugin validate plugins/rovo"]
+
 [tasks."typecheck:audit"]
 description = "packages/audit の型検査"
 dir = "packages/audit"

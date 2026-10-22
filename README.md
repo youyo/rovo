@@ -94,6 +94,14 @@ gateway は、タスクの状況をブラウザで見られる読み取り専用
 - `task_start` などの応答の `dashboard_url` を開くと、そのタスクの詳細に入れる。
 - デプロイの手順は [docs/deploy.md](docs/deploy.md) の 18、設計は [docs/specs/dashboard.md](docs/specs/dashboard.md)。
 
+## Claude Code の mod
+
+タスクの進み具合を Claude Code の横のペインに出す読み取り専用の mod を同梱している（[plugins/rovo/README.md](plugins/rovo/README.md)）。
+
+```
+/plugin install rovo --marketplace youyo/rovo
+```
+
 ## 構成
 
 - `apps/web`（Phase 5）: Web Research Service の別 Worker。`WebResearch`（`WorkerEntrypoint`）の RPC `search` / `fetchUrl`（`fetch` は HTTP のハンドラ名なので使えない）。呼び出し元の種別は service binding の `props.caller`（gateway は `parent`、agent は `child`）から取り、props が無い・不正なら拒否する。状態を持たず、持つバインディングは `ai` だけ（GitHub のトークンや Anthropic のキーは持たない）。公開のルートは無い（`workers_dev: false`）

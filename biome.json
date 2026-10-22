@@ -7,5 +7,18 @@
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always" } },
   "linter": { "enabled": true },
+  "overrides": [
+    {
+      "includes": ["plugins/rovo/**"],
+      "linter": {
+        "rules": {
+          "style": { "useTemplate": "off" },
+          "complexity": { "useOptionalChain": "off" },
+          "correctness": { "noUnusedFunctionParameters": "off" },
+          "suspicious": { "noControlCharactersInRegex": "off" }
+        }
+      }
+    }
+  ],
   "assist": { "actions": { "source": { "organizeImports": "on" } } }
 }

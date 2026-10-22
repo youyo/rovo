@@ -340,6 +340,7 @@ openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem | wrangler secret put GITH
 - OAuth のエンドポイント: DCR は `/oauth/register`、認可は `/authorize`、トークンは `/oauth/token`（いずれも `<PUBLIC_BASE_URL>` 配下）。protected resource metadata は Worker が公開する。
 - Portal の Access ポリシーは直接の URL で迂回できる。実際の防御線は gateway の `ALLOWED_ORG` / `ALLOWED_TEAM`（または `ALLOWED_USER_IDS`）と、タスクごとの push 権限の検証。
 - 登録後の接続確認: [acceptance.md](specs/acceptance.md) の「前提」と 1 節。
+- Claude Code の利用者向けに、タスクの進み具合を横のペインに出す mod を同梱している（`/plugin install rovo --marketplace youyo/rovo`。[plugins/rovo/README.md](../plugins/rovo/README.md)）。MCP がこの URL で接続されていれば使える。
 
 ## 9. R2 アーカイブの設定
 

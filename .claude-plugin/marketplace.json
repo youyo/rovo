@@ -1,0 +1,6 @@
+{
+  "name": "rovo",
+  "description": "rovo のタスクを Claude Code の横のペインに出す mod",
+  "owner": { "name": "youyo" },
+  "plugins": [{ "name": "rovo", "source": "./plugins/rovo" }]
+}

@@ -84,6 +84,15 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
   - 回数は呼び出しの前に数える（失敗しても戻さない）。web 自体には回数の上限を持たない（AI Gateway のレート制限とアカウントの上限に頼る）。
 - `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効なら親の tools/list にも子の Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、`docs/specs/acceptance.md` の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを判断してほしい。** 実機のゲートは任意で、作者は行わずに有効にしている。
 
+## ダッシュボード
+
+gateway は、タスクの状況をブラウザで見られる読み取り専用のダッシュボード（`/dashboard`）を配信する。GitHub でログインすると、今日のタイムライン・タスクの表・あなたの予算・全員の実績・モデル別の費用・Cloudflare の使用状況（AI Gateway・Workers・コンテナなど）の一覧と、タスクごとの詳細（進み具合・出力の末尾・費用・Draft PR の状態）が見られる。
+
+- **読み取り専用**: 状態を変える操作は無い（ログアウトを除く）。
+- **見えるのは、ログインした人が GitHub で権限を持つリポジトリのタスクだけ**。権限のないリポジトリのタスクは、一覧にも詳細にも出ない（件数と費用の合計だけが出る）。
+- `task_start` などの応答の `dashboard_url` を開くと、そのタスクの詳細に入れる。
+- デプロイの手順は [docs/deploy.md](docs/deploy.md) の 18、設計は [docs/specs/dashboard.md](docs/specs/dashboard.md)。
+
 ## 構成
 
 - `apps/web`（Phase 5）: Web Research Service の別 Worker。`WebResearch`（`WorkerEntrypoint`）の RPC `search` / `fetchUrl`（`fetch` は HTTP のハンドラ名なので使えない）。呼び出し元の種別は service binding の `props.caller`（gateway は `parent`、agent は `child`）から取り、props が無い・不正なら拒否する。状態を持たず、持つバインディングは `ai` だけ（GitHub のトークンや Anthropic のキーは持たない）。公開のルートは無い（`workers_dev: false`）

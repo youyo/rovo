@@ -1264,3 +1264,18 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - **実機での障害の起こし方（D6）**: コードに検証用の分岐を入れない。Cloudflare 側の操作でコンテナを止める方法を基本とし、具体的な手段は M7 で調べて手順に書く。手段が無ければ、実コンテナの E2E で確認済みとして記録し、実機で確かめられない限界を残す。
   - M7 で調べた結果（2026-10-19、ドキュメントによる）: rovo は `scheduling_policy: durable_object` なので、再デプロイでは Sandbox のインスタンスは止まらず、障害の再現に使えない。有力な手段は、`wrangler containers ssh` で入り、主プロセス（`tini -- sleep infinity`）を落とす方法。詳細は acceptance.md の 18 節。
   - 2026-10-20 の決定: この方法は試験の間だけでも本番のコンテナに ssh の口を開けるので採らず、復旧の試験は実機では行わない。実コンテナの E2E で確認済みとして記録し、本物の Containers での停止と作り直しを確かめていない限界を残す。
+
+### 15.9 ダッシュボード（2026-10-21 決定。2026-10-22 に PR の状態を追記）
+
+読み取り専用の運用画面（`/dashboard`）。選択肢・理由・却下した案は [dashboard.md](dashboard.md) の「決めること」（D1〜D18）と「気づいた矛盾・提案」にある。ここには決定の要点だけを写す。本文と食い違う場合はこの項を優先する。
+
+- **置き場所と配信（D1・D11・D12）**: SPA は新設の `apps/dashboard`（Vite + React + TypeScript。ルーターと状態管理は自前の最小実装、チャートは SVG）。ビルドの成果物を gateway の `assets` として同梱し、`run_worker_first: true` で Worker が `/dashboard/*` だけを渡す（`/mcp`・OAuth の経路を飲み込ませない。未知の `/dashboard/api/*` は JSON 404）。ビルドはデプロイの経路に組み込み、新しい secret・手順は増やさない。書体は自前配信（OFL。woff2 だけ）。
+- **ログイン（D2・D3・D4）**: `/callback` の URL は共有し、state の接頭辞（`rovo-dash.`）だけで振り分ける（既存の GitHub App の変更は要らない）。処理・KV・Cookie は MCP と分離し、身元確認（コード交換 → ユーザー取得 → 許可ルール → 資格の保存）は共通関数。セッションは UserDO の `dashboard_session` と `dashboard_epoch`（絶対 7 日 + 無操作 8 時間）。Cookie は暗号化した `__Host-` で、GitHub のトークンは入れない。GitHub のユーザートークンは MCP と共用の資格に保存する（ダッシュボード側の失効で MCP も再ログインになるリスクを承知）。
+- **認可（D5・D6・D7）**: 閲覧者のトークンで見えるリポジトリ id の集合を作り、一覧・詳細・events・result・件数のすべてに同じ判定をかける（詳細は TaskDO の現在の `repository_id` で再認可。曖昧なときは fail closed で、404 で存在を漏らさない）。キャッシュは 30 秒（詳細の最初の 1 回は取り直す）。見えないタスクは表・レーンから外し、「権限の無いタスク N 件」と全員分の合計だけを出す（差し引きで費用が推定できる点は承知）。
+- **索引と費用（D8・D9・D10）**: シングルトンの `DirectoryDO` に、TaskDO の outbox（単調増加の revision。索引の障害でタスクを失敗させない）と、consult の索引（UserDO の `consult_log` と outbox）を入れる。「全員」の合計は全員分、「あと何件」は閲覧者本人の分だけ。月の区切りは UTC で、画面に明記する。
+- **Cloudflare の概要（D13）**: 既存の Terraform 管理の読み取りトークンに Account Analytics Read を足す（名前は変えない）。サーバー側で固定した集計だけを返し、取れない項目は「取得できない」と出す。
+- **進み具合（D14・D15）**: agent がマスク済みの構造化イベント（command・編集したパス・commit・Web の host）を送り、gateway が再マスクして型ごとの許可リストと上限で絞る。差分の本文は送らない。更新は 5 秒のポーリング（非表示のタブで停止・backoff）で、SSE は後回し。
+- **`dashboard_url`（D16）**: `<PUBLIC_BASE_URL>/dashboard/tasks/<task_id>`。`task_start` / `task_status` / `task_result` に付く。ログインしていなければログイン後に同じ詳細に戻る（戻り先は固定の形だけ）。権限の無い人には 404。
+- **E2E と時刻（D17・D18）**: ブラウザの E2E は Playwright（Chromium）で、偽の GitHub と偽の Cloudflare API に向ける。画像の差分テストは入れない。「今日」はブラウザのローカル日。
+- **PR の状態（2026-10-22）**: 人が GitHub 上でマージしても rovo は知らないので、閲覧時に gateway が閲覧者本人のトークンで GraphQL から PR の状態（open / merged / closed / unknown）を取って表示する。権限の判定に通ったタスクの、完了済みで `pr_merged` が未記録の PR だけを聞く。失敗は `unknown` で、他の部分は壊さない。webhook は、手順と secret を増やすので採らない。
+- **安全**: テキストのみの表示（HTML・Markdown を解釈しない）、CSP（インライン無し）、読み取り API は `GET` のみ（ログアウトの `POST` は同一オリジンだけ）。マスクの限界は [SECURITY.md](../../SECURITY.md)。

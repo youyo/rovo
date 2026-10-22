@@ -2,7 +2,34 @@
 
 運用の状況（費用・タスク・コンテナの稼働）を、Cloudflare のダッシュボードを渡り歩かずに 1 か所で見るための、**読み取り専用**の画面を作る計画（**確定（ユーザー承認 2026-10-21）**。要件と設計は承認済み。Codex と advisor のレビュー反映済み）。
 
-**この文書は確定した計画で、コードはまだ無い。** 設計の判断が要ったものは「決めること」に選択肢・推奨・理由を並べ、各項目に「決定（2026-10-21）」の行を足した（却下した案は理由として残す）。決定は、design.md に 15.9 として書き写す（実装の最初の作業）。承認済みの要件・設計から変えた点は「気づいた矛盾・提案」に書いた。**最初の版から何も外さない**（consult・Cloudflare の概要・構造化イベントも最初の版に入れる。advisor の「最小の版」への組み替えは不採用）。
+**この文書は確定した計画で、実装は M1〜M10 まで済み、本番で実機の確認も始まっている（2026-10-22。状態は下の「実装の状態」）。** 設計の判断が要ったものは「決めること」に選択肢・推奨・理由を並べ、各項目に「決定（2026-10-21）」の行を足した（却下した案は理由として残す）。決定は design.md の 15.9 に書き写した。承認済みの要件・設計から変えた点は「気づいた矛盾・提案」に書いた。**最初の版から何も外さない**（consult・Cloudflare の概要・構造化イベントも最初の版に入れる。advisor の「最小の版」への組み替えは不採用）。
+
+### 実装の状態（2026-10-22）
+
+| M | 状態 |
+|---|---|
+| M1 配信の土台 | 済み |
+| M2 契約（DTO・fixtures） | 済み |
+| M3a / M3b 索引（TaskDO の outbox・DirectoryDO・consult の索引） | 済み |
+| M4 ブラウザのログインとセッション | 済み。localhost の Chromium で `__Host-` Cookie が通ることは 6b で確かめた（下の「M4 の未確認事項の結果」） |
+| M5a / M5b 認可と読み取り API | 済み |
+| M6a / M6b 一覧の画面・Playwright・書体 | 済み（書体の同梱方法は下の「書体の同梱」） |
+| M7 構造化イベントと詳細の API | 済み |
+| M8a / M8b 詳細の画面・Playwright | 済み |
+| M9 Cloudflare の概要 | 済み。本番では AI Gateway の分だけ取れ、Workers・コンテナ・Workers AI はトークンの権限の反映待ち（`terraform apply`。acceptance.md の 27 節） |
+| M10 `dashboard_url` | 済み |
+| PR の状態（矛盾 #4 の決定） | 済み。本番で確認（acceptance.md の 27 節） |
+| M11 通しと受入・docs | docs は済み（acceptance.md の 27 節、deploy.md の 18、README、SECURITY.md、design.md の 15.9）。実機の受入は一部だけ（private repo の権限の差・モバイル幅・キーボード・スクリーンリーダー・他の閲覧者は未実施）。Playwright の通しは 6b・8b で入れた分があり、「テスト方針」の通しのシナリオ全部との突き合わせは残り |
+
+#### M4 の未確認事項の結果
+
+「localhost で Chromium が `Secure` / `__Host-` の Cookie を受け付けるか」は、6b の Playwright（`127.0.0.1` の `wrangler dev`）で通った。接頭辞を外す仕組み（`ENVIRONMENT=test` で `__Host-` を外す案）は不要で、入れていない。
+
+#### 書体の同梱
+
+- 取得は npm の `@fontsource`（`@fontsource/familjen-grotesk`・`@fontsource/zen-kaku-gothic-new`・`@fontsource/jetbrains-mono`）。`apps/dashboard/src/main.tsx` が CSS を読み、ビルドで `dist/assets/` に出る。外部の CDN は使わない（CSP は `font-src 'self'`）。ライセンスは SIL OFL 1.1 で、全文を `dist/assets/licenses/` に同梱する。
+- Vite のプラグイン（`vite.config.ts`）で、woff2 だけにし（woff の予備は外す）、キリル・ギリシャ・ベトナム語の分割は同梱しない。unicode-range の分割は残し、ブラウザは使う文字を含む分割だけを読む。`assetsInlineLimit: 0` で `data:` URI に埋め込まない。
+- 容量の上限は 2 つに分けた。書体（woff2 と `@font-face`）は別枠で 6 MB、書体以外は 400 KB のまま据え置く（`scripts/dashboard-dist.test.mjs`）。和文が大きいため、1 つの枠にすると、アプリ本体の肥大に気づけなくなる。
 
 **デザインの正は、承認済みの見本**（https://claude.ai/artifact/RPWqojr9ySJ7DvdBaqZG3m の `Main.dc.html` = 一覧、`Task.dc.html` = 詳細）。実装はこの見本に合わせる。この文書の「画面」の節は、見本から読み取れる要点だけを書く。
 
@@ -387,10 +414,10 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
 | Vite の `base` と assets のパス（D11 の実装メモ） | **M1** | 最初の Red |
 | OAuthProvider の state の形（base64url 32 バイト、`.` を含まない。`oauth-provider.js:2292-2299`） | **M4** | 実コードを読み、Unit で `^[A-Za-z0-9_-]{43}$` を固定 |
 | GitHub App の callback URL を更新する API の有無 | **M4** | GitHub Docs。案 B を取るので影響は小さい（記録のため） |
-| localhost で Chromium が `Secure` / `__Host-` の Cookie を受け付けるか | **M4**（M6b の前提） | `wrangler dev` に対する実機の確認。だめなら E2E だけ `ENVIRONMENT=test` で接頭辞を外す |
+| localhost で Chromium が `Secure` / `__Host-` の Cookie を受け付けるか | **M4**（M6b の前提） | `wrangler dev` に対する実機の確認。だめなら E2E だけ `ENVIRONMENT=test` で接頭辞を外す。**6b で確認済み（通った。接頭辞を外す仕組みは不要）** |
 | `repository_id` が INSERT 後に変わらないこと（UPDATE が無い） | **M5a** | `grep` と Unit |
 | DO の SQLite の容量の上限（Directory の保持） | **M3a**（確認済み: 10 GB） | ドキュメント |
-| 見本の 3 書体のライセンスとサブセット化 | **M6b** | フォントの同梱の前にライセンスを確認 |
+| 見本の 3 書体のライセンスとサブセット化 | **M6b** | フォントの同梱の前にライセンスを確認。**確認済み（3 書体とも SIL OFL 1.1。@fontsource から woff2 だけ同梱）** |
 | Cloudflare の権限名（Analytics の Read）と各 API の要求権限 | **M9** | Cloudflare のドキュメント。Terraform の `plan` で見つかること |
 | `sandbox_instance`・子の出力の整形が main に入っているか | **M7** | main の状態の確認 |
 

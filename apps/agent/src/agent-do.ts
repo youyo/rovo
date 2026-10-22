@@ -112,6 +112,9 @@ const MIN_OUTPUT_TOKENS = 1_024;
  * 超えたら割り引かない（全量を通常の単価で見積もる）。
  */
 const CACHE_READ_TRUST_MS = 4 * 60_000;
+/** 予算の質問で、途中の作業を push できなかったために Sandbox を止めずに待ったときの warnings（固定文） */
+const BUDGET_KEPT_RUNNING_WARNING =
+  "途中の作業を push できなかったため、承認を待つ間も Sandbox を止めなかった";
 /** 予算超過の停止時に、システムが作る WIP commit のメッセージ（固定文。子の自由文は入れない） */
 const WIP_COMMIT_MESSAGE = "wip: budget exceeded（rovo が自動で commit）";
 /** WIP の commit・push 全体の上限（ms）。超えたら諦めて今までどおり止まる */
@@ -1962,6 +1965,9 @@ export class AgentDO extends DurableObject<Env> {
       // 予算超過の停止で、システムが未 commit の変更を WIP として commit した（できなかった）ことを伝える
       const wip = this.store.meta<WipCommit>("wip_commit");
       if (wip && decision.phase === "budget_exceeded") warnings.push(wipWarning(wip));
+      // 途中の作業を push できず、承認を待つ間 Sandbox を止めなかった（止めると作業を失いうるため）
+      if (this.store.meta("budget_kept_running") === true)
+        warnings.push(BUDGET_KEPT_RUNNING_WARNING);
       // 完了以外で report_completion が呼ばれていないとき、固定の文で止まった理由と最後の push を伝える
       const summary =
         this.store.meta<string>("last_summary") ||
@@ -2611,16 +2617,26 @@ export class AgentDO extends DurableObject<Env> {
     }
   }
 
-  /** 質問の前に Sandbox を中断する（fail-soft: 中断できなくても質問は出す。コンテナは動いたままになる） */
+  /**
+   * 質問の前に Sandbox を中断する。snapshot は「push 済みで clean な作業ツリーを速く戻すためのもの」だけに使う:
+   * WIP が push まで成功していない・作業ツリーが dirty のままなら、作業は snapshot の中にしか無く、戻せなかったとき
+   * （期限切れなど）に image から再 clone されて黙って失われる。その場合は中断せず、コンテナを止めずに待つ
+   * （費用は止まらないが作業を失わない）。止めずに待つときは、結果の warnings に固定文で 1 行出す。
+   * 中断の失敗・時間切れも同じく止めずに待つ（fail-soft）。
+   */
   private async suspendSandboxForBudget(spec: StoredSpec): Promise<void> {
     if (!this.sandboxBooted()) return; // 起動していない Sandbox は費用がかからない
     const sb = this.sandbox();
     if (!sb.suspend) return;
     try {
-      const allowReclone = await this.workTreeIsRecoverable(spec);
+      if (!(await this.workTreeIsRecoverable(spec))) {
+        this.store.setMeta("budget_kept_running", true);
+        return;
+      }
       let result: { mode: string } | undefined;
       const timedOut = await this.raceTimeout(
-        sb.suspend({ allowReclone }).then((r) => {
+        // push 済みで clean なので、snapshot が取れなくても止めてよい（戻すときは再 clone するだけで何も失わない）
+        sb.suspend({ allowReclone: true }).then((r) => {
           result = r;
         }),
         BUDGET_SUSPEND_WAIT_MS,

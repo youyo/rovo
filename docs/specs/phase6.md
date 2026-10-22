@@ -143,7 +143,7 @@
 | `web_blocked` | web | `kind`: search / fetch / browse。`reason`: 拒否は `bot_challenge` / `robots_disallowed` / `robots_unreachable` / `redirect_policy` / `private_address`、web_fetch / web_browse の判定不能は `dns_check_failed`、web_browse だけの判定不能は `invalid_status` / `invalid_final_url` / `invalid_redirect_chain` / `invalid_result`、本文（検索結果全体）の判定は block が `injection_rule`(決定論ルール) / `model_score`(モデル)、unknown が `evaluator_failed` / `state_truncated` / `model_not_performed` / `unknown`。`host` は fetch / browse のみ(ホスト名だけ。search は結果が複数なので出さない)。`requestId` は search のみ(AI Gateway の request id)。`caller` / `userId` / `taskId` は呼び出し元 | しない |
 | `task_cancelled` | gateway | `caller`: cancel の主体（今は `parent` だけ。reason は `parent_requested`）。変化があったときだけ（終端への再 cancel では出さない） | する（既存の `cancelled`） |
 | `agent_cancelled` | agent（AgentDO） | cancel を受理した最初の 1 回。`caller`: `parent`。reason: `stop_intent_recorded`（停止の意図を記録した）/ `not_started`（start より先の cancel。tombstone だけ）/ `already_terminal` | する（`audit`: `{code:"agent_cancelled"}`。`stop_intent_recorded` のときだけ。タスクが無い・終端済みのときは積まない） |
-| `task_ended_by_limit` | gateway / agent | `budget_exceeded` / `deadline` / `input_timeout` | する（既存の `status_changed` の reason） |
+| `task_ended_by_limit` | gateway / agent | `budget_exceeded` / `budget_extension_timeout`（予算の延長の質問への無応答） / `deadline` / `input_timeout` | する（既存の `status_changed` の reason） |
 | `delivery_given_up` | gateway（TaskDO） | 終端で、未配送の意図を取りやめた（`kind`: start / answer / steer。reason は `skipped_on_terminal`）。**再送の回数の上限による打ち切りは、今の実装には無い**（start / cancel / answer / steer / credential は成功まで alarm で再送する）ので、cancel と credential の kind は出ない | する（`audit`） |
 | `boot_superseded` | agent（SandboxDO） | 古い起動世代の boot の破棄。reason: `generation_changed`、`caller`: `system` | しない |
 | `start_cancelled_by_tombstone` | agent（AgentDO） | tombstone の後に届いた start を cancelled にした（再送のたびに出る）。`caller`: `parent` | しない |
@@ -336,7 +336,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 ### 二重化の線引き（M1 の実装）
 
 - events にも積む（type `audit`、payload は `{code, kind?}` の固定コードだけ）: `credential_issued`、`credential_revoked`、`credential_revoke_given_up`（`setup_failure` の経路だけ）、`delivery_given_up`。
-- 既存のイベントで足りるもの（監査ログにだけ出す）: `task_cancelled`（`cancelled`）、`task_ended_by_limit`（`status_changed` の reason。`budget_exceeded` / `deadline` / `input_timeout`）、`credential_revoke_given_up` の `attempts_exhausted` / `not_retryable`（`warning`: `token_revoke_failed`）。
+- 既存のイベントで足りるもの（監査ログにだけ出す）: `task_cancelled`（`cancelled`）、`task_ended_by_limit`（`status_changed` の reason。`budget_exceeded` / `budget_extension_timeout` / `deadline` / `input_timeout`）、`credential_revoke_given_up` の `attempts_exhausted` / `not_retryable`（`warning`: `token_revoke_failed`）。
 - 監査ログだけ: `auth_failed`、`authz_denied`、`credential_issue_failed`。
 - events の `audit` の件数と、監査ログの二重化したイベント（上の 4 種）の件数は、同じタスクで一致する（E2E で確認。acceptance 16）。
 - 既存の Unit / E2E の「イベント列」の期待は、トークン発行の `audit` が `created` の次に入るため更新した（例: `created, audit, draft_pr_created, status_changed`。cancel の後は `cancelled, audit`）。アサーションの意図は変えていない。

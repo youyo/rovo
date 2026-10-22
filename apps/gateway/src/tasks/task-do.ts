@@ -564,7 +564,10 @@ function budgetPolicyOf(row: Pick<TaskRow, "budget_policy">): BudgetPolicy {
 
 /** 上限による終了の reason（監査の固定コード）。上限でなければ undefined。 */
 function limitReason(to: TaskStatus, reason: unknown): string | undefined {
-  if (to === "BUDGET_EXCEEDED") return "budget_exceeded";
+  // 予算の延長の質問への無応答は、予算の枠による停止（budget_exceeded）と監査で区別する（status_changed の reason と同じコード）
+  if (to === "BUDGET_EXCEEDED") {
+    return reason === "budget_extension_timeout" ? "budget_extension_timeout" : "budget_exceeded";
+  }
   if (to === "FAILED" && (reason === "deadline" || reason === "input_timeout")) return reason;
   return undefined;
 }

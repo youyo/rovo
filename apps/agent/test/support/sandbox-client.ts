@@ -44,6 +44,14 @@ export function sandboxClient(baseUrl: string, name: string) {
     },
     exec: (argv: string[], options: Record<string, unknown> = {}) =>
       op("exec", { argv, options: { timeoutMs: 60_000, ...options } }) as Promise<ExecResult>,
+    /** 実行中の exec の途中の出力（exec の完了を待たずに返る）。 */
+    peekOutput: () =>
+      op("peek-output") as Promise<{
+        running: boolean;
+        startedAt?: number;
+        stdout: string;
+        stderr: string;
+      }>,
     readFile: (path: string) => op("read-file", { path }) as Promise<{ content: string }>,
     writeFile: (path: string, content: string) => op("write-file", { path, content }),
     stop: () => op("stop") as Promise<{ stopped: boolean }>,

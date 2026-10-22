@@ -12,6 +12,11 @@ export {
   SANDBOX_OPS,
   TASK_SUMMARY_METRICS,
 } from "./audit";
+export {
+  buildProgressTail,
+  type CommandProgressEvent,
+  normalizeCommandProgress,
+} from "./progress";
 export { maskSecrets } from "./redact";
 export {
   sanitizeText,

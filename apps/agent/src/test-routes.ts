@@ -30,6 +30,8 @@ export async function handleTestRoute(request: Request, env: Env): Promise<Respo
         return Response.json({ ok: true });
       case "exec":
         return Response.json(await sandbox.exec(body.argv ?? [], body.options));
+      case "peek-output":
+        return Response.json(await sandbox.peekOutput());
       case "read-file":
         return Response.json({ content: await sandbox.readFile(body.path ?? "") });
       case "write-file":

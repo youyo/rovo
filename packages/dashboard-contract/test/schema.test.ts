@@ -363,6 +363,22 @@ describe("詳細・Cloudflare・エラー", () => {
     (d.output as Record<string, unknown>).redacted = false;
     expect(ok(TaskDetailDtoSchema, d)).toBe(false);
   });
+  it("詳細の output は『実行中』の印と開始時刻を持てる（任意。古い応答もそのまま通る）", () => {
+    expect(ok(TaskDetailDtoSchema, clone(taskDetailRunningFixture))).toBe(true);
+    const withRunning = (extra: Record<string, unknown>) => {
+      const d = clone(taskDetailRunningFixture) as Record<string, unknown>;
+      d.output = { ...(d.output as Record<string, unknown>), ...extra };
+      return d;
+    };
+    expect(
+      ok(TaskDetailDtoSchema, withRunning({ running: true, started_at: "2026-10-21T05:50:00Z" })),
+    ).toBe(true);
+    // running は true だけ（false は『印を付けない』で表す）。開始時刻は ISO 8601
+    expect(ok(TaskDetailDtoSchema, withRunning({ running: false }))).toBe(false);
+    expect(ok(TaskDetailDtoSchema, withRunning({ running: true, started_at: "yesterday" }))).toBe(
+      false,
+    );
+  });
   it("詳細に instructions / token / enc を足すと弾かれる", () => {
     for (const k of ["instructions", "token", "enc", "git_token"]) {
       expect(ok(TaskDetailDtoSchema, { ...clone(taskDetailRunningFixture), [k]: "x" }), k).toBe(

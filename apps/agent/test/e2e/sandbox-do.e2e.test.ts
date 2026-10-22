@@ -562,6 +562,37 @@ describe("外向き通信の制限（clone 対象リポジトリだけ）", () =
 });
 
 describe("exec", () => {
+  it("exec の実行中（serial の中）でも peekOutput が待たされずに返り、途中の出力が見える。終わったら running: false", async () => {
+    const c = client("peek");
+    await c.ensureReady(specFor("peek"));
+    // 先に出力して 12 秒待つ。exec は完了まで待たない
+    const running = c.exec(
+      [
+        "bash",
+        "-c",
+        "echo first-line; echo err-line >&2; printf partial; sleep 12; echo last-line",
+      ],
+      {
+        origin: "agent_command",
+      },
+    );
+    running.catch(() => {});
+    await new Promise((r) => setTimeout(r, 4_000));
+    const t0 = Date.now();
+    const peek = await c.peekOutput();
+    const took = Date.now() - t0;
+    // exec はまだ終わっていないのに、peek は即座に返る
+    expect(took).toBeLessThan(3_000);
+    expect(peek.running).toBe(true);
+    expect(peek.stdout).toContain("first-line");
+    expect(peek.stderr).toContain("err-line");
+    const done = await running;
+    expect(done.stdout).toContain("last-line");
+    const after = await c.peekOutput();
+    expect(after.running).toBe(false);
+    expect(after.stdout).toBe("");
+  }, 60_000);
+
   it("タイムアウトで子孫プロセス（setsid で抜けたものを含む）まで止まる", async () => {
     const c = client("timeout");
     await c.ensureReady(specFor("timeout"));

@@ -17,6 +17,8 @@ export interface ToolContext {
    * 渡す前にツール側で正規化（マスク・整形・上限）する。ここが例外を投げてもツールの結果には影響させない。
    */
   onEvent?: (type: string, data: Record<string, unknown>) => void;
+  /** bash の実行中に、途中の出力（command_progress）を流す間隔（ms）。既定 4,000（3〜5 秒）。テストで短くする。 */
+  progressIntervalMs?: number;
 }
 
 export type PushResult = { ok: true; sha: string } | { ok: false; sha: string; error: string };

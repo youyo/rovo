@@ -572,6 +572,48 @@ describe("tasks/:id", () => {
     expect(done.output.tail).toContain("ok");
   });
 
+  it("output: 実行中のコマンドの進捗は running: true つきで出て、command が終わるか cancel で消える。events の一覧には出ない", async () => {
+    const GHP = `ghp_${"a1B2".repeat(9)}`;
+    const v = newViewer([4242]);
+    const t = await seedTask({ repository_id: 4242 });
+    await t.stub.advance();
+    await t.agent.emit("command_progress", {
+      command: "pnpm test",
+      startedAt: Date.UTC(2026, 9, 22, 1, 0, 0),
+      outputTail: `running\n${GHP}\n`,
+    });
+    await t.stub.advance();
+    const r = await api(v, `/tasks/${t.id}`);
+    const dto = TaskDetailDtoSchema.parse(r.json());
+    expect(dto.output).toMatchObject({
+      running: true,
+      started_at: "2026-10-22T01:00:00.000Z",
+      command: "pnpm test",
+      redacted: true,
+    });
+    expect(dto.output.tail).toContain("running");
+    expect(r.text).not.toContain(GHP);
+    // 履歴（events API）には出ない
+    const events = await api(v, `/tasks/${t.id}/events`);
+    expect(events.text).not.toContain("command_progress");
+    expect(events.text).not.toContain("running\\n");
+    // command が来たら実行中の印は消え、終わった command の出力になる
+    await t.agent.emit("command", { command: "pnpm test", exitCode: 0, outputTail: "all passed" });
+    await t.stub.advance();
+    const done = TaskDetailDtoSchema.parse((await api(v, `/tasks/${t.id}`)).json());
+    expect(done.output).not.toHaveProperty("running");
+    expect(done.output.tail).toContain("all passed");
+    // 取り消したタスクは実行中に見えない
+    await t.agent.emit("command_progress", { command: "sleep 99", startedAt: Date.now() });
+    await t.stub.advance();
+    expect(TaskDetailDtoSchema.parse((await api(v, `/tasks/${t.id}`)).json()).output.running).toBe(
+      true,
+    );
+    await t.stub.cancel(4_001);
+    const cancelled = TaskDetailDtoSchema.parse((await api(v, `/tasks/${t.id}`)).json());
+    expect(cancelled.output).not.toHaveProperty("running");
+  });
+
   it("権限なし・存在しない・repository_id が NULL は、どれも同じ 404（本文もヘッダも同じ）", async () => {
     const repo = newRepoId();
     const v = newViewer([repo]);

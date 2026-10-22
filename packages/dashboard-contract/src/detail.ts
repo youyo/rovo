@@ -65,6 +65,13 @@ export const TaskDetailDtoSchema = z.strictObject({
     /** 末尾の出力を出した command（1 行に整形・300 字まで）と、その記録時刻。tail が null のときは省く */
     command: singleLineText(LIMITS.nowText).optional(),
     at: isoTimeSchema.optional(),
+    /**
+     * いま実行中のコマンドの途中の出力か（追加のみ・任意。無ければ終わったコマンドの出力）。true のとき、tail は実行中の出力の末尾
+     * （未完の行は含まない）で、command はそのコマンド、at は最後に更新した時刻。false は表さない（印を付けないことで表す）。
+     */
+    running: z.literal(true).optional(),
+    /** 実行中のコマンドの開始時刻（running のときだけ。経過時間の表示用） */
+    started_at: isoTimeSchema.optional(),
     redacted: z.literal(true),
   }),
 });

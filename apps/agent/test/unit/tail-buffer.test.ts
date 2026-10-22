@@ -43,3 +43,29 @@ describe("TailBuffer", () => {
     expect(b.result().text.length).toBe(1024);
   });
 });
+
+describe("TailBuffer.peek（読み続けている最中の途中の中身）", () => {
+  it("今ある分をそのまま返し、続きを足せば伸びる（result は別に取れる）", () => {
+    const b = new TailBuffer(100);
+    b.append(enc("one\n"));
+    expect(b.peek()).toBe("one\n");
+    b.append(enc("two\n"));
+    expect(b.peek()).toBe("one\ntwo\n");
+    expect(b.result().text).toBe("one\ntwo\n");
+  });
+
+  it("末尾が UTF-8 の途中で切れていたら、その文字は含めない（次の peek では完全な文字になる）", () => {
+    const b = new TailBuffer(100);
+    const bytes = enc("あい");
+    b.append(bytes.subarray(0, 4));
+    expect(b.peek()).toBe("あ");
+    b.append(bytes.subarray(4));
+    expect(b.peek()).toBe("あい");
+  });
+
+  it("上限を超えたら末尾 max バイトだけ。先頭が文字の途中なら落とす", () => {
+    const b = new TailBuffer(7);
+    b.append(enc("あいう"));
+    expect(b.peek()).toBe("いう");
+  });
+});

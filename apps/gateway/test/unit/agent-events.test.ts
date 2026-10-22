@@ -516,3 +516,24 @@ describe("usage の Clef による昇格の判断の集計（sandbox_scale_*）"
     }
   });
 });
+
+describe("command_progress（実行中の途中の出力）", () => {
+  it("event ではなく progress に写す（汎用の agent_event に落ちない）。壊れたものは progress が undefined", () => {
+    const m = mapAgentEvent(
+      ev("command_progress", { command: "pnpm test", startedAt: 5, outputTail: "ok\n" }),
+    );
+    expect(m).toEqual({
+      kind: "progress",
+      progress: {
+        type: "command_progress",
+        command: "pnpm test",
+        startedAt: 5,
+        outputTail: "ok\n",
+      },
+    });
+    expect(mapAgentEvent(ev("command_progress", { startedAt: 5 }))).toEqual({
+      kind: "progress",
+      progress: undefined,
+    });
+  });
+});

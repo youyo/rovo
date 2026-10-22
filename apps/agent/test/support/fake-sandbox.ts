@@ -1,5 +1,11 @@
 import type { GitCredential, SandboxMetrics } from "../../src/agent/types";
-import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "../../src/sandbox-port";
+import type {
+  ExecOptions,
+  ExecResult,
+  PeekedOutput,
+  SandboxPort,
+  WorkspaceSpec,
+} from "../../src/sandbox-port";
 
 export type ExecHandler = (
   argv: string[],
@@ -48,7 +54,21 @@ export class FakeSandbox implements SandboxPort {
   /** 保持している認証トークン（expireIfDue が消す）。 */
   credentialAlive = false;
 
-  constructor(private readonly handler: ExecHandler = () => ({})) {}
+  /**
+   * peekOutput の再現。exec の実行中だけ running: true で、live の中身を返す（ハンドラが exec の途中で書き換える）。
+   * peekError を立てると peekOutput が例外を投げる。peekCalls は呼ばれた回数。
+   */
+  live = { stdout: "", stderr: "" };
+  peekError: Error | undefined;
+  peekCalls = 0;
+  private execStartedAt: number | undefined;
+
+  constructor(private handler: ExecHandler = () => ({})) {}
+
+  /** exec の台本を差し替える（ハンドラが sandbox 自身の live を書き換えるときに使う） */
+  setHandler(handler: ExecHandler): void {
+    this.handler = handler;
+  }
 
   async ensureReady(spec: WorkspaceSpec): Promise<void> {
     this.order.push("ready");
@@ -126,7 +146,16 @@ export class FakeSandbox implements SandboxPort {
   async exec(argv: string[], options: ExecOptions = {}): Promise<ExecResult> {
     this.requireAlive();
     this.calls.push({ argv, options });
-    const r = await this.handler(argv, options);
+    if (options.origin !== undefined) {
+      this.execStartedAt = Date.now();
+      this.live = { stdout: "", stderr: "" };
+    }
+    let r: Partial<ExecResult>;
+    try {
+      r = await this.handler(argv, options);
+    } finally {
+      this.execStartedAt = undefined;
+    }
     return {
       exitCode: 0,
       stdout: "",
@@ -135,6 +164,13 @@ export class FakeSandbox implements SandboxPort {
       truncated: false,
       ...r,
     };
+  }
+
+  async peekOutput(): Promise<PeekedOutput> {
+    this.peekCalls += 1;
+    if (this.peekError) throw this.peekError;
+    if (this.execStartedAt === undefined) return { running: false, stdout: "", stderr: "" };
+    return { running: true, startedAt: this.execStartedAt, ...this.live };
   }
 
   async readFile(path: string): Promise<string> {

@@ -273,8 +273,16 @@ export function TaskView(props: {
             <h3>
               {output.command === undefined
                 ? "出力の末尾"
-                : `${singleLine(output.command)} の出力（末尾）`}
+                : `${singleLine(output.command)} の出力（${output.running === true ? "途中" : "末尾"}）`}
             </h3>
+            {output.running === true && (
+              <p className="output-running">
+                実行中
+                {output.started_at !== undefined && !Number.isNaN(generatedAt)
+                  ? `（経過 ${formatDuration(generatedAt - Date.parse(output.started_at))}）`
+                  : ""}
+              </p>
+            )}
             {output.tail === null ? null : (
               <pre className="output">{sanitizeText(output.tail)}</pre>
             )}

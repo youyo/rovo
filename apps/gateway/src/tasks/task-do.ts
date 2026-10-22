@@ -1,5 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
-import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "@rovo/audit";
+import {
+  type AuditEventName,
+  type AuditFields,
+  type AuditRecord,
+  audit,
+  type CommandProgressEvent,
+} from "@rovo/audit";
 import { LIMITS, STRUCTURED_EVENT_TYPES } from "@rovo/dashboard-contract";
 import { type Effort, isSandboxPromotionReason } from "@rovo/models";
 import type { z } from "zod";
@@ -81,6 +87,8 @@ export const INPUT_REQUIRED_ALARM_INTERVAL_MS = 60_000;
 export const INPUT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const INPUT_TIMEOUT_GRACE_MS = 10 * 60 * 1000;
 const INPUT_REQUIRED_SINCE_KEY = "input_required_at";
+/** 実行中のコマンドの最新の進捗（meta の 1 行。履歴の events には入れない） */
+const PROGRESS_KEY = "command_progress";
 /** task_wait が待機中に AgentDO から取り込み直す間隔。 */
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const EVENT_PAGE_LIMIT = 100;
@@ -421,7 +429,16 @@ export type DashboardEventsResult =
     }
   | { ok: false; code: "not_found" };
 
-/** dashboardLatest の結果。recent は seq の昇順（直近 DASHBOARD_LATEST_RECENT 件）、latest_command は最新の command 1 件 */
+/** 実行中のコマンドの最新の進捗（時刻は epoch ms）。履歴には積まず 1 件だけ上書きで持つ */
+export interface DashboardProgress {
+  command: string;
+  cwd?: string;
+  started_at: number;
+  output_tail?: string;
+  updated_at: number;
+}
+
+/** dashboardLatest の結果。recent は seq の昇順（直近 DASHBOARD_LATEST_RECENT 件）、latest_command は最新の command 1 件、progress は実行中の進捗 */
 export type DashboardLatestResult =
   | {
       ok: true;
@@ -432,6 +449,7 @@ export type DashboardLatestResult =
         payload: EventPayload;
         created_at: number;
       } | null;
+      progress: DashboardProgress | null;
     }
   | { ok: false; code: "not_found" };
 
@@ -1020,6 +1038,7 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec("DELETE FROM meta WHERE key = ?", INPUT_REQUIRED_SINCE_KEY);
     }
     if (isTerminal(to)) {
+      this.clearProgress();
       this.ctx.storage.sql.exec(
         "UPDATE agent_link SET cancel_state = 'pending' WHERE cancel_state = 'none'",
       );
@@ -1368,7 +1387,14 @@ export class TaskDO extends DurableObject<Env> {
     const cmd = sql
       .exec<EventRow>(`SELECT ${cols} FROM events WHERE type = 'command' ORDER BY seq DESC LIMIT 1`)
       .toArray()[0];
-    return { ok: true, recent: recent.map(toRow), latest_command: cmd ? toRow(cmd) : null };
+    // 実行中の進捗。終端では出さない（後始末の取りこぼしがあっても、終わったタスクを実行中に見せない）
+    const progress = isTerminal(this.statusOf(row)) ? null : this.readProgress();
+    return {
+      ok: true,
+      recent: recent.map(toRow),
+      latest_command: cmd ? toRow(cmd) : null,
+      progress,
+    };
   }
 
   /** CANCELLED に確定する。終端状態なら何もせず成功（イベントは追加しない）。 */
@@ -1393,6 +1419,7 @@ export class TaskDO extends DurableObject<Env> {
         "UPDATE agent_link SET cancel_state = 'pending' WHERE cancel_state = 'none'",
       );
       this.ctx.storage.sql.exec("DELETE FROM meta WHERE key = ?", INPUT_REQUIRED_SINCE_KEY);
+      this.clearProgress();
       // 未配送の回答と steer は送らない（cancel と同じトランザクションで取りやめる）
       this.skipPendingDeliveries();
       return { ok: true, status: "CANCELLED", changed: true };
@@ -2143,8 +2170,13 @@ export class TaskDO extends DurableObject<Env> {
           if (open) this.appendAgentEvent("usage", m.payload, e.ts, link.operation_id, e.seq);
         } else if (m.kind === "question") {
           if (open) this.applyQuestion(m.payload, e.ts, link.operation_id, e.seq);
+        } else if (m.kind === "progress") {
+          // 履歴（events）には積まない。最新の 1 件だけを上書きする（終端の後は取り込まない）
+          if (open && m.progress !== undefined) this.applyProgress(m.progress, e.ts);
         } else if (open) {
           this.appendAgentEvent(m.type, m.payload, e.ts, link.operation_id, e.seq);
+          // 終わったコマンドの記録が来たら、そのコマンドの途中経過は要らない
+          if (m.type === "command") this.clearProgress();
         }
         cursor = e.seq;
       }
@@ -2164,6 +2196,44 @@ export class TaskDO extends DurableObject<Env> {
     });
     if (this.latestSeq() !== before) this.notifyWaiters();
     return progressed;
+  }
+
+  /** 実行中の進捗（command_progress）の保存場所。meta の 1 行で、履歴の events には入れない。 */
+  private applyProgress(p: CommandProgressEvent, ts: number): void {
+    if (p.ended === true) {
+      this.clearProgress();
+      return;
+    }
+    const value = {
+      command: p.command,
+      ...(p.cwd !== undefined ? { cwd: p.cwd } : {}),
+      started_at: p.startedAt,
+      ...(p.outputTail !== undefined ? { output_tail: p.outputTail } : {}),
+      updated_at: Number.isFinite(ts) ? ts : this.now(),
+    };
+    this.ctx.storage.sql.exec(
+      "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+      PROGRESS_KEY,
+      JSON.stringify(value),
+    );
+  }
+
+  /** 進捗を消す（最後の command・終端・cancel・ended で呼ぶ） */
+  private clearProgress(): void {
+    this.ctx.storage.sql.exec("DELETE FROM meta WHERE key = ?", PROGRESS_KEY);
+  }
+
+  /** 保存してある最新の進捗。無ければ null */
+  private readProgress(): DashboardProgress | null {
+    const row = this.ctx.storage.sql
+      .exec<{ value: string }>("SELECT value FROM meta WHERE key = ?", PROGRESS_KEY)
+      .toArray()[0];
+    if (!row) return null;
+    try {
+      return JSON.parse(row.value) as DashboardProgress;
+    } catch {
+      return null;
+    }
   }
 
   /** question の取り込み。questions への保存とイベントの追加は、取り込みと同じトランザクションの中で行う。 */

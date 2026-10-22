@@ -82,7 +82,7 @@ export function hostOfUrl(url: unknown): string | undefined {
 }
 
 /** 相対パス（ワークスペースの外・.. ・絶対パス・制御文字は undefined）。秘密らしい断片は伏せる */
-function relPath(v: unknown): string | undefined {
+export function relPath(v: unknown): string | undefined {
   if (typeof v !== "string" || v.startsWith("/")) return undefined;
   const p = workspaceRelativePath("/", v);
   if (p === undefined) return undefined;

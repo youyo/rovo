@@ -500,7 +500,7 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
         : {}),
     },
     // 出力の末尾は最新の command の output_tail（再マスク済み）。伏せている旨は常に true
-    output: buildOutput(latest.latest_command),
+    output: buildOutput(latest.latest_command, latest.progress),
   };
   return validated(TaskDetailDtoSchema, "TaskDetailDto", dto);
 }

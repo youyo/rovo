@@ -176,6 +176,18 @@ describe("タスク詳細（実行中。値のある now / output）", () => {
     expect(pr.getAttribute("rel")).toBe("noopener noreferrer");
   });
 
+  it("now が「$ コマンド」のときは、$ だけプロンプトの色（コンソールと同じ見た目）", async () => {
+    const dto = {
+      ...taskDetailRunningFixture,
+      now: { kind: "tool", text: "$ sleep 4", at: "2026-10-21T05:50:00Z" },
+    } as unknown as TaskDetailDto;
+    const { c } = await mount(server({ detail: () => json(200, dto) }));
+    const line = c.querySelector(".now-line") as HTMLElement;
+    expect(line.textContent).toBe("いまは $ sleep 4 を実行しています。");
+    expect(line.querySelector(".prompt")?.textContent).toBe("$ ");
+    expect(line.querySelector("strong")?.textContent).toBe("sleep 4");
+  });
+
   it("設定に「モデルの選び方」を 1 行出す（自動なら理由つき）。旧い gateway のように無ければ出さない", async () => {
     const { c } = await mount(server());
     expect(text(c)).toContain("モデルの選び方");

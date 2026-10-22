@@ -30,6 +30,12 @@ for (const scheme of ["light", "dark"] as const) {
     await settle(page);
     await page.screenshot({ path: join(dir, `${scheme}-detail.png`), fullPage: true });
 
+    // 幅 1,200px の詳細（ステータスバーが 1 行に収まる幅）
+    await page.setViewportSize({ width: 1200, height: 900 });
+    await page.goto(taskPath(s.tasks.done as string));
+    await settle(page);
+    await page.screenshot({ path: join(dir, `${scheme}-detail-1200.png`), fullPage: true });
+
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/dashboard/");
     await settle(page);

@@ -74,3 +74,45 @@ test("(24) スマホ幅では縦に積み、高さを固定せずページ全体
   expect(railBox.y + railBox.height).toBeLessThanOrEqual(consoleBox.y + 1);
   expect((await box(page, ".screen")).height).toBeGreaterThan(250);
 });
+
+test("(25) 幅 1,200px: モデル別が長くてもステータスバーは 1 行。項目は途中で切れない", async ({
+  page,
+}) => {
+  // 本番で見つかった長さ（3 つのモデルの金額）にそろえる。概要 API の応答のモデル別だけ差し替える
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await loginAs(page, s.users.alice, taskPath(id("long")));
+  await page.route(/\/dashboard\/api\/overview/, async (route) => {
+    const res = await route.fetch({
+      headers: { ...route.request().headers(), "sec-fetch-site": "same-origin" },
+    });
+    const body = (await res.json()) as { models: unknown[] };
+    body.models = [
+      { model: "claude-sonnet-5-5", task_cost_usd: 3.7, consult_cost_usd: 0.04 },
+      { model: "claude-haiku-5-5", task_cost_usd: 0.0629, consult_cost_usd: 0 },
+      { model: "claude-opus-5-5", task_cost_usd: 0.0258, consult_cost_usd: 0 },
+    ];
+    await route.fulfill({
+      status: res.status(),
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+  await page.reload();
+  await expect(page.locator(".statusbar [data-sb='models']")).toContainText("sonnet $3.74");
+  await expect(page.locator(".statusbar [data-sb='models']")).toContainText("opus $0.0258");
+  // 1 行 = ステータスバーの高さが、項目 1 つ分の高さに等しい
+  const bar = await box(page, ".statusbar");
+  const first = await box(page, ".statusbar .sb");
+  expect(bar.height).toBeLessThanOrEqual(first.height + 2);
+  // どの項目も途中で折り返さない（1 行の高さ）。nowrap の項目は nowrap
+  const items = await page.locator(".statusbar .sb, .statusbar .sb-item").evaluateAll((els) =>
+    els.map((el) => ({
+      k: el.getAttribute("data-sb") ?? el.textContent,
+      h: el.getBoundingClientRect().height,
+      ws: getComputedStyle(el).whiteSpace,
+    })),
+  );
+  expect(Math.max(...items.map((i) => i.h))).toBeLessThanOrEqual(first.height + 2);
+  for (const it of items.filter((i) => i.k !== "models"))
+    expect(it.ws, String(it.k)).toBe("nowrap");
+});

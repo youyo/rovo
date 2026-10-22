@@ -333,7 +333,7 @@ export function phaseBand(
   });
 }
 
-export type NowSentence = { before: string; target: string; after: string };
+export type NowSentence = { before: string; prompt?: string; target: string; after: string };
 
 const NOW_AFTER = {
   command: " を実行しています。",
@@ -359,5 +359,10 @@ const STATE_SENTENCE: Record<TaskStatusDto, string> = {
 export function nowSentence(now: TaskDetailDto["now"], status: TaskStatusDto): NowSentence {
   if (now === null) return { before: STATE_SENTENCE[status], target: "", after: "" };
   if (now.kind === "waiting") return { before: "入力を待っています。", target: "", after: "" };
-  return { before: "いまは ", target: singleLine(now.text), after: NOW_AFTER[now.kind] };
+  const text = singleLine(now.text);
+  // 「$ コマンド」はコンソールと同じ見た目（プロンプトだけ別の色）にするため、プロンプトを分けて返す
+  if (text.startsWith("$ ")) {
+    return { before: "いまは ", prompt: "$ ", target: text.slice(2), after: NOW_AFTER[now.kind] };
+  }
+  return { before: "いまは ", target: text, after: NOW_AFTER[now.kind] };
 }

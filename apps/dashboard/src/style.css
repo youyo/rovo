@@ -522,6 +522,10 @@ fieldset {
   font-weight: 700;
   color: var(--fg);
 }
+.now-prompt {
+  font-family: var(--mono);
+  font-weight: 700;
+}
 .con-more {
   margin-top: 4px;
   font-size: var(--fs-small);
@@ -740,6 +744,10 @@ fieldset {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* 項目の途中では折り返さない（折り返すのは項目と項目の間だけ） */
+.sb-item {
+  white-space: nowrap;
+}
 .sb--alt {
   background: var(--bar2);
 }
@@ -899,6 +907,10 @@ fieldset {
 /* 広い画面: ワークスペースをビューポートの高さいっぱいに広げる（制御卓）。
    ヘッダと帯は上、ステータスバーは下端、レールとコンソールが残りを埋め、画面（screen）とレールだけが内部でスクロールする */
 @media (min-width: 721px) {
+  /* ステータスバーの項目は途中で切らない（狭くなったら項目と項目の間で折り返す）。モデル別は中の項目ごと */
+  .sb:not([data-sb="models"]) {
+    white-space: nowrap;
+  }
   .shell {
     height: 100dvh;
   }

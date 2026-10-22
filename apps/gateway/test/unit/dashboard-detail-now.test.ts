@@ -79,7 +79,7 @@ describe("buildNow", () => {
 
   it("終わっていない tool_start が最新の構造化イベントより新しければ tool（実行中）", () => {
     const now = buildNow([cmd("ls"), start("c2", "bash", "pnpm test")], "RUNNING", "run");
-    expect(now).toMatchObject({ kind: "tool", text: "bash: pnpm test" });
+    expect(now).toMatchObject({ kind: "tool", text: "$ pnpm test" });
   });
 
   it("tool_end 済みの tool_start は飛ばし、最新の構造化イベントを出す", () => {
@@ -93,6 +93,47 @@ describe("buildNow", () => {
       text: "read: a.ts",
     });
     expect(buildNow([], "RUNNING", "run")).toBeNull();
+  });
+
+  it("ツールごとに人が読める形にする（bash は $ command、ファイル系はパス、検索はパターン）", () => {
+    const j = (o: unknown) => JSON.stringify(o);
+    const t = (name: string, args: unknown) =>
+      buildNow([start("c1", name, j(args))], "RUNNING", "run")?.text;
+    expect(t("bash", { command: 'for i in $(seq 1 15); do echo "p $i"; sleep 4; done' })).toBe(
+      '$ for i in $(seq 1 15); do echo "p $i"; sleep 4; done',
+    );
+    expect(t("bash", { command: "echo a\necho b" })).toBe("$ echo a echo b");
+    expect(t("read_file", { path: "src/a.ts", start_line: 1 })).toBe("read_file: src/a.ts");
+    expect(t("write_file", { path: "src/b.ts", content: "x" })).toBe("write_file: src/b.ts");
+    expect(t("edit_file", { path: "src/c.ts", old_string: "a", new_string: "b" })).toBe(
+      "edit_file: src/c.ts",
+    );
+    expect(t("list_files", {})).toBe("list_files");
+    expect(t("list_files", { path: "src" })).toBe("list_files: src");
+    expect(t("search", { pattern: "foo.*bar", path: "src" })).toBe("search: foo.*bar");
+  });
+
+  it("途中で切れた JSON（要約は 200 字で切られる）でも bash のコマンドを取り出す", () => {
+    const cut = '{"command":"npm run build && npm test -- --reporter=ver';
+    expect(buildNow([start("c1", "bash", cut)], "RUNNING", "run")?.text).toBe(
+      "$ npm run build && npm test -- --reporter=ver",
+    );
+  });
+
+  it("未知のツールの JSON は出さずツール名だけにする。JSON でない要約はそのまま", () => {
+    const text = (name: string, summary: string) =>
+      buildNow([start("c1", name, summary)], "RUNNING", "run")?.text;
+    expect(text("report_completion", '{"summary":"done"}')).toBe("report_completion");
+    expect(text("mystery", "[1,2")).toBe("mystery");
+    expect(text("mystery", "plain words")).toBe("mystery: plain words");
+  });
+
+  it("bash のコマンドも秘密はマスクし、300 字に切る", () => {
+    const j = JSON.stringify({ command: `curl -H "x" ${GHP} ${"y".repeat(500)}` });
+    const text = buildNow([start("c1", "bash", j)], "RUNNING", "run")?.text ?? "";
+    expect(text.startsWith("$ curl")).toBe(true);
+    expect(text).not.toContain(GHP);
+    expect(text.length).toBeLessThanOrEqual(300);
   });
 
   it("web ツールの tool_start は要約（URL）を出さない", () => {

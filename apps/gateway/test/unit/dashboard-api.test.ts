@@ -545,7 +545,7 @@ describe("tasks/:id", () => {
     await t.agent.emit("tool_start", { callId: "c1", name: "bash", summary: "ls -la" });
     await t.stub.advance();
     const legacy = TaskDetailDtoSchema.parse((await api(v, `/tasks/${t.id}`)).json());
-    expect(legacy.now).toMatchObject({ kind: "tool", text: "bash: ls -la" });
+    expect(legacy.now).toMatchObject({ kind: "tool", text: "$ ls -la" });
     expect(legacy.output).toEqual({ tail: null, redacted: true });
     // 保存済みの行にマスク漏れがあっても、API の最後の層で伏せる
     await runInDurableObject(t.stub, (_i, state) => {

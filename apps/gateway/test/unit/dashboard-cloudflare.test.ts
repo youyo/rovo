@@ -7,6 +7,12 @@ import {
   parseCloudflareRange,
   resetCloudflareSummaryCache,
 } from "../../src/dashboard/cloudflare";
+import {
+  buildCostEstimate,
+  CLOUDFLARE_PRICING_CHECKED_AT,
+  CLOUDFLARE_PRICING_SOURCES,
+  CLOUDFLARE_UNIT_PRICES_USD,
+} from "../../src/dashboard/cloudflare-pricing";
 
 // ダッシュボードの Cloudflare の概要（docs/specs/dashboard.md M9 / D13）。
 // 上流（GraphQL Analytics API・AI Gateway の残高 API）は fetch を差し込んで偽物にする。
@@ -472,5 +478,306 @@ describe("接続先とトークンの扱い", () => {
     expect(logged).not.toContain(TOKEN);
     expect(logged).not.toContain("Bearer");
     expect(errors).toHaveBeenCalled(); // 失敗は理由コードだけ記録する
+  });
+});
+
+// --- 推定の金額（無料枠を引く前。単価 × 使用量。AI Gateway の費用を含む合計） ---
+
+const ALL_ITEMS = [
+  "workers_requests",
+  "containers_vcpu",
+  "containers_memory",
+  "containers_disk",
+  "workers_ai",
+  "ai_gateway",
+] as const;
+
+describe("単価の定数（cloudflare-pricing.ts）", () => {
+  it("公開の単価（USD）。Workers 0.30 / 100 万リクエスト・Containers vCPU 秒 / GiB 秒 / GB 秒・Workers AI 0.011 / 1,000 Neurons", () => {
+    expect(CLOUDFLARE_UNIT_PRICES_USD).toEqual({
+      workers_request: 0.0000003,
+      containers_vcpu_second: 0.00002,
+      containers_gib_second: 0.0000025,
+      containers_gb_second: 0.00000007,
+      workers_ai_neuron: 0.000011,
+    });
+  });
+
+  it("出典は developers.cloudflare.com の 3 ページ。確認日は YYYY-MM-DD か null（未確認）", () => {
+    expect(Object.keys(CLOUDFLARE_PRICING_SOURCES).sort()).toEqual([
+      "containers",
+      "workers",
+      "workers_ai",
+    ]);
+    for (const url of Object.values(CLOUDFLARE_PRICING_SOURCES)) {
+      expect(url).toMatch(/^https:\/\/developers\.cloudflare\.com\/[a-z-]+\/platform\/pricing\/$/);
+    }
+    const checked = CLOUDFLARE_PRICING_CHECKED_AT;
+    expect(checked === null || /^\d{4}-\d{2}-\d{2}$/.test(checked)).toBe(true);
+  });
+});
+
+describe("buildCostEstimate（単価 × 使用量・無料枠を引かない・合計）", () => {
+  const full = {
+    workersRequests: 150,
+    vcpuSeconds: 4000,
+    memoryGibSeconds: 250,
+    diskGbSeconds: null,
+    neurons: 777.5,
+    aiGatewayCostUsd: 1.25,
+  };
+
+  it("項目ごとに単価 × 使用量。合計は取れた項目（AI Gateway を含む）の和。ディスクは使用量が無いので null", () => {
+    const e = buildCostEstimate(full);
+    expect(e.basis).toBe("before_free_tier");
+    expect(e.items.workers_requests).toEqual({
+      quantity: 150,
+      unit: "request",
+      unit_price_usd: 0.0000003,
+      estimated_usd_before_free_tier: 0.000045,
+    });
+    expect(e.items.containers_vcpu).toEqual({
+      quantity: 4000,
+      unit: "vcpu_second",
+      unit_price_usd: 0.00002,
+      estimated_usd_before_free_tier: 0.08,
+    });
+    expect(e.items.containers_memory).toEqual({
+      quantity: 250,
+      unit: "gib_second",
+      unit_price_usd: 0.0000025,
+      estimated_usd_before_free_tier: 0.000625,
+    });
+    expect(e.items.containers_disk).toEqual({
+      quantity: null,
+      unit: "gb_second",
+      unit_price_usd: 0.00000007,
+      estimated_usd_before_free_tier: null,
+    });
+    expect(e.items.workers_ai).toEqual({
+      quantity: 777.5,
+      unit: "neuron",
+      unit_price_usd: 0.000011,
+      estimated_usd_before_free_tier: 0.0085525,
+    });
+    expect(e.items.ai_gateway).toEqual({ cost_usd: 1.25 });
+    // 0.000045 + 0.08 + 0.000625 + 0.0085525 + 1.25
+    expect(e.total_estimated_usd_before_free_tier).toBeCloseTo(1.3392225, 9);
+    expect(e.excluded_items).toEqual(["containers_disk"]);
+    expect(e.partial).toBe(true);
+    expect(e.pricing_checked_at).toBe(CLOUDFLARE_PRICING_CHECKED_AT);
+  });
+
+  it("無料枠・プランに含まれる分を引かない（月 1,000 万リクエスト・1 日 1 万 Neurons 以内でも 0 にならない）", () => {
+    const e = buildCostEstimate({
+      ...full,
+      workersRequests: 5_000_000, // 月 1,000 万リクエストまで含まれるが、引かない
+      neurons: 10_000, // 1 日 1 万 Neurons まで無料だが、引かない
+      vcpuSeconds: 375 * 60, // 月 375 vCPU 分まで含まれるが、引かない
+      memoryGibSeconds: 25 * 3600, // 月 25 GiB 時間まで含まれるが、引かない
+    });
+    expect(e.items.workers_requests.estimated_usd_before_free_tier).toBeCloseTo(1.5, 9);
+    expect(e.items.workers_ai.estimated_usd_before_free_tier).toBeCloseTo(0.11, 9);
+    expect(e.items.containers_vcpu.estimated_usd_before_free_tier).toBeCloseTo(0.45, 9);
+    expect(e.items.containers_memory.estimated_usd_before_free_tier).toBeCloseTo(0.225, 9);
+  });
+
+  it("ディスクの使用量が取れていれば GB 秒 × 単価", () => {
+    const e = buildCostEstimate({ ...full, diskGbSeconds: 1_000_000 });
+    expect(e.items.containers_disk).toMatchObject({ quantity: 1_000_000, unit: "gb_second" });
+    expect(e.items.containers_disk.estimated_usd_before_free_tier).toBeCloseTo(0.07, 9);
+    expect(e.excluded_items).toEqual([]);
+    expect(e.partial).toBe(false);
+    expect(e.total_estimated_usd_before_free_tier).toBeCloseTo(1.3392225 + 0.07, 9);
+  });
+
+  it("使用量 0 は 0 USD（null ではない）。合計に含まれる", () => {
+    const e = buildCostEstimate({
+      workersRequests: 0,
+      vcpuSeconds: 0,
+      memoryGibSeconds: 0,
+      diskGbSeconds: 0,
+      neurons: 0,
+      aiGatewayCostUsd: 0,
+    });
+    for (const k of [
+      "workers_requests",
+      "containers_vcpu",
+      "containers_memory",
+      "containers_disk",
+      "workers_ai",
+    ] as const) {
+      expect(e.items[k].estimated_usd_before_free_tier, k).toBe(0);
+    }
+    expect(e.items.ai_gateway.cost_usd).toBe(0);
+    expect(e.total_estimated_usd_before_free_tier).toBe(0);
+    expect(e.excluded_items).toEqual([]);
+    expect(e.partial).toBe(false);
+  });
+
+  it("取得できない項目（使用量 null）の推定は null で、合計に含まれず、excluded_items に出る", () => {
+    const e = buildCostEstimate({
+      ...full,
+      vcpuSeconds: null,
+      memoryGibSeconds: null,
+      aiGatewayCostUsd: null,
+    });
+    expect(e.items.containers_vcpu.estimated_usd_before_free_tier).toBeNull();
+    expect(e.items.containers_memory.estimated_usd_before_free_tier).toBeNull();
+    expect(e.items.ai_gateway.cost_usd).toBeNull();
+    expect(e.excluded_items).toEqual([
+      "containers_vcpu",
+      "containers_memory",
+      "containers_disk",
+      "ai_gateway",
+    ]);
+    expect(e.partial).toBe(true);
+    // 残りの 2 項目（Workers のリクエスト・Workers AI）だけの和
+    expect(e.total_estimated_usd_before_free_tier).toBeCloseTo(0.000045 + 0.0085525, 9);
+  });
+
+  it("全項目が取れないときは合計も null（0 USD と見せない）", () => {
+    const e = buildCostEstimate({
+      workersRequests: null,
+      vcpuSeconds: null,
+      memoryGibSeconds: null,
+      diskGbSeconds: null,
+      neurons: null,
+      aiGatewayCostUsd: null,
+    });
+    expect(e.total_estimated_usd_before_free_tier).toBeNull();
+    expect([...e.excluded_items].sort()).toEqual([...ALL_ITEMS].sort());
+    expect(e.partial).toBe(true);
+  });
+});
+
+describe("推定の金額を DTO で返す（loadCloudflareSummary）", () => {
+  it("正常系: 項目ごとの推定と AI Gateway を含む合計。ディスクは取っていないので null で、合計に含まれない", async () => {
+    const up = upstream();
+    const dto = await loadCloudflareSummary(env(), "24h", { fetch: up.fetch, now: () => NOW });
+    expect(CloudflareSummaryDtoSchema.parse(dto)).toEqual(dto);
+    const est = dto.cost_estimate;
+    expect(est).toBeDefined();
+    expect(est?.basis).toBe("before_free_tier");
+    expect(est?.items.workers_requests.quantity).toBe(150);
+    expect(est?.items.workers_requests.estimated_usd_before_free_tier).toBeCloseTo(0.000045, 9);
+    expect(est?.items.containers_vcpu.quantity).toBe(4000);
+    expect(est?.items.containers_vcpu.estimated_usd_before_free_tier).toBeCloseTo(0.08, 9);
+    expect(est?.items.containers_memory.quantity).toBe(250);
+    expect(est?.items.containers_memory.estimated_usd_before_free_tier).toBeCloseTo(0.000625, 9);
+    expect(est?.items.containers_disk.estimated_usd_before_free_tier).toBeNull();
+    expect(est?.items.workers_ai.quantity).toBe(777.5);
+    expect(est?.items.workers_ai.estimated_usd_before_free_tier).toBeCloseTo(0.0085525, 9);
+    expect(est?.items.ai_gateway.cost_usd).toBe(1.25);
+    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(1.3392225, 9);
+    expect(est?.excluded_items).toEqual(["containers_disk"]);
+    expect(est?.partial).toBe(true);
+    // 既存の項目は変わらない
+    expect(dto.ai_gateway).toMatchObject({ ok: true, value: { cost_usd: 1.25 } });
+    expect(dto.credit_balance).toEqual({ ok: true, value: { balance_usd: 42.5 } });
+  });
+
+  it("range によらず使用量 × 単価（期間の按分や月の無料枠の調整をしない）", async () => {
+    const a = await loadCloudflareSummary(env(), "1h", {
+      fetch: upstream().fetch,
+      now: () => NOW,
+    });
+    resetCloudflareSummaryCache();
+    const b = await loadCloudflareSummary(env(), "7d", {
+      fetch: upstream().fetch,
+      now: () => NOW,
+    });
+    expect(a.cost_estimate?.total_estimated_usd_before_free_tier).toBe(
+      b.cost_estimate?.total_estimated_usd_before_free_tier,
+    );
+  });
+
+  it("Workers が forbidden なら Workers の推定だけ null。合計は残りの項目の和で、workers_requests が含まれない旨が出る", async () => {
+    const up = upstream({ workers: json({ errors: [] }, 403) });
+    const dto = await loadCloudflareSummary(env(), "24h", { fetch: up.fetch, now: () => NOW });
+    const est = dto.cost_estimate;
+    expect(dto.workers).toEqual({ ok: false, reason: "forbidden" });
+    expect(est?.items.workers_requests).toMatchObject({
+      quantity: null,
+      estimated_usd_before_free_tier: null,
+    });
+    expect(est?.excluded_items).toContain("workers_requests");
+    expect(est?.partial).toBe(true);
+    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(1.3392225 - 0.000045, 9);
+    CloudflareSummaryDtoSchema.parse(dto);
+  });
+
+  it("コンテナが unavailable なら vCPU・メモリ・ディスクの推定が null で、3 つとも合計に含まれない", async () => {
+    const up = upstream({ containers: json({}, 500) });
+    const dto = await loadCloudflareSummary(env(), "24h", { fetch: up.fetch, now: () => NOW });
+    const est = dto.cost_estimate;
+    for (const k of ["containers_vcpu", "containers_memory", "containers_disk"] as const) {
+      expect(est?.items[k].estimated_usd_before_free_tier, k).toBeNull();
+      expect(est?.excluded_items, k).toContain(k);
+    }
+    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(0.000045 + 0.0085525 + 1.25, 9);
+  });
+
+  it("AI Gateway が取れない（gateway id なし）と ai_gateway が null・合計に含まれない。Workers AI が empty なら workers_ai も null", async () => {
+    const up = upstream({ workersAi: gql("workersAi", null) });
+    const dto = await loadCloudflareSummary(env({ AI_GATEWAY_ID: "" }), "24h", {
+      fetch: up.fetch,
+      now: () => NOW,
+    });
+    const est = dto.cost_estimate;
+    expect(dto.ai_gateway).toEqual({ ok: false, reason: "not_configured" });
+    expect(est?.items.ai_gateway.cost_usd).toBeNull();
+    expect(est?.items.workers_ai.estimated_usd_before_free_tier).toBeNull();
+    expect(est?.excluded_items).toEqual(
+      expect.arrayContaining(["ai_gateway", "workers_ai", "containers_disk"]),
+    );
+    expect(est?.total_estimated_usd_before_free_tier).toBeCloseTo(0.000045 + 0.08 + 0.000625, 9);
+  });
+
+  it("未設定（上流を呼ばない）でも例外にならず、全項目の推定が null・合計 null・契約を通る", async () => {
+    const up = upstream();
+    const dto = await loadCloudflareSummary(env({ CLOUDFLARE_API_TOKEN: "" }), "24h", {
+      fetch: up.fetch,
+      now: () => NOW,
+    });
+    expect(up.calls).toHaveLength(0);
+    const est = dto.cost_estimate;
+    expect(est?.total_estimated_usd_before_free_tier).toBeNull();
+    expect([...(est?.excluded_items ?? [])].sort()).toEqual([...ALL_ITEMS].sort());
+    for (const k of [
+      "workers_requests",
+      "containers_vcpu",
+      "containers_memory",
+      "containers_disk",
+      "workers_ai",
+    ] as const) {
+      expect(est?.items[k].estimated_usd_before_free_tier, k).toBeNull();
+    }
+    expect(est?.items.ai_gateway.cost_usd).toBeNull();
+    expect(CloudflareSummaryDtoSchema.parse(dto)).toEqual(dto);
+  });
+
+  it("トラフィックが無い（行が 0 件）ときの推定は 0 USD で、取得できない項目だけ null", async () => {
+    const up = upstream({
+      containers: gql("containers", []),
+      workers: gql("workers", []),
+      aiGateway: gql("aiGateway", []),
+      workersAi: gql("workersAi", []),
+    });
+    const dto = await loadCloudflareSummary(env(), "1h", { fetch: up.fetch, now: () => NOW });
+    const est = dto.cost_estimate;
+    expect(est?.total_estimated_usd_before_free_tier).toBe(0);
+    expect(est?.items.workers_requests.estimated_usd_before_free_tier).toBe(0);
+    expect(est?.items.containers_disk.estimated_usd_before_free_tier).toBeNull();
+    expect(est?.excluded_items).toEqual(["containers_disk"]);
+  });
+
+  it("推定はキャッシュされた DTO と一緒に返る（TTL 内は上流を呼ばず同じ値）", async () => {
+    const up = upstream();
+    const deps = { fetch: up.fetch, now: () => NOW };
+    const a = await loadCloudflareSummary(env(), "24h", deps);
+    const b = await loadCloudflareSummary(env(), "24h", deps);
+    expect(up.calls).toHaveLength(5);
+    expect(b.cost_estimate).toEqual(a.cost_estimate);
   });
 });

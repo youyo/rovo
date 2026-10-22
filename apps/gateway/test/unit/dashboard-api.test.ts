@@ -2,6 +2,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import {
   BudgetMeDtoSchema,
+  CloudflareSummaryDtoSchema,
   ErrorDtoSchema,
   OverviewDtoSchema,
   TaskDetailDtoSchema,
@@ -1204,5 +1205,53 @@ describe("TaskDO.dashboardDetail", () => {
     expect(r.view.task_id).toBe(t.id);
     expect(r.merge_policy).toBe("agent_merge");
     expect(JSON.stringify(r)).not.toContain("SECRET-BODY");
+  });
+});
+
+describe("cloudflare（M9）", () => {
+  it("未ログインは 401、GET 以外は 405、range が列挙以外なら 400（認証が先）", async () => {
+    const v = newViewer([newRepoId()]);
+    const unauth = await api(v, "/cloudflare", { noCookie: true });
+    expect(unauth.status).toBe(401);
+    const badUnauth = await api(v, "/cloudflare?range=2h", { noCookie: true });
+    expect(badUnauth.status).toBe(401);
+    expect((await api(v, "/cloudflare", { method: "POST" })).status).toBe(405);
+    for (const q of [
+      "range=2h",
+      "range=",
+      "range=24H",
+      "range=now-1d",
+      "range=1h%2C7d",
+      "range=30d",
+    ]) {
+      const r = await api(v, `/cloudflare?${q}`);
+      expect(r.status, q).toBe(400);
+      expect(ErrorDtoSchema.parse(r.json())).toEqual({ error: "bad_request" });
+    }
+  });
+
+  it("range の省略は 24h。トークン・アカウント ID が未設定なら全項目 not_configured の 200（閲覧者の集合は取らない）", async () => {
+    const v = newViewer([newRepoId()]);
+    const r = await api(v, "/cloudflare");
+    expect(r.status).toBe(200);
+    expect(r.res.headers.get("cache-control")).toBe("no-store");
+    const dto = CloudflareSummaryDtoSchema.parse(r.json());
+    expect(dto.range).toBe("24h");
+    expect(dto.open_url).toBeNull();
+    for (const k of [
+      "containers",
+      "workers",
+      "ai_gateway",
+      "workers_ai",
+      "credit_balance",
+    ] as const) {
+      expect(dto[k]).toEqual({ ok: false, reason: "not_configured" });
+    }
+    expect(v.visibleCalls).toHaveLength(0);
+    for (const range of ["1h", "7d"]) {
+      const ok = await api(v, `/cloudflare?range=${range}`);
+      expect(ok.status, range).toBe(200);
+      expect(CloudflareSummaryDtoSchema.parse(ok.json()).range).toBe(range);
+    }
   });
 });

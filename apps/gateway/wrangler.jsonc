@@ -81,6 +81,9 @@
     // どれかが空なら判定せず、従来どおり AGENT_MODELS だけで決める。account id は公開しない値なので、デプロイ時に実値へ置き換える（deploy.example 参照）。
     "AI_GATEWAY_ID": "",
     "CLOUDFLARE_ACCOUNT_ID": "",
+    // ダッシュボードの Cloudflare の概要（Workers のリクエスト数）の対象にする rovo の Worker 名（カンマ区切り。秘密ではない）。
+    // deploy:config が rovo.config.json の workerNames（gateway・agent・web）から入れる。空なら Workers の項目は「未設定」と表示する。
+    "WORKER_NAMES": "",
     // 既定のモデル（task_start の model を省略したとき）。agent の同名の var と同じ値にする。
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
     // 選べるモデル（カンマ区切り。task_start の model と consult の model。models_list に出る）。

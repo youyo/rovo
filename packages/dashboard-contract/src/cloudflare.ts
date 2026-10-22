@@ -28,6 +28,23 @@ export const AiGatewayValueSchema = z.strictObject({
   cost_usd: usdSchema,
 });
 
+/** Workers のリクエスト数（workersInvocationsAdaptive。rovo の 3 つの Worker の合計） */
+export const WorkersValueSchema = z.strictObject({
+  period: periodSchema,
+  requests: countSchema,
+  errors: countSchema,
+});
+
+/** Workers AI の利用（aiInferenceAdaptiveGroups の neurons の合計） */
+export const WorkersAiValueSchema = z.strictObject({
+  period: periodSchema,
+  neurons: z.number().min(0).max(1e15),
+});
+
+/** 集計の期間（クライアントが選べるのはこの 3 つだけ） */
+export const CLOUDFLARE_RANGES = ["1h", "24h", "7d"] as const;
+export const cloudflareRangeSchema = z.enum(CLOUDFLARE_RANGES);
+
 /** クレジット残高は残高だけ */
 export const CreditBalanceValueSchema = z.strictObject({
   balance_usd: z.number().min(0).max(1e12),
@@ -46,5 +63,9 @@ export const CloudflareSummaryDtoSchema = z.strictObject({
   containers: item(ContainersValueSchema),
   ai_gateway: item(AiGatewayValueSchema),
   credit_balance: item(CreditBalanceValueSchema),
+  // M9 で追加（optional: 既存の fixtures・画面を壊さない。gateway は常に出す）
+  range: cloudflareRangeSchema.optional(),
+  workers: item(WorkersValueSchema).optional(),
+  workers_ai: item(WorkersAiValueSchema).optional(),
 });
 export type CloudflareSummaryDto = z.infer<typeof CloudflareSummaryDtoSchema>;

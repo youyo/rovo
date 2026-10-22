@@ -87,6 +87,11 @@ class State {
     { provider_slug: "anthropic", alias: "default" },
     { provider_slug: "openai", alias: "default" },
   ];
+  /**
+   * 偽の Cloudflare の分析 API（GraphQL・クレジット残高。M9）。forbidden に入れた項目は、権限が無い応答（GraphQL は 200 + authz、REST は 403）になる。
+   * 項目名: containers / workers / aiGateway / workersAi / credit
+   */
+  cloudflareForbidden = new Set<string>();
   log: RecordedRequest[] = [];
 }
 
@@ -132,6 +137,10 @@ export function createAdmin(
     setFault(target: FaultTarget, status: number | null, count?: number) {
       getState().faults[target] =
         status === null ? null : { status, remaining: count ?? Number.POSITIVE_INFINITY };
+    },
+    /** 権限が無い（403 / authz）応答にする項目を差し替える（空で解除）。項目名: containers / workers / aiGateway / workersAi / credit */
+    setCloudflareForbidden(items: string[]) {
+      getState().cloudflareForbidden = new Set(items);
     },
     setProviderKeys(keys: FakeProviderKey[]) {
       getState().providerKeys = keys;
@@ -245,6 +254,9 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
           (body.status ?? null) as number | null,
           body.count === undefined ? undefined : Number(body.count),
         );
+        break;
+      case "cloudflare-forbidden":
+        admin.setCloudflareForbidden(((body as { items?: unknown }).items ?? []) as string[]);
         break;
       case "provider-keys":
         admin.setProviderKeys((body.keys ?? []) as FakeProviderKey[]);
@@ -442,6 +454,83 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
     return sendJson(res, 200, { success: true, result });
   }
 
+  /** 偽の Cloudflare API: POST /client/v4/graphql（M9 の 4 つの固定クエリ）。query の中身でデータセットを選ぶ */
+  function graphql(
+    body: Record<string, unknown> | null,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ) {
+    const fault = takeFault("cloudflare");
+    if (fault) return faultResponse(res, fault);
+    if (req.headers.authorization !== `Bearer ${FAKE_CLOUDFLARE_TOKEN}`) {
+      return sendJson(res, 401, { success: false, errors: [{ code: 10000 }], result: null });
+    }
+    const query = String(body?.query ?? "");
+    const variables = (body?.variables ?? {}) as Record<string, unknown>;
+    const datasets: [string, string, unknown[]][] = [
+      [
+        "containersMetricsAdaptiveGroups",
+        "containers",
+        [
+          {
+            dimensions: { instanceId: "i-1" },
+            sum: { allocatedCpu: 7200, allocatedMemory: 2 * 2 ** 30 * 3600 },
+          },
+          {
+            dimensions: { instanceId: "i-2" },
+            sum: { allocatedCpu: 3600, allocatedMemory: 2 ** 30 * 1800 },
+          },
+        ],
+      ],
+      ["workersInvocationsAdaptive", "workers", [{ sum: { requests: 1200, errors: 7 } }]],
+      [
+        "aiGatewayRequestsAdaptiveGroups",
+        "aiGateway",
+        [{ count: 300, sum: { cost: 4.5, cachedRequests: 30, erroredRequests: 3 } }],
+      ],
+      ["aiInferenceAdaptiveGroups", "workersAi", [{ sum: { totalNeurons: 2500 } }]],
+    ];
+    const hit = datasets.find(([name]) => query.includes(name));
+    if (!hit) return sendJson(res, 200, { data: null, errors: [{ message: "unknown dataset" }] });
+    const [, item, rows] = hit;
+    if (state.cloudflareForbidden.has(item) || variables.accountTag !== "e2e-account") {
+      return sendJson(res, 200, {
+        data: { viewer: { accounts: [null] } },
+        errors: [
+          {
+            message: "does not have access to the path",
+            path: ["viewer", "accounts", 0, item],
+            extensions: { code: "authz" },
+          },
+        ],
+      });
+    }
+    return sendJson(res, 200, { data: { viewer: { accounts: [{ [item]: rows }] } }, errors: null });
+  }
+
+  /** 偽の Cloudflare API: GET /client/v4/accounts/:a/ai-gateway/billing/credit-balance（M9） */
+  function creditBalance(req: IncomingMessage, res: ServerResponse) {
+    const fault = takeFault("cloudflare");
+    if (fault) return faultResponse(res, fault);
+    if (req.headers.authorization !== `Bearer ${FAKE_CLOUDFLARE_TOKEN}`) {
+      return sendJson(res, 401, { success: false, errors: [{ code: 10000 }], result: null });
+    }
+    if (state.cloudflareForbidden.has("credit")) {
+      return sendJson(res, 403, { success: false, errors: [{ code: 10000 }], result: null });
+    }
+    return sendJson(res, 200, {
+      success: true,
+      errors: [],
+      messages: [],
+      result: {
+        balance: 18.25,
+        has_default_payment_method: true,
+        payment_method: { brand: "visa", last4: "4242" },
+        topup_config: { amount: 50, threshold: 5 },
+      },
+    });
+  }
+
   function api(url: URL, req: IncomingMessage, res: ServerResponse) {
     const fault = takeFault("api");
     if (fault) return faultResponse(res, fault);
@@ -556,6 +645,15 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
         )
       ) {
         return providerConfigs(url, req, res);
+      }
+      if (req.method === "POST" && url.pathname === "/client/v4/graphql") {
+        return graphql(body, req, res);
+      }
+      if (
+        req.method === "GET" &&
+        /^\/client\/v4\/accounts\/[^/]+\/ai-gateway\/billing\/credit-balance$/.test(url.pathname)
+      ) {
+        return creditBalance(req, res);
       }
       if (req.method === "GET") return api(url, req, res);
       return sendJson(res, 404, { message: "Not Found" });

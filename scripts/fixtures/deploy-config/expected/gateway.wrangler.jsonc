@@ -70,6 +70,7 @@
     // secret の CLOUDFLARE_API_TOKEN（権限は Account / AI Gateway / Read だけ）と合わせて設定する。どれかが空なら判定せず AGENT_MODELS だけで決める。
     "AI_GATEWAY_ID": "acme-gateway",
     "CLOUDFLARE_ACCOUNT_ID": "@ACCOUNT_ID@",
+    "WORKER_NAMES": "acme-gateway,acme-agent,acme-web",
     // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。models_list の effort と task_status / task_result に出る）。空なら upstream の既定。agent の同名の var と同じ値にする。
     "MODEL_EFFORTS": "anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off",
     "WEB_SEARCH_DAILY_LIMIT": "300",

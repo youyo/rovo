@@ -8,6 +8,8 @@ import {
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDetailCache } from "../src/detail-cache";
+import { formatUsd } from "../src/format";
 import { TaskScreen } from "../src/task-screen";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -111,6 +113,7 @@ async function mount(
   s: ReturnType<typeof server>,
   env = makeEnv(),
   onUnauthorized: () => void = () => {},
+  extra: Partial<Parameters<typeof TaskScreen>[0]> = {},
 ) {
   const container = document.createElement("div");
   document.body.append(container);
@@ -122,6 +125,7 @@ async function mount(
         id: ID,
         onUnauthorized,
         deps: { fetchImpl: s.fn as unknown as typeof fetch, pollerDeps: env.deps },
+        ...extra,
       }),
     );
     await settle();
@@ -816,5 +820,163 @@ describe("表示の安全（D14）: 悪意ある文字列は文字として出�
       server({ detail: () => json(200, d), events: () => json(200, events) }),
     );
     expect(c.querySelector("[data-pr] a")).toBeNull();
+  });
+});
+
+describe("画面の中での切り替え（fresh を付けない・キャッシュ・一覧の行の表示）", () => {
+  const never = () => new Promise<Response>(() => {});
+
+  it("fresh={false}: 最初の取得にも ?fresh=1 を付けない。ポーリングにも付けない", async () => {
+    const s = server();
+    const { env } = await mount(s, makeEnv(), () => {}, { fresh: false });
+    expect(s.calls).toEqual(["", "/events"]);
+    await env.fire();
+    expect(s.calls.slice(2)).toEqual(["", "/events?cursor=9"]);
+  });
+
+  it("fresh を指定しなければ、これまでどおり最初の取得に付く（単体で開いたとき）", async () => {
+    const s = server();
+    await mount(s);
+    expect(s.calls[0]).toBe("?fresh=1");
+  });
+
+  it("取れた詳細と events をキャッシュに入れる（最後の詳細）", async () => {
+    const cache = createDetailCache();
+    const s = server();
+    await mount(s, makeEnv(), () => {}, { cache });
+    const got = cache.get(ID);
+    expect(got?.detail).toEqual(taskDetailRunningFixture);
+    expect(got?.events).toEqual(taskEventsFixture.events);
+    expect(got?.hasOlder).toBe(false);
+  });
+
+  it("キャッシュにあれば、取得を待たずにすぐ描く（進み具合・出力）。取得は差分（cursor）で、届いたら差し替わる", async () => {
+    const cache = createDetailCache();
+    cache.set(ID, {
+      detail: {
+        ...taskDetailRunningFixture,
+        output: { tail: "CACHED-TAIL", redacted: true },
+      },
+      events: taskEventsFixture.events,
+      hasOlder: false,
+    });
+    let n = 0;
+    const s = server({
+      detail: () => {
+        n++;
+        return json(200, {
+          ...taskDetailRunningFixture,
+          output: { tail: "NEW-TAIL", redacted: true },
+        });
+      },
+    });
+    // 最初の取得が返る前の表示を見るため、詳細が返らない応答に差し替える
+    const hold = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/events")) return json(200, taskEventsFixture);
+      return never();
+    });
+    const { c } = await mount({ ...s, fn: hold }, makeEnv(), () => {}, { cache, fresh: false });
+    expect(c.querySelector("h1")?.textContent).toBe(taskDetailRunningFixture.task.title);
+    expect(c.querySelector(".output")?.textContent).toContain("CACHED-TAIL");
+    expect(steps(c)).toHaveLength(taskEventsFixture.events.length);
+    expect(text(c)).not.toContain("読み込み中");
+    expect(n).toBe(0);
+  });
+
+  it("キャッシュからの表示のあと、届いた詳細で差し替わり、events は cursor（最後の seq）の差分だけ取る", async () => {
+    const cache = createDetailCache();
+    cache.set(ID, {
+      detail: { ...taskDetailRunningFixture, output: { tail: "CACHED-TAIL", redacted: true } },
+      events: taskEventsFixture.events,
+      hasOlder: false,
+    });
+    const s = server({
+      detail: () =>
+        json(200, { ...taskDetailRunningFixture, output: { tail: "NEW-TAIL", redacted: true } }),
+      events: () => json(200, { ...taskEventsFixture, events: [] }),
+    });
+    const { c } = await mount(s, makeEnv(), () => {}, { cache, fresh: false });
+    expect(s.calls).toEqual(["", "/events?cursor=9"]);
+    expect(c.querySelector(".output")?.textContent).toContain("NEW-TAIL");
+    expect(steps(c)).toHaveLength(taskEventsFixture.events.length);
+  });
+
+  it("取り直しが 404 / 401 なら、キャッシュのその詳細を捨てる", async () => {
+    for (const status of [404, 401]) {
+      const cache = createDetailCache();
+      cache.set(ID, { detail: taskDetailRunningFixture, events: [], hasOlder: false });
+      const s = server({ detail: () => json(status, { error: "x" }) });
+      const { c } = await mount(s, makeEnv(), () => {}, { cache, fresh: false });
+      expect(cache.get(ID), String(status)).toBeUndefined();
+      expect(text(c), String(status)).not.toContain(taskDetailRunningFixture.task.title);
+      act(() => roots.pop()?.unmount());
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("キャッシュが無く、一覧の行（preview）があれば、詳細が届く前に行の題名・状態・費用・リポジトリを描く。届いたら差し替わる", async () => {
+    const row = taskDetailRunningFixture.task;
+    let release: (r: Response) => void = () => {};
+    const gate = new Promise<Response>((r) => {
+      release = r;
+    });
+    const hold = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/events")) return json(200, taskEventsFixture);
+      return gate;
+    });
+    const { c } = await mount({ ...server(), fn: hold }, makeEnv(), () => {}, {
+      preview: { task: row, at: Date.parse("2026-10-21T06:00:00Z") },
+      fresh: false,
+    });
+    expect(c.querySelector("h1")?.textContent).toBe(row.title);
+    const head = c.querySelector(".con-head")?.textContent ?? "";
+    expect(head).toContain("実行中");
+    expect(head).toContain(formatUsd(row.cost.cost_usd));
+    expect(head).toContain(row.repository);
+    expect(head).toContain(row.owner_login);
+    expect(text(c)).toContain("読み込み中");
+    expect(c.querySelector(".output")).toBeNull();
+    await act(async () => {
+      release(json(200, taskDetailRunningFixture));
+      await settle();
+    });
+    expect(c.querySelector(".output")).not.toBeNull();
+    expect(text(c)).not.toContain("読み込み中");
+  });
+
+  it("preview に悪意ある題名があっても、詳細と同じ整形（制御文字を除き、HTML は文字）", async () => {
+    const row = {
+      ...taskDetailRunningFixture.task,
+      title: "‮gpj.exe\u0007<img src=x onerror=alert(1)>\n改行",
+    };
+    const hold = vi.fn(async () => never());
+    const { c } = await mount({ ...server(), fn: hold }, makeEnv(), () => {}, {
+      preview: { task: row, at: 0 },
+    });
+    expect(c.querySelector("img")).toBeNull();
+    const t = c.querySelector("h1")?.textContent ?? "";
+    expect(t.includes("\u0007")).toBe(false);
+    expect(/[‪-‮⁦-⁩]/.test(t)).toBe(false);
+    expect(t).toContain("<img src=x onerror=alert(1)>");
+  });
+
+  it("preview が無ければ、これまでどおり「タスクの詳細 / 読み込み中」", async () => {
+    const hold = vi.fn(async () => never());
+    const { c } = await mount({ ...server(), fn: hold });
+    expect(c.querySelector("h1")?.textContent).toBe("タスクの詳細");
+    expect(text(c)).toContain("読み込み中");
+  });
+
+  it("画面を離れる（別のタスクへ切り替える）と、前の取得を止める（AbortController）", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const hold = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      signals.push(init?.signal ?? undefined);
+      return never();
+    });
+    await mount({ ...server(), fn: hold });
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(false);
+    act(() => roots.pop()?.unmount());
+    expect(signals[0]?.aborted).toBe(true);
   });
 });

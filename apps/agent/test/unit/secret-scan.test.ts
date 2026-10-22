@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExecResult } from "../../src/sandbox-port";
-import { scanRangeForSecrets } from "../../src/secret-scan";
+import { blockedMessage, scanRangeForSecrets, scanUnpushedForSecrets } from "../../src/secret-scan";
 
 const GHP = `ghp_${"a1B2".repeat(9)}`;
 const res = (over: Partial<ExecResult> = {}): ExecResult => ({
@@ -137,5 +137,148 @@ describe("scanRangeForSecrets（strict モード = WIP の commit 前）", () =>
     const v = await scanRangeForSecrets(git, ["--cached"], "strict", { shouldAbort: () => true });
     expect(v.status).toBe("aborted");
     expect(calls).toHaveLength(1);
+  });
+});
+
+/** commit ごとの区切り（U+0001 と SHA の行）つきの log の出力を作る */
+const section = (sha: string, ...body: string[]) => `\u0001${sha}\n\n${body.join("")}`;
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
+const BASE = "1".repeat(40);
+
+describe("scanUnpushedForSecrets（commit ごと）", () => {
+  it("git log で、HEAD から辿れて last_pushed から辿れない commit の numstat と差分を取る", async () => {
+    const { git, calls } = gitWith("", "");
+    expect(await scanUnpushedForSecrets(git, "HEAD", BASE)).toEqual({ status: "clean" });
+    expect(calls).toHaveLength(2);
+    for (const c of calls) {
+      expect(c).toContain("log");
+      expect(c).toContain("-m");
+      expect(c).toContain("--no-renames");
+      expect(c.slice(c.indexOf("HEAD"))).toEqual(["HEAD", "--not", BASE, "--"]);
+    }
+    expect(calls.some((c) => c.includes("--numstat"))).toBe(true);
+    expect(calls.some((c) => c.includes("-p"))).toBe(true);
+  });
+
+  it("last_pushed が無いときは --not を付けない（HEAD から辿れる全部）", async () => {
+    const { git, calls } = gitWith("", "");
+    await scanUnpushedForSecrets(git, "HEAD", undefined);
+    for (const c of calls) {
+      expect(c).not.toContain("--not");
+      expect(c.slice(c.indexOf("HEAD"))).toEqual(["HEAD", "--"]);
+    }
+  });
+
+  it("基準・head が SHA（または HEAD）の形でなければ、git を呼ばずに止める（オプションの注入を防ぐ）", async () => {
+    const { git, calls } = gitWith("", "");
+    for (const [head, last] of [
+      ["HEAD", "--output=x"],
+      ["HEAD", "abc"],
+      ["--all", BASE],
+      ["main", BASE],
+    ] as const) {
+      expect(await scanUnpushedForSecrets(git, head, last)).toEqual({
+        status: "unscannable",
+        reason: "git_failed",
+      });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("commit ごとに行番号・パスを数え、見つかった commit の SHA を返す。値は含まない", async () => {
+    const diff =
+      section(SHA_A, hunk("a.ts", 1, "+one", "+two")) +
+      section(SHA_B, hunk("b.ts", 5, " ctx", `+k = "${GHP}"`));
+    const { git } = gitWith("", diff);
+    const v = await scanUnpushedForSecrets(git, "HEAD", BASE);
+    expect(v).toEqual({
+      status: "secret",
+      category: "github-token",
+      path: "b.ts",
+      line: 6,
+      commit: SHA_B,
+    });
+    expect(JSON.stringify(v)).not.toContain(GHP);
+  });
+
+  it("numstat のバイナリは commit ごとに見る（鍵らしい拡張子だけ止める）", async () => {
+    const numstat = section(SHA_A, "-\t-\timg/a.png\n") + section(SHA_B, "-\t-\tk/a.p12\n");
+    const { git } = gitWith(numstat, "");
+    expect(await scanUnpushedForSecrets(git, "HEAD", BASE)).toEqual({
+      status: "binary",
+      path: "k/a.p12",
+      commit: SHA_B,
+    });
+  });
+
+  it("クォートされたパス（日本語の 8 進・引用符）を元に戻して報告する", async () => {
+    const quoted = '"\\346\\227\\245\\346\\234\\254 \\"q\\".txt"';
+    const diff = section(
+      SHA_A,
+      `diff --git a/x b/x\n--- /dev/null\n+++ b/${quoted}\n@@ -0,0 +1,1 @@\n+${GHP}\n`,
+    );
+    const { git } = gitWith("", diff);
+    expect(await scanUnpushedForSecrets(git, "HEAD", BASE)).toMatchObject({
+      path: '日本 "q".txt',
+      line: 1,
+    });
+  });
+
+  it("出力が切れた・git が失敗・例外は unscannable", async () => {
+    for (const c of [
+      gitWith("", "", { diff: { truncated: true } }),
+      gitWith("", "", { numstat: { truncated: true } }),
+      gitWith("", "", { diff: { exitCode: 128 } }),
+      gitWith("", "", { numstat: { timedOut: true, exitCode: 124 } }),
+    ]) {
+      expect((await scanUnpushedForSecrets(c.git, "HEAD", BASE)).status).toBe("unscannable");
+    }
+    const thrown = await scanUnpushedForSecrets(
+      async () => {
+        throw new Error("boom");
+      },
+      "HEAD",
+      BASE,
+    );
+    expect(thrown.status).toBe("unscannable");
+  });
+
+  it("shouldAbort が立てば、diff を取る前にやめる", async () => {
+    const { git, calls } = gitWith("", "");
+    const v = await scanUnpushedForSecrets(git, "HEAD", BASE, { shouldAbort: () => true });
+    expect(v).toEqual({ status: "aborted" });
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("blockedMessage", () => {
+  it("固定の文: カテゴリ・path:line・commit の短い SHA。値は含まない", () => {
+    expect(
+      blockedMessage({
+        status: "secret",
+        category: "github-token",
+        path: "a.ts",
+        line: 3,
+        commit: SHA_A,
+      }),
+    ).toBe("blocked: possible secret (github-token) in a.ts:3 (commit aaaaaaa)");
+    expect(blockedMessage({ status: "binary", path: "k.p12", commit: SHA_B })).toBe(
+      "blocked: possible secret (key file) in k.p12 (commit bbbbbbb)",
+    );
+    expect(blockedMessage({ status: "secret", category: "x" })).toBe(
+      "blocked: possible secret (x)",
+    );
+  });
+
+  it("パスにトークンが入っていても出さない（maskSecrets を通す）", () => {
+    for (const v of [
+      { status: "secret", category: "aws-access-key", path: `src/${GHP}.ts`, line: 1 },
+      { status: "binary", path: `keys/${GHP}.pem` },
+    ] as const) {
+      const msg = blockedMessage(v);
+      expect(msg).not.toContain(GHP);
+      expect(msg).toContain("[REDACTED]");
+    }
   });
 });

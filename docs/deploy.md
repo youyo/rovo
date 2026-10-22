@@ -490,12 +490,22 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 
 ## 18. ダッシュボード（`/dashboard`）
 
-gateway は、読み取り専用のダッシュボード（`apps/dashboard`。Vite + React + TypeScript の SPA）を `/dashboard` で配信する。設計は `docs/specs/dashboard.md`。現時点は配信の土台だけで、画面は「準備中」の雛形（ログインと中身は後続）。
+gateway は、読み取り専用のダッシュボード（`apps/dashboard`。Vite + React + TypeScript の SPA）を `/dashboard` で配信する。設計は `docs/specs/dashboard.md`。GitHub でログインした利用者が、権限のあるリポジトリのタスクの一覧（今日のタイムライン・表・予算・全員の実績・モデル別の費用・Cloudflare の枠）と詳細（進み具合・出力の末尾・費用・Draft PR）を見られる。状態を変える操作は、ログアウトを除いて無い。
 
 - **ビルドは自動**: `mise run deploy:gateway`（`deploy:all` を含む）と `mise run setup` が、gateway のデプロイの前に `pnpm exec vite build`（`apps/dashboard`）を実行して `apps/dashboard/dist` を作る。ビルドが失敗したら、古い `dist` をデプロイしないよう `wrangler deploy` を呼ばずに止まる。新しい secret・トークン・手順は要らない（`pnpm install` 済みであれば足りる）。手元で `wrangler dev` を使う場合は `mise run dev`（先にビルドする）。
 - **配信の仕組み**: gateway の `assets` は `run_worker_first: true`。すべてのリクエストが先に Worker に届き、`/dashboard` と `/dashboard/*` だけを SPA として扱う。それ以外（`/mcp`・`/authorize`・`/.well-known/...` など）は今までどおり OAuthProvider が処理する。`/dashboard/api/*` は JSON の API の置き場所で、未知のパスは JSON の 404。
 - **下流の設定**: `deploy.example/gateway.wrangler.jsonc` の `assets`（`"directory": "../apps/dashboard/dist"`）を `deploy:config` がそのまま出す。`deploy/` にコミット済みの設定は、`mise run deploy:config` で再生成する（`deploy:config:check` で差分を確かめる）。
-- **アクセス**: ダッシュボードの認証は GitHub（後続の実装）。Portal / Access を前に置くかは下流の判断（8）。
+- **配信されるもの**: `/dashboard`（一覧）と `/dashboard/tasks/<task_id>`（詳細）の SPA、`/dashboard/assets/*`（JS・CSS・書体・ライセンス文）、`/dashboard/auth/login`（ログインの開始。戻りは既存の `/callback`）、`/dashboard/api/*`（読み取りの JSON API と、`POST /dashboard/api/logout`）。ほかのパスは増えない。
+- **`PUBLIC_BASE_URL` と `dashboard_url`**: ログインの戻り先と、`task_start` / `task_status` / `task_result` の `dashboard_url`（`<PUBLIC_BASE_URL>/dashboard/tasks/<task_id>`）は、`PUBLIC_BASE_URL`（`publicBaseUrl`）から作る。空・不正なら `dashboard_url` は付かない。URL を変えたら、GitHub App の callback（下）も合わせる。権限の無い人が `dashboard_url` を開くと 404（URL 自体は秘密ではない）。
+- **ログイン（GitHub App の callback）**: ダッシュボードのログインも GitHub App のユーザー認可で、**callback は今までの `<PUBLIC_BASE_URL>/callback` のまま**（GitHub App の設定の変更も、新しい secret も要らない）。MCP のログインとの振り分けは、state の接頭辞（`rovo-dash.`）だけで行う。許可の判定（`ALLOWED_ORG` / `ALLOWED_TEAM` / `ALLOWED_USER_IDS`）は MCP のログインと同じ。セッションは暗号化した Cookie（`__Host-` 付き、`HttpOnly`・`Secure`）で、GitHub のトークンは Cookie に入れない。ブラウザで使うので `https` が前提（ローカルの `wrangler dev` の `127.0.0.1` では、E2E で通ることを確かめている）。
+- **Access を前に置く場合**: Cloudflare Access をゲートウェイのホストの前に置くときは、次のようにする。
+  - **`/callback` は Access を通さない**。GitHub がブラウザを戻す先で、Access のログインを挟むと戻れない（MCP のログインと同じ）。Access のポリシーは、`/callback` を Bypass にするか、`/callback` を含まないパスに限る。
+  - `/dashboard` と `/dashboard/api/*` は、Access を前に置いてもよい（設計からの推論で、実環境では未確認）（ブラウザで開くので Access のログインが挟まる）。ただし二重のログインになり、`dashboard_url` を開いたときの戻りも長くなる。実際の防御線は gateway の GitHub ログインと、リポジトリごとの閲覧の認可（閲覧者の GitHub トークンで見えるリポジトリだけ）で、Access は追加の層。`/dashboard/api/*` を Access で保護するなら、同じ Access のセッションがブラウザから `fetch` に付く構成（同一ホスト）にする。
+  - `/mcp`・`/authorize`・`/oauth/*`・`/.well-known/*` は、ダッシュボードとは別の経路で、今までの扱い（8）のまま。
+  - Portal に入れるのは MCP の URL だけでよい。（実環境では未確認）ダッシュボードを Portal の外に出す必要はない（Portal は MCP のゲートウェイで、ブラウザの SPA は経由しない）。
+- **Cloudflare の API トークンの権限**: 下の「Cloudflare の概要」。**AI Gateway Read** と **Account Analytics Read**（どちらも読み取り）。既存の環境は `terraform apply` が要る。`plan` でトークンが置き換え（`must be replaced`）になる場合だけ、`mise run deploy:secrets -- --rotate cloudflare-token` で値を入れ直す。`WORKER_NAMES`（Workers の集計の対象。`rovo.config.json` の `workerNames`）は `deploy:config` が入れる（5 の表）。
+- **書体の同梱**: 書体（Familjen Grotesk・Zen Kaku Gothic New・JetBrains Mono）は npm の `@fontsource` から `dist` に同梱し、同一オリジンから配信する（外部の CDN は使わない。ブラウザから外部への要求は 0 件）。ライセンスは SIL Open Font License 1.1 で、全文は `/dashboard/assets/licenses/` に同梱する。woff2 だけ、キリル・ギリシャ・ベトナム語は同梱しない。再配布する下流も、この `licenses/` を消さないこと。
+- **読み取り専用と安全**: 状態を変える API は無い（ログアウトの `POST` を除く）。表示する出力の末尾は、agent と gateway で秘密をマスクしてから出す。マスクの限界は `SECURITY.md`。
 
 ### Cloudflare の概要（`GET /dashboard/api/cloudflare`。M9）
 

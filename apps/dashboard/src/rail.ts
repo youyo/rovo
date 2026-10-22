@@ -1,36 +1,9 @@
 import type { OverviewDto, VisibleTaskDto } from "@rovo/dashboard-contract";
 import { formatDayHeading } from "./format";
-import { isTerminal, type MarkKind, markKindOf } from "./status";
+import { isTerminal, markKindOf } from "./status";
 import { taskTime } from "./timeline";
 
-/** レール・ヘッダ・ステータスバーの純関数（React に依存しない）。 */
-
-export type GlyphTone = "accent" | "fail" | "mute" | "fg";
-export type RailGlyph = { char: string; tone: GlyphTone; pulse: boolean };
-
-/**
- * レールの状態の印。見本の · – ✕ に、走行中（脈動）とマージ済み（●）を足す。
- * 色だけで区別しない: 行には状態の文字（読み上げ用）も付く。
- */
-const GLYPH = {
-  preparing: { char: "·", tone: "accent", pulse: true },
-  running: { char: "·", tone: "accent", pulse: true },
-  verifying: { char: "·", tone: "accent", pulse: true },
-  recovering: { char: "·", tone: "mute", pulse: true },
-  input: { char: "?", tone: "accent", pulse: false },
-  merged: { char: "●", tone: "accent", pulse: false },
-  review: { char: "·", tone: "fg", pulse: false },
-  closed: { char: "·", tone: "mute", pulse: false },
-  pr: { char: "·", tone: "fg", pulse: false },
-  done: { char: "·", tone: "fg", pulse: false },
-  failed: { char: "✕", tone: "fail", pulse: false },
-  budget: { char: "✕", tone: "fail", pulse: false },
-  cancelled: { char: "–", tone: "mute", pulse: false },
-} as const satisfies Record<MarkKind, RailGlyph>;
-
-export function railGlyph(kind: MarkKind): RailGlyph {
-  return GLYPH[kind];
-}
+/** レール・ヘッダ・ステータスバーの純関数（React に依存しない）。状態の印の形は status.ts の MARKS と status-mark.tsx。 */
 
 /**
  * 一覧のコンソールに出すタスク。走行中（終端でない）があれば開始が最新のもの、無ければ開始が最新のタスク。

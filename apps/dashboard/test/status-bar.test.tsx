@@ -146,12 +146,13 @@ describe("内訳の引き出し（今の side-panels と cloudflare-panel の中
     expect(button(c).getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("中身は予算（自分・全員）・モデル別・Cloudflare・凡例・更新の案内", () => {
+  it("中身は予算と実績（1 つの欄）・モデル別・Cloudflare・凡例・更新の案内", () => {
     const c = mount();
     const d = drawer(c);
-    expect(d.querySelector("[data-budget='me']")?.textContent).toContain("あなたの今月の予算");
-    expect(d.querySelector("[data-budget='all']")?.textContent).toContain("全員の今月の実績");
-    expect(d.querySelector("[data-budget='all']")?.textContent).toContain(
+    expect(d.querySelectorAll("[data-budget]")).toHaveLength(1);
+    expect(d.querySelector("[data-budget]")?.textContent).toContain("今月の予算と実績");
+    expect(d.querySelector("[data-budget]")?.textContent).toContain("全員の実績");
+    expect(d.querySelector("[data-budget]")?.textContent).toContain(
       "権限の無いリポジトリのタスクが 1 件",
     );
     expect(d.querySelector("[data-models]")?.textContent).toContain("タスク $30.60");

@@ -1,12 +1,12 @@
 import type { VisibleTaskDto } from "@rovo/dashboard-contract";
 import { formatClock, singleLine } from "./format";
-import { railGlyph } from "./rail";
-import { MARKS, markKindOf } from "./status";
+import { markKindOf } from "./status";
+import { MarkSymbol } from "./status-mark";
 import { taskTime } from "./timeline";
 
 /**
  * タスクのレール（1 行 1 タスク）。行にはリポジトリ・モデル・費用を出さない（選んだタスクのコンソールの見出しに出す）。
- * 状態は印（· – ✕ ● と走行中の脈動）と、読み上げ用の文字の両方で持つ。選択中は左にアクセント線（CSS）。
+ * 状態は印（状態ごとに形が違う SVG の記号。走行中は脈動）で持ち、印の label が読み上げ（aria-label）とマウスオーバー（title）になる。選択中は左にアクセント線（CSS）。
  */
 export function TaskRail(props: {
   tasks: readonly VisibleTaskDto[];
@@ -25,7 +25,6 @@ export function TaskRail(props: {
       ) : null}
       {rows.map((t) => {
         const kind = markKindOf(t);
-        const glyph = railGlyph(kind);
         const selected = t.task_id === props.selectedId;
         return (
           <a
@@ -37,16 +36,13 @@ export function TaskRail(props: {
             data-mark={kind}
             {...(selected ? { "aria-current": "true", "data-selected": "true" } : {})}
           >
-            <span className={`rail-mark rail-mark--${glyph.tone}`} aria-hidden="true">
-              {glyph.pulse ? <span className="pulse" /> : glyph.char}
-            </span>
+            <MarkSymbol kind={kind} />
             <span className="rail-title">
               {t.pr ? <span className="rail-pr">#{t.pr.number}</span> : null}
               {t.pr ? " " : null}
               {singleLine(t.title)}
             </span>
             <span className="rail-time">{formatClock(taskTime(t))}</span>
-            <span className="sr-only">{MARKS[kind].label}</span>
           </a>
         );
       })}

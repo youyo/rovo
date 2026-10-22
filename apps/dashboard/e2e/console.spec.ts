@@ -87,8 +87,8 @@ test("(13) ステータスバーに今月の自分・全員・モデル別・Clo
   await button.click();
   await expect(button).toHaveAttribute("aria-expanded", "true");
   await expect(drawer).toBeVisible();
-  await expect(drawer.locator('[data-budget="me"]')).toContainText("あなたの今月の予算");
-  await expect(drawer.locator('[data-budget="all"]')).toContainText("全員の今月の実績");
+  await expect(drawer.locator('[data-budget="month"]')).toContainText("今月の予算と実績");
+  await expect(drawer.locator('[data-budget="month"]')).toContainText("全員の実績");
   await expect(drawer.locator("[data-models]")).toBeVisible();
   await expect(drawer.locator("[data-cloudflare]")).toBeVisible();
   await button.click();

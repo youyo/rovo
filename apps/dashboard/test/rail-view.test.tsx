@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { formatClock } from "../src/format";
 import { TaskRail } from "../src/rail-view";
+import { MARKS } from "../src/status";
 import { taskTime } from "../src/timeline";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,7 +38,7 @@ describe("タスクのレール（1 行 1 タスク）", () => {
     expect(rows(c).map((a) => a.getAttribute("href"))).toEqual(expected);
   });
 
-  it("行の中身: 状態の印・PR 番号・題名・開始時刻。状態は文字（読み上げ）でも持つ", () => {
+  it("行の中身: 状態の印・PR 番号・題名・開始時刻。状態の名前は印が持つ（読み上げ・マウスオーバー）", () => {
     const c = mount(overviewFixture.tasks);
     for (const a of rows(c)) {
       const t = overviewFixture.tasks.find((x) => a.getAttribute("href")?.endsWith(x.task_id));
@@ -46,10 +47,12 @@ describe("タスクのレール（1 行 1 タスク）", () => {
       expect(a.querySelector(".rail-title")?.textContent).toContain(task.title);
       if (task.pr) expect(a.querySelector(".rail-pr")?.textContent).toBe(`#${task.pr.number}`);
       expect(a.querySelector(".rail-time")?.textContent).toBe(formatClock(taskTime(task)));
-      expect(a.querySelector(".rail-mark")?.getAttribute("aria-hidden")).toBe("true");
-      expect(a.querySelector(".sr-only")?.textContent).toMatch(
+      const mark = a.querySelector("svg.mark-sym");
+      expect(mark?.getAttribute("role")).toBe("img");
+      expect(mark?.getAttribute("aria-label")).toMatch(
         /マージ済み|レビュー待ち|失敗|実行中|完了|閉じた|PR あり/,
       );
+      expect(mark?.querySelector("title")?.textContent).toBe(mark?.getAttribute("aria-label"));
       expect(a.getAttribute("data-status")).toBe(task.status);
       expect(a.getAttribute("data-mark")).toBeTruthy();
     }
@@ -59,13 +62,34 @@ describe("タスクのレール（1 行 1 タスク）", () => {
     for (const w of ["マージ済み", "レビュー待ち", "失敗", "実行中"]) expect(text).toContain(w);
   });
 
-  it("印: 失敗は ✕、走行中は脈動。マージ済みは ●", () => {
+  it("印: 状態ごとに形が違う（✕ や ● の文字ではなく、SVG の記号）。走行中は脈動", () => {
     const c = mount(overviewFixture.tasks);
     const byStatus = (s: string) => rows(c).find((a) => a.getAttribute("data-status") === s);
-    expect(byStatus("FAILED")?.querySelector(".rail-mark")?.textContent).toBe("✕");
-    expect(byStatus("RUNNING")?.querySelector(".rail-mark .pulse")).not.toBeNull();
+    expect(byStatus("FAILED")?.querySelector("svg.mark-sym")?.getAttribute("data-shape")).toBe(
+      MARKS.failed.shape,
+    );
+    expect(byStatus("RUNNING")?.querySelector("svg.mark-sym.pulse")).not.toBeNull();
     const merged = rows(c).find((a) => a.getAttribute("data-mark") === "merged");
-    expect(merged?.querySelector(".rail-mark")?.textContent).toBe("●");
+    expect(merged?.querySelector("svg.mark-sym")?.getAttribute("data-shape")).toBe(
+      MARKS.merged.shape,
+    );
+    expect(merged?.querySelector("svg.mark-sym.pulse")).toBeNull();
+    // 行には、文字としての印（✕ ● ·）を置かない
+    for (const a of rows(c)) expect(a.querySelector(".rail-mark")).toBeNull();
+  });
+
+  it("状態が違えば、印の記号も違う（実行中・準備中・入力待ち・検証中・復旧中）", () => {
+    const base = overviewFixture.tasks[0] as VisibleTaskDto;
+    const statuses = ["CREATING", "RUNNING", "INPUT_REQUIRED", "VERIFYING", "RECOVERING"] as const;
+    const list = statuses.map((status, i) => ({
+      ...base,
+      task_id: `01JZ0000000000000000000${i}0A`,
+      status,
+      pr: null,
+    }));
+    const c = mount(list);
+    const shapes = rows(c).map((a) => a.querySelector("svg.mark-sym")?.getAttribute("data-shape"));
+    expect(new Set(shapes).size).toBe(statuses.length);
   });
 
   it("選択中の行は aria-current と data-selected（左のアクセント線は CSS）。1 行だけ", () => {
@@ -83,7 +107,7 @@ describe("タスクのレール（1 行 1 タスク）", () => {
     expect(rows(c).some((a) => a.hasAttribute("aria-current"))).toBe(false);
   });
 
-  it("リポジトリ・モデル・費用・PR の状態は行に出さず（見出しに出す）、ツールチップも付けない", () => {
+  it("リポジトリ・モデル・費用・PR の状態は行に出さず（見出しに出す）、title 属性も付けない（印の <title> は状態の名前だけ）", () => {
     const c = mount(overviewFixture.tasks);
     for (const a of rows(c)) {
       expect(a.hasAttribute("title")).toBe(false);

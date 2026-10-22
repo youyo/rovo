@@ -2,42 +2,52 @@ import type { OverviewDto } from "@rovo/dashboard-contract";
 import { formatUsd, shortModel } from "./format";
 
 /**
- * 予算は 2 つの数字を分けて出す（D8。画面で足し合わせない）。
- * (a) あなたの今月の予算（閲覧者本人の spent / remaining / startable）
- * (b) 全員の今月の実績（UTC の月。権限の無いタスクを含む）
- * 分母（上限）や 1 タスクの予約額は契約に無いので出さない。
+ * 月の上限（USD）。契約の monthly_budget_usd が先。無い古い応答だけ、今の逆算（使った額 + 予約 + 残り）に戻す。
+ * 残りが 0 の逆算は「上限 = 使った額 + 予約」と区別できないので、作った値を出さず null（画面は「不明」）。
  */
-export function BudgetPanels(props: { data: OverviewDto }) {
-  const { budget, month } = props.data;
-  return (
-    <>
-      <section className="panel" data-budget="me" aria-labelledby="budget-me-h">
-        <h2 id="budget-me-h">あなたの今月の予算</h2>
-        <p className="caption">UTC の月</p>
-        <dl className="figures">
-          <div>
-            <dt>使った額</dt>
-            <dd className="big">{formatUsd(budget.spent_usd)}</dd>
-          </div>
-          <div>
-            <dt>残り</dt>
-            <dd className="mid">{formatUsd(budget.remaining_usd)}</dd>
-          </div>
-        </dl>
-        <p>あと {budget.startable} 件始められます。</p>
-      </section>
+function monthlyLimit(budget: OverviewDto["budget"]): number | null {
+  if (budget.monthly_budget_usd !== undefined) return budget.monthly_budget_usd;
+  if (budget.remaining_usd <= 0) return null;
+  return budget.spent_usd + budget.reserved_usd + budget.remaining_usd;
+}
 
-      <section className="panel" data-budget="all" aria-labelledby="budget-all-h">
-        <h2 id="budget-all-h">全員の今月の実績</h2>
-        <p className="caption">UTC の月</p>
-        <p className="big">{formatUsd(month.budget_actual.spent_usd)}</p>
-        {month.hidden_tasks.count > 0 ? (
-          <p className="soft" data-hidden-tasks={month.hidden_tasks.count}>
-            権限の無いリポジトリのタスクが {month.hidden_tasks.count} 件、費用の合計に含まれます。
-          </p>
-        ) : null}
-      </section>
-    </>
+/**
+ * 今月の予算と実績（1 つの欄）。自分の使った額・残り・上限と、全員の実績を並べて比べられるようにする。
+ * 自分と全員は別の数字のまま（D8。足し合わせない）。1 タスクの予約額は出さない。月は UTC。
+ * 行は dl の項目で、名前（dt）は折り返せ、値（dd）は折り返さない（幅 360px でも重ならない。CSS の .budget-row）。
+ */
+export function BudgetPanel(props: { data: OverviewDto }) {
+  const { budget, month } = props.data;
+  const limit = monthlyLimit(budget);
+  const rows = [
+    { key: "spent", name: "あなたの使った額", value: formatUsd(budget.spent_usd) },
+    { key: "remaining", name: "あなたの残り", value: formatUsd(budget.remaining_usd) },
+    { key: "limit", name: "あなたの上限", value: limit === null ? "不明" : formatUsd(limit) },
+    { key: "all", name: "全員の実績", value: formatUsd(month.budget_actual.spent_usd) },
+  ];
+  return (
+    <section className="panel" data-budget="month" aria-labelledby="budget-month-h">
+      <h2 id="budget-month-h">今月の予算と実績</h2>
+      <p className="caption">UTC の月</p>
+      <dl className="budget-rows">
+        {rows.map((r) => (
+          <div
+            key={r.key}
+            className={r.key === "all" ? "budget-row budget-row--all" : "budget-row"}
+            data-budget-row={r.key}
+          >
+            <dt>{r.name}</dt>
+            <dd className="budget-value">{r.value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p data-budget-startable="">あと {budget.startable} 件始められます。</p>
+      {month.hidden_tasks.count > 0 ? (
+        <p className="soft" data-hidden-tasks={month.hidden_tasks.count}>
+          権限の無いリポジトリのタスクが {month.hidden_tasks.count} 件、費用の合計に含まれます。
+        </p>
+      ) : null}
+    </section>
   );
 }
 

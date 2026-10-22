@@ -1,32 +1,11 @@
 import type { OverviewDto, VisibleTaskDto } from "@rovo/dashboard-contract";
 import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it } from "vitest";
-import { budgetLimit, daySummary, pickConsoleTask, railGlyph } from "../src/rail";
-import { MARKS, type MarkKind } from "../src/status";
+import { budgetLimit, daySummary, pickConsoleTask } from "../src/rail";
 
 const task = (over: Partial<VisibleTaskDto>): VisibleTaskDto => ({
   ...(overviewFixture.tasks[0] as VisibleTaskDto),
   ...over,
-});
-
-describe("railGlyph（レールの状態の印。見本の · – ✕ と走行中）", () => {
-  it("失敗・予算超過は ✕、キャンセルは –、PR 済みの終了は ·、走行中は脈動", () => {
-    expect(railGlyph("failed")).toMatchObject({ char: "✕", tone: "fail", pulse: false });
-    expect(railGlyph("budget")).toMatchObject({ char: "✕", tone: "fail" });
-    expect(railGlyph("cancelled")).toMatchObject({ char: "–", tone: "mute", pulse: false });
-    expect(railGlyph("closed")).toMatchObject({ char: "·", pulse: false });
-    expect(railGlyph("review")).toMatchObject({ char: "·" });
-    expect(railGlyph("merged")).toMatchObject({ tone: "accent", pulse: false });
-    for (const k of ["preparing", "running", "verifying", "recovering"] as const) {
-      expect(railGlyph(k).pulse, k).toBe(true);
-    }
-  });
-
-  it("全ての印に対して定義がある（状態が増えたら気づく）", () => {
-    for (const k of Object.keys(MARKS) as MarkKind[]) {
-      expect(railGlyph(k).char.length, k).toBeGreaterThan(0);
-    }
-  });
 });
 
 describe("pickConsoleTask（一覧のコンソールに出すタスク）", () => {

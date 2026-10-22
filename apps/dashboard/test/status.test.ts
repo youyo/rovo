@@ -1,7 +1,7 @@
 import { TASK_STATUSES, type VisibleTaskDto } from "@rovo/dashboard-contract";
 import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it } from "vitest";
-import { MARKS, markKindOf, markOf } from "../src/status";
+import { MARKS, type MarkKind, markDescription, markKindOf, markOf } from "../src/status";
 
 const base = overviewFixture.tasks[0] as VisibleTaskDto;
 const task = (status: VisibleTaskDto["status"], pr: VisibleTaskDto["pr"]): VisibleTaskDto => ({
@@ -74,5 +74,55 @@ describe("状態の印（色だけで区別しない。形 + 文字）", () => {
     expect(markOf(task("INPUT_REQUIRED", null)).label).toBe("入力待ち");
     expect(markOf(task("CANCELLED", null)).label).toBe("キャンセル");
     expect(markOf(task("BUDGET_EXCEEDED", null)).label).toBe("予算超過");
+  });
+});
+
+describe("短い label（レール・見出し・バッジ）と、長い説明（凡例・点の title）", () => {
+  it("狭い場所で使う label は短いまま（閉じた・PR あり・準備中 など）", () => {
+    expect(MARKS.closed.label).toBe("閉じた");
+    expect(MARKS.pr.label).toBe("PR あり");
+    expect(MARKS.preparing.label).toBe("準備中");
+    for (const [k, m] of Object.entries(MARKS)) {
+      expect(m.label.length, `${k} の label は 8 文字以内`).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it("閉じた は説明で「マージせず」を足す（初めて見た人にも分かる）", () => {
+    expect(markDescription("closed")).toBe("閉じた（マージせず）");
+  });
+
+  it("説明が無い印は、label がそのまま説明", () => {
+    expect(markDescription("merged")).toBe("マージ済み");
+    expect(markDescription("running")).toBe("実行中");
+  });
+
+  it("説明はどれも label から始まり、説明どうしも重ならない", () => {
+    const kinds = Object.keys(MARKS) as MarkKind[];
+    for (const k of kinds) expect(markDescription(k).startsWith(MARKS[k].label), k).toBe(true);
+    expect(new Set(kinds.map(markDescription)).size).toBe(kinds.length);
+  });
+});
+
+describe("状態の印の形（記号）。色や濃さに頼らず、形だけで区別できる", () => {
+  it("すべての印の記号（shape）が互いに違う", () => {
+    const shapes = Object.values(MARKS).map((m) => m.shape);
+    expect(new Set(shapes).size).toBe(shapes.length);
+  });
+
+  it("同じ色（tone）の印どうしも、記号が違う", () => {
+    for (const tone of ["blue", "orange", "gray", "ink"] as const) {
+      const same = Object.values(MARKS).filter((m) => m.tone === tone);
+      expect(new Set(same.map((m) => m.shape)).size, tone).toBe(same.length);
+    }
+  });
+
+  it("実行中とマージ済みは、記号が違う（濃さの差だけにしない）", () => {
+    expect(MARKS.running.shape).not.toBe(MARKS.merged.shape);
+    expect(MARKS.running.fill).not.toBe(MARKS.merged.fill);
+  });
+
+  it("動いている状態（準備中・実行中・検証中・復旧中）だけ live", () => {
+    const live = (Object.keys(MARKS) as MarkKind[]).filter((k) => MARKS[k].live);
+    expect(live.sort()).toEqual(["preparing", "recovering", "running", "verifying"]);
   });
 });

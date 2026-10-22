@@ -170,6 +170,203 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
     expect(start("read_file", "123")?.target).toBe("123");
   });
 
+  describe("tool_start（bash）: 切れた JSON からコマンドを取り出す", () => {
+    const bash = (summary: string, current = false) =>
+      describeEvent(ev(1, { type: "tool_start", call_id: "c", name: "bash", summary }), { current });
+
+    it("完全な JSON は今までどおり。「…」は付けない", () => {
+      const d = bash('{"command":"pnpm test --filter agent"}');
+      expect(d?.target).toBe("pnpm test --filter agent");
+    });
+
+    it("途中で切れた JSON でも、生の JSON ではなくコマンドを出す。切れていれば末尾に … を付ける", () => {
+      const d = bash('{"command":"npm run build && npm test -- --reporter=ver');
+      expect(d).toMatchObject({
+        what: "コマンドを実行した",
+        target: "npm run build && npm test -- --reporter=ver…",
+      });
+      expect(d?.target).not.toContain('{"command"');
+      expect(bash('{"command":"ls -la', true)).toMatchObject({
+        what: "コマンドを実行中",
+        target: "ls -la…",
+      });
+    });
+
+    it("agent が切り詰めに付ける ... や … は、… に 1 つにまとめる（… を重ねない）", () => {
+      expect(bash('{"command":"pnpm exec vitest ru...')?.target).toBe("pnpm exec vitest ru…");
+      expect(bash('{"command":"pnpm exec vitest ru…')?.target).toBe("pnpm exec vitest ru…");
+    });
+
+    it('閉じる " まで読めていれば、後ろが切れていても値は完全（… を付けない）', () => {
+      expect(bash('{"command":"ls","timeout":12...')?.target).toBe("ls");
+    });
+
+    it("JSON の文字列のエスケープ（\\\" \\\\ \\n \\t \\uXXXX）を戻す", () => {
+      const cut = String.raw`{"command":"echo \"hi\" \\ done\nnext\tTab \u3042 \u00e9 tail`;
+      // \n と \t は 1 行にするときに空白 1 つになる
+      expect(bash(cut)?.target).toBe('echo "hi" \\ done next Tab あ é tail…');
+      // 閉じていれば、後ろに別のキーが続いても同じ（完全な JSON でないとき）
+      const closed = String.raw`{"command":"grep \"a\\b\" f","timeout":1`;
+      expect(bash(closed)?.target).toBe('grep "a\\b" f');
+    });
+
+    it("末尾が中途半端なエスケープで切れていても、壊れた文字を出さない", () => {
+      const t = (tail: string) => bash(`{"command":"echo ok ${tail}`)?.target;
+      expect(t("\\")).toBe("echo ok…");
+      expect(t("\\u")).toBe("echo ok…");
+      expect(t("\\u1")).toBe("echo ok…");
+      expect(t("\\u12")).toBe("echo ok…");
+      expect(t("\\u00e")).toBe("echo ok…");
+      // サロゲートペアの前半だけで切れた
+      expect(t("\\ud83d")).toBe("echo ok…");
+      expect(t("\\ud83d\\ude")).toBe("echo ok…");
+      // 切り詰めの印（...）が付いていても同じ
+      expect(t("\\...")).toBe("echo ok…");
+      expect(t("\\u12...")).toBe("echo ok…");
+      // 完全なペアは戻す
+      expect(t("\\ud83d\\ude00 x")).toBe("echo ok 😀 x…");
+      // 直前の \\\\ は 1 つの \\ になり、そのあとで切れていても壊れない
+      expect(t("\\\\")).toBe("echo ok \\…");
+    });
+
+    it("取り出せないとき（未知のキーで始まる・値が文字列でない・エスケープが壊れている）は、生の文字列のまま", () => {
+      expect(bash('{"foo":"bar","command":"ls')?.target).toBe('{"foo":"bar","command":"ls');
+      expect(bash('{"cmd":"ls')?.target).toBe('{"cmd":"ls');
+      expect(bash('{"command":{"a":1')?.target).toBe('{"command":{"a":1');
+      expect(bash('{"command":"ls \\q')?.target).toBe('{"command":"ls \\q');
+      expect(bash('{"command":"ls \\uZZZZ')?.target).toBe('{"command":"ls \\uZZZZ');
+      expect(bash('{"command":"')?.target).toBe('{"command":"');
+      // 既知のキーでも、そのツールの keys に無ければ取り出さない
+      const read = describeEvent(
+        ev(1, { type: "tool_start", call_id: "c", name: "read_file", summary: '{"command":"ls' }),
+        { current: false },
+      );
+      expect(read?.target).toBe('{"command":"ls');
+    });
+
+    it("read_file など bash 以外も、切れた JSON から既知のキーの値を取り出す", () => {
+      const start = (name: string, summary: string) =>
+        describeEvent(ev(1, { type: "tool_start", call_id: "c", name, summary }), {
+          current: false,
+        });
+      expect(start("read_file", '{"path":"src/very-long/pa')?.target).toBe("src/very-long/pa…");
+      expect(start("search", '{"pattern":"foo.*ba')?.target).toBe("foo.*ba…");
+      expect(start("web_fetch", '{"url":"https://example.com/a?b=1')?.target).toBe(
+        "https://example.com/a?b=1…",
+      );
+    });
+
+    it("取り出した値も、制御文字・双方向文字を除いて 1 行にする（エスケープで書かれていても）", () => {
+      const cut = String.raw`{"command":"echo a\nrm\u202e -rf\u0007 b\u001b[31m c`;
+      const d = bash(cut);
+      expect(d?.target).toBe("echo a rm -rf b[31m c…");
+      expect(d?.target).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e]/);
+      // 生の制御文字・双方向文字が混じっていても同じ
+      expect(bash('{"command":"echo \u0007x\u202ey')?.target).toBe("echo xy…");
+      // <script> などは文字のまま（HTML にはしない）
+      expect(bash('{"command":"echo <script>alert(1)</script>')?.target).toBe(
+        "echo <script>alert(1)</script>…",
+      );
+    });
+  });
+
+  describe("コマンドの cd /workspace の前置き", () => {
+    const bash = (summary: string) =>
+      describeEvent(ev(1, { type: "tool_start", call_id: "c", name: "bash", summary }), {
+        current: false,
+      });
+    const command = (c: string) =>
+      describeEvent(ev(1, { type: "command", command: c, exit_code: 0 }), { current: false });
+
+    it("cd /workspace/<相対パス> && は外し、場所（<相対パス>）を添える", () => {
+      const d = bash('{"command":"cd /workspace/apps/agent && pnpm exec vitest run"}');
+      expect(d).toMatchObject({
+        what: "コマンドを実行した",
+        target: "pnpm exec vitest run",
+        where: "apps/agent",
+      });
+      expect(d?.target).not.toContain("cd /workspace");
+      // 構造化イベント（command）も同じ見せ方
+      expect(command("cd /workspace/apps/gateway && pnpm test")).toMatchObject({
+        target: "pnpm test",
+        where: "apps/gateway",
+      });
+    });
+
+    it("切れた JSON でも前置きを外す（… は残る）", () => {
+      const d = bash('{"command":"cd /workspace/apps/agent && pnpm exec vitest ru');
+      expect(d).toMatchObject({ target: "pnpm exec vitest ru…", where: "apps/agent" });
+    });
+
+    it("cd /workspace && は前置きだけ外し、場所は付けない", () => {
+      const d = bash('{"command":"cd /workspace && git status"}');
+      expect(d?.target).toBe("git status");
+      expect(d).not.toHaveProperty("where");
+      expect(command("cd /workspace && git status")?.target).toBe("git status");
+      expect(command("cd /workspace && git status")).not.toHaveProperty("where");
+      expect(command("cd /workspace/ && git status")?.target).toBe("git status");
+    });
+
+    it("前置きの無いコマンドはそのまま（場所も付けない）", () => {
+      const d = bash('{"command":"pnpm test"}');
+      expect(d?.target).toBe("pnpm test");
+      expect(d).not.toHaveProperty("where");
+      expect(command("echo cd /workspace/a && b")?.target).toBe("echo cd /workspace/a && b");
+    });
+
+    it("外してよいのは素直な相対パスだけ。..・/workspace の外・変数・引用符・空のコマンドはそのまま", () => {
+      for (const c of [
+        "cd /workspace/../etc && rm x",
+        "cd /workspace/a/../b && ls",
+        "cd /workspace/a//b && ls",
+        "cd /workspace/./a && ls",
+        "cd /workspaces/a && ls",
+        "cd /tmp && ls",
+        "cd /workspace/$HOME && ls",
+        'cd "/workspace/my dir" && ls',
+        "cd /workspace/a; ls",
+        "cd /workspace/a &&",
+        "cd /workspace/a && ",
+      ]) {
+        const d = command(c);
+        expect(d?.target, c).toBe(c.trim());
+        expect(d, c).not.toHaveProperty("where");
+      }
+    });
+
+    it("末尾のスラッシュ・入れ子のパス・複数の && ", () => {
+      expect(command("cd /workspace/apps/agent/ && ls")).toMatchObject({
+        target: "ls",
+        where: "apps/agent",
+      });
+      expect(command("cd /workspace/a && cd b && ls")).toMatchObject({
+        target: "cd b && ls",
+        where: "a",
+      });
+    });
+
+    it("buildSteps でも、現在の手順の行に同じ見せ方で出る", () => {
+      const steps = buildSteps(
+        [
+          ev(1, {
+            type: "tool_start",
+            call_id: "a",
+            name: "bash",
+            summary: '{"command":"cd /workspace/apps/agent && pnpm test"}',
+          }),
+        ],
+        true,
+      );
+      expect(steps[0]).toMatchObject({
+        what: "コマンドを実行中",
+        target: "pnpm test",
+        where: "apps/agent",
+        current: true,
+        command: true,
+      });
+    });
+  });
+
   it("tool_end: 失敗のときだけ出す。成功は null", () => {
     const ok = describeEvent(
       ev(2, { type: "tool_end", call_id: "c", is_error: false, summary: "ok" }),
@@ -465,6 +662,51 @@ describe("nowSentence（「いまは X を実行しています」）", () => {
       after: " を実行しています。",
     });
     expect(sentence(now("tool", "read_file: a.ts"), "RUNNING")).not.toHaveProperty("prompt");
+  });
+  it("cd /workspace/<相対パス> && の前置きは外し、「<相対パス> で」を添える（タイムラインと同じ見せ方）", () => {
+    const expected = {
+      before: "いまは apps/agent で ",
+      prompt: "$ ",
+      target: "pnpm test",
+      after: " を実行しています。",
+    };
+    // 前置きがそのまま入っている text
+    expect(sentence(now("tool", "$ cd /workspace/apps/agent && pnpm test"), "RUNNING")).toEqual(
+      expected,
+    );
+    // gateway が「<相対パス> で」を添えた text
+    expect(sentence(now("tool", "apps/agent で $ pnpm test"), "RUNNING")).toEqual(expected);
+    // command の種類（$ なし）
+    expect(sentence(now("command", "cd /workspace/apps/agent && pnpm test"), "RUNNING")).toEqual({
+      before: "いまは apps/agent で ",
+      target: "pnpm test",
+      after: " を実行しています。",
+    });
+    expect(sentence(now("command", "apps/agent で pnpm test"), "RUNNING")).toEqual({
+      before: "いまは apps/agent で ",
+      target: "pnpm test",
+      after: " を実行しています。",
+    });
+  });
+  it("cd /workspace && は前置きだけ外す。場所は添えない。前置きの無い text はそのまま", () => {
+    expect(sentence(now("tool", "$ cd /workspace && ls -la"), "RUNNING")).toEqual({
+      before: "いまは ",
+      prompt: "$ ",
+      target: "ls -la",
+      after: " を実行しています。",
+    });
+    expect(sentence(now("command", "cd /workspace && ls"), "RUNNING").target).toBe("ls");
+    expect(sentence(now("command", "cd /workspace/../etc && ls"), "RUNNING")).toEqual({
+      before: "いまは ",
+      target: "cd /workspace/../etc && ls",
+      after: " を実行しています。",
+    });
+    // コマンド以外の種類には、場所の読み取りをしない
+    expect(sentence(now("commit", "commit で x"), "RUNNING")).toEqual({
+      before: "いまは ",
+      target: "commit で x",
+      after: " をコミットしています。",
+    });
   });
   it("waiting は固定の文（英語の text をそのまま出さない）", () => {
     expect(sentence(now("waiting", "waiting for input"), "INPUT_REQUIRED")).toEqual({

@@ -9,7 +9,7 @@ import {
   type ThinkingLevel,
 } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
-import type { AuditFields } from "@rovo/audit";
+import { type AuditFields, hostOfUrl, normalizeStructuredEvent } from "@rovo/audit";
 import {
   computeCostUsd,
   type Effort,
@@ -337,6 +337,8 @@ export class AgentDO extends DurableObject<Env> {
         createToolContext(WORKSPACE_ROOT, () => this.deadlineAt(), {
           branch: () => this.spec()?.branch,
           onPush: (r) => this.onCheckpointPush(r),
+          // 構造化イベント（D14: command / edit / commit）。ツール側で正規化済み。emit が終端後の追加を止める
+          onEvent: (type, data) => this.emit(type, data),
         }),
       ) as ToolRegistration[];
       registry.install(createAgentExtension(sandboxTools, this.piHooks()));
@@ -2126,6 +2128,7 @@ export class AgentDO extends DurableObject<Env> {
           "web_fetch",
           (web, ids) => web.fetchUrl({ ...ids, ...args }),
           (r) => formatWebFetch(r),
+          args.url,
         ),
       webBrowse: (args) =>
         this.webCall(
@@ -2133,6 +2136,7 @@ export class AgentDO extends DurableObject<Env> {
           "web_browse",
           (web, ids) => web.browse({ ...ids, url: args.url }),
           (r) => formatWebBrowse(r),
+          args.url,
         ),
       webBrowseEnabled: () => this.webBrowseEnabled(),
       sections: () => this.promptSections(),
@@ -2262,6 +2266,8 @@ export class AgentDO extends DurableObject<Env> {
     tool: string,
     call: (web: WebPort, ids: { userId: string; taskId: string }) => Promise<R>,
     format: (r: R) => WebToolResult,
+    /** 取得先の URL（fetch / browse）。構造化イベントにはホスト名だけを出す（パス・クエリ・資格・ポートは出さない） */
+    targetUrl?: unknown,
   ): Promise<WebToolResult> {
     const spec = this.spec();
     if (!spec || this.refused() || this.store.phase() === "input_required") {
@@ -2281,6 +2287,17 @@ export class AgentDO extends DurableObject<Env> {
         text: `[${tool}] You reached the limit of ${this.webLimit(kind)} ${tool} calls for this task. Do not call ${tool} again; continue with what you have or report what is missing.`,
         isError: true,
       };
+    }
+    // 構造化イベント（D14）。kind と host だけ（正規化の許可リストが他の項目を落とす）
+    // 補助の情報なので、送出の失敗でツールを失敗させない
+    try {
+      const webEvent = normalizeStructuredEvent("web", { kind, host: hostOfUrl(targetUrl) });
+      if (webEvent !== undefined) {
+        const { type: _type, ...rest } = webEvent;
+        this.emit("web", rest);
+      }
+    } catch {
+      // 落としてよい
     }
     try {
       return format(await call(web, { userId: spec.userId, taskId: spec.taskId }));

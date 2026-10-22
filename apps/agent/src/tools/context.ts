@@ -7,11 +7,16 @@ import type { ToolContext } from "./types";
 export function createToolContext(
   workspaceRoot: string,
   deadlineAt: () => number,
-  extra: { branch?: string | (() => string | undefined); onPush?: ToolContext["onPush"] } = {},
+  extra: {
+    branch?: string | (() => string | undefined);
+    onPush?: ToolContext["onPush"];
+    onEvent?: ToolContext["onEvent"];
+  } = {},
 ): ToolContext {
   const branch = extra.branch;
   return {
     onPush: extra.onPush,
+    onEvent: extra.onEvent,
     get branch() {
       return typeof branch === "function" ? branch() : branch;
     },

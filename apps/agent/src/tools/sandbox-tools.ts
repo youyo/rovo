@@ -1,5 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
+import { normalizeStructuredEvent, workspaceRelativePath } from "@rovo/audit";
 import { maskSecrets } from "../redact";
 import type { ExecResult, SandboxPort } from "../sandbox-port";
 import { stripAnsi } from "../text-util";
@@ -53,6 +54,12 @@ export function searchCommand(root: string, target: string, rgArgs: string[]): s
   return ["bash", "-c", SEARCH_SCRIPT, "rovo-search", root, target, ...rgArgs];
 }
 
+/** 行数（末尾の改行は数えない。空文字は 0） */
+function countLines(text: string): number {
+  if (text === "") return 0;
+  return text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+}
+
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const isExecResult = (r: unknown): r is ExecResult =>
   typeof r === "object" && r !== null && "exitCode" in r;
@@ -60,6 +67,18 @@ const isExecResult = (r: unknown): r is ExecResult =>
 export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) {
   const root = context.workspaceRoot;
   const cwdOpts = { cwd: root };
+
+  /** 構造化イベント（D14）。許可リストで正規化（マスク・整形・上限）してから渡す。失敗してもツールの結果に影響させない */
+  const emitEvent = (type: string, data: Record<string, unknown>): void => {
+    try {
+      const e = normalizeStructuredEvent(type, data);
+      if (e === undefined) return;
+      const { type: _type, ...rest } = e;
+      context.onEvent?.(type, rest);
+    } catch {
+      // イベントは補助の情報。落としてよい
+    }
+  };
 
   /** 期限の確認を先に行ってから本体を実行する。例外はツールのエラー結果にする。 */
   const guarded =
@@ -258,7 +277,18 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
       const size = new TextEncoder().encode(args.content).byteLength;
       if (size > WRITE_MAX_BYTES)
         throw new Error(`content is too large (${size} bytes; max ${WRITE_MAX_BYTES})`);
+      // 既存なら modify、無ければ create（行数の見積もりのために書く前に読む。読めなければ新規として扱う）
+      const before = await port.readFile(path).then(
+        (t) => t,
+        () => undefined,
+      );
       await port.writeFile(path, args.content);
+      emitEvent("edit", {
+        path: workspaceRelativePath(root, path),
+        op: before === undefined ? "create" : "modify",
+        added: countLines(args.content),
+        removed: before === undefined ? 0 : countLines(before),
+      });
       return ok("write_file", `wrote ${size} bytes to ${path}`);
     }),
   });
@@ -294,6 +324,12 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         const updated =
           content.slice(0, first) + args.new_string + content.slice(first + args.old_string.length);
         await port.writeFile(path, updated);
+        emitEvent("edit", {
+          path: workspaceRelativePath(root, path),
+          op: "modify",
+          added: countLines(args.new_string),
+          removed: countLines(args.old_string),
+        });
         return ok("edit_file", `edited ${path}`);
       },
     ),
@@ -319,6 +355,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         }
         const cwd = resolveWorkspacePath(root, args.cwd ?? ".");
         const remaining = Math.max(context.deadlineAt - Date.now(), 1);
+        const startedAt = Date.now();
         const r = await port.exec(["bash", "-lc", args.command], {
           cwd,
           timeoutMs: Math.min(seconds * 1000, remaining),
@@ -341,6 +378,13 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         if (r.stdout) parts.push(`--- stdout ---\n${stripAnsi(r.stdout)}`);
         if (r.stderr) parts.push(`--- stderr ---\n${stripAnsi(r.stderr)}`);
         const text = parts.join("\n");
+        emitEvent("command", {
+          command: args.command,
+          cwd: workspaceRelativePath(root, cwd),
+          exitCode: r.timedOut ? null : r.exitCode,
+          durationMs: Date.now() - startedAt,
+          outputTail: [r.stdout, r.stderr].filter(Boolean).join("\n"),
+        });
         return r.exitCode === 0 && !r.timedOut ? ok("bash", text) : fail("bash", text);
       },
     ),
@@ -412,6 +456,25 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         return fail("git_commit", commit.stderr || commit.stdout || "git commit failed");
       const head = await git(["rev-parse", "HEAD"]);
       const sha = head.stdout.trim();
+      // 構造化イベント用のファイル数（取れなければ 0）。メッセージは 1 行目だけが出る
+      // fail-soft: 取得が失敗（exec の reject を含む）してもツールは成功させ、push は必ず走らせる
+      let files = 0;
+      try {
+        const changed = await git([
+          "diff-tree",
+          "--no-commit-id",
+          "--name-only",
+          "-r",
+          "--root",
+          "HEAD",
+        ]);
+        if (changed.exitCode === 0) {
+          files = changed.stdout.split("\n").filter((l) => l.trim() !== "").length;
+        }
+      } catch {
+        // files は 0 のまま
+      }
+      emitEvent("commit", { message: args.message, sha, files });
       const pushed = await pushCheckpoint(sha);
       return ok("git_commit", `committed ${sha}${pushed}`);
     }),

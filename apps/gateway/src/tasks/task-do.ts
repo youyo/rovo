@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { type AuditEventName, type AuditFields, type AuditRecord, audit } from "@rovo/audit";
+import { LIMITS, STRUCTURED_EVENT_TYPES } from "@rovo/dashboard-contract";
 import { type Effort, isSandboxPromotionReason } from "@rovo/models";
 import type { z } from "zod";
 import { count, depsCacheStatus, depsMissReason, mapAgentEvent } from "../agent/agent-events";
@@ -11,6 +12,7 @@ import type {
   TaskSpec,
   UsageDto,
 } from "../agent/contract";
+import { DASHBOARD_EVENT_TYPES } from "../dashboard/events";
 import { indexBackoffMs } from "../directory/backoff";
 import { DIRECTORY_NAME, type TaskIndexSnapshot, type UpsertTaskResult } from "../directory/types";
 import {
@@ -396,6 +398,15 @@ export type DashboardDetailResult =
     }
   | { ok: false; code: "not_found" };
 
+/** dashboardEvents の結果。events は seq の昇順、created_at は epoch ms */
+export type DashboardEventsResult =
+  | {
+      ok: true;
+      events: { seq: number; type: string; payload: EventPayload; created_at: number }[];
+      has_older: boolean;
+    }
+  | { ok: false; code: "not_found" };
+
 type TaskRow = {
   id: string;
   owner_id: number;
@@ -487,6 +498,13 @@ function issueFailureCode(e: unknown): string {
 }
 
 type EventRow = { seq: number; type: string; payload: string; created_at: number };
+
+/** SQL の IN (...) に埋め込む、構造化イベントの型名（固定の定数だけ。入力は入らない） */
+const STRUCTURED_TYPES_SQL = STRUCTURED_EVENT_TYPES.map((t) => `'${t}'`).join(",");
+/** ダッシュボードの events API が返す型（固定の定数だけ） */
+const DASHBOARD_TYPES_SQL = DASHBOARD_EVENT_TYPES.map((t) => `'${t}'`).join(",");
+/** dashboardEvents の 1 回の上限（契約の LIMITS.eventsPerPage と同じ） */
+const DASHBOARD_EVENTS_MAX = LIMITS.eventsPerPage;
 
 type Waiter = { wake: () => void; timer?: ReturnType<typeof setTimeout> };
 
@@ -768,7 +786,8 @@ export class TaskDO extends DurableObject<Env> {
   private readEvents(afterSeq: number): TaskEvent[] {
     return this.ctx.storage.sql
       .exec<EventRow>(
-        "SELECT seq, type, payload, created_at FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+        // 構造化イベント（D14）は MCP の task_wait に出さない（保存はしてあり、ダッシュボードの専用 RPC だけが読む）
+        `SELECT seq, type, payload, created_at FROM events WHERE seq > ? AND type NOT IN (${STRUCTURED_TYPES_SQL}) ORDER BY seq LIMIT ?`,
         afterSeq,
         MAX_EVENTS_PER_WAIT,
       )
@@ -1157,6 +1176,76 @@ export class TaskDO extends DurableObject<Env> {
       view: this.buildIndexSnapshot(row, link),
       merge_policy: policyOf(row),
       sandbox_instance: row.sandbox_instance ?? null,
+    };
+  }
+
+  /**
+   * 詳細の画面の進み具合（docs/specs/dashboard.md D14・D15・M7）。events から、ダッシュボードが返す型だけを読む。
+   * 既定は末尾（新しい側）から limit 件、`before` はそれより古い側を末尾から、`cursor` はそれより新しいものを古い順に limit 件。
+   * 返す行は seq の昇順。has_older は、返した先頭より古い対象イベントがあるか。
+   *
+   * 所有者を問わず返すので、**gateway が閲覧者の集合で照合したあとに呼ぶ**（dashboard/api.ts の readAuthorizedTask だけ）。
+   * expectedRepositoryId は照合に使った repository_id。TaskDO の今の値と違えば not_found（照合と読み取りの間の食い違いを許さない）。
+   * 何も書かない。payload は保存時に agent と gateway が整形・マスク済みで、API の応答の前にもう一度かける。
+   */
+  async dashboardEvents(
+    expectedRepositoryId: number,
+    opts: { cursor?: number; before?: number; limit: number },
+  ): Promise<DashboardEventsResult> {
+    const row = this.getRow();
+    if (
+      !row ||
+      row.repository_id === null ||
+      row.repository_id !== expectedRepositoryId ||
+      !this.getLink()
+    ) {
+      return { ok: false, code: "not_found" };
+    }
+    const limit = Math.min(Math.max(Math.trunc(opts.limit) || 1, 1), DASHBOARD_EVENTS_MAX);
+    const sql = this.ctx.storage.sql;
+    const cols = "seq, type, payload, created_at";
+    const types = `type IN (${DASHBOARD_TYPES_SQL})`;
+    let found: EventRow[];
+    let hasMoreOlder: boolean | undefined;
+    if (opts.cursor !== undefined) {
+      found = sql
+        .exec<EventRow>(
+          `SELECT ${cols} FROM events WHERE ${types} AND seq > ? ORDER BY seq ASC LIMIT ?`,
+          opts.cursor,
+          limit,
+        )
+        .toArray();
+    } else {
+      const upper = opts.before ?? Number.MAX_SAFE_INTEGER;
+      const desc = sql
+        .exec<EventRow>(
+          `SELECT ${cols} FROM events WHERE ${types} AND seq < ? ORDER BY seq DESC LIMIT ?`,
+          upper,
+          limit + 1,
+        )
+        .toArray();
+      hasMoreOlder = desc.length > limit;
+      found = desc.slice(0, limit).reverse();
+    }
+    const first = found[0];
+    const hasOlder =
+      hasMoreOlder ??
+      (first !== undefined &&
+        sql
+          .exec<{ x: number }>(
+            `SELECT 1 AS x FROM events WHERE ${types} AND seq < ? LIMIT 1`,
+            first.seq,
+          )
+          .toArray().length > 0);
+    return {
+      ok: true,
+      events: found.map((e) => ({
+        seq: e.seq,
+        type: e.type,
+        payload: JSON.parse(e.payload) as EventPayload,
+        created_at: e.created_at,
+      })),
+      has_older: hasOlder,
     };
   }
 

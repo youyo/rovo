@@ -1,3 +1,4 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import {
   BudgetMeDtoSchema,
@@ -525,7 +526,7 @@ describe("tasks/:id", () => {
   });
 });
 
-describe("events（骨組み。中身は M7）", () => {
+describe("events（認可の経路・入力の検査）", () => {
   it("見えるタスクは TaskEventsPageDto（空のページ）。5 秒ごとのポーリングなので GitHub の取り直しはしない（fresh でない）", async () => {
     const repo = newRepoId();
     const v = newViewer([repo]);
@@ -551,6 +552,171 @@ describe("events（骨組み。中身は M7）", () => {
       expect(r.status, q).toBe(400);
     }
     expect((await api(v, `/tasks/${t.id}/events?cursor=3`)).status).toBe(200);
+  });
+});
+
+// 構造化イベント（M7・D14）の中身。GitHub の偽（repository_id 4242）で実際に取り込みまで進めたタスクを読む
+describe("events（構造化イベントの中身）", () => {
+  const FAKE_REPO_ID = 4242;
+  const GHP = `ghp_${"a1B2".repeat(9)}`;
+  const GHS = `ghs_${"c3D4".repeat(9)}`;
+  const PAT = `github_pat_${"E5f6".repeat(8)}`;
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const SECRETS = [GHP, GHS, PAT, "abcdef0123456789xyz", "s3cretPass", "plain123", "plainvalue789"];
+
+  async function running() {
+    const t = await seedTask({});
+    await t.stub.advance();
+    return t;
+  }
+  const page = (r: { json(): unknown }) => TaskEventsPageDtoSchema.parse(r.json());
+
+  it("agent の出した command / edit / commit / web を契約の形で返す。応答全体に平文の秘密が無い（マスク前の入力でも）", async () => {
+    const v = newViewer([FAKE_REPO_ID]);
+    const t = await running();
+    // agent 側のマスクが壊れていた想定で、秘密を平文のまま送る
+    await t.agent.emit("command", {
+      command: `echo start && wget --header "Authorization: Bearer ${"abcdef0123456789xyz"}" https://user:s3cretPass@h.example/x ${GHP} && GITHUB_TOKEN=plain123 run`,
+      cwd: "apps/gateway",
+      exitCode: 1,
+      durationMs: 321,
+      outputTail: `line1\n${GHS}\nAPI_KEY=plainvalue789\n${PAT}`,
+    });
+    await t.agent.emit("edit", {
+      path: "src/a.ts",
+      op: "modify",
+      added: 4,
+      removed: 2,
+      diff: "+x",
+    });
+    await t.agent.emit("commit", { message: `feat: x ${GHP}\n\nbody`, sha: SHA, files: 2 });
+    await t.agent.emit("web", { kind: "fetch", host: "docs.example.com", url: "https://a/b?c=d" });
+    await t.stub.advance();
+
+    const r = await api(v, `/tasks/${t.id}/events`);
+    expect(r.status).toBe(200);
+    const p = page(r);
+    const types = p.events.map((e) => e.type);
+    for (const type of ["command", "edit", "commit", "web", "status_changed"]) {
+      expect(types, type).toContain(type);
+    }
+    const cmd = p.events.find((e) => e.type === "command");
+    expect(cmd).toMatchObject({ cwd: "apps/gateway", exit_code: 1, duration_ms: 321 });
+    expect(p.events.find((e) => e.type === "edit")).toMatchObject({
+      path: "src/a.ts",
+      op: "modify",
+      added: 4,
+      removed: 2,
+    });
+    expect(p.events.find((e) => e.type === "commit")).toMatchObject({
+      message: "feat: x [REDACTED]",
+      sha: SHA,
+      files: 2,
+    });
+    expect(p.events.find((e) => e.type === "web")).toMatchObject({
+      kind: "fetch",
+      host: "docs.example.com",
+    });
+    // 応答全体（ヘッダ・本文）に平文の秘密が無い。余計な項目（diff・url）も無い
+    for (const s of SECRETS) expect(r.whole, s).not.toContain(s);
+    expect(r.whole).toContain("[REDACTED]");
+    expect(r.whole).not.toContain("a/b?c=d");
+    expect(r.whole).not.toContain('"diff"');
+    expect(p.newest_seq).toBe(Math.max(...p.events.map((e) => e.seq)));
+    expect(p.oldest_seq).toBe(Math.min(...p.events.map((e) => e.seq)));
+  });
+
+  it("保存された行に（過去のバグで）平文の秘密が残っていても、応答では伏せる（API の層）", async () => {
+    const v = newViewer([FAKE_REPO_ID]);
+    const t = await running();
+    await runInDurableObject(t.stub, (_i, state) => {
+      const seq =
+        (state.storage.sql.exec("SELECT MAX(seq) AS m FROM events").one() as { m: number }).m + 1;
+      state.storage.sql.exec(
+        "INSERT INTO events (seq, type, payload, created_at) VALUES (?, 'command', ?, ?)",
+        seq,
+        JSON.stringify({
+          command: `GITHUB_TOKEN=plain123 ${GHP}`,
+          output_tail: `${GHS} https://user:s3cretPass@h.example ${PAT}`,
+          exit_code: 0,
+        }),
+        Date.now(),
+      );
+    });
+    const r = await api(v, `/tasks/${t.id}/events`);
+    expect(r.status).toBe(200);
+    expect(page(r).events.some((e) => e.type === "command")).toBe(true);
+    for (const s of SECRETS) expect(r.whole, s).not.toContain(s);
+  });
+
+  it("末尾（新しい側）から 200 件。before で古い側へ、cursor で新しい側の差分だけ", async () => {
+    const v = newViewer([FAKE_REPO_ID]);
+    const t = await running();
+    const total = 230;
+    for (let i = 1; i <= total; i++)
+      await t.agent.emit("command", { command: `cmd-${i}`, exitCode: 0 });
+    for (let i = 0; i < 10; i++) await t.stub.advance();
+
+    const first = page(await api(v, `/tasks/${t.id}/events`));
+    expect(first.events).toHaveLength(200);
+    expect(first.has_older).toBe(true);
+    const lastCmd = first.events.at(-1);
+    expect(lastCmd).toMatchObject({ type: "command", command: `cmd-${total}` });
+    const asc = first.events.map((e) => e.seq);
+    expect(asc).toEqual([...asc].sort((a, b) => a - b));
+
+    const older = page(await api(v, `/tasks/${t.id}/events?before=${first.oldest_seq}`));
+    expect(older.events.length).toBeGreaterThan(0);
+    expect(Math.max(...older.events.map((e) => e.seq))).toBeLessThan(first.oldest_seq ?? 0);
+    expect(older.has_older).toBe(false);
+    // 全体で 1 件も欠けず重ならない
+    const seen = new Set([...older.events, ...first.events].map((e) => e.seq));
+    expect(seen.size).toBe(older.events.length + first.events.length);
+    expect([...older.events, ...first.events].filter((e) => e.type === "command")).toHaveLength(
+      total,
+    );
+
+    const none = page(await api(v, `/tasks/${t.id}/events?cursor=${first.newest_seq}`));
+    expect(none.events).toEqual([]);
+    expect(none.oldest_seq).toBeNull();
+    await t.agent.emit("command", { command: "cmd-new", exitCode: 0 });
+    await t.stub.advance();
+    const diff = page(await api(v, `/tasks/${t.id}/events?cursor=${first.newest_seq}`));
+    expect(diff.events.map((e) => (e as { command?: string }).command)).toEqual(["cmd-new"]);
+  });
+
+  it("古い agent（構造化イベントが無い）の履歴は、tool_start / tool_end と状態の変化で縮退して返す", async () => {
+    const v = newViewer([FAKE_REPO_ID]);
+    const t = await running();
+    await t.agent.emit("tool_start", {
+      callId: "c1",
+      name: "bash",
+      summary: `{"command":"${GHP}"}`,
+    });
+    await t.agent.emit("tool_end", { callId: "c1", name: "bash", isError: false, summary: "ok" });
+    await t.stub.advance();
+    const r = await api(v, `/tasks/${t.id}/events`);
+    expect(r.status).toBe(200);
+    const types = page(r).events.map((e) => e.type);
+    expect(types).toContain("tool_start");
+    expect(types).toContain("tool_end");
+    expect(types).not.toContain("command");
+    expect(r.whole).not.toContain(GHP);
+  });
+
+  it("権限のない閲覧者は 404。応答に秘密も task_id も出ない", async () => {
+    const other = newViewer([newRepoId()]);
+    const t = await running();
+    await t.agent.emit("command", { command: `echo ${GHP}`, exitCode: 0 });
+    await t.stub.advance();
+    for (const q of ["", "?cursor=1", "?before=99"]) {
+      const r = await api(other, `/tasks/${t.id}/events${q}`);
+      expect(r.status, q).toBe(404);
+      expect(ErrorDtoSchema.parse(r.json())).toEqual({ error: "not_found" });
+      expect(r.whole).not.toContain(GHP);
+      expect(r.whole).not.toContain("echo");
+      expect(r.whole).not.toContain(t.id);
+    }
   });
 });
 

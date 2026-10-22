@@ -12,6 +12,7 @@ import {
   baseUrl,
   bodyOf,
   directoryRow,
+  emitAgentEvent,
   INSTALLATION_ID,
   login,
   newUser,
@@ -173,6 +174,139 @@ describe("ダッシュボードの読み取り API（2 ユーザーの見え方�
     const overview = await dashboardGet(s.cookies.a, overviewPath());
     expect(overview.whole).not.toContain(secretTask);
   }, 180_000);
+
+  it("構造化イベント: 偽 agent が秘密入りの command を出す台本 → 応答全体に平文の秘密が無い。末尾から 200 件のページング。権限なしは 404。task_wait には出ない", async () => {
+    const s = await setup();
+    const { bTask, secretTask } = s.tasks;
+    const GHP = `ghp_${"a1B2".repeat(9)}`;
+    const GHS = `ghs_${"c3D4".repeat(9)}`;
+    const PAT = `github_pat_${"E5f6".repeat(8)}`;
+    const SECRETS = [
+      GHP,
+      GHS,
+      PAT,
+      "abcdef0123456789xyz",
+      "s3cretPass",
+      "plain123",
+      "plainvalue789",
+    ];
+
+    // 台本: 秘密を平文のまま含む command（agent のマスクが壊れていた想定）→ 通常の command を 205 件 → edit / commit / web
+    await emitAgentEvent(bTask, "command", {
+      command: `echo start && wget --header "Authorization: Bearer ${"abcdef0123456789xyz"}" https://user:s3cretPass@h.example/x ${GHP} && GITHUB_TOKEN=plain123 run`,
+      cwd: "apps/gateway",
+      exitCode: 1,
+      durationMs: 42,
+      outputTail: `line\n${GHS}\nAPI_KEY=plainvalue789\n${PAT}`,
+    });
+    for (let i = 1; i <= 205; i++) {
+      await emitAgentEvent(bTask, "command", { command: `cmd-${i}`, exitCode: 0 });
+    }
+    await emitAgentEvent(bTask, "edit", { path: "src/a.ts", op: "modify", added: 3, removed: 1 });
+    await emitAgentEvent(bTask, "commit", {
+      message: `feat: x ${GHP}\n\nbody`,
+      sha: "0123456789abcdef0123456789abcdef01234567",
+      files: 2,
+    });
+    await emitAgentEvent(bTask, "web", { kind: "fetch", host: "docs.example.com" });
+    // A の secret のタスクにも秘密入りの command（B には 404 で、中身が応答に出ない）
+    await emitAgentEvent(secretTask, "command", { command: `echo SECRET-CMD ${GHP}`, exitCode: 0 });
+
+    // TaskDO の取り込み（alarm / 次の poll）を待つ。最後の web が見えるまで
+    let first: ReturnType<typeof TaskEventsPageDtoSchema.parse> | undefined;
+    let raw = "";
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      const r = await dashboardGet(s.cookies.b, `/tasks/${bTask}/events`);
+      expect(r.status).toBe(200);
+      raw = r.whole;
+      first = TaskEventsPageDtoSchema.parse(r.json());
+      if (first.events.some((e) => e.type === "web")) break;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    if (!first) throw new Error("events が取れませんでした");
+    expect(first.events.some((e) => e.type === "web")).toBe(true);
+
+    // 末尾（新しい側）から最大 200 件、seq の昇順
+    expect(first.events).toHaveLength(200);
+    expect(first.has_older).toBe(true);
+    const seqs = first.events.map((e) => e.seq);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(first.events.at(-1)).toMatchObject({
+      type: "web",
+      kind: "fetch",
+      host: "docs.example.com",
+    });
+    expect(first.events.at(-3)).toMatchObject({ type: "edit", path: "src/a.ts" });
+    expect(first.events.at(-2)).toMatchObject({ type: "commit", message: "feat: x [REDACTED]" });
+
+    // 古い側へ（before）。秘密入りの最初の command がそこにある。応答全体に平文の秘密が無い
+    const older = await dashboardGet(
+      s.cookies.b,
+      `/tasks/${bTask}/events?before=${first.oldest_seq}`,
+    );
+    const olderPage = TaskEventsPageDtoSchema.parse(older.json());
+    expect(olderPage.events.length).toBeGreaterThan(0);
+    expect(olderPage.has_older).toBe(false);
+    const secretCmd = olderPage.events.find(
+      (e) => e.type === "command" && e.command.startsWith("echo start"),
+    );
+    expect(secretCmd).toMatchObject({ cwd: "apps/gateway", exit_code: 1, duration_ms: 42 });
+    for (const resp of [raw, older.whole]) {
+      for (const secret of SECRETS) expect(resp, secret).not.toContain(secret);
+    }
+    expect(older.whole).toContain("[REDACTED]");
+
+    // cursor: それより新しい側の差分だけ
+    const none = TaskEventsPageDtoSchema.parse(
+      (await dashboardGet(s.cookies.b, `/tasks/${bTask}/events?cursor=${first.newest_seq}`)).json(),
+    );
+    expect(none.events).toEqual([]);
+    await emitAgentEvent(bTask, "command", { command: "cmd-after", exitCode: 0 });
+    let diff = none;
+    while (Date.now() < deadline && diff.events.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      diff = TaskEventsPageDtoSchema.parse(
+        (
+          await dashboardGet(s.cookies.b, `/tasks/${bTask}/events?cursor=${first.newest_seq}`)
+        ).json(),
+      );
+    }
+    expect(diff.events.map((e) => (e.type === "command" ? e.command : e.type))).toEqual([
+      "cmd-after",
+    ]);
+
+    // C（widgets は見える）も B のタスクを読める。権限のない者（secret を見られない B）は A のタスクを 404
+    const cView = await dashboardGet(s.cookies.c, `/tasks/${bTask}/events`);
+    expect(cView.status).toBe(200);
+    const denied = await dashboardGet(s.cookies.b, `/tasks/${secretTask}/events`);
+    expect(denied.status).toBe(404);
+    expect(denied.whole).not.toContain("SECRET-CMD");
+    expect(denied.whole).not.toContain(secretTask);
+    for (const secret of SECRETS) expect(denied.whole).not.toContain(secret);
+    // A 自身は読める（中身は伏せられている）
+    const aView = await dashboardGet(s.cookies.a, `/tasks/${secretTask}/events`);
+    expect(aView.status).toBe(200);
+    expect(aView.whole).not.toContain(GHP);
+
+    // MCP の task_wait には新しい型が出ない
+    const client = await login(s.users.b);
+    try {
+      const wait = bodyOf(
+        await client.callTool({
+          name: "task_wait",
+          arguments: { task_id: bTask, cursor: "0", timeout_seconds: 0 },
+        }),
+      );
+      const types = (wait.events as { type: string }[]).map((e) => e.type);
+      for (const hidden of ["command", "edit", "commit", "web"]) {
+        expect(types, hidden).not.toContain(hidden);
+      }
+      expect(JSON.stringify(wait)).not.toContain("cmd-1");
+    } finally {
+      await client.close();
+    }
+  }, 240_000);
 
   it("GitHub が落ちている間は fail closed（503）。中身は返さない。未ログイン・ヘッダ無しは拒否", async () => {
     const s = await setup();

@@ -54,3 +54,15 @@ export function taskPath(taskId: string): string {
 export function apiCalls(net: NetworkLog, match: RegExp): number {
   return net.urls.filter((u) => match.test(new URL(u).pathname)).length;
 }
+
+/** レールの行（1 行 1 タスク）。 */
+export function rail(page: Page, taskId: string) {
+  return page.locator(`a.rail-row[data-task-id="${taskId}"]`);
+}
+
+/** 「内訳」の引き出しを開く（開いていれば何もしない）。 */
+export async function openDrawer(page: Page): Promise<void> {
+  const button = page.getByRole("button", { name: "内訳" });
+  if ((await button.getAttribute("aria-expanded")) !== "true") await button.click();
+  await expect(page.locator(".drawer")).toBeVisible();
+}

@@ -1,16 +1,19 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
-import { CloudflarePanel } from "./cloudflare-panel";
-import { formatClock, formatDayHeading } from "./format";
-import { BudgetPanels, ModelCosts } from "./side-panels";
-import { markKindOf } from "./status";
-import { TaskTable } from "./task-table";
+import type { ReactNode } from "react";
+import { TaskRail } from "./rail-view";
+import { StatusBar } from "./status-bar";
 import { buildLanes, HOUR, taskTime, timelineDomain } from "./timeline";
-import { Legend, TimelineView } from "./timeline-view";
+import { TimelineView } from "./timeline-view";
 import type { CloudflareState } from "./use-cloudflare";
 
-/** 一覧の本体（純粋な表示。データ取得は use-overview）。 */
+/**
+ * 骨格の本体（純粋な表示。データ取得は use-overview）。
+ * 細いタイムライン帯 → 左のレール + 中央のコンソール（console は呼び出し側が渡す）→ 下のステータスバー。
+ * data が null（一覧をまだ取れていない）のときは、帯とステータスバーを出さず、レールに railNote を出す。
+ * 要素の並びは data の有無で変えない（中央のコンソールを作り直さない）。
+ */
 export function OverviewView(props: {
-  data: OverviewDto;
+  data: OverviewDto | null;
   autoRefresh: boolean;
   onAutoRefreshChange: (on: boolean) => void;
   onRefresh: () => void;
@@ -18,83 +21,73 @@ export function OverviewView(props: {
   stale: boolean;
   /** Cloudflare の枠の状態（無ければ枠を出さない） */
   cloudflare?: CloudflareState;
+  /** レールで選択中のタスク（コンソールに出しているタスク） */
+  selectedId: string | null;
+  /** 中央のコンソール */
+  console: ReactNode;
+  /** data が無いとき、レールに出す案内 */
+  railNote?: string;
+  /** 自動更新の操作を引き出しに出すか（コンソールが自分の下に持っているときは false） */
+  showRefreshControls?: boolean;
 }) {
   const { data } = props;
-  const dayStart = Date.parse(data.range.from);
-  const nowMs = Date.parse(data.generated_at);
-  const domain = timelineDomain({
-    starts: [...data.tasks.map(taskTime), ...data.consults.map((c) => Date.parse(c.at))],
-    nowMs,
-    dayStart,
-    dayEnd: dayStart + 24 * HOUR,
-  });
-  const lanes = buildLanes(data, domain);
-  const kinds = data.tasks.map(markKindOf);
-  const merged = kinds.filter((k) => k === "merged").length;
-  const empty = data.tasks.length === 0 && data.consults.length === 0;
+  let band: ReactNode = null;
+  let nowMs = 0;
+  if (data) {
+    const dayStart = Date.parse(data.range.from);
+    nowMs = Date.parse(data.generated_at);
+    const domain = timelineDomain({
+      starts: [...data.tasks.map(taskTime), ...data.consults.map((c) => Date.parse(c.at))],
+      nowMs,
+      dayStart,
+      dayEnd: dayStart + 24 * HOUR,
+    });
+    const empty = data.tasks.length === 0 && data.consults.length === 0;
+    band = (
+      <section className="tlband" aria-label="今日のタイムライン">
+        {empty ? (
+          <p className="empty">タスクを始めると、ここにタイムラインが出ます。</p>
+        ) : (
+          <TimelineView lanes={buildLanes(data, domain)} domain={domain} nowMs={nowMs} />
+        )}
+      </section>
+    );
+  }
 
   return (
-    <div className="overview">
+    <>
       {props.stale ? (
         <p className="notice" role="status">
           更新できませんでした。前の内容を表示しています（自動で再試行します）。
         </p>
       ) : null}
 
-      <section className="today" aria-labelledby="today-h">
-        <div className="today-head">
-          <h1 id="today-h">{formatDayHeading(dayStart)}</h1>
-          <p className="summary">
-            {data.tasks.length === 0
-              ? "今日のタスクはまだありません。"
-              : `${data.tasks.length} 件のタスクを実行し、${merged} 件をマージしました。`}
-          </p>
-        </div>
-        {empty ? (
-          <p className="empty">タスクを始めると、ここにタイムラインが出ます。</p>
-        ) : (
-          <>
-            <TimelineView lanes={lanes} domain={domain} nowMs={nowMs} />
-            <Legend kinds={kinds} />
-          </>
-        )}
-      </section>
+      {band}
 
-      <div className="columns">
-        <section className="tasks-section" aria-labelledby="tasks-h">
-          <h2 id="tasks-h">タスク</h2>
-          {data.tasks.length > 0 ? (
-            <TaskTable tasks={data.tasks} />
-          ) : (
-            <p className="soft">まだありません。</p>
-          )}
-        </section>
-        <aside className="side" aria-label="費用と利用状況">
-          <BudgetPanels data={data} />
-          <ModelCosts models={data.models} />
-          {props.cloudflare ? <CloudflarePanel state={props.cloudflare} /> : null}
-        </aside>
+      <div className="main">
+        {data ? (
+          <TaskRail tasks={data.tasks} selectedId={props.selectedId} />
+        ) : (
+          <nav className="rail" aria-label="タスク">
+            <p className="rail-empty" role="status">
+              {props.railNote ?? ""}
+            </p>
+          </nav>
+        )}
+        <div className="console-col">{props.console}</div>
       </div>
 
-      <footer className="foot">
-        <p>
-          {formatClock(nowMs)} に更新。あなたが GitHub
-          で見られるリポジトリのタスクだけを表示しています。
-        </p>
-        <div className="foot-controls">
-          <label>
-            <input
-              type="checkbox"
-              checked={props.autoRefresh}
-              onChange={(e) => props.onAutoRefreshChange(e.currentTarget.checked)}
-            />
-            自動で更新する
-          </label>
-          <button type="button" className="link-button" onClick={props.onRefresh}>
-            今すぐ更新
-          </button>
-        </div>
-      </footer>
-    </div>
+      {data ? (
+        <StatusBar
+          data={data}
+          nowMs={nowMs}
+          cloudflare={props.cloudflare}
+          autoRefresh={props.autoRefresh}
+          onAutoRefreshChange={props.onAutoRefreshChange}
+          onRefresh={props.onRefresh}
+          showRefreshControls={props.showRefreshControls ?? true}
+        />
+      ) : null}
+    </>
   );
 }

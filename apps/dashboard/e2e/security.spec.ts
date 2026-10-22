@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, loginAs, taskPath, test } from "./fixtures";
+import { expect, loginAs, openDrawer, rail, taskPath, test } from "./fixtures";
 import { readState } from "./state";
 
 const s = readState();
@@ -33,17 +33,18 @@ function collectApi(page: Page): ApiResponse[] {
 test("(6) 権限の無いタスクは、一覧の画面にもネットワーク応答にも出ない", async ({ page }) => {
   const api = collectApi(page);
   await loginAs(page, s.users.bob);
-  await expect(page.locator(`tr[data-task-id="${s.tasks.bob}"]`)).toBeVisible();
+  await expect(rail(page, s.tasks.bob as string)).toBeVisible();
   // alice の widgets のタスクは見える（権限がある）
-  await expect(page.locator(`tr[data-task-id="${id("done")}"]`)).toBeVisible();
-  // secret のタスクは行にもタイムラインにもない
+  await expect(rail(page, id("done"))).toBeVisible();
+  // secret のタスクはレールにもタイムラインにもない
   await expect(
     page.locator(`[data-task-id="${id("secret")}"], [data-task="${id("secret")}"]`),
   ).toHaveCount(0);
   const text = await page.locator("body").innerText();
   expect(text).not.toContain(s.marks.secretTitle);
   expect(text).not.toContain("SECRET-CMD");
-  // 件数と合計だけ（題名は無い）
+  // 件数と合計だけ（題名は無い。内訳の引き出しの中）
+  await openDrawer(page);
   await expect(page.locator("[data-hidden-tasks]")).toBeVisible();
 
   const overview = api.filter((a) => a.url.includes("/dashboard/api/overview"));
@@ -111,11 +112,9 @@ test("(7) 題名・command・出力の悪意のある入力は文字として出
   expect(await root.locator('a[href^="javascript:" i]').count()).toBe(0);
   expect(await root.locator("[onerror]").count()).toBe(0);
 
-  // 一覧でも同じ（題名が表とタイムラインの名前に出る）
+  // 一覧でも同じ（題名がレールとタイムラインの名前に出る）
   await page.goto("/dashboard/");
-  await expect(page.locator(`tr[data-task-id="${id("xss")}"] td.title a`)).toContainText(
-    "<script>",
-  );
+  await expect(rail(page, id("xss"))).toContainText("<script>");
   expect(await page.locator("#root script, #root img, #root [onerror]").count()).toBe(0);
 
   expect(

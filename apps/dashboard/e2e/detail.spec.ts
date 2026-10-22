@@ -96,7 +96,7 @@ test("(5) 自動更新を切ると取りに行かない。今すぐ更新では�
 });
 
 test("(8) prefers-reduced-motion では脈動しない（通常は脈動する）", async ({ page }) => {
-  const pulse = page.locator(".pulse");
+  const pulse = page.locator(".console .state-name .pulse");
   const animation = () => pulse.evaluate((el) => getComputedStyle(el).animationName);
 
   await page.emulateMedia({ reducedMotion: "no-preference" });

@@ -247,6 +247,21 @@ describe("buildSteps", () => {
   it("空なら空", () => {
     expect(buildSteps([], true)).toEqual([]);
   });
+  it("コマンドの手順には command の印（画面で `$ コマンド` の行にする）。ほかの手順には付けない", () => {
+    const steps = buildSteps(taskEventsFixture.events, false);
+    expect(steps.filter((s) => s.command).map((s) => s.seq)).toEqual([6]);
+    // 古い履歴の bash の tool_start も、コマンドの行
+    const legacy = buildSteps(
+      [ev(1, { type: "tool_start", call_id: "a", name: "bash", summary: '{"command":"ls"}' })],
+      false,
+    );
+    expect(legacy[0]?.command).toBe(true);
+    const other = buildSteps(
+      [ev(1, { type: "tool_start", call_id: "b", name: "read_file", summary: '{"path":"a"}' })],
+      false,
+    );
+    expect(other[0]?.command).toBe(false);
+  });
 
   const start = (seq: number, id: string, name: string, summary: string) =>
     ev(seq, { type: "tool_start", call_id: id, name, summary });

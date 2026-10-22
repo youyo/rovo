@@ -1,6 +1,6 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { expect, loginAs, taskPath, test } from "./fixtures";
+import { expect, loginAs, rail, taskPath, test } from "./fixtures";
 import { readState } from "./state";
 
 const s = readState();
@@ -23,10 +23,10 @@ test("(11) 書体は同梱のものが同一オリジンから読まれ、外部
   });
 
   await loginAs(page, s.users.alice);
-  await expect(page.locator(`tr[data-task-id="${s.tasks.done}"]`)).toBeVisible();
+  await expect(rail(page, s.tasks.done as string)).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
   const firstPaintFonts = fonts.map((f) => ({ ...f }));
-  // 詳細（出力の枠は JetBrains Mono）
+  // 詳細（画面の出力）
   await page.goto(taskPath(s.tasks.done as string));
   await expect(page.locator("pre.output")).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
@@ -36,7 +36,7 @@ test("(11) 書体は同梱のものが同一オリジンから読まれ、外部
       .filter((f) => f.status === "loaded")
       .map((f) => f.family.replace(/["']/g, "")),
   );
-  for (const family of ["Familjen Grotesk", "Zen Kaku Gothic New", "JetBrains Mono"]) {
+  for (const family of ["M PLUS 1 Code"]) {
     expect(loaded, `${family} が読み込まれていない`).toContain(family);
   }
 
@@ -47,7 +47,9 @@ test("(11) 書体は同梱のものが同一オリジンから読まれ、外部
     expect(f.type, f.url).toMatch(/font\/woff2|application\/(font-woff2|octet-stream)/);
     expect(f.bytes, f.url).toBeGreaterThan(1000);
   }
-  // unicode-range の分割: 全部は読まない（dist には 370 個ほどある。使う文字を含む分割だけ読む）
+  // 全体の書体は M PLUS 1 Code だけ（旧い 3 書体は読まない）
+  expect(loaded.filter((f) => f !== "M PLUS 1 Code")).toEqual([]);
+  // unicode-range の分割: 全部は読まない（dist には 200 個ほどある。使う文字を含む分割だけ読む）
   const bundled = readdirSync(join(import.meta.dirname, "..", "dist", "assets")).filter((f) =>
     f.endsWith(".woff2"),
   ).length;

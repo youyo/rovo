@@ -5,6 +5,9 @@ import { countSchema, isoTimeSchema, LIMITS, singleLineText, untrustedText } fro
 /** 準備 → 実行 → 検証 → 完了の帯 */
 export const PHASES = ["prepare", "run", "verify", "done"] as const;
 
+/** 止まった段階（done は止まっていないので含めない） */
+export const STOPPED_PHASES = ["prepare", "run", "verify"] as const;
+
 /** 「いまは X を実行中」の X の種類 */
 export const NOW_KINDS = ["command", "edit", "commit", "web", "tool", "waiting"] as const;
 
@@ -29,6 +32,11 @@ export const TaskDetailDtoSchema = z.strictObject({
   generated_at: isoTimeSchema,
   task: VisibleTaskDtoSchema,
   phase: z.enum(PHASES),
+  /**
+   * 終端（失敗・予算超過・キャンセル）で、どの段階で止まったか。完了・非終端は null。省略は旧い gateway（画面は状態から推定する）。
+   * 追加のみの項目。
+   */
+  stopped_phase: z.enum(STOPPED_PHASES).nullable().optional(),
   /** 最新の command / edit などから作る一言。無ければ null（画面は「待機中」等） */
   now: z
     .strictObject({

@@ -1,4 +1,4 @@
-import { maskSecrets, sanitizeText, truncateEnd } from "@rovo/audit";
+import { maskSecrets, sanitizeText, truncateEnd, truncateStart } from "@rovo/audit";
 import { LIMITS, type TaskDetailDto, type TaskEventDto } from "@rovo/dashboard-contract";
 import { type StoredEventRow, toEventDto } from "./events";
 
@@ -68,7 +68,6 @@ export function buildNow(
     if (e?.type === "tool_end") ended.add(e.call_id);
   }
 
-  let hasStructured = false;
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i];
     if (r === undefined) continue;
@@ -81,12 +80,8 @@ export function buildNow(
       continue;
     }
     const s = nowOfStructured(e, at);
-    if (s !== null) {
-      hasStructured = true;
-      return s;
-    }
+    if (s !== null) return s;
   }
-  if (hasStructured) return null;
 
   // 古い agent: 構造化イベントが無い。最新の tool_start（終わっていてもよい）
   for (let i = rows.length - 1; i >= 0; i--) {
@@ -115,7 +110,7 @@ export function buildOutput(latestCommand: StoredEventRow | null): OutputDto {
   }
   const at = isoOf(latestCommand.created_at);
   return {
-    tail: truncateEnd(maskSecrets(e.output_tail), LIMITS.outputTail),
+    tail: truncateStart(maskSecrets(e.output_tail), LIMITS.outputTail),
     command: oneLine(e.command),
     ...(at !== undefined ? { at } : {}),
     redacted: true,

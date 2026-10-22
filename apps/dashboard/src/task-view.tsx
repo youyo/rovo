@@ -175,7 +175,7 @@ export function TaskView(props: {
   const reached = new Set(
     events.flatMap((e) => (e.type === "status_changed" ? [e.to] : [])),
   ) as ReadonlySet<TaskStatusDto>;
-  const band = phaseBand(task, detail.phase, reached);
+  const band = phaseBand(task, detail.phase, reached, detail.stopped_phase);
   const steps = buildSteps(events, active);
   const now = nowSentence(detail.now, task.status);
   const model = shortModel(task.model);
@@ -251,7 +251,11 @@ export function TaskView(props: {
           )}
 
           <div className="output-box">
-            <h3>出力の末尾</h3>
+            <h3>
+              {output.command === undefined
+                ? "出力の末尾"
+                : `${singleLine(output.command)} の出力（末尾）`}
+            </h3>
             {output.tail === null ? null : (
               <pre className="output">{sanitizeText(output.tail)}</pre>
             )}

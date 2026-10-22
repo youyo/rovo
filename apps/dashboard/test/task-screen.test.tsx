@@ -273,11 +273,28 @@ describe("タスク詳細（準備で失敗・終端）", () => {
     expect(prSection.querySelector("[data-mark='merged']")).not.toBeNull();
   });
 
-  it("古い agent の履歴（構造化イベントなし）も、動詞の無い素の一覧で出る", async () => {
+  it("古い agent の履歴（構造化イベントなし）も縮退して出る。成功の tool_end は出さない", async () => {
     const { c } = await mount(server({ events: () => json(200, legacyTaskEventsFixture) }));
-    expect(steps(c)).toHaveLength(3);
-    expect(text(c)).toContain("bash を実行");
-    expect(text(c)).toContain("ツールが終わった");
+    expect(steps(c)).toHaveLength(2);
+    expect(text(c)).toContain("コマンドを実行した");
+    expect(text(c)).toContain("pnpm exec vitest run");
+    expect(text(c)).not.toContain("ツールが終わった");
+    expect(text(c)).not.toContain('{"command"');
+  });
+
+  it("出力の枠の見出しは、output.command があれば「<command> の出力（末尾）」", async () => {
+    const withCmd: TaskDetailDto = {
+      ...taskDetailRunningFixture,
+      output: { tail: "ok", command: "pnpm test", redacted: true },
+    };
+    const a = await mount(server({ detail: () => json(200, withCmd) }));
+    expect(a.c.querySelector(".output-box h3")?.textContent).toBe("pnpm test の出力（末尾）");
+    const noCmd: TaskDetailDto = {
+      ...taskDetailRunningFixture,
+      output: { tail: null, redacted: true },
+    };
+    const b = await mount(server({ detail: () => json(200, noCmd) }));
+    expect(b.c.querySelector(".output-box h3")?.textContent).toBe("出力の末尾");
   });
 });
 
@@ -542,6 +559,29 @@ describe("さらに読む（before で遡る）", () => {
     expect([...c.querySelectorAll("button")].some((b) => b.textContent === "さらに読む")).toBe(
       true,
     );
+  });
+
+  it("遡りが 404 なら 404 画面へ、401 なら onUnauthorized を呼んで止まる", async () => {
+    for (const [status, code] of [
+      [404, "not_found"],
+      [401, "unauthorized"],
+    ] as const) {
+      const onUnauthorized = vi.fn();
+      const s = server({
+        events: (_u, n) => (n === 0 ? json(200, tail) : json(status, { error: code })),
+      });
+      const { c, env } = await mount(s, makeEnv(), onUnauthorized);
+      const btn = [...c.querySelectorAll("button")].find((b) => b.textContent === "さらに読む");
+      await act(async () => {
+        btn?.click();
+        await settle();
+      });
+      if (status === 404) expect(text(c)).toContain("このタスクは見られません");
+      else expect(onUnauthorized).toHaveBeenCalled();
+      expect(env.pending()).toHaveLength(0);
+      for (const r of roots.splice(0)) act(() => r.unmount());
+      document.body.innerHTML = "";
+    }
   });
 
   it("遡ったあとの差分取得は、最後の seq の cursor のまま（古い側に引きずられない）", async () => {

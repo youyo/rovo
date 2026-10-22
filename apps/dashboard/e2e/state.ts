@@ -22,3 +22,6 @@ export function readState(): E2eState {
   if (!raw) throw new Error(`${STATE_ENV} が無い（globalSetup が走っていない）`);
   return JSON.parse(raw) as E2eState;
 }
+
+/** 手順が長いタスク（key: long）に、globalSetup が最初に積むコマンドの数 */
+export const LONG_STEPS = 60;

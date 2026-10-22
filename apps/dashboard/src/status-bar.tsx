@@ -1,0 +1,146 @@
+import type { CloudflareSummaryDto, OverviewDto } from "@rovo/dashboard-contract";
+import { useId, useState } from "react";
+import { cloudflareRows } from "./cloudflare";
+import { CloudflarePanel } from "./cloudflare-panel";
+import { formatClock, formatCount, formatUsd, shortModel } from "./format";
+import { budgetLimit } from "./rail";
+import { BudgetPanels, ModelCosts } from "./side-panels";
+import { markKindOf } from "./status";
+import { Legend } from "./timeline-view";
+import type { CloudflareState } from "./use-cloudflare";
+
+/** tmux 風のステータスバー（今月の自分・全員・モデル別・Cloudflare の要約）と、「内訳」の引き出し。 */
+
+function cloudflareData(state: CloudflareState | undefined): CloudflareSummaryDto | null {
+  if (!state) return null;
+  if (state.phase === "ready") return state.data;
+  return state.phase === "failed" ? state.stale : null;
+}
+
+/** バーに出す Cloudflare の要約（Workers とクレジット残高）。取れない項目は引き出しと同じ理由の言葉。 */
+function cloudflareBar(state: CloudflareState | undefined): { workers: string; credit: string } {
+  const data = cloudflareData(state);
+  if (data === null) {
+    const text = state?.phase === "failed" ? "取得できませんでした" : "読み込み中…";
+    return { workers: `Cloudflare ${text}`, credit: "" };
+  }
+  const rows = cloudflareRows(data);
+  const workers = rows.find((r) => r.key === "workers");
+  const credit = rows.find((r) => r.key === "credit_balance");
+  return {
+    workers: workers?.ok
+      ? `Workers ${workers.text.replace("、", "  ")}`
+      : `Workers ${workers?.text ?? ""}`,
+    credit: credit?.ok ? `クレジット ${credit.text}` : `クレジット ${credit?.text ?? ""}`,
+  };
+}
+
+function Sb(props: { alt?: boolean; strong?: boolean; children: React.ReactNode; k: string }) {
+  const cls = `sb${props.alt ? " sb--alt" : ""}${props.strong ? " sb--strong" : ""}`;
+  return (
+    <span className={cls} data-sb={props.k}>
+      {props.children}
+    </span>
+  );
+}
+
+/** モデル別をバーに収める短い文字列（合計の大きい順。多いときは上位だけ） */
+function modelLine(models: OverviewDto["models"]): string {
+  const rows = models
+    .map((m) => ({ name: shortModel(m.model).name, total: m.task_cost_usd + m.consult_cost_usd }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 4);
+  return rows.length === 0
+    ? "モデル別 まだありません"
+    : rows.map((r) => `${r.name} ${formatUsd(r.total)}`).join("  ");
+}
+
+export function StatusBar(props: {
+  data: OverviewDto;
+  nowMs: number;
+  cloudflare?: CloudflareState;
+  autoRefresh: boolean;
+  onAutoRefreshChange: (on: boolean) => void;
+  onRefresh: () => void;
+  /** 自動更新の操作を引き出しに出すか（コンソールが自分の下に持っているときは false。入切は共有する） */
+  showRefreshControls?: boolean;
+  /** 引き出しの初期状態（テスト用） */
+  initialOpen?: boolean;
+}) {
+  const { data } = props;
+  const [open, setOpen] = useState(props.initialOpen ?? false);
+  const drawerId = useId();
+  const limit = budgetLimit(data.budget);
+  const cf = cloudflareBar(props.cloudflare);
+  const kinds = data.tasks.map(markKindOf);
+
+  return (
+    <div className="bar-wrap">
+      <section
+        id={drawerId}
+        className="drawer"
+        aria-label="内訳"
+        hidden={!open}
+        data-open={String(open)}
+      >
+        <div className="drawer-grid">
+          <BudgetPanels data={data} />
+          <ModelCosts models={data.models} />
+          {props.cloudflare ? <CloudflarePanel state={props.cloudflare} /> : null}
+        </div>
+        <Legend kinds={kinds} />
+        <div className="drawer-foot">
+          <p>
+            {formatClock(props.nowMs)} に更新。あなたが GitHub
+            で見られるリポジトリのタスクだけを表示しています。
+          </p>
+          {props.showRefreshControls === false ? null : (
+            <div className="drawer-controls">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={props.autoRefresh}
+                  onChange={(e) => props.onAutoRefreshChange(e.currentTarget.checked)}
+                />
+                自動で更新する
+              </label>
+              <button type="button" className="link-button" onClick={props.onRefresh}>
+                今すぐ更新
+              </button>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="statusbar" aria-label="費用と枠">
+        <Sb k="budget-me" strong>
+          今月 {formatUsd(data.budget.spent_usd)}
+          {limit === null ? "" : ` / ${formatUsd(limit)}`}
+        </Sb>
+        <Sb k="budget-left" alt>
+          {`残り ${formatUsd(data.budget.remaining_usd)}  あと ${formatCount(data.budget.startable)} 件`}
+        </Sb>
+        <Sb k="budget-all">全員 {formatUsd(data.month.budget_actual.spent_usd)}</Sb>
+        <Sb k="models" alt>
+          {modelLine(data.models)}
+        </Sb>
+        <span className="sb-grow" />
+        <Sb k="cloudflare">{cf.workers}</Sb>
+        {cf.credit === "" ? null : (
+          <Sb k="credit" alt>
+            {cf.credit}
+          </Sb>
+        )}
+        <button
+          type="button"
+          className="sb-button"
+          aria-expanded={open}
+          aria-controls={drawerId}
+          onClick={() => setOpen((v) => !v)}
+        >
+          内訳
+        </button>
+      </section>
+    </div>
+  );
+}

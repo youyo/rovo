@@ -1,4 +1,9 @@
-import { overviewFixture, overviewMeFixture } from "@rovo/dashboard-contract/fixtures";
+import {
+  overviewFixture,
+  overviewMeFixture,
+  taskDetailRunningFixture,
+  taskEventsFixture,
+} from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +21,10 @@ function router(overview: Handler) {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/dashboard/api/me") return json(200, { login: "alice-example" });
     if (url.pathname === "/dashboard/api/overview") return overview(url);
+    // 一覧のコンソールに出す走行中のタスク
+    const id = taskDetailRunningFixture.task.task_id;
+    if (url.pathname === `/dashboard/api/tasks/${id}`) return json(200, taskDetailRunningFixture);
+    if (url.pathname === `/dashboard/api/tasks/${id}/events`) return json(200, taskEventsFixture);
     return json(404, { error: "not_found" });
   });
 }
@@ -64,7 +73,7 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
   it("ログイン済みなら overview を取って一覧を出す。範囲はローカル日の 0 時〜いま、scope=all", async () => {
     const f = router(byScope);
     const c = await mount(f);
-    expect(c.querySelector("h1")?.textContent).toMatch(/^\d+月\d+日$/);
+    expect(c.querySelector(".day-summary")?.textContent).toMatch(/^\d+月\d+日 +5 件/);
     expect(lanesOf(c)).toHaveLength(3);
     const u = overviewCalls(f)[0] as URL;
     expect(u.searchParams.get("scope")).toBe("all");
@@ -107,13 +116,13 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
       me?.click();
     });
     expect(lanesOf(c)).toHaveLength(0);
-    expect(c.querySelector("table")).toBeNull();
+    expect(c.querySelector("a.rail-row")).toBeNull();
     expect(c.textContent).toContain("読み込み中");
   });
 
-  it("期間は「今日」だけ（7 日・30 日のボタンを作らない）", async () => {
+  it("期間は今日だけ（ヘッダはその日の日付の要約。7 日・30 日のボタンを作らない）", async () => {
     const c = await mount(router(byScope));
-    expect(c.textContent).toContain("今日");
+    expect(c.querySelector(".day-summary")?.textContent).toMatch(/^\d+月\d+日/);
     expect(c.textContent).not.toContain("7 日");
     expect(c.textContent).not.toContain("30 日");
   });

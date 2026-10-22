@@ -10,8 +10,16 @@ export function TaskScreen(props: {
   id: string;
   onUnauthorized: () => void;
   deps?: TaskDetailDeps;
+  /** 自動更新の入切を親（一覧と共有する画面）が持つとき。無ければこの画面で持つ */
+  autoRefresh?: boolean;
+  onAutoRefreshChange?: (on: boolean) => void;
+  /** 「今すぐ更新」で詳細のほかに取り直したいもの（一覧など） */
+  onRefreshAlso?: () => void;
+  /** 一覧のコンソールのとき、詳細ページへのリンク先 */
+  detailHref?: string;
 }) {
-  const [autoRefresh, setAutoRefresh] = useState(() => loadAutoRefresh());
+  const [ownAutoRefresh, setOwnAutoRefresh] = useState(() => loadAutoRefresh());
+  const autoRefresh = props.autoRefresh ?? ownAutoRefresh;
   const { state, refresh, loadOlder } = useTaskDetail(props.id, autoRefresh, props.deps);
   const { onUnauthorized } = props;
 
@@ -19,10 +27,19 @@ export function TaskScreen(props: {
     if (state.phase === "unauthorized") onUnauthorized();
   }, [state.phase, onUnauthorized]);
 
-  const onAutoRefreshChange = useCallback((on: boolean) => {
-    setAutoRefresh(on);
-    saveAutoRefresh(on);
-  }, []);
+  const { onAutoRefreshChange: notifyAutoRefresh, onRefreshAlso } = props;
+  const onAutoRefreshChange = useCallback(
+    (on: boolean) => {
+      setOwnAutoRefresh(on);
+      saveAutoRefresh(on);
+      notifyAutoRefresh?.(on);
+    },
+    [notifyAutoRefresh],
+  );
+  const onRefresh = useCallback(() => {
+    refresh();
+    onRefreshAlso?.();
+  }, [refresh, onRefreshAlso]);
 
   switch (state.phase) {
     case "loading":
@@ -70,7 +87,8 @@ export function TaskScreen(props: {
           olderError={state.olderError}
           autoRefresh={autoRefresh}
           onAutoRefreshChange={onAutoRefreshChange}
-          onRefresh={refresh}
+          onRefresh={onRefresh}
+          detailHref={props.detailHref}
           onLoadOlder={() => void loadOlder()}
         />
       );

@@ -1,4 +1,5 @@
 import { abortAllDurableObjects, env, runInDurableObject } from "cloudflare:test";
+import { watchEvents } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides } from "../../src/agent/deps";
 import type { UsageDto } from "../../src/agent/types";
@@ -1010,39 +1011,103 @@ describe("停止の確定は Pi の abort を無期限には待たない", () =>
   const pendingAbort = (fx: ReturnType<typeof newFixture>) =>
     runInDO<boolean>(fx.stub, (inst) => inst.aborting !== undefined);
 
+  // waitUntil の非同期版（DO の中を読む条件用）。条件が成り立つまで待ち、上限は条件が成り立たないときの打ち切りだけ
+  const waitUntilAsync = async (cond: () => Promise<boolean>, timeoutMs = 10_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await cond())) {
+      if (Date.now() > deadline) throw new Error("waitUntilAsync timeout");
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  };
+
+  // Pi の観測用の context（AgentDO の BG と同じ形。取り消さない）
+  const BG: Inst = Object.freeze({
+    abortSignal: undefined,
+    value: () => undefined,
+    toString: () => "[Context rovo agent test]",
+  });
+
+  /** モデルの生成の途中経過（usage を含む）が Pi に永続化されたか。abort で中断されたとき、実費はこの途中経過から計上される */
+  const partialCommitted = (fx: ReturnType<typeof newFixture>) =>
+    runInDO<boolean>(fx.stub, async (inst) => {
+      const pi = await inst.harness.pi();
+      const root = await pi.root(BG);
+      const stream = await watchEvents(pi, root.id, BG);
+      try {
+        return stream.snapshot.generation?.message !== undefined;
+      } finally {
+        await stream.stop();
+      }
+    });
+
+  /** Pi が計上した実費の合計（abort の後で、中断された生成の usage が確定すると増える） */
+  const piCostUsd = (fx: ReturnType<typeof newFixture>) =>
+    runInDO<number>(fx.stub, async (inst) => {
+      const pi = await inst.harness.pi();
+      const state = await pi.usage(BG);
+      let total = 0;
+      for (const u of Object.values(state.models) as { cost: { total: number } }[]) {
+        total += u.cost.total;
+      }
+      return total;
+    });
+
   it("上限を超えたら、呼び出し前の見積額を usage に含めて確定する。cancel は上限内に abort が終わらなければ stopped:false、再送で abort の完了後に true", async () => {
-    // 確定の上限 100ms、abort の完了は abort の 150ms 後、cancel の待ちは 120ms
+    // 確定の上限 100ms、cancel の待ちは 120ms。abort の完了は、テストが放すまで止めておく
+    // （Pi の abort は実際に走らせたうえで、完了を AgentDO へ返すのだけを止める。時間の競争にしない）
     const fx = newFixture(
       "finalize-cap",
       [{ text: "遅い応答", usage: { input: 500_000 }, delayMs: 4000 }],
       { cancelWaitMs: 120, finalizeWaitMs: 100 },
     );
-    await fx.stub.start(makeSpec("finalize-cap"));
-    await waitUntil(() => fx.modelCalls.count === 1);
-    await new Promise((r) => setTimeout(r, 300)); // 生成の途中経過（usage）が Pi に届くまで
-    // 1 回目: abort が終わる前に待ちの上限が来る
-    expect(await fx.stub.cancel()).toEqual({ stopped: false });
-    expect(await pendingAbort(fx)).toBe(true);
-    // モデルの応答（4 秒）を待たずに確定する
-    expect(await waitForTerminal(fx, 2000)).toBe("cancelled");
-    const r = done(await fx.stub.getResult());
-    expect(r.usage.costUsd).toBeGreaterThan(0); // 見積額（上限側）が計上されている
-    const events = await allEvents(fx);
-    const last = events[events.length - 1];
-    expect(last).toMatchObject({ type: "phase", data: { phase: "cancelled" } });
-    // 再送で true になった時点では、abort は終わっている
-    const end = Date.now() + 3000;
-    let again = await fx.stub.cancel();
-    while (!again.stopped && Date.now() < end) {
-      await new Promise((r) => setTimeout(r, 30));
-      again = await fx.stub.cancel();
+    const abortHold = { held: true, finished: false };
+    try {
+      await fx.stub.start(makeSpec("finalize-cap"));
+      await waitUntil(() => fx.modelCalls.count === 1);
+      // 生成の途中経過（usage）が Pi に届くまで
+      await waitUntilAsync(() => partialCommitted(fx));
+      await runInDO(fx.stub, (inst) => {
+        const orig = inst.harness.abort.bind(inst.harness);
+        inst.harness.abort = async (...a: unknown[]) => {
+          const r = await orig(...a);
+          abortHold.finished = true;
+          while (abortHold.held) await new Promise((res) => setTimeout(res, 10));
+          return r;
+        };
+      });
+      // 1 回目: abort が終わる前に待ちの上限が来る
+      expect(await fx.stub.cancel()).toEqual({ stopped: false });
+      expect(await pendingAbort(fx)).toBe(true);
+      // モデルの応答（4 秒）も abort の完了も待たずに確定する
+      expect(await waitForTerminal(fx, 3000)).toBe("cancelled");
+      const r = done(await fx.stub.getResult());
+      expect(r.usage.costUsd).toBeGreaterThan(0); // 見積額（上限側）が計上されている
+      const events = await allEvents(fx);
+      const last = events[events.length - 1];
+      expect(last).toMatchObject({ type: "phase", data: { phase: "cancelled" } });
+      // abort が終わっていない間の再送は、確定済みでも true にならない
+      expect(await fx.stub.cancel()).toEqual({ stopped: false });
+      expect(await pendingAbort(fx)).toBe(true);
+      // 再送で true になった時点では、abort は終わっている
+      abortHold.held = false;
+      let again: { stopped: boolean; finalSeq?: number } = { stopped: false };
+      await waitUntilAsync(async () => {
+        again = await fx.stub.cancel();
+        return again.stopped;
+      }, 3000);
+      expect(again.stopped).toBe(true);
+      expect(again.finalSeq).toBe(last?.seq);
+      expect(abortHold.finished).toBe(true);
+      expect(await pendingAbort(fx)).toBe(false);
+      // 確定の後に遅れて届く実費でイベントは増えない（実費が Pi に届き、AgentDO が run の終わりを処理し終えてから確かめる）
+      await waitUntilAsync(async () => {
+        const settled = await runInDO<boolean>(fx.stub, (inst) => inst.watching === undefined);
+        return settled && (await piCostUsd(fx)) > 0;
+      });
+      expect((await allEvents(fx)).length).toBe(events.length);
+    } finally {
+      abortHold.held = false;
     }
-    expect(again.stopped).toBe(true);
-    expect(again.finalSeq).toBe(last?.seq);
-    expect(await pendingAbort(fx)).toBe(false);
-    // 確定の後に遅れて届く実費でイベントは増えない
-    await new Promise((r) => setTimeout(r, 300));
-    expect((await allEvents(fx)).length).toBe(events.length);
   });
 
   it("確定の後に遅れて戻った usage の読み取りは、実費が見積額を超えていてもイベントを積まない", async () => {

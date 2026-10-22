@@ -1,7 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { parseRoute } from "../src/route";
+import { parseDay, parseRoute } from "../src/route";
 
 const ID = "01K8ZF00000000000000000004";
+
+describe("parseDay（?day=YYYY-MM-DD。不正な値は null = 今日）", () => {
+  it("実在する日付だけ受け取る", () => {
+    expect(parseDay("?day=2026-10-22")).toBe("2026-10-22");
+    expect(parseDay("?scope=me&day=2026-02-28")).toBe("2026-02-28");
+    expect(parseDay("?day=2024-02-29")).toBe("2024-02-29");
+  });
+  it("無い・不正・存在しない日付は null", () => {
+    for (const s of [
+      "",
+      "?",
+      "?day=",
+      "?day=abc",
+      "?day=2026-13-01",
+      "?day=2026-02-30",
+      "?day=2025-02-29",
+      "?day=2026-1-5",
+      "?day=2026-10-22x",
+      "?day=20261022",
+    ]) {
+      expect(parseDay(s), s).toBeNull();
+    }
+  });
+});
 
 describe("parseRoute（/dashboard/tasks/<ULID> で詳細、それ以外は一覧）", () => {
   it("詳細", () => {

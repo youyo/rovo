@@ -14,7 +14,10 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-function mount(data: OverviewDto, extra: { stale?: boolean; selectedId?: string | null } = {}) {
+function mount(
+  data: OverviewDto,
+  extra: { stale?: boolean; selectedId?: string | null; isToday?: boolean } = {},
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -27,6 +30,7 @@ function mount(data: OverviewDto, extra: { stale?: boolean; selectedId?: string 
         onAutoRefreshChange: () => {},
         onRefresh: () => {},
         stale: extra.stale ?? false,
+        isToday: extra.isToday ?? true,
         selectedId: extra.selectedId ?? null,
         console: createElement("section", { className: "console" }, "コンソールの場所"),
       }),
@@ -109,6 +113,20 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
     expect(c.textContent).toContain("今日のタスクはまだありません");
     expect(c.querySelector("a.rail-row")).toBeNull();
     expect(c.querySelector("[data-lane]")).toBeNull();
+  });
+
+  it("過去の日: 文言はその日向け", () => {
+    const empty: OverviewDto = { ...overviewMeFixture, tasks: [], consults: [] };
+    const c = mount(empty, { isToday: false });
+    expect(c.textContent).toContain("この日のタスクはありません");
+    expect(c.textContent).not.toContain("今日のタスク");
+    expect(c.querySelector(".tlband")?.getAttribute("aria-label")).toBe("この日のタイムライン");
+  });
+
+  it("いまの破線は今日のときだけ出す", () => {
+    expect(mount(overviewFixture, { isToday: false }).querySelector("[data-now]")).toBeNull();
+    document.body.innerHTML = "";
+    expect(mount(overviewFixture, { isToday: true }).querySelector("[data-now]")).toBeTruthy();
   });
 
   it("レール: 新しい開始が上。選択中の行を示す", () => {

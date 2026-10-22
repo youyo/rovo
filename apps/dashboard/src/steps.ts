@@ -17,6 +17,8 @@ export type Tone = "normal" | "fail";
 export type StepText = {
   what: string;
   target: string;
+  /** コマンドを実行した場所（`cd /workspace/<相対パス> && ` の前置きの <相対パス>）。画面では「<相対パス> で」と添える */
+  where?: string;
   note: string;
   tone: Tone;
 };
@@ -73,11 +75,74 @@ const STRUCTURED_OF: Record<string, TaskEventDto["type"]> = {
   web_browse: "web",
 };
 
+const MARK = "…";
+
+/** 先頭が `{"<キー>":"` で始まる（文字列の値の手前まで）。キーは JSON のエスケープを含まないものだけ */
+const STRING_HEAD = /^\s*\{\s*"([^"\\]*)"\s*:\s*"/;
+const HEX4 = /^[0-9a-fA-F]{4}$/;
+const HEX_PART = /^[0-9a-fA-F]*$/;
+const SIMPLE_ESCAPE: Record<string, string> = {
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+};
+
 /**
- * summary は子が書いた非信頼データ。JSON のオブジェクトとして読めて、既知のキーが文字列のときだけ取り出す。
- * それ以外（切れた JSON・配列・数値・未知のキー・文字列でない値）は、sanitize した文字列のまま。
+ * JSON の文字列の中身（開き " の次から）を読み、エスケープを戻す。閉じる " が無ければ、途中で切れている（cut）。
+ * 切れているときは、切り詰めの印（agent の "..."・gateway の "…"）を外し、末尾の中途半端なエスケープ
+ * （\ や \u12）と、対の片方だけのサロゲートは捨てる。エスケープが壊れていれば undefined。
  */
-function pickTarget(summary: string, keys: readonly string[]): string {
+function readJsonString(body: string): { value: string; cut: boolean } | undefined {
+  let end = -1;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "\\") i++;
+    else if (c === '"') {
+      end = i;
+      break;
+    }
+  }
+  const cut = end < 0;
+  const raw = cut ? body.replace(/(?:\.\.\.|…)$/, "") : body.slice(0, end);
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i] as string;
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    const n = raw[i + 1];
+    if (n === undefined) break; // 切れた位置が \ の直後
+    if (n === "u") {
+      const hex = raw.slice(i + 2, i + 6);
+      if (hex.length < 4) {
+        if (cut && HEX_PART.test(hex)) break; // 切れた位置が \uXX の途中
+        return undefined;
+      }
+      if (!HEX4.test(hex)) return undefined;
+      out += String.fromCharCode(Number.parseInt(hex, 16));
+      i += 5;
+      continue;
+    }
+    const e = SIMPLE_ESCAPE[n];
+    if (e === undefined) return undefined;
+    out += e;
+    i++;
+  }
+  return { value: cut ? out.replace(/[\uD800-\uDBFF]$/, "") : out, cut };
+}
+
+/**
+ * summary から、既知のキーの文字列の値を取り出して、表示できる 1 行（sanitize 済み。切れていれば末尾に …）にする。
+ * JSON として読めるときはオブジェクトの既知のキー。読めない（切れた）ときは、先頭が `{"<既知のキー>":"` のときだけ、
+ * その文字列を取り出す。取り出せなければ undefined。
+ */
+function pickString(summary: string, keys: readonly string[]): string | undefined {
   try {
     const v: unknown = JSON.parse(summary);
     if (typeof v === "object" && v !== null && !Array.isArray(v)) {
@@ -86,10 +151,65 @@ function pickTarget(summary: string, keys: readonly string[]): string {
         if (typeof x === "string" && x !== "") return singleLine(x);
       }
     }
+    return undefined;
   } catch {
-    // JSON でないときは、そのまま出す
+    // 切れた JSON かもしれない
   }
-  return singleLine(summary);
+  const head = STRING_HEAD.exec(summary);
+  if (head === null || !keys.includes(head[1] as string)) return undefined;
+  const read = readJsonString(summary.slice(head[0].length));
+  if (read === undefined || read.value === "") return undefined;
+  return `${singleLine(read.value)}${read.cut ? MARK : ""}`;
+}
+
+/**
+ * summary は子が書いた非信頼データ。既知のキーの文字列を取り出せるときだけ取り出す（切れた JSON も）。
+ * それ以外（配列・数値・未知のキー・文字列でない値・壊れたエスケープ）は、sanitize した文字列のまま。
+ */
+function pickTarget(summary: string, keys: readonly string[]): string {
+  return pickString(summary, keys) ?? singleLine(summary);
+}
+
+/** 場所の 1 区切りに許す文字（素直なディレクトリ名だけ。空白・引用符・変数・シェルの記号は許さない） */
+const DIR_SEGMENT = /^[\p{L}\p{N}_.@+-]+$/u;
+const CD_PREFIX = /^cd\s+(\/workspace(?:\/\S*)?)\s+&&\s+(\S.*)$/;
+
+/** /workspace からの相対パス。/workspace 自身は ""。素直なパスでない（.. や // を含む・変な文字がある）ものは undefined */
+function relativeDir(abs: string): string | undefined {
+  const rest = abs.slice("/workspace".length);
+  if (rest === "") return "";
+  const parts = rest.slice(1).split("/");
+  if (parts.at(-1) === "") parts.pop();
+  for (const p of parts) {
+    if (p === "." || p === ".." || !DIR_SEGMENT.test(p)) return undefined;
+  }
+  return parts.join("/");
+}
+
+/**
+ * コマンドの先頭の `cd /workspace/<相対パス> && ` を外し、<相対パス> を場所として返す。
+ * `cd /workspace && ` は前置きだけ外す（場所なし）。ほかの形（.. を含む・/workspace の外・引用符つきなど）は触らない。
+ * text は sanitize 済みの 1 行。
+ */
+function splitCommand(text: string): { command: string; where?: string } {
+  const m = CD_PREFIX.exec(text);
+  if (m === null) return { command: text };
+  const dir = relativeDir(m[1] as string);
+  if (dir === undefined) return { command: text };
+  const command = m[2] as string;
+  return dir === "" ? { command } : { command, where: dir };
+}
+
+/** コマンドの手順の文。前置きを外し、場所があれば添える（タイムライン・「いま」・gateway で同じ見せ方） */
+function commandText(text: string, base: { what: string; note: string; tone: Tone }): StepText {
+  const c = splitCommand(text);
+  return {
+    what: base.what,
+    target: c.command,
+    ...(c.where === undefined ? {} : { where: c.where }),
+    note: base.note,
+    tone: base.tone,
+  };
 }
 
 function describeToolStart(name: string, summary: string, current: boolean): StepText {
@@ -105,12 +225,10 @@ function describeToolStart(name: string, summary: string, current: boolean): Ste
       tone: "normal",
     };
   }
-  return {
-    what: current ? spec.running : spec.done,
-    target: pickTarget(summary, spec.keys),
-    note: "",
-    tone: "normal",
-  };
+  const what = current ? spec.running : spec.done;
+  const target = pickTarget(summary, spec.keys);
+  if (name === "bash") return commandText(target, { what, note: "", tone: "normal" });
+  return { what, target, note: "", tone: "normal" };
 }
 
 /**
@@ -122,16 +240,15 @@ export function describeEvent(ev: TaskEventDto, opts: { current: boolean }): Ste
     case "command": {
       const failed = ev.exit_code !== null && ev.exit_code !== 0;
       const running = ev.exit_code === null && opts.current;
-      return {
+      return commandText(singleLine(ev.command), {
         what: failed ? "コマンドが失敗した" : running ? "コマンドを実行中" : "コマンドを実行した",
-        target: singleLine(ev.command),
         note: join([
           failed && `終了コード ${ev.exit_code}`,
           ev.exit_code === null && !opts.current && "終了コード不明",
           ev.duration_ms !== undefined && formatDuration(ev.duration_ms),
         ]),
         tone: failed ? "fail" : "normal",
-      };
+      });
     }
     case "edit": {
       const what = {
@@ -355,14 +472,35 @@ const STATE_SENTENCE: Record<TaskStatusDto, string> = {
   CANCELLED: "キャンセルされました。",
 };
 
-/** 「いまは X を実行しています。」。X（target）だけ強調できるように 3 つに分ける。now が null なら状態に応じた文。 */
+/** gateway が添える「<相対パス> で 」（now.text の先頭）。素直なパス 1 つだけ */
+const NOW_WHERE = /^([\p{L}\p{N}_.@+-]+(?:\/[\p{L}\p{N}_.@+-]+)*) で (\S.*)$/u;
+
+/**
+ * 「いまは X を実行しています。」。X（target）だけ強調できるように 3 つに分ける。now が null なら状態に応じた文。
+ * コマンド（command・tool）は、タイムラインと同じ見せ方にする: `cd /workspace/<相対パス> && ` の前置きを外し、
+ * 場所を「いまは <相対パス> で $ コマンド を実行しています。」と添える（gateway が添えた「<相対パス> で 」も読む）。
+ */
 export function nowSentence(now: TaskDetailDto["now"], status: TaskStatusDto): NowSentence {
   if (now === null) return { before: STATE_SENTENCE[status], target: "", after: "" };
   if (now.kind === "waiting") return { before: "入力を待っています。", target: "", after: "" };
-  const text = singleLine(now.text);
-  // 「$ コマンド」はコンソールと同じ見た目（プロンプトだけ別の色）にするため、プロンプトを分けて返す
-  if (text.startsWith("$ ")) {
-    return { before: "いまは ", prompt: "$ ", target: text.slice(2), after: NOW_AFTER[now.kind] };
+  let text = singleLine(now.text);
+  let where: string | undefined;
+  if (now.kind === "command" || now.kind === "tool") {
+    const w = NOW_WHERE.exec(text);
+    if (w !== null) {
+      where = w[1];
+      text = w[2] as string;
+    }
   }
-  return { before: "いまは ", target: text, after: NOW_AFTER[now.kind] };
+  // 「$ コマンド」はコンソールと同じ見た目（プロンプトだけ別の色）にするため、プロンプトを分けて返す
+  const prompt = text.startsWith("$ ");
+  if (prompt) text = text.slice(2);
+  if (where === undefined && (prompt || now.kind === "command")) {
+    const c = splitCommand(text);
+    text = c.command;
+    where = c.where;
+  }
+  const before = where === undefined ? "いまは " : `いまは ${where} で `;
+  const after = NOW_AFTER[now.kind];
+  return prompt ? { before, prompt: "$ ", target: text, after } : { before, target: text, after };
 }

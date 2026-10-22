@@ -1,6 +1,7 @@
 import { expect, test } from "claude-code/testing";
 import type { RovoTask } from "../types";
 import {
+  budgetToastText,
   coerceTasks,
   formatElapsed,
   glyph,
@@ -199,6 +200,45 @@ test("slideShift counts how many lines the tail slid forward", () => {
 test("statusLabel translates CREATING and VERIFYING", () => {
   expect(statusLabel("CREATING")).toBe("準備中");
   expect(statusLabel("VERIFYING")).toBe("検証中");
+});
+
+test("statusLabel says 予算の承認待ち only for INPUT_REQUIRED with awaiting budget_extension", () => {
+  expect(statusLabel("INPUT_REQUIRED")).toBe("入力待ち");
+  expect(statusLabel("INPUT_REQUIRED", "budget_extension")).toBe("予算の承認待ち");
+  expect(statusLabel("INPUT_REQUIRED", "other")).toBe("入力待ち");
+  expect(statusLabel("RUNNING", "budget_extension")).toBe("実行中");
+});
+
+test("parseConsole keeps awaiting only for exactly budget_extension on INPUT_REQUIRED", () => {
+  const aw = (status: string, v: unknown) =>
+    parseConsole(JSON.stringify({ status, awaiting: v }))?.awaiting;
+  expect(aw("INPUT_REQUIRED", "budget_extension")).toBe("budget_extension");
+  expect(aw("INPUT_REQUIRED", "Budget_Extension")).toBeUndefined();
+  expect(aw("INPUT_REQUIRED", "something_new")).toBeUndefined();
+  expect(aw("INPUT_REQUIRED", 1)).toBeUndefined();
+  expect(aw("RUNNING", "budget_extension")).toBeUndefined();
+  expect(parseConsole(JSON.stringify({ status: "INPUT_REQUIRED" }))?.awaiting).toBeUndefined();
+});
+
+test("parseStatus reads pending_question.kind the same way", () => {
+  const aw = (kind: unknown) =>
+    parseStatus(JSON.stringify({ status: "INPUT_REQUIRED", pending_question: { kind } }))?.awaiting;
+  expect(aw("budget_extension")).toBe("budget_extension");
+  expect(aw("zzz")).toBeUndefined();
+});
+
+test("coerceTasks keeps awaiting only when it is budget_extension", () => {
+  expect(coerceTasks([task(1, { awaiting: "budget_extension" })])[0]?.awaiting).toBe(
+    "budget_extension",
+  );
+  expect(coerceTasks([{ ...task(1), awaiting: "x" }])[0]?.awaiting).toBeUndefined();
+});
+
+test("budgetToastText names the task and the next step", () => {
+  const text = budgetToastText("T");
+  expect(text).toContain("T");
+  expect(text).toContain("予算の承認待ち");
+  expect(text).toContain("task_answer");
 });
 
 test("pr: parseConsole keeps only { number, https url }", () => {

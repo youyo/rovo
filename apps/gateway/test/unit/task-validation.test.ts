@@ -431,3 +431,21 @@ describe("sandbox_instance（Sandbox の大きさ）", () => {
     expect(withModel).not.toBe(await fp({ model: "anthropic/claude-haiku-5-5" }));
   });
 });
+
+describe("budget_policy", () => {
+  const parse = (v: object) => taskInputSchema.parse(v);
+
+  it("省略は ask。ask と stop だけ受け付ける", () => {
+    expect(parse(base).budget_policy).toBe("ask");
+    expect(parse({ ...base, budget_policy: "stop" }).budget_policy).toBe("stop");
+    expect(taskInputSchema.safeParse({ ...base, budget_policy: "maybe" }).success).toBe(false);
+  });
+
+  it("fingerprint: ask（既定）は含めず、これまでの値と同じ。stop だけ別の値になる", async () => {
+    const a = await computeFingerprint(parse(base));
+    expect(await computeFingerprint(parse({ ...base, budget_policy: "ask" }))).toBe(a);
+    const stop = await computeFingerprint(parse({ ...base, budget_policy: "stop" }));
+    expect(stop).not.toBe(a);
+    expect(stop).toMatch(/^[0-9a-f]{64}$/);
+  });
+});

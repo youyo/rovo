@@ -2,8 +2,9 @@ import type { EngineInterface, McpToolResult, Register, ThemeKey, Timer } from "
 import { atom, read, update } from "claude-code";
 
 import type { RovoConsole, RovoTask } from "../types";
-import type { ParsedConsole, PrLink } from "./lib";
+import type { Awaiting, ParsedConsole, PrLink } from "./lib";
 import {
+  budgetToastText,
   CONSOLE_RETRY_MS,
   cleanTitle,
   coerceTasks,
@@ -166,11 +167,13 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   let status: string;
   let dashboardUrl: string | undefined;
   let pr: PrLink | undefined;
+  let awaiting: Awaiting | undefined;
   let view: Omit<RovoConsole, "fetchedAt">;
   if (parsed !== null) {
     status = parsed.status;
     dashboardUrl = parsed.dashboardUrl;
     pr = parsed.pr;
+    awaiting = parsed.awaiting;
     view = {
       phase: parsed.phase,
       stoppedPhase: parsed.stoppedPhase,
@@ -182,7 +185,8 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
       ...(pr !== undefined ? { pr } : {}),
     };
   } else {
-    let one: { status: string; dashboardUrl?: string; pr?: PrLink } | null = null;
+    let one: { status: string; dashboardUrl?: string; pr?: PrLink; awaiting?: Awaiting } | null =
+      null;
     try {
       const res = await $.mcp.call(t.server, t.prefix + TOOL_STATUS, { task_id: t.taskId });
       one = res.isError ? null : parseStatus(textOf(res));
@@ -193,6 +197,7 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
     status = one.status;
     dashboardUrl = one.dashboardUrl;
     pr = one.pr;
+    awaiting = one.awaiting;
     view = {
       phase: null,
       stoppedPhase: null,
@@ -208,6 +213,7 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   const now = await $.clock.now();
   const becameTerminal = !isTerminal(t.status) && isTerminal(status);
   const shouldToast = becameTerminal && t.notified !== true;
+  const shouldToastBudget = awaiting !== undefined && t.awaiting === undefined;
   const key = taskKey(t);
   await mutate($, (list) =>
     list.map((x) =>
@@ -216,6 +222,7 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
         : {
             ...x,
             status,
+            awaiting,
             ...(isConsoleMissing
               ? {
                   noConsole: true as const,
@@ -242,6 +249,7 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   }
   await update($, consolesAtom, (map) => ({ ...map, [key]: { ...view, fetchedAt: now } }));
   if (shouldToast) $.ui.toast(toastText(t.title, status));
+  if (shouldToastBudget) $.ui.toast(budgetToastText(t.title));
 };
 
 /** 前の呼び出しが終わるまで次を出さない。1 回の中でも 1 本ずつ。 */
@@ -580,7 +588,7 @@ export const register: Register = (on) => {
               {selected.title}
             </Text>
             <Text dimColor wrap="truncate-end">
-              {`${statusLabel(selected.status)} / 経過 ${elapsedOf(selected)}`}
+              {`${statusLabel(selected.status, selected.awaiting)} / 経過 ${elapsedOf(selected)}`}
             </Text>
             {view === undefined && <Text dimColor>まだ取得していません。</Text>}
             {view !== undefined && view.hasOutput && (

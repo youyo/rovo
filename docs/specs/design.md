@@ -304,6 +304,8 @@ Claude Code と Cowork におけるバックグラウンドMCP呼び出しの挙
 
 同一質問への重複回答で処理を二重再開しない。
 
+**予算の延長の質問（`kind: "budget_extension"`）**: タスクが予算に近づくと、`budget_policy: "ask"`（既定）のタスクは止まらずに `INPUT_REQUIRED` になり、rovo（システム）が書く質問が出る。`question` イベントと `task_status` の `pending_question` に optional の `kind: "budget_extension"` が付き（子の質問 `ask_parent` には付かない。古いクライアントは `kind` を知らなくても、ふつうの質問として扱える）、`message` と `options` は数値（使った額・タスクの予算・延長する額・延長の残り回数）だけから gateway が固定文で作る（AgentDO が送る文は使わない）。子の自由文は入らないので `<<<UNTRUSTED_CHILD_QUESTION>>>` で囲まない（子の質問は今までどおり囲む）。`options` は `[あと $X 使って続ける, ここで止める]` の 2 つで、`answer` にはそのどちらかをそのまま渡す（それ以外は `invalid_input`）。**利用者に確認してから答える**（MCP の instructions・`task_start`・`task_answer` の説明と `create-task` スキルに書く）。詳細は 5.2 の「予算のソフトリミット」。
+
 ### 4.6 task_steer
 
 実行中のタスクに追加指示を渡す。
@@ -339,7 +341,7 @@ Draft PRは自動削除しない。
 | `RECOVERING` | 障害復旧中 |
 | `COMPLETED` | 正常終了 |
 | `FAILED` | 復旧不能な失敗 |
-| `BUDGET_EXCEEDED` | 予算上限到達 |
+| `BUDGET_EXCEEDED` | 予算上限到達（`budget_policy: ask` の延長の質問に「止める」と答えた・月の枠が足りない・延長の上限〔2 回〕・無応答〔reason: `budget_extension_timeout`〕を含む） |
 | `CANCELLED` | キャンセル |
 
 ### 5.2 状態管理
@@ -362,6 +364,22 @@ Durable Objectsで以下を保持する。
 - Created / Updated Timestamps
 
 状態変更は原則として単一タスクのDurable Object内で直列化する。
+
+#### 予算のソフトリミット（`budget_policy`）
+
+`task_start` の `budget_policy`（`"ask"` | `"stop"`、既定 `ask`）で、タスクが予算（`TASK_BUDGET_USD`）に近づいたときの扱いを決める。TaskDO の `task.budget_policy` に保存し（この変更より前の行は NULL = `stop`）、`task_status`・`task_result` に返す（`merge_policy` と同じ流儀）。`stop` のとき fingerprint は `v6` で包み、`ask`（既定）は含めない（これまでの idempotency_key の再試行と一致させる）。`TaskSpec.budgetPolicy` として AgentDO に渡る（無ければ `stop`）。
+
+- **stop**: 今までどおり。`AgentDO.preModelCall` が `requestStop("budget_exceeded")` で止める（未 commit の作業の WIP commit・push は従来どおり）。無人で回す用途向け。
+- **ask**: 止める判定のところで、次の順に進む（`AgentDO.askBudgetExtension`）。
+  1. 未 commit の作業を WIP として commit・push する（止めるときと同じ `commitWipOnBudgetStop`。fail-soft）。
+  2. SandboxDO の期限を回答待ちの上限まで延ばし（`ask_parent` と同じ）、Sandbox を**中断**する（下記）。
+  3. 質問（`kind: budget_extension`。数値は `budget_spent_usd`・`budget_total_usd`・`budget_extension_usd`・`budget_extensions_left`）を記録して `INPUT_REQUIRED` にする。`input_timeout` の job を差し替える（回答待ちの累計は 24 時間まで）。
+  聞けない（extend の上限に達した・停止中・中断前の失敗）ときは、聞かずに今までどおり `budget_exceeded` で止まる。
+- **回答**: TaskDO は答えが「続ける」（`options[0]`）のとき、受け付ける**前に** `UserDO.extendTaskBudget(taskId, n)` で月の枠から延長分（`TASK_BUDGET_USD` と同額）をその場で予約する。`task_budget.reserved_micro` に足し、`extensions` に n を記録する（n 回目の再送は冪等。2 回まで。月の枠に足りなければ `budget_exceeded` で予約しない = **月の枠はハードリミットのまま**）。予約できたときだけ `questions.decision = 'extend'` とし、それ以外（「止める」・月の枠が足りない・延長の上限・精算済み）は `stop`。AgentDO へ配送するのは親の答えの文ではなく**固定の語 `extend` | `stop`** だけ。`extend` なら AgentDO は予算を `budgetUsd` ぶん増やして（`budget_extensions` を数える。最大 2 回、1 タスク最大 `budgetUsd` x 3）、rovo が書いた固定文を user メッセージとして Pi に渡して続ける。`stop`（と、それ以外の語）は `budget_exceeded` で止まる。`task_answer` の応答に `budget_extension`（`extended` | `declined` | `monthly_limit` | `limit_reached`）が付く。UserDO を呼べなかったとき（予約できたか分からない）は答えを記録せず `upstream_unavailable` を返す（再送できる）。
+- **待つ間の Sandbox**: `SandboxDO.suspend`（`SandboxPort.suspend?`）が、作業ツリーのスナップショットを取ってからコンテナを止める（昇格と同じ `snapshotContainer`）。次の操作（exec など）の `boot` が、同じスナップショットから（image ではなく）起動し直し、CA 証明書・作業ツリーの状態（HEAD・差分）が中断前と同じことを確かめてから続ける。「再起動した」例外は出さず、`restarts` にも数えない。戻せなければスナップショットを捨てて image から起動し、再 clone する（WIP を push 済みなら失わない。未 push の変更だけ失われる）。**スナップショットが取れない・使えないとき**は、作業ツリーが clean で HEAD が push 済み（作業ブランチ、または最初の commit）と AgentDO が確かめられたときだけコンテナを止める（`allowReclone`。戻すときは再 clone するだけで何も失わない）。そうでなければ**コンテナを止めずに待つ**（fail-soft。費用は止まらないが、作業ツリーを失わない）。理由: 未 push の変更（WIP の commit が秘密・バイナリ・失敗で見送られたもの）を、親の返事を待つ間に黙って捨てるより、費用を許容するほうが安全なため。回答待ちは最長 24 時間で、Sandbox の無操作の停止（2 時間）は走るので、その場合は戻すときに再 clone になる。
+- **返事が無いとき**: 回答待ちの上限（累計 24 時間。子の質問と同じ）で、`StopIntent` の `budget_extension_timeout` を記録し、終端は `BUDGET_EXCEEDED`、reason は `budget_extension_timeout`（`decideTerminal` の優先順位は cancel > deadline > input_timeout > **budget_extension_timeout** > budget_exceeded > failed > completed。子の質問の無応答は従来どおり `FAILED(input_timeout)`）。Sandbox は破棄せず（`budget_exceeded` と同じく patch を取って止める）、中断中なら patch の取得のために戻す。TaskDO の 24 時間 + 猶予 10 分のバックストップも、最後の質問が予算の延長なら `BUDGET_EXCEEDED(budget_extension_timeout)` にする。
+- **止めるとき**: 「止める」の回答でも無応答でも、中断前に WIP は済んでいるので、止めるためだけに Sandbox を起こして WIP を繰り返さない（`budget_suspended`）。結果の `warnings` には WIP の結果が出る。
+- **見え方**: ダッシュボードと `task_console`（Claude Code の mod が使う）は、入力待ちの一種として「予算の承認待ち」と出す（`now.text` が `waiting for budget approval`。`task_console` には optional の `awaiting: "budget_extension"`）。mod は読み取り専用のままで、`task_answer` は呼ばない。
 
 ### 5.3 実行リース
 
@@ -1050,10 +1068,10 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 
 ### 15.4 予算
 
-- タスク単位の上限（初期値 $10 / Task）に加え、ユーザー単位の月額上限を設ける。
+- タスク単位の上限（初期値 $10 / Task）に加え、ユーザー単位の月額上限を設ける。タスク単位の上限は**ソフトリミット**（`budget_policy`。下の「予算のソフトリミット」）、月額上限は**ハードリミット**（延長の予約も超えられない）。
 - 同時に実行できるタスクの数には、ユーザーごとの上限を設ける（`MAX_CONCURRENT_TASKS`、`rovo.config.json` の `concurrency.maxTasks`。OSS の既定は 2）。UserDO の `reservation_slot` にタスクごとに 1 行の枠を持ち、件数が上限に達していれば `concurrency_limit` で断る。旧スキーマの `reservation`（1 行だけ）は、UserDO の起動時に `reservation_slot` へ移して消す（実行中の予約を失わない）。照合による回収（一度も作られなかった予約だけ）と `finishTask` による解放は、タスクごとに行う。予算（`task_budget`）の予約は別の仕組みで、両方を満たすときだけ始められる。
 - **子のモデル呼び出し前の判定**（`AgentDO.preModelCall`）: 入力は、直前の呼び出しでプロバイダーが返した実測（input + cacheRead + cacheWrite）に、前回以降に context へ足された分をバイト数（トークン数の上限）で足す。実測が無い初回は context 全体のバイト数。単価は入力・出力とも最大値のまま（少なく数えない）。ただし、前回の実測で `cacheRead` があった分（`last_call_basis.cacheReadTokens`。前回の入力の合計を上限とする）だけは、cacheRead の単価（base と全 tier の最大値）で見積もる（`maxOutputTokensWithin` / `estimateCallCostUsd` の `cachedTokens`）。前回の通常の入力・cacheWrite の分、増分（context の増加と枠の余裕 1,024）は、入力と cacheWrite の高い方の単価のまま（Anthropic では境界より後ろの新しい入力が input にも cacheWrite〔1.25 倍〕にもなるため、どちらでも下回らない）。割り引くのは、basis が同じモデルで context が縮んでおらず、`at`（前回の応答の時刻）が 4 分以内（Anthropic のキャッシュの TTL 5 分より短く）のときだけ。basis が無い・モデルが違う・context が縮んだ・古い形（`cacheReadTokens` / `at` が無い）・TTL 超過は、従来どおり全量を通常の単価で見積もる。前回の呼び出しで cache hit した分が次の呼び出しで外れた場合に限り、1 回分の見積もりが実際を下回りうる（利用者と合意した許容範囲）。`inflight` の `estimateUsd`（呼び出しの途中で確定するときや usage が返らないときに費用へ積む額）は割り引かない最悪の値のまま。出力は即 block せず、残額に収まる `maxTokens`（`maxOutputTokensWithin`）まで絞って呼ぶ。収まる出力が 1,024 トークンを割るときだけ `budget_exceeded` で止める。
-- **予算超過で止まるときの WIP commit**（`AgentDO.commitWipOnBudgetStop`）: `requestStop("budget_exceeded")` は、モデルを呼ばずに、作業ツリーに未 commit の変更があれば `git add -A` → 取り込む差分を `maskSecrets` で確かめる（秘密らしき文字列があれば `git reset` して commit しない。バイナリの変更〔`diff --cached --numstat` が `-\t-`〕は中身を検査できないので、見つけたら commit せず `git reset` する。4MiB を超えて確かめ切れないときも同様。warnings は固定文で、git の出力は載せない）→ 固定メッセージ `wip: budget exceeded（rovo が自動で commit）` で commit → 作業ブランチへ push（`git_commit` と同じ経路。`pushed` / `push_failed` イベントと `branch_sync`）を行ってから、確定（patch の取得）に進む。全体で 90 秒が上限で、時間切れの後は後段の git（diff・commit・push）を実行せず結果も書き換えない。Sandbox を起動していない・git の失敗・時間切れは諦めて今までどおり止まる（fail-soft）。結果は `task_result` の `warnings` に 1 行で出る（commit した / push できなかった / 秘密のため見送った / 失敗）。期限切れ（deadline）・回答待ちの期限（input_timeout）・cancel では行わない: これらは停止の時点で Sandbox を破棄する設計で（期限は時間の上限を守るため、cancel は利用者の明示の停止のため）、破棄後の Sandbox から commit を取らない。
+- **予算超過で止まるときの WIP commit**（`AgentDO.commitWipOnBudgetStop`）: `requestStop("budget_exceeded")` は、モデルを呼ばずに、作業ツリーに未 commit の変更があれば `git add -A` → 取り込む差分を `maskSecrets` で確かめる（秘密らしき文字列があれば `git reset` して commit しない。バイナリの変更〔`diff --cached --numstat` が `-\t-`〕は中身を検査できないので、見つけたら commit せず `git reset` する。4MiB を超えて確かめ切れないときも同様。warnings は固定文で、git の出力は載せない）→ 固定メッセージ `wip: budget exceeded（rovo が自動で commit）` で commit → 作業ブランチへ push（`git_commit` と同じ経路。`pushed` / `push_failed` イベントと `branch_sync`）を行ってから、確定（patch の取得）に進む。全体で 90 秒が上限で、時間切れの後は後段の git（diff・commit・push）を実行せず結果も書き換えない。Sandbox を起動していない・git の失敗・時間切れは諦めて今までどおり止まる（fail-soft）。結果は `task_result` の `warnings` に 1 行で出る（commit した / push できなかった / 秘密のため見送った / 失敗）。`budget_policy: ask` のときは、止める前の質問のとき（`askBudgetExtension`）にも同じ処理を行い、その後に Sandbox を中断する（5.2 の「予算のソフトリミット」。止めると答えたとき・無応答のときは、中断前に済んだ WIP を繰り返さない）。期限切れ（deadline）・回答待ちの期限（input_timeout）・cancel では行わない: これらは停止の時点で Sandbox を破棄する設計で（期限は時間の上限を守るため、cancel は利用者の明示の停止のため）、破棄後の Sandbox から commit を取らない。
 - **予算超過で止まったときの結果**: 作業ブランチへ push 済みの SHA（チェックポイントの push を含む）を `pushedSha` に、patch・diffstat を（Sandbox を破棄する前に取れれば）結果に残す。summary が空なら停止理由と最後に push した commit を固定文で入れる。PR の `head_sha` は記録するが、検証した commit が無いので `head_matches_verified` は false。cancel・期限・回答待ちの期限は Sandbox を直ちに破棄するので、patch は残さない（`pushedSha` と summary は同じ）。
 
 ### 15.5 Web 取得結果の安全性評価

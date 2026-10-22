@@ -101,6 +101,16 @@ export interface SandboxPort {
    */
   terminate?(): Promise<{ stopped: boolean }>;
   /**
+   * 回答待ちの間、費用を止めるためにコンテナを止める（予算の延長の承認待ちなど）。作業ツリーのスナップショットを取ってから止め、
+   * 次の操作（exec など）で同じスナップショットから起動し直して作業ツリーを戻す。
+   * mode: snapshot = 取って止めた / destroyed = 取れなかったが allowReclone なので止めた（戻すときは再 clone） /
+   * running = 取れず、止めなかった（fail-soft。作業ツリーを失わないため）。allowReclone は、呼び出し側が
+   * 「作業ツリーが clean で HEAD が push 済み」を確かめたときだけ true にする。無い実装では中断せずコンテナを動かし続ける。
+   */
+  suspend?(options: {
+    allowReclone: boolean;
+  }): Promise<{ mode: "snapshot" | "destroyed" | "running" }>;
+  /**
    * 実行時間・作り直し・起動のやり直しのカウンタ（永続。定義は sandbox-do.ts）。AgentDO が usage イベントに載せる。
    * 無い実装、または読めない（undefined / 例外）ときは、usage に sandbox を載せない。
    */

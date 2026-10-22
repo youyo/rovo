@@ -250,6 +250,26 @@ export class FakeAgentDO extends DurableObject {
     this.setPhase("input_required");
   }
 
+  /** 予算の延長の質問を再現する: 数値だけの question イベント（kind: budget_extension）を積み、phase を input_required にする。 */
+  askBudget(
+    questionId: string,
+    nums: { spent: number; total: number; extension: number; left: number },
+    extra: Record<string, unknown> = {},
+  ): void {
+    this.append("question", {
+      question_id: questionId,
+      kind: "budget_extension",
+      budget_spent_usd: nums.spent,
+      budget_total_usd: nums.total,
+      budget_extension_usd: nums.extension,
+      budget_extensions_left: nums.left,
+      ...extra,
+    });
+    this.pendingQuestion = questionId;
+    this.save();
+    this.setPhase("input_required");
+  }
+
   /** イベントを積む（phase 以外）。 */
   emit(type: string, data: unknown): number {
     return this.append(type, data);

@@ -31,9 +31,10 @@ import {
 } from "../github";
 import { errorMessageForLog } from "../log-error";
 import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
+import { MAX_BUDGET_EXTENSIONS } from "./budget-question";
 import { addColumnIfMissing } from "./sql-schema";
 import type { TaskDO } from "./task-do";
-import { isConsultId, ulid, ulidTime } from "./ulid";
+import { isConsultId, isTaskId, ulid, ulidTime } from "./ulid";
 
 /** requests の保存期間。 */
 export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -343,6 +344,8 @@ export class UserDO extends DurableObject<Env> {
     );
     // settled が実費ではなく見積もり（予約額など）で確定した行は 1。列の追加前の行は 0（見積もりではない扱い）。
     addColumnIfMissing(sql, "task_budget", "settled_estimated", "INTEGER NOT NULL DEFAULT 0");
+    // 予算の延長（budget_policy: ask）で承認された回数。延長のたびに reserved_micro へタスク予算と同じ額を足す
+    addColumnIfMissing(sql, "task_budget", "extensions", "INTEGER NOT NULL DEFAULT 0");
     // 親（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
     sql.exec(`CREATE TABLE IF NOT EXISTS web_usage (
       day TEXT NOT NULL,
@@ -1009,6 +1012,55 @@ export class UserDO extends DurableObject<Env> {
       return this.clearSlot(taskId);
     });
     return { ok: true, released };
+  }
+
+  /**
+   * タスクの予算の延長（budget_policy: ask で親が「続ける」を選んだとき）。n 回目（1 または 2）の延長として、
+   * タスク予算（task_budget_usd）と同じ額を、月の枠から「その場で」そのタスクの予約に足す。
+   * 月の枠はハードリミットのまま: 予約済み + 使用済み + 延長分が上限を超えるなら予約せず budget_exceeded。
+   * 同じ n の再送は冪等（applied: false）。n は 1 から順に（2 回目は 1 回目の後）。精算済み（closed）のタスクは closed。
+   */
+  extendTaskBudget(
+    taskId: string,
+    n: number,
+  ):
+    | { ok: true; applied: boolean; reserved_usd: number }
+    | { ok: false; code: "budget_exceeded" | "not_found" | "closed" | "invalid_input" } {
+    if (!isTaskId(taskId)) return { ok: false, code: "not_found" };
+    if (!Number.isInteger(n) || n < 1 || n > MAX_BUDGET_EXTENSIONS) {
+      return { ok: false, code: "invalid_input" };
+    }
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const row = sql
+        .exec<{ month: string; reserved_micro: number; closed: number; extensions: number }>(
+          "SELECT month, reserved_micro, closed, extensions FROM task_budget WHERE task_id = ?",
+          taskId,
+        )
+        .toArray()[0];
+      if (!row) return { ok: false as const, code: "not_found" as const };
+      if (n <= row.extensions) {
+        return { ok: true as const, applied: false, reserved_usd: row.reserved_micro / MICRO };
+      }
+      if (row.closed === 1) return { ok: false as const, code: "closed" as const };
+      if (n !== row.extensions + 1) return { ok: false as const, code: "invalid_input" as const };
+      const addMicro = Math.round(taskBudgetUsd(this.env) * MICRO);
+      this.closeStaleConsults(this.now());
+      if (this.committedMicro(row.month) + addMicro > Math.round(this.monthlyLimitUsd() * MICRO)) {
+        return { ok: false as const, code: "budget_exceeded" as const };
+      }
+      sql.exec(
+        "UPDATE task_budget SET reserved_micro = reserved_micro + ?, extensions = ? WHERE task_id = ?",
+        addMicro,
+        n,
+        taskId,
+      );
+      return {
+        ok: true as const,
+        applied: true,
+        reserved_usd: (row.reserved_micro + addMicro) / MICRO,
+      };
+    });
   }
 
   /**

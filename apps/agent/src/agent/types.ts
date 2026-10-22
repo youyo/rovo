@@ -79,6 +79,11 @@ export interface TaskSpec {
   sandboxInstance?: string;
   /** このタスクに使える上限（USD） */
   budgetUsd: number;
+  /**
+   * 予算に近づいたときの扱い。ask: 止めずに親へ「あと budgetUsd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
+   * 承認の予約は gateway が月の枠から行う）/ stop: 今までどおり budget_exceeded で止まる。無い（古い gateway）は stop。
+   */
+  budgetPolicy?: "ask" | "stop";
   /** epoch ms。開始から 2 時間を超える値は 2 時間に丸める。 */
   deadlineAt: number;
   /**

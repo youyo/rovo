@@ -182,6 +182,11 @@ function promoteSnapshotName(taskId: string | undefined, seq: number): string {
   return `promote-${(taskId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}-${seq}`;
 }
 
+/** 中断（回答待ちの間にコンテナを止める）のスナップショットの名前。昇格と同じ考え方（名前の重複に依存しない） */
+function suspendSnapshotName(taskId: string | undefined, seq: number): string {
+  return `suspend-${(taskId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}-${seq}`;
+}
+
 /** 確率を小数 2 桁にする（記録を小さくする） */
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
@@ -682,6 +687,56 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /**
+   * 回答待ちの間の中断（予算の延長の承認待ち）。serial の中（実行中の exec が終わってから）で、作業ツリーの状態を読み、
+   * スナップショットを取ってコンテナを止める。スナップショットの id と状態は kv に残し、次の起動（boot）が戻す。
+   * 取れなかったとき: allowReclone なら止める（戻すときは image から起動して再 clone）。そうでなければ止めずに running を返す。
+   */
+  async suspend(options: {
+    allowReclone: boolean;
+  }): Promise<{ mode: "snapshot" | "destroyed" | "running" }> {
+    if (this.terminated()) throw new Error("sandbox was terminated");
+    return this.serial(async () => {
+      this.requireSpec();
+      const kv = this.ctx.storage.kv;
+      const container = this.container();
+      if (!container.running) {
+        return {
+          mode: kv.get("suspend") !== undefined ? ("snapshot" as const) : ("destroyed" as const),
+        };
+      }
+      const keepOrDrop = async (): Promise<{ mode: "destroyed" | "running" }> => {
+        if (!options.allowReclone) return { mode: "running" };
+        await this.destroyContainer(this.bootDestroyMs);
+        kv.delete("suspend");
+        return { mode: "destroyed" };
+      };
+      if (typeof container.snapshotContainer !== "function") return keepOrDrop();
+      const before = await this.workspaceState();
+      if (before === undefined) return keepOrDrop();
+      const seq = this.num("suspend_seq") + 1;
+      kv.put("suspend_seq", seq);
+      let snapshotId: string | undefined;
+      try {
+        const snapshot = await withDeadline(
+          container.snapshotContainer({ name: suspendSnapshotName(this.ctx.id.name, seq) }),
+          Date.now() + this.promoteSnapshotMs,
+        );
+        if (snapshot !== "timeout" && typeof snapshot?.id === "string" && snapshot.id !== "") {
+          snapshotId = snapshot.id;
+        }
+      } catch {
+        // snapshot_failed として扱う（例外の文面は残さない）
+      }
+      this.requireSpec();
+      if (snapshotId === undefined) return keepOrDrop();
+      await this.destroyContainer(this.bootDestroyMs);
+      kv.put("suspend", { snapshotId, state: before });
+      this.audit("sandbox_privileged_op", { op: "suspend" });
+      return { mode: "snapshot" };
+    });
+  }
+
+  /**
    * 永続的な終端停止（cancel 用）。コンテナを破棄し、以後の ensureReady / exec / ファイル操作を拒否する。
    * 遅れて届いた指示で再起動しないための tombstone。停止の保証は destroy だけで行う。
    * 進行中の boot は無効化し、収束した後にもう一度停止を確かめる。
@@ -852,6 +907,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (container.running && !this.baseline()) await this.destroyContainer(this.bootDestroyMs);
     // destroy を待っている間に terminate・期限・世代が変わりうる。start の直前に必ず確かめ直す
     this.assertBootCurrent(g);
+    // 中断（回答待ち）で止めたコンテナは、同じスナップショットから戻す。戻せなければ捨てて、下の image からの起動（再 clone）に進む
+    if (!container.running && this.ctx.storage.kv.get("suspend") !== undefined) {
+      if (await this.resumeSuspended(g, spec)) return false;
+      this.assertBootCurrent(g);
+    }
     // 動いているコンテナを初めて見たなら、ここから実行区間を数える（start を見ていない DO の再起動の後など）
     if (container.running) this.openRuntime();
     let started = false;
@@ -1471,6 +1531,54 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
     await this.runningOrThrowRestarted();
     return "skipped";
+  }
+
+  /**
+   * 中断したコンテナを、スナップショットから戻す。起動・CA 証明書・作業ツリーの状態（中断前と同じ）を確かめ、成功なら true。
+   * どこで失敗しても false（スナップショットは捨てる。呼び出し側が image からの起動に進む）。terminate・世代の変化は投げる。
+   */
+  private async resumeSuspended(g: number, spec: WorkspaceSpec): Promise<boolean> {
+    const container = this.container();
+    const kv = this.ctx.storage.kv;
+    const saved = kv.get<{ snapshotId: string; state: string }>("suspend");
+    kv.delete("suspend");
+    if (saved === undefined) return false;
+    const fail = async (): Promise<false> => {
+      await this.destroyContainer(this.bootDestroyMs).catch(() => undefined);
+      return false;
+    };
+    try {
+      container.start({
+        containerSnapshot: { id: saved.snapshotId },
+        enableInternet: false,
+        instance: this.currentInstance(),
+        env: BASE_ENV,
+      });
+    } catch {
+      return false;
+    }
+    this.openRuntime();
+    try {
+      if (!(await this.waitContainerReady(g, spec))) return await fail();
+      const cert = await this.rawExec(["test", "-r", CA_CERT], { timeoutMs: 10_000, cwd: "/" });
+      this.assertBootCurrent(g);
+      if (cert.exitCode !== 0) return await fail();
+      const after = await this.workspaceState();
+      this.assertBootCurrent(g);
+      if (after !== saved.state) return await fail();
+      await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+      const list = await this.rawExec(["bash", "-c", PROCESS_SCRIPT, "rovo-baseline", "list"], {
+        timeoutMs: REAPER_TIMEOUT_MS,
+      });
+      this.assertBootCurrent(g);
+      if (list.exitCode !== 0) return await fail();
+      kv.put("baseline", list.stdout.split("\n").filter(Boolean));
+      await this.armAlarm();
+      return true;
+    } catch (e) {
+      if (this.gen !== g || this.terminated()) throw e;
+      return await fail();
+    }
   }
 
   /** 起動したコンテナの傍受を登録し、exec が応答するまで待つ（boot と同じ。期限は 1 回の起動の待ち）。応答すれば true */

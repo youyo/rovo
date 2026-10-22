@@ -37,6 +37,15 @@ describe("buildNow", () => {
     });
   });
 
+  it("予算の延長の承認待ちの INPUT_REQUIRED は、入力待ちに一言添える（waiting for budget approval）", () => {
+    expect(buildNow([cmd("ls")], "INPUT_REQUIRED", "run", true)).toEqual({
+      kind: "waiting",
+      text: "waiting for budget approval",
+    });
+    // INPUT_REQUIRED でなければ効かない
+    expect(buildNow([cmd("ls")], "RUNNING", "run", true)?.kind).toBe("command");
+  });
+
   it("最新の command から作る。複数行は 1 行にし、300 字に切り、時刻を付ける", () => {
     const long = `echo ${"x".repeat(500)}`;
     const now = buildNow([cmd("old"), cmd(`first\nsecond ${long}`)], "RUNNING", "run");

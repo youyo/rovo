@@ -482,7 +482,14 @@ const NOW_WHERE = /^([\p{L}\p{N}_.@+-]+(?:\/[\p{L}\p{N}_.@+-]+)*) で (\S.*)$/u;
  */
 export function nowSentence(now: TaskDetailDto["now"], status: TaskStatusDto): NowSentence {
   if (now === null) return { before: STATE_SENTENCE[status], target: "", after: "" };
-  if (now.kind === "waiting") return { before: "入力を待っています。", target: "", after: "" };
+  if (now.kind === "waiting") {
+    // gateway が固定で返す text。予算の延長の承認待ちには一言添える（入力待ちの一種）
+    const before =
+      now.text === "waiting for budget approval"
+        ? "予算の承認を待っています（入力待ち）。"
+        : "入力を待っています。";
+    return { before, target: "", after: "" };
+  }
   let text = singleLine(now.text);
   let where: string | undefined;
   if (now.kind === "command" || now.kind === "tool") {

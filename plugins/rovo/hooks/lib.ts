@@ -21,7 +21,15 @@ export type ParsedConsole = {
   isRunning: boolean;
   dashboardUrl?: string;
   pr?: PrLink;
+  /** 予算の延長の承認待ちのときだけ。 */
+  awaiting?: Awaiting;
 };
+
+export type Awaiting = "budget_extension";
+
+/** 未知の値は信用せず、"budget_extension" の完全一致だけを通す。INPUT_REQUIRED のときだけ意味がある。 */
+const parseAwaiting = (status: string, value: unknown): Awaiting | undefined =>
+  status === "INPUT_REQUIRED" && value === "budget_extension" ? "budget_extension" : undefined;
 
 export const CONSOLE_RETRY_MS = 60_000;
 
@@ -120,6 +128,7 @@ export const parseConsole = (text: string): ParsedConsole | null => {
     | undefined;
   const dashboardUrl = httpsOnly(body.dashboard_url);
   const pr = parsePr(body.pr);
+  const awaiting = parseAwaiting(body.status, body.awaiting);
   return {
     status: stripFence(body.status),
     phase: plain(body.phase),
@@ -130,18 +139,22 @@ export const parseConsole = (text: string): ParsedConsole | null => {
     isRunning: output?.running === true,
     ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
     ...(pr !== undefined ? { pr } : {}),
+    ...(awaiting !== undefined ? { awaiting } : {}),
   };
 };
 
 export const parseStatus = (
   text: string,
-): { status: string; dashboardUrl?: string; pr?: PrLink } | null => {
+): { status: string; dashboardUrl?: string; pr?: PrLink; awaiting?: Awaiting } | null => {
   const body = asObject(text);
   if (body === null || typeof body.status !== "string") return null;
   const dashboardUrl = httpsOnly(body.dashboard_url);
   const pr = prFromUrl(body.draft_pr_url);
+  const question = body.pending_question as { kind?: unknown } | null | undefined;
+  const awaiting = parseAwaiting(body.status, question?.kind);
   return {
     status: stripFence(body.status),
+    ...(awaiting !== undefined ? { awaiting } : {}),
     ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
     ...(pr !== undefined ? { pr } : {}),
   };
@@ -208,7 +221,8 @@ export const glyph = (status: string): string => {
   }
 };
 
-export const statusLabel = (status: string): string => {
+export const statusLabel = (status: string, awaiting?: string): string => {
+  if (status === "INPUT_REQUIRED" && awaiting === "budget_extension") return "予算の承認待ち";
   switch (status) {
     case "COMPLETED":
       return "完了";
@@ -245,6 +259,10 @@ export const toastText = (title: string, status: string): string => {
             : status;
   return `${title} が${what}`;
 };
+
+/** 予算の承認待ちに入ったときのトースト。 */
+export const budgetToastText = (title: string): string =>
+  `${title} が予算の承認待ち（利用者に確認してから task_answer で答える）`;
 
 export const taskKey = (t: Pick<RovoTask, "server" | "taskId">): string =>
   `${t.server}/${t.taskId}`;
@@ -288,6 +306,7 @@ export const coerceTasks = (value: unknown): RovoTask[] => {
       ...(typeof t.terminalAt === "number" ? { terminalAt: t.terminalAt } : {}),
       ...(t.notified === true ? { notified: true } : {}),
       ...(t.noConsole === true ? { noConsole: true } : {}),
+      ...(t.awaiting === "budget_extension" ? { awaiting: "budget_extension" as const } : {}),
       ...(typeof t.consoleRetryAt === "number" ? { consoleRetryAt: t.consoleRetryAt } : {}),
     });
   }

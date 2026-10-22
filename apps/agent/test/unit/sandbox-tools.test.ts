@@ -53,6 +53,17 @@ describe("createSandboxTools: 構成", () => {
     for (const t of tools) expect(t.description.length).toBeGreaterThan(10);
     expect(tools.find((t) => t.name === "bash")?.description).toMatch(/untrusted/i);
   });
+
+  it("bash の説明は cd が引き継がれないことと cwd の使用を案内し、cwd はルートからの相対パス", () => {
+    const { tools } = setup();
+    const bash = tools.find((t) => t.name === "bash");
+    expect(bash?.description).toMatch(/a cd does not carry over/i);
+    expect(bash?.description).toMatch(/cwd/);
+    const cwdDesc = (bash?.parameters as { properties?: { cwd?: { description?: string } } })
+      ?.properties?.cwd?.description;
+    expect(cwdDesc).toMatch(/relative to the workspace root/i);
+    expect(cwdDesc).toMatch(/instead of cd/i);
+  });
 });
 
 describe("wrapUntrusted", () => {

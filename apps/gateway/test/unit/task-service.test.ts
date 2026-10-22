@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   createTaskService as createRealTaskService,
   type Principal,
+  START_NOTE,
   type StartOptions,
   UNTRUSTED_QUESTION_BEGIN,
   UNTRUSTED_QUESTION_END,
@@ -648,5 +649,114 @@ describe("子が書いた自由文のイベントも非信頼データとして�
     expect(byType("tool_start")?.payload.call_id).toBe("c1");
     expect(byType("push_failed")?.payload.sha).toBe("abc123");
     expect(byType("push_failed")?.payload.final).toBe(true);
+  });
+});
+
+describe("task service: dashboard_url（M10。task_start / task_status / task_result だけに付く）", () => {
+  const BASE = String(env.PUBLIC_BASE_URL).replace(/\/+$/, "");
+
+  /** start → 終端（COMPLETED）まで進め、3 つの応答（と wait の応答）を返す。 */
+  async function run(over: Record<string, unknown> = {}) {
+    const svc = createTaskService({ ...env, ...over } as typeof env);
+    const p = principal();
+    const started = await svc.start(p, { ...startInput });
+    if (!started.ok) throw new Error("start failed");
+    const taskId = started.value.task_id;
+    const status = await svc.status(p, taskId);
+    if (!status.ok) throw new Error("status failed");
+    await fakeAgent(taskId).setPhase("completed");
+    await taskStub(taskId).advance();
+    const result = await svc.result(p, taskId);
+    if (!result.ok) throw new Error("result failed");
+    const wait = await svc.wait(p, { task_id: taskId, cursor: "0", timeout_seconds: 0 });
+    if (!wait.ok) throw new Error("wait failed");
+    return {
+      svc,
+      p,
+      taskId,
+      started: started.value,
+      status: status.value,
+      result: result.value,
+      wait: wait.value,
+    };
+  }
+
+  it("task_start・task_status・task_result の応答に <PUBLIC_BASE_URL>/dashboard/tasks/<task_id> が入る", async () => {
+    const { taskId, started, status, result } = await run();
+    const expected = `${BASE}/dashboard/tasks/${taskId}`;
+    expect(started.dashboard_url).toBe(expected);
+    expect(status.dashboard_url).toBe(expected);
+    expect(result.dashboard_url).toBe(expected);
+  });
+
+  it("同じ idempotency_key の再試行でも、同じ task_id の URL が入る", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    const a = await svc.start(p, { ...startInput, idempotency_key: "dash-url-retry" });
+    const b = await svc.start(p, { ...startInput, idempotency_key: "dash-url-retry" });
+    if (!a.ok || !b.ok) throw new Error("start failed");
+    expect(a.value.dashboard_url).toBe(`${BASE}/dashboard/tasks/${a.value.task_id}`);
+    expect(b.value.dashboard_url).toBe(a.value.dashboard_url);
+  });
+
+  it("task_wait の応答は変わらない（dashboard_url を付けない）", async () => {
+    const { wait } = await run();
+    expect(wait).not.toHaveProperty("dashboard_url");
+    expect(JSON.stringify(wait)).not.toContain("dashboard_url");
+    expect(Object.keys(wait)).toEqual(
+      expect.arrayContaining(["task_id", "status", "cursor", "events"]),
+    );
+  });
+
+  it("task_cancel の応答も変わらない", async () => {
+    const svc = createTaskService(env);
+    const p = principal();
+    const started = await svc.start(p, { ...startInput });
+    if (!started.ok) throw new Error("start failed");
+    const c = await svc.cancel(p, started.value.task_id);
+    expect(c).toEqual({
+      ok: true,
+      value: { task_id: started.value.task_id, status: "CANCELLED" },
+    });
+  });
+
+  it("PUBLIC_BASE_URL の末尾の / は除く（二重のスラッシュにならない）", async () => {
+    const { taskId, started, status, result } = await run({ PUBLIC_BASE_URL: `${BASE}//` });
+    const expected = `${BASE}/dashboard/tasks/${taskId}`;
+    expect(started.dashboard_url).toBe(expected);
+    expect(status.dashboard_url).toBe(expected);
+    expect(result.dashboard_url).toBe(expected);
+  });
+
+  it("PUBLIC_BASE_URL が空・不正なら、3 つの応答のどれにもキーが付かない（null にもしない）", async () => {
+    for (const bad of [
+      "",
+      "   ",
+      "not a url",
+      "ftp://rovo.example.com",
+      `${BASE}/gateway`,
+      `${BASE}?a=1`,
+    ]) {
+      const { started, status, result } = await run({ PUBLIC_BASE_URL: bad });
+      for (const [name, value] of [
+        ["start", started],
+        ["status", status],
+        ["result", result],
+      ] as const) {
+        expect("dashboard_url" in value, `${name}: ${JSON.stringify(bad)}`).toBe(false);
+        expect(JSON.stringify(value), `${name}: ${JSON.stringify(bad)}`).not.toContain(
+          '"dashboard_url"',
+        );
+      }
+      // 残りの応答は壊れない
+      expect(started).toMatchObject({ status: "RUNNING", draft_pr_url: null });
+      expect(result).toMatchObject({ status: "COMPLETED" });
+    }
+  });
+
+  it("START_NOTE と task_start の応答の note に dashboard_url の説明がある", async () => {
+    expect(START_NOTE).toContain("dashboard_url");
+    const { started } = await run();
+    expect(started.note).toBe(START_NOTE);
   });
 });

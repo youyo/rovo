@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { dashboardUrl } from "../dashboard/url";
 import { type ModelEnv, resolveModel } from "../models";
 import type { ProviderKeysDeps } from "../provider-keys";
 import { maxConcurrentTasks } from "./budget";
@@ -63,15 +64,22 @@ export type TaskServiceDeps = {
 
 export type StartOptions = { repositoryId?: number | null; installationId?: number | null };
 
+/**
+ * dashboard_url は、そのタスクの詳細をブラウザで見られる URL（`${PUBLIC_BASE_URL}/dashboard/tasks/<task_id>`。
+ * dashboard/url.ts の dashboardUrl）。PUBLIC_BASE_URL が空・不正のときは作れないので、null にせずキーを付けない。
+ * task_start・task_status・task_result だけに付ける（task_wait などには付けない）。
+ */
+export type WithDashboardUrl = { dashboard_url?: string };
+
 export type StartValue = {
   task_id: string;
   status: TaskStatus;
   draft_pr_url: string | null;
   note: string;
-};
+} & WithDashboardUrl;
 
 export const START_NOTE =
-  "Phase 3: 作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントが Sandbox で編集・テスト・commit・push します。draft_pr_url は作成前なので null です。PR の URL は task_status・task_result・イベント draft_pr_created で返ります。成果は終端になってから task_result で取得できます（rovo は PR を Ready にもマージにもしません。PR は Draft のまま返り、あなたが差分をレビューして問題が無ければ task_pr_ready で Ready にします。merge_policy が agent_merge なら task_pr_merge でマージもできます。次の一手は task_result の next_steps に書かれます）。";
+  "Phase 3: 作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントが Sandbox で編集・テスト・commit・push します。draft_pr_url は作成前なので null です。PR の URL は task_status・task_result・イベント draft_pr_created で返ります。成果は終端になってから task_result で取得できます（rovo は PR を Ready にもマージにもしません。PR は Draft のまま返り、あなたが差分をレビューして問題が無ければ task_pr_ready で Ready にします。merge_policy が agent_merge なら task_pr_merge でマージもできます。次の一手は task_result の next_steps に書かれます）。応答の dashboard_url は、このタスクの詳細をブラウザで見られる URL です（task_status・task_result にも付きます。閲覧権限が無い人が開いても 404 になるだけで、URL 自体は秘密ではありません。デプロイの設定によっては付きません）。";
 
 /** クライアントに返すイベントの値。TaskDO の保存形はプリミティブだけ（RPC・保存のため）だが、usage の履歴だけは配列で返す */
 export type PublicEventValue =
@@ -84,7 +92,7 @@ export type PublicTaskEvent = Omit<TaskEvent, "payload"> & {
   payload: Record<string, PublicEventValue>;
 };
 
-export type StatusValue = Omit<TaskView, "owner_id">;
+export type StatusValue = Omit<TaskView, "owner_id"> & WithDashboardUrl;
 export type WaitValue = {
   task_id: string;
   status: TaskStatus;
@@ -96,7 +104,9 @@ export type AnswerValue = { task_id: string; question_id: string; status: TaskSt
 export type SteerValue = { task_id: string; steer_id: string; status: TaskStatus };
 export type CancelValue = { task_id: string; status: TaskStatus };
 /** task_result の応答。next_steps は呼び出し元の AI への案内（状態から決まる文）。 */
-export type ResultValue = { task_id: string } & ResultView & { next_steps: string };
+export type ResultValue = { task_id: string } & ResultView & {
+    next_steps: string;
+  } & WithDashboardUrl;
 export type PrReadyValue = {
   task_id: string;
   pr_number: number;
@@ -257,7 +267,8 @@ export function checkStartInput(rawInput: unknown): ServiceResult<CheckedStartIn
 }
 
 export function createTaskService(
-  env: Pick<Env, "USER_DO" | "TASK_DO"> & ModelEnv & { MAX_CONCURRENT_TASKS?: string },
+  env: Pick<Env, "USER_DO" | "TASK_DO"> &
+    ModelEnv & { MAX_CONCURRENT_TASKS?: string; PUBLIC_BASE_URL?: string },
   overrides: Partial<TaskServiceDeps> = {},
   /** プロバイダーキーの取得（Unit が fetch / 時計を差し替える） */
   providerKeys?: ProviderKeysDeps,
@@ -265,6 +276,12 @@ export function createTaskService(
   const deps: TaskServiceDeps = {
     users: overrides.users ?? ((id) => env.USER_DO.getByName(String(id))),
     tasks: overrides.tasks ?? ((id) => env.TASK_DO.getByName(id)),
+  };
+
+  /** dashboard_url を付ける応答に混ぜる。URL を作れない（PUBLIC_BASE_URL が空・不正）ときは何も足さない。 */
+  const withDashboardUrl = (taskId: string): WithDashboardUrl => {
+    const url = dashboardUrl(env, taskId);
+    return url === undefined ? {} : { dashboard_url: url };
   };
 
   return {
@@ -339,6 +356,7 @@ export function createTaskService(
           status,
           draft_pr_url: created.task.draft_pr_url,
           note: START_NOTE,
+          ...withDashboardUrl(created.task.task_id),
         },
       };
     },
@@ -359,6 +377,7 @@ export function createTaskService(
                 options: view.pending_question.options.map(wrapUntrustedQuestion),
               }
             : null,
+          ...withDashboardUrl(taskId),
         },
       };
     },
@@ -502,6 +521,7 @@ export function createTaskService(
               verification: r.result.verification,
               pr: r.result.pr,
             }),
+            ...withDashboardUrl(taskId),
           },
         };
       }

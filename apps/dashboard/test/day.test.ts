@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dayHref, dayOfTask, dayRange, resolveDay, shiftDay } from "../src/day";
+import { dayHref, dayOfTask, dayRange, resolveDay, routeDay, shiftDay } from "../src/day";
 
 const NOW = new Date(2026, 9, 23, 15, 40, 12).getTime(); // 2026-10-23 15:40 ローカル
 
@@ -80,5 +80,28 @@ describe("dayOfTask（タスクが始まったローカルの日。今日・取�
     expect(dayOfTask({ created_at: at(2026, 10, 23, 1), started_at: null }, NOW)).toBeNull();
     expect(dayOfTask({ created_at: at(2026, 10, 25), started_at: null }, NOW)).toBeNull();
     expect(dayOfTask({ created_at: "zz", started_at: "yy" }, NOW)).toBeNull();
+  });
+});
+
+describe("routeDay（URL が指す日。ページの読み込み・popstate で使う）", () => {
+  const TASK = { kind: "task", id: "01K8ZF00000000000000000004" } as const;
+  const OVERVIEW = { kind: "overview" } as const;
+
+  it("一覧: ?day=（無い・不正・今日以降は今日 = null）", () => {
+    expect(routeDay(OVERVIEW, "?day=2026-10-22", NOW)).toBe("2026-10-22");
+    expect(routeDay(OVERVIEW, "", NOW)).toBeNull();
+    expect(routeDay(OVERVIEW, "?day=zz", NOW)).toBeNull();
+    expect(routeDay(OVERVIEW, "?day=2026-10-23", NOW)).toBeNull();
+  });
+
+  it("タスクの URL: ?day= が無ければ未確定（undefined。タスクが始まった日で決める）", () => {
+    expect(routeDay(TASK, "", NOW)).toBeUndefined();
+    expect(routeDay(TASK, "?day=zz", NOW)).toBeUndefined();
+  });
+
+  it("タスクの URL: ?day= があれば、その日（画面の中で選んだときに、見ていた日を残した URL）", () => {
+    expect(routeDay(TASK, "?day=2026-10-22", NOW)).toBe("2026-10-22");
+    // 今日以降の値は今日（null）。未確定にはしない
+    expect(routeDay(TASK, "?day=2026-10-23", NOW)).toBeNull();
   });
 });

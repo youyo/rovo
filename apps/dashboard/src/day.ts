@@ -1,5 +1,5 @@
 import { localDayRange } from "./api";
-import { parseDay } from "./route";
+import { parseDay, type Route } from "./route";
 
 /**
  * 一覧で見る日の計算（ブラウザのローカルの暦日）。day は "YYYY-MM-DD"（過去の日）か null（今日）。
@@ -23,6 +23,16 @@ function startOf(key: string): Date {
 export function resolveDay(search: string, nowMs: number): DayKey {
   const day = parseDay(search);
   return day !== null && day < keyOf(new Date(nowMs)) ? day : null;
+}
+
+/**
+ * URL（ページの読み込み・popstate）が指す日。一覧は ?day=（無い・今日以降は今日 = null）。
+ * タスクの URL は、?day= があればその日（画面の中で選んだときに、見ていた日を残した URL）、無ければ未確定（undefined）。
+ * 未確定は、そのタスクが始まった日（dayOfTask）を詳細の取得から決める。
+ */
+export function routeDay(route: Route, search: string, nowMs: number): DayKey | undefined {
+  if (route.kind === "overview") return resolveDay(search, nowMs);
+  return parseDay(search) === null ? undefined : resolveDay(search, nowMs);
 }
 
 /** 前後に送る。今日より先へは行けない（null のまま）。今日に届いたら null。 */

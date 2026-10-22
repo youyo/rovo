@@ -59,11 +59,13 @@ async function get<T>(
   url: string,
   check: (b: unknown) => b is T,
   fetchImpl: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<{ kind: "ok"; data: T } | { kind: "unauthorized" | "not_found" | "error" }> {
   try {
     const res = await fetchImpl(url, {
       credentials: "same-origin",
       headers: { accept: "application/json" },
+      ...(signal ? { signal } : {}),
     });
     if (res.status === 401) return { kind: "unauthorized" };
     if (res.status === 404) return { kind: "not_found" };
@@ -75,19 +77,28 @@ async function get<T>(
   }
 }
 
-/** fresh: true は、開いた最初の取得だけに付ける（サーバーが GitHub で権限を取り直す。D6）。ポーリングには付けない。 */
+/**
+ * fresh: true は、URL を直接開いたときの最初の取得だけに付ける（サーバーが GitHub で権限を取り直す。D6）。
+ * 画面の中での切り替えとポーリングには付けない。signal は、選択が移ったときに前の取得を止めるため。
+ */
 export function fetchTaskDetail(
   id: string,
   fetchImpl: typeof fetch = fetch,
-  opts: { fresh?: boolean } = {},
+  opts: { fresh?: boolean; signal?: AbortSignal } = {},
 ): Promise<DetailResult> {
-  return get(opts.fresh ? `${base(id)}?fresh=1` : base(id), looksLikeDetail, fetchImpl);
+  return get(
+    opts.fresh ? `${base(id)}?fresh=1` : base(id),
+    looksLikeDetail,
+    fetchImpl,
+    opts.signal,
+  );
 }
 
 export function fetchTaskEvents(
   id: string,
   q: EventsQuery,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<EventsResult> {
-  return get(eventsUrl(id, q), looksLikeEvents, fetchImpl);
+  return get(eventsUrl(id, q), looksLikeEvents, fetchImpl, signal);
 }

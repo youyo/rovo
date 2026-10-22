@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { OverviewView } from "../src/overview-view";
 import { TL_AXIS_H, TL_BAND_H, TL_MIN_LANE_H } from "../src/timeline-view";
+import { BROWSER_CLICKS, clickLink } from "./click-link";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -16,7 +17,12 @@ afterEach(() => {
 
 function mount(
   data: OverviewDto,
-  extra: { stale?: boolean; selectedId?: string | null; isToday?: boolean } = {},
+  extra: {
+    stale?: boolean;
+    selectedId?: string | null;
+    isToday?: boolean;
+    onSelectTask?: (id: string) => void;
+  } = {},
 ) {
   const container = document.createElement("div");
   document.body.append(container);
@@ -32,6 +38,7 @@ function mount(
         stale: extra.stale ?? false,
         isToday: extra.isToday ?? true,
         selectedId: extra.selectedId ?? null,
+        onSelectTask: extra.onSelectTask,
         console: createElement("section", { className: "console" }, "コンソールの場所"),
       }),
     );
@@ -351,5 +358,40 @@ describe("表示の安全（D14）", () => {
     expect(c.innerHTML).not.toMatch(/\sstyle=/i);
     expect(c.innerHTML).not.toMatch(/<style/i);
     expect(c.innerHTML).not.toMatch(/(src|href)="https?:\/\/(?!github\.com\/)/);
+  });
+});
+
+describe("OverviewView: レールとタイムラインの行のクリック（ページを読み直さず切り替える）", () => {
+  const id = overviewFixture.tasks[1]?.task_id as string;
+
+  it("タイムラインの棒: 左クリックは preventDefault して onSelectTask(ID)。href は残る", () => {
+    const calls: string[] = [];
+    const c = mount(overviewFixture, { onSelectTask: (x) => calls.push(x) });
+    const a = c.querySelector(`a[data-task="${id}"]`) as Element;
+    expect(clickLink(a)).toBe(true);
+    expect(calls).toEqual([id]);
+    expect(a.getAttribute("href")).toBe(`/dashboard/tasks/${id}`);
+  });
+
+  it("タイムラインの棒: 修飾キー付き・中クリックは preventDefault も onSelectTask もしない", () => {
+    const calls: string[] = [];
+    const c = mount(overviewFixture, { onSelectTask: (x) => calls.push(x) });
+    const a = c.querySelector(`a[data-task="${id}"]`) as Element;
+    for (const { name, init } of BROWSER_CLICKS) expect(clickLink(a, init), name).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it("レールの行も同じ onSelectTask につながる", () => {
+    const calls: string[] = [];
+    const c = mount(overviewFixture, { onSelectTask: (x) => calls.push(x) });
+    const a = c.querySelector(`a.rail-row[data-task-id="${id}"]`) as Element;
+    expect(clickLink(a)).toBe(true);
+    expect(calls).toEqual([id]);
+  });
+
+  it("onSelectTask が無ければ、どちらも普通のリンク", () => {
+    const c = mount(overviewFixture);
+    expect(clickLink(c.querySelector(`a[data-task="${id}"]`) as Element)).toBe(false);
+    expect(clickLink(c.querySelector(`a.rail-row[data-task-id="${id}"]`) as Element)).toBe(false);
   });
 });

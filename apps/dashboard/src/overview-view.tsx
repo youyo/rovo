@@ -27,6 +27,8 @@ export function OverviewView(props: {
   budget?: BudgetMeDto | null;
   /** レールで選択中のタスク（コンソールに出しているタスク） */
   selectedId: string | null;
+  /** レール・タイムラインの行の（修飾キー無しの）左クリック。ページを読み直さず、そのタスクを選ぶ。無ければ普通のリンク */
+  onSelectTask?: (id: string) => void;
   /** 中央のコンソール */
   console: ReactNode;
   /** data が無いとき、レールに出す案内 */
@@ -64,6 +66,7 @@ export function OverviewView(props: {
             domain={domain}
             nowMs={props.isToday ? nowMs : null}
             isToday={props.isToday}
+            onSelect={props.onSelectTask}
           />
         )}
       </section>
@@ -82,7 +85,12 @@ export function OverviewView(props: {
 
       <div className="main">
         {data ? (
-          <TaskRail tasks={data.tasks} selectedId={props.selectedId} isToday={props.isToday} />
+          <TaskRail
+            tasks={data.tasks}
+            selectedId={props.selectedId}
+            isToday={props.isToday}
+            onSelect={props.onSelectTask}
+          />
         ) : (
           <nav className="rail" aria-label="タスク">
             <p className="rail-empty" role="status">

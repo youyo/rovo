@@ -89,7 +89,8 @@ export function Workspace(props: {
   }
 
   // 切り替えた瞬間に描く、一覧の行の情報（一覧で権限を確かめ済みのタスク）。詳細が届くまでの見出し
-  const row = data && consoleId !== null ? data.tasks.find((t) => t.task_id === consoleId) : undefined;
+  const row =
+    data && consoleId !== null ? data.tasks.find((t) => t.task_id === consoleId) : undefined;
   const preview =
     data && row
       ? {

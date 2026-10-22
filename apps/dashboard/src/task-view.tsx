@@ -204,7 +204,9 @@ function ConMeta(props: {
       <span>{formatUsd(task.cost.cost_usd)}</span>
       <span className="soft">{singleLine(task.repository)}</span>
       <span className="soft">{singleLine(task.owner_login)} が依頼</span>
-      {task.reason === undefined ? null : <span className="soft">理由 {singleLine(task.reason)}</span>}
+      {task.reason === undefined ? null : (
+        <span className="soft">理由 {singleLine(task.reason)}</span>
+      )}
       <span className="grow" />
       <PrInline task={task} />
     </div>
@@ -268,11 +270,7 @@ export function TaskView(props: {
 
       <div className="con-head">
         <h1 id="task-h">{singleLine(task.title)}</h1>
-        <ConMeta
-          task={task}
-          generatedAt={generatedAt}
-          modelSelection={settings.model_selection}
-        />
+        <ConMeta task={task} generatedAt={generatedAt} modelSelection={settings.model_selection} />
         <p className="now-line">
           {now.before}
           {now.prompt === undefined ? null : (

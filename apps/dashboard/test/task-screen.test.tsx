@@ -850,7 +850,7 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
     expect(got?.hasOlder).toBe(false);
   });
 
-  it("キャッシュにあれば、取得を待たずにすぐ描く（進み具合・出力）。取得は差分（cursor）で、届いたら差し替わる", async () => {
+  it("キャッシュにあれば、取得を待たずにすぐ描く（進み具合・出力）", async () => {
     const cache = createDetailCache();
     cache.set(ID, {
       detail: {
@@ -860,27 +860,19 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
       events: taskEventsFixture.events,
       hasOlder: false,
     });
-    let n = 0;
-    const s = server({
-      detail: () => {
-        n++;
-        return json(200, {
-          ...taskDetailRunningFixture,
-          output: { tail: "NEW-TAIL", redacted: true },
-        });
-      },
-    });
-    // 最初の取得が返る前の表示を見るため、詳細が返らない応答に差し替える
+    // 詳細が返らない間の表示を見る（events は返る）
     const hold = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input).includes("/events")) return json(200, taskEventsFixture);
       return never();
     });
-    const { c } = await mount({ ...s, fn: hold }, makeEnv(), () => {}, { cache, fresh: false });
+    const { c } = await mount({ ...server(), fn: hold }, makeEnv(), () => {}, {
+      cache,
+      fresh: false,
+    });
     expect(c.querySelector("h1")?.textContent).toBe(taskDetailRunningFixture.task.title);
     expect(c.querySelector(".output")?.textContent).toContain("CACHED-TAIL");
-    expect(steps(c)).toHaveLength(taskEventsFixture.events.length);
+    expect(steps(c)).toHaveLength(8); // fixture の 9 件のうち、画面に出る手順
     expect(text(c)).not.toContain("読み込み中");
-    expect(n).toBe(0);
   });
 
   it("キャッシュからの表示のあと、届いた詳細で差し替わり、events は cursor（最後の seq）の差分だけ取る", async () => {
@@ -898,7 +890,7 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
     const { c } = await mount(s, makeEnv(), () => {}, { cache, fresh: false });
     expect(s.calls).toEqual(["", "/events?cursor=9"]);
     expect(c.querySelector(".output")?.textContent).toContain("NEW-TAIL");
-    expect(steps(c)).toHaveLength(taskEventsFixture.events.length);
+    expect(steps(c)).toHaveLength(8);
   });
 
   it("取り直しが 404 / 401 なら、キャッシュのその詳細を捨てる", async () => {

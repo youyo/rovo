@@ -9,7 +9,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app";
 import { formatUsd } from "../src/format";
-import { MARKS } from "../src/status";
+import { MARKS, markKindOf } from "../src/status";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,7 +37,10 @@ const deferred = (): Deferred => {
 };
 
 /** 一覧の行の task に、詳細だけが持つ値（いまは・出力）を足した詳細 */
-const detailOf = (id: string, tail = "RUN v4.1.12\n ✓ test/a.test.ts (3 tests)\n"): TaskDetailDto => ({
+const detailOf = (
+  id: string,
+  tail = "RUN v4.1.12\n ✓ test/a.test.ts (3 tests)\n",
+): TaskDetailDto => ({
   ...taskDetailRunningFixture,
   task: rowOf(id),
   output: { tail, redacted: true },
@@ -289,23 +292,21 @@ describe("?fresh=1 は、URL を直接開いたときの最初の取得だけ", 
     expect(detailSearches(detailCalls, B)).toEqual([""]);
   });
 
-  it("切り替えたあとのポーリングにも付かない", async () => {
+  it("切り替えたあとのポーリングにも付かない（走行中のタスクは 5 秒ごとに取り直す）", async () => {
     vi.useFakeTimers();
-    const { c, detailCalls } = await mount(`/dashboard/tasks/${A}`);
-    await leftClick(railRow(c, B));
+    const { c, detailCalls } = await mount(`/dashboard/tasks/${B}`);
+    await leftClick(railRow(c, A)); // A は走行中のタスク
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
-    const b = detailSearches(detailCalls, B);
-    expect(b.length).toBeGreaterThanOrEqual(3);
-    expect(b.every((q) => q === "")).toBe(true);
-    // 直接開いたタスクも、最初の 1 回だけ（ポーリングには付かない）
     const a = detailSearches(detailCalls, A);
-    expect(a[0]).toBe("?fresh=1");
-    expect(a.slice(1).every((q) => q === "")).toBe(true);
+    expect(a.length).toBeGreaterThanOrEqual(3);
+    expect(a.every((q) => q === "")).toBe(true);
+    // 直接開いたタスクの最初の取得だけ fresh
+    expect(detailSearches(detailCalls, B)).toEqual(["?fresh=1"]);
   });
 
   it("もう一度 URL を直接開く（ページの読み込み）と、そのタスクの最初の取得に付く", async () => {
@@ -329,7 +330,7 @@ describe("切り替えた瞬間の表示: 一覧の行の情報と、キャッ�
     const row = rowOf(B);
     expect(consoleTitle(c)).toBe(row.title);
     const head = c.querySelector(".console .con-head")?.textContent ?? "";
-    expect(head).toContain(MARKS.done.label);
+    expect(head).toContain(MARKS[markKindOf(row)].label);
     expect(head).toContain(formatUsd(row.cost.cost_usd));
     expect(head).toContain(row.repository);
     expect(c.querySelector(".console")?.textContent).toContain("読み込み中");
@@ -382,6 +383,7 @@ describe("切り替えた瞬間の表示: 一覧の行の情報と、キャッ�
         call.id === A && call.n >= 1 ? hold.promise : json(200, detailOf(call.id, "OLD-TAIL")),
     });
     await leftClick(railRow(c, B));
+    expect(consoleTitle(c)).toBe(rowOf(B).title);
     await back(); // 一覧の既定（A）へ
     expect(selectedId(c)).toBe(A);
     expect(c.querySelector(".console .output")?.textContent).toContain("OLD-TAIL");
@@ -415,8 +417,8 @@ describe("切り替えた瞬間の表示: 一覧の行の情報と、キャッ�
     const { c } = await mount(`/dashboard/tasks/${B}`, {
       detail: (call) => (call.id === B ? slow.promise : json(200, detailOf(call.id))),
     });
-    expect(c.querySelector(".console .output")).toBeNull();
-    expect(c.querySelector(".console")?.textContent).toContain("読み込み中");
+    expect(c.querySelector(".output")).toBeNull();
+    expect(c.querySelector(".console-col")?.textContent).toContain("読み込み中");
   });
 });
 
@@ -425,7 +427,9 @@ describe("古い応答は、新しい選択を上書きしない", () => {
     const slowB = deferred();
     const { c, detailCalls } = await mount("/dashboard/", {
       detail: (call) =>
-        call.id === B ? slowB.promise : json(200, detailOf(call.id, `TAIL-OF-${call.id.slice(-2)}`)),
+        call.id === B
+          ? slowB.promise
+          : json(200, detailOf(call.id, `TAIL-OF-${call.id.slice(-2)}`)),
     });
     await leftClick(railRow(c, B));
     await leftClick(railRow(c, C));

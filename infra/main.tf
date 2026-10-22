@@ -138,32 +138,54 @@ resource "cloudflare_api_token" "logpush" {
 
 # ---- gateway の読み取り用トークン（D10b / D12） --------------------------------
 
-# gateway が AI Gateway のプロバイダーキー（BYOK）の一覧を読むための secret（CLOUDFLARE_API_TOKEN）。
-# 権限は「AI Gateway Read」だけ。対象はこのアカウントだけ。値は sensitive の output にして、
+# gateway の secret（CLOUDFLARE_API_TOKEN）。名前は "ai-gateway-read" のままだが、実態は読み取り専用の 2 つの権限:
+#   1. 「AI Gateway Read」: AI Gateway のプロバイダーキー（BYOK）の一覧と、クレジット残高を読む（D10b / ダッシュボードの M9）
+#   2. 「Account Analytics Read」: ダッシュボードの Cloudflare の概要が GraphQL Analytics API を読む（コンテナ・Workers・
+#      AI Gateway・Workers AI の集計。M9 / D13 案 B）
+# 名前（と resource のアドレス）を変えるとトークンが再作成されて値が変わる（`deploy:secrets --rotate` が要る）ので、変えない。
+# 対象はこのアカウントだけ。値は sensitive の output にして、
 # `mise run deploy:secrets` が `terraform output -raw` で wrangler secret put に流す（画面にも引数にも出さない）。
 data "cloudflare_api_token_permission_groups_list" "ai_gateway_read" {
   count = var.ai_gateway_read_permission_group_id == null ? 1 : 0
   name  = "AI Gateway Read"
 }
 
+data "cloudflare_api_token_permission_groups_list" "account_analytics_read" {
+  count = var.account_analytics_read_permission_group_id == null ? 1 : 0
+  name  = "Account Analytics Read"
+}
+
 locals {
-  # 名前の完全一致で選ぶ。見つからなければ plan で止まる（添字が範囲外）。
-  ai_gateway_read_permission_group_id = coalesce(
-    var.ai_gateway_read_permission_group_id,
-    try([for g in data.cloudflare_api_token_permission_groups_list.ai_gateway_read[0].result : g.id if g.name == "AI Gateway Read"][0], null),
-  )
+  # 名前の完全一致で選ぶ。見つからなければ null になり、下のトークンの precondition で plan が止まる。
+  account_analytics_read_permission_group_id = var.account_analytics_read_permission_group_id != null ? var.account_analytics_read_permission_group_id : try([for g in data.cloudflare_api_token_permission_groups_list.account_analytics_read[0].result : g.id if g.name == "Account Analytics Read"][0], null)
+  ai_gateway_read_permission_group_id        = var.ai_gateway_read_permission_group_id != null ? var.ai_gateway_read_permission_group_id : try([for g in data.cloudflare_api_token_permission_groups_list.ai_gateway_read[0].result : g.id if g.name == "AI Gateway Read"][0], null)
 }
 
 resource "cloudflare_api_token" "ai_gateway_read" {
   name = "${var.name_prefix}-gateway-ai-gateway-read"
 
   policies = [{
-    effect            = "allow"
-    permission_groups = [{ id = local.ai_gateway_read_permission_group_id }]
+    effect = "allow"
+    permission_groups = [
+      { id = local.ai_gateway_read_permission_group_id },
+      { id = local.account_analytics_read_permission_group_id },
+    ]
     resources = jsonencode({
       "com.cloudflare.api.account.${var.account_id}" = "*"
     })
   }]
+
+  lifecycle {
+    # 権限グループが名前で見つからない（名前が変わった・API の権限が足りない）まま、権限の欠けたトークンを作らない
+    precondition {
+      condition     = local.ai_gateway_read_permission_group_id != null
+      error_message = "権限グループ「AI Gateway Read」が見つからない。ai_gateway_read_permission_group_id に ID を指定する。"
+    }
+    precondition {
+      condition     = local.account_analytics_read_permission_group_id != null
+      error_message = "権限グループ「Account Analytics Read」が見つからない。account_analytics_read_permission_group_id に ID を指定する。"
+    }
+  }
 }
 
 # R2 を宛先にした Logpush の資格情報は、API トークンから作る S3 互換の鍵:

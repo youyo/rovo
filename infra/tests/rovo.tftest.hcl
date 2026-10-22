@@ -11,6 +11,8 @@ variables {
   r2_item_write_permission_group_id = "fedcba9876543210${"fedcba9876543210"}"
   # 同上（「AI Gateway Read」の権限グループ）
   ai_gateway_read_permission_group_id = "0011223344556677${"8899aabbccddeeff"}"
+  # 同上（「Account Analytics Read」の権限グループ。ダッシュボードの Cloudflare の概要の GraphQL 用）
+  account_analytics_read_permission_group_id = "ffeeddccbbaa9988${"7766554433221100"}"
 }
 
 run "logpush_filter_has_three_script_names" {
@@ -196,7 +198,8 @@ run "token_is_scoped_to_audit_bucket" {
   }
 }
 
-# gateway の読み取り用トークン（D10b の CLOUDFLARE_API_TOKEN。D12 で Terraform が作る）。権限は AI Gateway の読み取りだけ。
+# gateway の読み取り用トークン（D10b の CLOUDFLARE_API_TOKEN。D12 で Terraform が作る）。権限は AI Gateway の読み取りと、
+# 分析の読み取り（Account Analytics Read。ダッシュボードの Cloudflare の概要。M9 / D13 案 B）。どちらも読み取りだけ。
 run "gateway_read_token_is_read_only_and_account_scoped" {
   command = plan
 
@@ -205,8 +208,8 @@ run "gateway_read_token_is_read_only_and_account_scoped" {
     error_message = "gateway 用トークンのポリシーが 1 つではない"
   }
   assert {
-    condition     = [for g in cloudflare_api_token.ai_gateway_read.policies[0].permission_groups : g.id] == [var.ai_gateway_read_permission_group_id]
-    error_message = "gateway 用トークンの権限が「AI Gateway Read」だけになっていない"
+    condition     = [for g in cloudflare_api_token.ai_gateway_read.policies[0].permission_groups : g.id] == [var.ai_gateway_read_permission_group_id, var.account_analytics_read_permission_group_id]
+    error_message = "gateway 用トークンの権限が「AI Gateway Read」と「Account Analytics Read」の 2 つ（読み取りだけ）になっていない"
   }
   assert {
     condition     = jsondecode(cloudflare_api_token.ai_gateway_read.policies[0].resources) == { "com.cloudflare.api.account.${var.account_id}" = "*" }
@@ -220,6 +223,27 @@ run "gateway_read_token_is_read_only_and_account_scoped" {
     condition     = cloudflare_api_token.ai_gateway_read.name == "rovo-gateway-ai-gateway-read"
     error_message = "gateway 用トークンの名前が接頭辞から決まっていない"
   }
+}
+
+# 権限グループが名前で見つからないとき（検索結果が空）、plan が止まる。ID を渡さず（null）、mock の検索結果（空）に任せる
+run "analytics_permission_group_not_found_stops_plan" {
+  command = plan
+
+  variables {
+    account_analytics_read_permission_group_id = null
+  }
+
+  expect_failures = [cloudflare_api_token.ai_gateway_read]
+}
+
+run "ai_gateway_permission_group_not_found_stops_plan" {
+  command = plan
+
+  variables {
+    ai_gateway_read_permission_group_id = null
+  }
+
+  expect_failures = [cloudflare_api_token.ai_gateway_read]
 }
 
 run "gateway_read_token_name_follows_prefix" {
@@ -384,6 +408,16 @@ run "reject_bad_ai_gateway_read_permission_group_id" {
   }
 
   expect_failures = [var.ai_gateway_read_permission_group_id]
+}
+
+run "reject_bad_account_analytics_read_permission_group_id" {
+  command = plan
+
+  variables {
+    account_analytics_read_permission_group_id = "not-hex"
+  }
+
+  expect_failures = [var.account_analytics_read_permission_group_id]
 }
 
 run "reject_bad_permission_group_id" {

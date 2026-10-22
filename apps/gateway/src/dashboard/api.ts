@@ -1,6 +1,7 @@
 import {
   type BudgetMeDto,
   BudgetMeDtoSchema,
+  CloudflareSummaryDtoSchema,
   type ErrorDto,
   LIMITS,
   type OverviewDto,
@@ -20,6 +21,7 @@ import { errorMessageForLog } from "../log-error";
 import type { DashboardDetailResult } from "../tasks/task-do";
 import { isTaskId } from "../tasks/ulid";
 import { type DashboardSession, requireSession } from "./auth";
+import { loadCloudflareSummary, parseCloudflareRange } from "./cloudflare";
 import { toEventDto } from "./events";
 import { jsonResponse } from "./guard";
 
@@ -59,6 +61,8 @@ const PR_STATE_VALUES: ReadonlySet<string> = new Set(PR_STATES);
 export interface ReadApiDeps {
   /** 時刻（テスト用）。月（UTC）の範囲と generated_at に使う */
   now?: () => number;
+  /** Cloudflare の上流の呼び出し（テスト用） */
+  fetch?: typeof fetch;
 }
 
 const errorJson = (status: 400 | 401 | 404 | 503, error: ErrorDto["error"]) =>
@@ -527,6 +531,22 @@ async function handleBudget(request: Request, env: Env): Promise<Response> {
 }
 
 /**
+ * Cloudflare の概要（M9 / D13）。閲覧者に依らない集計なので、見えるリポジトリの集合は使わない（ログインだけ必須）。
+ * range は 1h / 24h / 7d の列挙だけ（既定 24h）。GraphQL・ID・期間の式はクライアントから受けない。
+ */
+async function handleCloudflare(request: Request, env: Env, deps: ReadApiDeps): Promise<Response> {
+  const auth = await authenticate(request, env);
+  if (!auth.ok) return auth.response;
+  const range = parseCloudflareRange(new URL(request.url).searchParams.get("range"));
+  if (range === null) return errorJson(400, "bad_request");
+  const dto = await loadCloudflareSummary(env, range, {
+    ...(deps.fetch ? { fetch: deps.fetch } : {}),
+    ...(deps.now ? { now: deps.now } : {}),
+  });
+  return validated(CloudflareSummaryDtoSchema, "CloudflareSummaryDto", dto);
+}
+
+/**
  * 読み取り API の振り分け。対象外の経路は null（呼び出し側が JSON の 404 にする）。
  * 例外（UserDO・DirectoryDO・TaskDO の障害、DashboardUnavailableError）は投げたままにする（呼び出し側が 503 にする）。
  */
@@ -539,7 +559,8 @@ export async function handleReadApi(
   if (!pathname.startsWith(`${PREFIX}/`)) return null;
   const rest = pathname.slice(PREFIX.length);
   const task = /^\/tasks\/([^/]+)(\/events)?$/.exec(rest);
-  const known = rest === "/overview" || rest === "/budget" || task !== null;
+  const known =
+    rest === "/overview" || rest === "/budget" || rest === "/cloudflare" || task !== null;
   if (!known) return null;
   const method = request.method.toUpperCase();
   if (method !== "GET" && method !== "HEAD") {
@@ -548,6 +569,7 @@ export async function handleReadApi(
   const now = deps.now ?? Date.now;
   if (rest === "/overview") return handleOverview(request, env, now);
   if (rest === "/budget") return handleBudget(request, env);
+  if (rest === "/cloudflare") return handleCloudflare(request, env, deps);
   const taskId = task?.[1] ?? "";
   return task?.[2] === "/events"
     ? handleTaskEvents(request, env, taskId)

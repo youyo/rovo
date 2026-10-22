@@ -28,7 +28,7 @@ output "ai_web_gateway_id" {
 # 秘密。state に平文で残る（Logpush 用トークンと同じ扱い。README）。wrangler 設定には書かない。
 # 読むのは `mise run deploy:secrets` だけ（terraform output -raw gateway_cloudflare_api_token を wrangler secret put に流す）。
 output "gateway_cloudflare_api_token" {
-  description = "gateway の secret CLOUDFLARE_API_TOKEN（AI Gateway Read だけ。sensitive）"
+  description = "gateway の secret CLOUDFLARE_API_TOKEN（AI Gateway Read + Account Analytics Read。読み取りだけ。sensitive）"
   value       = cloudflare_api_token.ai_gateway_read.value
   sensitive   = true
 }

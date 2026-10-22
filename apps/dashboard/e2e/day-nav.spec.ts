@@ -71,6 +71,38 @@ test("(day-2) 日付が進んだ画面（ブラウザの時計を 1 日進める
   await expect(rail(page, s.tasks.done as string)).toHaveCount(0);
 });
 
+test("(day-task) /dashboard/tasks/<id> は一覧でそのタスクを選んだ状態で開く。表示する日はそのタスクが始まった日。URL はそのまま", async ({
+  page,
+}) => {
+  const done = s.tasks.done as string;
+  // 今日始まったタスク: 今日の表示、レールで選択中、「詳細を開く」は無い
+  await loginAs(page, s.users.alice, `/dashboard/tasks/${done}`);
+  await expect(page).toHaveURL(new RegExp(`/dashboard/tasks/${done}$`));
+  await expect(page.locator("nav.rail")).toBeVisible();
+  await expect(rail(page, done)).toHaveAttribute("aria-current", "true");
+  await expect(page.getByRole("heading", { level: 1, name: "完了したタスク" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "詳細を開く" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "次の日" })).toBeDisabled();
+  await expect(page.locator(".day-summary")).toContainText(heading(Date.now()));
+
+  // ブラウザの時計を 1 日進める → そのタスクは「前の日」に始まったことになり、その日の一覧で開く
+  await page.clock.setFixedTime(Date.now() + DAY_MS);
+  await page.reload();
+  await expect(page).toHaveURL(new RegExp(`/dashboard/tasks/${done}$`));
+  await expect(page.locator(".day-summary")).toContainText(heading(Date.now()));
+  await expect(rail(page, done)).toHaveAttribute("aria-current", "true");
+  await expect(page.getByRole("heading", { level: 1, name: "完了したタスク" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "今日へ" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "次の日" })).toBeEnabled();
+
+  // 日を送ると一覧の URL になり、戻るで元のタスクの表示に戻る
+  await page.getByRole("button", { name: "今日へ" }).click();
+  await expect(page).toHaveURL(/\/dashboard\/$/);
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/dashboard/tasks/${done}$`));
+  await expect(rail(page, done)).toHaveAttribute("aria-current", "true");
+});
+
 test("(day-3) 狭い画面（360px）でもヘッダーが横にあふれない", async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 700 });
   await loginAs(page, s.users.alice);

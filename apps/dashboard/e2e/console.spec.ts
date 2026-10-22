@@ -58,17 +58,16 @@ test("(12) 一覧の骨格: ヘッダ → 細いタイムライン帯 → レー
   expect(band.height).toBeGreaterThan(30);
   expect(band.height).toBeLessThanOrEqual(64);
 
-  // 一覧のコンソールは最新の走行中。見出しに「詳細を開く」、レールで選択中
+  // 一覧のコンソールは最新の走行中。レールで選択中。個別ページへの「詳細を開く」リンクは無い（一覧がそのまま詳細）
   await expect(page.getByRole("heading", { level: 1, name: "手順が長いタスク" })).toBeVisible();
-  const open = page.getByRole("link", { name: "詳細を開く" });
-  await expect(open).toHaveAttribute("href", taskPath(id("long")));
+  await expect(page.getByRole("link", { name: "詳細を開く" })).toHaveCount(0);
   await expect(rail(page, id("long"))).toHaveAttribute("aria-current", "true");
-  await open.click();
-  await expect(page).toHaveURL(new RegExp(`${taskPath(id("long"))}$`));
-  // 詳細も同じ骨格
+  // タスクの URL（MCP の dashboard_url）を開いても、同じ骨格
+  await page.goto(taskPath(id("long")));
   for (const sel of ["header.top", ".tlband", "nav.rail", ".console", ".statusbar"]) {
     await expect(page.locator(sel).first(), sel).toBeVisible();
   }
+  await expect(page.getByRole("link", { name: "詳細を開く" })).toHaveCount(0);
 });
 
 test("(13) ステータスバーに今月の自分・全員・モデル別・Cloudflare。「内訳」で引き出しを開閉できる（情報は消えない）", async ({

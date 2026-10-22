@@ -98,12 +98,13 @@ describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
     );
   });
 
-  it("詳細でも同じヘッダ（全員/自分・要約）。戻るリンクがある", async () => {
+  it("タスクの URL でも同じヘッダ（全員/自分・要約・日付の前後送り）。戻るリンクは無い", async () => {
     const { c } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
     const head = c.querySelector("header.top") as HTMLElement;
     expect(head.querySelector("fieldset.seg")).not.toBeNull();
     expect(text(head.querySelector(".day-summary"))).toContain("5 件");
-    expect(head.querySelector("a[href='/dashboard/']")?.textContent).toBe("ダッシュボードに戻る");
+    expect(head.querySelector("a[href='/dashboard/']")).toBeNull();
+    expect(head.querySelector("button[aria-label='前の日']")).not.toBeNull();
   });
 
   it("「自分」に切り替えると、要約もレールも自分の分になる", async () => {
@@ -122,12 +123,11 @@ describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
 });
 
 describe("一覧 /dashboard のコンソール", () => {
-  it("走行中のタスクがあれば最新の走行中を出す。見出しに「詳細を開く」リンク", async () => {
+  it("走行中のタスクがあれば最新の走行中を出す。「詳細を開く」リンクは無い", async () => {
     const { c, f } = await mount("/dashboard/");
     expect(paths(f)).toContain(`/dashboard/api/tasks/${RUNNING_ID}`);
     expect(text(c.querySelector(".console h1"))).toBe(taskDetailRunningFixture.task.title);
-    const open = [...c.querySelectorAll(".console a")].find((a) => a.textContent === "詳細を開く");
-    expect(open?.getAttribute("href")).toBe(`/dashboard/tasks/${RUNNING_ID}`);
+    expect([...c.querySelectorAll("a")].some((a) => a.textContent === "詳細を開く")).toBe(false);
     // レールでも選択されている
     expect(c.querySelector("a.rail-row[aria-current='true']")?.getAttribute("data-task-id")).toBe(
       RUNNING_ID,
@@ -163,7 +163,7 @@ describe("一覧 /dashboard のコンソール", () => {
   });
 });
 
-describe("詳細 /dashboard/tasks/:id も同じ骨格", () => {
+describe("/dashboard/tasks/:id は一覧でそのタスクを選んだ状態（同じ骨格）", () => {
   it("タイムライン帯・レール・コンソール・ステータスバーが出る。選んだタスクが選択中。「詳細を開く」は出さない", async () => {
     const { c, f } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
     expect(paths(f)).toContain("/dashboard/api/overview");

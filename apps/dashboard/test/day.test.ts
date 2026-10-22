@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dayHref, dayRange, resolveDay, shiftDay } from "../src/day";
+import { dayHref, dayOfTask, dayRange, resolveDay, shiftDay } from "../src/day";
 
 const NOW = new Date(2026, 9, 23, 15, 40, 12).getTime(); // 2026-10-23 15:40 ローカル
 
@@ -55,5 +55,30 @@ describe("dayHref", () => {
   it("今日はクエリ無し、過去の日は ?day=", () => {
     expect(dayHref("/dashboard/", null)).toBe("/dashboard/");
     expect(dayHref("/dashboard/", "2026-10-22")).toBe("/dashboard/?day=2026-10-22");
+  });
+});
+
+describe("dayOfTask（タスクが始まったローカルの日。今日・取れないときは null）", () => {
+  const at = (y: number, mo: number, d: number, h = 12) => new Date(y, mo - 1, d, h).toISOString();
+  it("started_at のローカルの暦日", () => {
+    expect(dayOfTask({ created_at: at(2026, 10, 20), started_at: at(2026, 10, 21) }, NOW)).toBe(
+      "2026-10-21",
+    );
+  });
+  it("started_at が無ければ created_at", () => {
+    expect(dayOfTask({ created_at: at(2026, 10, 20), started_at: null }, NOW)).toBe("2026-10-20");
+  });
+  it("ローカルの 0 時直後・23 時台はその日のまま（UTC の日付ではない）", () => {
+    expect(dayOfTask({ created_at: at(2026, 10, 20, 0), started_at: null }, NOW)).toBe(
+      "2026-10-20",
+    );
+    expect(dayOfTask({ created_at: at(2026, 10, 20, 23), started_at: null }, NOW)).toBe(
+      "2026-10-20",
+    );
+  });
+  it("今日・未来・壊れた日時は null（今日）", () => {
+    expect(dayOfTask({ created_at: at(2026, 10, 23, 1), started_at: null }, NOW)).toBeNull();
+    expect(dayOfTask({ created_at: at(2026, 10, 25), started_at: null }, NOW)).toBeNull();
+    expect(dayOfTask({ created_at: "zz", started_at: "yy" }, NOW)).toBeNull();
   });
 });

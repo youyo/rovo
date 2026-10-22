@@ -5,7 +5,7 @@ import { type TaskDetailDeps, useTaskDetail } from "./use-task-detail";
 
 const BACK = "/dashboard/";
 
-/** 詳細の画面（取得・自動更新・各状態）。401 は onUnauthorized で再ログインの表示へ。404 は題名の断片も出さない。 */
+/** コンソール（取得・自動更新・各状態）。401 は onUnauthorized で再ログインの表示へ。404 は題名の断片も出さない。 */
 export function TaskScreen(props: {
   id: string;
   onUnauthorized: () => void;
@@ -15,8 +15,6 @@ export function TaskScreen(props: {
   onAutoRefreshChange?: (on: boolean) => void;
   /** 「今すぐ更新」で詳細のほかに取り直したいもの（一覧など） */
   onRefreshAlso?: () => void;
-  /** 一覧のコンソールのとき、詳細ページへのリンク先 */
-  detailHref?: string;
 }) {
   const [ownAutoRefresh, setOwnAutoRefresh] = useState(() => loadAutoRefresh());
   const autoRefresh = props.autoRefresh ?? ownAutoRefresh;
@@ -88,7 +86,6 @@ export function TaskScreen(props: {
           autoRefresh={autoRefresh}
           onAutoRefreshChange={onAutoRefreshChange}
           onRefresh={onRefresh}
-          detailHref={props.detailHref}
           onLoadOlder={() => void loadOlder()}
         />
       );

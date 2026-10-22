@@ -2,16 +2,14 @@ import type { ReactNode } from "react";
 import type { Scope } from "./api";
 import type { DayKey } from "./day";
 import type { DaySummary } from "./rail";
-import type { Route } from "./route";
 
 const SCOPES: { value: Scope; label: string }[] = [
   { value: "all", label: "全員" },
   { value: "me", label: "自分" },
 ];
 
-/** ヘッダ（一覧と詳細で同じ）: rovo・全員/自分・その日の要約・利用者名・ログアウト。 */
+/** ヘッダ: rovo・全員/自分・その日の要約・利用者名・ログアウト。 */
 export function Header(props: {
-  route: Route;
   /** ログイン済みのときだけ全員/自分を出す */
   scope?: Scope;
   onScopeChange?: (scope: Scope) => void;
@@ -33,11 +31,6 @@ export function Header(props: {
   return (
     <header className="top">
       <div className="brand">rovo</div>
-      {props.route.kind === "task" ? (
-        <a className="back" href="/dashboard/">
-          ダッシュボードに戻る
-        </a>
-      ) : null}
       {props.scope !== undefined && props.onScopeChange ? (
         <fieldset className="seg" aria-label="表示するタスク">
           {SCOPES.map((s) => (

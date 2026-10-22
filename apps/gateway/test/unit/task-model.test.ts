@@ -193,7 +193,7 @@ describe("task_start の effort（タスクごとの上書き）", () => {
     });
   });
 
-  it("未指定は従来どおり MODEL_EFFORTS の値（既定のモデル = high、haiku = 上書きの minimal）。spec に effort は付かない", async () => {
+  it("未指定は従来どおり MODEL_EFFORTS の値（既定のモデル = high、haiku = 上書きの minimal）。spec にも同じ既定の effort が入る", async () => {
     const p = principal();
     const svc = createTaskService(env);
     const a = await start(p);
@@ -203,8 +203,16 @@ describe("task_start の effort（タスクごとの上書き）", () => {
       ok: true,
       value: { effort: "high" },
     });
-    expect((await fakeAgent(a.value.task_id).calls()).specs[0]).not.toHaveProperty("effort");
-    expect((await fakeAgent(b.value.task_id).calls()).specs[0]).not.toHaveProperty("effort");
+    expect((await fakeAgent(a.value.task_id).calls()).specs[0]?.effort).toBe("high");
+    expect((await fakeAgent(b.value.task_id).calls()).specs[0]?.effort).toBe("minimal");
+  });
+
+  it("省略時に既定の effort を spec へ載せても、同じ idempotency_key・同じ入力の再試行は同じ task_id", async () => {
+    const p = principal();
+    const a = await start(p, { idempotency_key: "eff-idem-1" });
+    const b = await start(p, { idempotency_key: "eff-idem-1" });
+    if (!a.ok || !b.ok) throw new Error("start failed");
+    expect(b.value.task_id).toBe(a.value.task_id);
   });
 
   it("そのモデルが対応しないレベルは invalid_input。message に使えるレベルの一覧が入り、予約もしない", async () => {

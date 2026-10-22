@@ -1234,8 +1234,10 @@ export class TaskDO extends DurableObject<Env> {
           : {}),
         constraints: data.constraints,
         model,
-        // 明示したときだけ載せる（省略は agent が、モデルごとの既定 MODEL_EFFORTS で決める）
-        ...(data.effort !== undefined ? { effort: data.effort } : {}),
+        // 常に載せる（task 行に保存したのと同じ値。省略時はモデルごとの既定。off も値として載せる）。
+        // gateway と agent の片方だけのデプロイでも、task_status の effort と実際の思考レベルがずれない。
+        // fingerprint は data.effort だけで作る（既定の値は入れない）
+        effort,
         // 明示したときだけ載せる（省略は agent の既定。後段の自動の昇格も、明示したタスクでは行わない）
         ...(data.sandbox_instance !== undefined ? { sandboxInstance: data.sandbox_instance } : {}),
         budgetUsd: taskBudgetUsd(this.env),

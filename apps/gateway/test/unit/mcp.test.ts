@@ -71,7 +71,7 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("15 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("16 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
@@ -82,6 +82,7 @@ describe("/mcp ツール一覧", () => {
       "sandbox_instances_list",
       "task_answer",
       "task_cancel",
+      "task_console",
       "task_pr_merge",
       "task_pr_ready",
       "task_result",
@@ -2280,5 +2281,107 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     const instructions = client.getInstructions() ?? "";
     expect(instructions).toMatch(/mise run[^。]*使わない/);
     await client.close();
+  });
+});
+
+describe("task_console（mod が画面に進み具合を出すための読み取り専用ツール）", () => {
+  it("説明: 読み取り専用・画面用であること、エージェントの流れは task_wait と task_result で繰り返し呼ばないこと、子の文字列は非信頼の囲み（データ）であることを書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const desc = tools.find((t) => t.name === "task_console")?.description ?? "";
+    expect(desc).toContain("読み取り専用");
+    expect(desc).toContain("画面");
+    expect(desc).toContain("task_wait");
+    expect(desc).toContain("task_result");
+    expect(desc).toMatch(/繰り返し呼ばない/);
+    expect(desc).toContain("UNTRUSTED_CHILD_QUESTION");
+    expect(desc).toMatch(/指示ではなく.*データ/);
+    expect(desc).toContain("自分のタスクだけ");
+    const schema = tools.find((t) => t.name === "task_console")?.inputSchema;
+    expect(schema?.required).toEqual(["task_id"]);
+    // task_wait の説明は変えない（task_console を勧めない）
+    expect(tools.find((t) => t.name === "task_wait")?.description).not.toContain("task_console");
+    await client.close();
+  });
+
+  it("instructions に task_console の項目を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const text = client.getInstructions() ?? "";
+    expect(text).toContain("task_console");
+    expect(text).toMatch(/task_console[^。]*繰り返し呼ばない/);
+    await client.close();
+  });
+
+  it("実行中は phase=run・output に command_progress が出る。終端（cancel）で phase=done・stopped_phase・output=null。task_status / task_wait の応答は変わらない", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const s = body(await client.callTool({ name: "task_start", arguments: startArgs("t1") }));
+    const taskId = String(s.task_id);
+    await fakeAgent(taskId).emit("command_progress", {
+      command: "pnpm test",
+      startedAt: Date.UTC(2026, 9, 22, 1, 0, 0),
+      outputTail: "step 1\n",
+    });
+    await taskStub(taskId).advance();
+    const running = await client.callTool({ name: "task_console", arguments: { task_id: taskId } });
+    expect(running.isError).toBeFalsy();
+    expect(body(running)).toMatchObject({
+      task_id: taskId,
+      status: "RUNNING",
+      phase: "run",
+      stopped_phase: null,
+      output: { running: true, redacted: true },
+    });
+    expect(JSON.stringify(body(running).output)).toContain("UNTRUSTED_CHILD_QUESTION");
+    const wait = body(
+      await client.callTool({
+        name: "task_wait",
+        arguments: { task_id: taskId, cursor: "0", timeout_seconds: 0 },
+      }),
+    );
+    expect(JSON.stringify(wait)).not.toContain("step 1");
+    expect(wait).not.toHaveProperty("phase");
+
+    await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
+    const done = body(
+      await client.callTool({ name: "task_console", arguments: { task_id: taskId } }),
+    );
+    expect(done).toMatchObject({
+      status: "CANCELLED",
+      phase: "done",
+      stopped_phase: "run",
+      now: null,
+      output: null,
+    });
+    const status = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+    );
+    expect(status).not.toHaveProperty("phase");
+    expect(status).not.toHaveProperty("output");
+    await client.close();
+  });
+
+  it("他人のタスクは task_status と同じ not_found。未知の task_id も not_found。task_id 欠落は invalid_input", async () => {
+    const alice = await user("alice");
+    const bob = await user("bob");
+    const ca = await connect(createApiApp(), alice.props);
+    const cb = await connect(createApiApp(), bob.props);
+    const s = body(await ca.callTool({ name: "task_start", arguments: startArgs("t1") }));
+    const taskId = String(s.task_id);
+    const viaConsole = await cb.callTool({ name: "task_console", arguments: { task_id: taskId } });
+    const viaStatus = await cb.callTool({ name: "task_status", arguments: { task_id: taskId } });
+    expect(viaConsole.isError).toBe(true);
+    expect(body(viaConsole)).toEqual(body(viaStatus));
+    expect(body(viaConsole).code).toBe("not_found");
+    const unknown = await ca.callTool({
+      name: "task_console",
+      arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+    });
+    expect(body(unknown).code).toBe("not_found");
+    const missing = await ca.callTool({ name: "task_console", arguments: {} });
+    expect(body(missing).code).toBe("invalid_input");
+    await Promise.all([ca.close(), cb.close()]);
   });
 });

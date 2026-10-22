@@ -191,3 +191,32 @@ export function buildOutput(
     redacted: true,
   };
 }
+
+const PHASE_OF: Record<string, TaskDetailDto["phase"]> = {
+  CREATING: "prepare",
+  RUNNING: "run",
+  INPUT_REQUIRED: "run",
+  RECOVERING: "run",
+  VERIFYING: "verify",
+};
+
+/**
+ * 終端（失敗・予算超過・キャンセル）で止まった段階。準備で失敗（failure_phase が setup）→ prepare、
+ * 検証に入った記録がある → verify、実行に入った記録がある → run、どちらも無い → prepare。完了・非終端は null。
+ */
+export function stoppedPhaseOf(
+  status: string,
+  failurePhase: string | null,
+  reached: { running: boolean; verifying: boolean },
+): "prepare" | "run" | "verify" | null {
+  if (status !== "FAILED" && status !== "BUDGET_EXCEEDED" && status !== "CANCELLED") return null;
+  if (failurePhase === "setup") return "prepare";
+  if (reached.verifying) return "verify";
+  if (reached.running) return "run";
+  return "prepare";
+}
+
+/** 状態から段階を求める（詳細 API と task_console が同じ関数を使う）。終端（と未知の状態）は done */
+export function phaseOf(status: string): TaskDetailDto["phase"] {
+  return PHASE_OF[status] ?? "done";
+}

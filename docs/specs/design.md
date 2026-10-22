@@ -205,6 +205,7 @@ Claude Code と Cowork に同じ Remote MCP Server を提供する。
 | `task_start` | タスク開始 |
 | `task_wait` | イベント待機 |
 | `task_status` | 状態取得 |
+| `task_console` | 画面（Claude Code の mod）に進み具合を出すための読み取り専用ツール。状態・段階・いまの手順・コンソールの出力を返す。ダッシュボードの設計 D19 |
 | `task_answer` | 子の質問への回答 |
 | `task_steer` | 追加指示 |
 | `task_cancel` | キャンセル |

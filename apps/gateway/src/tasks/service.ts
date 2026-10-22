@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildNow, buildOutput, phaseOf, stoppedPhaseOf } from "../dashboard/detail-now";
 import { dashboardUrl } from "../dashboard/url";
 import {
   type ModelChoice,
@@ -104,6 +105,27 @@ export type PublicTaskEvent = Omit<TaskEvent, "payload"> & {
 };
 
 export type StatusValue = Omit<TaskView, "owner_id"> & WithDashboardUrl;
+/**
+ * task_console の応答（Claude Code の mod が画面に出す。docs/specs/dashboard.md の task_console）。
+ * phase / stopped_phase / now / output はダッシュボードの詳細 API と同じ関数で作る。子が書いた文字列
+ * （now.text・output.command・output.tail）は非信頼の囲みで包む。
+ */
+export type ConsoleValue = {
+  task_id: string;
+  status: TaskStatus;
+  phase: "prepare" | "run" | "verify" | "done" | null;
+  stopped_phase: "prepare" | "run" | "verify" | null;
+  now: { kind: string; text: string; at?: string } | null;
+  output: {
+    command?: string;
+    tail: string | null;
+    running?: true;
+    started_at?: string;
+    at?: string;
+    redacted: true;
+  } | null;
+  generated_at: string;
+} & WithDashboardUrl;
 export type WaitValue = {
   task_id: string;
   status: TaskStatus;
@@ -444,6 +466,48 @@ export function createTaskService(
                 options: view.pending_question.options.map(wrapUntrustedQuestion),
               }
             : null,
+          ...withDashboardUrl(taskId),
+        },
+      };
+    },
+
+    /**
+     * 画面に進み具合を出すための読み取り専用の応答。権限は status と同じ（getStatus が所有者を照合する。他人・未知は not_found）。
+     * 照合のあとに、ダッシュボードの詳細と同じ読み取り（dashboardDetail・dashboardLatest。どちらも何も書かない）で材料を集める。
+     */
+    async console(principal: Principal, taskId: string): Promise<ServiceResult<ConsoleValue>> {
+      if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
+      const stub = deps.tasks(taskId);
+      const owned = await stub.getStatus(principal.githubUserId);
+      if (!owned.ok) return fail("not_found", NOT_FOUND);
+      const detail = await stub.dashboardDetail();
+      const repositoryId = detail.ok ? detail.view.repository_id : null;
+      if (!detail.ok || repositoryId === null) return fail("not_found", NOT_FOUND);
+      const latest = await stub.dashboardLatest(repositoryId);
+      if (!latest.ok) return fail("not_found", NOT_FOUND);
+      const { view, reached } = detail;
+      const phase = phaseOf(view.status);
+      const now = buildNow(latest.recent, view.status, phase);
+      const out = buildOutput(latest.latest_command, latest.progress);
+      return {
+        ok: true,
+        value: {
+          task_id: taskId,
+          status: owned.task.status,
+          phase,
+          stopped_phase: stoppedPhaseOf(view.status, view.failure_phase, reached),
+          now: now === null ? null : { ...now, text: wrapUntrustedQuestion(now.text) },
+          output:
+            out.tail === null && out.command === undefined
+              ? null
+              : {
+                  ...out,
+                  tail: out.tail === null ? null : wrapUntrustedQuestion(out.tail),
+                  ...(out.command !== undefined
+                    ? { command: wrapUntrustedQuestion(out.command) }
+                    : {}),
+                },
+          generated_at: new Date().toISOString(),
           ...withDashboardUrl(taskId),
         },
       };

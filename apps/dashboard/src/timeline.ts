@@ -47,10 +47,15 @@ export function xFraction(t: number, d: Domain): number {
   return Math.min(1, Math.max(0, (t - d.start) / (d.end - d.start)));
 }
 
-/** 費用 → 棒の高さ（px）。最大の費用で最大の高さ。0・NaN でも最小の高さ。 */
+/**
+ * 費用 → 棒の高さ（px）。最大の費用で最大の高さ、0・NaN は最小の高さ。
+ * 桁の違う費用（$0.001 と $2）でも差が見えるように、対数的な尺度（log1p(cost / FLOOR)）にする。
+ */
+const COST_FLOOR = 0.001;
 export function stemHeight(cost: number, maxCost: number, min = 12, max = 92): number {
   if (!Number.isFinite(cost) || !Number.isFinite(maxCost) || cost <= 0 || maxCost <= 0) return min;
-  return Math.round(min + Math.min(1, cost / maxCost) * (max - min));
+  const ratio = Math.log1p(Math.min(cost, maxCost) / COST_FLOOR) / Math.log1p(maxCost / COST_FLOOR);
+  return Math.round(min + ratio * (max - min));
 }
 
 export type Tick = { t: number; frac: number; label: string };
@@ -64,29 +69,41 @@ export function hourTicks(d: Domain): Tick[] {
   return ticks;
 }
 
-/**
- * 近い位置（minGap 未満）の棒を横にずらす。返すのは入力と同じ順序の横のずれ（px）。
- * 近いものの連なりを 1 つの群とし、群の中心に対して stepPx 間隔で左右に並べる。
- */
-export function spreadOverlaps(fracs: number[], minGap: number, stepPx = 10): number[] {
+/** 近い位置（minGap 未満）の連なりを 1 群にする。群は位置順で、中身は元の添字。 */
+export function clusterGroups(fracs: number[], minGap: number): number[][] {
   const order = fracs.map((_, i) => i).sort((a, b) => (fracs[a] as number) - (fracs[b] as number));
-  const dx = new Array<number>(fracs.length).fill(0);
-  let group: number[] = [];
-  const flush = () => {
-    group.forEach((idx, k) => {
-      dx[idx] = (k - (group.length - 1) / 2) * stepPx;
-    });
-    group = [];
-  };
+  const groups: number[][] = [];
   let last = Number.NEGATIVE_INFINITY;
   for (const idx of order) {
     const f = fracs[idx] as number;
-    if (group.length > 0 && f - last >= minGap) flush();
-    group.push(idx);
+    if (groups.length === 0 || f - last >= minGap) groups.push([]);
+    (groups[groups.length - 1] as number[]).push(idx);
     last = f;
   }
-  flush();
+  return groups;
+}
+
+/**
+ * 近い位置の棒を横にずらす。返すのは入力と同じ順序の横のずれ（px）。
+ * 群の中心に対して stepPx 間隔で左右に並べる。
+ */
+export function spreadOverlaps(fracs: number[], minGap: number, stepPx = 10): number[] {
+  const dx = new Array<number>(fracs.length).fill(0);
+  for (const group of clusterGroups(fracs, minGap)) {
+    group.forEach((idx, k) => {
+      dx[idx] = (k - (group.length - 1) / 2) * stepPx;
+    });
+  }
   return dx;
+}
+
+/** 群の PR ラベル。1 件は #n、複数は #最小–#最大（棒の間隔に入らない数字を並べない）。PR が無ければ null。 */
+export function clusterLabel(numbers: (number | null)[]): string | null {
+  const ns = numbers.filter((n): n is number => n !== null);
+  if (ns.length === 0) return null;
+  const lo = Math.min(...ns);
+  const hi = Math.max(...ns);
+  return lo === hi ? `#${lo}` : `#${lo}–#${hi}`;
 }
 
 export type LaneTask = {
@@ -98,11 +115,14 @@ export type LaneTask = {
   /** 重なりを避ける横のずれ（px） */
   dx: number;
 };
+/** 群ごとの PR ラベル（群の中央の位置、群で一番高い棒の高さ） */
+export type LaneLabel = { frac: number; height: number; text: string };
 export type LaneConsult = { consult: ConsultPointDto; frac: number };
 export type Lane = {
   login: string;
   isViewer: boolean;
   tasks: LaneTask[];
+  labels: LaneLabel[];
   consults: LaneConsult[];
 };
 
@@ -131,6 +151,17 @@ export function buildLanes(data: OverviewDto, domain: Domain): Lane[] {
     const mine = data.tasks.filter((t) => t.owner_login === login);
     const fracs = mine.map((t) => xFraction(taskTime(t), domain));
     const dx = spreadOverlaps(fracs, MIN_GAP);
+    const heights = mine.map((t) => stemHeight(t.cost.cost_usd, maxCost));
+    const labels: LaneLabel[] = [];
+    for (const g of clusterGroups(fracs, MIN_GAP)) {
+      const text = clusterLabel(g.map((i) => (mine[i] as VisibleTaskDto).pr?.number ?? null));
+      if (text === null) continue;
+      labels.push({
+        frac: g.reduce((a, i) => a + (fracs[i] as number), 0) / g.length,
+        height: Math.max(...g.map((i) => heights[i] as number)),
+        text,
+      });
+    }
     return {
       login,
       isViewer: login === viewer,
@@ -138,9 +169,10 @@ export function buildLanes(data: OverviewDto, domain: Domain): Lane[] {
         task,
         kind: markKindOf(task),
         frac: fracs[i] as number,
-        height: stemHeight(task.cost.cost_usd, maxCost),
+        height: heights[i] as number,
         dx: dx[i] as number,
       })),
+      labels,
       consults: data.consults
         .filter((c) => c.owner_login === login)
         .map((consult) => ({ consult, frac: xFraction(Date.parse(consult.at), domain) })),

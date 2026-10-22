@@ -63,6 +63,25 @@ export function TimelineView(props: { lanes: Lane[]; domain: Domain; nowMs: numb
                   <circle className="consult" data-consult="" cx={0} cy={LANE_H - 4} r={3.5} />
                 </svg>
               ))}
+              {lane.labels.map((lb) => (
+                <svg
+                  className="pin"
+                  key={`${lb.frac}-${lb.text}`}
+                  x={pct(lb.frac)}
+                  y={0}
+                  aria-hidden="true"
+                >
+                  <text
+                    className="lbl"
+                    data-pr-label=""
+                    x={0}
+                    y={LANE_H - lb.height - 6}
+                    textAnchor="middle"
+                  >
+                    {lb.text}
+                  </text>
+                </svg>
+              ))}
               {lane.tasks.map((l) => (
                 <a
                   key={l.task.task_id}
@@ -88,11 +107,6 @@ export function TimelineView(props: { lanes: Lane[]; domain: Domain; nowMs: numb
                       width={8}
                       height={l.height}
                     />
-                    {l.task.pr ? (
-                      <text className="lbl" x={l.dx} y={LANE_H - l.height - 6} textAnchor="middle">
-                        {`#${l.task.pr.number}`}
-                      </text>
-                    ) : null}
                     <title>{taskLabel(l)}</title>
                   </svg>
                 </a>

@@ -67,3 +67,10 @@ export function formatDayHeading(ms: number): string {
   const d = new Date(ms);
   return `${d.getMonth() + 1}月${d.getDate()}日`;
 }
+
+/** モデル名の表示用。最後の / より後ろ（プロバイダなどの接頭辞を省く）を名前にし、全体は title 用に残す。 */
+export function shortModel(id: string): { name: string; full: string } {
+  const full = singleLine(id);
+  const name = full.slice(full.lastIndexOf("/") + 1);
+  return { name: name === "" ? full : name, full };
+}

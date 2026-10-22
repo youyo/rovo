@@ -127,6 +127,14 @@ fieldset {
   border: 0;
 }
 
+/* sr-only は絶対配置なので、含む面（スクロールする枠）の中に収めるため、使う側を位置の基準にする */
+.rail-row,
+.lane-name,
+.step-body,
+.screen {
+  position: relative;
+}
+
 .soft {
   color: var(--dim);
 }
@@ -886,6 +894,38 @@ fieldset {
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 18px;
+}
+
+/* 広い画面: ワークスペースをビューポートの高さいっぱいに広げる（制御卓）。
+   ヘッダと帯は上、ステータスバーは下端、レールとコンソールが残りを埋め、画面（screen）とレールだけが内部でスクロールする */
+@media (min-width: 721px) {
+  .shell {
+    height: 100dvh;
+  }
+  .main {
+    flex: 1 1 0;
+    min-height: 420px;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+  .rail {
+    max-height: none;
+    min-height: 0;
+  }
+  .console-col {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .console {
+    flex: 1 1 0;
+    min-height: 0;
+  }
+  .screen {
+    flex: 1 1 0;
+    height: auto;
+    min-height: 120px;
+  }
 }
 
 /* スマホ幅（390px）: レールはコンソールの上に積む。ステータスバーは折り返す。横スクロールはコンソールの中だけ */

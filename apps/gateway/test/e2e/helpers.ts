@@ -267,6 +267,12 @@ export async function resetProviderKeysCache(): Promise<void> {
   if (!res.ok) throw new Error(`/__test/provider-keys/reset failed: ${res.status}`);
 }
 
+/** gateway が持つ Cloudflare の概要のメモリキャッシュ（45 秒）を消す（M9。上流の状態を切り替えたあと、待たずに反映させる）。 */
+export async function resetDashboardCloudflareCache(): Promise<void> {
+  const res = await fetch(`${baseUrl}/__test/dashboard-cloudflare/reset`, { method: "POST" });
+  if (!res.ok) throw new Error(`/__test/dashboard-cloudflare/reset failed: ${res.status}`);
+}
+
 /** 偽の Cloudflare API（provider_configs）への呼び出し回数 */
 export async function providerConfigsCalls(): Promise<number> {
   return (await admin.requests()).filter((r) => r.path.endsWith("/provider_configs")).length;

@@ -2,6 +2,7 @@ import type { AuditRecord } from "@rovo/audit";
 import type { Hono } from "hono";
 import type { AgentRpc, TaskSpec } from "./agent/contract";
 import { readWorkerAudit } from "./audit-sink";
+import { resetCloudflareSummaryCache } from "./dashboard/cloudflare";
 import { DIRECTORY_NAME } from "./directory/types";
 import { resetProviderKeysCache } from "./provider-keys";
 
@@ -42,6 +43,13 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/__test/provider-keys/reset", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();
     await resetProviderKeysCache(c.env.OAUTH_KV);
+    return c.json({ ok: true });
+  });
+
+  // ダッシュボードの Cloudflare の概要のメモリキャッシュ（45 秒）を消す（M9。E2E が上流の状態を切り替えたあと、待たずに反映させる）
+  app.post("/__test/dashboard-cloudflare/reset", (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    resetCloudflareSummaryCache();
     return c.json({ ok: true });
   });
 

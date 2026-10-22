@@ -113,11 +113,140 @@ describe("buildNow", () => {
     expect(t("search", { pattern: "foo.*bar", path: "src" })).toBe("search: foo.*bar");
   });
 
-  it("途中で切れた JSON（要約は 200 字で切られる）でも bash のコマンドを取り出す", () => {
-    const cut = '{"command":"npm run build && npm test -- --reporter=ver';
-    expect(buildNow([start("c1", "bash", cut)], "RUNNING", "run")?.text).toBe(
-      "$ npm run build && npm test -- --reporter=ver",
-    );
+  describe("bash の tool_start: 切れた JSON からコマンドを取り出す", () => {
+    const text = (summary: string, name = "bash") =>
+      buildNow([start("c1", name, summary)], "RUNNING", "run")?.text;
+
+    it("完全な JSON は今までどおり。… は付けない", () => {
+      expect(text('{"command":"pnpm test --filter agent"}')).toBe("$ pnpm test --filter agent");
+    });
+
+    it("途中で切れた JSON（要約は 200 字で切られる）でも bash のコマンドを取り出し、末尾に … を付ける", () => {
+      const cut = '{"command":"npm run build && npm test -- --reporter=ver';
+      expect(text(cut)).toBe("$ npm run build && npm test -- --reporter=ver…");
+    });
+
+    it("agent が切り詰めに付ける ... や … は、… に 1 つにまとめる（… を重ねない）", () => {
+      expect(text('{"command":"pnpm exec vitest ru...')).toBe("$ pnpm exec vitest ru…");
+      expect(text('{"command":"pnpm exec vitest ru…')).toBe("$ pnpm exec vitest ru…");
+    });
+
+    it('閉じる " まで読めていれば、後ろが切れていても値は完全（… を付けない）', () => {
+      expect(text('{"command":"ls","timeout":12...')).toBe("$ ls");
+    });
+
+    it("JSON の文字列のエスケープ（\\\" \\\\ \\n \\t \\uXXXX）を戻す", () => {
+      const cut = String.raw`{"command":"echo \"hi\" \\ done\nnext\tTab \u3042 \u00e9 tail`;
+      expect(text(cut)).toBe('$ echo "hi" \\ done next Tab あ é tail…');
+      const closed = String.raw`{"command":"grep \"a\\b\" f","timeout":1`;
+      expect(text(closed)).toBe('$ grep "a\\b" f');
+    });
+
+    it("末尾が中途半端なエスケープで切れていても、壊れた文字を出さない", () => {
+      const t = (tail: string) => text(`{"command":"echo ok ${tail}`);
+      expect(t("\\")).toBe("$ echo ok…");
+      expect(t("\\u")).toBe("$ echo ok…");
+      expect(t("\\u1")).toBe("$ echo ok…");
+      expect(t("\\u12")).toBe("$ echo ok…");
+      expect(t("\\u00e")).toBe("$ echo ok…");
+      expect(t("\\ud83d")).toBe("$ echo ok…");
+      expect(t("\\ud83d\\ude")).toBe("$ echo ok…");
+      expect(t("\\...")).toBe("$ echo ok…");
+      expect(t("\\u12...")).toBe("$ echo ok…");
+      expect(t("\\ud83d\\ude00 x")).toBe("$ echo ok 😀 x…");
+      expect(t("\\\\")).toBe("$ echo ok \\…");
+    });
+
+    it("取り出せないとき（未知のキーで始まる・値が文字列でない・エスケープが壊れている）は、生の JSON を出さずツール名だけ", () => {
+      expect(text('{"foo":"bar","command":"ls')).toBe("bash");
+      expect(text('{"cmd":"ls')).toBe("bash");
+      expect(text('{"command":{"a":1')).toBe("bash");
+      expect(text('{"command":"ls \\q')).toBe("bash");
+      expect(text('{"command":"ls \\uZZZZ')).toBe("bash");
+      expect(text('{"command":"')).toBe("bash");
+      // 既知のキーでも、そのツールのキーでなければ取り出さない
+      expect(text('{"command":"ls', "read_file")).toBe("read_file");
+    });
+
+    it("read_file など bash 以外も、切れた JSON から既知のキーの値を取り出す", () => {
+      expect(text('{"path":"src/very-long/pa', "read_file")).toBe("read_file: src/very-long/pa…");
+      expect(text('{"pattern":"foo.*ba', "search")).toBe("search: foo.*ba…");
+    });
+
+    it("取り出した値も、制御文字・双方向文字を除いて 1 行にし、秘密はマスクする", () => {
+      const cut = String.raw`{"command":"echo a\nrm\u202e -rf\u0007 b\u001b[31m c`;
+      const t = text(cut) ?? "";
+      expect(t).toBe("$ echo a rm -rf b[31m c…");
+      expect(t).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e]/);
+      expect(text(`{"command":"curl -H x ${GHP} ${"y".repeat(500)}`)).not.toContain(GHP);
+      expect((text(`{"command":"curl ${"y".repeat(500)}`) ?? "").length).toBeLessThanOrEqual(300);
+    });
+  });
+
+  describe("コマンドの cd /workspace の前置き", () => {
+    const tool = (command: string) =>
+      buildNow([start("c1", "bash", JSON.stringify({ command }))], "RUNNING", "run")?.text;
+    const cmdText = (command: string) => buildNow([cmd(command)], "RUNNING", "run")?.text;
+
+    it("cd /workspace/<相対パス> && は外し、「<相対パス> で」を先頭に添える（tool も command も）", () => {
+      expect(tool("cd /workspace/apps/agent && pnpm exec vitest run")).toBe(
+        "apps/agent で $ pnpm exec vitest run",
+      );
+      expect(cmdText("cd /workspace/apps/gateway && pnpm test")).toBe("apps/gateway で pnpm test");
+      expect(buildNow([cmd("cd /workspace/a && ls")], "RUNNING", "run")?.kind).toBe("command");
+    });
+
+    it("切れた JSON でも前置きを外す（… は残る）", () => {
+      const cut = '{"command":"cd /workspace/apps/agent && pnpm exec vitest ru';
+      expect(buildNow([start("c1", "bash", cut)], "RUNNING", "run")?.text).toBe(
+        "apps/agent で $ pnpm exec vitest ru…",
+      );
+    });
+
+    it("cd /workspace && は前置きだけ外し、場所は付けない", () => {
+      expect(tool("cd /workspace && git status")).toBe("$ git status");
+      expect(cmdText("cd /workspace && git status")).toBe("git status");
+      expect(cmdText("cd /workspace/ && git status")).toBe("git status");
+    });
+
+    it("前置きの無いコマンドはそのまま", () => {
+      expect(tool("pnpm test")).toBe("$ pnpm test");
+      expect(cmdText("pnpm test")).toBe("pnpm test");
+      expect(cmdText("echo cd /workspace/a && b")).toBe("echo cd /workspace/a && b");
+    });
+
+    it("外してよいのは素直な相対パスだけ。..・/workspace の外・変数・引用符・空のコマンドはそのまま", () => {
+      for (const c of [
+        "cd /workspace/../etc && rm x",
+        "cd /workspace/a/../b && ls",
+        "cd /workspace/a//b && ls",
+        "cd /workspace/./a && ls",
+        "cd /workspaces/a && ls",
+        "cd /tmp && ls",
+        "cd /workspace/$HOME && ls",
+        'cd "/workspace/my dir" && ls',
+        "cd /workspace/a; ls",
+        "cd /workspace/a &&",
+      ]) {
+        expect(cmdText(c), c).toBe(c);
+        expect(tool(c), c).toBe(`$ ${c}`);
+      }
+    });
+
+    it("末尾のスラッシュ・複数の &&。場所も制御文字は除き、秘密はマスクし、300 字に収める", () => {
+      expect(cmdText("cd /workspace/apps/agent/ && ls")).toBe("apps/agent で ls");
+      expect(cmdText("cd /workspace/a && cd b && ls")).toBe("a で cd b && ls");
+      expect(cmdText("cd /workspace/a &&\nls\u0007")).toBe("a で ls");
+      const long = cmdText(`cd /workspace/a && echo ${GHP} ${"z".repeat(500)}`) ?? "";
+      expect(long).not.toContain(GHP);
+      expect(long.startsWith("a で echo")).toBe(true);
+      expect(long.length).toBeLessThanOrEqual(300);
+    });
+
+    it("契約（TaskDetailDto の now）に合う", () => {
+      const now = buildNow([cmd("cd /workspace/apps/agent && ls")], "RUNNING", "run");
+      expect(TaskDetailDtoSchema.shape.now.safeParse(now).success).toBe(true);
+    });
   });
 
   it("未知のツールの JSON は出さずツール名だけにする。JSON でない要約はそのまま", () => {

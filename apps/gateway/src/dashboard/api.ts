@@ -445,13 +445,29 @@ const PHASE_OF: Record<string, TaskDetailDto["phase"]> = {
   VERIFYING: "verify",
 };
 
+/**
+ * 終端（失敗・予算超過・キャンセル）で止まった段階。準備で失敗（failure_phase が setup）→ prepare、
+ * 検証に入った記録がある → verify、実行に入った記録がある → run、どちらも無い → prepare。完了・非終端は null。
+ */
+export function stoppedPhaseOf(
+  status: string,
+  failurePhase: string | null,
+  reached: { running: boolean; verifying: boolean },
+): "prepare" | "run" | "verify" | null {
+  if (status !== "FAILED" && status !== "BUDGET_EXCEEDED" && status !== "CANCELLED") return null;
+  if (failurePhase === "setup") return "prepare";
+  if (reached.verifying) return "verify";
+  if (reached.running) return "run";
+  return "prepare";
+}
+
 async function handleTaskDetail(request: Request, env: Env, taskId: string): Promise<Response> {
   const auth = await authenticate(request, env);
   if (!auth.ok) return auth.response;
   // 詳細を開いた最初の 1 回は、GitHub で取り直す（権限の取り消しを厳密に反映。D6）
   const read = await readAuthorizedTask(env, auth.session, taskId, { fresh: true });
   if (!read.ok) return read.response;
-  const { view, merge_policy, sandbox_instance } = read.detail;
+  const { view, merge_policy, sandbox_instance, reached } = read.detail;
 
   // 「いまの手順」と出力の末尾の材料（直近の数十件と最新の command だけ）。照合に使った repository_id を渡し、TaskDO が突き合わせる
   const repositoryId = view.repository_id;
@@ -468,6 +484,7 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
     generated_at: iso(Date.now()),
     task,
     phase,
+    stopped_phase: stoppedPhaseOf(view.status, view.failure_phase, reached),
     // 実行中の一言。最新の command / edit / web などから作る（古い agent は tool_start に縮退。終端は null）
     now: buildNow(latest.recent, view.status, phase),
     settings: {

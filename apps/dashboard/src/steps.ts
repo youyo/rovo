@@ -44,6 +44,73 @@ const STATUS_VERB: Record<TaskStatusDto, { what: string; tone: Tone }> = {
 const join = (parts: (string | false | null | undefined)[]) =>
   parts.filter((p): p is string => typeof p === "string" && p !== "").join("、");
 
+type ToolSpec = { done: string; running: string; keys: readonly string[] };
+
+/** 子のツール名 → 人の言葉。keys は summary（JSON）から取り出してよいキー（先に見つかったものを使う） */
+const TOOL_TEXT: Record<string, ToolSpec> = {
+  bash: { done: "コマンドを実行した", running: "コマンドを実行中", keys: ["command"] },
+  read_file: { done: "ファイルを読んだ", running: "ファイルを読んでいる", keys: ["path"] },
+  list_files: { done: "一覧を見た", running: "一覧を見ている", keys: ["path"] },
+  search: { done: "検索した", running: "検索している", keys: ["pattern", "query"] },
+  write_file: { done: "ファイルを書いた", running: "ファイルを書いている", keys: ["path"] },
+  edit_file: { done: "ファイルを編集した", running: "ファイルを編集している", keys: ["path"] },
+  git_commit: { done: "コミットした", running: "コミットしている", keys: ["message"] },
+  web_search: { done: "検索した", running: "検索している", keys: ["query"] },
+  web_fetch: { done: "ページを読んだ", running: "ページを読んでいる", keys: ["url"] },
+  web_browse: { done: "ページを開いた", running: "ページを開いている", keys: ["url"] },
+};
+
+/** 構造化イベント（command / edit / commit / web）を別に出すツール → その型 */
+const STRUCTURED_OF: Record<string, TaskEventDto["type"]> = {
+  bash: "command",
+  write_file: "edit",
+  edit_file: "edit",
+  git_commit: "commit",
+  web_search: "web",
+  web_fetch: "web",
+  web_browse: "web",
+};
+
+/**
+ * summary は子が書いた非信頼データ。JSON のオブジェクトとして読めて、既知のキーが文字列のときだけ取り出す。
+ * それ以外（切れた JSON・配列・数値・未知のキー・文字列でない値）は、sanitize した文字列のまま。
+ */
+function pickTarget(summary: string, keys: readonly string[]): string {
+  try {
+    const v: unknown = JSON.parse(summary);
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+      for (const k of keys) {
+        const x = (v as Record<string, unknown>)[k];
+        if (typeof x === "string" && x !== "") return singleLine(x);
+      }
+    }
+  } catch {
+    // JSON でないときは、そのまま出す
+  }
+  return singleLine(summary);
+}
+
+function describeToolStart(name: string, summary: string, current: boolean): StepText {
+  if (name === "report_completion") {
+    return { what: "完了を報告した", target: "", note: "", tone: "normal" };
+  }
+  const spec = TOOL_TEXT[name];
+  if (spec === undefined) {
+    return {
+      what: `${singleLine(name)} を${current ? "実行中" : "実行した"}`,
+      target: singleLine(summary),
+      note: "",
+      tone: "normal",
+    };
+  }
+  return {
+    what: current ? spec.running : spec.done,
+    target: pickTarget(summary, spec.keys),
+    note: "",
+    tone: "normal",
+  };
+}
+
 /**
  * イベント 1 件を、人の言葉の動詞にする。進み具合に出さないイベント（usage）は null。
  * `current` はそのイベントが「いまの手順」か（実行中のコマンドは「実行中」と言える）。
@@ -106,19 +173,12 @@ export function describeEvent(ev: TaskEventDto, opts: { current: boolean }): Ste
     case "draft_pr_created":
       return { what: "Draft PR を作った", target: `#${ev.pr_number}`, note: "", tone: "normal" };
     case "tool_start":
-      return {
-        what: `${singleLine(ev.name)} を${opts.current ? "実行中" : "実行した"}`,
-        target: singleLine(ev.summary),
-        note: "",
-        tone: "normal",
-      };
+      return describeToolStart(ev.name, ev.summary, opts.current);
     case "tool_end":
-      return {
-        what: ev.is_error ? "ツールが失敗した" : "ツールが終わった",
-        target: singleLine(ev.summary),
-        note: "",
-        tone: ev.is_error ? "fail" : "normal",
-      };
+      // 成功は出さない（構造化イベント・次の手順で分かる）。失敗のときだけ出す
+      return ev.is_error
+        ? { what: "失敗した", target: singleLine(ev.summary), note: "", tone: "fail" }
+        : null;
     case "agent_event":
       return {
         what: "その他の処理",
@@ -139,9 +199,46 @@ export function mergeEvents(prev: readonly TaskEventDto[], incoming: readonly Ta
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
-/** 進み具合の一覧（時系列）。実行中のタスクは、進み具合に出る最後の手順が「いま」。 */
+/**
+ * 構造化イベントで置き換わる tool_start の call_id を返す。
+ * tool_start から、その tool_end（まだ無ければ末尾）までの間に、そのツールの型の構造化イベントが
+ * 来ていれば、その call は構造化イベントが表す（1 つの構造化イベントは 1 つの call にしか対応しない）。
+ * events は seq の昇順。
+ */
+function pairedCalls(events: readonly TaskEventDto[]): Set<string> {
+  const endAt = new Map<string, number>();
+  for (const e of events) if (e.type === "tool_end") endAt.set(e.call_id, e.seq);
+  const claimed = new Set<number>();
+  const paired = new Set<string>();
+  for (const s of events) {
+    if (s.type !== "tool_start") continue;
+    const want = STRUCTURED_OF[s.name];
+    if (want === undefined) continue;
+    const until = endAt.get(s.call_id) ?? Number.POSITIVE_INFINITY;
+    const hit = events.find(
+      (e) => e.type === want && e.seq > s.seq && e.seq < until && !claimed.has(e.seq),
+    );
+    if (hit) {
+      claimed.add(hit.seq);
+      paired.add(s.call_id);
+    }
+  }
+  return paired;
+}
+
+/**
+ * 進み具合の一覧（時系列）。実行中のタスクは、進み具合に出る最後の手順が「いま」。
+ * 構造化イベントを出すツールの tool_start / tool_end は、構造化イベントがあれば出さない（1 つの操作を 1 行にする）。
+ * 構造化イベントがまだ来ていない実行中の tool_start は「実行中」の 1 行で、来たら置き換わる。
+ * 構造化イベントが無い古い履歴は、tool_start を人の言葉にして出す（成功の tool_end は出さない）。
+ */
 export function buildSteps(events: readonly TaskEventDto[], active: boolean): Step[] {
-  const shown = events.filter((e) => e.type !== "usage");
+  const paired = pairedCalls(events);
+  const shown = events.filter(
+    (e) =>
+      e.type !== "usage" &&
+      !((e.type === "tool_start" || e.type === "tool_end") && paired.has(e.call_id)),
+  );
   const lastSeq = shown.at(-1)?.seq;
   const steps: Step[] = [];
   for (const e of shown) {
@@ -181,12 +278,14 @@ const LABEL: Record<Exclude<BandState, "stopped">, string> = {
  * 準備 → 実行 → 検証 → 完了の帯。状態から決める:
  * CREATING→準備、RUNNING→実行、VERIFYING→検証、INPUT_REQUIRED→実行で入力待ち、RECOVERING→実行で復旧中、
  * COMPLETED→すべて済み、失敗・予算超過・キャンセル→止まった段（failure_phase が setup なら準備）。
- * 終端で phase が done のときは、検証に入った記録（reached）があれば検証、無ければ実行（開始前なら準備）で止まったとみる。
+ * 止まった段は gateway の stopped_phase を使う。無いとき（旧い gateway）だけ、終端で phase が done なら
+ * 検証に入った記録（reached）があれば検証、無ければ実行（開始前なら準備）で止まったとみる。
  */
 export function phaseBand(
   task: VisibleTaskDto,
   phase: TaskDetailDto["phase"],
   reached: ReadonlySet<TaskStatusDto> = new Set(),
+  stopped?: TaskDetailDto["stopped_phase"],
 ): BandStep[] {
   const indexOf = (p: TaskDetailDto["phase"]) => BAND.findIndex((b) => b.key === p);
   let at: number;
@@ -215,7 +314,9 @@ export function phaseBand(
     case "BUDGET_EXCEEDED":
     case "CANCELLED":
       state = "stopped";
-      if (task.failure_phase === "setup") at = 0;
+      if (stopped !== undefined && stopped !== null)
+        at = { prepare: 0, run: 1, verify: 2 }[stopped];
+      else if (task.failure_phase === "setup") at = 0;
       else if (phase !== "done") at = indexOf(phase);
       else if (reached.has("VERIFYING")) at = 2;
       else at = task.started_at === null ? 0 : 1;

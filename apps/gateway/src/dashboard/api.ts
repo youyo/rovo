@@ -20,6 +20,7 @@ import { errorMessageForLog } from "../log-error";
 import type { DashboardDetailResult } from "../tasks/task-do";
 import { isTaskId } from "../tasks/ulid";
 import { type DashboardSession, requireSession } from "./auth";
+import { buildNow, buildOutput } from "./detail-now";
 import { toEventDto } from "./events";
 import { jsonResponse } from "./guard";
 
@@ -448,6 +449,13 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
   if (!read.ok) return read.response;
   const { view, merge_policy, sandbox_instance } = read.detail;
 
+  // 「いまの手順」と出力の末尾の材料（直近の数十件と最新の command だけ）。照合に使った repository_id を渡し、TaskDO が突き合わせる
+  const repositoryId = view.repository_id;
+  if (repositoryId === null) return errorJson(404, "not_found");
+  const latest = await env.TASK_DO.getByName(taskId).dashboardLatest(repositoryId);
+  if (!latest.ok) return errorJson(404, "not_found");
+  const phase = PHASE_OF[view.status] ?? "done";
+
   const deps = view.deps_cache;
   // 権限の照合（readAuthorizedTask）に通ったあとで、PR の状態を閲覧者のトークンで取る（fail-soft）
   const task = snapshotToVisibleTask(view);
@@ -455,9 +463,9 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
   const dto: TaskDetailDto = {
     generated_at: iso(Date.now()),
     task,
-    phase: PHASE_OF[view.status] ?? "done",
-    // 実行中の一言は、構造化イベント（M7）が入ってから作る。ここでは待機中だけ
-    now: view.status === "INPUT_REQUIRED" ? { kind: "waiting", text: "waiting for input" } : null,
+    phase,
+    // 実行中の一言。最新の command / edit / web などから作る（古い agent は tool_start に縮退。終端は null）
+    now: buildNow(latest.recent, view.status, phase),
     settings: {
       merge_policy,
       ...(deps === "hit" || deps === "miss" || deps === "built" || deps === "disabled"
@@ -466,8 +474,8 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
       ...(view.sandbox_runtime_ms !== null ? { sandbox_runtime_ms: view.sandbox_runtime_ms } : {}),
       ...(sandbox_instance !== null ? { sandbox_instance } : {}),
     },
-    // 出力の末尾は構造化イベント（M7）から。伏せている旨は常に true
-    output: { tail: null, redacted: true },
+    // 出力の末尾は最新の command の output_tail（再マスク済み）。伏せている旨は常に true
+    output: buildOutput(latest.latest_command),
   };
   return validated(TaskDetailDtoSchema, "TaskDetailDto", dto);
 }

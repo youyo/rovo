@@ -482,6 +482,42 @@ describe("tasks/:id", () => {
     expect(done.now).toBeNull();
   });
 
+  it("now / output: 構造化イベントから作る。保存済みの秘密が平文でも応答に出ない。終端は now が null で出力は残る", async () => {
+    const GHP = `ghp_${"a1B2".repeat(9)}`;
+    const v = newViewer([4242]);
+    const t = await seedTask({ repository_id: 4242 });
+    await t.stub.advance();
+    // 古い agent: 構造化イベントが無いので tool_start に縮退
+    await t.agent.emit("tool_start", { callId: "c1", name: "bash", summary: "ls -la" });
+    await t.stub.advance();
+    const legacy = TaskDetailDtoSchema.parse((await api(v, `/tasks/${t.id}`)).json());
+    expect(legacy.now).toMatchObject({ kind: "tool", text: "bash: ls -la" });
+    expect(legacy.output).toEqual({ tail: null, redacted: true });
+    // 保存済みの行にマスク漏れがあっても、API の最後の層で伏せる
+    await runInDurableObject(t.stub, (_i, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO events (seq, type, payload, created_at) VALUES ((SELECT COALESCE(MAX(seq),0)+1 FROM events), 'command', ?, ?)",
+        JSON.stringify({
+          command: `deploy ${GHP}`,
+          exit_code: 0,
+          output_tail: `ok\nGITHUB_TOKEN=plain123\n${GHP}`,
+        }),
+        Date.now(),
+      );
+    });
+    const r = await api(v, `/tasks/${t.id}`);
+    const dto = TaskDetailDtoSchema.parse(r.json());
+    expect(dto.now?.kind).toBe("command");
+    expect(dto.output.tail).toContain("ok");
+    expect(dto.output.command).toContain("deploy");
+    expect(r.text).not.toContain(GHP);
+    expect(r.text).not.toContain("plain123");
+    await t.stub.cancel(4_001);
+    const done = TaskDetailDtoSchema.parse((await api(v, `/tasks/${t.id}`)).json());
+    expect(done.now).toBeNull();
+    expect(done.output.tail).toContain("ok");
+  });
+
   it("権限なし・存在しない・repository_id が NULL は、どれも同じ 404（本文もヘッダも同じ）", async () => {
     const repo = newRepoId();
     const v = newViewer([repo]);

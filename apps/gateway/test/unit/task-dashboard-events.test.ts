@@ -207,3 +207,29 @@ describe("dashboardEvents", () => {
     for (const d of dtos) TaskEventDtoSchema.parse(d);
   });
 });
+
+describe("dashboardLatest", () => {
+  it("直近 30 件だけ（昇順）と最新の command 1 件を返す。対象外の型は含まない", async () => {
+    const t = await started();
+    await t.agent.emit("command", { command: "first", exitCode: 0, outputTail: "old out" });
+    for (let i = 1; i <= 40; i++) {
+      await t.agent.emit("edit", { path: `f${i}.ts`, op: "modify", added: 1, removed: 0 });
+    }
+    await t.agent.emit("completion_report", { summary: "done" });
+    await ingest(t);
+    const r = await t.stub.dashboardLatest(REPO_ID);
+    if (!r.ok) throw new Error("not ok");
+    expect(r.recent).toHaveLength(30);
+    expect(r.recent.every((e) => e.type === "edit")).toBe(true);
+    const seqs = r.recent.map((e) => e.seq);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(r.latest_command?.payload.command).toBe("first");
+  });
+
+  it("expectedRepositoryId が違う・repository_id が NULL は not_found", async () => {
+    const t = await started();
+    expect(await t.stub.dashboardLatest(REPO_ID + 1)).toEqual({ ok: false, code: "not_found" });
+    const nul = await createTask({ repository_id: null }, OWNER);
+    expect(await nul.stub.dashboardLatest(REPO_ID)).toEqual({ ok: false, code: "not_found" });
+  });
+});

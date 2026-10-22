@@ -97,7 +97,7 @@ describe("Cloudflare の枠", () => {
     ] as Cf[]) {
       const { container, root } = await mount(router(cf));
       expect(container.querySelector("[data-lane]")).not.toBeNull();
-      expect(container.querySelector("[data-budget='me']")).not.toBeNull();
+      expect(container.querySelector("[data-budget='month']")).not.toBeNull();
       expect(panel(container).textContent).toContain("取得できませんでした");
       act(() => root.unmount());
       document.body.innerHTML = "";

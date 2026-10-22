@@ -15,9 +15,15 @@ import {
   shortModel,
   singleLine,
 } from "./format";
-import { railGlyph } from "./rail";
-import { completedKind, isTerminal, MARKS, type MarkKind, markKindOf } from "./status";
-import { MarkGlyph } from "./status-mark";
+import {
+  completedKind,
+  isTerminal,
+  MARKS,
+  type MarkKind,
+  markDescription,
+  markKindOf,
+} from "./status";
+import { MarkSymbol } from "./status-mark";
 import { type BandStep, buildSteps, nowSentence, phaseBand, type Step } from "./steps";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
@@ -58,20 +64,12 @@ const DEPS_CACHE: Record<NonNullable<TaskDetailDto["settings"]["deps_cache"]>, s
   disabled: "使わない",
 };
 
-const PULSING: ReadonlySet<TaskStatusDto> = new Set(["RUNNING", "VERIFYING"]);
-
+/** 見出しの状態。印はレール・凡例と同じ記号。名前は短い label のまま、title で長い説明（無ければ label）を出す */
 function StatusLine(props: { task: VisibleTaskDto }) {
-  const { task } = props;
-  const kind = markKindOf(task);
+  const kind = markKindOf(props.task);
   return (
-    <span className="state-name">
-      {PULSING.has(task.status) ? (
-        <span className="pulse" aria-hidden="true" />
-      ) : (
-        <span className={`rail-mark rail-mark--${railGlyph(kind).tone}`} aria-hidden="true">
-          {railGlyph(kind).char}
-        </span>
-      )}
+    <span className="state-name" title={markDescription(kind)}>
+      <MarkSymbol kind={kind} decorative />
       {MARKS[kind].label}
     </span>
   );
@@ -161,8 +159,8 @@ function PrInline(props: { task: VisibleTaskDto }) {
         <span>{label}</span>
       )}
       {kind === null ? null : (
-        <span className="status">
-          <MarkGlyph kind={kind} />
+        <span className="status" title={markDescription(kind)}>
+          <MarkSymbol kind={kind} decorative />
           {MARKS[kind].label}
         </span>
       )}

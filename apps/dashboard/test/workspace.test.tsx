@@ -263,7 +263,7 @@ describe("内訳の引き出しはアプリの中で開閉できる", () => {
     ) as HTMLElement;
     await act(async () => btn.click());
     expect(drawer.hidden).toBe(false);
-    expect(drawer.querySelector("[data-budget='me']")).not.toBeNull();
+    expect(drawer.querySelector("[data-budget='month']")).not.toBeNull();
     expect(drawer.querySelector("[data-models]")).not.toBeNull();
     expect(drawer.querySelector("[data-cloudflare]")).not.toBeNull();
   });

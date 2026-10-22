@@ -1,6 +1,6 @@
 import { formatClock, formatUsd, singleLine } from "./format";
-import { MARKS, type MarkKind } from "./status";
-import { MarkGlyph, MarkRect } from "./status-mark";
+import { MARKS, type MarkKind, markDescription } from "./status";
+import { MarkRect, MarkSymbol } from "./status-mark";
 import { type Domain, hourTicks, type Lane, xFraction } from "./timeline";
 
 /**
@@ -25,16 +25,19 @@ export function laneHeight(laneCount: number): number {
   );
 }
 
+/** consult の呼び名。初めて見た人にも分かるよう、意味を添える（凡例・レーンの見出し・点の title で同じ言葉） */
+export const CONSULT_LABEL = "consult（モデルに意見を聞いた）";
+
 function laneNote(lane: Lane, isToday: boolean): string {
   if (lane.tasks.length === 0 && lane.consults.length === 0)
     return isToday ? "今日のタスクはまだありません" : "この日のタスクはありません";
-  return `${lane.tasks.length} 件、相談 ${lane.consults.length} 回`;
+  return `${lane.tasks.length} 件、${CONSULT_LABEL} ${lane.consults.length} 回`;
 }
 
 function taskLabel(l: Lane["tasks"][number]): string {
   const { task } = l;
   const pr = task.pr ? `PR ${task.pr.number}、` : "";
-  return `${singleLine(task.title)}（${pr}${MARKS[l.kind].label}、${formatUsd(task.cost.cost_usd)}）`;
+  return `${singleLine(task.title)}（${pr}${markDescription(l.kind)}、${formatUsd(task.cost.cost_usd)}）`;
 }
 
 /** buildLanes の棒の高さ（12〜92）を、レーンの高さに収まる範囲に写す */
@@ -94,7 +97,7 @@ export function TimelineView(props: {
               )}
               {lane.consults.map((c) => (
                 <svg className="pin" key={c.consult.consult_id} x={pct(c.frac)} y={0}>
-                  <title>{`相談 ${formatClock(Date.parse(c.consult.at))}`}</title>
+                  <title>{`${CONSULT_LABEL} ${formatClock(Date.parse(c.consult.at))}`}</title>
                   <circle className="consult" data-consult="" cx={0} cy={laneH - 4} r={2.5} />
                 </svg>
               ))}
@@ -147,7 +150,7 @@ export function TimelineView(props: {
   );
 }
 
-/** 凡例。出ている状態の印 + consult の点。 */
+/** 凡例。出ている状態の印（レールと同じ記号 + 長い説明）+ consult の点。 */
 export function Legend(props: { kinds: MarkKind[] }) {
   const order = Object.keys(MARKS) as MarkKind[];
   const kinds = order.filter((k) => props.kinds.includes(k));
@@ -155,8 +158,8 @@ export function Legend(props: { kinds: MarkKind[] }) {
     <ul className="legend" aria-label="凡例">
       {kinds.map((k) => (
         <li key={k}>
-          <MarkGlyph kind={k} />
-          {MARKS[k].label}
+          <MarkSymbol kind={k} decorative />
+          {markDescription(k)}
           {k === "merged" ? "（高さは費用）" : ""}
         </li>
       ))}
@@ -171,7 +174,7 @@ export function Legend(props: { kinds: MarkKind[] }) {
         >
           <circle className="consult" cx={4} cy={4} r={3.5} />
         </svg>
-        相談（consult）
+        {CONSULT_LABEL}
       </li>
     </ul>
   );

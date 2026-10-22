@@ -4,7 +4,7 @@ import { cloudflareRows } from "./cloudflare";
 import { CloudflarePanel } from "./cloudflare-panel";
 import { formatClock, formatCount, formatUsd, shortModel } from "./format";
 import { budgetLimit } from "./rail";
-import { BudgetPanels, ModelCosts } from "./side-panels";
+import { BudgetPanel, ModelCosts } from "./side-panels";
 import { markKindOf } from "./status";
 import { Legend } from "./timeline-view";
 import type { CloudflareState } from "./use-cloudflare";
@@ -110,7 +110,7 @@ export function StatusBar(props: {
         data-open={String(open)}
       >
         <div className="drawer-grid">
-          <BudgetPanels data={data} />
+          <BudgetPanel data={data} />
           <ModelCosts models={data.models} />
           {props.cloudflare ? <CloudflarePanel state={props.cloudflare} /> : null}
         </div>

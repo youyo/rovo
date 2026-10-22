@@ -105,6 +105,40 @@ describe("コンソールの見出し（今の表の情報をここに出す）"
     expect(head.textContent).toContain(`${t.owner_login} が依頼`);
   });
 
+  it("状態は印（レール・凡例と同じ記号）+ 短い label。走行中は脈動し、title は label", () => {
+    const c = mount();
+    const state = c.querySelector(".con-head .state-name") as HTMLElement;
+    expect(state.textContent).toBe("実行中");
+    const mark = state.querySelector("svg.mark-sym") as SVGElement;
+    expect(mark.getAttribute("data-mark")).toBe("running");
+    expect(mark.getAttribute("aria-hidden")).toBe("true"); // 隣に文字があるので読み上げは二重にしない
+    expect(mark.classList.contains("pulse")).toBe(true);
+    expect(state.getAttribute("title")).toBe("実行中");
+  });
+
+  it("閉じた PR: 見出しとバッジの label は短い「閉じた」のまま、title で「閉じた（マージせず）」", () => {
+    const t = taskDetailRunningFixture.task;
+    const detail: TaskDetailDto = {
+      ...taskDetailRunningFixture,
+      task: {
+        ...t,
+        status: "COMPLETED",
+        ended_at: "2026-10-21T05:59:00Z",
+        pr: { ...(t.pr as NonNullable<typeof t.pr>), merged: false, state: "closed" },
+      },
+    };
+    const c = mount(detail, []);
+    const state = c.querySelector(".con-head .state-name") as HTMLElement;
+    expect(state.textContent).toBe("閉じた");
+    expect(state.getAttribute("title")).toBe("閉じた（マージせず）");
+    expect(state.querySelector("svg.mark-sym")?.getAttribute("data-mark")).toBe("closed");
+    expect(state.querySelector("svg.mark-sym.pulse")).toBeNull();
+    const badge = c.querySelector("[data-pr] .status") as HTMLElement;
+    expect(badge.textContent).toBe("閉じた");
+    expect(badge.getAttribute("title")).toBe("閉じた（マージせず）");
+    expect(badge.querySelector("svg.mark-sym")?.getAttribute("data-mark")).toBe("closed");
+  });
+
   it("終端のタスクは「所要」", () => {
     const c = mount(taskDetailFailedSetupFixture, []);
     expect(c.querySelector(".con-head")?.textContent).toContain("所要");

@@ -396,7 +396,7 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
     expect(res.headers.get("location")).toBe(`/dashboard/tasks/${TASK_ID}`);
   });
 
-  it("ログインのたびに新しい sid になり、古い Cookie は使えなくなる（セッション固定の対策）", async () => {
+  it("ログインのたびに新しい sid になり（ログイン前の sid は引き継がない = セッション固定の対策）、別端末の古いセッションも有効なまま", async () => {
     const { env } = makeEnv();
     const user = newGithubUser();
     const first = await beginLogin(env);
@@ -411,13 +411,14 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
     const v1 = await openSession(ENC_KEY, c1.slice(SESSION_COOKIE.length + 1), Date.now());
     const v2 = await openSession(ENC_KEY, c2.slice(SESSION_COOKIE.length + 1), Date.now());
     expect(v1?.sid).not.toBe(v2?.sid);
+    // 複数端末: 最初のログインのセッションも有効なまま、2 つ目も有効
     expect(
       (await userStub(user.userId).checkDashboardSession(v1?.sid ?? "", v1?.ver ?? 0)).ok,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       (await userStub(user.userId).checkDashboardSession(v2?.sid ?? "", v2?.ver ?? 0)).ok,
     ).toBe(true);
-    expect(await sessionRows(user.userId)).toBe(1);
+    expect(await sessionRows(user.userId)).toBe(2);
   });
 
   describe("state / Cookie の不一致は 400（fail closed）。MCP の経路・監査に落とさない", () => {
@@ -885,10 +886,25 @@ describe("セッションの確認（GET /dashboard/api/me）とログアウト"
     expect(res.status).toBe(401);
   });
 
-  it("再ログインすると古いセッションは 401、新しいセッションは 200", async () => {
+  it("再ログインしても古いセッションは 200 のまま（複数端末）。新しいセッションも 200", async () => {
     const { env } = makeEnv();
     const first = await loggedIn(env);
     const second = await loggedIn(env, first.user);
+    expect(second.session).not.toBe(first.session);
+    expect((await me(env, { ...SAME, cookie: first.session })).status).toBe(200);
+    expect((await me(env, { ...SAME, cookie: second.session })).status).toBe(200);
+  });
+
+  it("ログアウトは自分のセッションだけを失効し、他の端末は 200 のまま", async () => {
+    const { env } = makeEnv();
+    const first = await loggedIn(env);
+    const second = await loggedIn(env, first.user);
+    const out = await dash(
+      "/dashboard/api/logout",
+      { method: "POST", headers: { ...SAME, cookie: first.session } },
+      env,
+    );
+    expect(out.status).toBe(204);
     expect((await me(env, { ...SAME, cookie: first.session })).status).toBe(401);
     expect((await me(env, { ...SAME, cookie: second.session })).status).toBe(200);
   });

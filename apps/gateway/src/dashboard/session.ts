@@ -20,6 +20,11 @@ export const SESSION_AAD = "dashboard-session-v1";
 export const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60 * 1000;
 /** 無操作の期限 8 時間。 */
 export const SESSION_IDLE_MS = 8 * 60 * 60 * 1000;
+/**
+ * 1 人の利用者が同時に持てるセッションの数（端末・ブラウザの数）。PC・スマホ・タブレット × 複数ブラウザを見込んだ値。
+ * 超えたら、ログインのときに last_seen がいちばん古いものから消す。
+ */
+export const SESSION_MAX_PER_USER = 10;
 /** last_seen を更新する最小の間隔 5 分（毎回書かない）。 */
 export const SESSION_TOUCH_MS = 5 * 60 * 1000;
 /** ログイン開始から callback までの猶予 10 分。 */
@@ -32,7 +37,7 @@ export interface SessionClaims {
   uid: number;
   /** セッション ID（UserDO の dashboard_session の主キー） */
   sid: string;
-  /** ログイン世代（UserDO の dashboard_epoch と一致するときだけ有効） */
+  /** ログイン世代（UserDO の dashboard_epoch と一致するときだけ有効。全端末ログアウトのときだけ進む） */
   ver: number;
   iat: number;
   exp: number;

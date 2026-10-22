@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   SESSION_ABSOLUTE_MS,
   SESSION_IDLE_MS,
+  SESSION_MAX_PER_USER,
   SESSION_TOUCH_MS,
   SID_RE,
 } from "../../src/dashboard/session";
@@ -46,23 +47,96 @@ describe("UserDO のダッシュボードのセッション（D3）", () => {
     });
   });
 
-  it("ログインのたびに新しい sid・新しい世代になり、古い sid は全部失効する（セッション固定の対策）", async () => {
+  it("ログインのたびに新しい sid になり、世代は進まず、前の端末のセッションも有効なまま（複数端末）", async () => {
     const stub = userStub(newUserId());
     await useClock(stub);
     const first = await stub.createDashboardSession("alice");
     const second = await stub.createDashboardSession("alice");
     expect(second.sid).not.toBe(first.sid);
-    expect(second.version).toBeGreaterThan(first.version);
-    expect(await stub.checkDashboardSession(first.sid, first.version)).toEqual({ ok: false });
-    // 古い sid に新しい世代を組み合わせても通らない（記録が無い）
-    expect(await stub.checkDashboardSession(first.sid, second.version)).toEqual({ ok: false });
-    // 新しい sid に古い世代を組み合わせても通らない
-    expect(await stub.checkDashboardSession(second.sid, first.version)).toEqual({ ok: false });
+    expect(second.version).toBe(first.version);
+    expect(await stub.checkDashboardSession(first.sid, first.version)).toEqual({
+      ok: true,
+      login: "alice",
+    });
     expect(await stub.checkDashboardSession(second.sid, second.version)).toEqual({
       ok: true,
       login: "alice",
     });
-    expect(await sql(stub, "SELECT sid FROM dashboard_session")).toHaveLength(1);
+    // 別の sid に世代だけ合わせても通らない・世代が違えば通らない
+    expect(await stub.checkDashboardSession(first.sid, second.version + 1)).toEqual({ ok: false });
+    expect(await stub.checkDashboardSession("A".repeat(43), second.version)).toEqual({
+      ok: false,
+    });
+    expect(await sql(stub, "SELECT sid FROM dashboard_session")).toHaveLength(2);
+  });
+
+  it("既存のセッション（今の世代の行）は、デプロイ後の新しいログインでも消えない", async () => {
+    const stub = userStub(newUserId());
+    const clock = await useClock(stub);
+    // 旧実装が作った行を直接入れる（世代 5 のとき）
+    await runInDurableObject(stub, (_i, state) => {
+      state.storage.sql.exec("UPDATE dashboard_epoch SET epoch = 5 WHERE singleton = 1");
+      state.storage.sql.exec(
+        "INSERT INTO dashboard_session (sid, version, login, created_at, expires_at, last_seen) VALUES (?, 5, 'alice', ?, ?, ?)",
+        "O".repeat(43),
+        clock.now(),
+        clock.now() + SESSION_ABSOLUTE_MS,
+        clock.now(),
+      );
+    });
+    expect((await stub.checkDashboardSession("O".repeat(43), 5)).ok).toBe(true);
+    const created = await stub.createDashboardSession("alice");
+    expect(created.version).toBe(5);
+    expect((await stub.checkDashboardSession("O".repeat(43), 5)).ok).toBe(true);
+  });
+
+  it("上限（SESSION_MAX_PER_USER）を超えると、last_seen が最も古いものだけが消える", async () => {
+    const stub = userStub(newUserId());
+    const clock = await useClock(stub);
+    const made: { sid: string; version: number }[] = [];
+    for (let i = 0; i < SESSION_MAX_PER_USER; i++) {
+      made.push(await stub.createDashboardSession("alice"));
+      clock.advance(MIN);
+    }
+    expect(await sql(stub, "SELECT sid FROM dashboard_session")).toHaveLength(SESSION_MAX_PER_USER);
+    // 最古（made[0]）を使い、last_seen を更新して最古でなくする（更新は 5 分以上あけば書かれる）
+    const [oldest, second, ...rest] = made;
+    if (!oldest || !second) throw new Error("sessions were not made");
+    clock.advance(SESSION_TOUCH_MS);
+    expect((await stub.checkDashboardSession(oldest.sid, oldest.version)).ok).toBe(true);
+    const extra = await stub.createDashboardSession("alice");
+    expect(await sql(stub, "SELECT sid FROM dashboard_session")).toHaveLength(SESSION_MAX_PER_USER);
+    // 追い出されるのは、いまいちばん古い made[1]
+    expect((await stub.checkDashboardSession(second.sid, second.version)).ok).toBe(false);
+    for (const s of [oldest, ...rest, extra]) {
+      expect((await stub.checkDashboardSession(s.sid, s.version)).ok, s.sid).toBe(true);
+    }
+  });
+
+  it("期限切れ（絶対期限・無操作）の行は、ログインの INSERT 時に掃除される", async () => {
+    const stub = userStub(newUserId());
+    const clock = await useClock(stub);
+    const idle = await stub.createDashboardSession("alice");
+    clock.advance(SESSION_IDLE_MS + 1);
+    const fresh = await stub.createDashboardSession("alice");
+    // idle は検証していない（check の掃除に頼らない）のに、行ごと消えている
+    expect(await sql(stub, "SELECT sid FROM dashboard_session")).toEqual([{ sid: fresh.sid }]);
+    expect((await stub.checkDashboardSession(idle.sid, idle.version)).ok).toBe(false);
+
+    // 絶対期限切れ: last_seen が新しくても expires_at を過ぎた行は消す
+    const old = await stub.createDashboardSession("alice");
+    await runInDurableObject(stub, (_i, state) => {
+      state.storage.sql.exec(
+        "UPDATE dashboard_session SET expires_at = ? WHERE sid = ?",
+        clock.now() - 1,
+        old.sid,
+      );
+    });
+    const next = await stub.createDashboardSession("alice");
+    const sids = (await sql<{ sid: string }>(stub, "SELECT sid FROM dashboard_session")).map(
+      (r) => r.sid,
+    );
+    expect(sids.sort()).toEqual([fresh.sid, next.sid].sort());
   });
 
   it("知らない sid・存在しない利用者の sid は拒否する（理由は区別しない）", async () => {
@@ -114,25 +188,28 @@ describe("UserDO のダッシュボードのセッション（D3）", () => {
     expect(await sql(stub, "SELECT sid FROM dashboard_session")).toHaveLength(0);
   });
 
-  it("ログアウト: sid を失効する。もう一度呼んでも安全（冪等）で、別の sid には影響しない", async () => {
+  it("ログアウト: 自分の sid だけを失効する。もう一度呼んでも安全（冪等）で、他の端末のセッションは通る", async () => {
     const stub = userStub(newUserId());
     await useClock(stub);
     const s = await stub.createDashboardSession("alice");
+    const other = await stub.createDashboardSession("alice");
     await stub.revokeDashboardSession("B".repeat(43)); // 知らない sid
     expect((await stub.checkDashboardSession(s.sid, s.version)).ok).toBe(true);
     await stub.revokeDashboardSession(s.sid);
     expect(await stub.checkDashboardSession(s.sid, s.version)).toEqual({ ok: false });
+    expect((await stub.checkDashboardSession(other.sid, other.version)).ok).toBe(true);
     await stub.revokeDashboardSession(s.sid);
   });
 
-  it("ログアウトしても世代は戻らない（同じ世代の sid を作り直せない）", async () => {
+  it("ログアウト後に再ログインしても、前の sid は戻らない（毎回新しい sid）", async () => {
     const stub = userStub(newUserId());
     await useClock(stub);
     const a = await stub.createDashboardSession("alice");
     await stub.revokeDashboardSession(a.sid);
     const b = await stub.createDashboardSession("alice");
-    expect(b.version).toBeGreaterThan(a.version);
+    expect(b.sid).not.toBe(a.sid);
     expect(await stub.checkDashboardSession(a.sid, a.version)).toEqual({ ok: false });
+    expect((await stub.checkDashboardSession(b.sid, b.version)).ok).toBe(true);
   });
 
   it("世代は DO の再起動（メモリの消去）をまたいで残る。MCP の loginEpoch とは別", async () => {

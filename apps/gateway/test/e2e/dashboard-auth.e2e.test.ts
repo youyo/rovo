@@ -127,12 +127,19 @@ describe("ダッシュボードのログイン（正常系）", () => {
     }
   });
 
-  it("再ログインすると古いセッションは失効し、新しいセッションだけが有効", async () => {
+  it("再ログインしても古いセッションは有効なまま（複数端末）。ログアウトは自分の分だけ", async () => {
     const user = newUser("dash");
     await addMember(user);
     const first = await completeLogin(user);
     const second = await completeLogin(user);
     expect(second.session).not.toBe(first.session);
+    expect((await me(first.session)).status).toBe(200);
+    expect((await me(second.session)).status).toBe(200);
+    const out = await fetch(`${baseUrl}/dashboard/api/logout`, {
+      method: "POST",
+      headers: { ...SAME, cookie: first.session },
+    });
+    expect(out.status).toBe(204);
     expect((await me(first.session)).status).toBe(401);
     expect((await me(second.session)).status).toBe(200);
   });

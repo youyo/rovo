@@ -44,6 +44,15 @@ export function isAllowedPrUrl(url: unknown): url is string {
   return typeof url === "string" && PR_URL.test(url);
 }
 
+/**
+ * Cloudflare のダッシュボードを開くリンク。許すのはこのトップの URL だけ（アカウント ID を含めない）。
+ * gateway の open_url は使わない（アカウント ID を含みうる）。
+ */
+export const CLOUDFLARE_DASH_URL = "https://dash.cloudflare.com/";
+export function isAllowedCloudflareUrl(url: unknown): url is string {
+  return url === CLOUDFLARE_DASH_URL;
+}
+
 /** 金額（USD）。0 は $0、1 ドル以上は小数 2 桁、未満は 4 桁まで（末尾の 0 を落とし、2 桁は残す）。 */
 export function formatUsd(v: number): string {
   if (!Number.isFinite(v) || v === 0) return "$0";

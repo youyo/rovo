@@ -863,3 +863,31 @@ h2 {
 .foot-note {
   font-size: var(--fs-small);
 }
+
+/* Cloudflare の枠（M9） */
+.cf-rows {
+  display: flex;
+  flex-direction: column;
+}
+.cf-rows li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-2);
+}
+.cf-value {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  min-width: 0;
+}
+.cf-text {
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.cf-missing {
+  color: var(--ink-3);
+}

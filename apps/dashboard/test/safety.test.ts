@@ -31,13 +31,13 @@ describe("ソースの禁止事項（D14）", () => {
     }
   });
 
-  it("外部ホストの URL を書かない（GitHub の PR の正規表現とコメントを除く）", () => {
+  it("外部ホストの URL を書かない（GitHub の PR の正規表現・Cloudflare のトップへのリンク 1 つ・コメントを除く）", () => {
     for (const { name, text } of files) {
       const code = text
         .split("\n")
         .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
         .join("\n");
-      expect(code, name).not.toMatch(/https?:\/\/(?!github\\\.com)/);
+      expect(code, name).not.toMatch(/https?:\/\/(?!github\\\.com|dash\.cloudflare\.com\/")/);
     }
   });
 });

@@ -172,13 +172,10 @@ function pickTarget(summary: string, keys: readonly string[]): string {
 
 /** 場所の 1 区切りに許す文字（素直なディレクトリ名だけ。空白・引用符・変数・シェルの記号は許さない） */
 const DIR_SEGMENT = /^[\p{L}\p{N}_.@+-]+$/u;
-const CD_PREFIX = /^cd\s+(\/workspace(?:\/\S*)?)\s+&&\s+(\S.*)$/;
+const CD_PREFIX = /^cd\s+(\S+)\s+&&\s+(\S.*)$/;
 
-/** /workspace からの相対パス。/workspace 自身は ""。素直なパスでない（.. や // を含む・変な文字がある）ものは undefined */
-function relativeDir(abs: string): string | undefined {
-  const rest = abs.slice("/workspace".length);
-  if (rest === "") return "";
-  const parts = rest.slice(1).split("/");
+/** cd の引数の区切りが素直か（.・..・空・変な文字を含まない）。素直なら相対パス（"" は場所なし）、そうでなければ undefined */
+function cleanParts(parts: string[]): string | undefined {
   if (parts.at(-1) === "") parts.pop();
   for (const p of parts) {
     if (p === "." || p === ".." || !DIR_SEGMENT.test(p)) return undefined;
@@ -187,7 +184,22 @@ function relativeDir(abs: string): string | undefined {
 }
 
 /**
- * コマンドの先頭の `cd /workspace/<相対パス> && ` を外し、<相対パス> を場所として返す。
+ * cd の引数から /workspace からの相対パスを得る。/workspace 自身・`.` は ""。
+ * 絶対パスは /workspace の下だけ。相対パスは / ~ - $ や引用符で始まらないものだけ（先頭の ./ は 1 つだけ外す）。
+ * 素直なパスでない（.. や // を含む・変な文字がある）ものは undefined
+ */
+function relativeDir(arg: string): string | undefined {
+  if (arg === "/workspace") return "";
+  if (arg.startsWith("/workspace/")) return cleanParts(arg.slice("/workspace/".length).split("/"));
+  if (/^[/~$-]/.test(arg) || /["'`]/.test(arg)) return undefined;
+  if (arg === ".") return "";
+  const rel = arg.startsWith("./") ? arg.slice(2) : arg;
+  if (rel === "") return "";
+  return cleanParts(rel.split("/"));
+}
+
+/**
+ * コマンドの先頭の `cd /workspace/<相対パス> && ` と `cd <相対パス> && `（/workspace からの相対）を外し、<相対パス> を場所として返す。
  * `cd /workspace && ` は前置きだけ外す（場所なし）。ほかの形（.. を含む・/workspace の外・引用符つきなど）は触らない。
  * text は sanitize 済みの 1 行。
  */

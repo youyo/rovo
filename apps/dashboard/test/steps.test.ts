@@ -344,6 +344,60 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
       }
     });
 
+    it("cd <相対パス> && も /workspace からの相対として同じ見せ方にする（先頭の ./ は 1 つだけ外す）", () => {
+      expect(command("cd apps/agent && pnpm test")).toMatchObject({
+        target: "pnpm test",
+        where: "apps/agent",
+      });
+      expect(command("cd apps/agent/ && ls")).toMatchObject({ target: "ls", where: "apps/agent" });
+      expect(command("cd ./apps/agent && x")).toMatchObject({ target: "x", where: "apps/agent" });
+      expect(command("cd a && cd b && ls")).toMatchObject({ target: "cd b && ls", where: "a" });
+      expect(bash('{"command":"cd apps/agent && pnpm test"}')).toMatchObject({
+        target: "pnpm test",
+        where: "apps/agent",
+      });
+      expect(bash('{"command":"cd apps/agent && pnpm exec vitest ru')).toMatchObject({
+        target: "pnpm exec vitest ru…",
+        where: "apps/agent",
+      });
+    });
+
+    it("cd . && は前置きだけ外し、場所は付けない", () => {
+      for (const c of ["cd . && git status", "cd ./ && git status"]) {
+        expect(command(c)?.target, c).toBe("git status");
+        expect(command(c), c).not.toHaveProperty("where");
+      }
+    });
+
+    it("相対パスでも、..・空や . の区切り・~・$HOME・-・引用符・変な文字はそのまま", () => {
+      for (const c of [
+        "cd .. && ls",
+        "cd ../etc && rm x",
+        "cd apps/../etc && ls",
+        "cd a/./b && ls",
+        "cd a//b && ls",
+        "cd ././a && ls",
+        "cd .//a && ls",
+        "cd ~ && ls",
+        "cd ~/apps && ls",
+        "cd $HOME && ls",
+        "cd $HOME/apps && ls",
+        "cd - && ls",
+        "cd -P && ls",
+        'cd "apps/agent" && ls',
+        "cd 'apps/agent' && ls",
+        'cd "my dir" && ls',
+        "cd a\\ b && ls",
+        "cd a;b && ls",
+        "cd a; ls",
+        "cd a &&",
+      ]) {
+        const d = command(c);
+        expect(d?.target, c).toBe(c);
+        expect(d, c).not.toHaveProperty("where");
+      }
+    });
+
     it("末尾のスラッシュ・入れ子のパス・複数の && ", () => {
       expect(command("cd /workspace/apps/agent/ && ls")).toMatchObject({
         target: "ls",

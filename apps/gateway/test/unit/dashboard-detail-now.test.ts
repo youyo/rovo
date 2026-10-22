@@ -249,6 +249,53 @@ describe("buildNow", () => {
       }
     });
 
+    it("cd <相対パス> && も /workspace からの相対として同じ見せ方にする（先頭の ./ は 1 つだけ外す）", () => {
+      expect(tool("cd apps/agent && pnpm test")).toBe("apps/agent で $ pnpm test");
+      expect(cmdText("cd apps/agent && pnpm test")).toBe("apps/agent で pnpm test");
+      expect(cmdText("cd apps/agent/ && ls")).toBe("apps/agent で ls");
+      expect(cmdText("cd a && cd b && ls")).toBe("a で cd b && ls");
+      expect(cmdText("cd ./apps/agent && x")).toBe("apps/agent で x");
+      expect(tool("cd ./apps/agent && x")).toBe("apps/agent で $ x");
+      const cut = '{"command":"cd apps/agent && pnpm exec vitest ru';
+      expect(buildNow([start("c1", "bash", cut)], "RUNNING", "run")?.text).toBe(
+        "apps/agent で $ pnpm exec vitest ru…",
+      );
+    });
+
+    it("cd . && は前置きだけ外し、場所は付けない", () => {
+      expect(cmdText("cd . && git status")).toBe("git status");
+      expect(tool("cd . && git status")).toBe("$ git status");
+      expect(cmdText("cd ./ && git status")).toBe("git status");
+    });
+
+    it("相対パスでも、..・空や . の区切り・~・$HOME・-・引用符・変な文字はそのまま", () => {
+      for (const c of [
+        "cd .. && ls",
+        "cd ../etc && rm x",
+        "cd apps/../etc && ls",
+        "cd a/./b && ls",
+        "cd a//b && ls",
+        "cd ././a && ls",
+        "cd .//a && ls",
+        "cd ~ && ls",
+        "cd ~/apps && ls",
+        "cd $HOME && ls",
+        "cd $HOME/apps && ls",
+        "cd - && ls",
+        "cd -P && ls",
+        'cd "apps/agent" && ls',
+        "cd 'apps/agent' && ls",
+        'cd "my dir" && ls',
+        "cd a\\ b && ls",
+        "cd a;b && ls",
+        "cd a; ls",
+        "cd a &&",
+      ]) {
+        expect(cmdText(c), c).toBe(c);
+        expect(tool(c), c).toBe(`$ ${c}`);
+      }
+    });
+
     it("末尾のスラッシュ・複数の &&。場所も制御文字は除き、秘密はマスクし、300 字に収める", () => {
       expect(cmdText("cd /workspace/apps/agent/ && ls")).toBe("apps/agent で ls");
       expect(cmdText("cd /workspace/a && cd b && ls")).toBe("a で cd b && ls");

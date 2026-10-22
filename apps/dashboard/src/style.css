@@ -503,3 +503,363 @@ h2 {
   min-height: 44px;
   cursor: pointer;
 }
+
+/* ===== タスクの詳細（見本 Task.dc.html の再現）===== */
+:root {
+  /* 出力の枠だけ等幅。書体の名前 + system の等幅（フォントの同梱は M6b） */
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+.task {
+  display: flex;
+  flex-direction: column;
+  gap: 36px;
+}
+.task-head {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  color: var(--ink-2);
+}
+.state-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--blue);
+  animation: rovo-beat 1.8s ease-in-out infinite;
+}
+@keyframes rovo-beat {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(40, 64, 196, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(40, 64, 196, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
+}
+.task-head h1 {
+  font-size: var(--fs-big);
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  max-width: 28ch;
+  overflow-wrap: anywhere;
+}
+.now-line {
+  font-size: 18px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.now-line strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* 段階の帯（色 + 塗りの形 + 文字）*/
+.band {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  max-width: 760px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.band-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.band-bar {
+  display: block;
+  height: 8px;
+  border-radius: 2px;
+  border: 2px solid var(--face);
+  background: var(--face);
+}
+.band-name {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+.band-label {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+.band-item--done .band-bar {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.band-item--done .band-name {
+  color: var(--ink);
+}
+.band-item--now .band-bar {
+  background: repeating-linear-gradient(135deg, var(--blue) 0 6px, var(--bg) 6px 9px);
+  border-color: var(--blue);
+}
+.band-item--waiting .band-bar,
+.band-item--recovering .band-bar {
+  background: transparent;
+  border: 2px dashed var(--blue);
+}
+.band-item--stopped .band-bar {
+  background: transparent;
+  border: 2px dashed var(--orange);
+}
+.band-item--now .band-name,
+.band-item--now .band-label,
+.band-item--waiting .band-name,
+.band-item--waiting .band-label,
+.band-item--recovering .band-name,
+.band-item--recovering .band-label {
+  color: var(--blue);
+  font-weight: 600;
+}
+.band-item--stopped .band-name,
+.band-item--stopped .band-label {
+  color: var(--orange);
+  font-weight: 600;
+}
+
+.task-cols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 40px 56px;
+  align-items: flex-start;
+}
+.progress {
+  flex: 999 1 640px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.progress-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+.progress h2,
+.info h2 {
+  font-size: var(--fs-h2);
+  font-weight: 600;
+}
+.progress-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  color: var(--ink-2);
+}
+.progress-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  cursor: pointer;
+}
+.progress-controls input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--blue);
+}
+.older {
+  display: flex;
+  align-items: center;
+  color: var(--ink-3);
+}
+.older button:disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+.step {
+  display: grid;
+  grid-template-columns: 76px 20px minmax(0, 1fr);
+  column-gap: 14px;
+}
+.step-time {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+  padding-top: 2px;
+}
+.step-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.step-dot {
+  width: 9px;
+  height: 9px;
+  margin-top: 7px;
+  border-radius: 999px;
+  background: var(--ink);
+}
+.step-rail::after {
+  content: "";
+  flex: 1 1 auto;
+  width: 1px;
+  background: var(--line);
+}
+.step:last-child .step-rail::after {
+  display: none;
+}
+.step-body {
+  min-width: 0;
+  padding-bottom: 18px;
+}
+.step-what {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.step-target {
+  color: var(--ink-2);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.step-note {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+/* いまの手順: 青 + 大きい点 + 「いま」の文字 */
+.step--now .step-what {
+  color: var(--blue);
+}
+.step--now .step-dot {
+  width: 11px;
+  height: 11px;
+  margin-top: 6px;
+  background: var(--blue);
+}
+.step-tag {
+  margin-left: 10px;
+  padding: 0 8px;
+  border: 1px solid var(--blue);
+  border-radius: 999px;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--blue);
+}
+/* 失敗した手順: オレンジ + 中空の点（動詞にも「失敗した」と出る）*/
+.step--fail .step-what {
+  color: var(--orange);
+}
+.step--fail .step-dot {
+  background: transparent;
+  border: 2px solid var(--orange);
+  width: 11px;
+  height: 11px;
+  margin-top: 6px;
+}
+
+/* 出力の末尾（暗い枠・等幅）*/
+.output-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.output-box h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.output {
+  margin: 0;
+  padding: 16px 18px;
+  background: var(--ink);
+  color: var(--line-2);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow: auto;
+}
+.output-note {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+
+/* 右の情報 */
+.info {
+  flex: 1 1 300px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 36px;
+}
+.info-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cost-big {
+  font-size: var(--fs-big);
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.facts {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+.fact {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-2);
+}
+.fact dt {
+  color: var(--ink-3);
+}
+.fact dd {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.pr-link {
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.pr-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+}
+.foot-note {
+  font-size: var(--fs-small);
+}

@@ -51,7 +51,7 @@ export const MARKS = {
  * COMPLETED の印を PR で決める。rovo の記録（pr.merged）が先で、GitHub の状態（pr.state）はその次。
  * state が "unknown"（取れなかった）なら、記録だけで判断し、マージ済みでなければ「PR あり」と断定しない。
  */
-function completedKind(pr: NonNullable<VisibleTaskDto["pr"]>): MarkKind {
+export function completedKind(pr: NonNullable<VisibleTaskDto["pr"]>): MarkKind {
   if (pr.merged) return "merged";
   const byState = {
     merged: "merged",
@@ -82,3 +82,13 @@ export function markKindOf(task: VisibleTaskDto): MarkKind {
 export function markOf(task: VisibleTaskDto): Mark {
   return MARKS[markKindOf(task)];
 }
+
+const TERMINAL: ReadonlySet<TaskStatusDto> = new Set([
+  "COMPLETED",
+  "FAILED",
+  "BUDGET_EXCEEDED",
+  "CANCELLED",
+]);
+
+/** 終端の状態か（もう進まない）。 */
+export const isTerminal = (s: TaskStatusDto): boolean => TERMINAL.has(s);

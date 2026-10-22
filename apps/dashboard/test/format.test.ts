@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   formatClock,
+  formatClockSeconds,
+  formatCount,
   formatDayHeading,
+  formatDuration,
   formatUsd,
   isAllowedPrUrl,
   sanitizeText,
@@ -111,5 +114,33 @@ describe("shortModel（モデル名の表示。プロバイダなどの接頭辞
   it("制御文字を除く。末尾が / など空になるときは全体を名前にする", () => {
     expect(shortModel("a/b\u0007c").name).toBe("bc");
     expect(shortModel("abc/").name).toBe("abc/");
+  });
+});
+
+describe("formatDuration（経過時間。日本語）", () => {
+  it("1 秒未満・秒・分秒・時間分", () => {
+    expect(formatDuration(0)).toBe("1 秒未満");
+    expect(formatDuration(999)).toBe("1 秒未満");
+    expect(formatDuration(42_000)).toBe("42 秒");
+    expect(formatDuration(252_000)).toBe("4 分 12 秒");
+    expect(formatDuration(60_000)).toBe("1 分 0 秒");
+    expect(formatDuration(3_600_000)).toBe("1 時間 0 分");
+    expect(formatDuration(3_600_000 * 2 + 5 * 60_000 + 59_000)).toBe("2 時間 5 分");
+  });
+  it("負・NaN は 0 として扱う", () => {
+    expect(formatDuration(-5)).toBe("1 秒未満");
+    expect(formatDuration(Number.NaN)).toBe("1 秒未満");
+  });
+});
+
+describe("formatClockSeconds / formatCount", () => {
+  it("ローカル時刻の HH:MM:SS", () => {
+    const d = new Date(2026, 9, 21, 4, 5, 6).getTime();
+    expect(formatClockSeconds(d)).toBe("04:05:06");
+  });
+  it("桁区切り", () => {
+    expect(formatCount(0)).toBe("0");
+    expect(formatCount(9412)).toBe("9,412");
+    expect(formatCount(1234567)).toBe("1,234,567");
   });
 });

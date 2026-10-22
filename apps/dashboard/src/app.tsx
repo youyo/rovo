@@ -1,18 +1,27 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Scope } from "./api";
 import { AuthView } from "./auth-view";
 import { OverviewScreen } from "./overview-screen";
+import { parseRoute } from "./route";
 import { type AuthState, fetchMe, loginHref, logout } from "./session";
+import { TaskScreen } from "./task-screen";
 
 const SCOPES: { value: Scope; label: string }[] = [
   { value: "all", label: "全員" },
   { value: "me", label: "自分" },
 ];
 
-/** 一覧（M6）。ログインの確認（M4）→ 今日のタスクと費用。期間は「今日」だけ。 */
+/**
+ * 一覧（M6）と詳細（M8）。ログインの確認（M4）→ `/dashboard/tasks/<ULID>` なら詳細、それ以外は今日のタスクと費用。
+ * 画面の切り替えは通常のリンク（全リロード）で、ブラウザの履歴は使わない。
+ */
 export function App() {
   const [auth, setAuth] = useState<AuthState>({ state: "loading" });
   const [scope, setScope] = useState<Scope>("all");
+  const route = useMemo(
+    () => parseRoute(typeof location === "undefined" ? "/dashboard/" : location.pathname),
+    [],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -39,7 +48,12 @@ export function App() {
     <main className="shell">
       <header className="top">
         <div className="brand">rovo</div>
-        {signedIn ? (
+        {route.kind === "task" ? (
+          <a className="back" href="/dashboard/">
+            ダッシュボードに戻る
+          </a>
+        ) : null}
+        {signedIn && route.kind === "overview" ? (
           <>
             <fieldset className="seg" aria-label="表示するタスク">
               {SCOPES.map((s) => (
@@ -63,13 +77,19 @@ export function App() {
           <AuthView auth={auth} loginHref={href} onLogout={onLogout} />
         </div>
       </header>
-      {signedIn ? (
+      {signedIn && route.kind === "task" ? (
+        <TaskScreen id={route.id} onUnauthorized={onUnauthorized} />
+      ) : signedIn ? (
         <OverviewScreen scope={scope} onUnauthorized={onUnauthorized} />
       ) : (
         <div className="state">
-          <h1>ダッシュボード</h1>
+          <h1>{route.kind === "task" ? "タスクの詳細" : "ダッシュボード"}</h1>
           {auth.state === "loading" ? null : (
-            <p>ログインすると、今日のタスクと費用を見られます。</p>
+            <p>
+              {route.kind === "task"
+                ? "ログインすると、このタスクの詳細を見られます。"
+                : "ログインすると、今日のタスクと費用を見られます。"}
+            </p>
           )}
         </div>
       )}

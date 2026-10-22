@@ -143,7 +143,7 @@ describe("outbox: 各更新点で revision が上がる", () => {
         cancel: (owner: number) => Promise<unknown>;
       };
       const orig = o.appendEvent.bind(i);
-      o.appendEvent = (...a: unknown[]) => {
+      o.appendEvent = () => {
         o.appendEvent = orig;
         throw new Error("boom");
       };

@@ -404,11 +404,16 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
 
   const bash = defineTool({
     name: "bash",
-    description: `Run a shell command with bash -lc in the sandbox container (default timeout ${BASH_DEFAULT_TIMEOUT_S}s, max ${BASH_MAX_TIMEOUT_S}s). Output keeps the last ${BASH_MAX_OUTPUT_BYTES} bytes of stdout and of stderr. Every process you start is killed when the call ends: background processes (&, nohup, setsid) do not survive. ${UNTRUSTED_NOTE}`,
+    description: `Run a shell command with bash -lc in the sandbox container (default timeout ${BASH_DEFAULT_TIMEOUT_S}s, max ${BASH_MAX_TIMEOUT_S}s). Output keeps the last ${BASH_MAX_OUTPUT_BYTES} bytes of stdout and of stderr. Every process you start is killed when the call ends: background processes (&, nohup, setsid) do not survive. Each call starts at the workspace root; a cd does not carry over to the next call, so do not put cd at the start of the command. To run in a subdirectory, pass it as cwd (e.g. apps/agent). ${UNTRUSTED_NOTE}`,
     parameters: Type.Object({
       command: Type.String({ minLength: 1 }),
       timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: BASH_MAX_TIMEOUT_S })),
-      cwd: Type.Optional(Type.String({ description: "Working directory inside the workspace" })),
+      cwd: Type.Optional(
+        Type.String({
+          description:
+            "Working directory as a path relative to the workspace root (e.g. apps/agent). Defaults to the root. Use this instead of cd.",
+        }),
+      ),
     }),
     replay: "unsafe",
     execute: guarded(

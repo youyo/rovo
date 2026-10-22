@@ -98,6 +98,32 @@ describe("回帰: 本番相当の入力から手書き相当の設定が出る",
     assert.equal(parseJsonc(out.agent).assets, undefined);
     assert.equal(parseJsonc(out.web).assets, undefined);
   });
+  it("gateway に ai バインディングと、モデルの自動選択の var が出る（新しい secret は要らない）", () => {
+    const g = parseJsonc(out.gateway);
+    assert.deepEqual(g.ai, { binding: "AI" });
+    assert.equal(
+      g.vars.AUTO_MODEL_CANDIDATES,
+      "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5",
+    );
+    assert.equal(g.vars.AUTO_MODEL_CLEF_THRESHOLDS, "");
+    // fable は既定の候補に入れない
+    assert.doesNotMatch(g.vars.AUTO_MODEL_CANDIDATES, /fable/);
+    // gateway の AI Gateway の id は agent と同じ（Clef の呼び出しも同じ Gateway を通る）
+    assert.equal(g.vars.AI_GATEWAY_ID, parseJsonc(out.agent).vars.AI_GATEWAY_ID);
+  });
+  it("vars.gateway.AUTO_MODEL_CANDIDATES で候補を変えられる（fable を足す）。agent / web には無い", () => {
+    const cfg = validated({
+      ...productionLike(),
+      vars: {
+        gateway: {
+          AUTO_MODEL_CANDIDATES: "anthropic/claude-sonnet-5-5,anthropic/claude-fable-5-1",
+        },
+      },
+    });
+    const o = generateAll(cfg, infra, templates);
+    assert.match(parseJsonc(o.gateway).vars.AUTO_MODEL_CANDIDATES, /fable/);
+    assert.equal(parseJsonc(o.agent).vars.AUTO_MODEL_CANDIDATES, undefined);
+  });
   it("生成物に <...> のプレースホルダが残らない（コメント行を除く）", () => {
     for (const n of ["gateway", "agent", "web"]) {
       const bad = out[n]

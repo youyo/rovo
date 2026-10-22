@@ -11,6 +11,16 @@ export const STOPPED_PHASES = ["prepare", "run", "verify"] as const;
 /** 「いまは X を実行中」の X の種類 */
 export const NOW_KINDS = ["command", "edit", "commit", "web", "tool", "waiting"] as const;
 
+/**
+ * モデルの選び方（task_start の model を指定したか、省略して rovo が選んだか）。確率・時間・選んだモデルは持たない（モデルは task.model にある）。
+ * `reason` は固定のコード（clef_flash など。画面が日本語にする。知らないコードはそのまま出す）で、自由文は受け付けない。追加のみの項目。
+ */
+export const ModelSelectionDtoSchema = z.strictObject({
+  mode: z.enum(["auto", "explicit"]),
+  reason: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
+});
+export type ModelSelectionDto = z.infer<typeof ModelSelectionDtoSchema>;
+
 /** 設定の欄。`sandbox_instance` は表にある名前だけ（standard-2 など） */
 export const SettingsDtoSchema = z.strictObject({
   merge_policy: z.enum(["human_review", "agent_merge"]),
@@ -21,6 +31,8 @@ export const SettingsDtoSchema = z.strictObject({
     .string()
     .regex(/^[a-z0-9][a-z0-9-]{0,31}$/)
     .optional(),
+  /** 無いのは旧い gateway・記録の無い古いタスク（画面は行を出さない） */
+  model_selection: ModelSelectionDtoSchema.optional(),
 });
 export type SettingsDto = z.infer<typeof SettingsDtoSchema>;
 

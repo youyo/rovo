@@ -2228,3 +2228,57 @@ describe("dashboard_url（M10。task_start / task_status / task_result だけに
     await client.close();
   });
 });
+
+describe("モデルの自動選択: AI への伝え方（instructions と説明）", () => {
+  it("task_start の説明: model を省略すると rovo がタスクの内容から選び、選んだモデルと理由が応答に返る。モデルを指定すればそのモデル", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    const start = desc("task_start");
+    expect(start).toContain("model を省略すると rovo がタスクの内容から選ぶ");
+    expect(start).toContain("指定すればそのモデル");
+    expect(start).toContain("model_selection");
+    for (const code of [
+      "clef_flash",
+      "clef_cascade",
+      "single_candidate",
+      "fallback_",
+      "explicit",
+    ]) {
+      expect(start, code).toContain(code);
+    }
+    // 応答の形に model と model_selection がある
+    expect(start).toMatch(/応答は \{task_id, status, draft_pr_url, model, model_selection\?/);
+    for (const name of ["task_status", "task_result"]) {
+      expect(desc(name), name).toContain("model_selection");
+    }
+    // 入力の model の説明
+    const schema = JSON.stringify(tools.find((t) => t.name === "task_start")?.inputSchema);
+    expect(schema).toContain("省略すると rovo がタスクの内容から選ぶ");
+    await client.close();
+  });
+
+  it("instructions: 全体の流れの 1 と 8 に、model の省略で rovo が選ぶこと・応答に選んだモデルと理由が返ることを書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const instructions = client.getInstructions() ?? "";
+    expect(instructions).toContain("model を省略すると rovo がタスクの内容から選ぶ");
+    expect(instructions).toContain("選んだモデルと理由は応答に返る");
+    expect(instructions).not.toContain("省略は既定のモデル）。budget_status");
+    await client.close();
+  });
+
+  it("verification_commands: Sandbox にあるコマンド（pnpm・node・python など）で書き、mise run は使わない（Sandbox に mise が無い）", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const start = tools.find((t) => t.name === "task_start")?.description ?? "";
+    expect(start).toContain("Sandbox にあるコマンド");
+    expect(start).toContain("pnpm");
+    expect(start).toMatch(/mise run[^。]*使わない/);
+    const instructions = client.getInstructions() ?? "";
+    expect(instructions).toMatch(/mise run[^。]*使わない/);
+    await client.close();
+  });
+});

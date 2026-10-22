@@ -56,8 +56,15 @@ function writeE2eConfig(dir: string, opts: { logs: boolean }): string {
   const base = JSON.parse(
     stripJsonComments(readFileSync(join(GATEWAY_DIR, "wrangler.jsonc"), "utf8")),
   ) as Record<string, unknown>;
+  // ai バインディングは常にリモートの Workers AI につながる（実アカウントを呼ぶ）ので、E2E では外し、
+  // 偽の AI（fake-agent-worker の FakeAI。WorkerEntrypoint の run）への service binding に差し替える
+  const { ai: _ai, ...withoutAi } = base;
   const config = {
-    ...base,
+    ...withoutAi,
+    services: [
+      ...((base.services as unknown[] | undefined) ?? []),
+      { binding: "AI", service: "rovo-agent", entrypoint: "FakeAI" },
+    ],
     main: join(GATEWAY_DIR, String(base.main)),
     // assets.directory も設定の置き場所（一時ディレクトリ）からの相対にならないよう絶対パスにする。
     // 中身は build:dashboard が作る（mise の test:e2e:gateway が依存している）

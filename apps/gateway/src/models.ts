@@ -8,6 +8,12 @@ import {
   providerOf,
   resolveEfforts,
 } from "@rovo/models";
+import {
+  type Candidate,
+  DEFAULT_AUTO_MODEL_CANDIDATES,
+  eligibleCandidates,
+  parseCandidates,
+} from "./model-selection";
 import { loadProviderKeys, type ProviderKeysDeps, type ProviderKeysEnv } from "./provider-keys";
 
 /** 既定のモデル（env の AGENT_MODEL。空なら DEFAULT_MODEL）。agent の同名の var と同じ値にする。 */
@@ -69,6 +75,8 @@ export type ModelEnv = Partial<ProviderKeysEnv> & {
   AGENT_MODEL?: string;
   AGENT_MODELS?: string;
   MODEL_EFFORTS?: string;
+  /** model を省略したときに Clef が選ぶ候補（カンマ区切り）。未設定は既定の 3 つ、空は自動選択をしない */
+  AUTO_MODEL_CANDIDATES?: string;
 };
 
 /** プロバイダーのキーが登録されているか。keys が undefined（判定できない・未設定）なら従来どおり使える扱い。Workers AI はキー不要。 */
@@ -180,4 +188,17 @@ export async function listModels(env: ModelEnv, deps?: ProviderKeysDeps): Promis
     });
   }
   return out;
+}
+
+/**
+ * model を省略したときの自動選択の候補（env の AUTO_MODEL_CANDIDATES ∩ このデプロイで使えるモデル）。
+ * 使えるとは、AGENT_MODELS にあり、プロバイダーのキー（D10b）が判定できて無い場合を除くこと。
+ * 費用の安い順（haiku < sonnet < opus < fable）。anthropic 以外・等級の分からないモデルは入らない。
+ * 未設定は既定の 3 つ（haiku / sonnet / opus。fable は env で足す）、空文字は自動選択をしない。
+ */
+export async function autoCandidates(env: ModelEnv, deps?: ProviderKeysDeps): Promise<Candidate[]> {
+  const ids = parseCandidates(env.AUTO_MODEL_CANDIDATES ?? DEFAULT_AUTO_MODEL_CANDIDATES);
+  if (ids.length === 0) return [];
+  const keys = await keysOf(env, deps);
+  return eligibleCandidates(ids, agentModelsOf(env), (id) => hasKey(id, keys));
 }

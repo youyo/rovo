@@ -468,6 +468,30 @@ describe("tasks/:id", () => {
     expect(v.visibleCalls).toEqual([{ fresh: true }]);
   });
 
+  it("設定にモデルの選び方（mode と reason だけ。確率・時間は出さない）が出る。記録の無いタスクには付かない", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const withSel = await seedTask({
+      repository_id: repo,
+      model: "anthropic/claude-sonnet-5-5",
+      model_selection: {
+        mode: "auto",
+        chosen: "anthropic/claude-sonnet-5-5",
+        reason: "clef_cascade",
+        scores: { "anthropic/claude-sonnet-5-5": 0.91 },
+        latency_ms: 812,
+      },
+    });
+    const r = await api(v, `/tasks/${withSel.id}`);
+    const dto = TaskDetailDtoSchema.parse(r.json());
+    expect(dto.settings.model_selection).toEqual({ mode: "auto", reason: "clef_cascade" });
+    expect(r.text).not.toContain("0.91");
+    expect(r.text).not.toContain("812");
+    const plain = await seedTask({ repository_id: repo });
+    const dto2 = TaskDetailDtoSchema.parse((await api(v, `/tasks/${plain.id}`)).json());
+    expect(dto2.settings).not.toHaveProperty("model_selection");
+  });
+
   it("phase: 実行中は run、終端は done（now は無い）", async () => {
     // 偽の GitHub App で Draft PR を作れる実在のリポジトリ（id 4242）で進める
     const v = newViewer([4242]);

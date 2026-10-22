@@ -23,7 +23,7 @@ rovo を upstream として取り込み、自分の Cloudflare アカウント�
 | Durable Objects（SQLite） | `TaskDO` / `UserDO`（gateway）、`AgentDO` / `SandboxDO`（agent） | |
 | Containers | agent の `SandboxDO`（コーディング用の Sandbox） | `apps/agent/Dockerfile` からイメージをビルドする。デプロイするマシンで Docker が動く必要がある |
 | KV | gateway の `OAUTH_KV`（OAuth の状態） | |
-| Workers AI | web の `AI`（Web Search API、HTML の Markdown 変換、Clef-flash）、agent の `AI`（AI Gateway 経由で Claude を呼ぶ） | |
+| Workers AI | web の `AI`（Web Search API、HTML の Markdown 変換、Clef-flash）、agent の `AI`（AI Gateway 経由で Claude を呼ぶ。Sandbox の昇格の判断に Clef）、gateway の `AI`（task_start で model を省略したとき、Clef がモデルを選ぶ。新しい secret は無い） | gateway に `ai` バインディングが増えた。既存のデプロイは `mise run deploy:config` で設定を作り直してから deploy する（`deploy:config:check` で確かめる） |
 | AI Gateway | Claude、Web Search API、Clef-flash の呼び出し | Anthropic の API キーは AI Gateway に保管する。Worker には置かない |
 | R2 | gateway の `LOGS`（任意。9） | |
 | Browser Run | web の `BROWSER`（宣言は常にある。コードが使うのは `WEB_BROWSE_ENABLED` が `"true"` のときだけ。12） | upstream の `wrangler.jsonc` も `deploy.example/` も `browser` を常に宣言している。`apps/web/src/service.ts` は `env.BROWSER` を `WEB_BROWSE_ENABLED` の確認より後でしか触らない（無効なら使われない）。Browser Run の無いアカウントで宣言だけでデプロイが通るか: **【実機で確認して追記】** |
@@ -244,6 +244,8 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `WEB_BROWSE_ENABLED` | gateway / agent / web | 任意 | `"false"` | `"true"` のときだけ `web_browse` が有効。3 つの Worker で揃える（12） |
 | `SANDBOX_INSTANCE` | gateway | 任意 | `standard-2` | `sandbox_instances_list` の `default`（`task_start` で `sandbox_instance` を省略したときの大きさ）。agent の同名の var と同じ値にする。`deploy:config` が `sandbox.instance` から両方に入れる。単価の計算には使わない |
 | `SANDBOX_MAX_INSTANCE` | gateway | 任意 | `standard-4` | `sandbox_instances_list` の `auto_scale_max`（Clef が Sandbox を自動で上げる上限）。agent の同名の var と同じ値にする。空・`off`・不正な値は上限なし（どれも `false`）。`deploy:config` が `sandbox.maxInstance` から両方に入れる。**旧 `SANDBOX_HEAVY_INSTANCE` / `SANDBOX_AGENT_MAX_INSTANCE` は廃止**（取り除く）（11） |
+| `AUTO_MODEL_CANDIDATES` | gateway | 任意 | `anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5` | task_start で model を省略したとき、Clef（Workers AI の決定モデル）が内容から選ぶモデルの候補（カンマ区切り）。`AGENT_MODELS` にあり、プロバイダーのキーが使えるものだけが候補になる（費用の安い順に並べ替える）。候補が 1 つ以下なら Clef を呼ばず既定のモデル。anthropic の haiku / sonnet / opus / fable だけで、openai/*・workers-ai/* は書いても候補にならない。fable は既定に入れていない（使うなら `vars.gateway.AUTO_MODEL_CANDIDATES` に足し、`models.list` にも入れる）。空文字は自動選択をしない。`rovo.config.json` の `vars.gateway` で上書きできる |
+| `AUTO_MODEL_CLEF_THRESHOLDS` | gateway | 任意 | （空 = 既定の閾値） | 自動選択の閾値。`up=0.5,band=0.3-0.7` の形で、書いたキーだけ上書きする（`up`: 「その段以上」の確率がこれ以上のうち、いちばん重い段を選ぶ / `band`: 確率がこの帯（下端を含み上端を含まない）にある段があれば clef で聞き直す）。不正な値は既定に戻す。実験の根拠は docs/specs/design.md の「モデルの自動選択」 |
 | `SANDBOX_USD_PER_HOUR` | gateway | 任意 | `0.1291`（`standard-2`） | 推定費用の単価（11）。`deploy:config` が `sandbox.instance` から計算する。agent が使った大きさを報告したタスクは、その大きさの単価（表の値）で計算するので、この値は大きさが分からないタスク（Sandbox を起動しなかった・古い agent）にだけ効く |
 | `WEB_USD_PER_1K_SEARCH` | gateway | 任意 | `5.00` | 同上 |
 | `WEB_USD_PER_1K_FETCH` | gateway | 任意 | `0` | 同上 |

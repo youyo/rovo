@@ -17,6 +17,9 @@
   "logpush": true,
   // Workers Logs の head sampling を 100% にする（docs/deploy.md の 10）。
   "observability": { "enabled": true, "head_sampling_rate": 1 },
+  // Workers AI。task_start で model を省略したとき、Clef（決定モデル）がタスクの内容から使うモデルを選ぶ（AUTO_MODEL_CANDIDATES）。
+  // 新しい secret は要らない。AI Gateway の ID は AI_GATEWAY_ID を使う（agent の ai バインディングと同じ）。
+  "ai": { "binding": "AI" },
   // terraform output kv_namespace_id の値
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "kv-namespace-id-example" }],
   // アーカイブ（docs/deploy.md の 9）。gateway にだけ置く。terraform output archive_bucket_name の値
@@ -65,6 +68,12 @@
     "AGENT_MODEL": "anthropic/claude-sonnet-5-5",
     // Workers AI のモデル（workers-ai/@cf/...。キー不要。無料プランでも使えるものだけ）を入れておくと、Anthropic / OpenAI のキーが無いときの代わりになる。
     "AGENT_MODELS": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,workers-ai/@cf/openai/gpt-oss-120b",
+    // model を省略したとき Clef が選ぶモデルの候補（カンマ区切り）。AGENT_MODELS にあり、プロバイダーのキー（D10b）が使えるものだけが候補になり、
+    // 候補が 1 つ以下なら Clef を呼ばず既定のモデル。anthropic の haiku / sonnet / opus / fable だけ（openai/*・workers-ai/* は書いても候補にならない）。
+    // fable（極端に重い作業向け）は既定に入れていない。使うなら vars.gateway.AUTO_MODEL_CANDIDATES に "anthropic/claude-fable-5-1" を足し、rovo.config.json の models.list にも入れる。空文字にすると自動選択をしない。
+    "AUTO_MODEL_CANDIDATES": "anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5",
+    // 自動選択の閾値の上書き（`up=0.5,band=0.3-0.7` の形。書いたキーだけ上書き。空なら実験で決めた既定。不正な値は既定に戻す）。
+    "AUTO_MODEL_CLEF_THRESHOLDS": "",
     // AI Gateway に BYOK 登録されたプロバイダーキーを読んで、キーが無いプロバイダーのモデルを選べなくする（D10b）。
     // AI_GATEWAY_ID は agent と同じ値（terraform output ai_gateway_id）、CLOUDFLARE_ACCOUNT_ID は Cloudflare の account id（公開しない値）。
     // secret の CLOUDFLARE_API_TOKEN（権限は Account / AI Gateway / Read だけ）と合わせて設定する。どれかが空なら判定せず AGENT_MODELS だけで決める。

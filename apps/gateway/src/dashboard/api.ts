@@ -467,7 +467,7 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
   // 詳細を開いた最初の 1 回は、GitHub で取り直す（権限の取り消しを厳密に反映。D6）
   const read = await readAuthorizedTask(env, auth.session, taskId, { fresh: true });
   if (!read.ok) return read.response;
-  const { view, merge_policy, sandbox_instance, reached } = read.detail;
+  const { view, merge_policy, sandbox_instance, model_selection, reached } = read.detail;
 
   // 「いまの手順」と出力の末尾の材料（直近の数十件と最新の command だけ）。照合に使った repository_id を渡し、TaskDO が突き合わせる
   const repositoryId = view.repository_id;
@@ -494,6 +494,10 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
         : {}),
       ...(view.sandbox_runtime_ms !== null ? { sandbox_runtime_ms: view.sandbox_runtime_ms } : {}),
       ...(sandbox_instance !== null ? { sandbox_instance } : {}),
+      // モデルの選び方は mode と reason（固定のコード）だけ。確率・時間・選んだモデルは出さない
+      ...(model_selection !== undefined
+        ? { model_selection: { mode: model_selection.mode, reason: model_selection.reason } }
+        : {}),
     },
     // 出力の末尾は最新の command の output_tail（再マスク済み）。伏せている旨は常に true
     output: buildOutput(latest.latest_command),

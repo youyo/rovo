@@ -1,0 +1,316 @@
+{
+  "measured_at": "2026-10-22",
+  "note": "実際の Clef（@cf/cloudflare/clef-flash と @cf/cloudflare/clef）の応答の確率（answers.tier.probabilities）。候補は haiku / sonnet / opus の 3 段。見本は model-selection-samples.json。scripts/clef-model-experiment.mjs で測った（同じ入力は同じ確率になった）",
+  "candidates": [
+    "anthropic/claude-haiku-5-5",
+    "anthropic/claude-sonnet-5-5",
+    "anthropic/claude-opus-5-5"
+  ],
+  "tier_criteria": [
+    "Mechanical or small change: one file or a few lines, such as fixing a typo, changing wording, bumping a version, editing a config value, or applying a routine, fully specified edit. No design decisions and little or no new logic. (Anything simpler than this also belongs here.)",
+    "Ordinary implementation: a feature or bug fix that spans several files, follows patterns already in the codebase, and needs tests to be written. The approach is clear from the instructions.",
+    "Heavy work: needs design decisions, a broad refactor across many modules, finding the root cause of a bug whose cause is unknown, or careful reasoning about concurrency, security or data integrity. (Anything heavier than this also belongs here.)"
+  ],
+  "results": [
+    {
+      "id": "readme-line",
+      "expect": "haiku",
+      "input_tokens": 390,
+      "flash": {
+        "0": 0.9169,
+        "1": 0.0385,
+        "2": 0.0446
+      },
+      "clef": {
+        "0": 0.9735,
+        "1": 0.017,
+        "2": 0.0095
+      }
+    },
+    {
+      "id": "typo",
+      "expect": "haiku",
+      "input_tokens": 400,
+      "flash": {
+        "0": 0.9291,
+        "1": 0.0332,
+        "2": 0.0377
+      },
+      "clef": {
+        "0": 0.9755,
+        "1": 0.016,
+        "2": 0.0085
+      }
+    },
+    {
+      "id": "bump-dep",
+      "expect": "haiku",
+      "input_tokens": 416,
+      "flash": {
+        "0": 0.905,
+        "1": 0.0436,
+        "2": 0.0514
+      },
+      "clef": {
+        "0": 0.9619,
+        "1": 0.0279,
+        "2": 0.0102
+      }
+    },
+    {
+      "id": "config-value",
+      "expect": "haiku",
+      "input_tokens": 401,
+      "flash": {
+        "0": 0.9184,
+        "1": 0.0463,
+        "2": 0.0353
+      },
+      "clef": {
+        "0": 0.9643,
+        "1": 0.0271,
+        "2": 0.0086
+      }
+    },
+    {
+      "id": "dashboard-url",
+      "expect": "sonnet",
+      "input_tokens": 490,
+      "flash": {
+        "0": 0.0832,
+        "1": 0.8597,
+        "2": 0.0571
+      },
+      "clef": {
+        "0": 0.0521,
+        "1": 0.9027,
+        "2": 0.0452
+      }
+    },
+    {
+      "id": "bug-redirect",
+      "expect": "sonnet",
+      "input_tokens": 458,
+      "flash": {
+        "0": 0.1767,
+        "1": 0.7433,
+        "2": 0.08
+      },
+      "clef": {
+        "0": 0.1267,
+        "1": 0.7796,
+        "2": 0.0937
+      }
+    },
+    {
+      "id": "wait-elapsed",
+      "expect": "sonnet",
+      "input_tokens": 445,
+      "flash": {
+        "0": 0.1053,
+        "1": 0.8272,
+        "2": 0.0675
+      },
+      "clef": {
+        "0": 0.0504,
+        "1": 0.9075,
+        "2": 0.0421
+      }
+    },
+    {
+      "id": "consult-limit",
+      "expect": "sonnet",
+      "input_tokens": 461,
+      "flash": {
+        "0": 0.0998,
+        "1": 0.8661,
+        "2": 0.0341
+      },
+      "clef": {
+        "0": 0.0872,
+        "1": 0.8874,
+        "2": 0.0254
+      }
+    },
+    {
+      "id": "english-flag",
+      "expect": "sonnet",
+      "input_tokens": 428,
+      "flash": {
+        "0": 0.1088,
+        "1": 0.845,
+        "2": 0.0462
+      },
+      "clef": {
+        "0": 0.0568,
+        "1": 0.9256,
+        "2": 0.0176
+      }
+    },
+    {
+      "id": "sandbox-scale",
+      "expect": "opus",
+      "input_tokens": 541,
+      "flash": {
+        "0": 0.1039,
+        "1": 0.3655,
+        "2": 0.5306
+      },
+      "clef": {
+        "0": 0.0212,
+        "1": 0.1357,
+        "2": 0.8431
+      }
+    },
+    {
+      "id": "prod-typeerror",
+      "expect": "opus",
+      "input_tokens": 464,
+      "flash": {
+        "0": 0.0674,
+        "1": 0.0983,
+        "2": 0.8343
+      },
+      "clef": {
+        "0": 0.0177,
+        "1": 0.0738,
+        "2": 0.9085
+      }
+    },
+    {
+      "id": "redos",
+      "expect": "opus",
+      "input_tokens": 479,
+      "flash": {
+        "0": 0.1326,
+        "1": 0.3205,
+        "2": 0.5469
+      },
+      "clef": {
+        "0": 0.0635,
+        "1": 0.3165,
+        "2": 0.62
+      }
+    },
+    {
+      "id": "outbox-redesign",
+      "expect": "opus",
+      "input_tokens": 465,
+      "flash": {
+        "0": 0.0535,
+        "1": 0.1052,
+        "2": 0.8413
+      },
+      "clef": {
+        "0": 0.0177,
+        "1": 0.0858,
+        "2": 0.8965
+      }
+    },
+    {
+      "id": "auth-migration",
+      "expect": "opus",
+      "input_tokens": 479,
+      "flash": {
+        "0": 0.067,
+        "1": 0.1227,
+        "2": 0.8103
+      },
+      "clef": {
+        "0": 0.0124,
+        "1": 0.0496,
+        "2": 0.938
+      }
+    },
+    {
+      "id": "rename-fn",
+      "expect": "haiku",
+      "input_tokens": 385,
+      "flash": {
+        "0": 0.3489,
+        "1": 0.4799,
+        "2": 0.1712
+      },
+      "clef": {
+        "0": 0.2508,
+        "1": 0.6594,
+        "2": 0.0898
+      }
+    },
+    {
+      "id": "vague-fix",
+      "expect": "sonnet",
+      "input_tokens": 366,
+      "flash": {
+        "0": 0.5251,
+        "1": 0.3755,
+        "2": 0.0994
+      },
+      "clef": {
+        "0": 0.1733,
+        "1": 0.2666,
+        "2": 0.5601
+      }
+    },
+    {
+      "id": "dark-mode",
+      "expect": "sonnet",
+      "input_tokens": 428,
+      "flash": {
+        "0": 0.0762,
+        "1": 0.8645,
+        "2": 0.0593
+      },
+      "clef": {
+        "0": 0.0412,
+        "1": 0.8866,
+        "2": 0.0722
+      }
+    },
+    {
+      "id": "major-upgrade",
+      "expect": "opus",
+      "input_tokens": 420,
+      "flash": {
+        "0": 0.1113,
+        "1": 0.2098,
+        "2": 0.6789
+      },
+      "clef": {
+        "0": 0.0538,
+        "1": 0.1753,
+        "2": 0.7709
+      }
+    },
+    {
+      "id": "flaky-e2e",
+      "expect": "opus",
+      "input_tokens": 447,
+      "flash": {
+        "0": 0.032,
+        "1": 0.0518,
+        "2": 0.9162
+      },
+      "clef": {
+        "0": 0.0105,
+        "1": 0.0424,
+        "2": 0.9471
+      }
+    },
+    {
+      "id": "long-log",
+      "expect": "sonnet",
+      "input_tokens": 2559,
+      "flash": {
+        "0": 0.1462,
+        "1": 0.7839,
+        "2": 0.0699
+      },
+      "clef": {
+        "0": 0.123,
+        "1": 0.8134,
+        "2": 0.0636
+      }
+    }
+  ]
+}

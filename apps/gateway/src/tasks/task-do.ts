@@ -50,6 +50,7 @@ import {
 } from "../sandbox-instance";
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
+import { BUDGET_EXTENSION_KIND, MAX_BUDGET_EXTENSIONS } from "./budget-question";
 import { addColumnIfMissing } from "./sql-schema";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import {
@@ -63,7 +64,9 @@ import {
 import { isTaskId, ulid } from "./ulid";
 import type { UserDO } from "./user-do";
 import {
+  type BudgetPolicy,
   computeFingerprint,
+  DEFAULT_BUDGET_POLICY,
   DEFAULT_MERGE_POLICY,
   isValidIdempotencyKey,
   MAX_ANSWER_LENGTH,
@@ -163,6 +166,8 @@ export type TaskView = {
   draft_pr_url: string | null;
   /** PR のマージの方針（task_start で指定。既定 human_review） */
   merge_policy: MergePolicy;
+  /** 予算に近づいたときの扱い（task_start で指定。既定 ask = 止めずに親へ延長を聞く / stop = 止める）。この変更より前のタスクは stop */
+  budget_policy: BudgetPolicy;
   /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
   model: string;
   /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値。考える量が多いほど出力トークン＝費用が増える） */
@@ -176,7 +181,13 @@ export type TaskView = {
   /** 最後のイベントの seq（不透明な cursor 文字列）。 */
   latest_cursor: string;
   /** 子の未回答の質問（終端でないとき）。message は子が作った非信頼データ */
-  pending_question: { question_id: string; message: string; options: string[] } | null;
+  pending_question: {
+    question_id: string;
+    message: string;
+    options: string[];
+    /** budget_extension: 予算の延長の質問（rovo が数値だけで書く固定文。子の質問ではない）。子の質問（ask_parent）には付かない */
+    kind?: "budget_extension";
+  } | null;
 };
 
 /** イベントの中身。RPC で返せるよう、値はプリミティブに限る。 */
@@ -235,6 +246,8 @@ export type ResultView = {
   warnings: string[];
   /** タスクの merge_policy（task_start で指定。task_pr_merge が使えるかを決める） */
   merge_policy: MergePolicy;
+  /** 予算に近づいたときの扱い（task_start の budget_policy。ask | stop） */
+  budget_policy: BudgetPolicy;
   /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
   model: string;
   /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値） */
@@ -311,7 +324,10 @@ export type ResultView = {
 };
 
 /** 結果の組み立て途中の形（merge_policy は GitHub 側の情報と一緒に足す）。 */
-type ResultCore = Omit<ResultView, "merge_policy" | "model" | "effort" | "model_selection">;
+type ResultCore = Omit<
+  ResultView,
+  "merge_policy" | "budget_policy" | "model" | "effort" | "model_selection"
+>;
 
 /** task_pr_ready / task_pr_merge の入口で TaskDO が返す、対象と判定の結果。 */
 export type PrContextResult =
@@ -379,9 +395,15 @@ export type CancelResult =
   | { ok: true; status: TaskStatus; changed: boolean }
   | { ok: false; code: "not_found" };
 
+/**
+ * 予算の延長の質問への回答の結果: extended = 月の枠から延長分を予約して続ける / declined = 親が止めることを選んだ /
+ * monthly_limit = 続けたいが月の枠が足りず予約できなかったので止まる / limit_reached = 延長の上限（2 回）に達していたので止まる。
+ */
+export type BudgetExtensionOutcome = "extended" | "declined" | "monthly_limit" | "limit_reached";
+
 export type AnswerResult =
-  | { ok: true; status: TaskStatus }
-  | { ok: false; code: "not_found" | "conflict" | "invalid_input" };
+  | { ok: true; status: TaskStatus; budget_extension?: BudgetExtensionOutcome }
+  | { ok: false; code: "not_found" | "conflict" | "invalid_input" | "unavailable" };
 
 export type SteerResult =
   | { ok: true; status: TaskStatus; steer_id: string }
@@ -413,6 +435,8 @@ export type DashboardDetailResult =
       view: TaskIndexSnapshot;
       merge_policy: MergePolicy;
       sandbox_instance: string | null;
+      /** 予算の延長の承認待ち（INPUT_REQUIRED で、未回答の質問が budget_extension）か */
+      awaiting_budget: boolean;
       /** モデルの選び方の記録。無いタスクには付かない */
       model_selection?: ModelSelection;
       /** 状態の遷移の記録に RUNNING / VERIFYING があるか（止まった段階の判定用。1 回の SQL で読む） */
@@ -471,6 +495,8 @@ type TaskRow = {
   status: string;
   draft_pr_url: string | null;
   merge_policy: string;
+  /** 予算に近づいたときの扱い。この変更より前のタスクは NULL（stop として扱う） */
+  budget_policy: string | null;
   /** D10 より前のタスクは NULL（既定のモデルとして扱う） */
   model: string | null;
   /** D10 の思考レベル。開始時の値。それより前のタスクは NULL（現在の設定から求める） */
@@ -529,6 +555,11 @@ class SetupFailure extends Error {
 /** 行の merge_policy（未知の値は、より慎重な human_review に倒す）。 */
 function policyOf(row: Pick<TaskRow, "merge_policy">): MergePolicy {
   return row.merge_policy === "agent_merge" ? "agent_merge" : DEFAULT_MERGE_POLICY;
+}
+
+/** 行の budget_policy（NULL = この変更より前のタスクは、止まる動きだったので stop） */
+function budgetPolicyOf(row: Pick<TaskRow, "budget_policy">): BudgetPolicy {
+  return row.budget_policy === "ask" ? "ask" : "stop";
 }
 
 /** 上限による終了の reason（監査の固定コード）。上限でなければ undefined。 */
@@ -746,6 +777,8 @@ export class TaskDO extends DurableObject<Env> {
     );
     // D14: 依存関係のキャッシュの指定（TaskSpec.deps の JSON。"null" は lockfile なし・読めなかった。NULL は未取得で、spec に載せない）
     addColumnIfMissing(this.ctx.storage.sql, "github_link", "deps", "TEXT");
+    // 予算に近づいたときの扱い（task_start の budget_policy。NULL = この変更より前のタスク = stop）
+    addColumnIfMissing(this.ctx.storage.sql, "task", "budget_policy", "TEXT");
     // D10: 子のモデル（task_start の model。NULL は既定のモデル）
     addColumnIfMissing(this.ctx.storage.sql, "task", "model", "TEXT");
     // D10: 子のモデルの思考レベル（開始時の値。NULL は現在の設定から求める）
@@ -763,6 +796,9 @@ export class TaskDO extends DurableObject<Env> {
       delivery_state TEXT NOT NULL DEFAULT 'none',
       asked_at INTEGER NOT NULL
     )`);
+    // 予算の延長の質問（kind = 'budget_extension'）と、その回答の決定（extend | stop。親の答えと月の枠の予約結果から gateway が決める）
+    addColumnIfMissing(sql, "questions", "kind", "TEXT");
+    addColumnIfMissing(sql, "questions", "decision", "TEXT");
     sql.exec(`CREATE TABLE IF NOT EXISTS steers (
       n INTEGER PRIMARY KEY AUTOINCREMENT,
       steer_id TEXT NOT NULL UNIQUE,
@@ -870,6 +906,7 @@ export class TaskDO extends DurableObject<Env> {
       title: row.title,
       draft_pr_url: row.draft_pr_url,
       merge_policy: policyOf(row),
+      budget_policy: budgetPolicyOf(row),
       model: this.modelOf(row),
       effort: this.effortOfRow(row),
       ...this.selectionOf(row),
@@ -906,8 +943,8 @@ export class TaskDO extends DurableObject<Env> {
   private pendingQuestion(status: TaskStatus): TaskView["pending_question"] {
     if (isTerminal(status)) return null;
     const q = this.ctx.storage.sql
-      .exec<{ question_id: string; message: string; options: string }>(
-        "SELECT question_id, message, options FROM questions WHERE answer IS NULL ORDER BY asked_at DESC, rowid DESC LIMIT 1",
+      .exec<{ question_id: string; message: string; options: string; kind: string | null }>(
+        "SELECT question_id, message, options, kind FROM questions WHERE answer IS NULL ORDER BY asked_at DESC, rowid DESC LIMIT 1",
       )
       .toArray()[0];
     if (!q) return null;
@@ -918,7 +955,12 @@ export class TaskDO extends DurableObject<Env> {
     } catch {
       // 壊れていれば空（保存時に正規化済みなので通常は起きない）
     }
-    return { question_id: q.question_id, message: q.message, options };
+    return {
+      question_id: q.question_id,
+      message: q.message,
+      options,
+      ...(q.kind === BUDGET_EXTENSION_KIND ? { kind: BUDGET_EXTENSION_KIND } : {}),
+    };
   }
 
   // --- 書き込み（必ず transactionSync の中から呼ぶ） ---
@@ -1136,8 +1178,8 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO task (singleton, id, owner_id, owner_login, repository, repository_id,
            installation_id, base_ref, base_sha, title, instructions, acceptance_criteria,
-           constraints, verification_commands, fingerprint, merge_policy, model, effort, model_selection, sandbox_instance, status, draft_pr_url, created_at, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
+           constraints, verification_commands, fingerprint, merge_policy, budget_policy, model, effort, model_selection, sandbox_instance, status, draft_pr_url, created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
         input.task_id,
         input.owner_id,
         input.owner_login,
@@ -1153,6 +1195,7 @@ export class TaskDO extends DurableObject<Env> {
         JSON.stringify(data.verification_commands),
         fingerprint,
         data.merge_policy,
+        data.budget_policy,
         model,
         effort,
         modelSelection === undefined ? null : JSON.stringify(modelSelection),
@@ -1182,6 +1225,7 @@ export class TaskDO extends DurableObject<Env> {
         // 明示したときだけ載せる（省略は agent の既定。後段の自動の昇格も、明示したタスクでは行わない）
         ...(data.sandbox_instance !== undefined ? { sandboxInstance: data.sandbox_instance } : {}),
         budgetUsd: taskBudgetUsd(this.env),
+        budgetPolicy: data.budget_policy,
         deadlineAt: at + AGENT_DEADLINE_MS,
       };
       this.ctx.storage.sql.exec(
@@ -1265,6 +1309,7 @@ export class TaskDO extends DurableObject<Env> {
       view: this.buildIndexSnapshot(row, link),
       merge_policy: policyOf(row),
       sandbox_instance: row.sandbox_instance ?? null,
+      awaiting_budget: this.pendingQuestion(this.statusOf(row))?.kind === BUDGET_EXTENSION_KIND,
       ...this.selectionOf(row),
       reached: this.reachedStatuses(),
     };
@@ -1451,6 +1496,44 @@ export class TaskDO extends DurableObject<Env> {
     ) {
       return { ok: false, code: "invalid_input" };
     }
+    // 予算の延長の質問（kind: budget_extension）は、答えが「続ける」なら、受け付ける前に月の枠から延長分を予約する
+    // （予約できたときだけ extend。月の枠はハードリミットなので、足りなければ stop = BUDGET_EXCEEDED になる）。
+    // await をまたぐので、先に読んで判断し、記録は下の同期区間でやり直して確かめる
+    let decision: "extend" | "stop" | undefined;
+    let budgetExtension: BudgetExtensionOutcome | undefined;
+    const pre = this.readQuestionForAnswer(ownerId, questionId);
+    if (
+      pre?.kind === BUDGET_EXTENSION_KIND &&
+      pre.answer === null &&
+      pre.status === "INPUT_REQUIRED"
+    ) {
+      const [cont, stop] = pre.options;
+      if (answer !== cont && answer !== stop) return { ok: false, code: "invalid_input" };
+      if (answer === stop) {
+        decision = "stop";
+        budgetExtension = "declined";
+      } else {
+        const n = this.grantedBudgetExtensions() + 1;
+        if (n > MAX_BUDGET_EXTENSIONS) {
+          decision = "stop";
+          budgetExtension = "limit_reached";
+        } else {
+          let r: Awaited<ReturnType<UserDO["extendTaskBudget"]>>;
+          try {
+            r = await this.userStub(pre.owner_id).extendTaskBudget(pre.task_id, n);
+          } catch {
+            // 予約できたか分からない。答えを記録せず、呼び出し側に再試行させる（extendTaskBudget は冪等）
+            return { ok: false, code: "unavailable" };
+          }
+          decision = r.ok ? "extend" : "stop";
+          budgetExtension = r.ok
+            ? "extended"
+            : r.code === "budget_exceeded"
+              ? "monthly_limit"
+              : "declined";
+        }
+      }
+    }
     const result = this.ctx.storage.transactionSync((): AnswerResult & { changed?: boolean } => {
       const row = this.getRow();
       if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
@@ -1467,14 +1550,79 @@ export class TaskDO extends DurableObject<Env> {
       }
       if (status !== "INPUT_REQUIRED") return { ok: false, code: "conflict" };
       this.ctx.storage.sql.exec(
-        "UPDATE questions SET answer = ?, delivery_state = 'pending' WHERE question_id = ? AND answer IS NULL",
+        "UPDATE questions SET answer = ?, delivery_state = 'pending', decision = ? WHERE question_id = ? AND answer IS NULL",
         answer,
+        decision ?? null,
         questionId,
       );
-      return { ok: true, status, changed: true };
+      return {
+        ok: true,
+        status,
+        changed: true,
+        ...(budgetExtension !== undefined ? { budget_extension: budgetExtension } : {}),
+      };
     });
     if (result.ok && result.changed) await this.pullAlarmIn(ALARM_INTERVAL_MS);
-    return result.ok ? { ok: true, status: result.status } : result;
+    return result.ok
+      ? {
+          ok: true,
+          status: result.status,
+          ...(result.budget_extension !== undefined
+            ? { budget_extension: result.budget_extension }
+            : {}),
+        }
+      : result;
+  }
+
+  /** answer の前読み（所有者の確認つき）。予算の延長の質問の判断に使う。見つからなければ undefined */
+  private readQuestionForAnswer(
+    ownerId: number,
+    questionId: string,
+  ):
+    | {
+        kind: string | null;
+        answer: string | null;
+        options: string[];
+        status: TaskStatus;
+        owner_id: number;
+        task_id: string;
+      }
+    | undefined {
+    const row = this.getRow();
+    // 監査を出す notOwner は使わない（下の同期区間が同じ確認をして、他人の呼び出しは 1 回だけ記録する）
+    if (!row || row.owner_id !== ownerId) return undefined;
+    const q = this.ctx.storage.sql
+      .exec<{ kind: string | null; answer: string | null; options: string }>(
+        "SELECT kind, answer, options FROM questions WHERE question_id = ?",
+        questionId,
+      )
+      .toArray()[0];
+    if (!q) return undefined;
+    let options: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(q.options);
+      if (Array.isArray(parsed)) options = parsed.filter((x): x is string => typeof x === "string");
+    } catch {
+      // 壊れていれば空
+    }
+    return {
+      kind: q.kind,
+      answer: q.answer,
+      options,
+      status: this.statusOf(row),
+      owner_id: row.owner_id,
+      task_id: row.id,
+    };
+  }
+
+  /** 承認済み（decision = extend）の予算の延長の回数 */
+  private grantedBudgetExtensions(): number {
+    return this.ctx.storage.sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM questions WHERE kind = ? AND decision = 'extend'",
+        BUDGET_EXTENSION_KIND,
+      )
+      .one().n;
   }
 
   /**
@@ -1786,14 +1934,16 @@ export class TaskDO extends DurableObject<Env> {
     const gl = this.getGithub();
     const row = this.getRow();
     const merge_policy = row ? policyOf(row) : DEFAULT_MERGE_POLICY;
+    const budget_policy = row ? budgetPolicyOf(row) : DEFAULT_BUDGET_POLICY;
     const model = row ? this.modelOf(row) : defaultModelOf(this.env);
     const effort = row ? this.effortOfRow(row) : effortOf(this.env, model);
     const selection = row ? this.selectionOf(row) : {};
-    if (!gl) return { ...view, merge_policy, model, effort, ...selection, pr: null };
+    if (!gl) return { ...view, merge_policy, budget_policy, model, effort, ...selection, pr: null };
     const extra = (JSON.parse(gl.warnings) as string[]).filter((w) => !view.warnings.includes(w));
     return {
       ...view,
       merge_policy,
+      budget_policy,
       model,
       effort,
       ...selection,
@@ -1970,12 +2120,15 @@ export class TaskDO extends DurableObject<Env> {
     const link = this.getLink();
     if (link?.start_state !== "accepted" || isTerminal(this.currentStatus())) return;
     const pending = this.ctx.storage.sql
-      .exec<{ question_id: string; answer: string }>(
-        "SELECT question_id, answer FROM questions WHERE delivery_state = 'pending' AND answer IS NOT NULL ORDER BY asked_at, rowid",
+      .exec<{ question_id: string; answer: string; kind: string | null; decision: string | null }>(
+        "SELECT question_id, answer, kind, decision FROM questions WHERE delivery_state = 'pending' AND answer IS NOT NULL ORDER BY asked_at, rowid",
       )
       .toArray();
     for (const q of pending) {
-      const r = await this.agentStub().answer(q.question_id, q.answer);
+      // 予算の延長の質問には、親の答えの文ではなく、gateway が決めた固定の語（extend | stop）を渡す
+      const delivered =
+        q.kind === BUDGET_EXTENSION_KIND ? (q.decision === "extend" ? "extend" : "stop") : q.answer;
+      const r = await this.agentStub().answer(q.question_id, delivered);
       if (!r.ok) return;
       // await の間に cancel が skipped にしていれば、上書きしない
       this.ctx.storage.sql.exec(
@@ -2048,7 +2201,20 @@ export class TaskDO extends DurableObject<Env> {
       .toArray()[0];
     const at = since ? Number(since.value) : Number.NaN;
     if (!Number.isFinite(at)) return;
-    if (this.now() - at > INPUT_TIMEOUT_MS + INPUT_TIMEOUT_GRACE_MS) this.failTask("input_timeout");
+    if (this.now() - at > INPUT_TIMEOUT_MS + INPUT_TIMEOUT_GRACE_MS) {
+      // 予算の延長の質問への無応答は、AgentDO と同じく BUDGET_EXCEEDED（reason: budget_extension_timeout）
+      const latest = this.ctx.storage.sql
+        .exec<{ kind: string | null }>(
+          "SELECT kind FROM questions ORDER BY asked_at DESC, rowid DESC LIMIT 1",
+        )
+        .toArray()[0];
+      if (latest?.kind === BUDGET_EXTENSION_KIND) {
+        this.ctx.storage.transactionSync(() => {
+          this.changeStatus("BUDGET_EXCEEDED", { reason: "budget_extension_timeout" });
+        });
+        this.notifyWaiters();
+      } else this.failTask("input_timeout");
+    }
   }
 
   private async deliverCancel(): Promise<void> {
@@ -2252,10 +2418,11 @@ export class TaskDO extends DurableObject<Env> {
     if (known.length > 0) return;
     const at = Number.isFinite(ts) ? ts : this.now();
     sql.exec(
-      "INSERT INTO questions (question_id, message, options, delivery_state, asked_at) VALUES (?, ?, ?, 'none', ?)",
+      "INSERT INTO questions (question_id, message, options, kind, delivery_state, asked_at) VALUES (?, ?, ?, ?, 'none', ?)",
       questionId,
       String(payload.message ?? ""),
       String(payload.options ?? "[]"),
+      payload.kind === BUDGET_EXTENSION_KIND ? BUDGET_EXTENSION_KIND : null,
       at,
     );
     this.appendAgentEvent("question", payload, ts, operationId, agentSeq);

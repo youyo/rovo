@@ -725,6 +725,13 @@ describe("nowSentence（「いまは X を実行しています」）", () => {
       after: "",
     });
   });
+  it("waiting のうち予算の延長の承認待ち（text が waiting for budget approval）は、入力待ちに一言添える", () => {
+    expect(sentence(now("waiting", "waiting for budget approval"), "INPUT_REQUIRED")).toEqual({
+      before: "予算の承認を待っています（入力待ち）。",
+      target: "",
+      after: "",
+    });
+  });
   it("now が null: 状態ごとの文", () => {
     for (const s of TASK_STATUSES) {
       const n = sentence(null, s);

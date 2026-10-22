@@ -53,4 +53,24 @@ describe("decideTerminal: cancel > deadline > budget_exceeded > failed > complet
       phase: "cancelled",
     });
   });
+
+  it("budget_extension_timeout（予算の延長の質問に答えが無かった）は budget_exceeded で、reason は区別できる。優先順位は input_timeout の下、budget_exceeded の上", () => {
+    const timeout = { phase: "budget_exceeded", reason: "budget_extension_timeout" } as const;
+    expect(decideTerminal(["budget_extension_timeout"], [completed])).toEqual(timeout);
+    expect(decideTerminal(["budget_extension_timeout"], [failed])).toEqual(timeout);
+    expect(decideTerminal(["budget_exceeded", "budget_extension_timeout"], [completed])).toEqual(
+      timeout,
+    );
+    expect(decideTerminal(["budget_extension_timeout", "input_timeout"], [completed])).toEqual({
+      phase: "failed",
+      reason: "input_timeout",
+    });
+    expect(decideTerminal(["budget_extension_timeout", "deadline"], [completed])).toEqual({
+      phase: "failed",
+      reason: "deadline",
+    });
+    expect(decideTerminal(["budget_extension_timeout", "cancel"], [completed])).toMatchObject({
+      phase: "cancelled",
+    });
+  });
 });

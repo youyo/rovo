@@ -16,6 +16,8 @@ export type RovoTask = {
   terminalAt?: number;
   /** 終端のトーストを出し済み。 */
   notified?: boolean;
+  /** 予算の延長の承認待ち（INPUT_REQUIRED のとき）。トーストを繰り返さない印も兼ねる。 */
+  awaiting?: "budget_extension";
   /** task_console が使えなかったので task_status に切り替えた。 */
   noConsole?: boolean;
   /** noConsole の間、task_console を次に試し直す時刻（ms）。60 秒に 1 回。 */

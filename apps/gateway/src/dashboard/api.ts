@@ -465,7 +465,7 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
     phase,
     stopped_phase: stoppedPhaseOf(view.status, view.failure_phase, reached),
     // 実行中の一言。最新の command / edit / web などから作る（古い agent は tool_start に縮退。終端は null）
-    now: buildNow(latest.recent, view.status, phase),
+    now: buildNow(latest.recent, view.status, phase, read.detail.awaiting_budget),
     settings: {
       merge_policy,
       ...(deps === "hit" || deps === "miss" || deps === "built" || deps === "disabled"

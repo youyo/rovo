@@ -1395,6 +1395,30 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
     await client.close();
   });
 
+  it("task_start は budget_policy（ask | stop、既定 ask）を受け取る。instructions と task_answer・task_start の説明に「budget_extension の質問には利用者に確認してから答える」と書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const text = client.getInstructions() ?? "";
+    const start = tools.find((t) => t.name === "task_start");
+    const answer = tools.find((t) => t.name === "task_answer");
+    const props = start?.inputSchema.properties as Record<string, { enum?: string[] }>;
+    expect(props.budget_policy?.enum).toEqual(["ask", "stop"]);
+    for (const [name, doc] of [
+      ["instructions", text],
+      ["task_start", start?.description ?? ""],
+      ["task_answer", answer?.description ?? ""],
+    ] as const) {
+      expect(doc, name).toContain("budget_extension");
+      expect(doc, name).toMatch(/利用者に確認してから/);
+    }
+    expect(start?.description).toContain("budget_policy");
+    for (const name of ["task_status", "task_result"]) {
+      expect(tools.find((t) => t.name === name)?.description, name).toContain("budget_policy");
+    }
+    await client.close();
+  });
+
   it("task_result の説明に next_steps と merge_policy、pr.draft を書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);

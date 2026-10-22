@@ -78,6 +78,14 @@ export const MERGE_POLICIES = ["human_review", "agent_merge"] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
 export const DEFAULT_MERGE_POLICY: MergePolicy = "human_review";
 
+/**
+ * 予算に近づいたときの扱い。ask（既定）は止めずに親へ「あと task_budget_usd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
+ * 月の枠はハードリミットのまま、延長の都度その場で予約する）。stop は今までどおり BUDGET_EXCEEDED で止まる（無人で回す用途）。
+ */
+export const BUDGET_POLICIES = ["ask", "stop"] as const;
+export type BudgetPolicy = (typeof BUDGET_POLICIES)[number];
+export const DEFAULT_BUDGET_POLICY: BudgetPolicy = "ask";
+
 /** task_start の入力（design.md 4.3）。idempotency_key は含めない。 */
 export const taskInputSchema = z.object({
   // GitHub の上限: owner は 39 文字、リポジトリ名は 100 文字
@@ -99,6 +107,7 @@ export const taskInputSchema = z.object({
     .max(MAX_VERIFICATION_COMMANDS)
     .default([]),
   merge_policy: z.enum(MERGE_POLICIES).default(DEFAULT_MERGE_POLICY),
+  budget_policy: z.enum(BUDGET_POLICIES).default(DEFAULT_BUDGET_POLICY),
   /** 子のモデル（D10）。省略は env の AGENT_MODEL。env の AGENT_MODELS の中だけ（照合は service と TaskDO が env で行う） */
   model: z.string().min(1).max(MAX_MODEL_LENGTH).optional(),
   /**
@@ -126,6 +135,7 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * merge_policy は既定（human_review）なら含めない（保存済みの値と一致させる）。agent_merge のときだけ v3 として足す。
  * model は未指定なら含めない（従来の v1 / v2 / v3 のまま）。指定があれば v4 として merge_policy と一緒に末尾へ足す。
  * sandbox_instance も未指定なら含めない（v1〜v4 のまま）。指定があれば v5 として、model（無ければ null）の後ろへ足す。
+ * budget_policy は既定（ask）なら含めない（これまでの値と一致させる）。stop のときだけ、上の全体を v6 で包んで足す。
  */
 export async function computeFingerprint(input: TaskInput): Promise<string> {
   const fields: unknown[] = [
@@ -143,7 +153,7 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
     c.cwd ?? null,
     c.timeout_seconds ?? null,
   ]);
-  const canonical = JSON.stringify(
+  const base =
     input.sandbox_instance !== undefined
       ? ["v5", ...fields, commands, input.merge_policy, input.model ?? null, input.sandbox_instance]
       : input.model !== undefined
@@ -152,8 +162,8 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
           ? ["v3", ...fields, commands, input.merge_policy]
           : commands.length === 0
             ? ["v1", ...fields]
-            : ["v2", ...fields, commands],
-  );
+            : ["v2", ...fields, commands];
+  const canonical = JSON.stringify(input.budget_policy === "stop" ? ["v6", base] : base);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

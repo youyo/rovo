@@ -11,9 +11,10 @@ import {
 import { autoCandidates, type ModelEnv, resolveModel } from "../models";
 import type { ProviderKeysDeps } from "../provider-keys";
 import { maxConcurrentTasks } from "./budget";
+import { BUDGET_EXTENSION_KIND } from "./budget-question";
 import { nextSteps, nextStepsAfterMerge, nextStepsAfterReady } from "./next-steps";
 import type { TaskStatus } from "./state";
-import type { ResultView, TaskDO, TaskEvent, TaskView } from "./task-do";
+import type { BudgetExtensionOutcome, ResultView, TaskDO, TaskEvent, TaskView } from "./task-do";
 import { isTaskId, ulid } from "./ulid";
 import type { UserDO } from "./user-do";
 import {
@@ -115,6 +116,8 @@ export type ConsoleValue = {
   status: TaskStatus;
   phase: "prepare" | "run" | "verify" | "done" | null;
   stopped_phase: "prepare" | "run" | "verify" | null;
+  /** 予算の延長の承認待ち（INPUT_REQUIRED で、未回答の質問が budget_extension）のときだけ付く */
+  awaiting?: "budget_extension";
   now: { kind: string; text: string; at?: string } | null;
   output: {
     command?: string;
@@ -135,7 +138,13 @@ export type WaitValue = {
   events: PublicTaskEvent[];
   retry_after_seconds?: number;
 };
-export type AnswerValue = { task_id: string; question_id: string; status: TaskStatus };
+export type AnswerValue = {
+  task_id: string;
+  question_id: string;
+  status: TaskStatus;
+  /** 予算の延長の質問への回答のときだけ: 続ける（extended）/ 止める（declined）/ 月の枠が足りず止まる（monthly_limit）/ 延長の上限で止まる（limit_reached） */
+  budget_extension?: BudgetExtensionOutcome;
+};
 export type SteerValue = { task_id: string; steer_id: string; status: TaskStatus };
 export type CancelValue = { task_id: string; status: TaskStatus };
 /** task_result の応答。next_steps は呼び出し元の AI への案内（状態から決まる文）。 */
@@ -251,6 +260,8 @@ function wrapEvent(e: TaskEvent): PublicTaskEvent {
   const free = FREE_TEXT_FIELDS[e.type];
   if (free !== undefined) return wrapFreeText(e, free);
   if (e.type !== "question" || typeof e.payload.message !== "string") return e;
+  // 予算の延長の質問は rovo が数値だけで書いた固定文（子の自由文ではない）。囲まない
+  if (e.payload.kind === BUDGET_EXTENSION_KIND) return e;
   const payload: Record<string, string | number | boolean | null> = {
     ...e.payload,
     message: wrapUntrustedQuestion(e.payload.message),
@@ -461,13 +472,17 @@ export function createTaskService(
         ok: true,
         value: {
           ...view,
-          pending_question: view.pending_question
-            ? {
-                ...view.pending_question,
-                message: wrapUntrustedQuestion(view.pending_question.message),
-                options: view.pending_question.options.map(wrapUntrustedQuestion),
-              }
-            : null,
+          pending_question:
+            view.pending_question === null
+              ? null
+              : view.pending_question.kind === BUDGET_EXTENSION_KIND
+                ? // rovo が数値だけで書いた固定文。子の質問ではないので囲まない（囲むと子の質問と区別がつかない）
+                  view.pending_question
+                : {
+                    ...view.pending_question,
+                    message: wrapUntrustedQuestion(view.pending_question.message),
+                    options: view.pending_question.options.map(wrapUntrustedQuestion),
+                  },
           ...withDashboardUrl(taskId),
         },
       };
@@ -489,7 +504,7 @@ export function createTaskService(
       if (!latest.ok) return fail("not_found", NOT_FOUND);
       const { view, reached } = detail;
       const phase = phaseOf(view.status);
-      const now = buildNow(latest.recent, view.status, phase);
+      const now = buildNow(latest.recent, view.status, phase, detail.awaiting_budget);
       const out = buildOutput(latest.latest_command, latest.progress);
       // url は task_status と同じ出どころ（task 行の draft_pr_url。TaskDO が PR 作成時に number と同じ transaction で書く GitHub の PR の URL）
       const prUrl = owned.task.draft_pr_url;
@@ -502,6 +517,9 @@ export function createTaskService(
           status: owned.task.status,
           phase,
           stopped_phase: stoppedPhaseOf(view.status, view.failure_phase, reached),
+          ...(detail.awaiting_budget && owned.task.status === "INPUT_REQUIRED"
+            ? { awaiting: BUDGET_EXTENSION_KIND }
+            : {}),
           now: now === null ? null : { ...now, text: wrapUntrustedQuestion(now.text) },
           output:
             out.tail === null && out.command === undefined
@@ -586,7 +604,15 @@ export function createTaskService(
           ? fail("conflict", "the question is not waiting for this answer")
           : r.code === "invalid_input"
             ? fail("invalid_input", "invalid answer")
-            : fail("not_found", NOT_FOUND);
+            : r.code === "unavailable"
+              ? fail(
+                  "upstream_unavailable",
+                  "could not reserve the budget extension; retry later",
+                  {
+                    retry_after_seconds: UPSTREAM_RETRY_AFTER_SECONDS,
+                  },
+                )
+              : fail("not_found", NOT_FOUND);
       }
       try {
         await task.advance();
@@ -595,7 +621,12 @@ export function createTaskService(
       }
       return {
         ok: true,
-        value: { task_id: input.task_id, question_id: input.question_id, status: r.status },
+        value: {
+          task_id: input.task_id,
+          question_id: input.question_id,
+          status: r.status,
+          ...(r.budget_extension !== undefined ? { budget_extension: r.budget_extension } : {}),
+        },
       };
     },
 

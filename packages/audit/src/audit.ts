@@ -91,7 +91,13 @@ export type AuditRecord = {
 } & AuditFields;
 
 /** Sandbox の特権操作の種類（固定）。 */
-export const SANDBOX_OPS = ["terminate", "destroy", "set_deadline", "extend_deadline"] as const;
+export const SANDBOX_OPS = [
+  "terminate",
+  "destroy",
+  "set_deadline",
+  "extend_deadline",
+  "suspend",
+] as const;
 /** task_summary の metrics に載せられるキー（固定。title や自由な文のキーは無い）。 */
 export const TASK_SUMMARY_METRICS = [
   "duration_ms",

@@ -47,6 +47,7 @@
 | 25 | Sandbox の昇格（重いコマンドの初回に大きい Sandbox へ。2026-10-22 に規則を Clef に置き換え。26 を参照） | ○（実コンテナの E2E でスナップショット・昇格先の起動・作業ツリーの保持・作り直しまで。fail-soft は Unit で container の API を差し替え） | ○（本番の `standard-3` の起動・按分された推定費用・スナップショットの保管） | ○ | ○ | ○ | 規則の頃の確認の結果を残している（昇格の手順そのものは今も同じ）。重いテストを流すタスクで `usage.sandbox_promoted_to` が付き、作業ツリーが残り、速くなることを確かめた |
 | 26 | Clef による Sandbox の昇格（旧: 規則と sandbox_scale_up を置き換えた。2026-10-22） | ○（実コンテナの E2E で、Clef の応答を仕込んで 2 → 3 → 4 の昇格・作業ツリーの保持・コンテナ内でのリポジトリの設定の収集・作り直し・Clef の失敗の fail-soft まで。確率 → 大きさ・再試行・上限・固定・origin は Unit で AI.run と container の API を差し替え） | ○（実際の Clef の判断の精度・遅延・本番のスナップショットでの 2 回目の昇格・上限・振り返りの項目） | ○ | ○ | ○ | 重いテストを流すタスクで Clef が上げ（`trigger: clef`）、3 → 4 の 2 回目も動き、`usage.sandbox_scale_log` と按分が読めることを確かめる |
 | 27 | ダッシュボード（`/dashboard`。読み取り専用） | ○（偽 GitHub・偽の Cloudflare API・Playwright の E2E。認可・マスク・XSS・書体の外部要求 0 件を含む） | ○ | 小（タスク 1 件） | ○ | ○ | 実 GitHub のログインはブラウザで人が操作する。private リポジトリの権限の差には、権限の違う 2 つ目のアカウントが要る。モバイル幅・キーボード・スクリーンリーダーは人の目と耳で確かめる。Cloudflare の集計はトークンの権限が `terraform apply` で反映されてから |
+| 28 | 予算のソフトリミット（`budget_policy: ask`。予算に近づいたら止めずに親へ聞く。2026-10-23） | ○（agent の Unit〔WIP・質問・延長・停止・上限・無応答・中断〕、SandboxDO の `sandbox-do-suspend`〔container の API を差し替え〕、gateway の `task-budget-extension` / `user-budget-extension` / `task-service-budget`、mod の Unit） | ○（本番のスナップショットでの中断と復元・按分された費用・実モデルでの延長・月の枠の予約） | 小（予算を $1 程度に下げたタスク） | ○ | ○ | `TASK_BUDGET_USD` を下げたデプロイで確かめる。親の返事を待つ間のコンテナの停止と復元は実コンテナでしか分からない |
 
 環境の準備が要る個別の項目（節をまたぐ）:
 
@@ -744,3 +745,37 @@ gateway が配信する読み取り専用のダッシュボード（設計は [d
 | 実施者 | 日付 | 環境 | 結果 | 備考 |
 |---|---|---|---|---|
 | エージェント（利用者の Chrome で操作） | 2026-10-22 | 本番、ブラウザ、GitHub のログイン。タスクは haiku の小さなもの | 通った: ログイン・一覧の中身・構造化イベント・詳細の画面・書体と外部要求 0 件。一部: 実 Cloudflare の集計・`dashboard_url`（ログイン済みの状態のみ）・PR の状態（閉じたのみ）。未実施: private リポジトリの権限の差・モバイル幅・キーボード・スクリーンリーダー・自動更新・他の閲覧者 | Cloudflare の集計は、`terraform apply` の後に 5 項目すべて取れた（Cloudflare の画面との突き合わせは未実施）。PR の状態は、デプロイ直後に `TypeError` で `unknown` になり、再デプロイで解消（原因未確定） |
+
+## 28. 予算のソフトリミット（`budget_policy: ask`。2026-10-23）
+
+タスクが予算に近づいたとき、止めずに親へ「あと `task_budget_usd` 使って続けるか」を聞くこと（design 5.2 の「予算のソフトリミット」）の本番での確認。自動テストは済み（agent の `agent-do-budget-extension`・`terminal`・`sandbox-do-suspend`、gateway の `task-budget-extension`・`user-budget-extension`・`task-service-budget`・`agent-events`・`mcp`、dashboard の `steps`、`test:plugin`）。ここでは、本番のスナップショットでのコンテナの停止と復元、実モデルでの延長、月の枠の予約を見る。
+
+前提: `TASK_BUDGET_USD` を小さく（例 $1）したデプロイ、またはコストの高いモデルで小さな予算を使い切るタスク。
+
+各項目の「結果」が、その項目の結果の欄。「未実施」はまだ確かめていない。
+
+- [ ] **聞いてくる**: `budget_policy` を省略して予算を使い切るタスクを実行すると、止まらずに `INPUT_REQUIRED` になり、`task_status` の `pending_question.kind` が `budget_extension`、`message` と `options` が数値だけの固定文（`<<<UNTRUSTED_CHILD_QUESTION>>>` で囲まれない）になる。未 commit の変更があれば、作業ブランチに WIP が push されている。
+  - 結果: 未実施。
+- [ ] **続ける**: 「あと $X 使って続ける」を答えると、`task_answer` の応答が `budget_extension: extended`、`budget_status` の `reserved_usd` が `task_budget_usd` 分増え、タスクが `RUNNING` に戻って続く。待つ間に止めたコンテナがスナップショットから戻り、作業ツリー（未 push の変更を含む）が残っている（「再起動した」エラーが子に返らない）。
+  - 結果: 未実施。
+- [ ] **待つ間に費用が止まる**: 返事を待つ間、`sandbox_runtime_ms` が増えない（コンテナが止まっている）。
+  - 結果: 未実施。
+- [ ] **止める**: 「ここで止める」で `BUDGET_EXCEEDED`（reason `budget_exceeded`）。`task_result` の warnings に WIP の結果が出る。
+  - 結果: 未実施。
+- [ ] **延長は 2 回まで**: 3 回目は聞かずに `BUDGET_EXCEEDED`。
+  - 結果: 未実施。
+- [ ] **月の枠はハードリミット**: 月の枠の残りを延長分より小さくして「続ける」を答えると、予約されず `budget_extension: monthly_limit` で `BUDGET_EXCEEDED`。
+  - 結果: 未実施。
+- [ ] **無応答**: 24 時間（確認のために短くしたデプロイでよい）答えないと `BUDGET_EXCEEDED`、reason が `budget_extension_timeout`（子の質問の無応答の `FAILED(input_timeout)` とは別）。
+  - 結果: 未実施。
+- [ ] **stop**: `budget_policy: stop` のタスクは、今までどおり聞かずに `BUDGET_EXCEEDED`。
+  - 結果: 未実施。
+- [ ] **表示**: ダッシュボードの詳細が「予算の承認を待っています（入力待ち）」と出る。Claude Code の mod（`rovo` 0.2.0 以降）のペインが「予算の承認待ち」、トーストが 1 回出る。
+  - 結果: 未実施。
+- [ ] **スナップショットが使えないとき（fail-soft）**: スナップショットが取れない状態では、作業ツリーが clean で push 済みならコンテナを止め、そうでなければ止めずに待つ。どちらでもタスクは失敗せず、質問が出る。
+  - 結果: 未実施。
+
+### 28 の結果
+
+| 実施者 | 日付 | 環境 | 結果 | 備考 |
+|---|---|---|---|---|

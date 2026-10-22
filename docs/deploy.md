@@ -229,7 +229,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `DRAFT_PR_FALLBACK` | gateway | 任意 | `fail` | Draft PR を作れないリポジトリ（Free プランの private など）での扱い。`fail`（既定）/ `ready`。不正な値は `fail` |
 | `PR_SHOW_COST` | gateway | 任意 | `false` | `true` のときだけ費用を PR 本文に載せる。公開リポジトリでは誰でも見られる |
 | `MONTHLY_BUDGET_USD` | gateway | 任意 | `100` | ユーザーごとの月額の費用上限（USD）。1 タスクにつき `TASK_BUDGET_USD` を予約する |
-| `TASK_BUDGET_USD` | gateway | 任意 | `10` | 1 タスクに予約する予算（USD）。子エージェントの `budgetUsd`（超えると `budget_exceeded` で止まる）にも同じ値を渡す。0 以下・不正な値は 10。`MONTHLY_BUDGET_USD` より大きいとタスクを始められないので、月額を 10 未満にするときはこれも下げる |
+| `TASK_BUDGET_USD` | gateway | 任意 | `10` | 1 タスクに予約する予算（USD）。子エージェントの `budgetUsd` にも同じ値を渡す。超えそうになると、`task_start` の `budget_policy` が `stop` なら `budget_exceeded` で止まり、`ask`（既定）なら親に「あと同じ額を使って続けるか」を聞く（承認のたびに同じ額を月の枠から予約する。1 タスク 2 回まで）。0 以下・不正な値は 10。`MONTHLY_BUDGET_USD` より大きいとタスクを始められないので、月額を 10 未満にするときはこれも下げる |
 | `MAX_CONCURRENT_TASKS` | gateway | 任意 | `2` | 利用者ごとに同時に実行できるタスクの上限（1 以上の整数。不正な値・未設定は 2）。上限に達すると `task_start` は `concurrency_limit` で断られる。月額の枠（`MONTHLY_BUDGET_USD` と `TASK_BUDGET_USD`）とは別で、両方を満たすときだけ始められる。値は `budget_status` の `concurrency_limit` で見える。UserDO の状態は利用者ごとなので、値を変えても実行中のタスクには影響しない（下げたときは、件数が上限を下回るまで新しいタスクを断る） |
 | `CONSULT_BUDGET_USD` | gateway | 任意 | `0.5` | `consult`（セカンドオピニオン）1 回に月額の枠から予約する額（USD）。終わったら実費で精算する。`max_output_tokens` もこの額に収まるよう上限が掛かり、入力だけでこの額を超えるときは拒否される。0 以下・不正な値は 0.5 |
 | `AGENT_MODEL` | gateway / agent | 任意 | `anthropic/claude-sonnet-5-5` | 既定のモデル（`task_start` の `model` を省略したとき）。許可リスト（`packages/models`）にあるものだけ使える。**gateway と agent で同じ値にする** |
@@ -450,7 +450,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 
 ## 15. 運用の注意
 
-- 予算: タスクごとに `TASK_BUDGET_USD`（既定 $10）を月額の枠（`MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。ユーザーごとに同時に実行できるタスクの数にも上限がある（`MAX_CONCURRENT_TASKS`。`budget_status` の `concurrency_limit`）。GitHub やモデルのプロバイダーの API には利用者の合計の呼び出しが集まるので、上限を大きくするときはそれぞれのレート制限（429）に注意する。
+- 予算: タスクごとに `TASK_BUDGET_USD`（既定 $10）を月額の枠（`MONTHLY_BUDGET_USD`、既定 100）から予約する。足りなければ `budget_exceeded`。タスクの予算に近づいたときは `budget_policy`（既定 `ask`）で親に延長を聞く（承認のたびに月の枠から予約。月の枠はハードリミット）。ユーザーごとに同時に実行できるタスクの数にも上限がある（`MAX_CONCURRENT_TASKS`。`budget_status` の `concurrency_limit`）。GitHub やモデルのプロバイダーの API には利用者の合計の呼び出しが集まるので、上限を大きくするときはそれぞれのレート制限（429）に注意する。
 - 秘密のローテーション:
   - `TOKEN_ENC_KEY`（gateway）を変えると、保存済みの GitHub 資格は復号できなくなり、全員が再ログインになる。
   - `TOKEN_ENC_KEY`（agent）を変えると、実行中のタスクは次のトークン更新まで push / clone が 401 になる。実行中のタスクが無いときに変える。

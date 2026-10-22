@@ -45,6 +45,12 @@ export interface TaskSpec {
    */
   sandboxInstance?: string;
   budgetUsd: number;
+  /**
+   * 予算に近づいたときの扱い（task_start の budget_policy）。ask: 止めずに親へ「あと budgetUsd 使って続けるか」を聞く
+   * （延長は 1 タスク 2 回まで。承認の予約は TaskDO が月の枠から行う）/ stop: 今までどおり budget_exceeded で止まる。
+   * AgentDO は無ければ stop として扱う。
+   */
+  budgetPolicy?: "ask" | "stop";
   deadlineAt: number;
   /** 作業ブランチ名（agent/task-<id>）。TaskDO が AgentDO.start より前に作っている */
   branch: string;

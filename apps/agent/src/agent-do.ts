@@ -88,6 +88,9 @@ import {
   type WebToolResult,
 } from "./tools/web";
 
+/** 金額の表示（USD、小数 2 桁） */
+const usd = (n: number): string => `$${n.toFixed(2)}`;
+
 /** 0 以上の有限の数だけ通す（壊れた値は 0） */
 const finiteCount = (v: unknown): number =>
   typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
@@ -129,6 +132,12 @@ const TICK_MS = 30_000;
 const OUTPUT_TAIL = 4000;
 /** 回答待ちの累計の上限（設計 7.3）。超えたら failed(input_timeout) */
 const MAX_INPUT_WAIT_MS = 24 * 60 * 60 * 1000;
+/** 予算の延長（ask）は 1 タスクにつき最大この回数。1 回の延長は spec.budgetUsd と同じ額 */
+const MAX_BUDGET_EXTENSIONS = 2;
+/** 予算の質問の前に Sandbox を中断する（スナップショット + 停止）のを待つ上限（ms）。超えたらコンテナを止めずに待つ */
+const BUDGET_SUSPEND_WAIT_MS = 150_000;
+/** 予算の質問への回答（gateway が決めて渡す固定の語）。これ以外は止める */
+const BUDGET_ANSWER_EXTEND = "extend";
 const QUESTION_MAX_CHARS = 4000;
 const QUESTION_MAX_OPTIONS = 10;
 const QUESTION_OPTION_MAX_CHARS = 500;
@@ -145,6 +154,8 @@ function parseLimit(raw: string | undefined, fallback: number): number {
 }
 
 interface StoredQuestion {
+  /** 予算の延長の質問（rovo が数値だけで書く固定文）。無いものは子の質問（ask_parent） */
+  kind?: "budget_extension";
   message: string;
   options: string[];
   answered: boolean;
@@ -155,7 +166,7 @@ interface StoredQuestion {
 type StoredSpec = Omit<TaskSpec, "gitCredential">;
 /** 停止の意図の時点で Sandbox を破棄するもの。予算超過だけは、patch を取ってから破棄する。 */
 const sandboxDestroyedBy = (intents: readonly StopIntent[]): boolean =>
-  intents.some((i) => i !== "budget_exceeded");
+  intents.some((i) => i !== "budget_exceeded" && i !== "budget_extension_timeout");
 
 /** WIP commit の結果を task_result の warnings に載せる 1 行にする。 */
 function wipWarning(w: WipCommit): string {
@@ -574,6 +585,9 @@ export class AgentDO extends DurableObject<Env> {
       extendDeadline: (d) => raw.extendDeadline(d),
       setDeadline: (d) => raw.setDeadline(d),
       stop: () => raw.stop(),
+      ...(raw.suspend
+        ? { suspend: (o) => raw.suspend?.(o) as ReturnType<NonNullable<SandboxPort["suspend"]>> }
+        : {}),
       ...(raw.terminate
         ? { terminate: () => raw.terminate?.() as Promise<{ stopped: boolean }> }
         : {}),
@@ -665,7 +679,9 @@ export class AgentDO extends DurableObject<Env> {
    * Sandbox の特権操作を、events に audit として積む（二重化。R2 の events.jsonl に残る）。
    * terminate は発行した時点、期限の設定・延長は Sandbox が受理した後に積む。ログ側（監査の本体）は SandboxDO が出す。
    */
-  private recordPrivilegedOp(op: "terminate" | "set_deadline" | "extend_deadline"): void {
+  private recordPrivilegedOp(
+    op: "terminate" | "set_deadline" | "extend_deadline" | "suspend",
+  ): void {
     // タスクが始まっていなければ events の対象が無い（ログ側は SandboxDO が出す）
     if (this.store.meta("fingerprint") === undefined) return;
     try {
@@ -1208,6 +1224,13 @@ export class AgentDO extends DurableObject<Env> {
     }
     if (!isValidCredential(spec.gitCredential)) return "invalid_spec: gitCredential";
     if (!(spec.budgetUsd > 0) || !Number.isFinite(spec.deadlineAt)) return "invalid_spec";
+    if (
+      spec.budgetPolicy !== undefined &&
+      spec.budgetPolicy !== "ask" &&
+      spec.budgetPolicy !== "stop"
+    ) {
+      return "invalid_spec: budgetPolicy";
+    }
     const gw = aiGatewayRejection(this.env as AgentEnv);
     if (gw) return gw;
     // start の時点では spec はまだ保存されていないので、届いた spec.model で判定する
@@ -1432,7 +1455,7 @@ export class AgentDO extends DurableObject<Env> {
     if (this.refused()) return { ok: true, ignored: true };
     // 回答待ちの上限（累計 24 時間）を過ぎた後の回答では再開しない
     if (this.inputTimedOut()) {
-      this.requestStop("input_timeout");
+      this.requestInputTimeout();
       return { ok: true, ignored: true };
     }
     const q = this.questions()[questionId];
@@ -1440,6 +1463,21 @@ export class AgentDO extends DurableObject<Env> {
     const resuming = this.store.meta<string | null>("pending_resume") === questionId;
     if (q.answered) return resuming ? this.resumeFromAnswer(questionId) : { ok: true };
     if (this.store.phase() !== "input_required") return { ok: true, ignored: true };
+    // 予算の延長の質問: extend 以外（と延長の上限を超える extend）は、お金を使わずに止める
+    if (
+      q.kind === "budget_extension" &&
+      (answer !== BUDGET_ANSWER_EXTEND || this.budgetExtensions() >= MAX_BUDGET_EXTENSIONS)
+    ) {
+      this.store.tx(() => {
+        this.store.setMeta("questions", {
+          ...this.questions(),
+          [questionId]: { ...q, answered: true, answer },
+        });
+        this.store.appendEvent("answered", { question_id: questionId });
+      });
+      this.requestStop("budget_exceeded");
+      return { ok: true };
+    }
 
     // 待った分を足した期限を計算し、submit より前に SandboxDO の期限をその正確な値にする（質問で上限まで延ばした分を戻す）
     const pausedAt = this.pausedAt() ?? this.now();
@@ -1468,6 +1506,12 @@ export class AgentDO extends DurableObject<Env> {
         // 回答の run を監視する operation に切り替える。submit の成功までは再開済みの印（pending_resume）を残す
         this.store.setMeta("operation_id", `answer:${questionId}`);
         this.store.setMeta("pending_resume", questionId);
+        if (q.kind === "budget_extension") {
+          // 延長を受け入れた: 予算を 1 回分増やし、中断を解く（Sandbox は次の操作で戻る）。次の予算超過の WIP の結果を前のと混ぜない
+          this.store.setMeta("budget_extensions", this.budgetExtensions() + 1);
+          this.store.setMeta("budget_suspended", false);
+          this.store.setMeta("wip_commit", null);
+        }
         this.store.appendEvent("answered", { question_id: questionId });
         this.store.setPhase("running");
       });
@@ -1488,10 +1532,11 @@ export class AgentDO extends DurableObject<Env> {
       const operationId = `answer:${questionId}`;
       const carried = this.carrySteers(operationId);
       const answer = this.questions()[questionId]?.answer ?? "";
-      await this.harness.submit(
-        this.userInput(`The parent answered your question (${questionId}):\n${answer}`, carried),
-        { operationId },
-      );
+      const text =
+        this.questions()[questionId]?.kind === "budget_extension"
+          ? this.budgetResumeText()
+          : `The parent answered your question (${questionId}):\n${answer}`;
+      await this.harness.submit(this.userInput(text, carried), { operationId });
       await this.overrides().afterAnswerSubmit?.();
       if (this.store.meta<string | null>("pending_resume") === questionId) {
         this.store.tx(() => {
@@ -1591,13 +1636,16 @@ export class AgentDO extends DurableObject<Env> {
     if (job.fn === "input_timeout") {
       if (phase !== "input_required") return undefined;
       if (this.inputTimedOut()) {
-        this.requestStop("input_timeout");
+        this.requestInputTimeout();
         return undefined;
       }
       return { rescheduleAt: this.inputTimeoutAt() };
     }
     if (phase === "input_required") {
-      if (this.inputTimedOut()) this.requestStop("input_timeout");
+      if (this.inputTimedOut()) this.requestInputTimeout();
+      // 回答（stop）や無応答で停止の意図を記録した後に DO が再起動して、確定が途切れたとき（回答待ちの run は無いので onRunSettled が来ない）
+      else if (this.stopIntents().length > 0)
+        void this.finalize(undefined, this.abortRun()).catch(() => undefined);
     } else if (this.deadlineExceeded()) this.requestStop("deadline");
     else if (this.store.meta<string | null>("pending_resume")) {
       void this.resumeFromAnswer(String(this.store.meta("pending_resume"))).catch(() => undefined);
@@ -1667,10 +1715,19 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /** 期限・予算の超過を記録し、すぐに停止を始めて確定まで進める（待たない。Pi のタスクの中からも呼ばれる）。 */
-  private requestStop(reason: "deadline" | "input_timeout" | "budget_exceeded"): void {
+  /** 回答待ちの上限に達した。予算の延長の質問なら budget_exceeded（reason: budget_extension_timeout）、子の質問なら failed(input_timeout) */
+  private requestInputTimeout(): void {
+    const open = this.openQuestionId();
+    const kind = open ? this.questions()[open]?.kind : undefined;
+    this.requestStop(kind === "budget_extension" ? "budget_extension_timeout" : "input_timeout");
+  }
+
+  private requestStop(
+    reason: "deadline" | "input_timeout" | "budget_exceeded" | "budget_extension_timeout",
+  ): void {
     if (isTerminal(this.store.phase()) || this.stopIntents().includes(reason)) return;
     this.recordIntent(reason);
-    if (reason === "budget_exceeded") {
+    if (reason === "budget_exceeded" || reason === "budget_extension_timeout") {
       // 予算の超過はモデル呼び出しの前に見つかる（実行中のツールは無い）ので、Sandbox は生きたまま patch を取ってから止める。
       // Sandbox の破棄は確定の後（取得に失敗・タイムアウトしても止める）
       // 作業が失われないよう、patch を取る前に、未 commit の変更をシステム側で WIP として commit・push する
@@ -1698,6 +1755,8 @@ export class AgentDO extends DurableObject<Env> {
     const spec = this.spec();
     // Sandbox を一度も起動していない（ファイルにも git にも触れなかった）なら、変更は無い。commit のために起動しない
     if (!spec || !this.sandboxBooted()) return;
+    // 予算の質問の前に WIP を済ませて Sandbox を中断している。止めるためだけに起こさない（変更は無い）
+    if (this.store.meta("budget_suspended") === true) return;
     const limit = this.overrides().wipCommitWaitMs ?? WIP_COMMIT_WAIT_MS;
     // 時間切れのあとは、走っている runWipCommit が後段の git を実行しないよう印を立てる（確定・破棄の後に commit・push が走らない）
     const ctl = { expired: false };
@@ -1902,7 +1961,7 @@ export class AgentDO extends DurableObject<Env> {
       }
       // 予算超過の停止で、システムが未 commit の変更を WIP として commit した（できなかった）ことを伝える
       const wip = this.store.meta<WipCommit>("wip_commit");
-      if (wip && decision.reason === "budget_exceeded") warnings.push(wipWarning(wip));
+      if (wip && decision.phase === "budget_exceeded") warnings.push(wipWarning(wip));
       // 完了以外で report_completion が呼ばれていないとき、固定の文で止まった理由と最後の push を伝える
       const summary =
         this.store.meta<string>("last_summary") ||
@@ -2230,11 +2289,14 @@ export class AgentDO extends DurableObject<Env> {
     const fits = maxOutputTokensWithin(
       price,
       inputTokens,
-      spec.budgetUsd - spent.costUsd,
+      this.budgetLimitUsd(spec) - spent.costUsd,
       cachedTokens,
     );
     const allowed = Math.min(maxTokens, fits);
     if (allowed < Math.min(maxTokens, MIN_OUTPUT_TOKENS)) {
+      // ask: 止めずに親へ聞く（WIP を commit・push し、Sandbox を中断して INPUT_REQUIRED）。聞けない・聞かないなら止める
+      if (await this.askBudgetExtension(spec, spent.costUsd))
+        return { block: "waiting for parent" };
       this.requestStop("budget_exceeded");
       return { block: "budget_exceeded" };
     }
@@ -2494,6 +2556,156 @@ export class AgentDO extends DurableObject<Env> {
       return format(await call(web, { userId: spec.userId, taskId: spec.taskId }));
     } catch (e) {
       return formatWebError(tool, e);
+    }
+  }
+
+  // ---- 予算のソフトリミット（budget_policy: ask）----
+  //
+  // 予算に近づいた（モデル呼び出しの前の判定）とき、stop 以外のポリシーでは止めずに親へ聞く:
+  //  1. 未 commit の変更を WIP として commit・push する（止めるときと同じ処理）
+  //  2. Sandbox を中断する（スナップショット + コンテナ停止で費用を止める）。失敗したらコンテナは動かしたまま待つ
+  //  3. 質問（kind: budget_extension。rovo が数値だけで書く固定文）を記録して INPUT_REQUIRED にする
+  // 回答は gateway が「月の枠からの予約が済んだ extend」か「stop」に決めて渡す。extend なら予算が 1 回分（spec.budgetUsd）増えて続き、
+  // それ以外は budget_exceeded で止まる。延長は 1 タスク 2 回まで。月の枠はハードリミットで、予約は gateway 側で行う。
+
+  private budgetExtensions(): number {
+    return this.store.meta<number>("budget_extensions") ?? 0;
+  }
+
+  /** このタスクが今使える上限（USD）。延長 1 回につき spec.budgetUsd ずつ増える */
+  private budgetLimitUsd(spec: StoredSpec): number {
+    return spec.budgetUsd * (1 + this.budgetExtensions());
+  }
+
+  private budgetResumeText(): string {
+    const spec = this.spec();
+    const ext = spec?.budgetUsd ?? 0;
+    return `The parent extended the task budget by ${usd(ext)} (the budget is now ${usd(spec ? this.budgetLimitUsd(spec) : 0)}). Continue the task. Commit your work with git_commit as you go, and call report_completion when you are done.`;
+  }
+
+  /**
+   * 作業ツリーが clean で HEAD が push 済み（作業ブランチ、または最初の commit）か。スナップショットが取れずコンテナを止めても、
+   * 戻すときに再 clone するだけで何も失わない、と言えるとき true。確かめられなければ false。
+   */
+  private async workTreeIsRecoverable(spec: StoredSpec): Promise<boolean> {
+    try {
+      const sb = this.sandbox();
+      const opts = { cwd: WORKSPACE_ROOT, timeoutMs: 60_000 };
+      const status = await sb.exec(["git", "status", "--porcelain"], opts);
+      if (
+        status.exitCode !== 0 ||
+        status.timedOut ||
+        status.truncated ||
+        status.stdout.trim() !== ""
+      ) {
+        return false;
+      }
+      const head = await sb.exec(["git", "rev-parse", "HEAD"], opts);
+      const sha = head.stdout.trim();
+      if (head.exitCode !== 0 || !SHA_RE.test(sha)) return false;
+      return (
+        sha === spec.initialSha || sha === this.store.meta<BranchSync>("branch_sync")?.pushedSha
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** 質問の前に Sandbox を中断する（fail-soft: 中断できなくても質問は出す。コンテナは動いたままになる） */
+  private async suspendSandboxForBudget(spec: StoredSpec): Promise<void> {
+    if (!this.sandboxBooted()) return; // 起動していない Sandbox は費用がかからない
+    const sb = this.sandbox();
+    if (!sb.suspend) return;
+    try {
+      const allowReclone = await this.workTreeIsRecoverable(spec);
+      let result: { mode: string } | undefined;
+      const timedOut = await this.raceTimeout(
+        sb.suspend({ allowReclone }).then((r) => {
+          result = r;
+        }),
+        BUDGET_SUSPEND_WAIT_MS,
+      );
+      if (!timedOut && result && result.mode !== "running") {
+        this.store.setMeta("budget_suspended", true);
+        this.recordPrivilegedOp("suspend");
+      }
+    } catch {
+      // 中断できなくても待てる（コンテナは動いたまま）
+    }
+  }
+
+  /**
+   * 予算に近づいたとき、止めずに親へ聞く。聞いたら true（phase は input_required。呼び出し側はモデルを呼ばせない）。
+   * 聞かない（ポリシーが ask でない・延長の上限・停止中）、または聞けなかったときは false（呼び出し側が budget_exceeded で止める）。
+   */
+  private async askBudgetExtension(spec: StoredSpec, spentUsd: number): Promise<boolean> {
+    if (spec.budgetPolicy !== "ask") return false;
+    const used = this.budgetExtensions();
+    if (used >= MAX_BUDGET_EXTENSIONS) return false;
+    if (this.refused() || this.openQuestionId()) return false;
+    try {
+      // 1. WIP の commit・push（止めるときと同じ。fail-soft）
+      await this.commitWipOnBudgetStop();
+      if (this.refused()) return false;
+      // 2. 回答待ちの間、SandboxDO の期限を回答待ちの上限まで延ばす（ask_parent と同じ。失敗したら聞かずに止める）
+      const sandboxDeadline = Math.min(
+        this.deadlineAt() + Math.max(0, MAX_INPUT_WAIT_MS - this.pausedTotal()),
+        this.baseDeadline() + MAX_INPUT_WAIT_MS,
+      );
+      if (this.sandboxBooted()) {
+        await this.sandbox().extendDeadline(sandboxDeadline);
+        this.recordPrivilegedOp("extend_deadline");
+      }
+      if (this.refused()) return false;
+      // 3. Sandbox の中断
+      await this.suspendSandboxForBudget(spec);
+      if (this.refused()) return false;
+      // 4. 質問を記録して INPUT_REQUIRED にする
+      const seq = (this.store.meta<number>("question_seq") ?? 0) + 1;
+      const questionId = `q-${seq}`;
+      const extra = spec.budgetUsd;
+      const total = this.budgetLimitUsd(spec);
+      const left = MAX_BUDGET_EXTENSIONS - used;
+      const message = `タスクの予算 ${usd(total)} のうち ${usd(spentUsd)} を使いました。あと ${usd(extra)} 使って続けますか。延長できる残り回数: ${left} 回。`;
+      const options = [`あと ${usd(extra)} 使って続ける`, "ここで止める"];
+      this.store.tx(() => {
+        this.store.setMeta("question_seq", seq);
+        this.store.setMeta("questions", {
+          ...this.questions(),
+          [questionId]: { kind: "budget_extension", message, options, answered: false },
+        });
+        this.store.setMeta("paused_at", this.now());
+        this.store.appendEvent("question", {
+          question_id: questionId,
+          message,
+          options: JSON.stringify(options),
+          kind: "budget_extension",
+          budget_spent_usd: Math.round(spentUsd * 1e6) / 1e6,
+          budget_total_usd: total,
+          budget_extension_usd: extra,
+          budget_extensions_left: left,
+        });
+        this.store.setPhase("input_required");
+      });
+      await this.overrides().afterQuestion?.();
+      try {
+        await this.lifecycle.jobs.push({
+          id: "deadline",
+          fn: "input_timeout",
+          time: this.inputTimeoutAt(),
+        });
+      } catch {
+        // tick が代わりに見張る
+      }
+      try {
+        await this.reclaimQueuedSteers();
+      } catch {
+        // 引き戻せなくても、preModelCall が回答待ちの間のモデル呼び出しを止める
+      }
+      return true;
+    } catch {
+      // 聞けなかった。すでに質問を記録していれば待つ。そうでなければ止める
+      return this.store.phase() === "input_required";
     }
   }
 

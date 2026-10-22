@@ -34,6 +34,13 @@ export class FakeSandbox implements SandboxPort {
   metricsValue: SandboxMetrics | undefined;
   metricsError: Error | undefined;
 
+  /** suspend（回答待ちの間の中断）の再現。suspendCalls は受け取った引数、suspendResult を Error にすると例外 */
+  readonly suspendCalls: { allowReclone: boolean }[] = [];
+  suspendResult: { mode: "snapshot" | "destroyed" | "running" } | Error = { mode: "snapshot" };
+  /** 中断中（次の exec / readFile / writeFile で戻り、resumes が増える） */
+  suspended = false;
+  resumes = 0;
+
   /** extendDeadline で受け取った期限（古い順） */
   readonly extended: number[] = [];
   /** 設定すると extendDeadline がこの例外を投げる（1 回で消える） */
@@ -132,6 +139,22 @@ export class FakeSandbox implements SandboxPort {
     if (this.destroyed) throw new Error("sandbox deadline exceeded");
   }
 
+  async suspend(options: {
+    allowReclone: boolean;
+  }): Promise<{ mode: "snapshot" | "destroyed" | "running" }> {
+    this.suspendCalls.push(options);
+    if (this.suspendResult instanceof Error) throw this.suspendResult;
+    if (this.suspendResult.mode !== "running") this.suspended = true;
+    return this.suspendResult;
+  }
+
+  private resumeIfSuspended(): void {
+    if (this.suspended) {
+      this.suspended = false;
+      this.resumes += 1;
+    }
+  }
+
   async stop(): Promise<{ stopped: boolean }> {
     this.stopCount += 1;
     return { stopped: this.stopResults.shift() ?? true };
@@ -145,6 +168,7 @@ export class FakeSandbox implements SandboxPort {
 
   async exec(argv: string[], options: ExecOptions = {}): Promise<ExecResult> {
     this.requireAlive();
+    this.resumeIfSuspended();
     this.calls.push({ argv, options });
     if (options.origin !== undefined) {
       this.execStartedAt = Date.now();
@@ -175,6 +199,7 @@ export class FakeSandbox implements SandboxPort {
 
   async readFile(path: string): Promise<string> {
     this.requireAlive();
+    this.resumeIfSuspended();
     const v = this.files.get(path);
     if (v === undefined) throw new Error(`ENOENT: ${path}`);
     return v;
@@ -182,6 +207,7 @@ export class FakeSandbox implements SandboxPort {
 
   async writeFile(path: string, content: string): Promise<void> {
     this.requireAlive();
+    this.resumeIfSuspended();
     this.files.set(path, content);
   }
 }

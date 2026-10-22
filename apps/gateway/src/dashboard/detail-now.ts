@@ -15,6 +15,8 @@ type NowDto = NonNullable<TaskDetailDto["now"]>;
 type OutputDto = TaskDetailDto["output"];
 
 const WAITING: NowDto = { kind: "waiting", text: "waiting for input" };
+/** 予算の延長の承認待ち（kind: budget_extension の質問）。入力待ちの一種で、画面には一言添える */
+export const WAITING_BUDGET: NowDto = { kind: "waiting", text: "waiting for budget approval" };
 
 /** 画面に出す 1 行の文字列。改行・制御文字を空白にし、マスクしてから切る */
 function oneLine(v: string): string {
@@ -57,9 +59,10 @@ export function buildNow(
   rows: StoredEventRow[],
   status: string,
   phase: TaskDetailDto["phase"],
+  awaitingBudget = false,
 ): NowDto | null {
   if (phase === "done") return null;
-  if (status === "INPUT_REQUIRED") return WAITING;
+  if (status === "INPUT_REQUIRED") return awaitingBudget ? WAITING_BUDGET : WAITING;
 
   const ended = new Set<string>();
   for (const r of rows) {

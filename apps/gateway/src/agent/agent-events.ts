@@ -12,6 +12,11 @@ import {
   sanitizePromotions,
   sanitizeScaleStats,
 } from "../sandbox-instance";
+import {
+  BUDGET_EXTENSION_KIND,
+  budgetQuestionText,
+  parseBudgetNumbers,
+} from "../tasks/budget-question";
 import type { TaskStatus } from "../tasks/state";
 import type { AgentEventDto, AgentPhase, SandboxUsageDto } from "./contract";
 
@@ -256,7 +261,26 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
         },
       };
     }
-    case "question":
+    case "question": {
+      // 予算の延長の質問は、数値だけを受け取り、文と選択肢は gateway が固定文で作る（子の自由文を通さない）。
+      // kind が違う・数値が不正なら、子の質問として扱う（囲まれる）
+      const budget = d.kind === BUDGET_EXTENSION_KIND ? parseBudgetNumbers(d) : undefined;
+      if (budget !== undefined) {
+        const text = budgetQuestionText(budget);
+        return {
+          kind: "question",
+          payload: {
+            question_id: typeof d.question_id === "string" ? d.question_id.slice(0, 128) : "",
+            message: text.message,
+            options: JSON.stringify(text.options),
+            kind: BUDGET_EXTENSION_KIND,
+            budget_spent_usd: budget.spent_usd,
+            budget_total_usd: budget.total_usd,
+            budget_extension_usd: budget.extension_usd,
+            budget_extensions_left: budget.extensions_left,
+          },
+        };
+      }
       return {
         kind: "question",
         payload: {
@@ -265,6 +289,7 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
           options: questionOptions(d.options),
         },
       };
+    }
     case "answered":
       return {
         kind: "event",

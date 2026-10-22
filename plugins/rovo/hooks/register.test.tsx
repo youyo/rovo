@@ -689,6 +689,69 @@ test("a terminal task already announced does not toast again after a restart", a
   expect(r.calls.map((c) => c.tool)).toEqual(["task_console"]);
 });
 
+// --- budget extension (awaiting) -------------------------------------------
+
+const BUDGET_TOAST = "B が予算の承認待ち（利用者に確認してから task_answer で答える）";
+
+const startOne = async ($: Parameters<typeof startSession>[0], r: Rig, title = "B") => {
+  r.answers.set(START, startAnswer("t1"));
+  await startSession($);
+  await $.tool.call({ tool: START, title, repository: "o/r" });
+};
+
+test("awaiting budget_extension toasts once, and again after it cleared and came back", async ($, on) => {
+  const r = rig(on);
+  await startOne($, r);
+  const awaiting = (v: unknown) =>
+    ok(
+      consoleBody("t1", { status: "INPUT_REQUIRED", ...(v === undefined ? {} : { awaiting: v }) }),
+    );
+
+  r.setHandler(() => awaiting("budget_extension"));
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual([BUDGET_TOAST]);
+
+  r.setHandler(() => ok(consoleBody("t1"))); // answered, running again
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual([BUDGET_TOAST]);
+
+  r.setHandler(() => awaiting("budget_extension"));
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual([BUDGET_TOAST, BUDGET_TOAST]);
+});
+
+test("the pane says 予算の承認待ち for awaiting, 入力待ち otherwise, and ignores unknown values", async ($, on) => {
+  const r = rig(on);
+  await startOne($, r);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  const textsOf = async () => {
+    return (await ui.findAll({ type: "Text" })).map((t) => t.text ?? "").join("\n");
+  };
+
+  r.setHandler(() =>
+    ok(consoleBody("t1", { status: "INPUT_REQUIRED", awaiting: "budget_extension" })),
+  );
+  await r.clock.advance(4_000);
+  expect(await textsOf()).toContain("予算の承認待ち");
+
+  r.setHandler(() => ok(consoleBody("t1", { status: "INPUT_REQUIRED" })));
+  await r.clock.advance(4_000);
+  const plain = await textsOf();
+  expect(plain).toContain("入力待ち");
+  expect(plain).not.toContain("予算の承認待ち");
+
+  r.setHandler(() => ok(consoleBody("t1", { status: "INPUT_REQUIRED", awaiting: { evil: true } })));
+  await r.clock.advance(4_000);
+  expect(await textsOf()).toContain("入力待ち");
+  r.setHandler(() => ok(consoleBody("t1", { status: "INPUT_REQUIRED", awaiting: "future_kind" })));
+  await r.clock.advance(4_000);
+  expect(await textsOf()).toContain("入力待ち");
+  expect(r.toasts).toEqual([BUDGET_TOAST]); // only the first, real one; unknown values never toast
+  expect(r.calls.every((c) => !WRITE_TOOLS.test(c.tool))).toBe(true);
+});
+
 // --- limits ----------------------------------------------------------------
 
 test("keeps at most 10 tasks, the newest", async ($, on) => {

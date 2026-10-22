@@ -22,7 +22,7 @@ import type { DashboardDetailResult } from "../tasks/task-do";
 import { isTaskId } from "../tasks/ulid";
 import { type DashboardSession, requireSession } from "./auth";
 import { loadCloudflareSummary, parseCloudflareRange } from "./cloudflare";
-import { buildNow, buildOutput } from "./detail-now";
+import { buildNow, buildOutput, phaseOf, stoppedPhaseOf } from "./detail-now";
 import { toEventDto } from "./events";
 import { jsonResponse } from "./guard";
 
@@ -437,30 +437,6 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
   return validated(OverviewDtoSchema, "OverviewDto", dto);
 }
 
-const PHASE_OF: Record<string, TaskDetailDto["phase"]> = {
-  CREATING: "prepare",
-  RUNNING: "run",
-  INPUT_REQUIRED: "run",
-  RECOVERING: "run",
-  VERIFYING: "verify",
-};
-
-/**
- * 終端（失敗・予算超過・キャンセル）で止まった段階。準備で失敗（failure_phase が setup）→ prepare、
- * 検証に入った記録がある → verify、実行に入った記録がある → run、どちらも無い → prepare。完了・非終端は null。
- */
-export function stoppedPhaseOf(
-  status: string,
-  failurePhase: string | null,
-  reached: { running: boolean; verifying: boolean },
-): "prepare" | "run" | "verify" | null {
-  if (status !== "FAILED" && status !== "BUDGET_EXCEEDED" && status !== "CANCELLED") return null;
-  if (failurePhase === "setup") return "prepare";
-  if (reached.verifying) return "verify";
-  if (reached.running) return "run";
-  return "prepare";
-}
-
 async function handleTaskDetail(request: Request, env: Env, taskId: string): Promise<Response> {
   const auth = await authenticate(request, env);
   if (!auth.ok) return auth.response;
@@ -474,7 +450,7 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
   if (repositoryId === null) return errorJson(404, "not_found");
   const latest = await env.TASK_DO.getByName(taskId).dashboardLatest(repositoryId);
   if (!latest.ok) return errorJson(404, "not_found");
-  const phase = PHASE_OF[view.status] ?? "done";
+  const phase = phaseOf(view.status);
 
   const deps = view.deps_cache;
   // 権限の照合（readAuthorizedTask）に通ったあとで、PR の状態を閲覧者のトークンで取る（fail-soft）
@@ -604,3 +580,5 @@ export async function handleReadApi(
     ? handleTaskEvents(request, env, taskId)
     : handleTaskDetail(request, env, taskId);
 }
+
+export { stoppedPhaseOf };

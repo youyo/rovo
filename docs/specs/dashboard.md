@@ -373,6 +373,18 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 **決定（2026-10-21）: 推奨どおり。** 月の予算・費用は UTC のまま、画面に「UTC の月」と明記する。「今日」はブラウザのローカル日。
 
+### D19. `task_console`（Claude Code の mod 向けの読み取り専用ツール）
+
+- 目的: Claude Code の会話の横のペイン（mod）が、4 秒ごとに呼んで、実行中のタスクの状態とコンソールの出力を画面に出す。MCP のツールとして `apps/gateway/src/mcp/server.ts` に置き、実装は `createTaskService` の `console`（`apps/gateway/src/tasks/service.ts`）。
+- 入力: `{task_id}`。応答: `{task_id, status, phase, stopped_phase, now, output, dashboard_url?, generated_at}`。
+  - `status` は `task_status` と同じ文字列。`phase`（`prepare` / `run` / `verify` / `done`）と `stopped_phase`（`prepare` / `run` / `verify` / `null`）は、詳細 API と同じ関数（`dashboard/detail-now.ts` の `phaseOf` / `stoppedPhaseOf`）で求める。
+  - `now` は詳細 API の `now`（`buildNow`）、`output` は同じく `output`（`buildOutput`。実行中の `command_progress` を `running: true` つきで含む）。出す内容が無ければ `null`（`output` は command も末尾も無いとき）。
+  - `dashboard_url` は `task_status` と同じ規則（`PUBLIC_BASE_URL` が不正・空なら、キー自体を付けない）。
+- 権限は `task_status` と同じ。**自分のタスクだけ**（TaskDO の `getStatus` が所有者を照合し、他人・未知の `task_id` は `not_found`）。ダッシュボードの「閲覧者が GitHub で見られるリポジトリなら全員のタスク」とは違う。照合に通ったあとで、詳細と同じ読み取り専用の RPC（`dashboardDetail` / `dashboardLatest`）で材料を集める。TaskDO は変えない。
+- 非信頼データ: 子が書いた文字列（`now.text`、`output.command`、`output.tail`）は、`task_status` / `task_result` / `task_wait` と同じ `<<<UNTRUSTED_CHILD_QUESTION ...>>>` 〜 `<<<END_UNTRUSTED_CHILD_QUESTION>>>` で囲む（`null` は囲まない）。マスク・整形・長さの制限は、詳細 API と同じ関数を通る。
+- 使い方: 画面用。エージェントの作業の流れでは `task_wait` と `task_result` を使い、`task_console` を繰り返し呼ばない（会話が止まり、出力がコンテキストに入る）。`task_wait` の構造化イベントの除外（`STRUCTURED_TYPES_SQL`）、`task_wait` / `task_status` / `task_result` の応答は変えない。
+- テスト: Unit は `apps/gateway/test/unit/task-console.test.ts` と `mcp.test.ts`、E2E は `apps/gateway/test/e2e/tools.e2e.test.ts`（実行中の出力・終端・他人のタスクの拒否）。
+
 ## マイルストーン
 
 各 M は、先に失敗するテストを書いてから実装する（TDD。Unit と E2E の両方）。規模の目安は S（半日未満）/ M（1 日前後）/ L（数日）。

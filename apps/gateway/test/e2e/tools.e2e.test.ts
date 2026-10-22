@@ -4,6 +4,7 @@ import {
   admin,
   baseUrl,
   bodyOf,
+  emitAgentEvent,
   installApp,
   login,
   newUser,
@@ -457,6 +458,111 @@ describe("Draft PR（偽 GitHub の App API 経由）", () => {
     } finally {
       await admin.app("setDraftUnsupported", false);
       await client.close();
+    }
+  });
+});
+
+describe("task_console（mod 用の読み取り専用ツール。本物のログイン後）", () => {
+  const GHP = `ghp_${"a1B2".repeat(9)}`;
+
+  it("実行中は phase=run・output に実行中のコマンド（running）が囲み付きで出て、秘密は伏せられる。終端で phase=done・stopped_phase・output=null", async () => {
+    const { client } = await memberClient("console");
+    try {
+      const started = bodyOf(
+        await client.callTool({ name: "task_start", arguments: startArgs("console-1") }),
+      );
+      const taskId = started.task_id as string;
+
+      const first = bodyOf(
+        await client.callTool({ name: "task_console", arguments: { task_id: taskId } }),
+      );
+      expect(first).toMatchObject({
+        task_id: taskId,
+        status: "RUNNING",
+        phase: "run",
+        stopped_phase: null,
+        now: null,
+        output: null,
+        dashboard_url: `${baseUrl}/dashboard/tasks/${taskId}`,
+      });
+      expect(new Date(first.generated_at as string).toISOString()).toBe(first.generated_at);
+
+      await emitAgentEvent(taskId, "command_progress", {
+        command: "pnpm test",
+        startedAt: Date.now() - 5_000,
+        outputTail: `running step 1\n${GHP}\nAPI_KEY=plainvalue789\n`,
+      });
+      let running: Record<string, unknown> = first;
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline) {
+        running = bodyOf(
+          await client.callTool({ name: "task_console", arguments: { task_id: taskId } }),
+        );
+        if (running.output !== null) break;
+        await new Promise((r) => setTimeout(r, 1_000));
+      }
+      expect(running).toMatchObject({
+        status: "RUNNING",
+        phase: "run",
+        output: { running: true, redacted: true },
+      });
+      const output = running.output as { command: string; tail: string; started_at: string };
+      expect(output.command).toContain("<<<UNTRUSTED_CHILD_QUESTION");
+      expect(output.command).toContain("pnpm test");
+      expect(output.command).toContain("<<<END_UNTRUSTED_CHILD_QUESTION>>>");
+      expect(output.tail).toContain("running step 1");
+      expect(output.tail).toContain("<<<END_UNTRUSTED_CHILD_QUESTION>>>");
+      expect(JSON.stringify(running)).not.toContain(GHP);
+      expect(JSON.stringify(running)).not.toContain("plainvalue789");
+
+      // task_wait には、実行中の進捗も console の項目も出ない
+      const wait = bodyOf(
+        await client.callTool({
+          name: "task_wait",
+          arguments: { task_id: taskId, cursor: "0", timeout_seconds: 0 },
+        }),
+      );
+      expect(JSON.stringify(wait)).not.toContain("running step 1");
+
+      await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
+      const done = bodyOf(
+        await client.callTool({ name: "task_console", arguments: { task_id: taskId } }),
+      );
+      expect(done).toMatchObject({
+        status: "CANCELLED",
+        phase: "done",
+        stopped_phase: "run",
+        now: null,
+        output: null,
+      });
+    } finally {
+      await client.close();
+    }
+  }, 180_000);
+
+  it("他人のタスクは task_status と同じ not_found で拒否される", async () => {
+    const alice = newUser("console-a");
+    const bob = newUser("console-b");
+    await addMember(alice);
+    await addMember(bob);
+    await installApp();
+    const ca = await login(alice);
+    const cb = await login(bob);
+    try {
+      const { task_id: taskId } = bodyOf(
+        await ca.callTool({ name: "task_start", arguments: startArgs("console-secret") }),
+      ) as { task_id: string };
+      const viaConsole = await cb.callTool({
+        name: "task_console",
+        arguments: { task_id: taskId },
+      });
+      const viaStatus = await cb.callTool({ name: "task_status", arguments: { task_id: taskId } });
+      expect(viaConsole.isError).toBe(true);
+      expect(bodyOf(viaConsole)).toEqual(bodyOf(viaStatus));
+      expect(bodyOf(viaConsole).code).toBe("not_found");
+      expect(JSON.stringify(bodyOf(viaConsole))).not.toContain("console-secret");
+    } finally {
+      await Promise.all([ca.close(), cb.close()]);
     }
   });
 });

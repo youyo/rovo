@@ -17,7 +17,7 @@ export {
   type CommandProgressEvent,
   normalizeCommandProgress,
 } from "./progress";
-export { maskSecrets } from "./redact";
+export { type BlockingFinding, findBlockingSecrets, maskSecrets } from "./redact";
 export {
   sanitizeText,
   truncateEnd,

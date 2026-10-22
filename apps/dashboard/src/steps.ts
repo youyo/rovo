@@ -27,6 +27,8 @@ export type Step = StepText & {
   at: number;
   /** いま実行している手順（実行中のタスクの最後の手順） */
   current: boolean;
+  /** コマンドの手順か（画面では `$ コマンド` の行にする。古い履歴の bash の tool_start も含む） */
+  command: boolean;
 };
 
 const STATUS_VERB: Record<TaskStatusDto, { what: string; tone: Tone }> = {
@@ -244,7 +246,8 @@ export function buildSteps(events: readonly TaskEventDto[], active: boolean): St
   for (const e of shown) {
     const current = active && e.seq === lastSeq;
     const d = describeEvent(e, { current });
-    if (d) steps.push({ ...d, seq: e.seq, at: Date.parse(e.at), current });
+    const command = e.type === "command" || (e.type === "tool_start" && e.name === "bash");
+    if (d) steps.push({ ...d, seq: e.seq, at: Date.parse(e.at), current, command });
   }
   return steps;
 }

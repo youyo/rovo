@@ -58,11 +58,12 @@ const paths = (f: ReturnType<typeof vi.fn>) =>
   f.mock.calls.map((c) => new URL(String(c[0]), "http://localhost").pathname);
 
 describe("App のルーティング", () => {
-  it("/dashboard/tasks/<ULID> は詳細。一覧の API は呼ばない。一覧の絞り込み（全員 / 自分）は出さず、戻るリンクを出す", async () => {
+  it("/dashboard/tasks/<ULID> は詳細（コンソール）。一覧と同じ骨格のためレール用に一覧の API も取る。全員 / 自分と戻るリンクを出す", async () => {
     const { c, f } = await mount(`/dashboard/tasks/${ID}`);
-    expect(c.querySelector("h1")?.textContent).toBe(taskDetailRunningFixture.task.title);
-    expect(paths(f)).not.toContain("/dashboard/api/overview");
-    expect(c.querySelector("fieldset[aria-label='表示するタスク']")).toBeNull();
+    expect(c.querySelector(".console h1")?.textContent).toBe(taskDetailRunningFixture.task.title);
+    expect(paths(f)).toContain(`/dashboard/api/tasks/${ID}`);
+    expect(paths(f)).toContain("/dashboard/api/overview");
+    expect(c.querySelector("fieldset[aria-label='表示するタスク']")).not.toBeNull();
     expect(c.querySelector("header a[href='/dashboard/']")?.textContent).toBe(
       "ダッシュボードに戻る",
     );
@@ -72,8 +73,9 @@ describe("App のルーティング", () => {
     for (const p of ["/dashboard/", "/dashboard/tasks/not-a-ulid"]) {
       const { c, f } = await mount(p);
       expect(paths(f), p).toContain("/dashboard/api/overview");
-      expect(paths(f), p).not.toContain(`/dashboard/api/tasks/${ID}`);
+      // 一覧のコンソールは走行中のタスク。URL の ID が不正でも一覧になる
       expect(c.querySelector("[data-lane]"), p).not.toBeNull();
+      expect(c.querySelector("a.rail-row"), p).not.toBeNull();
       act(() => roots.pop()?.unmount());
       document.body.innerHTML = "";
     }

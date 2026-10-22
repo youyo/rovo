@@ -1,5 +1,6 @@
 import { CloudflareSummaryDtoSchema, ErrorDtoSchema } from "@rovo/dashboard-contract";
 import { beforeEach, describe, expect, it } from "vitest";
+import { CLOUDFLARE_UNIT_PRICES_USD } from "../../src/dashboard/cloudflare-pricing";
 import { dashboardGet, dashboardLogin } from "./dashboard-session";
 import { addMember, admin, baseUrl, newUser, resetDashboardCloudflareCache } from "./helpers";
 
@@ -46,6 +47,70 @@ describe("GET /dashboard/api/cloudflare", () => {
     expect(dto?.credit_balance).toEqual({ ok: true, value: { balance_usd: 18.25 } });
     // 残高 API の支払い方法・自動チャージの設定は応答に出さない
     expect(r.whole).not.toMatch(/visa|4242|topup|payment/i);
+  });
+
+  it("正常: cost_estimate は偽 API の使用量 × 単価で、無料枠を引く前・AI Gateway を含む合計・disk は除外", async () => {
+    const cookie = await viewer();
+    const { r, dto } = await summary(cookie);
+    expect(r.status).toBe(200);
+    const est = dto?.cost_estimate;
+    if (!est) throw new Error("cost_estimate が無い");
+    const price = CLOUDFLARE_UNIT_PRICES_USD;
+    // 期待値は偽の Cloudflare API の値（test/fake-github/server.ts）から計算する
+    // vCPU: allocatedCpu 7200 + 3600 秒 / メモリ: 2 GiB × 3600 s + 1 GiB × 1800 s（= 9000 GiB 秒）
+    // Workers: 1200 リクエスト / Workers AI: 2500 Neurons / AI Gateway: cost 4.5 USD（単価なし）
+    const expected = {
+      workers: 1200 * price.workers_request,
+      vcpu: (7200 + 3600) * price.containers_vcpu_second,
+      memory: (2 * 3600 + 1 * 1800) * price.containers_gib_second,
+      workersAi: 2500 * price.workers_ai_neuron,
+      aiGateway: 4.5,
+    };
+    expect(est.basis).toBe("before_free_tier");
+    expect(est.items.workers_requests).toMatchObject({
+      quantity: 1200,
+      unit: "request",
+      unit_price_usd: price.workers_request,
+    });
+    expect(est.items.workers_requests.estimated_usd_before_free_tier).toBeCloseTo(
+      expected.workers,
+      9,
+    );
+    expect(est.items.containers_vcpu).toMatchObject({
+      quantity: 10800,
+      unit: "vcpu_second",
+      unit_price_usd: price.containers_vcpu_second,
+    });
+    expect(est.items.containers_vcpu.estimated_usd_before_free_tier).toBeCloseTo(expected.vcpu, 9);
+    expect(est.items.containers_memory).toMatchObject({
+      quantity: 9000,
+      unit: "gib_second",
+      unit_price_usd: price.containers_gib_second,
+    });
+    expect(est.items.containers_memory.estimated_usd_before_free_tier).toBeCloseTo(
+      expected.memory,
+      9,
+    );
+    // ディスクは使用量を取っていないので推定は null（合計に入らない）
+    expect(est.items.containers_disk).toMatchObject({
+      quantity: null,
+      unit: "gb_second",
+      unit_price_usd: price.containers_gb_second,
+      estimated_usd_before_free_tier: null,
+    });
+    expect(est.items.workers_ai).toMatchObject({
+      quantity: 2500,
+      unit: "neuron",
+      unit_price_usd: price.workers_ai_neuron,
+    });
+    expect(est.items.workers_ai.estimated_usd_before_free_tier).toBeCloseTo(expected.workersAi, 9);
+    expect(est.items.ai_gateway.cost_usd).toBeCloseTo(expected.aiGateway, 9);
+    // 合計は取れた項目の和（AI Gateway の費用を含む）
+    const total =
+      expected.workers + expected.vcpu + expected.memory + expected.workersAi + expected.aiGateway;
+    expect(est.total_estimated_usd_before_free_tier).toBeCloseTo(total, 9);
+    expect(est.excluded_items).toEqual(["containers_disk"]);
+    expect(est.partial).toBe(true);
   });
 
   it("一部が権限なし: その項目だけ forbidden で、他は取れる（200 のまま）", async () => {

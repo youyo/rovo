@@ -488,7 +488,9 @@ describe("詳細・Cloudflare・エラー", () => {
     expect(ok(CloudflareSummaryDtoSchema, withEstimate)).toBe(true);
     expect(est.basis).toBe("before_free_tier");
     const items = est.items as Record<string, { estimated_usd_before_free_tier?: number | null }>;
-    expect(items.containers_disk.estimated_usd_before_free_tier).toBeNull();
+    const disk = items.containers_disk;
+    if (!disk) throw new Error("containers_disk の項目が無い");
+    expect(disk.estimated_usd_before_free_tier).toBeNull();
     expect(est.excluded_items).toContain("containers_disk");
     // 全項目が取れないとき（合計も null）も通る
     const nothing = clone(est) as Record<string, unknown>;
@@ -506,6 +508,13 @@ describe("詳細・Cloudflare・エラー", () => {
     nothing.partial = true;
     expect(ok(CloudflareSummaryDtoSchema, { ...old, cost_estimate: nothing })).toBe(true);
     // 形は固定: 基準が違う・負の金額・未知のキー・足りない項目・日付の形が違う は弾く
+    // workers_requests の行を取り出す（無ければテストを失敗させる）
+    const workersRequestsLine = (e: Record<string, unknown>): Record<string, unknown> => {
+      const lines = e.items as Record<string, Record<string, unknown>>;
+      const line = lines.workers_requests;
+      if (!line) throw new Error("workers_requests の項目が無い");
+      return line;
+    };
     const bad = (patch: (e: Record<string, unknown>) => void) => {
       const e = clone(est) as Record<string, unknown>;
       patch(e);
@@ -522,12 +531,12 @@ describe("詳細・Cloudflare・エラー", () => {
     expect(bad((e) => delete (e.items as Record<string, unknown>).workers_ai)).toBe(false);
     expect(
       bad((e) => {
-        (e.items as Record<string, Record<string, unknown>>).workers_requests.unit_price_usd = -1;
+        workersRequestsLine(e).unit_price_usd = -1;
       }),
     ).toBe(false);
     expect(
       bad((e) => {
-        (e.items as Record<string, Record<string, unknown>>).workers_requests.unit = "request_x";
+        workersRequestsLine(e).unit = "request_x";
       }),
     ).toBe(false);
   });

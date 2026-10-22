@@ -4,6 +4,7 @@ import {
   randomToken,
   SESSION_ABSOLUTE_MS,
   SESSION_IDLE_MS,
+  SESSION_MAX_PER_USER,
   SESSION_TOUCH_MS,
 } from "../dashboard/session";
 import { indexBackoffMs } from "../directory/backoff";
@@ -369,7 +370,7 @@ export class UserDO extends DurableObject<Env> {
       updated_at INTEGER
     )`);
     sql.exec("INSERT OR IGNORE INTO github_credential (singleton, generation) VALUES (1, 0)");
-    // ダッシュボードのブラウザセッション（D3）。epoch はログインのたびに進む永続の世代で、MCP の loginEpoch（メモリのみ）とは別。
+    // ダッシュボードのブラウザセッション（D3）。epoch は全端末ログアウト用の永続の世代（ログインでは進めない。複数端末で同時に使える）で、MCP の loginEpoch（メモリのみ）とは別。
     // 資格（github_credential）とは独立に持つ。GitHub のトークンは入れない。
     sql.exec(`CREATE TABLE IF NOT EXISTS dashboard_epoch (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -387,9 +388,10 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * ブラウザのログイン成功後にセッションを作る。世代を進め、既存のセッションはすべて消す
-   * （ログインのたびに新しい sid。ログイン前の sid は引き継がない = セッション固定の対策）。
-   * 同じ利用者のセッションは常に 1 つだけ。
+   * ブラウザのログイン成功後にセッションを作る。複数の端末で同時に使える（ログインで他の端末を落とさない）。
+   * ログインのたびに新しい sid を発行し、ログイン前の sid は引き継がない（セッション固定の対策）。
+   * 世代（epoch）は進めず、今の世代を version に入れる。epoch は「全端末ログアウト」のために残してあり、進めると全 sid が失効する。
+   * INSERT の前に同じトランザクションで、期限切れ（絶対・無操作）の行を消し、残りが上限以上なら last_seen の古い順に消す。
    */
   async createDashboardSession(
     login: string,
@@ -399,11 +401,21 @@ export class UserDO extends DurableObject<Env> {
     const sid = randomToken();
     const expiresAt = now + SESSION_ABSOLUTE_MS;
     const version = this.ctx.storage.transactionSync(() => {
-      sql.exec("UPDATE dashboard_epoch SET epoch = epoch + 1 WHERE singleton = 1");
       const epoch = sql
         .exec<{ epoch: number }>("SELECT epoch FROM dashboard_epoch WHERE singleton = 1")
         .one().epoch;
-      sql.exec("DELETE FROM dashboard_session");
+      sql.exec(
+        "DELETE FROM dashboard_session WHERE expires_at <= ? OR last_seen <= ?",
+        now,
+        now - SESSION_IDLE_MS,
+      );
+      // 新しい 1 件を入れたあとに上限以下になるよう、上限 - 1 件まで残す
+      sql.exec(
+        `DELETE FROM dashboard_session WHERE sid IN (
+           SELECT sid FROM dashboard_session ORDER BY last_seen DESC, created_at DESC LIMIT -1 OFFSET ?
+         )`,
+        SESSION_MAX_PER_USER - 1,
+      );
       sql.exec(
         "INSERT INTO dashboard_session (sid, version, login, created_at, expires_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
         sid,

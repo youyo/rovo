@@ -13,12 +13,14 @@ export function createToolContext(
   extra: {
     branch?: string | (() => string | undefined);
     onPush?: ToolContext["onPush"];
+    lastPushedSha?: ToolContext["lastPushedSha"];
     onEvent?: ToolContext["onEvent"];
   } = {},
 ): ToolContext {
   const branch = extra.branch;
   return {
     onPush: extra.onPush,
+    lastPushedSha: extra.lastPushedSha,
     onEvent: extra.onEvent,
     get branch() {
       return typeof branch === "function" ? branch() : branch;

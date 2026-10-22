@@ -450,7 +450,7 @@ describe("git_commit", () => {
   const handler =
     (diffExit: number): ExecHandler =>
     (argv) => {
-      if (argv.includes("diff")) return { exitCode: diffExit };
+      if (argv.includes("--quiet")) return { exitCode: diffExit };
       if (argv.includes("rev-parse")) return { stdout: "abc1234def\n" };
       return {};
     };
@@ -487,7 +487,7 @@ describe("git_commit", () => {
     const b = setup((argv) =>
       argv.includes("commit")
         ? { exitCode: 1, stderr: "hook failed" }
-        : argv.includes("diff")
+        : argv.includes("--quiet")
           ? { exitCode: 1 }
           : {},
     );
@@ -502,7 +502,7 @@ describe("git_commit の push（チェックポイント）", () => {
   const handler =
     (push: { exitCode?: number; stderr?: string; timedOut?: boolean } = {}): ExecHandler =>
     (argv) => {
-      if (argv.includes("diff")) return { exitCode: 1 };
+      if (argv.includes("--quiet")) return { exitCode: 1 };
       if (argv.includes("rev-parse")) return { stdout: `${SHA}\n` };
       if (argv.includes("push")) return push;
       return {};
@@ -566,7 +566,7 @@ describe("git_commit の push（チェックポイント）", () => {
   });
 
   it("変更が無ければ push しない。ブランチが未設定でも push しない", async () => {
-    const a = setup((argv) => (argv.includes("diff") ? { exitCode: 0 } : {}), {
+    const a = setup((argv) => (argv.includes("--quiet") ? { exitCode: 0 } : {}), {
       branch: "agent/task-t1",
       onPush: async () => {},
     });
@@ -582,7 +582,7 @@ describe("git_commit の push（チェックポイント）", () => {
       (argv) =>
         argv.includes("commit")
           ? { exitCode: 1, stderr: "hook failed" }
-          : argv.includes("diff")
+          : argv.includes("--quiet")
             ? { exitCode: 1 }
             : {},
       { branch: "agent/task-t1", onPush: async () => {} },

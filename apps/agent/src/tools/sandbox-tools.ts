@@ -8,6 +8,13 @@ import {
 } from "@rovo/audit";
 import { maskSecrets } from "../redact";
 import type { ExecResult, SandboxPort } from "../sandbox-port";
+import {
+  blockedMessage,
+  EMPTY_TREE_SHA,
+  type ScanGit,
+  type ScanVerdict,
+  scanRangeForSecrets,
+} from "../secret-scan";
 import { stripAnsi } from "../text-util";
 import { resolveWorkspacePath } from "../workspace-path";
 import type { PushResult, ToolContext } from "./types";
@@ -475,12 +482,47 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
     ),
   });
 
+  /** 最後に push が成功した SHA（このツールが見たもの）。ToolContext.lastPushedSha が無いときの代わり */
+  let lastPushedLocal: string | undefined;
+  const scanGit: ScanGit = (argv, timeoutMs, maxOutputBytes) =>
+    port.exec(["git", ...argv], { ...cwdOpts, timeoutMs, maxOutputBytes });
+
+  /** 止めたときに子へ返す文（値は含めない）。commit は残り、push はしていない */
+  const blockedText = (v: Exclude<ScanVerdict, { status: "clean" | "aborted" }>): string => {
+    const head = `\npush skipped: the commit is kept locally but was NOT pushed (${blockedMessage(v)}).`;
+    if (v.status === "unscannable")
+      return `${head}\nThe diff since the last push could not be scanned for secrets (too large or git failed). Reduce the amount of changes in a commit, then call git_commit again.`;
+    const what =
+      v.status === "binary"
+        ? "A binary file that may hold a key or credential"
+        : `A possible secret (${v.category ?? "unknown"})`;
+    const where =
+      v.status === "secret" && v.path
+        ? ` at ${v.path}${v.line ? `:${v.line}` : ""}`
+        : v.status === "binary" && v.path
+          ? ` at ${v.path}`
+          : "";
+    return `${head}\n${what} was found${where} in the changes since the last push. Remove it, also from the git history (for example, redo the commit with git reset --soft <last pushed commit>), then call git_commit again. The next git_commit scans the whole range again, so a secret left in an earlier commit still blocks the push.`;
+  };
+
   /**
    * commit のたびの push（チェックポイント）。best-effort: 失敗しても git_commit は失敗にしない。
-   * 結果の文面（モデルに返す）を返す。
+   * push の直前に、最後に push できた SHA から HEAD までの追加行を検査し、確度の高い秘密があれば push しない（commit はローカルに残す）。
+   * 検査そのものの失敗も push しない（安全側）。結果の文面（モデルに返す）を返す。
    */
   const pushCheckpoint = async (sha: string): Promise<string> => {
     if (!context.branch || !context.onPush) return "";
+    const known = context.lastPushedSha?.() ?? lastPushedLocal;
+    const base = known && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(known) ? known : EMPTY_TREE_SHA;
+    const verdict = await scanRangeForSecrets(scanGit, [`${base}..HEAD`], "push");
+    if (verdict.status !== "clean" && verdict.status !== "aborted") {
+      try {
+        await context.onPush({ ok: false, sha, error: blockedMessage(verdict) });
+      } catch {
+        // 記録の失敗で commit を失敗にしない
+      }
+      return blockedText(verdict);
+    }
     const r = await port
       .exec(["git", "push", "origin", `HEAD:refs/heads/${context.branch}`], {
         ...cwdOpts,
@@ -493,6 +535,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
       result = { ok: false, sha, error: errMsg(r) };
     } else if (r.exitCode === 0 && !r.timedOut) {
       result = { ok: true, sha };
+      lastPushedLocal = sha;
     } else {
       const why = r.timedOut ? "timed out" : (r.stderr || r.stdout || `exit ${r.exitCode}`).trim();
       result = { ok: false, sha, error: maskSecrets(why).slice(-500) };

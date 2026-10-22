@@ -106,7 +106,7 @@ describe("git_commit の commit イベント", () => {
 
   it("メッセージの 1 行目（マスク済み）・sha・ファイル数", async () => {
     const { events, run } = setup((argv) => {
-      if (argv.includes("diff")) return { exitCode: 1 };
+      if (argv.includes("--quiet")) return { exitCode: 1 };
       if (argv.includes("rev-parse")) return { stdout: `${sha}\n` };
       if (argv.includes("diff-tree")) return { stdout: "a.ts\nb/c.ts\n" };
       return {};
@@ -118,14 +118,14 @@ describe("git_commit の commit イベント", () => {
   });
 
   it("変更なしでは出さない", async () => {
-    const { events, run } = setup((argv) => (argv.includes("diff") ? { exitCode: 0 } : {}));
+    const { events, run } = setup((argv) => (argv.includes("--quiet") ? { exitCode: 0 } : {}));
     await run("git_commit", { message: "m" });
     expect(events).toEqual([]);
   });
 
   it("files の取得に失敗しても commit イベントは出る（files は 0）", async () => {
     const { events, run } = setup((argv) => {
-      if (argv.includes("diff")) return { exitCode: 1 };
+      if (argv.includes("--quiet")) return { exitCode: 1 };
       if (argv.includes("rev-parse")) return { stdout: `${sha}\n` };
       if (argv.includes("diff-tree")) return { exitCode: 128 };
       return {};
@@ -140,7 +140,7 @@ describe("git_commit: diff-tree が失敗してもツールは成功し、push �
   it("exec が reject しても commit イベントは出て（files は 0）、isError にならず、push する", async () => {
     const { sandbox, events, run } = setup(
       (argv) => {
-        if (argv.includes("diff")) return { exitCode: 1 };
+        if (argv.includes("--quiet")) return { exitCode: 1 };
         if (argv.includes("rev-parse")) return { stdout: `${sha}\n` };
         if (argv.includes("diff-tree")) throw new Error("exec rejected");
         return {};

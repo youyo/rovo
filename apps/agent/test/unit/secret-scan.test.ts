@@ -28,8 +28,11 @@ function gitWith(
   return { git, calls };
 }
 
-const hunk = (path: string, start: number, ...body: string[]) =>
-  `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,3 +${start},${body.length} @@\n${body.join("\n")}\n`;
+const hunk = (path: string, start: number, ...body: string[]) => {
+  const oldN = body.filter((l) => l[0] === " " || l[0] === "-").length;
+  const newN = body.filter((l) => l[0] === " " || l[0] === "+").length;
+  return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,${oldN} +${start},${newN} @@\n${body.join("\n")}\n`;
+};
 
 describe("scanRangeForSecrets（push モード）", () => {
   it("追加行の秘密を、新しいファイルでの行番号つきで返す。値は含まない", async () => {

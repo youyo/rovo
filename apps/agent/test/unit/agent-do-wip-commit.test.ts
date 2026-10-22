@@ -30,6 +30,12 @@ interface Knobs {
   status: string;
   /** 取り込み予定（git diff --cached）の出力 */
   staged: string;
+  /** staged の diff が 4MiB 超で切れた */
+  stagedTruncated: boolean;
+  /** diff --cached --numstat の出力 */
+  numstat: string;
+  /** add が返るまでの待ち（ms）。時間切れの再現 */
+  addDelayMs: number;
   commitExit: number;
   pushExit: number;
   /** bash の実行中にここが true の間は待つ（cancel の再現） */
@@ -41,6 +47,9 @@ function wipSandbox(over: Partial<Knobs> = {}) {
   const knobs: Knobs = {
     status: " M src/a.ts\n",
     staged: "diff --git a/src/a.ts b/src/a.ts\n+const x = 1;\n",
+    stagedTruncated: false,
+    numstat: "1\t0\tsrc/a.ts\n",
+    addDelayMs: 0,
     commitExit: 0,
     pushExit: 0,
     hold: false,
@@ -56,7 +65,13 @@ function wipSandbox(over: Partial<Knobs> = {}) {
     git.push(argv);
     const sub = argv.find((a) => !a.startsWith("-") && a !== "git" && !a.includes("="));
     if (sub === "status") return { stdout: knobs.status };
-    if (sub === "diff" && argv.includes("--cached")) return { stdout: knobs.staged };
+    if (sub === "add" && knobs.addDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, knobs.addDelayMs));
+    }
+    if (sub === "diff" && argv.includes("--numstat")) return { stdout: knobs.numstat };
+    if (sub === "diff" && argv.includes("--cached")) {
+      return { stdout: knobs.staged, truncated: knobs.stagedTruncated };
+    }
     if (sub === "commit") return { exitCode: knobs.commitExit, stderr: "commit failed" };
     if (sub === "rev-parse") return { stdout: `${SHA}\n` };
     if (sub === "push") return { exitCode: knobs.pushExit, stderr: "remote: denied" };
@@ -183,6 +198,76 @@ describe("予算超過で止まるとき、未 commit の変更を WIP として
     expect(await waitForTerminal(asFx(stub))).toBe("budget_exceeded");
     const r = done(await stub.getResult());
     expect(r.warnings.join("\n")).toContain("WIP");
+  });
+});
+
+describe("WIP commit の安全側の振る舞い", () => {
+  it("バイナリの変更を含むときは中身を確かめられないので commit せず reset し、固定文の警告を出す", async () => {
+    const t = await runToBudgetStop("wip-binary", {
+      numstat: "1\t0\tsrc/a.ts\n-\t-\tkeys/a.p12\n",
+    });
+    expect(t.ran("commit")).toHaveLength(0);
+    expect(t.ran("push")).toHaveLength(0);
+    expect(t.ran("reset")).toHaveLength(1);
+    const r = done(await t.stub.getResult());
+    expect(r.status).toBe("budget_exceeded");
+    expect(r.warnings.join("\n")).toContain("確かめられないファイルがあるため行わなかった");
+    expect(JSON.stringify(r)).not.toContain("a.p12");
+  });
+
+  it("差分が上限（4MiB）を超えて切れたときは commit しない", async () => {
+    const t = await runToBudgetStop("wip-truncated", { stagedTruncated: true });
+    expect(t.ran("commit")).toHaveLength(0);
+    expect(t.ran("push")).toHaveLength(0);
+    expect(t.ran("reset")).toHaveLength(1);
+    const r = done(await t.stub.getResult());
+    expect(r.warnings.join("\n")).toContain("確かめられないファイルがあるため行わなかった");
+  });
+
+  it("失敗の警告は固定文だけで、リポジトリ由来の stderr を含めない", async () => {
+    const t = await runToBudgetStop("wip-fixed-warning", { commitExit: 1 });
+    const r = done(await t.stub.getResult());
+    const text = r.warnings.join("\n");
+    expect(text).toContain("WIP");
+    expect(text).not.toContain("commit failed");
+  });
+
+  it("Sandbox を起動していなければ何もしない（起動もしない）", async () => {
+    const made = wipSandbox();
+    setAgentTestOverrides("wip-unbooted", { sandbox: made.sandbox, script: [report()] });
+    const stub = env.AGENT_DO.getByName("wip-unbooted");
+    // 最小の入力の見積もりも払えない予算にして、最初のモデル呼び出しの前に止める
+    await stub.start(makeSpec("wip-unbooted", { verificationCommands: [], budgetUsd: 0.0001 }));
+    expect(await waitForTerminal(asFx(stub))).toBe("budget_exceeded");
+    expect(made.git).toHaveLength(0);
+    expect(made.sandbox.calls).toHaveLength(0);
+    expect(made.sandbox.readySpecs).toHaveLength(0);
+  });
+
+  it("時間切れのあとは、後段の git（diff・commit・push）を実行しない", async () => {
+    const made = wipSandbox({ addDelayMs: 300 });
+    setAgentTestOverrides("wip-expired", {
+      sandbox: made.sandbox,
+      wipCommitWaitMs: 50,
+      script: [{ ...call("bash", { command: "echo hi" }), usage: { output: 999_999 } }, report()],
+    });
+    const stub = env.AGENT_DO.getByName("wip-expired");
+    await stub.start(
+      makeSpec("wip-expired", {
+        verificationCommands: [],
+        budgetUsd: 1.0,
+        deadlineAt: Date.now() + 3_600_000,
+      }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("budget_exceeded");
+    // add が返ったあとの動きを待つ
+    await new Promise((r) => setTimeout(r, 800));
+    expect(made.ran("add")).toHaveLength(1);
+    expect(made.ran("--cached")).toHaveLength(0);
+    expect(made.ran("commit")).toHaveLength(0);
+    expect(made.ran("push")).toHaveLength(0);
+    const r = done(await stub.getResult());
+    expect(r.pushedSha).toBeUndefined();
   });
 });
 

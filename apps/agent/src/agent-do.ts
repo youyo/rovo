@@ -166,8 +166,11 @@ function wipWarning(w: WipCommit): string {
         : `予算超過で止まる前に、未 commit の変更を rovo が WIP として自動で commit しましたが、push できませんでした（${w.sha}。patch には含まれています）`;
     case "secret":
       return "予算超過で止まる前の WIP commit は、変更に秘密らしき文字列があるため行いませんでした（未 commit の変更は失われます）";
+    case "unscannable":
+      return "予算超過で止まる前の WIP commit は、確かめられないファイルがあるため行わなかった（バイナリ、または差分が大きすぎる。未 commit の変更は失われます）";
     case "failed":
-      return `予算超過で止まる前の WIP commit に失敗しました（${w.reason}）。未 commit の変更は失われた可能性があります`;
+      // reason には git の出力（リポジトリ由来の文字列）が入りうるので、warnings には出さない（meta の wip_commit にだけ残る）
+      return "予算超過で止まる前の WIP commit に失敗しました。未 commit の変更は失われた可能性があります";
   }
 }
 
@@ -191,6 +194,7 @@ interface CallBasis {
 type WipCommit =
   | { outcome: "committed"; sha: string; pushed: boolean }
   | { outcome: "secret" }
+  | { outcome: "unscannable" }
   | { outcome: "failed"; reason: string };
 interface BranchSync {
   pushedSha?: string;
@@ -1695,24 +1699,30 @@ export class AgentDO extends DurableObject<Env> {
     // Sandbox を一度も起動していない（ファイルにも git にも触れなかった）なら、変更は無い。commit のために起動しない
     if (!spec || !this.sandboxBooted()) return;
     const limit = this.overrides().wipCommitWaitMs ?? WIP_COMMIT_WAIT_MS;
-    const timedOut = await this.raceTimeout(this.runWipCommit(spec), limit);
-    if (timedOut && !this.store.meta<WipCommit>("wip_commit")) {
-      this.store.setMeta("wip_commit", {
-        outcome: "failed",
-        reason: "timed out",
-      } satisfies WipCommit);
+    // 時間切れのあとは、走っている runWipCommit が後段の git を実行しないよう印を立てる（確定・破棄の後に commit・push が走らない）
+    const ctl = { expired: false };
+    const timedOut = await this.raceTimeout(this.runWipCommit(spec, ctl), limit);
+    if (timedOut) {
+      ctl.expired = true;
+      if (!this.store.meta<WipCommit>("wip_commit")) {
+        this.store.setMeta("wip_commit", {
+          outcome: "failed",
+          reason: "timed out",
+        } satisfies WipCommit);
+      }
     }
   }
 
-  private async runWipCommit(spec: StoredSpec): Promise<void> {
+  private async runWipCommit(spec: StoredSpec, ctl: { expired: boolean }): Promise<void> {
+    // 結果の記録は、時間切れの後は行わない（warnings と実際の食い違いを避ける）。reason は meta にだけ残し、warnings には出さない
+    const record = (w: WipCommit) => {
+      if (!ctl.expired) this.store.setMeta("wip_commit", w);
+    };
     const fail = (reason: string) =>
-      this.store.setMeta("wip_commit", {
-        outcome: "failed",
-        reason: tail(maskSecrets(reason), 200),
-      } satisfies WipCommit);
+      record({ outcome: "failed", reason: tail(maskSecrets(reason), 200) });
     try {
       // 予算超過より先に cancel・期限が来ていれば、Sandbox は破棄される（利用者の停止や時間切れは尊重する）
-      const interrupted = () => sandboxDestroyedBy(this.stopIntents());
+      const interrupted = () => ctl.expired || sandboxDestroyedBy(this.stopIntents());
       if (interrupted()) return;
       const sb = this.lazySandbox();
       const git = (argv: string[], timeoutMs = 60_000, maxOutputBytes = 32 * 1024) =>
@@ -1725,23 +1735,32 @@ export class AgentDO extends DurableObject<Env> {
       if (!okRun(status)) return fail(`git status ${why(status)}`);
       if (status.stdout.trim() === "") return; // 変更なし。何もしない
 
+      if (interrupted()) return;
       const add = await git(["add", "-A"]);
       if (!okRun(add)) return fail(`git add ${why(add)}`);
+      if (interrupted()) return;
       // 秘密を commit しない: 取り込む差分を、ログ・イベントと同じ秘密のパターン（maskSecrets）で確かめる。
       // マスクで文字列が変わる = 秘密らしきものがある。差分が大きすぎて確かめ切れないときも commit しない
-      const staged = await git(["diff", "--cached", "--no-color"], 120_000, WIP_SCAN_MAX_BYTES);
-      const scanned = okRun(staged) && staged.truncated !== true;
+      // バイナリ（numstat が "-\t-\t<path>"）は diff に中身が出ず検査できない（鍵・.p12 など）ので、安全側に倒して commit しない
+      const numstat = await git(["diff", "--cached", "--numstat"], 60_000, WIP_SCAN_MAX_BYTES);
+      const hasBinary =
+        okRun(numstat) &&
+        numstat.truncated !== true &&
+        numstat.stdout.split("\n").some((l) => l.startsWith("-\t-\t"));
+      if (interrupted()) return;
+      const staged = hasBinary
+        ? undefined
+        : await git(["diff", "--cached", "--no-color"], 120_000, WIP_SCAN_MAX_BYTES);
+      const scanned =
+        staged !== undefined &&
+        okRun(numstat) &&
+        numstat.truncated !== true &&
+        okRun(staged) &&
+        staged.truncated !== true;
       if (!scanned || maskSecrets(staged.stdout) !== staged.stdout) {
+        if (interrupted()) return;
         await git(["reset", "-q"]).catch(() => undefined);
-        this.store.setMeta(
-          "wip_commit",
-          scanned
-            ? ({ outcome: "secret" } satisfies WipCommit)
-            : ({
-                outcome: "failed",
-                reason: "could not scan the staged changes",
-              } satisfies WipCommit),
-        );
+        record(scanned ? { outcome: "secret" } : { outcome: "unscannable" });
         return;
       }
       if (interrupted()) return;
@@ -1761,6 +1780,7 @@ export class AgentDO extends DurableObject<Env> {
       const head = await git(["rev-parse", "HEAD"]);
       const sha = head.stdout.trim();
       if (!okRun(head) || !SHA_RE.test(sha)) return fail("could not read HEAD after commit");
+      if (interrupted()) return;
       // push は git_commit と同じ経路（作業ブランチへ HEAD を push し、pushed / push_failed イベントと branch_sync を更新）
       const push = await git(["push", "origin", `HEAD:refs/heads/${spec.branch}`]).catch(
         (e: unknown) => e,
@@ -1775,7 +1795,7 @@ export class AgentDO extends DurableObject<Env> {
               error: push instanceof Error ? push.message : why(push as ExecResult),
             },
       );
-      this.store.setMeta("wip_commit", { outcome: "committed", sha, pushed } satisfies WipCommit);
+      record({ outcome: "committed", sha, pushed });
     } catch (e) {
       fail(e instanceof Error ? e.message : String(e));
     }

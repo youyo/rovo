@@ -22,14 +22,16 @@ const ceilHour = (ms: number) => {
  */
 export function timelineDomain(input: {
   starts: number[];
-  nowMs: number;
+  /** いま。過去の日は null（いまを範囲に含めない） */
+  nowMs: number | null;
   dayStart: number;
   dayEnd: number;
   minSpanMs?: number;
 }): Domain {
   const { starts, nowMs, dayStart, dayEnd } = input;
   const minSpan = input.minSpanMs ?? 3 * HOUR;
-  const anchors = [...starts, nowMs];
+  const anchors = [...starts, ...(nowMs === null ? [] : [nowMs])];
+  if (anchors.length === 0) anchors.push(dayStart + HOUR);
   const lo = Math.min(...anchors);
   const hi = Math.max(...anchors);
   let start = Math.max(dayStart, floorHour(lo) - HOUR);

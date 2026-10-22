@@ -1,0 +1,46 @@
+import { localDayRange } from "./api";
+import { parseDay } from "./route";
+
+/**
+ * 一覧で見る日の計算（ブラウザのローカルの暦日）。day は "YYYY-MM-DD"（過去の日）か null（今日）。
+ * null の今日は日付が変わると新しい今日に追従する。過去の日はその日のまま。
+ */
+
+export type DayKey = string | null;
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+function keyOf(d: Date): string {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function startOf(key: string): Date {
+  const [y, m, d] = key.split("-").map(Number) as [number, number, number];
+  return new Date(y, m - 1, d);
+}
+
+/** URL の day を表示する日にする。今日・未来・不正は null（今日）。 */
+export function resolveDay(search: string, nowMs: number): DayKey {
+  const day = parseDay(search);
+  return day !== null && day < keyOf(new Date(nowMs)) ? day : null;
+}
+
+/** 前後に送る。今日より先へは行けない（null のまま）。今日に届いたら null。 */
+export function shiftDay(day: DayKey, delta: -1 | 1, nowMs: number): DayKey {
+  const base = day === null ? startOf(keyOf(new Date(nowMs))) : startOf(day);
+  base.setDate(base.getDate() + delta);
+  const key = keyOf(base);
+  return key < keyOf(new Date(nowMs)) ? key : null;
+}
+
+/** 取得する範囲。過去の日はローカル 0 時〜翌日 0 時、今日は 0 時〜いま（D18）。 */
+export function dayRange(day: DayKey, nowMs: number): { from: number; to: number } {
+  if (day === null) return localDayRange(nowMs);
+  const from = startOf(day);
+  const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 1);
+  return { from: from.getTime(), to: to.getTime() };
+}
+
+export function dayHref(pathname: string, day: DayKey): string {
+  return day === null ? pathname : `${pathname}?day=${day}`;
+}

@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { Scope } from "./api";
+import type { DayKey } from "./day";
 import { Header } from "./header";
 import { OverviewView } from "./overview-view";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
@@ -19,15 +20,18 @@ export function Workspace(props: {
   route: Route;
   scope: Scope;
   onScopeChange: (scope: Scope) => void;
+  /** 表示する日（null = 今日）と、前後送り（一覧だけ） */
+  day: DayKey;
+  onDayChange: (move: -1 | 1 | "today") => void;
   onUnauthorized: () => void;
   /** 利用者名とログアウト */
   user: ReactNode;
   deps?: OverviewDeps;
   cloudflareDeps?: CloudflareDeps;
 }) {
-  const { route, scope, onUnauthorized } = props;
+  const { route, scope, day, onUnauthorized } = props;
   const [autoRefresh, setAutoRefresh] = useState(() => loadAutoRefresh());
-  const { state, refresh } = useOverview(scope, autoRefresh, props.deps);
+  const { state, refresh } = useOverview(scope, day, autoRefresh, props.deps);
   // Cloudflare は一覧とは別の 60 秒間隔。失敗しても一覧は出す（401 だけは一覧と同じ扱い）
   const cloudflare = useCloudflare(autoRefresh, props.cloudflareDeps);
   const unauthorized = state.phase === "unauthorized" || cloudflare.phase === "unauthorized";
@@ -51,6 +55,7 @@ export function Workspace(props: {
       scope={scope}
       onScopeChange={props.onScopeChange}
       summary={data ? daySummary(data) : null}
+      {...(route.kind === "overview" ? { day, onDayChange: props.onDayChange } : {})}
     >
       {props.user}
     </Header>
@@ -88,6 +93,7 @@ export function Workspace(props: {
       {header}
       <OverviewView
         data={data}
+        isToday={day === null}
         stale={state.phase === "ready" ? state.stale : false}
         cloudflare={cloudflare}
         autoRefresh={autoRefresh}

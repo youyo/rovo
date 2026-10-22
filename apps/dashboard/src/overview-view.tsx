@@ -14,6 +14,8 @@ import type { CloudflareState } from "./use-cloudflare";
  */
 export function OverviewView(props: {
   data: OverviewDto | null;
+  /** 表示しているのが今日か（過去の日は文言をその日向けにし、いまの線を出さない） */
+  isToday: boolean;
   autoRefresh: boolean;
   onAutoRefreshChange: (on: boolean) => void;
   onRefresh: () => void;
@@ -32,23 +34,35 @@ export function OverviewView(props: {
 }) {
   const { data } = props;
   let band: ReactNode = null;
-  let nowMs = 0;
+  let nowMs = 0; // 更新時刻（引き出しの表示）。タイムラインの「いま」は今日のときだけ使う
   if (data) {
     const dayStart = Date.parse(data.range.from);
     nowMs = Date.parse(data.generated_at);
     const domain = timelineDomain({
       starts: [...data.tasks.map(taskTime), ...data.consults.map((c) => Date.parse(c.at))],
-      nowMs,
+      nowMs: props.isToday ? nowMs : null,
       dayStart,
       dayEnd: dayStart + 24 * HOUR,
     });
     const empty = data.tasks.length === 0 && data.consults.length === 0;
     band = (
-      <section className="tlband" aria-label="今日のタイムライン">
+      <section
+        className="tlband"
+        aria-label={props.isToday ? "今日のタイムライン" : "この日のタイムライン"}
+      >
         {empty ? (
-          <p className="empty">タスクを始めると、ここにタイムラインが出ます。</p>
+          <p className="empty">
+            {props.isToday
+              ? "タスクを始めると、ここにタイムラインが出ます。"
+              : "この日のタスクはありません。"}
+          </p>
         ) : (
-          <TimelineView lanes={buildLanes(data, domain)} domain={domain} nowMs={nowMs} />
+          <TimelineView
+            lanes={buildLanes(data, domain)}
+            domain={domain}
+            nowMs={props.isToday ? nowMs : null}
+            isToday={props.isToday}
+          />
         )}
       </section>
     );
@@ -66,7 +80,7 @@ export function OverviewView(props: {
 
       <div className="main">
         {data ? (
-          <TaskRail tasks={data.tasks} selectedId={props.selectedId} />
+          <TaskRail tasks={data.tasks} selectedId={props.selectedId} isToday={props.isToday} />
         ) : (
           <nav className="rail" aria-label="タスク">
             <p className="rail-empty" role="status">

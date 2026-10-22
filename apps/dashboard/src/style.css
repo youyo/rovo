@@ -199,6 +199,47 @@ fieldset {
   gap: 0 12px;
   color: var(--dim);
 }
+/* 日付の前後送り: ◀ 前の日 ｜ 10月23日 N 件 ... ｜ 次の日 ▶ （今日以外では「今日へ」） */
+.day-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  min-width: 0;
+}
+.day-btn {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--link);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.day-btn:disabled {
+  color: var(--dim);
+  opacity: 0.45;
+  cursor: default;
+}
+.day-today {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+@media (max-width: 520px) {
+  /* 狭い画面では ◀ ▶ の矢印だけにする（名前は aria-label が持つ） */
+  .day-btn-text {
+    display: none;
+  }
+  .day-btn:not(.day-today) {
+    min-width: 32px;
+  }
+}
+@media (pointer: coarse) {
+  .day-btn {
+    min-height: 44px;
+  }
+}
 .user {
   color: var(--dim);
 }

@@ -25,8 +25,9 @@ export function laneHeight(laneCount: number): number {
   );
 }
 
-function laneNote(lane: Lane): string {
-  if (lane.tasks.length === 0 && lane.consults.length === 0) return "今日のタスクはまだありません";
+function laneNote(lane: Lane, isToday: boolean): string {
+  if (lane.tasks.length === 0 && lane.consults.length === 0)
+    return isToday ? "今日のタスクはまだありません" : "この日のタスクはありません";
   return `${lane.tasks.length} 件、相談 ${lane.consults.length} 回`;
 }
 
@@ -43,10 +44,17 @@ function markHeight(stem: number, laneH: number): number {
   return Math.max(6, Math.round(6 + ratio * (room - 6)));
 }
 
-export function TimelineView(props: { lanes: Lane[]; domain: Domain; nowMs: number }) {
+/** nowMs が null（過去の日）のときは、いまの線を出さない */
+export function TimelineView(props: {
+  lanes: Lane[];
+  domain: Domain;
+  nowMs: number | null;
+  isToday?: boolean;
+}) {
   const { lanes, domain, nowMs } = props;
+  const isToday = props.isToday ?? true;
   const ticks = hourTicks(domain);
-  const nowFrac = xFraction(nowMs, domain);
+  const nowFrac = nowMs === null ? null : xFraction(nowMs, domain);
   const laneH = laneHeight(lanes.length);
   return (
     <div className="tl-scroll">
@@ -55,7 +63,7 @@ export function TimelineView(props: { lanes: Lane[]; domain: Domain; nowMs: numb
           <div className="lane" key={lane.login} data-lane={lane.login}>
             <div className="lane-name">
               <span className="lane-login">{singleLine(lane.login)}</span>
-              <span className="sr-only">{laneNote(lane)}</span>
+              <span className="sr-only">{laneNote(lane, isToday)}</span>
             </div>
             {/* biome-ignore lint/a11y/useSemanticElements: SVG にはグループを表す要素が無い */}
             <svg
@@ -74,14 +82,16 @@ export function TimelineView(props: { lanes: Lane[]; domain: Domain; nowMs: numb
                   y2={laneH}
                 />
               ))}
-              <line
-                className="now"
-                data-now=""
-                x1={pct(nowFrac)}
-                x2={pct(nowFrac)}
-                y1={0}
-                y2={laneH}
-              />
+              {nowFrac === null ? null : (
+                <line
+                  className="now"
+                  data-now=""
+                  x1={pct(nowFrac)}
+                  x2={pct(nowFrac)}
+                  y1={0}
+                  y2={laneH}
+                />
+              )}
               {lane.consults.map((c) => (
                 <svg className="pin" key={c.consult.consult_id} x={pct(c.frac)} y={0}>
                   <title>{`相談 ${formatClock(Date.parse(c.consult.at))}`}</title>
@@ -118,16 +128,18 @@ export function TimelineView(props: { lanes: Lane[]; domain: Domain; nowMs: numb
           <svg className="axis-svg" height={TL_AXIS_H} aria-hidden="true">
             {ticks.map((t) => (
               <g key={t.t} data-tick={t.label}>
-                {Math.abs(t.frac - nowFrac) > 0.04 ? (
+                {nowFrac === null || Math.abs(t.frac - nowFrac) > 0.04 ? (
                   <text className="lbl lbl--axis" x={pct(t.frac)} y={10} textAnchor="middle">
                     {t.label}
                   </text>
                 ) : null}
               </g>
             ))}
-            <text className="lbl lbl--now" x={pct(nowFrac)} y={10} textAnchor="middle">
-              いま
-            </text>
+            {nowFrac === null ? null : (
+              <text className="lbl lbl--now" x={pct(nowFrac)} y={10} textAnchor="middle">
+                いま
+              </text>
+            )}
           </svg>
         </div>
       </div>

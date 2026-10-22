@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Scope } from "./api";
 import { AuthView } from "./auth-view";
+import { type DayKey, dayHref, resolveDay, shiftDay } from "./day";
 import { Header } from "./header";
 import { parseRoute } from "./route";
 import { type AuthState, fetchMe, loginHref, logout } from "./session";
@@ -13,6 +14,10 @@ import { Workspace } from "./workspace";
 export function App() {
   const [auth, setAuth] = useState<AuthState>({ state: "loading" });
   const [scope, setScope] = useState<Scope>("all");
+  // 表示する日は URL の ?day=（無ければ今日）。前後送りは履歴に積む（戻るで元の日へ）
+  const [day, setDay] = useState<DayKey>(() =>
+    resolveDay(typeof location === "undefined" ? "" : location.search, Date.now()),
+  );
   const route = useMemo(
     () => parseRoute(typeof location === "undefined" ? "/dashboard/" : location.pathname),
     [],
@@ -27,6 +32,22 @@ export function App() {
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    const onPop = () => setDay(resolveDay(location.search, Date.now()));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const onDayChange = useCallback(
+    (move: -1 | 1 | "today") => {
+      const now = Date.now();
+      const next = move === "today" ? null : shiftDay(day, move, now);
+      history.pushState(null, "", dayHref(location.pathname, next));
+      setDay(next);
+    },
+    [day],
+  );
 
   const onLogout = useCallback(() => {
     void logout().then((ok) => {
@@ -47,6 +68,8 @@ export function App() {
           route={route}
           scope={scope}
           onScopeChange={setScope}
+          day={day}
+          onDayChange={onDayChange}
           onUnauthorized={onUnauthorized}
           user={user}
         />

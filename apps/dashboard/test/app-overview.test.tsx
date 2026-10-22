@@ -155,6 +155,102 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
   });
 });
 
+const ymd = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const daysAgo = (n: number) => {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d;
+};
+const dayBtn = (c: HTMLElement, name: string) =>
+  [...c.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === name) as
+    | HTMLButtonElement
+    | undefined;
+
+describe("App: 日付の前後送り", () => {
+  afterEach(() => history.replaceState(null, "", "/"));
+
+  it("今日: 「次の日」は無効、「前の日」は有効、「今日へ」は無い", async () => {
+    history.replaceState(null, "", "/dashboard/");
+    const c = await mount(router(byScope));
+    expect(dayBtn(c, "次の日")?.disabled).toBe(true);
+    expect(dayBtn(c, "前の日")?.disabled).toBe(false);
+    expect(dayBtn(c, "今日へ")).toBeUndefined();
+  });
+
+  it("「前の日」で URL が ?day= になり、前日のローカル 0 時〜翌 0 時で取り直す。scope は保つ", async () => {
+    history.replaceState(null, "", "/dashboard/");
+    const f = router(byScope);
+    const c = await mount(f);
+    const me = [...c.querySelectorAll("button")].find((b) => b.textContent === "自分");
+    await act(async () => {
+      me?.click();
+    });
+    await act(async () => {
+      dayBtn(c, "前の日")?.click();
+    });
+    const y = daysAgo(1);
+    expect(location.search).toBe(`?day=${ymd(y)}`);
+    const u = overviewCalls(f).at(-1) as URL;
+    expect(Number(u.searchParams.get("from"))).toBe(
+      new Date(y.getFullYear(), y.getMonth(), y.getDate()).getTime(),
+    );
+    expect(Number(u.searchParams.get("to"))).toBe(
+      new Date(y.getFullYear(), y.getMonth(), y.getDate() + 1).getTime(),
+    );
+    expect(u.searchParams.get("scope")).toBe("me");
+    expect(dayBtn(c, "次の日")?.disabled).toBe(false);
+    expect(dayBtn(c, "今日へ")).toBeDefined();
+  });
+
+  it("?day= を直接開くとその日。「次の日」で今日に戻り URL からクエリが消える", async () => {
+    history.replaceState(null, "", `/dashboard/?day=${ymd(daysAgo(1))}`);
+    const f = router(byScope);
+    const c = await mount(f);
+    const first = overviewCalls(f)[0] as URL;
+    const width = Number(first.searchParams.get("to")) - Number(first.searchParams.get("from"));
+    expect(width).toBeGreaterThanOrEqual(23 * 3600_000);
+    await act(async () => {
+      dayBtn(c, "次の日")?.click();
+    });
+    expect(location.search).toBe("");
+    expect(dayBtn(c, "次の日")?.disabled).toBe(true);
+  });
+
+  it("「今日へ」で今日に戻る。不正な ?day= は今日として扱う", async () => {
+    history.replaceState(null, "", `/dashboard/?day=${ymd(daysAgo(5))}`);
+    const c = await mount(router(byScope));
+    await act(async () => {
+      dayBtn(c, "今日へ")?.click();
+    });
+    expect(location.search).toBe("");
+    document.body.innerHTML = "";
+    history.replaceState(null, "", "/dashboard/?day=garbage");
+    const c2 = await mount(router(byScope));
+    expect(dayBtn(c2, "次の日")?.disabled).toBe(true);
+  });
+
+  it("過去の日を開いている画面は、取り直しでもその日のまま", async () => {
+    vi.useFakeTimers();
+    history.replaceState(null, "", `/dashboard/?day=${ymd(daysAgo(2))}`);
+    const f = router(byScope);
+    await mount(f);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    const [a, b] = overviewCalls(f);
+    expect(b).toBeDefined();
+    expect(a?.searchParams.get("from")).toBe(b?.searchParams.get("from"));
+    expect(a?.searchParams.get("to")).toBe(b?.searchParams.get("to"));
+  });
+
+  it("過去の日で空なら、文言がその日向けになる", async () => {
+    history.replaceState(null, "", `/dashboard/?day=${ymd(daysAgo(1))}`);
+    const c = await mount(router(() => json(200, { ...overviewFixture, tasks: [], consults: [] })));
+    expect(c.textContent).toContain("この日のタスクはありません");
+  });
+});
+
 describe("App: 自動更新（D15）", () => {
   it("5 秒ごとに取り直し、チェックを外すと止まる。状態は localStorage に残る", async () => {
     vi.useFakeTimers();

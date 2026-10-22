@@ -1,4 +1,5 @@
 import { CLOUDFLARE_RANGES, type CloudflareSummaryDto } from "@rovo/dashboard-contract";
+import { buildCostEstimate } from "./cloudflare-pricing";
 
 /**
  * ダッシュボードの Cloudflare の概要（docs/specs/dashboard.md M9 / D13）。
@@ -10,6 +11,8 @@ import { CLOUDFLARE_RANGES, type CloudflareSummaryDto } from "@rovo/dashboard-co
  *   workersInvocationsAdaptive（sum.requests / sum.errors。filter.scriptName_in）、
  *   aiGatewayRequestsAdaptiveGroups（count / sum.cost / sum.cachedRequests / sum.erroredRequests。filter.gateway）、
  *   aiInferenceAdaptiveGroups（sum.totalNeurons = Workers AI）。AI Gateway のログ（prompt / body / metadata）は取らない
+ * - 推定の金額（`cost_estimate`）: 単価 × 使用量。**無料枠・プランに含まれる分を引く前**の推定で、AI Gateway の費用を含む合計。
+ *   単価・出典・確認日は `cloudflare-pricing.ts` の定数だけ。取れない項目は推定 null で合計に含めない。コンテナのディスクは取っていない
  * - クレジット残高: GET /accounts/{id}/ai-gateway/billing/credit-balance（AI Gateway Read で読める）
  * - トークン: secret の CLOUDFLARE_API_TOKEN（Terraform の cloudflare_api_token.ai_gateway_read。AI Gateway Read + Account Analytics Read）。
  *   Authorization ヘッダだけに載せ、応答・ログ・エラーに出さない
@@ -384,6 +387,14 @@ export async function loadCloudflareSummary(
     ai_gateway: g,
     workers_ai: ai,
     credit_balance: credit,
+    cost_estimate: buildCostEstimate({
+      workersRequests: w.ok ? w.value.requests : null,
+      vcpuSeconds: c.ok ? c.value.vcpu_seconds : null,
+      memoryGibSeconds: c.ok ? c.value.memory_gib_seconds : null,
+      diskGbSeconds: null, // ディスクの使用量は GraphQL で取っていない（合計に含まれず excluded_items に出る）
+      neurons: ai.ok ? ai.value.neurons : null,
+      aiGatewayCostUsd: g.ok ? g.value.cost_usd : null,
+    }),
   };
 
   const unavailable = [c, w, g, ai, credit].some((i) => !i.ok && i.reason === "unavailable");

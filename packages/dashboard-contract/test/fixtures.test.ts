@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   cloudflareSummaryFixture,
+  cloudflareSummaryWithEstimateFixture,
   errorFixtures,
   HIDDEN_TASK_SENTINELS,
   legacyTaskEventsFixture,
@@ -44,6 +45,15 @@ describe("fixtures はスキーマを通る", () => {
     ];
     expect(items.some((i) => i.ok === false)).toBe(true);
     expect(items.some((i) => i.ok === true)).toBe(true);
+  });
+  it("Cloudflare（推定の金額つき。取得できない項目の推定は null、合計に含まれない項目の一覧がある）", () => {
+    const r = CloudflareSummaryDtoSchema.safeParse(cloudflareSummaryWithEstimateFixture);
+    expect(r.success).toBe(true);
+    const est = cloudflareSummaryWithEstimateFixture.cost_estimate;
+    expect(est?.basis).toBe("before_free_tier");
+    expect(est?.partial).toBe(true);
+    expect(est?.excluded_items.length).toBeGreaterThan(0);
+    expect(est?.total_estimated_usd_before_free_tier).toBeGreaterThan(0);
   });
   it("エラー", () => {
     for (const e of errorFixtures) expect(ErrorDtoSchema.safeParse(e).success).toBe(true);
@@ -103,6 +113,7 @@ describe("fixtures は架空の値だけ（公開リポジトリ）", () => {
     taskEventsFixture,
     legacyTaskEventsFixture,
     cloudflareSummaryFixture,
+    cloudflareSummaryWithEstimateFixture,
     errorFixtures,
   ]);
   it("トークンの形の文字列を含まない", () => {

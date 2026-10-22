@@ -102,8 +102,36 @@ function toolNow(e: Extract<TaskEventDto, { type: "tool_start" }>, at: string): 
   };
 }
 
-/** 出力の末尾。最新の command の output_tail（toEventDto で再マスク済み）。伏せている旨は常に true */
-export function buildOutput(latestCommand: StoredEventRow | null): OutputDto {
+/** 実行中のコマンドの最新の進捗（TaskDO が 1 件だけ上書きで持つもの。時刻は epoch ms） */
+export interface OutputProgress {
+  command: string;
+  started_at: number;
+  output_tail?: string;
+  updated_at: number;
+}
+
+/**
+ * 出力の末尾。実行中のコマンドの進捗があればそれ（running: true と開始時刻つき）、無ければ最新の command の output_tail
+ * （toEventDto で再マスク済み）。進捗も保存済みの値をもう一度マスクして切る。伏せている旨は常に true
+ */
+export function buildOutput(
+  latestCommand: StoredEventRow | null,
+  progress: OutputProgress | null = null,
+): OutputDto {
+  if (progress !== null) {
+    const at = isoOf(progress.updated_at);
+    const startedAt = isoOf(progress.started_at);
+    return {
+      tail: progress.output_tail
+        ? truncateStart(maskSecrets(sanitizeText(progress.output_tail)), LIMITS.outputTail)
+        : null,
+      command: oneLine(progress.command),
+      ...(at !== undefined ? { at } : {}),
+      running: true,
+      ...(startedAt !== undefined ? { started_at: startedAt } : {}),
+      redacted: true,
+    };
+  }
   const e = latestCommand === null ? null : toEventDto(latestCommand);
   if (latestCommand === null || e?.type !== "command" || !e.output_tail) {
     return { tail: null, redacted: true };

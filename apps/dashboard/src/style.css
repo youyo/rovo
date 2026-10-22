@@ -811,6 +811,11 @@ h2 {
   font-size: var(--fs-small);
   color: var(--ink-3);
 }
+.output-running {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--ink-2);
+}
 
 /* 右の情報 */
 .info {

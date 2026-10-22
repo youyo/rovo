@@ -141,3 +141,50 @@ describe("buildOutput の切り詰め", () => {
     expect(out.tail?.startsWith("…")).toBe(true);
   });
 });
+
+describe("buildOutput: 実行中の進捗", () => {
+  const progress = (extra: Record<string, unknown> = {}) => ({
+    command: "pnpm test",
+    started_at: T0,
+    output_tail: "step 1\nstep 2\n",
+    updated_at: T0 + 5_000,
+    ...extra,
+  });
+
+  it("進捗があれば running: true と開始時刻つきで、進捗の出力を出す（直前の終わった command より優先）", () => {
+    const out = buildOutput(cmd("old", { output_tail: "old out" }), progress());
+    expect(out).toEqual({
+      tail: "step 1\nstep 2\n",
+      command: "pnpm test",
+      at: "2026-10-22T01:00:05.000Z",
+      running: true,
+      started_at: "2026-10-22T01:00:00.000Z",
+      redacted: true,
+    });
+    expect(TaskDetailDtoSchema.shape.output.safeParse(out).success).toBe(true);
+  });
+
+  it("出力がまだ無い進捗は tail が null のまま running を出す", () => {
+    const out = buildOutput(null, progress({ output_tail: undefined }));
+    expect(out).toMatchObject({ tail: null, running: true, command: "pnpm test" });
+  });
+
+  it("進捗が無ければ従来どおり（running を付けない）", () => {
+    expect(buildOutput(cmd("ls"), null)).toEqual({ tail: null, redacted: true });
+    expect(buildOutput(null)).not.toHaveProperty("running");
+  });
+
+  it("保存済みの進捗の秘密も、応答の前にもう一度マスクする。2,000 字を超えない", () => {
+    const out = buildOutput(
+      null,
+      progress({
+        command: `curl ${GHP}`,
+        output_tail: `x\n${GHP}\nGITHUB_TOKEN=plain123value\n${"y".repeat(3000)}`,
+      }),
+    );
+    const whole = JSON.stringify(out);
+    expect(whole).not.toContain(GHP);
+    expect(whole).not.toContain("plain123value");
+    expect(out.tail?.length ?? 0).toBeLessThanOrEqual(2000);
+  });
+});

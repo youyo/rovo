@@ -52,6 +52,15 @@ export interface WorkspaceSpec {
   instance?: string;
 }
 
+/** peekOutput の結果。stdout / stderr はそれぞれ末尾 64KiB までの途中の出力（未マスク）。 */
+export interface PeekedOutput {
+  running: boolean;
+  /** 実行を始めた時刻（ms）。running のときだけ */
+  startedAt?: number;
+  stdout: string;
+  stderr: string;
+}
+
 /** AgentDO から見た Sandbox。Unit では fake に差し替え、E2E では SandboxDO（実コンテナ）を使う。 */
 export interface SandboxPort {
   /**
@@ -69,6 +78,11 @@ export interface SandboxPort {
   exec(argv: string[], options?: ExecOptions): Promise<ExecResult>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<void>;
+  /**
+   * 実行中の子のコマンド（origin 付きの exec）の途中の出力。exec の完了を待たずに返る（exec の鎖の外）。
+   * 実行中でなければ running: false。マスクはしない（呼び出し側が窓全体にかけてから切る）。無い実装では進捗を流さない。
+   */
+  peekOutput?(): Promise<PeekedOutput>;
   /**
    * 期限を延ばす（回答待ちの間に止めていた分を戻す）。単調増加だけ受け付け（小さい値は無視）、
    * 上限は作成時刻 + 2 時間 + 24 時間。超える値・準備前・終端後は例外。alarm も張り直す。

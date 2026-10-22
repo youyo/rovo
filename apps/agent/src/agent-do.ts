@@ -73,7 +73,7 @@ import {
   type ScriptStep,
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
-import type { ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import type { ExecResult, PeekedOutput, SandboxPort, WorkspaceSpec } from "./sandbox-port";
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createSandboxTools } from "./tools";
 import { createToolContext } from "./tools/context";
@@ -534,6 +534,8 @@ export class AgentDO extends DurableObject<Env> {
       ...(raw.metrics
         ? { metrics: () => raw.metrics?.() as Promise<SandboxMetrics | undefined> }
         : {}),
+      // 実行中の出力の覗き見。起動はしない（実行中の exec があるなら Sandbox は既に起動している）
+      ...(raw.peekOutput ? { peekOutput: () => raw.peekOutput?.() as Promise<PeekedOutput> } : {}),
     };
   }
 

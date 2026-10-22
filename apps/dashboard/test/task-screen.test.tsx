@@ -324,6 +324,36 @@ describe("タスク詳細（準備で失敗・終端）", () => {
   });
 });
 
+describe("出力の枠: 実行中のコマンド", () => {
+  it("running のときは「実行中」の印と、generated_at からの経過時間を出す。終わったコマンドの出力には出さない", async () => {
+    const running: TaskDetailDto = {
+      ...taskDetailRunningFixture,
+      generated_at: "2026-10-22T01:01:05Z",
+      output: {
+        tail: "step 1\nstep 2\n",
+        command: "pnpm test",
+        running: true,
+        started_at: "2026-10-22T01:00:00Z",
+        redacted: true,
+      },
+    };
+    const a = await mount(server({ detail: () => json(200, running) }));
+    const mark = a.c.querySelector(".output-box .output-running");
+    expect(mark?.textContent).toContain("実行中");
+    expect(mark?.textContent).toContain("1 分 5 秒");
+    expect(a.c.querySelector("pre.output")?.textContent).toBe("step 1\nstep 2\n");
+    expect(a.c.querySelector(".output-box h3")?.textContent).toBe("pnpm test の出力（途中）");
+
+    const finished: TaskDetailDto = {
+      ...taskDetailRunningFixture,
+      output: { tail: "ok", command: "pnpm test", redacted: true },
+    };
+    const b = await mount(server({ detail: () => json(200, finished) }));
+    expect(b.c.querySelector(".output-running")).toBeNull();
+    expect(b.c.querySelector(".output-box h3")?.textContent).toBe("pnpm test の出力（末尾）");
+  });
+});
+
 describe("404 / 401 / 取得失敗", () => {
   it("404: 「このタスクは見られません」だけ。題名の断片も出さない", async () => {
     const { c } = await mount(

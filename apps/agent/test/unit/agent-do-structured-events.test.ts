@@ -111,6 +111,44 @@ describe("AgentDO: 構造化イベント（D14）", () => {
     expect(whole).not.toContain("\u001b");
   });
 
+  it("bash の実行中の途中の出力は command_progress として積まれ（既定の間隔 4 秒）、秘密は平文で残らない。command より前", async () => {
+    const sandbox = new FakeSandbox(async (argv) => {
+      if (argv[0] === "git" && argv[1] === "diff") return { exitCode: 1 };
+      if (argv[0] === "git" && argv[1] === "rev-parse") return { stdout: `${SHA}\n` };
+      if (argv[0] === "git" && argv[1] === "diff-tree") return { stdout: "a.txt\n" };
+      if (argv[0] === "git" && argv[1] === "ls-remote") return { stdout: `${SHA}\t${argv[3]}\n` };
+      if (argv[0] === "git" && argv[1] === "format-patch") return { stdout: "PATCH" };
+      if (argv[0] === "bash") {
+        sandbox.live.stdout = `building ${GHS}\nAPI_KEY=plainvalue123\nhalf-line`;
+        await new Promise((r) => setTimeout(r, 4_800));
+        return { stdout: "built\n" };
+      }
+      return {};
+    });
+    setAgentTestOverrides("structured-progress", {
+      sandbox,
+      script: [call("bash", { command: "pnpm build" }), report("done")],
+    });
+    const stub = env.AGENT_DO.getByName("structured-progress");
+    await stub.start(
+      makeSpec("structured-progress", {
+        deadlineAt: Date.now() + 60 * 60 * 1000,
+        verificationCommands: [],
+      }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    const events = await allEvents(asFx(stub));
+    const progress = events.filter((e) => e.type === "command_progress");
+    expect(progress.length).toBeGreaterThanOrEqual(1);
+    expect(progress[0]?.data).toMatchObject({ command: "pnpm build" });
+    expect(String(progress[0]?.data.outputTail)).toContain("building");
+    expect(String(progress[0]?.data.outputTail)).not.toContain("half-line");
+    const types = events.map((e) => e.type);
+    expect(types.indexOf("command_progress")).toBeLessThan(types.indexOf("command"));
+    const whole = JSON.stringify(progress);
+    for (const s of SECRETS) expect(whole, s).not.toContain(s);
+  }, 30_000);
+
   it("web イベントの送出が失敗しても、web ツールは失敗しない", async () => {
     setAgentTestOverrides("structured-3", {
       sandbox: new FakeSandbox(),

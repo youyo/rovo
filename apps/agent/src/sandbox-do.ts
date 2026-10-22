@@ -40,7 +40,13 @@ import {
 import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./deps-scripts";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
-import type { ExecOptions, ExecResult, SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import type {
+  ExecOptions,
+  ExecResult,
+  PeekedOutput,
+  SandboxPort,
+  WorkspaceSpec,
+} from "./sandbox-port";
 import {
   buildDecisionState,
   decideSandboxSize,
@@ -241,6 +247,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private slowCommandMs = SLOW_COMMAND_MS;
   /** 設定の警告を 1 回だけ出すための印（永続しない） */
   private warnedScaleConfig = new Set<string>();
+  /** 実行中の子のコマンド（origin 付き）の出力バッファ。peekOutput が serial の外から読む（永続しない）。 */
+  private activeExec?: { startedAt: number; out: TailBuffer; err: TailBuffer };
   /** キャッシュを作る処理（builder として使われたとき）。同時の依頼は 1 つを共有する。 */
   private depsBuilding?: Promise<DepsBuildResult>;
 
@@ -578,6 +586,16 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * 実行中の子のコマンドの途中の出力。serial を通さない（exec が鎖の中で待っている間も返る）ので、ストレージにも触れない。
+   * origin の無い内部の exec（git など）は見せない。
+   */
+  async peekOutput(): Promise<PeekedOutput> {
+    const a = this.activeExec;
+    if (!a) return { running: false, stdout: "", stderr: "" };
+    return { running: true, startedAt: a.startedAt, stdout: a.out.peek(), stderr: a.err.peek() };
   }
 
   async exec(argv: string[], options: ExecOptions = {}): Promise<ExecResult> {
@@ -1994,12 +2012,14 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const out = new TailBuffer(max);
     const err = new TailBuffer(max);
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const active = options.origin !== undefined ? { startedAt: Date.now(), out, err } : undefined;
     try {
       const proc = await container.exec(argv, {
         cwd: options.cwd,
         env: { ...BASE_ENV, ...options.env },
         signal: ac.signal,
       });
+      this.activeExec = active;
       const a = drain(proc.stdout, out);
       const b = drain(proc.stderr, err);
       const exited = proc.exitCode.catch(() => -1);
@@ -2042,6 +2062,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       throw e;
     } finally {
       if (timer) clearTimeout(timer);
+      if (this.activeExec === active) this.activeExec = undefined;
     }
   }
 }

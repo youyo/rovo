@@ -161,6 +161,36 @@ describe("AgentDO + 実コンテナ", () => {
     expect(r.patch).toContain("a + b");
   });
 
+  it("長い bash の実行中に、途中の出力が command_progress として流れる（実コンテナ）。未完の行と秘密は出ず、command は最後", async () => {
+    const fakeToken = `ghp_${"a1B2".repeat(9)}`;
+    const { agent, spec: s } = await setup(
+      "progress",
+      [
+        tool("bash", {
+          command: `echo build-step-1; echo token=${fakeToken}; printf unfinished-line; sleep 10; echo build-done`,
+        }),
+        report("done"),
+      ],
+      { verificationCommands: [] },
+    );
+    expect(await agent.start(s)).toMatchObject({ status: "accepted" });
+    expect(await agent.waitForTerminal()).toBe("completed");
+    const events = await agent.allEvents();
+    const progress = events.filter((e) => e.type === "command_progress");
+    expect(progress.length).toBeGreaterThanOrEqual(1);
+    const tails = progress.map((e) => String(e.data.outputTail ?? ""));
+    expect(tails.some((t) => t.includes("build-step-1"))).toBe(true);
+    for (const t of tails) {
+      expect(t).not.toContain("unfinished-line");
+      expect(t).not.toContain(fakeToken.slice(10));
+    }
+    const types = events.map((e) => e.type);
+    expect(types.indexOf("command_progress")).toBeLessThan(types.indexOf("command"));
+    expect(types.lastIndexOf("command_progress")).toBeLessThan(types.indexOf("command"));
+    const commandEvent = events.find((e) => e.type === "command");
+    expect(String(commandEvent?.data.outputTail)).toContain("build-done");
+  }, 120_000);
+
   it("cancel で terminate され、以後の exec が拒否される", async () => {
     const {
       agent,

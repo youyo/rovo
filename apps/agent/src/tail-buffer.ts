@@ -49,4 +49,25 @@ export class TailBuffer {
     }
     return { text: new TextDecoder().decode(bytes), truncated, totalBytes: this.total };
   }
+
+  /**
+   * 実行中の途中の中身（読み続けている最中に呼べる）。末尾が UTF-8 の途中で切れていたら、その文字は含めない
+   * （TextDecoder の stream モードで保留して捨てる。次の peek では完全な文字になっている）。
+   */
+  peek(): string {
+    const all = new Uint8Array(this.held);
+    let off = 0;
+    for (const c of this.chunks) {
+      all.set(c, off);
+      off += c.byteLength;
+    }
+    let bytes = all;
+    if (bytes.byteLength > this.max) bytes = bytes.subarray(bytes.byteLength - this.max);
+    if (this.cut || all.byteLength > this.max) {
+      let i = 0;
+      while (i < bytes.byteLength && i < 4 && ((bytes[i] ?? 0) & 0xc0) === 0x80) i++;
+      bytes = bytes.subarray(i);
+    }
+    return new TextDecoder().decode(bytes, { stream: true });
+  }
 }

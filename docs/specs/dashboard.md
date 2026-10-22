@@ -325,6 +325,13 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 - 秘密の扱い: 「秘密を伏せた旨」は画面に常に出す（**常に伏せている**という表示）。マスクが取りこぼすもの（任意の文字列の秘密）は原理的に残るので、**表示は出力の枠の中だけ・外部送信なし**にし、既知の限界を SECURITY.md に書く。
 - 表示の安全: React の `{text}` のエスケープに頼らない前提で、(1) 表示前に制御文字（改行・タブ以外の C0/C1、双方向の制御文字 `U+202A-202E`・`U+2066-2069`）を除去 / 可視化する純関数、(2) `dangerouslySetInnerHTML` を使わない（lint で禁止）、(3) Markdown / HTML を解釈しない、(4) `<a>` は GitHub の PR の URL（`https://github.com/<owner>/<repo>/pull/<n>` に厳密に一致するもの）だけに許可し、`rel="noopener noreferrer"`、(5) `<img>` を出さない（外部画像なし）。
 
+**追加（2026-10-22）: 実行中のコマンドの途中の出力（`command_progress`）。**
+- 子の bash ツールが `exec` の完了を待つ間、3〜5 秒ごとに SandboxDO の `peekOutput()`（`exec` の鎖の外の RPC。実行中の TailBuffer の中身を返す）を呼び、前回と違うときだけ `command_progress`（`command` / `cwd` / `startedAt` / `outputTail`）を onEvent の側路で積む。子の LLM に返る tool result には入れない。
+- マスクの規則: stdout / stderr それぞれの窓（末尾 64KiB）の全体に `maskSecrets` をかけてから末尾 2,000 字へ切る（切ってからマスクしない）。最後の改行より後（未完の行）と、閉じていない `-----BEGIN` から先は出さない（`packages/audit/src/progress.ts`）。フィールド名は `outputTail` で、AgentDO の `maskEventStrings` と取り込み時の再マスクが効く。
+- 保存は上書き: gateway の TaskDO は `events`（履歴）に積まず、`meta` の 1 行（`command_progress`）に最新の 1 件だけを書く。`dashboardLatest` が読み、`dashboardEvents` / `task_wait` / `task_status` / `task_result` には出ない（`mapAgentEvent` は専用の `progress` 種別に写し、汎用の `agent_event` に落とさない）。
+- 後始末: 最後の `command` イベント、`ended: true` の進捗（`command` を出せずに終わったとき）、タスクの終端、cancel で消す。`dashboardLatest` は終端のタスクでは進捗を返さない。
+- 契約: 詳細の `output` に `running: true` と `started_at`（ISO 8601）を任意で足した（後方互換）。
+
 **決定（2026-10-21）: 推奨どおり**（D14）。
 
 ### D15. ポーリングと詳細の履歴

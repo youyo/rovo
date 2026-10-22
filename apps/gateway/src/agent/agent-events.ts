@@ -1,4 +1,10 @@
-import { normalizeStructuredEvent, SANDBOX_OPS, type StructuredEvent } from "@rovo/audit";
+import {
+  type CommandProgressEvent,
+  normalizeCommandProgress,
+  normalizeStructuredEvent,
+  SANDBOX_OPS,
+  type StructuredEvent,
+} from "@rovo/audit";
 import { isSandboxPromotionReason } from "@rovo/models";
 import {
   sandboxInstanceName,
@@ -25,7 +31,12 @@ export type MappedAgentEvent =
   | { kind: "usage"; costMicroUsd: number; payload: PublicPayload }
   /** 子の質問。TaskDO は questions テーブルにも保存する。options は JSON 配列の文字列 */
   | { kind: "question"; payload: PublicPayload }
-  | { kind: "event"; type: string; payload: PublicPayload };
+  | { kind: "event"; type: string; payload: PublicPayload }
+  /**
+   * 実行中のコマンドの途中の出力（command_progress）。events（履歴）には積まず、TaskDO が最新の 1 件だけを上書きで持つ。
+   * 正規化できないもの（progress が undefined）は捨てる。汎用の agent_event の行に落とさない（task_wait に出さないため）。
+   */
+  | { kind: "progress"; progress: CommandProgressEvent | undefined };
 
 const PHASE_STATUS: Readonly<Record<AgentPhase, TaskStatus | null>> = {
   starting: null,
@@ -330,6 +341,8 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
       if (payload !== undefined) return { kind: "event", type: "audit", payload };
       return { kind: "event", type: "agent_event", payload: { agent_type: "audit" } };
     }
+    case "command_progress":
+      return { kind: "progress", progress: normalizeCommandProgress(d) };
     case "command":
     case "edit":
     case "commit":

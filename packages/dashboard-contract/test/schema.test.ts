@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   cloudflareSummaryFixture,
+  cloudflareSummaryWithEstimateFixture,
   overviewFixture,
   taskDetailRunningFixture,
   taskEventsFixture,
@@ -473,6 +474,60 @@ describe("詳細・Cloudflare・エラー", () => {
       ok(CloudflareSummaryDtoSchema, {
         ...full,
         workers: { ok: true, value: { period, requests: 1, errors: 0, url: "x" } },
+      }),
+    ).toBe(false);
+  });
+  it("推定の金額（cost_estimate）は省略でき、古い応答（無し）も通る。出すなら『無料枠を引く前』の形で固定", () => {
+    // 古い応答（cost_estimate が無い fixtures・M9 の応答）は通る
+    const old = clone(cloudflareSummaryFixture) as Record<string, unknown>;
+    expect("cost_estimate" in old).toBe(false);
+    expect(ok(CloudflareSummaryDtoSchema, old)).toBe(true);
+    // 新しい項目付き（取得できない項目の推定は null）も通る
+    const withEstimate = clone(cloudflareSummaryWithEstimateFixture) as Record<string, unknown>;
+    const est = withEstimate.cost_estimate as Record<string, unknown>;
+    expect(ok(CloudflareSummaryDtoSchema, withEstimate)).toBe(true);
+    expect(est.basis).toBe("before_free_tier");
+    const items = est.items as Record<string, { estimated_usd_before_free_tier?: number | null }>;
+    expect(items.containers_disk.estimated_usd_before_free_tier).toBeNull();
+    expect(est.excluded_items).toContain("containers_disk");
+    // 全項目が取れないとき（合計も null）も通る
+    const nothing = clone(est) as Record<string, unknown>;
+    const nothingItems = clone(items) as Record<string, Record<string, unknown>>;
+    for (const line of Object.values(nothingItems)) {
+      if ("estimated_usd_before_free_tier" in line) {
+        line.quantity = null;
+        line.estimated_usd_before_free_tier = null;
+      } else {
+        line.cost_usd = null;
+      }
+    }
+    nothing.items = nothingItems;
+    nothing.total_estimated_usd_before_free_tier = null;
+    nothing.partial = true;
+    expect(ok(CloudflareSummaryDtoSchema, { ...old, cost_estimate: nothing })).toBe(true);
+    // 形は固定: 基準が違う・負の金額・未知のキー・足りない項目・日付の形が違う は弾く
+    const bad = (patch: (e: Record<string, unknown>) => void) => {
+      const e = clone(est) as Record<string, unknown>;
+      patch(e);
+      return ok(CloudflareSummaryDtoSchema, { ...old, cost_estimate: e });
+    };
+    expect(bad(() => {})).toBe(true);
+    expect(bad((e) => (e.basis = "after_free_tier"))).toBe(false);
+    expect(bad((e) => (e.total_estimated_usd_before_free_tier = -1))).toBe(false);
+    expect(bad((e) => (e.total_estimated_usd_before_free_tier = "1.5"))).toBe(false);
+    expect(bad((e) => (e.pricing_checked_at = "2026/10/22"))).toBe(false);
+    expect(bad((e) => (e.pricing_checked_at = null))).toBe(true); // 未確認
+    expect(bad((e) => (e.excluded_items = ["workers"]))).toBe(false);
+    expect(bad((e) => (e.note = "x"))).toBe(false);
+    expect(bad((e) => delete (e.items as Record<string, unknown>).workers_ai)).toBe(false);
+    expect(
+      bad((e) => {
+        (e.items as Record<string, Record<string, unknown>>).workers_requests.unit_price_usd = -1;
+      }),
+    ).toBe(false);
+    expect(
+      bad((e) => {
+        (e.items as Record<string, Record<string, unknown>>).workers_requests.unit = "request_x";
       }),
     ).toBe(false);
   });

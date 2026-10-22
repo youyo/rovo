@@ -22,3 +22,8 @@ export function parseRoute(pathname: string): Route {
   const m = TASK_PATH.exec(pathname);
   return m?.[1] ? { kind: "task", id: m[1] } : { kind: "overview" };
 }
+
+/** タスクを選んだ一覧の URL のパス（レール・タイムラインの行の href と、画面の中で切り替えるときの pushState の行き先） */
+export function taskPath(id: string): string {
+  return `/dashboard/tasks/${id}`;
+}

@@ -541,6 +541,9 @@ fieldset {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.con-loading {
+  padding: 12px 16px;
+}
 .state-name {
   display: inline-flex;
   align-items: center;

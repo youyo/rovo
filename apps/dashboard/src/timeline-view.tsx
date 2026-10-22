@@ -1,4 +1,6 @@
+import { isPlainLeftClick } from "./click";
 import { formatClock, formatUsd, singleLine } from "./format";
+import { taskPath } from "./route";
 import { MARKS, type MarkKind, markDescription } from "./status";
 import { MarkRect, MarkSymbol } from "./status-mark";
 import { type Domain, hourTicks, type Lane, xFraction } from "./timeline";
@@ -47,14 +49,18 @@ function markHeight(stem: number, laneH: number): number {
   return Math.max(6, Math.round(6 + ratio * (room - 6)));
 }
 
-/** nowMs が null（過去の日）のときは、いまの線を出さない */
+/**
+ * nowMs が null（過去の日）のときは、いまの線を出さない。
+ * 棒は /dashboard/tasks/<ID> へのリンク（href は残す）。onSelect があれば、修飾キー無しの左クリックだけページを読み直さず onSelect を呼ぶ。
+ */
 export function TimelineView(props: {
   lanes: Lane[];
   domain: Domain;
   nowMs: number | null;
   isToday?: boolean;
+  onSelect?: (id: string) => void;
 }) {
-  const { lanes, domain, nowMs } = props;
+  const { lanes, domain, nowMs, onSelect } = props;
   const isToday = props.isToday ?? true;
   const ticks = hourTicks(domain);
   const nowFrac = nowMs === null ? null : xFraction(nowMs, domain);
@@ -108,7 +114,12 @@ export function TimelineView(props: {
                 return (
                   <a
                     key={l.task.task_id}
-                    href={`/dashboard/tasks/${l.task.task_id}`}
+                    href={taskPath(l.task.task_id)}
+                    onClick={(e) => {
+                      if (onSelect === undefined || !isPlainLeftClick(e)) return;
+                      e.preventDefault();
+                      onSelect(l.task.task_id);
+                    }}
                     aria-label={taskLabel(l)}
                     data-task={l.task.task_id}
                     data-status={l.task.status}

@@ -2,6 +2,7 @@ import type { TaskDetailDto } from "@rovo/dashboard-contract";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { Scope } from "./api";
 import type { DayKey } from "./day";
+import type { DetailCache } from "./detail-cache";
 import { Header } from "./header";
 import { OverviewView } from "./overview-view";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
@@ -28,6 +29,15 @@ export function Workspace(props: {
   /** コンソールの最初の詳細の取得が決着したとき（タスクの URL の日を決める） */
   onTaskSettled?: (task: TaskDetailDto["task"] | null) => void;
   onUnauthorized: () => void;
+  /** レール・タイムラインの行の左クリック。ページを読み直さず、URL を pushState で変えて選ぶ（修飾キー付き・中クリックは呼ばれない） */
+  onSelectTask?: (id: string) => void;
+  /** 開いたことのあるタスクの最後の詳細（メモリ上）。切り替えた瞬間にすぐ描くため。無ければキャッシュしない */
+  detailCache?: DetailCache;
+  /**
+   * 最初の取得に ?fresh=1 を付けるタスクの ID（URL を直接開いたとき、その URL のタスクだけ。D6）。null は付けない。
+   * 指定しなければ（undefined）、コンソールの既定のとおり最初の取得に付ける。
+   */
+  freshTaskId?: string | null;
   /** 利用者名とログアウト */
   user: ReactNode;
   deps?: OverviewDeps;
@@ -78,6 +88,18 @@ export function Workspace(props: {
     );
   }
 
+  // 切り替えた瞬間に描く、一覧の行の情報（一覧で権限を確かめ済みのタスク）。詳細が届くまでの見出し
+  const row = data && consoleId !== null ? data.tasks.find((t) => t.task_id === consoleId) : undefined;
+  const preview =
+    data && row
+      ? {
+          task: row,
+          at: Number.isFinite(Date.parse(data.generated_at))
+            ? Date.parse(data.generated_at)
+            : Date.now(),
+        }
+      : null;
+
   const consoleNode =
     consoleId === null ? (
       <section className="console console--empty" aria-label="コンソール">
@@ -93,6 +115,9 @@ export function Workspace(props: {
       <TaskScreen
         key={consoleId}
         id={consoleId}
+        cache={props.detailCache}
+        fresh={props.freshTaskId === undefined ? undefined : consoleId === props.freshTaskId}
+        preview={preview}
         onUnauthorized={onUnauthorized}
         autoRefresh={autoRefresh}
         onAutoRefreshChange={onAutoRefreshChange}
@@ -114,6 +139,7 @@ export function Workspace(props: {
         onAutoRefreshChange={onAutoRefreshChange}
         onRefresh={refresh}
         selectedId={consoleId}
+        onSelectTask={props.onSelectTask}
         console={consoleNode}
         railNote={railNote(state.phase)}
         showRefreshControls={consoleId === null}

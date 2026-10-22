@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Scope } from "./api";
 import { OverviewView } from "./overview-view";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
+import { type CloudflareDeps, useCloudflare } from "./use-cloudflare";
 import { type OverviewDeps, useOverview } from "./use-overview";
 
 /** 一覧の画面（取得・自動更新・各状態）。401 は onUnauthorized で再ログインの表示へ。 */
@@ -9,14 +10,18 @@ export function OverviewScreen(props: {
   scope: Scope;
   onUnauthorized: () => void;
   deps?: OverviewDeps;
+  cloudflareDeps?: CloudflareDeps;
 }) {
   const [autoRefresh, setAutoRefresh] = useState(() => loadAutoRefresh());
   const { state, refresh } = useOverview(props.scope, autoRefresh, props.deps);
+  // Cloudflare は一覧とは別の 60 秒間隔。失敗しても一覧は出す（401 だけは一覧と同じ扱い）
+  const cloudflare = useCloudflare(autoRefresh, props.cloudflareDeps);
   const { onUnauthorized } = props;
+  const unauthorized = state.phase === "unauthorized" || cloudflare.phase === "unauthorized";
 
   useEffect(() => {
-    if (state.phase === "unauthorized") onUnauthorized();
-  }, [state.phase, onUnauthorized]);
+    if (unauthorized) onUnauthorized();
+  }, [unauthorized, onUnauthorized]);
 
   const onAutoRefreshChange = useCallback((on: boolean) => {
     setAutoRefresh(on);
@@ -60,6 +65,7 @@ export function OverviewScreen(props: {
         <OverviewView
           data={state.data}
           stale={state.stale}
+          cloudflare={cloudflare}
           autoRefresh={autoRefresh}
           onAutoRefreshChange={onAutoRefreshChange}
           onRefresh={refresh}

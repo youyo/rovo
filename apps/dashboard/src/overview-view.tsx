@@ -1,10 +1,12 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
+import { CloudflarePanel } from "./cloudflare-panel";
 import { formatClock, formatDayHeading } from "./format";
 import { BudgetPanels, ModelCosts } from "./side-panels";
 import { markKindOf } from "./status";
 import { TaskTable } from "./task-table";
 import { buildLanes, HOUR, taskTime, timelineDomain } from "./timeline";
 import { Legend, TimelineView } from "./timeline-view";
+import type { CloudflareState } from "./use-cloudflare";
 
 /** 一覧の本体（純粋な表示。データ取得は use-overview）。 */
 export function OverviewView(props: {
@@ -14,6 +16,8 @@ export function OverviewView(props: {
   onRefresh: () => void;
   /** 直近の更新に失敗した（前のデータを出している） */
   stale: boolean;
+  /** Cloudflare の枠の状態（無ければ枠を出さない） */
+  cloudflare?: CloudflareState;
 }) {
   const { data } = props;
   const dayStart = Date.parse(data.range.from);
@@ -68,6 +72,7 @@ export function OverviewView(props: {
         <aside className="side" aria-label="費用と利用状況">
           <BudgetPanels data={data} />
           <ModelCosts models={data.models} />
+          {props.cloudflare ? <CloudflarePanel state={props.cloudflare} /> : null}
         </aside>
       </div>
 

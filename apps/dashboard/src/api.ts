@@ -1,4 +1,4 @@
-import type { OverviewDto } from "@rovo/dashboard-contract";
+import type { CloudflareSummaryDto, OverviewDto } from "@rovo/dashboard-contract";
 
 /** 読み取り API の呼び出し（同一オリジン・Cookie のセッション）。契約は型だけ取り込む（zod を画面に入れない）。 */
 
@@ -42,6 +42,43 @@ function looksLikeOverview(b: unknown): b is OverviewDto {
     obj(month?.budget_actual) &&
     obj(month?.hidden_tasks)
   );
+}
+
+export type CloudflareResult =
+  | { kind: "ok"; data: CloudflareSummaryDto }
+  | { kind: "unauthorized" }
+  | { kind: "not_found" }
+  | { kind: "error" };
+
+/** 期間は 24 時間で固定（切り替えは作らない）。 */
+export const CLOUDFLARE_URL = "/dashboard/api/cloudflare?range=24h";
+
+function looksLikeCloudflare(b: unknown): b is CloudflareSummaryDto {
+  if (typeof b !== "object" || b === null) return false;
+  const o = b as Record<string, unknown>;
+  const obj = (v: unknown) => typeof v === "object" && v !== null;
+  return (
+    typeof o.generated_at === "string" &&
+    obj(o.containers) &&
+    obj(o.ai_gateway) &&
+    obj(o.credit_balance)
+  );
+}
+
+export async function fetchCloudflare(fetchImpl: typeof fetch = fetch): Promise<CloudflareResult> {
+  try {
+    const res = await fetchImpl(CLOUDFLARE_URL, {
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    if (res.status === 401) return { kind: "unauthorized" };
+    if (res.status === 404) return { kind: "not_found" };
+    if (res.status !== 200) return { kind: "error" };
+    const body: unknown = await res.json();
+    return looksLikeCloudflare(body) ? { kind: "ok", data: body } : { kind: "error" };
+  } catch {
+    return { kind: "error" };
+  }
 }
 
 export async function fetchOverview(

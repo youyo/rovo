@@ -2143,3 +2143,88 @@ describe("AI への伝え方: Web の優先・タスクの分割と並列・モ�
     await client.close();
   });
 });
+
+describe("dashboard_url（M10。task_start / task_status / task_result だけに付く）", () => {
+  const publicBase = String(env.PUBLIC_BASE_URL).replace(/\/+$/, "");
+
+  async function startAndFinish(testEnv?: Env) {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props, testEnv);
+    const started = body(await client.callTool({ name: "task_start", arguments: startArgs("t") }));
+    const taskId = started.task_id as string;
+    const status = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+    );
+    await fakeAgent(taskId).setPhase("completed");
+    await taskStub(taskId).advance();
+    const result = body(
+      await client.callTool({ name: "task_result", arguments: { task_id: taskId } }),
+    );
+    const wait = body(
+      await client.callTool({
+        name: "task_wait",
+        arguments: { task_id: taskId, cursor: "0", timeout_seconds: 0 },
+      }),
+    );
+    const cancel = body(
+      await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } }),
+    );
+    await client.close();
+    return { taskId, started, status, result, wait, cancel };
+  }
+
+  it("3 つのツールの応答に <PUBLIC_BASE_URL>/dashboard/tasks/<task_id> が入り、task_wait・task_cancel には入らない", async () => {
+    const { taskId, started, status, result, wait, cancel } = await startAndFinish();
+    const expected = `${publicBase}/dashboard/tasks/${taskId}`;
+    expect(started.dashboard_url).toBe(expected);
+    expect(status.dashboard_url).toBe(expected);
+    expect(result.dashboard_url).toBe(expected);
+    expect(wait).not.toHaveProperty("dashboard_url");
+    expect(cancel).not.toHaveProperty("dashboard_url");
+  });
+
+  it("PUBLIC_BASE_URL の末尾の / は除く", async () => {
+    const { taskId, started, status, result } = await startAndFinish({
+      ...env,
+      PUBLIC_BASE_URL: `${publicBase}/`,
+    } as unknown as Env);
+    const expected = `${publicBase}/dashboard/tasks/${taskId}`;
+    expect(started.dashboard_url).toBe(expected);
+    expect(status.dashboard_url).toBe(expected);
+    expect(result.dashboard_url).toBe(expected);
+  });
+
+  it("PUBLIC_BASE_URL が空・不正なら、キー自体が付かない（null にしない）", async () => {
+    for (const bad of ["", "not a url", `${publicBase}/gateway`]) {
+      const { started, status, result } = await startAndFinish({
+        ...env,
+        PUBLIC_BASE_URL: bad,
+      } as unknown as Env);
+      expect(started, bad).toMatchObject({ status: "RUNNING" });
+      for (const value of [started, status, result]) {
+        expect(value, bad).not.toHaveProperty("dashboard_url");
+        expect(Object.keys(value), bad).not.toContain("dashboard_url");
+      }
+    }
+  });
+
+  it("task_start・task_status・task_result の説明と、応答の note に dashboard_url の説明がある（URL は秘密ではなく、権限が無ければ 404）", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    for (const name of ["task_start", "task_status", "task_result"]) {
+      const description = tools.find((t) => t.name === name)?.description ?? "";
+      expect(description, name).toContain("dashboard_url");
+      expect(description, name).toContain("ブラウザ");
+      expect(description, name).toContain("404");
+      expect(description, name).toContain("秘密");
+    }
+    // task_wait の説明には足さない（応答にも付けない）
+    const wait = tools.find((t) => t.name === "task_wait")?.description ?? "";
+    expect(wait).not.toContain("dashboard_url");
+    const started = body(await client.callTool({ name: "task_start", arguments: startArgs("t") }));
+    expect(String(started.note)).toContain("dashboard_url");
+    expect(String(started.note)).toContain("404");
+    await client.close();
+  });
+});

@@ -81,7 +81,7 @@ import {
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
 import type { ExecResult, PeekedOutput, SandboxPort, WorkspaceSpec } from "./sandbox-port";
-import { blockedMessage, EMPTY_TREE_SHA, scanRangeForSecrets } from "./secret-scan";
+import { blockedMessage, scanRangeForSecrets, scanUnpushedForSecrets } from "./secret-scan";
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createSandboxTools } from "./tools";
 import { COMMIT_AUTHOR, createToolContext } from "./tools/context";
@@ -1850,10 +1850,10 @@ export class AgentDO extends DurableObject<Env> {
       if (interrupted()) return;
       // push の前にも、git_commit と同じ検査をする。commit 前に見たのは staged の差分だけで、HEAD には子が自分で積んだ
       // 未 push の commit（git_commit で止められたものなど）が残っていることがある。それらの秘密も送らない
-      const range = await scanRangeForSecrets(
+      const range = await scanUnpushedForSecrets(
         (argv, timeoutMs, maxOutputBytes) => git(argv, timeoutMs, maxOutputBytes),
-        [`${this.lastPushedSha() ?? EMPTY_TREE_SHA}..HEAD`],
-        "push",
+        "HEAD",
+        this.lastPushedSha(),
       );
       if (interrupted()) return;
       if (range.status !== "clean" && range.status !== "aborted") {

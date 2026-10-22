@@ -4,9 +4,6 @@ import type { ExecResult } from "./sandbox-port";
 /** 検査する差分（numstat・diff それぞれ）の出力の上限。超えたら検査しきれないものとして扱う（4MiB） */
 export const SECRET_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 
-/** 空の木（git の定数）。基準になる SHA が分からないとき、全体を検査するために使う */
-export const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
 /** 鍵らしい拡張子。バイナリは中身を検査できないので、push のモードではこれだけを止める */
 const KEY_FILE_EXTENSIONS = [
   ".pem",
@@ -30,10 +27,13 @@ export type ScanMode = "push" | "strict";
 /** 検査の結果。値（一致した文字列）は決して含めない */
 export type ScanVerdict =
   | { status: "clean" }
-  /** 秘密らしきものがある。push モードでは category・path・line（新しいファイルでの行番号）が付く */
-  | { status: "secret"; category?: string; path?: string; line?: number }
-  /** 中身を検査できないバイナリ（push: 鍵らしい拡張子のもの / strict: 全部） */
-  | { status: "binary"; path?: string }
+  /**
+   * 秘密らしきものがある。push モードでは category・path・line（その commit での新しいファイルの行番号）が付く。
+   * commit は、見つかった commit の SHA（commit ごとの検査のとき）
+   */
+  | { status: "secret"; category?: string; path?: string; line?: number; commit?: string }
+  /** 中身を検査できないバイナリ（push: 鍵らしい拡張子のもの / strict: 全部）。commit は見つかった commit の SHA */
+  | { status: "binary"; path?: string; commit?: string }
   /** 差分が大きすぎる・git が失敗した・時間切れ。検査していないので、安全側で止める */
   | { status: "unscannable"; reason: "too_large" | "git_failed" }
   /** shouldAbort が立ったので、途中でやめた */
@@ -52,18 +52,45 @@ function isKeyFile(path: string): boolean {
   return KEY_FILE_EXTENSIONS.some((ext) => p.endsWith(ext));
 }
 
+/** git の C 形式のクォート（"..."）を外す。\ooo の 8 進は UTF-8 のバイト列として読む。クォートされていなければそのまま */
+function unquotePath(raw: string): string {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const inner = raw.slice(1, -1);
+  const simple: Record<string, number> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
+  const enc = new TextEncoder();
+  const bytes: number[] = [];
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i] as string;
+    if (c !== "\\") {
+      bytes.push(...enc.encode(c));
+      continue;
+    }
+    const n = inner[i + 1] ?? "";
+    const oct = /^[0-7]{3}/.exec(inner.slice(i + 1, i + 4))?.[0];
+    if (oct) {
+      bytes.push(Number.parseInt(oct, 8) & 0xff);
+      i += 3;
+    } else if (n in simple) {
+      bytes.push(simple[n] as number);
+      i += 1;
+    } else {
+      bytes.push(...enc.encode(n));
+      i += 1;
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
 /** numstat の行のパス（クォートされていれば外す） */
 function numstatPath(line: string): string {
-  const path = line.split("\t").slice(2).join("\t");
-  return path.length >= 2 && path.startsWith('"') && path.endsWith('"') ? path.slice(1, -1) : path;
+  return unquotePath(line.split("\t").slice(2).join("\t"));
 }
 
 /** `+++ b/<path>` / `diff --git a/<x> b/<path>` のパス */
 function headerPath(raw: string): string | undefined {
-  let p = raw.replace(/\t.*$/, "");
-  if (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
-  if (p === "/dev/null") return undefined;
-  return p.replace(/^[ab]\//, "");
+  const path = unquotePath(raw.startsWith('"') ? raw : raw.replace(/\t.*$/, ""));
+  if (path === "/dev/null") return undefined;
+  return path.replace(/^[ab]\//, "");
 }
 
 interface AddedLine {
@@ -169,25 +196,108 @@ export async function scanRangeForSecrets(
   }
 }
 
-/** 【Red 確認用の仮実装。次の手順で置き換える】 */
+const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** log の出力で commit の区切りにする（先頭が制御文字の行。diff の行は " "・"+"・"-"・英字で始まるので、内容と混ざらない） */
+const COMMIT_MARK = "\u0001";
+
+/** `git log --format=%x01%H ...` の出力を commit ごとの本文に分ける（merge commit は親ごとに同じ SHA で複数出る） */
+function splitByCommit(out: string): { commit: string; body: string }[] {
+  const sections: { commit: string; lines: string[] }[] = [];
+  for (const line of out.split("\n")) {
+    if (line.startsWith(COMMIT_MARK)) {
+      sections.push({ commit: line.slice(1).trim(), lines: [] });
+    } else {
+      sections.at(-1)?.lines.push(line);
+    }
+  }
+  return sections.map((x) => ({ commit: x.commit, body: x.lines.join("\n") }));
+}
+
+/**
+ * これから push で送る commit（head から辿れて、lastPushed から辿れないもの = `git rev-list head --not lastPushed`）を
+ * commit ごとに検査する。2 つの木の差分（`lastPushed..head` の diff）では、途中の commit で足して後の commit で消した秘密が
+ * 見えないが、push はリモートに無い commit をすべて送るので、途中の commit の秘密も公開される。ここは各 commit の追加行を見る。
+ * - lastPushed が head の祖先でない（reset・rebase で履歴を書き換えた）ときも、リモートに無い commit だけが対象になる
+ * - lastPushed が無いとき（初回）は、head から辿れる全部の commit（ルートを含む）
+ * - merge commit は各親との差分（-m）を見る
+ * - 判定は push のモード: 止めるのは確度の高いパターン（findBlockingSecrets）と、鍵らしい拡張子のバイナリだけ。
+ *   出力の上限（4MiB）は全 commit の合計。上限超え・git の失敗・例外は unscannable
+ * path・line は、その commit での新しいファイルの値。
+ */
 export async function scanUnpushedForSecrets(
   git: ScanGit,
   head: string,
   lastPushed: string | undefined,
   opts: { shouldAbort?: () => boolean } = {},
 ): Promise<ScanVerdict> {
-  return scanRangeForSecrets(git, [`${lastPushed ?? EMPTY_TREE_SHA}..${head}`], "push", opts);
+  try {
+    if (!(head === "HEAD" || SHA_RE.test(head)))
+      return { status: "unscannable", reason: "git_failed" };
+    if (lastPushed !== undefined && !SHA_RE.test(lastPushed))
+      return { status: "unscannable", reason: "git_failed" };
+    const common = [
+      "-c",
+      "core.quotepath=false",
+      "log",
+      "-m",
+      "--reverse",
+      "--no-color",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--no-renames",
+      "--no-show-signature",
+      "--format=%x01%H",
+    ];
+    const revs = lastPushed === undefined ? [head] : [head, "--not", lastPushed];
+    const numstat = await git(
+      [...common, "--numstat", ...revs, "--"],
+      60_000,
+      SECRET_SCAN_MAX_BYTES,
+    );
+    if (!okRun(numstat)) return { status: "unscannable", reason: "git_failed" };
+    if (numstat.truncated === true) return { status: "unscannable", reason: "too_large" };
+    for (const sec of splitByCommit(numstat.stdout)) {
+      const key = sec.body
+        .split("\n")
+        .filter((l) => l.startsWith("-\t-\t"))
+        .map(numstatPath)
+        .find(isKeyFile);
+      if (key !== undefined) return { status: "binary", path: key, commit: sec.commit };
+    }
+    if (opts.shouldAbort?.()) return { status: "aborted" };
+
+    const diff = await git([...common, "-p", ...revs, "--"], 120_000, SECRET_SCAN_MAX_BYTES);
+    if (!okRun(diff)) return { status: "unscannable", reason: "git_failed" };
+    if (diff.truncated === true) return { status: "unscannable", reason: "too_large" };
+    for (const sec of splitByCommit(diff.stdout)) {
+      const added = addedLines(sec.body);
+      const found = findBlockingSecrets(added.map((a) => a.text).join("\n"))[0];
+      if (!found) continue;
+      const at = added[found.line - 1];
+      return {
+        status: "secret",
+        category: found.category,
+        path: at?.path,
+        line: at?.line,
+        commit: sec.commit,
+      };
+    }
+    return { status: "clean" };
+  } catch {
+    return { status: "unscannable", reason: "git_failed" };
+  }
 }
 
-/** 止めたときの固定の文（onPush の error になる）。一致した値は含めない */
+/** 止めたときの固定の文（onPush の error になる）。一致した値は含めない。パスにトークンが入っていても出ないよう、パスも maskSecrets を通す */
 export function blockedMessage(v: Exclude<ScanVerdict, { status: "clean" | "aborted" }>): string {
+  const at = v.status !== "unscannable" && v.commit ? ` (commit ${v.commit.slice(0, 7)})` : "";
   switch (v.status) {
     case "secret": {
-      const where = v.path ? ` in ${v.path}${v.line ? `:${v.line}` : ""}` : "";
-      return `blocked: possible secret (${v.category ?? "unknown"})${where}`;
+      const where = v.path ? ` in ${maskSecrets(v.path)}${v.line ? `:${v.line}` : ""}` : "";
+      return `blocked: possible secret (${v.category ?? "unknown"})${where}${at}`;
     }
     case "binary":
-      return `blocked: possible secret (key file)${v.path ? ` in ${v.path}` : ""}`;
+      return `blocked: possible secret (key file)${v.path ? ` in ${maskSecrets(v.path)}` : ""}${at}`;
     case "unscannable":
       return v.reason === "too_large"
         ? "blocked: the diff is too large to scan for secrets"

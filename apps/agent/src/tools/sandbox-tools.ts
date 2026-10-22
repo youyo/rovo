@@ -10,10 +10,9 @@ import { maskSecrets } from "../redact";
 import type { ExecResult, SandboxPort } from "../sandbox-port";
 import {
   blockedMessage,
-  EMPTY_TREE_SHA,
   type ScanGit,
   type ScanVerdict,
-  scanRangeForSecrets,
+  scanUnpushedForSecrets,
 } from "../secret-scan";
 import { stripAnsi } from "../text-util";
 import { resolveWorkspacePath } from "../workspace-path";
@@ -513,8 +512,9 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
   const pushCheckpoint = async (sha: string): Promise<string> => {
     if (!context.branch || !context.onPush) return "";
     const known = context.lastPushedSha?.() ?? lastPushedLocal;
-    const base = known && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(known) ? known : EMPTY_TREE_SHA;
-    const verdict = await scanRangeForSecrets(scanGit, [`${base}..HEAD`], "push");
+    // 基準が分からないとき（無い・SHA の形でない）は、HEAD から辿れる全部の commit を見る
+    const base = known && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(known) ? known : undefined;
+    const verdict = await scanUnpushedForSecrets(scanGit, "HEAD", base);
     if (verdict.status !== "clean" && verdict.status !== "aborted") {
       try {
         await context.onPush({ ok: false, sha, error: blockedMessage(verdict) });

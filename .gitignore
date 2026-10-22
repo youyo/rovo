@@ -19,3 +19,7 @@ infra/.terraform/
 infra/*.tfstate
 infra/*.tfstate.*
 infra/crash.log
+
+# Playwright（apps/dashboard の E2E）の成果物
+test-results/
+playwright-report/

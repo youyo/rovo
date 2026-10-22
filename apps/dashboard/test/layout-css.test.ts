@@ -8,11 +8,11 @@ import { describe, expect, it } from "vitest";
  */
 const css = readFileSync(join(import.meta.dirname, "..", "src", "style.css"), "utf8");
 
-const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** セレクタ 1 つだけの規則の本体（グループ化された規則や @media の中は拾わない） */
 function body(selector: string): string {
-  const m = new RegExp(`(?:^|\\n)${escape(selector)}\\s*\\{([^}]*)\\}`).exec(css);
+  const m = new RegExp(`(?:^|\\n)${escapeRe(selector)}\\s*\\{([^}]*)\\}`).exec(css);
   if (!m) throw new Error(`${selector} の規則が無い`);
   return m[1] as string;
 }

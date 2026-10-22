@@ -253,9 +253,14 @@ describe("凡例・レーンの見出し・点の title は、初めて見た人
     const texts = [...legend(c).querySelectorAll("li")].map((li) => li.textContent);
     expect(texts).toContain("閉じた（マージせず）");
     expect(texts).toContain("マージ済み（高さは費用）");
-    expect(texts).toContain("レビュー待ち");
     expect(texts).toContain("実行中");
     expect(texts).toContain("失敗");
+    // closedData は、開いた PR（レビュー待ち）のタスクを閉じた PR に変えているので、レビュー待ちは元のデータで確かめる
+    document.body.innerHTML = "";
+    const open = mount(overviewFixture);
+    const openTexts = [...legend(open).querySelectorAll("li")].map((li) => li.textContent);
+    expect(openTexts).toContain("レビュー待ち");
+    expect(openTexts).not.toContain("閉じた（マージせず）");
   });
 
   it("凡例の印は、レールと同じ記号（MarkSymbol）。状態ごとに形が違う", () => {

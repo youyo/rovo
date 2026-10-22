@@ -20,10 +20,9 @@ test("(1) 偽 GitHub でログインすると一覧が出る（127.0.0.1 の __H
   await expect(page.locator(".day-summary")).toBeVisible();
   await expect(page.locator(".tlband .tl-scroll").first()).toBeVisible();
   await expect(page.locator(".statusbar")).toBeVisible();
-  // 予算の内訳（自分・全員）は「内訳」の引き出しの中
+  // 予算の内訳（自分・全員を 1 つの欄に）は「内訳」の引き出しの中
   await openDrawer(page);
-  await expect(page.locator('[data-budget="me"]')).toBeVisible();
-  await expect(page.locator('[data-budget="all"]')).toBeVisible();
+  await expect(page.locator('[data-budget="month"]')).toBeVisible();
 });
 
 test("(2) 全員 / 自分の切り替え: 最初は「自分」で他人のタスクが無く、「全員」にすると出る", async ({
@@ -69,10 +68,11 @@ test("(9) 状態が DOM の属性とアクセシブルな名前で判別でき�
   // アクセシブルな名前に題名と状態の文字が入る
   await expect(done).toHaveAccessibleName(/完了したタスク（.*完了、/);
   await expect(failed).toHaveAccessibleName(/失敗したタスク（.*失敗、/);
-  // レールでも状態は文字で出る（印は装飾。読み上げ用の文字を持つ）
-  await expect(rail(page, s.tasks.done as string).locator(".sr-only")).toHaveText("完了");
-  await expect(rail(page, s.tasks.failed as string).locator(".sr-only")).toHaveText("失敗");
-  await expect(rail(page, s.tasks.failed as string).locator(".rail-mark")).toHaveText("✕");
+  // レールの印は SVG の記号。名前（aria-label）と形（data-shape）を持つ
+  const railMark = (id: string) => rail(page, id).locator("svg.mark-sym");
+  await expect(railMark(s.tasks.done as string)).toHaveAttribute("aria-label", "完了");
+  await expect(railMark(s.tasks.failed as string)).toHaveAttribute("aria-label", "失敗");
+  await expect(railMark(s.tasks.failed as string)).toHaveAttribute("data-shape", "cross");
   // 印の形が属性で違う（塗り・縁）。色を無視しても、文字と形で区別できる
   const mark = (id: string) =>
     page.locator(`a[data-task="${id}"] rect[data-mark]`).getAttribute("class");

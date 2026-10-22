@@ -1,15 +1,503 @@
-/* system フォントのみ（フォントの同梱は M6b）。外部ホストは参照しない。 */
+/*
+ * 一覧の見た目（見本 Main.dc.html の再現）。インライン style は使わない（CSP の style-src 'self'）。
+ * 色・文字のトークンはこの :root の 1 か所に置く。外部ホストは参照しない。
+ * 書体は見本の名前 + system のフォールバック（フォントの同梱は M6b）。
+ */
 :root {
-  color-scheme: light dark;
-  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  color-scheme: light;
+
+  /* 色（見本から）。合図はコバルト（マージ済み・いま）とオレンジ（失敗）だけ */
+  --bg: #eef1f3;
+  --ink: #17212b;
+  --ink-2: #3b4652;
+  --ink-3: #5b6773;
+  --line: #c9d1d8;
+  --line-2: #dce2e7;
+  --face: #dde3e8;
+  --blue: #2840c4;
+  --blue-dark: #1a2c8f;
+  --orange: #c8661a;
+  --gray: #8a96a3;
+
+  /* 文字 */
+  --font:
+    "Familjen Grotesk", "Zen Kaku Gothic New", system-ui, -apple-system, "Hiragino Sans",
+    "Noto Sans JP", sans-serif;
+  --fs-body: 15px;
+  --fs-small: 13px;
+  --fs-table: 14px;
+  --fs-h2: 17px;
+  --fs-date: 56px;
+  --fs-big: 40px;
+
+  font-family: var(--font);
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  font-feature-settings: "tnum" 1;
 }
 
+a {
+  color: var(--blue);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+a:hover {
+  color: var(--blue-dark);
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .seg button {
+    transition: none;
+  }
+}
+
+h1,
+h2,
+p,
+ul,
+dl,
+dd {
+  margin: 0;
+}
+ul {
+  padding: 0;
+  list-style: none;
+}
+
+/* 全体 */
 .shell {
-  max-width: 64rem;
+  max-width: 1360px;
   margin: 0 auto;
-  padding: 2rem 1rem;
+  padding: 28px 32px 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+
+/* ヘッダー */
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 28px;
+}
+.brand {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.grow {
+  flex: 1 1 auto;
+}
+fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.seg {
+  display: flex;
+  background: var(--face);
+  border-radius: 999px;
+  padding: 3px;
+}
+.seg button {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  background: transparent;
+  color: var(--ink-2);
+  transition: background 160ms;
+}
+.seg button[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--bg);
+}
+.period span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 6px;
+  text-decoration-thickness: 2px;
+}
+.user {
+  color: var(--ink-3);
+}
+.user p {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.user button,
+.link-button {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* 読み込み中・エラーなどの状態 */
+.state {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+}
+.state h1 {
+  font-size: 28px;
+  font-weight: 600;
+}
+.state button {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+.notice {
+  padding: 10px 14px;
+  border-left: 3px solid var(--orange);
+  background: var(--face);
+}
+
+.overview {
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+
+/* 今日 */
+.today {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.today-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 24px;
+}
+.today h1 {
+  font-size: var(--fs-date);
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+}
+.summary {
+  font-size: 18px;
+  color: var(--ink-2);
+  max-width: 46ch;
+}
+.empty,
+.muted,
+.soft {
+  color: var(--ink-3);
+}
+
+/* タイムライン */
+.tl-scroll {
+  overflow-x: auto;
+  margin: 0 -8px;
+  padding: 0 8px;
+}
+.tl {
+  min-width: 760px;
+  padding-right: 24px;
+  display: flex;
+  flex-direction: column;
+}
+.lane {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  align-items: end;
+  height: 132px;
+  border-bottom: 1px solid var(--line);
+}
+.lane--axis {
+  height: 28px;
+  border-bottom: 0;
+  align-items: start;
+}
+.lane-name {
+  padding: 0 12px 14px 0;
+  display: flex;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+.lane-login {
+  font-weight: 600;
+}
+.lane-note {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+.lane-svg,
+.axis-svg {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+.pin {
+  overflow: visible;
+}
+.grid {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+.now {
+  stroke: var(--ink);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.consult {
+  fill: var(--gray);
+}
+.hit {
+  fill: transparent;
+}
+.lbl {
+  font-size: 12px;
+  fill: var(--ink-2);
+  font-family: var(--font);
+}
+.lbl--axis {
+  fill: var(--ink-3);
+}
+.lbl--now {
+  fill: var(--ink);
+  font-weight: 700;
+}
+.lane-svg a:focus-visible {
+  outline: 2px solid var(--blue);
+}
+
+/* 状態の印（色 + 塗り + 縁の形。文字は隣に必ずある） */
+.mk {
+  stroke-width: 2;
+}
+.mk--blue {
+  --c: var(--blue);
+}
+.mk--orange {
+  --c: var(--orange);
+}
+.mk--gray {
+  --c: var(--gray);
+}
+.mk--ink {
+  --c: var(--ink);
+}
+.mk--solid {
+  fill: var(--c);
+  stroke: var(--c);
+}
+.mk--hollow {
+  fill: none;
+  stroke: var(--c);
+}
+.mk--dashed {
+  stroke-dasharray: 3 2;
+}
+.mk--dotted {
+  stroke-dasharray: 1 2;
+}
+.glyph {
+  flex: none;
+}
+
+/* 凡例 */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  font-size: var(--fs-small);
+  color: var(--ink-2);
+}
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 表と右の列 */
+.columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 48px 56px;
+  align-items: flex-start;
+}
+.tasks-section {
+  flex: 999 1 640px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+h2 {
+  font-size: var(--fs-h2);
+  font-weight: 600;
+}
+.table-scroll {
+  overflow-x: auto;
+}
+.tasks {
+  width: 100%;
+  min-width: 780px;
+  border-collapse: collapse;
+  font-size: var(--fs-table);
+}
+.tasks th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--ink-3);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.tasks td {
+  padding: 12px;
+  border-bottom: 1px solid var(--line-2);
+}
+.tasks th:first-child,
+.tasks td:first-child {
+  padding-left: 0;
+}
+.tasks th:last-child,
+.tasks td:last-child {
+  padding-right: 0;
+}
+.tasks .num {
+  text-align: right;
+}
+.tasks .nowrap {
+  white-space: nowrap;
+}
+.tasks .soft {
+  color: var(--ink-2);
+}
+.tasks .title {
+  max-width: 30ch;
+  overflow-wrap: anywhere;
+}
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.side {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.caption {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+.figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 32px;
+}
+.figures dt {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+.big {
+  font-size: var(--fs-big);
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.mid {
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 600;
+}
+.models {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.models li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+.model-name {
+  overflow-wrap: anywhere;
+}
+.model-cost {
+  text-align: right;
+  font-size: var(--fs-small);
+}
+.model-bar {
+  grid-column: 1 / -1;
+  width: 100%;
+  border-radius: 2px;
+}
+.model-bar-bg {
+  fill: var(--face);
+}
+.model-bar-fill {
+  fill: var(--ink);
+}
+
+/* 下 */
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 24px;
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+.foot-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.foot-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  cursor: pointer;
 }

@@ -482,6 +482,35 @@ describe("tasks/:id", () => {
     expect(done.now).toBeNull();
   });
 
+  it("stopped_phase: 終端で止まった段階を返す（開始前のキャンセル=prepare、実行中=run、検証に入った後=verify）。非終端と完了は null", async () => {
+    const v = newViewer([4242]);
+    const detail = async (id: string) =>
+      TaskDetailDtoSchema.parse((await api(v, `/tasks/${id}`)).json());
+    // 開始前にキャンセル
+    const early = await seedTask({ repository_id: 4242 });
+    expect((await detail(early.id)).stopped_phase).toBeNull();
+    await early.stub.cancel(4_001);
+    expect((await detail(early.id)).stopped_phase).toBe("prepare");
+    // 実行中にキャンセル
+    const running = await seedTask({ repository_id: 4242 });
+    await running.stub.advance();
+    expect((await detail(running.id)).stopped_phase).toBeNull();
+    await running.stub.cancel(4_001);
+    expect((await detail(running.id)).stopped_phase).toBe("run");
+    // 検証に入った記録があるタスクの中断
+    const verifying = await seedTask({ repository_id: 4242 });
+    await verifying.stub.advance();
+    await runInDurableObject(verifying.stub, (_i, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO events (seq, type, payload, created_at) VALUES ((SELECT COALESCE(MAX(seq),0)+1 FROM events), 'status_changed', ?, ?)",
+        JSON.stringify({ status: "VERIFYING", from: "RUNNING" }),
+        Date.now(),
+      );
+    });
+    await verifying.stub.cancel(4_001);
+    expect((await detail(verifying.id)).stopped_phase).toBe("verify");
+  });
+
   it("now / output: 構造化イベントから作る。保存済みの秘密が平文でも応答に出ない。終端は now が null で出力は残る", async () => {
     const GHP = `ghp_${"a1B2".repeat(9)}`;
     const v = newViewer([4242]);

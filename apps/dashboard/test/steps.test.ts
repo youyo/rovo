@@ -117,23 +117,70 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
     expect(d).toMatchObject({ what: "Draft PR を作った", target: "#23" });
   });
 
-  it("tool_start / tool_end（古い agent。動詞の無い素の一覧）", () => {
-    const start = ev(1, { type: "tool_start", call_id: "c", name: "bash", summary: "ls" });
-    expect(describeEvent(start, { current: true })).toMatchObject({
-      what: "bash を実行中",
-      target: "ls",
+  it("tool_start: 既知のツールは summary の JSON から既知のキーだけ取り出して人の言葉にする", () => {
+    const start = (name: string, summary: string) =>
+      describeEvent(ev(1, { type: "tool_start", call_id: "c", name, summary }), { current: false });
+    expect(start("read_file", '{"path":"src/x.ts","start_line":3}')).toMatchObject({
+      what: "ファイルを読んだ",
+      target: "src/x.ts",
     });
-    expect(describeEvent(start, { current: false })?.what).toBe("bash を実行した");
+    expect(start("list_files", '{"path":"/workspace"}')).toMatchObject({
+      what: "一覧を見た",
+      target: "/workspace",
+    });
+    expect(start("search", '{"pattern":"title","path":"src"}')).toMatchObject({
+      what: "検索した",
+      target: "title",
+    });
+    expect(start("bash", '{"command":"ls; cat README.md | head -5"}')).toMatchObject({
+      what: "コマンドを実行した",
+      target: "ls; cat README.md | head -5",
+    });
+    expect(start("web_search", '{"query":"vitest"}')).toMatchObject({
+      what: "検索した",
+      target: "vitest",
+    });
+    expect(start("report_completion", '{"summary":"本文は出さない"}')).toEqual({
+      what: "完了を報告した",
+      target: "",
+      note: "",
+      tone: "normal",
+    });
+    // 実行中
+    const running = describeEvent(
+      ev(1, { type: "tool_start", call_id: "c", name: "bash", summary: '{"command":"pnpm test"}' }),
+      { current: true },
+    );
+    expect(running).toMatchObject({ what: "コマンドを実行中", target: "pnpm test" });
+  });
+
+  it("tool_start: JSON でない・切れている・未知のキーだけのときは、sanitize した文字列のまま", () => {
+    const start = (name: string, summary: string) =>
+      describeEvent(ev(1, { type: "tool_start", call_id: "c", name, summary }), { current: false });
+    const cut = start("read_file", '{"path":"src/very-long');
+    expect(cut?.target).toBe('{"path":"src/very-long');
+    const weird = start("read_file", '{"foo":"bar"}');
+    expect(weird?.target).toBe('{"foo":"bar"}');
+    const wrongType = start("read_file", '{"path":{"a":1}}');
+    expect(wrongType?.target).toBe('{"path":{"a":1}}');
+    const unknown = start("some_new_tool", "x\u0007y");
+    expect(unknown).toMatchObject({ what: "some_new_tool を実行した", target: "xy" });
+    // 配列・数値の JSON でも壊れない
+    expect(start("read_file", "[1,2]")?.target).toBe("[1,2]");
+    expect(start("read_file", "123")?.target).toBe("123");
+  });
+
+  it("tool_end: 失敗のときだけ出す。成功は null", () => {
     const ok = describeEvent(
       ev(2, { type: "tool_end", call_id: "c", is_error: false, summary: "ok" }),
       { current: false },
     );
-    expect(ok).toMatchObject({ what: "ツールが終わった", target: "ok", tone: "normal" });
+    expect(ok).toBeNull();
     const bad = describeEvent(
       ev(2, { type: "tool_end", call_id: "c", is_error: true, summary: "x" }),
       { current: false },
     );
-    expect(bad).toMatchObject({ what: "ツールが失敗した", tone: "fail" });
+    expect(bad).toMatchObject({ what: "失敗した", target: "x", tone: "fail" });
   });
 
   it("agent_event（gateway が知らない型）は型名だけ。usage は進み具合に出さない（null）", () => {
@@ -199,6 +246,113 @@ describe("buildSteps", () => {
   });
   it("空なら空", () => {
     expect(buildSteps([], true)).toEqual([]);
+  });
+
+  const start = (seq: number, id: string, name: string, summary: string) =>
+    ev(seq, { type: "tool_start", call_id: id, name, summary });
+  const end = (seq: number, id: string, is_error = false, summary = "out") =>
+    ev(seq, { type: "tool_end", call_id: id, is_error, summary });
+  const command = (seq: number, c: string) =>
+    ev(seq, { type: "command", command: c, exit_code: 0, duration_ms: 44_000 });
+  const whats = (evs: TaskEventDto[], active = false) =>
+    buildSteps(evs, active).map((s) => `${s.what}|${s.target}`);
+
+  describe("構造化イベントのあるツールは 1 行に畳む", () => {
+    it("bash: tool_start / tool_end を出さず、command の 1 行だけ", () => {
+      const evs = [start(1, "a", "bash", '{"command":"ls"}'), command(2, "ls"), end(3, "a")];
+      expect(whats(evs)).toEqual(["コマンドを実行した|ls"]);
+    });
+
+    it("write_file / edit_file / git_commit / web_* も同じ", () => {
+      const evs = [
+        start(1, "a", "write_file", '{"path":"a.ts"}'),
+        ev(2, { type: "edit", path: "a.ts", op: "create", added: 1, removed: 0 }),
+        end(3, "a"),
+        start(4, "b", "edit_file", '{"path":"a.ts"}'),
+        ev(5, { type: "edit", path: "a.ts", op: "modify", added: 1, removed: 1 }),
+        end(6, "b"),
+        start(7, "c", "git_commit", '{"message":"m"}'),
+        ev(8, { type: "commit", message: "m", sha: SHA, files: 1 }),
+        end(9, "c"),
+        start(10, "d", "web_search", '{"query":"q"}'),
+        ev(11, { type: "web", kind: "search" }),
+        end(12, "d"),
+        start(13, "e", "web_fetch", '{"url":"https://example.com/"}'),
+        ev(14, { type: "web", kind: "fetch", host: "example.com" }),
+        end(15, "e"),
+        start(16, "f", "web_browse", '{"url":"https://example.com/"}'),
+        ev(17, { type: "web", kind: "browse", host: "example.com" }),
+        end(18, "f"),
+      ];
+      expect(buildSteps(evs, false).map((s) => s.seq)).toEqual([2, 5, 8, 11, 14, 17]);
+    });
+
+    it("同じ call の失敗の tool_end も、構造化イベントがあれば出さない", () => {
+      const evs = [
+        start(1, "a", "bash", '{"command":"false"}'),
+        ev(2, { type: "command", command: "false", exit_code: 1 }),
+        end(3, "a", true),
+      ];
+      expect(buildSteps(evs, false).map((s) => s.seq)).toEqual([2]);
+    });
+
+    it("構造化イベントが来ていない古い履歴は、縮退して出す（開始は人の言葉、成功の終了は出さない）", () => {
+      const evs = [start(1, "a", "bash", '{"command":"ls"}'), end(2, "a")];
+      expect(whats(evs)).toEqual(["コマンドを実行した|ls"]);
+      const failed = [start(1, "a", "bash", '{"command":"ls"}'), end(2, "a", true, "boom")];
+      expect(whats(failed)).toEqual(["コマンドを実行した|ls", "失敗した|boom"]);
+    });
+
+    it("実行中（start だけ）は「実行中」の 1 行。command が来たら置き換わる", () => {
+      const running = [start(1, "a", "bash", '{"command":"pnpm test"}')];
+      expect(whats(running, true)).toEqual(["コマンドを実行中|pnpm test"]);
+      expect(buildSteps(running, true)[0]?.current).toBe(true);
+      const done = [...running, command(2, "pnpm test")];
+      expect(whats(done, true)).toEqual(["コマンドを実行した|pnpm test"]);
+    });
+
+    it("1 つの構造化イベントは 1 つの call にしか対応しない（連続する bash）", () => {
+      const evs = [
+        start(1, "a", "bash", '{"command":"one"}'),
+        command(2, "one"),
+        end(3, "a"),
+        start(4, "b", "bash", '{"command":"two"}'),
+        end(5, "b", true, "spawn failed"),
+      ];
+      expect(whats(evs)).toEqual([
+        "コマンドを実行した|one",
+        "コマンドを実行した|two",
+        "失敗した|spawn failed",
+      ]);
+    });
+
+    it("構造化イベントの無いツール（read_file など）は start を人の言葉で出し、成功の end は出さない", () => {
+      const evs = [
+        start(1, "a", "read_file", '{"path":"src/x.ts"}'),
+        end(2, "a"),
+        start(3, "b", "report_completion", '{"summary":"done"}'),
+        end(4, "b"),
+      ];
+      expect(whats(evs)).toEqual(["ファイルを読んだ|src/x.ts", "完了を報告した|"]);
+    });
+  });
+});
+
+describe("phaseBand: gateway の stopped_phase を優先する", () => {
+  const stoppedAt = (stopped: "prepare" | "run" | "verify" | null | undefined) =>
+    phaseBand(task({ status: "FAILED" }), "done", new Set(), stopped).findIndex(
+      (b) => b.state === "stopped",
+    );
+  it("stopped_phase があればそれで止まった段を決める（events からの推定より優先）", () => {
+    expect(stoppedAt("prepare")).toBe(0);
+    expect(stoppedAt("run")).toBe(1);
+    expect(stoppedAt("verify")).toBe(2);
+    const b = phaseBand(task({ status: "FAILED" }), "done", new Set(["VERIFYING"]), "run");
+    expect(b.findIndex((x) => x.state === "stopped")).toBe(1);
+  });
+  it("無い（undefined / null）ときは従来の推定", () => {
+    expect(stoppedAt(undefined)).toBe(1);
+    expect(stoppedAt(null)).toBe(1);
   });
 });
 

@@ -131,3 +131,13 @@ describe("buildOutput", () => {
     expect(out.tail?.length ?? 0).toBeLessThanOrEqual(2000);
   });
 });
+
+describe("buildOutput の切り詰め", () => {
+  it("上限を超える出力は、末尾を残して先頭を切る（… が先頭に付く）", () => {
+    const body = `${"head-".repeat(2_000)}THE-LAST-LINE`;
+    const out = buildOutput(row("command", { command: "ls", exit_code: 0, output_tail: body }));
+    expect(out.tail).not.toBeNull();
+    expect(out.tail?.endsWith("THE-LAST-LINE")).toBe(true);
+    expect(out.tail?.startsWith("…")).toBe(true);
+  });
+});

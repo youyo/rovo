@@ -395,6 +395,8 @@ export type DashboardDetailResult =
       view: TaskIndexSnapshot;
       merge_policy: MergePolicy;
       sandbox_instance: string | null;
+      /** 状態の遷移の記録に RUNNING / VERIFYING があるか（止まった段階の判定用。1 回の SQL で読む） */
+      reached: { running: boolean; verifying: boolean };
     }
   | { ok: false; code: "not_found" };
 
@@ -1196,7 +1198,21 @@ export class TaskDO extends DurableObject<Env> {
       view: this.buildIndexSnapshot(row, link),
       merge_policy: policyOf(row),
       sandbox_instance: row.sandbox_instance ?? null,
+      reached: this.reachedStatuses(),
     };
+  }
+
+  /** status_changed の記録に RUNNING / VERIFYING があるか（1 回の SQL。何も書かない） */
+  private reachedStatuses(): { running: boolean; verifying: boolean } {
+    const found = new Set(
+      this.ctx.storage.sql
+        .exec<{ s: string | null }>(
+          "SELECT DISTINCT json_extract(payload, '$.status') AS s FROM events WHERE type = 'status_changed'",
+        )
+        .toArray()
+        .map((r) => r.s),
+    );
+    return { running: found.has("RUNNING"), verifying: found.has("VERIFYING") };
   }
 
   /**

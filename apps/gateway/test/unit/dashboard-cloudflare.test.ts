@@ -481,7 +481,7 @@ describe("接続先とトークンの扱い", () => {
   });
 });
 
-// --- 推定の金額（無料枠を引く前。単価 × 使用量。AI Gateway の費用を含む合計） ---
+// --- 推定の金額（無料枠を引く前。単価 × 使用量。合計は Cloudflare に払う分だけで、AI Gateway の費用は別の項目） ---
 
 // 合計（Cloudflare に払う分）の項目。AI Gateway は BYOK のモデル費用なので含まない（excluded_items にも出ない）
 const ALL_ITEMS = [

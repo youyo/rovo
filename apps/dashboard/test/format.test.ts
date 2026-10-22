@@ -5,6 +5,7 @@ import {
   formatUsd,
   isAllowedPrUrl,
   sanitizeText,
+  shortModel,
   singleLine,
 } from "../src/format";
 
@@ -91,5 +92,24 @@ describe("表示用の整形", () => {
   it("formatDayHeading: ローカル日付の「M月D日」", () => {
     expect(formatDayHeading(new Date(2026, 9, 21, 0, 0).getTime())).toBe("10月21日");
     expect(formatDayHeading(new Date(2026, 0, 5, 23, 59).getTime())).toBe("1月5日");
+  });
+});
+
+describe("shortModel（モデル名の表示。プロバイダなどの接頭辞は省く）", () => {
+  it("最後の / より後ろを名前にし、全体は full に残す", () => {
+    expect(shortModel("anthropic/claude-haiku-5-5")).toEqual({
+      name: "claude-haiku-5-5",
+      full: "anthropic/claude-haiku-5-5",
+    });
+    expect(shortModel("workers-ai/@cf/openai/gpt-oss-120b").name).toBe("gpt-oss-120b");
+    expect(shortModel("example-model-large")).toEqual({
+      name: "example-model-large",
+      full: "example-model-large",
+    });
+  });
+
+  it("制御文字を除く。末尾が / など空になるときは全体を名前にする", () => {
+    expect(shortModel("a/b\u0007c").name).toBe("bc");
+    expect(shortModel("abc/").name).toBe("abc/");
   });
 });

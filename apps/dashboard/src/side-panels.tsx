@@ -1,5 +1,5 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
-import { formatUsd, singleLine } from "./format";
+import { formatUsd, shortModel } from "./format";
 
 /**
  * 予算は 2 つの数字を分けて出す（D8。画面で足し合わせない）。
@@ -53,7 +53,9 @@ export function ModelCosts(props: { models: OverviewDto["models"] }) {
       <ul className="models">
         {props.models.map((m, i) => (
           <li key={m.model}>
-            <span className="model-name">{singleLine(m.model)}</span>
+            <span className="model-name" title={shortModel(m.model).full}>
+              {shortModel(m.model).name}
+            </span>
             <span className="model-cost">
               タスク {formatUsd(m.task_cost_usd)}、相談 {formatUsd(m.consult_cost_usd)}
             </span>

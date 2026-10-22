@@ -1,5 +1,5 @@
 import type { VisibleTaskDto } from "@rovo/dashboard-contract";
-import { formatClock, formatUsd, isAllowedPrUrl, singleLine } from "./format";
+import { formatClock, formatUsd, isAllowedPrUrl, shortModel, singleLine } from "./format";
 import { MARKS, markKindOf } from "./status";
 import { MarkGlyph } from "./status-mark";
 import { taskTime } from "./timeline";
@@ -53,7 +53,9 @@ export function TaskTable(props: { tasks: VisibleTaskDto[] }) {
                   <a href={`/dashboard/tasks/${t.task_id}`}>{singleLine(t.title)}</a>
                 </td>
                 <td className="nowrap soft">{singleLine(t.repository)}</td>
-                <td className="nowrap soft">{singleLine(t.model)}</td>
+                <td className="nowrap soft" data-model="" title={shortModel(t.model).full}>
+                  {shortModel(t.model).name}
+                </td>
                 <td className="num nowrap">{formatUsd(t.cost.cost_usd)}</td>
                 <td className="num soft">{formatClock(taskTime(t))}</td>
                 <td>

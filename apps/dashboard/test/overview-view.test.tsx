@@ -152,6 +152,21 @@ describe("OverviewView（fixtures で一覧が出る）", () => {
     expect(models?.textContent).not.toMatch(/\d+ 件/);
   });
 
+  it("モデル名は途中で折り返さず、接頭辞を省いて title に全体を入れる（右の列も表も）", () => {
+    const data: OverviewDto = {
+      ...overviewFixture,
+      models: [{ model: "anthropic/claude-haiku-5-5", task_cost_usd: 1, consult_cost_usd: 0 }],
+      tasks: overviewFixture.tasks.map((t) => ({ ...t, model: "anthropic/claude-haiku-5-5" })),
+    };
+    const c = mount(data);
+    const side = c.querySelector("[data-models] .model-name");
+    expect(side?.textContent).toBe("claude-haiku-5-5");
+    expect(side?.getAttribute("title")).toBe("anthropic/claude-haiku-5-5");
+    const cell = c.querySelector("tbody td[data-model]");
+    expect(cell?.textContent).toBe("claude-haiku-5-5");
+    expect(cell?.getAttribute("title")).toBe("anthropic/claude-haiku-5-5");
+  });
+
   it("下に「HH:MM に更新。…」", () => {
     const c = mount(overviewFixture);
     expect(c.textContent).toContain(

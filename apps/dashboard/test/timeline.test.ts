@@ -3,6 +3,8 @@ import { overviewFixture, overviewMeFixture } from "@rovo/dashboard-contract/fix
 import { describe, expect, it } from "vitest";
 import {
   buildLanes,
+  clusterGroups,
+  clusterLabel,
   HOUR,
   hourTicks,
   spreadOverlaps,
@@ -148,5 +150,47 @@ describe("buildLanes（レーン: 全員は owner_login ごと、自分は自分
     expect(biggest.height).toBe(92);
     const t1 = all.find((t) => t.task.task_id === overviewFixture.tasks[0]?.task_id);
     expect(t1?.frac).toBeCloseTo((Date.parse("2026-10-21T01:06:10Z") - utcDay) / (24 * HOUR), 5);
+  });
+});
+
+describe("stemHeight は桁の違う費用でも差が見える（対数的な尺度）", () => {
+  it("$0.001・$0.008・$2.11 が互いに 6px 以上離れ、最大は 92、0 は最小の 12", () => {
+    const hs = [0.001, 0.008, 2.11].map((c) => stemHeight(c, 2.11));
+    expect(hs[2]).toBe(92);
+    expect((hs[1] as number) - (hs[0] as number)).toBeGreaterThanOrEqual(6);
+    expect((hs[2] as number) - (hs[1] as number)).toBeGreaterThanOrEqual(6);
+    expect(hs[0]).toBeGreaterThan(12);
+    expect(stemHeight(0, 2.11)).toBe(12);
+  });
+});
+
+describe("PR ラベルの重なり（群ごとにまとめる）", () => {
+  it("clusterGroups: 近い位置の連なりを 1 群にする（元の添字で返す）", () => {
+    expect(clusterGroups([0.5, 0.1, 0.5, 0.505], 0.02)).toEqual([[1], [0, 2, 3]]);
+    expect(clusterGroups([], 0.02)).toEqual([]);
+  });
+
+  it("clusterLabel: 1 件は #n、複数は最小–最大、PR が無ければ null", () => {
+    expect(clusterLabel([20])).toBe("#20");
+    expect(clusterLabel([22, 20, 25, 23, 24, 21])).toBe("#20–#25");
+    expect(clusterLabel([null, 7, null])).toBe("#7");
+    expect(clusterLabel([null])).toBeNull();
+    expect(clusterLabel([])).toBeNull();
+  });
+
+  it("buildLanes: 02:35〜02:38 に 6 件集まっても、ラベルは 1 つ（#20–#25）で重ならない", () => {
+    const base = overviewMeFixture.tasks[0] as (typeof overviewMeFixture.tasks)[number];
+    const tasks = [20, 21, 22, 23, 24, 25].map((n, i) => ({
+      ...base,
+      task_id: `01K8ZF${String(100 + n).padStart(20, "0")}`,
+      started_at: `2026-10-21T02:3${5 + (i % 4)}:00Z`,
+      pr: { ...(base.pr as NonNullable<typeof base.pr>), number: n },
+    }));
+    const utcDay = Date.parse("2026-10-21T00:00:00Z");
+    const lanes = buildLanes(
+      { ...overviewMeFixture, tasks, consults: [] },
+      { start: utcDay, end: utcDay + 24 * HOUR },
+    );
+    expect(lanes[0]?.labels.map((l) => l.text)).toEqual(["#20–#25"]);
   });
 });

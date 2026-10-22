@@ -6,8 +6,10 @@ import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_ORDER,
   DEFAULT_SANDBOX_INSTANCE,
+  EFFORT_LEVELS,
   EFFORTS,
   effortFor,
+  isEffort,
   isSandboxPromotionReason,
   isSandboxPromotionTrigger,
   isSelectableSandboxInstance,
@@ -237,6 +239,21 @@ describe("EFFORTS（モデルごとに固定した思考レベル）", () => {
     expect(supportedEfforts("openai/gpt-6-sol")).not.toContain("minimal");
     expect(supportedEfforts("unknown/model")).toEqual([]);
     expect(supportedEfforts("toString")).toEqual([]);
+  });
+
+  it("EFFORT_LEVELS: task_start の effort に指定できる 7 つ（弱い順）。EFFORTS の値も supportedEfforts の値も、ここに含まれる", () => {
+    expect([...EFFORT_LEVELS]).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    for (const id of ALLOWED_MODEL_IDS) {
+      expect(EFFORT_LEVELS, id).toContain(EFFORTS[id]);
+      for (const level of supportedEfforts(id)) expect(EFFORT_LEVELS, id).toContain(level);
+    }
+  });
+
+  it("isEffort: 既知のレベルだけ true（未知の文字列・大文字・空・文字列以外は false）", () => {
+    for (const level of EFFORT_LEVELS) expect(isEffort(level), level).toBe(true);
+    for (const v of ["turbo", "HIGH", " high", "", "none", 3, null, undefined, ["high"], {}]) {
+      expect(isEffort(v), JSON.stringify(v)).toBe(false);
+    }
   });
 
   it("予算の前提: 許可リストの Anthropic は adaptive thinking（forceAdaptiveThinking）で、max_tokens に思考が含まれる", () => {

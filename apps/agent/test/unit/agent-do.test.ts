@@ -169,6 +169,91 @@ describe("モデルごとの思考レベル（effort）", () => {
   });
 });
 
+describe("タスクごとの effort（spec.effort。task_start の上書き）", () => {
+  // vitest.config.ts の AGENT_MODELS: sonnet（既定）・haiku・gpt-6-sol。EFFORTS の初期値は sonnet=high / haiku=low / sol=medium
+
+  it("spec.effort があれば、モデルの既定（初期値・MODEL_EFFORTS）より優先して、Pi のモデル呼び出し（options.reasoning）に毎回渡す", async () => {
+    const cases: [string | undefined, string, string | undefined][] = [
+      // [model, spec.effort, MODEL_EFFORTS]
+      [undefined, "xhigh", undefined],
+      ["anthropic/claude-sonnet-5-5", "low", undefined],
+      ["anthropic/claude-haiku-5-5", "high", undefined],
+      ["openai/gpt-6-sol", "max", undefined],
+      ["anthropic/claude-sonnet-5-5", "max", "anthropic/claude-sonnet-5-5=medium"],
+      ["anthropic/claude-sonnet-5-5", "minimal", "anthropic/claude-sonnet-5-5=off"],
+    ];
+    for (const [i, [model, effort, modelEfforts]] of cases.entries()) {
+      const name = `spec-effort-${i}`;
+      const fx = newFixture(name, [report()], modelEfforts ? { modelEfforts } : {});
+      const spec = makeSpec(name, { effort: effort as never, ...(model ? { model } : {}) });
+      expect(await fx.stub.start(spec), `${model} ${effort}`).toMatchObject({ status: "accepted" });
+      expect(await waitForTerminal(fx), `${model} ${effort}`).toBe("completed");
+      expect(fx.modelCalls.reasoning.length, `${model} ${effort}`).toBeGreaterThan(0);
+      expect(new Set(fx.modelCalls.reasoning), `${model} ${effort}`).toEqual(new Set([effort]));
+    }
+  });
+
+  it("spec.effort が off なら、モデルの既定が high でも reasoning を渡さない", async () => {
+    const fx = newFixture("spec-effort-off", [report()]);
+    await fx.stub.start(makeSpec("spec-effort-off", { effort: "off" }));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.modelCalls.reasoning.length).toBeGreaterThan(0);
+    expect(new Set(fx.modelCalls.reasoning)).toEqual(new Set([undefined]));
+  });
+
+  it("spec.effort が無ければ従来どおり（モデルの初期値、MODEL_EFFORTS の上書き）", async () => {
+    const fx = newFixture("spec-effort-none", [report()], {
+      modelEfforts: "anthropic/claude-sonnet-5-5=medium",
+    });
+    const spec = makeSpec("spec-effort-none");
+    expect(spec).not.toHaveProperty("effort");
+    await fx.stub.start(spec);
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(new Set(fx.modelCalls.reasoning)).toEqual(new Set(["medium"]));
+  });
+
+  it("知らない値（既知のレベルでない・文字列でない）は start で拒否する。Sandbox もモデルも動かさない", async () => {
+    for (const [i, effort] of ["turbo", "", "HIGH", " high", "none", 3, null, ["high"]].entries()) {
+      const fx = newFixture(`spec-effort-bad-${i}`, []);
+      const res = await fx.stub.start(
+        makeSpec(`spec-effort-bad-${i}`, { effort: effort as never }),
+      );
+      expect(res, JSON.stringify(effort)).toMatchObject({ status: "rejected" });
+      expect((res as { reason: string }).reason, JSON.stringify(effort)).toContain("effort");
+      expect(fx.sandbox.readySpecs, JSON.stringify(effort)).toHaveLength(0);
+      expect(fx.modelCalls.count, JSON.stringify(effort)).toBe(0);
+    }
+  });
+
+  it("既知のレベルは 7 つとも受理する", async () => {
+    for (const [i, effort] of [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ].entries()) {
+      const fx = newFixture(`spec-effort-ok-${i}`, [report()]);
+      const res = await fx.stub.start(makeSpec(`spec-effort-ok-${i}`, { effort: effort as never }));
+      expect(res, effort).toMatchObject({ status: "accepted" });
+      expect(await waitForTerminal(fx), effort).toBe("completed");
+    }
+  });
+
+  it("effort の有無・値は spec の同一性に入る（違えば conflict）", async () => {
+    const fx = newFixture("spec-effort-fp", [call("gate")]);
+    const spec = makeSpec("spec-effort-fp", { effort: "high" });
+    expect(await fx.stub.start(spec)).toMatchObject({ status: "accepted" });
+    expect(await fx.stub.start({ ...spec, effort: "xhigh" })).toEqual({ status: "conflict" });
+    const { effort: _e, ...without } = spec;
+    expect(await fx.stub.start(without)).toEqual({ status: "conflict" });
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("failed");
+  });
+});
+
 describe("モデルの 4xx と 5xx の区別（タスク）", () => {
   it("モデルが 4xx（リクエストの中身の問題）で失敗したら、終端の reason は model_rejected（待っても直らない）", async () => {
     const fx = newFixture("rej-4xx", [{ error: "invalid_request_error", status: 400 }]);

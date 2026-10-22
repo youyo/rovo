@@ -304,11 +304,36 @@ export function parseAgentModels(
 /** 思考レベル。pi-ai の ModelThinkingLevel（off / minimal / low / medium / high / xhigh / max）。 */
 export type Effort = ModelThinkingLevel;
 
-const EFFORT_ORDER: readonly Effort[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/**
+ * 思考レベルの全部（弱い順）。task_start の effort に指定できる値と、agent が spec.effort として受け付ける値の出どころ。
+ * Effort の型と食い違わないよう、下の型検査で全部が載っていることを確かめる。
+ */
+export const EFFORT_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const satisfies readonly Effort[];
+
+// Effort に値が増えて EFFORT_LEVELS に足し忘れたら、右辺が never になって型エラーになる
+const _allEffortsListed: [Exclude<Effort, (typeof EFFORT_LEVELS)[number]>] extends [never]
+  ? true
+  : never = true;
+
+const EFFORT_ORDER: readonly Effort[] = EFFORT_LEVELS;
+
+/** 知らない値（未知のレベル・文字列以外）を弾く。 */
+export function isEffort(value: unknown): value is Effort {
+  return typeof value === "string" && (EFFORT_ORDER as readonly string[]).includes(value);
+}
 
 /**
- * 思考レベルの初期値（upstream の既定。モデルごとに固定で、タスクごとには変えない）。
- * デプロイごとに env MODEL_EFFORTS で上書きできる（resolveEfforts）。
+ * 思考レベルの初期値（upstream の既定。モデルごと）。
+ * デプロイごとに env MODEL_EFFORTS で上書きできる（resolveEfforts）。さらにタスクごとに、task_start の effort で上書きできる
+ * （そのモデルが受け付けるレベルだけ。supportedEfforts）。
  * 思考のトークンは出力として課金されるので、考える量が多いほど費用が増える。
  */
 export const EFFORTS: Readonly<Record<string, Effort>> = {

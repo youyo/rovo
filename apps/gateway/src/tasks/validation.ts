@@ -1,4 +1,4 @@
-import { SELECTABLE_SANDBOX_INSTANCES } from "@rovo/models";
+import { EFFORT_LEVELS, SELECTABLE_SANDBOX_INSTANCES } from "@rovo/models";
 import { z } from "zod";
 
 export const DEFAULT_WAIT_SECONDS = 30;
@@ -115,6 +115,12 @@ export const taskInputSchema = z.object({
    * 省略は agent の env の既定（SANDBOX_INSTANCE）。指定したらそのタスクの間はずっとその大きさ。
    */
   sandbox_instance: z.enum(SELECTABLE_SANDBOX_INSTANCES).optional(),
+  /**
+   * 子のモデルの思考レベル（そのタスクだけの上書き）。値は packages/models の EFFORT_LEVELS（Effort の型）が出どころ。
+   * 省略は、モデルごとの既定（env の MODEL_EFFORTS で上書きした値。models_list の effort）。
+   * そのモデルが受け付けるか（supportedEfforts）は、最終のモデルが決まってから service と TaskDO が確かめる（invalid_input）。
+   */
+  effort: z.enum(EFFORT_LEVELS).optional(),
 });
 
 /** 入力全体（JSON）の上限。項目ごとの上限だけでは合計が大きくなりうるため。 */
@@ -136,6 +142,8 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * model は未指定なら含めない（従来の v1 / v2 / v3 のまま）。指定があれば v4 として merge_policy と一緒に末尾へ足す。
  * sandbox_instance も未指定なら含めない（v1〜v4 のまま）。指定があれば v5 として、model（無ければ null）の後ろへ足す。
  * budget_policy は既定（ask）なら含めない（これまでの値と一致させる）。stop のときだけ、上の全体を v6 で包んで足す。
+ * effort は未指定なら含めない（これまでの値と一致させる）。指定があれば、上の全体を v7 で包んで末尾に足す（利用者の入力なので、
+ * model を rovo が選んだとき（mode: auto）も含める）。
  */
 export async function computeFingerprint(input: TaskInput): Promise<string> {
   const fields: unknown[] = [
@@ -163,7 +171,10 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
           : commands.length === 0
             ? ["v1", ...fields]
             : ["v2", ...fields, commands];
-  const canonical = JSON.stringify(input.budget_policy === "stop" ? ["v6", base] : base);
+  const withBudget = input.budget_policy === "stop" ? ["v6", base] : base;
+  const canonical = JSON.stringify(
+    input.effort !== undefined ? ["v7", withBudget, input.effort] : withBudget,
+  );
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

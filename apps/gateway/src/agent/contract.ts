@@ -6,6 +6,7 @@
  */
 
 import type {
+  Effort,
   SandboxInstance,
   SandboxPromotionReason,
   SandboxPromotionTrigger,
@@ -39,6 +40,12 @@ export interface TaskSpec {
   constraints?: string[];
   /** 子のモデル（D10。"anthropic/claude-haiku-5-5" など）。省略は AgentDO の env の AGENT_MODEL */
   model?: string;
+  /**
+   * 子のモデルの思考レベル（task_start の effort。そのモデルが受け付けるレベルだけを TaskDO が通している）。**ある = 利用者がこのタスクで指定した**
+   * ので、モデルごとの既定（AgentDO の env の MODEL_EFFORTS）より優先する。off なら AgentDO は reasoning を渡さない。
+   * 省略したときはこの項目自体を付けない（AgentDO が従来どおり MODEL_EFFORTS から決める。spec の同一性も変えない）。
+   */
+  effort?: Effort;
   /**
    * 子の Sandbox の大きさ（task_start の sandbox_instance。standard-1〜4）。**ある = 利用者が明示した**ので、そのタスクの間はずっとその大きさ
    * （後段の自動の昇格もしない）。省略は agent の env の既定（SANDBOX_INSTANCE）で、省略したときはこの項目自体を付けない（spec の同一性を変えない）。

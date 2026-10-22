@@ -212,6 +212,57 @@ describe("task_start: model を省略したときの自動選択", () => {
   });
 });
 
+describe("task_start の effort と自動選択（検査は選ばれたモデルで行う）", () => {
+  it("Clef が選んだモデル（haiku）が受け付ける effort なら、保存され、spec と task_status に出る（haiku の MODEL_EFFORTS = minimal より優先）", async () => {
+    const { ai } = fakeAi([clefResponse([0.95, 0.05])]);
+    const e = setup(ai);
+    const p = principal();
+    const r = await start(e, p, { effort: "xhigh" });
+    if (!r.ok) throw new Error(`start failed: ${JSON.stringify(r)}`);
+    expect(r.value.model).toBe(HAIKU);
+    const id = r.value.task_id;
+    expect((await fakeAgent(id).calls()).specs[0]).toMatchObject({ model: HAIKU, effort: "xhigh" });
+    expect(await createTaskService(e).status(p, id)).toMatchObject({
+      ok: true,
+      value: { model: HAIKU, effort: "xhigh" },
+    });
+  });
+
+  it("選ばれたモデルが受け付けない effort は invalid_input（message に選ばれたモデルと使えるレベル）。Clef が失敗して既定のモデルになったときも同じ", async () => {
+    // Clef が失敗 → 既定のモデル（AGENT_MODEL = gpt-6-sol）。sol は minimal を受け付けない
+    const { ai } = fakeAi([new Error("boom"), new Error("boom")]);
+    const p = principal();
+    const r = await start(setup(ai, { AGENT_MODEL: SOL }), p, { effort: "minimal" });
+    expect(r).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+    if (!r.ok) {
+      expect(r.error.message).toContain(SOL);
+      expect(r.error.message).toContain("off, low, medium, high, xhigh, max");
+    }
+    // 予約は残らない
+    const ok = await start(setup(fakeAi([]).ai, { AGENT_MODEL: SOL }), p, { effort: "low" });
+    expect(ok).toMatchObject({ ok: true, value: { model: SOL } });
+  });
+
+  it("冪等キー: 同じ入力（effort も同じ）の再試行は、Clef の答えが変わっても同じタスク。effort が違えば conflict", async () => {
+    const { ai } = fakeAi([
+      clefResponse([0.95, 0.05]),
+      clefResponse([0.05, 0.95]),
+      clefResponse([0.05, 0.95]),
+    ]);
+    const e = setup(ai);
+    const p = principal();
+    const first = await start(e, p, { effort: "high" }, "idem-e1");
+    const second = await start(e, p, { effort: "high" }, "idem-e1");
+    if (!first.ok || !second.ok) throw new Error(JSON.stringify([first, second]));
+    expect(second.value.task_id).toBe(first.value.task_id);
+    expect(second.value.model).toBe(HAIKU);
+    expect(await start(e, p, { effort: "low" }, "idem-e1")).toMatchObject({
+      ok: false,
+      error: { code: "conflict" },
+    });
+  });
+});
+
 describe("候補（autoCandidates）", () => {
   it("未設定は既定の 3 つ（haiku / sonnet / opus）∩ AGENT_MODELS", async () => {
     const got = await autoCandidates({

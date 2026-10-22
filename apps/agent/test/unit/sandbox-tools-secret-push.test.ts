@@ -134,7 +134,7 @@ describe("git_commit の push 前の秘密の検査", () => {
     t.git.stage(
       file(
         "docs/a.md",
-        "Authorization: Bearer abcdef0123456789xyz",
+        "Authorization: Bearer abc.DEF-123_xyz==",
         "curl 'https://e.com/?token=abc123def456'",
         "FOO_TOKEN=bar",
       ),

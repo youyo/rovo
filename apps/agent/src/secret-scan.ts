@@ -169,6 +169,16 @@ export async function scanRangeForSecrets(
   }
 }
 
+/** 【Red 確認用の仮実装。次の手順で置き換える】 */
+export async function scanUnpushedForSecrets(
+  git: ScanGit,
+  head: string,
+  lastPushed: string | undefined,
+  opts: { shouldAbort?: () => boolean } = {},
+): Promise<ScanVerdict> {
+  return scanRangeForSecrets(git, [`${lastPushed ?? EMPTY_TREE_SHA}..${head}`], "push", opts);
+}
+
 /** 止めたときの固定の文（onPush の error になる）。一致した値は含めない */
 export function blockedMessage(v: Exclude<ScanVerdict, { status: "clean" | "aborted" }>): string {
   switch (v.status) {

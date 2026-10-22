@@ -47,7 +47,7 @@ describe("findBlockingSecrets（push を止める確度の高いパターンだ�
   });
 
   it.each([
-    ["Authorization: Bearer", "Authorization: Bearer abcdef0123456789xyz"],
+    ["Authorization: Bearer", "Authorization: Bearer abc.DEF-123_xyz=="],
     ["bearer", "token is Bearer abcdef0123456789xyz here"],
     ["cookie", "cookie: a=b"],
     ["set-cookie", "set-cookie: sid=abcdef0123456789"],
@@ -75,7 +75,7 @@ describe("findBlockingSecrets（push を止める確度の高いパターンだ�
   it("maskSecrets の結果は変わらない（共有した正規表現でも）", () => {
     expect(maskSecrets(`x ${GHP} y`)).toBe("x [REDACTED] y");
     expect(maskSecrets(`x ${GHP} y`)).toBe("x [REDACTED] y");
-    expect(maskSecrets("Authorization: Bearer abcdef0123456789xyz")).toBe(
+    expect(maskSecrets("Authorization: Bearer abc.DEF-123_xyz==")).toBe(
       "Authorization: [REDACTED]",
     );
   });

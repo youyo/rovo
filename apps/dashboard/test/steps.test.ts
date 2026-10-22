@@ -20,6 +20,12 @@ const task = (over: Partial<VisibleTaskDto> = {}): VisibleTaskDto => ({
   ...(overviewFixture.tasks[0] as VisibleTaskDto),
   ...over,
 });
+/** 改行・タブ以外の制御文字（C0・DEL・C1）と、双方向の制御文字があるか（正規表現に制御文字を書かないため、コード単位で見る） */
+const hasUnsafeChar = (s: string) =>
+  [...s].some((ch) => {
+    const c = ch.charCodeAt(0);
+    return c <= 0x1f || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e);
+  });
 const usage = (seq: number) =>
   ev(seq, {
     type: "usage",
@@ -174,7 +180,9 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
 
   describe("tool_start（bash）: 切れた JSON からコマンドを取り出す", () => {
     const bash = (summary: string, current = false) =>
-      describeEvent(ev(1, { type: "tool_start", call_id: "c", name: "bash", summary }), { current });
+      describeEvent(ev(1, { type: "tool_start", call_id: "c", name: "bash", summary }), {
+        current,
+      });
 
     it("完全な JSON は今までどおり。「…」は付けない", () => {
       const d = bash('{"command":"pnpm test --filter agent"}');
@@ -203,7 +211,7 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
       expect(bash('{"command":"ls","timeout":12...')?.target).toBe("ls");
     });
 
-    it("JSON の文字列のエスケープ（\\\" \\\\ \\n \\t \\uXXXX）を戻す", () => {
+    it('JSON の文字列のエスケープ（\\" \\\\ \\n \\t \\uXXXX）を戻す', () => {
       const cut = String.raw`{"command":"echo \"hi\" \\ done\nnext\tTab \u3042 \u00e9 tail`;
       // \n と \t は 1 行にするときに空白 1 つになる
       expect(bash(cut)?.target).toBe('echo "hi" \\ done next Tab あ é tail…');
@@ -262,7 +270,7 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
       const cut = String.raw`{"command":"echo a\nrm\u202e -rf\u0007 b\u001b[31m c`;
       const d = bash(cut);
       expect(d?.target).toBe("echo a rm -rf b[31m c…");
-      expect(d?.target).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e]/);
+      expect(hasUnsafeChar(d?.target ?? "")).toBe(false);
       // 生の制御文字・双方向文字が混じっていても同じ
       expect(bash('{"command":"echo \u0007x\u202ey')?.target).toBe("echo xy…");
       // <script> などは文字のまま（HTML にはしない）

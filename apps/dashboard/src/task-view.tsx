@@ -113,9 +113,7 @@ function StepItem(props: { step: Step }) {
         {step.command ? (
           <>
             <span className="sr-only">{step.what} </span>
-            {step.where === undefined ? null : (
-              <span className="step-where">{step.where} で </span>
-            )}
+            {step.where === undefined ? null : <span className="step-where">{step.where} で </span>}
             <span className="prompt">$ </span>
             <span className="step-target">{step.target}</span>
           </>

@@ -176,7 +176,8 @@ function argString(summary: string, key: string): string | undefined {
   if (head === null || head[1] !== key) return undefined;
   const read = readJsonString(summary.slice(head[0].length));
   if (read === undefined || read.value === "") return undefined;
-  return `${read.value}${read.cut ? MARK : ""}`;
+  // 切れているときは、sanitize して前後の空白を落としてから … を付ける（空白の直後に … が付かないように）
+  return read.cut ? `${sanitizeText(read.value, { singleLine: true }).trim()}${MARK}` : read.value;
 }
 
 /** 引数が JSON のオブジェクト・配列に見える（生のまま画面に出さない） */

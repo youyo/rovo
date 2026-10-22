@@ -185,7 +185,13 @@ describe("画面（screen）", () => {
   it("cd /workspace/<相対パス> && の前置きは行に出さず、「<相対パス> で」を `$` の前に添える", () => {
     const at = "2026-10-21T05:50:00Z";
     const events: TaskEventDto[] = [
-      { seq: 1, at, type: "command", command: "cd /workspace/apps/agent && pnpm test", exit_code: 0 },
+      {
+        seq: 1,
+        at,
+        type: "command",
+        command: "cd /workspace/apps/agent && pnpm test",
+        exit_code: 0,
+      },
       { seq: 2, at, type: "command", command: "cd /workspace && git status", exit_code: 0 },
       {
         seq: 3,

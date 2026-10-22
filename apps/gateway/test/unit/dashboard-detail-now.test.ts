@@ -12,6 +12,12 @@ function row(type: string, payload: Record<string, unknown>): StoredEventRow {
   seq += 1;
   return { seq, type, payload, created_at: T0 + seq * 1000 };
 }
+/** 制御文字（C0・DEL・C1）と双方向の制御文字があるか（正規表現に制御文字を書かないため、コード単位で見る） */
+const hasUnsafeChar = (s: string) =>
+  [...s].some((ch) => {
+    const c = ch.charCodeAt(0);
+    return c <= 0x1f || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e);
+  });
 const cmd = (command: string, extra: Record<string, unknown> = {}) =>
   row("command", { command, exit_code: 0, ...extra });
 const start = (id: string, name = "bash", summary = "ls") =>
@@ -135,7 +141,7 @@ describe("buildNow", () => {
       expect(text('{"command":"ls","timeout":12...')).toBe("$ ls");
     });
 
-    it("JSON の文字列のエスケープ（\\\" \\\\ \\n \\t \\uXXXX）を戻す", () => {
+    it('JSON の文字列のエスケープ（\\" \\\\ \\n \\t \\uXXXX）を戻す', () => {
       const cut = String.raw`{"command":"echo \"hi\" \\ done\nnext\tTab \u3042 \u00e9 tail`;
       expect(text(cut)).toBe('$ echo "hi" \\ done next Tab あ é tail…');
       const closed = String.raw`{"command":"grep \"a\\b\" f","timeout":1`;
@@ -176,8 +182,9 @@ describe("buildNow", () => {
     it("取り出した値も、制御文字・双方向文字を除いて 1 行にし、秘密はマスクする", () => {
       const cut = String.raw`{"command":"echo a\nrm\u202e -rf\u0007 b\u001b[31m c`;
       const t = text(cut) ?? "";
-      expect(t).toBe("$ echo a rm -rf b[31m c…");
-      expect(t).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e]/);
+      // gateway の sanitizeText は ANSI のエスケープ（\u001b[31m）も除く
+      expect(t).toBe("$ echo a rm -rf b c…");
+      expect(hasUnsafeChar(t)).toBe(false);
       expect(text(`{"command":"curl -H x ${GHP} ${"y".repeat(500)}`)).not.toContain(GHP);
       expect((text(`{"command":"curl ${"y".repeat(500)}`) ?? "").length).toBeLessThanOrEqual(300);
     });

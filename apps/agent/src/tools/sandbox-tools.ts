@@ -553,7 +553,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
   const git_commit = defineTool({
     name: "git_commit",
     description:
-      "Stage all changes (git add -A) and create a local commit with the given message. Reports when there is nothing to commit. The commit is pushed to the task branch automatically; never run git push yourself.",
+      "Stage all changes (git add -A) and create a local commit with the given message. Reports when there is nothing to commit. The commit is pushed to the task branch automatically; never run git push yourself. Before pushing, the changes since the last push are scanned for secrets (tokens, private keys); if one is found nothing is pushed and the result tells you where.",
     parameters: Type.Object({ message: Type.String({ minLength: 1, maxLength: 5000 }) }),
     replay: "unsafe",
     execute: guarded("git_commit", async (args: { message: string }) => {

@@ -127,9 +127,7 @@ describe("scanRangeForSecrets（strict モード = WIP の commit 前）", () =>
 
   it("大きすぎる・失敗は unscannable。秘密が無ければ clean", async () => {
     const big = gitWith("", "", { diff: { truncated: true } });
-    expect((await scanRangeForSecrets(big.git, ["--cached"], "strict")).status).toBe(
-      "unscannable",
-    );
+    expect((await scanRangeForSecrets(big.git, ["--cached"], "strict")).status).toBe("unscannable");
     const ok = gitWith("1\t0\ta", "diff --git a/a b/a\n+x\n");
     expect((await scanRangeForSecrets(ok.git, ["--cached"], "strict")).status).toBe("clean");
   });

@@ -137,7 +137,11 @@ export async function scanRangeForSecrets(
 ): Promise<ScanVerdict> {
   try {
     const common = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
-    const numstat = await git([...common, "--numstat", ...diffArgs, "--"], 60_000, SECRET_SCAN_MAX_BYTES);
+    const numstat = await git(
+      [...common, "--numstat", ...diffArgs, "--"],
+      60_000,
+      SECRET_SCAN_MAX_BYTES,
+    );
     if (!okRun(numstat)) return { status: "unscannable", reason: "git_failed" };
     if (numstat.truncated === true) return { status: "unscannable", reason: "too_large" };
     const binaries = numstat.stdout

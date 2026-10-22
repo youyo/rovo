@@ -34,6 +34,8 @@ interface Knobs {
   stagedTruncated: boolean;
   /** diff --cached --numstat の出力 */
   numstat: string;
+  /** push 前の範囲の検査（git diff <last_pushed>..HEAD）の diff の出力 */
+  rangeDiff: string;
   /** add が返るまでの待ち（ms）。時間切れの再現 */
   addDelayMs: number;
   commitExit: number;
@@ -49,6 +51,7 @@ function wipSandbox(over: Partial<Knobs> = {}) {
     staged: "diff --git a/src/a.ts b/src/a.ts\n+const x = 1;\n",
     stagedTruncated: false,
     numstat: "1\t0\tsrc/a.ts\n",
+    rangeDiff: "",
     addDelayMs: 0,
     commitExit: 0,
     pushExit: 0,
@@ -69,6 +72,9 @@ function wipSandbox(over: Partial<Knobs> = {}) {
       await new Promise((r) => setTimeout(r, knobs.addDelayMs));
     }
     if (sub === "diff" && argv.includes("--numstat")) return { stdout: knobs.numstat };
+    if (sub === "diff" && argv.some((a) => a.includes("..")) && !argv.includes("--cached")) {
+      return { stdout: knobs.rangeDiff };
+    }
     if (sub === "diff" && argv.includes("--cached")) {
       return { stdout: knobs.staged, truncated: knobs.stagedTruncated };
     }
@@ -170,6 +176,35 @@ describe("予算超過で止まるとき、未 commit の変更を WIP として
     expect(r.warnings.join("\n")).toContain("秘密");
     // 秘密の値そのものは結果に出ない
     expect(JSON.stringify(r)).not.toContain("ghp_aaaa");
+  });
+
+  it("WIP の commit 前の判定は今までどおり広い（推測系の FOO_TOKEN=… でも commit しない）", async () => {
+    const t = await runToBudgetStop("wip-guess", {
+      staged: "diff --git a/.env b/.env\n+FOO_TOKEN=plainvalue123\n",
+    });
+    expect(t.ran("commit")).toHaveLength(0);
+    expect(t.ran("push")).toHaveLength(0);
+    expect(t.ran("reset")).toHaveLength(1);
+    expect(done(await t.stub.getResult()).warnings.join("\n")).toContain("秘密");
+  });
+
+  it("commit 前の差分は clean でも、push 前に last_pushed..HEAD の秘密（子が自分で積んだ commit など）が見つかれば push しない。commit は残り、push_failed が出る", async () => {
+    const leaked = `ghp_${"a1B2".repeat(9)}`;
+    const t = await runToBudgetStop("wip-range-secret", {
+      rangeDiff: `diff --git a/x.env b/x.env\n--- /dev/null\n+++ b/x.env\n@@ -0,0 +1,2 @@\n+A=1\n+T=${leaked}\n`,
+    });
+    expect(t.ran("commit")).toHaveLength(1);
+    expect(t.ran("push")).toHaveLength(0);
+    // 範囲は initialSha（まだ push できていない）から HEAD まで
+    expect(t.ran("diff").some((a) => a.includes(`${"1".repeat(40)}..HEAD`))).toBe(true);
+    const events = await allEvents(asFx(t.stub));
+    const failed = events.find((e) => e.type === "push_failed" && e.data.final !== true);
+    expect(failed?.data.message).toBe("blocked: possible secret (github-token) in x.env:2");
+    expect(JSON.stringify(events)).not.toContain(leaked);
+    const r = done(await t.stub.getResult());
+    expect(r.status).toBe("budget_exceeded");
+    expect(r.pushedSha).toBeUndefined();
+    expect(JSON.stringify(r)).not.toContain(leaked);
   });
 
   it("git が時間内に終わらなくても（上限）、止まる処理は完了する", async () => {

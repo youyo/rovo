@@ -23,6 +23,19 @@ const clone = <T>(v: T): T => structuredClone(v);
 const at = "2026-10-21T01:02:03Z";
 const ok = (s: z.ZodType, v: unknown) => s.safeParse(v).success;
 
+describe("budget の monthly_budget_usd（月の上限）", () => {
+  it("fixtures は上限を持ち、スキーマを通る。負の値は弾く。古い応答（無し）も通る", () => {
+    expect(overviewFixture.budget.monthly_budget_usd).toBe(49.9);
+    expect(ok(OverviewDtoSchema, overviewFixture)).toBe(true);
+    const neg = clone(overviewFixture);
+    neg.budget.monthly_budget_usd = -1;
+    expect(ok(OverviewDtoSchema, neg)).toBe(false);
+    const legacy = clone(overviewFixture);
+    delete legacy.budget.monthly_budget_usd;
+    expect(ok(OverviewDtoSchema, legacy)).toBe(true);
+  });
+});
+
 describe("見えないタスクの漏れを防ぐ形", () => {
   it("hidden_tasks のキーは count と cost_usd だけ", () => {
     expect(Object.keys(HiddenTasksDtoSchema.shape).sort()).toEqual(["cost_usd", "count"]);

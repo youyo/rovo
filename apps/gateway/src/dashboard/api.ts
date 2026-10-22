@@ -266,6 +266,7 @@ async function readAuthorizedTask(
 // --- 予算 ---
 
 function toBudgetMe(raw: {
+  monthly_budget_usd: number;
   remaining_usd: number;
   spent_usd: number;
   estimated_usd: number;
@@ -280,6 +281,7 @@ function toBudgetMe(raw: {
     Math.min(raw.max_concurrent_tasks, raw.concurrency_limit - raw.running_slots),
   );
   return {
+    monthly_budget_usd: raw.monthly_budget_usd,
     remaining_usd: raw.remaining_usd,
     spent_usd: raw.spent_usd,
     estimated_usd: raw.estimated_usd,

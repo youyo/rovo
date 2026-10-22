@@ -54,16 +54,22 @@ const item = (c: HTMLElement, k: string) => c.querySelector(`.statusbar [data-sb
 describe("ステータスバー（tmux 風。下に 1 行、狭いと折り返す）", () => {
   it("今月の自分: 使った額 / 上限、残り・あと何件", () => {
     const c = mount();
-    // 上限 = 使った額 + 予約 + 残り（契約は上限を持たない）
+    // 上限は契約の monthly_budget_usd
     expect(item(c, "budget-me")?.textContent).toBe("今月 $11.40 / $49.90");
     expect(item(c, "budget-left")?.textContent).toBe("残り $38.50  あと 2 件");
   });
 
-  it("残りが 0 のときは上限を出さない（求められない値を作らない）", () => {
+  it("残りが 0 でも、契約の上限があれば上限を出す", () => {
     const c = mount({
       ...overviewFixture,
       budget: { ...overviewFixture.budget, remaining_usd: 0 },
     });
+    expect(item(c, "budget-me")?.textContent).toBe("今月 $11.40 / $49.90");
+  });
+
+  it("古い応答（上限なし）で残りが 0 のときは上限を出さない（求められない値を作らない）", () => {
+    const { monthly_budget_usd: _omit, ...legacy } = overviewFixture.budget;
+    const c = mount({ ...overviewFixture, budget: { ...legacy, remaining_usd: 0 } });
     expect(item(c, "budget-me")?.textContent).toBe("今月 $11.40");
   });
 

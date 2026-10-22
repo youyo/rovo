@@ -106,6 +106,11 @@ export type HiddenTasksDto = z.infer<typeof HiddenTasksDtoSchema>;
  * `startable` = min(max_concurrent_tasks, concurrency_limit - running_slots)（0 未満は 0）。
  */
 export const BudgetMeDtoSchema = z.strictObject({
+  /**
+   * 月の上限（USD。MCP の budget_status の monthly_budget_usd と同じ値）。gateway は常に返す。
+   * 上限を足す前の gateway の応答でも画面が壊れないよう optional（無いときは画面が逆算に戻る）。
+   */
+  monthly_budget_usd: usdSchema.optional(),
   remaining_usd: usdSchema,
   spent_usd: usdSchema,
   estimated_usd: usdSchema,

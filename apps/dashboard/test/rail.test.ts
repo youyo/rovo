@@ -92,11 +92,19 @@ describe("daySummary（ヘッダの要約「10月22日 12 件 マージ 0 走行
   });
 });
 
-describe("budgetLimit（月の上限。契約には無いので、使った額 + 予約 + 残りから求める）", () => {
-  it("spent + reserved + remaining", () => {
+describe("budgetLimit（月の上限。契約の monthly_budget_usd を使い、無ければ使った額 + 予約 + 残りから求める）", () => {
+  it("monthly_budget_usd があればそれをそのまま使う。残りが 0 でも出る", () => {
+    expect(budgetLimit({ ...overviewFixture.budget, monthly_budget_usd: 50 })).toBe(50);
+    expect(
+      budgetLimit({ ...overviewFixture.budget, monthly_budget_usd: 50, remaining_usd: 0 }),
+    ).toBe(50);
+  });
+
+  it("monthly_budget_usd が無い古い応答では spent + reserved + remaining", () => {
+    const { monthly_budget_usd: _omit, ...legacy } = overviewFixture.budget;
     expect(
       budgetLimit({
-        ...overviewFixture.budget,
+        ...legacy,
         spent_usd: 7.97,
         reserved_usd: 0,
         remaining_usd: 42.03,
@@ -105,6 +113,7 @@ describe("budgetLimit（月の上限。契約には無いので、使った額 +
   });
 
   it("残りが 0（上限を超えて切り上げられている）なら求められないので null", () => {
-    expect(budgetLimit({ ...overviewFixture.budget, remaining_usd: 0 })).toBeNull();
+    const { monthly_budget_usd: _omit, ...legacy } = overviewFixture.budget;
+    expect(budgetLimit({ ...legacy, remaining_usd: 0 })).toBeNull();
   });
 });

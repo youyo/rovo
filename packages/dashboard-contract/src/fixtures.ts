@@ -341,6 +341,88 @@ export const cloudflareSummaryFixture: CloudflareSummaryDto = {
   credit_balance: { ok: false, reason: "unavailable" },
 };
 
+/** 推定の金額つきの Cloudflare の概要（ディスクは取れていないので null で、合計に含まれない） */
+export const cloudflareSummaryWithEstimateFixture: CloudflareSummaryDto = {
+  generated_at: "2026-10-21T06:00:00Z",
+  range: "24h",
+  open_url: null,
+  containers: {
+    ok: true,
+    value: {
+      period: { start: "2026-10-20T06:00:00Z", end: "2026-10-21T06:00:00Z" },
+      running_instances: 2,
+      vcpu_seconds: 4_000,
+      memory_gib_seconds: 250,
+    },
+  },
+  workers: {
+    ok: true,
+    value: {
+      period: { start: "2026-10-20T06:00:00Z", end: "2026-10-21T06:00:00Z" },
+      requests: 150,
+      errors: 3,
+    },
+  },
+  ai_gateway: {
+    ok: true,
+    value: {
+      period: { start: "2026-10-20T06:00:00Z", end: "2026-10-21T06:00:00Z" },
+      requests: 40,
+      cached_requests: 5,
+      errors: 2,
+      cost_usd: 1.25,
+    },
+  },
+  workers_ai: {
+    ok: true,
+    value: {
+      period: { start: "2026-10-20T06:00:00Z", end: "2026-10-21T06:00:00Z" },
+      neurons: 777.5,
+    },
+  },
+  credit_balance: { ok: false, reason: "unavailable" },
+  cost_estimate: {
+    basis: "before_free_tier",
+    pricing_checked_at: "2026-10-22",
+    items: {
+      workers_requests: {
+        quantity: 150,
+        unit: "request",
+        unit_price_usd: 0.0000003,
+        estimated_usd_before_free_tier: 0.000045,
+      },
+      containers_vcpu: {
+        quantity: 4_000,
+        unit: "vcpu_second",
+        unit_price_usd: 0.00002,
+        estimated_usd_before_free_tier: 0.08,
+      },
+      containers_memory: {
+        quantity: 250,
+        unit: "gib_second",
+        unit_price_usd: 0.0000025,
+        estimated_usd_before_free_tier: 0.000625,
+      },
+      containers_disk: {
+        quantity: null,
+        unit: "gb_second",
+        unit_price_usd: 0.00000007,
+        estimated_usd_before_free_tier: null,
+      },
+      workers_ai: {
+        quantity: 777.5,
+        unit: "neuron",
+        unit_price_usd: 0.000011,
+        estimated_usd_before_free_tier: 0.0085525,
+      },
+      ai_gateway: { cost_usd: 1.25 },
+    },
+    total_estimated_usd_before_free_tier: 1.3392225,
+    excluded_items: ["containers_disk"],
+    partial: true,
+  },
+};
+
 export const errorFixtures: ErrorDto[] = [
   { error: "unauthorized" },
   { error: "forbidden" },

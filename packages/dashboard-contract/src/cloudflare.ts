@@ -50,6 +50,80 @@ export const CreditBalanceValueSchema = z.strictObject({
   balance_usd: z.number().min(0).max(1e12),
 });
 
+/** 推定の単位（単価はこの 1 単位あたりの USD） */
+export const CLOUDFLARE_COST_UNITS = [
+  "request",
+  "vcpu_second",
+  "gib_second",
+  "gb_second",
+  "neuron",
+] as const;
+
+/** 推定の対象の項目。合計に含まれなかった項目（`excluded_items`）の名前にも使う */
+export const CLOUDFLARE_COST_ITEMS = [
+  "workers_requests",
+  "containers_vcpu",
+  "containers_memory",
+  "containers_disk",
+  "workers_ai",
+  "ai_gateway",
+] as const;
+
+/**
+ * 推定の 1 項目（公開の単価 × 使用量）。**無料枠・プランに含まれる分を引く前**の金額で、請求額ではない（上限側の推定）。
+ * 使用量が取れない項目は quantity・estimated_usd_before_free_tier とも null。
+ */
+export const CloudflareCostLineSchema = z.strictObject({
+  quantity: z.number().min(0).max(1e15).nullable().describe("使用量（取得できなければ null）"),
+  unit: z.enum(CLOUDFLARE_COST_UNITS).describe("quantity の単位"),
+  unit_price_usd: z.number().min(0).max(1e6).describe("1 単位あたりの単価（USD。公開の単価）"),
+  estimated_usd_before_free_tier: usdSchema
+    .nullable()
+    .describe(
+      "単価 × 使用量。無料枠・プランに含まれる分を引く前の推定（USD）。取得できなければ null",
+    ),
+});
+
+/**
+ * 推定の金額（USD）。Workers のリクエスト・コンテナの vCPU 秒 / メモリ GiB 秒 / ディスク・Workers AI の Neuron の
+ * **単価 × 使用量**と、AI Gateway の費用（`ai_gateway.cost_usd`。Cloudflare の集計値）を足した合計。
+ * 無料枠・プランに含まれる分は引かない。取得できない項目の推定は null で、合計に含まれない（`excluded_items` に出る）。
+ */
+export const CloudflareCostEstimateSchema = z.strictObject({
+  basis: z
+    .literal("before_free_tier")
+    .describe("無料枠・プランに含まれる分を引く前の推定（請求額ではない）"),
+  pricing_checked_at: z.iso
+    .date()
+    .nullable()
+    .describe("単価を公式のページで確認した日（YYYY-MM-DD）。未確認は null"),
+  items: z.strictObject({
+    workers_requests: CloudflareCostLineSchema,
+    containers_vcpu: CloudflareCostLineSchema,
+    containers_memory: CloudflareCostLineSchema,
+    containers_disk: CloudflareCostLineSchema,
+    workers_ai: CloudflareCostLineSchema,
+    ai_gateway: z.strictObject({
+      cost_usd: usdSchema
+        .nullable()
+        .describe(
+          "AI Gateway の費用（Cloudflare の集計値。単価 × 使用量ではない）。取得できなければ null",
+        ),
+    }),
+  }),
+  total_estimated_usd_before_free_tier: usdSchema
+    .nullable()
+    .describe(
+      "取得できた項目（AI Gateway を含む）の合計。無料枠を引く前の推定。含まれない項目は excluded_items。1 つも取れなければ null",
+    ),
+  excluded_items: z
+    .array(z.enum(CLOUDFLARE_COST_ITEMS))
+    .max(CLOUDFLARE_COST_ITEMS.length)
+    .describe("取得できず、合計に含まれていない項目"),
+  partial: z.boolean().describe("excluded_items がある（合計が一部の項目だけ）なら true"),
+});
+export type CloudflareCostEstimateDto = z.infer<typeof CloudflareCostEstimateSchema>;
+
 /** Cloudflare のダッシュボードを開くリンク（https://dash.cloudflare.com/ 配下だけ） */
 export const cloudflareOpenUrlSchema = z
   .string()
@@ -67,5 +141,7 @@ export const CloudflareSummaryDtoSchema = z.strictObject({
   range: cloudflareRangeSchema.optional(),
   workers: item(WorkersValueSchema).optional(),
   workers_ai: item(WorkersAiValueSchema).optional(),
+  // 推定の金額（無料枠を引く前）。optional: 古い gateway・古い応答・fixtures を壊さない
+  cost_estimate: CloudflareCostEstimateSchema.optional(),
 });
 export type CloudflareSummaryDto = z.infer<typeof CloudflareSummaryDtoSchema>;

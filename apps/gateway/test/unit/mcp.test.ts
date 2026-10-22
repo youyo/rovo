@@ -1355,6 +1355,15 @@ describe("監査（authz_denied / auth_failed）", () => {
 // ---- PR のレビューと Ready 化・マージ（D9）----
 
 describe("MCP の instructions と、D9 のツールの説明", () => {
+  it("instructions に effort の使い分けの目安（調べもの・上げる high / xhigh）を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const text = client.getInstructions() ?? "";
+    expect(text).toContain("調べもの");
+    expect(text).toContain("xhigh");
+    expect(text).toContain("effort を上げる");
+  });
+
   it("initialize の応答の instructions に、rovo の使い方の全体の流れを書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);

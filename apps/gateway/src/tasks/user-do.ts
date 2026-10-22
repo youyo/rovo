@@ -28,6 +28,7 @@ import {
   type UserPull,
   VisibleSetTooLargeError,
 } from "../github";
+import { errorMessageForLog } from "../log-error";
 import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
 import { addColumnIfMissing } from "./sql-schema";
 import type { TaskDO } from "./task-do";
@@ -609,10 +610,11 @@ export class UserDO extends DurableObject<Env> {
       const { client, credentials } = this.github();
       states = await credentials.withToken((tok) => client.getPullStates(tok, refs));
     } catch (e) {
-      // メッセージにトークン等が入りうるので、エラー名（と GitHubError のコード）だけを記録する
+      // エラー名（と GitHubError のコード）と、マスクして 200 文字に切ったメッセージを記録する
       console.error(
         "user_do_pull_states_error",
         e instanceof GitHubError ? e.code : e instanceof Error ? e.name : typeof e,
+        errorMessageForLog(e),
       );
       states = refs.map(() => "unknown");
     }

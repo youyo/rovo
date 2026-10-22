@@ -340,8 +340,13 @@ describe("ダッシュボードの読み取り API（2 ユーザーの見え方�
 // COMPLETED + 未マージの PR だけが対象。キャッシュは閲覧者ごと（UserDO）なので、閲覧者を替えて GitHub 側の変化を確かめる。
 describe("ダッシュボードの PR の状態（GitHub から取る）", () => {
   it("overview・詳細に state が出る。GitHub 側で閉じると別の閲覧者には closed。GitHub の GraphQL が 500 でも 200 で state=unknown", async () => {
-    const [a, b, c] = [newUser("dash-pr-a"), newUser("dash-pr-b"), newUser("dash-pr-c")];
-    for (const u of [a, b, c]) await addMember(u);
+    const [a, b, c, d] = [
+      newUser("dash-pr-a"),
+      newUser("dash-pr-b"),
+      newUser("dash-pr-c"),
+      newUser("dash-pr-d"),
+    ];
+    for (const u of [a, b, c, d]) await addMember(u);
     await admin.setInstallation(INSTALLATION_ID, [WIDGETS]);
     // 契約の PR の URL は github.com だけ。偽 GitHub の PR の URL の host を合わせる
     await admin.app("setPrHost", "github.com");
@@ -379,6 +384,7 @@ describe("ダッシュボードの PR の状態（GitHub から取る）", () =>
       a: await dashboardLogin(a),
       b: await dashboardLogin(b),
       c: await dashboardLogin(c),
+      d: await dashboardLogin(d),
     };
 
     // 索引に COMPLETED と PR が入るまで待つ
@@ -407,6 +413,11 @@ describe("ダッシュボードの PR の状態（GitHub から取る）", () =>
     await admin.app("closePull", "acme/widgets", first?.pr?.number);
     expect((await find(cookies.b))?.pr).toMatchObject({ merged: false, state: "closed" });
     expect((await find(cookies.a))?.pr?.state).toBe("open");
+
+    // 同じ閲覧者の同時の閲覧（自動更新・複数のタブ・詳細と一覧）でも、どれも state が出る（UserDO の中で
+    // 別のリクエストの I/O を待ち合わせても TypeError にならない）
+    const burst = await Promise.all(Array.from({ length: 8 }, () => find(cookies.d)));
+    expect(burst.map((t) => t?.pr?.state)).toEqual(Array(8).fill("closed"));
 
     // GitHub の GraphQL が 500: C（キャッシュなし）にも 200 で、state=unknown。画面の他の部分（tasks・budget）は壊れない
     await admin.app("setFault", { pattern: "^POST /graphql$", status: 500 });

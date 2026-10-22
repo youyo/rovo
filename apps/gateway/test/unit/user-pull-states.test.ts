@@ -1,5 +1,6 @@
 import { runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { UserDO } from "../../src/tasks/user-do";
 import {
   MAX_PR_STATE_REFS,
   PR_STATE_FAILURE_TTL_MS,
@@ -269,5 +270,39 @@ describe("dashboardPullStates: 権限", () => {
         .map((r) => r.name),
     );
     expect(tables.filter((n) => /pull|pr_state/i.test(n))).toEqual([]);
+  });
+});
+
+describe("dashboardPullStates: 失敗のログ", () => {
+  it("取得中の例外は、名前とマスクしたメッセージ（200 文字まで）をログに残す。トークンは出さず、戻りは unknown", async () => {
+    const token = ["gh", "u", "_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"].join("");
+    const { uid, stub } = await setup();
+    // 許可ルールの確認（team）には影響させず、GraphQL を呼ぶ getPullStates だけを TypeError にする
+    await runInDurableObject(stub, (instance: unknown) => {
+      const i = instance as { github: () => { client: { getPullStates: () => never } } };
+      const original = i.github.bind(i);
+      i.github = () => {
+        const g = original();
+        g.client.getPullStates = () => {
+          throw new TypeError(`boom ${token} ${"y".repeat(500)}`);
+        };
+        return g;
+      };
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // DO の中の console を見るため、呼び出しも DO の中（同じ実行環境）で行う
+      const out = await runInDurableObject(stub, (instance: UserDO) =>
+        instance.dashboardPullStates(uid, [ref(1)]),
+      );
+      expect(out).toEqual(["unknown"]);
+      const call = spy.mock.calls.find((c) => c[0] === "user_do_pull_states_error");
+      expect(call?.[1]).toBe("TypeError");
+      expect(String(call?.[2])).toMatch(/^boom /);
+      expect(String(call?.[2]).length).toBeLessThanOrEqual(200);
+      expect(JSON.stringify(spy.mock.calls)).not.toContain(token);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

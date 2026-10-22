@@ -7,7 +7,7 @@ import {
   TaskDetailDtoSchema,
   TaskEventsPageDtoSchema,
 } from "@rovo/dashboard-contract";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readApiTuning, snapshotToVisibleTask } from "../../src/dashboard/api";
 import { handleDashboard } from "../../src/dashboard/serve";
 import { SESSION_COOKIE, sealSession } from "../../src/dashboard/session";
@@ -1016,6 +1016,32 @@ describe("PR の状態（GitHub から閲覧者のトークンで取る）", () 
       const dto = OverviewDtoSchema.parse(r.json());
       expect(prOf(dto, t.id)).toBe("unknown");
       expect(prOf(dto, m.id)).toBe("merged");
+    }
+  });
+
+  it("UserDO の例外は、名前とマスクしたメッセージ（200 文字まで）をログに残す。トークンは出さない", async () => {
+    const token = ["gh", "u", "_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"].join("");
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PR(43, "acme/log") } },
+    );
+    v.pullStates = () => {
+      throw new TypeError(
+        `The RPC receiver does not implement the method ${token} ${"x".repeat(500)}`,
+      );
+    };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await api(v, overviewPath())).status).toBe(200);
+      const call = spy.mock.calls.find((c) => c[0] === "dashboard_pr_state_error");
+      expect(call?.[1]).toBe("TypeError");
+      expect(String(call?.[2])).toContain("The RPC receiver does not implement the method");
+      expect(String(call?.[2]).length).toBeLessThanOrEqual(200);
+      expect(JSON.stringify(spy.mock.calls)).not.toContain(token);
+    } finally {
+      spy.mockRestore();
     }
   });
 

@@ -16,6 +16,7 @@ import {
 } from "@rovo/dashboard-contract";
 import type { z } from "zod";
 import { DIRECTORY_NAME, type TaskIndexRow, type TaskIndexSnapshot } from "../directory/types";
+import { errorMessageForLog } from "../log-error";
 import type { DashboardDetailResult } from "../tasks/task-do";
 import { isTaskId } from "../tasks/ulid";
 import { type DashboardSession, requireSession } from "./auth";
@@ -182,8 +183,12 @@ async function attachPrStates(env: Env, uid: number, tasks: VisibleTaskDto[]): P
       pr.state = byKey.get(keyOf(t.repository, pr.number)) ?? pr.state;
     }
   } catch (e) {
-    // 内容（トークンが入りうる）は出さず、名前だけを記録する
-    console.error("dashboard_pr_state_error", e instanceof Error ? e.name : typeof e);
+    // 名前と、マスクして 200 文字に切ったメッセージを記録する（トークンが入りうるので、そのままは出さない）
+    console.error(
+      "dashboard_pr_state_error",
+      e instanceof Error ? e.name : typeof e,
+      errorMessageForLog(e),
+    );
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }

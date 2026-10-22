@@ -13,6 +13,7 @@ import { type AuditFields, hostOfUrl, normalizeStructuredEvent } from "@rovo/aud
 import {
   computeCostUsd,
   type Effort,
+  isEffort,
   isSandboxPromotionReason,
   isSandboxPromotionTrigger,
   isSelectableSandboxInstance,
@@ -22,7 +23,13 @@ import {
 } from "@rovo/models";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
-import { agentModels, aiGatewayRejection, defaultModel, modelEffort } from "./agent/config";
+import {
+  agentModels,
+  aiGatewayRejection,
+  defaultModel,
+  modelEffort,
+  reasoningFor,
+} from "./agent/config";
 import { getAgentTestOverrides } from "./agent/deps";
 import { createModelAccess, sessionModelRef } from "./agent/model-access";
 import {
@@ -459,10 +466,12 @@ export class AgentDO extends DurableObject<Env> {
     return modelEffort(this.env as AgentEnv, rovoModelId, this.overrides().modelEfforts);
   }
 
-  /** Pi に渡す思考レベル（options.reasoning）。off・不明は undefined（渡さない = 思考オフ）。 */
-  private reasoningOf(rovoModelId: string): ThinkingLevel | undefined {
-    const effort = this.effortOf(rovoModelId);
-    return effort === undefined || effort === "off" ? undefined : effort;
+  /**
+   * Pi に渡す思考レベル（options.reasoning）。タスクの spec.effort（task_start の effort）があればそれ、無ければモデルごとの既定
+   * （MODEL_EFFORTS）。off・不明は undefined（渡さない = 思考オフ）。consult は spec が無い（specEffort を渡さない）ので、モデルごとの既定のまま。
+   */
+  private reasoningOf(rovoModelId: string, specEffort?: Effort): ThinkingLevel | undefined {
+    return reasoningFor(specEffort, this.effortOf(rovoModelId));
   }
 
   /**
@@ -1145,7 +1154,7 @@ export class AgentDO extends DurableObject<Env> {
     });
 
     // guardProvider が thinking の補正と、maxTokens の上限・metadata の付与を行う
-    // 思考レベルはモデルごとに固定（req.model の effort。off なら渡さない）。思考のトークンは出力として課金され、
+    // consult の思考レベルはモデルごとの既定のまま（req.model の effort。タスクごとの上書きは無い。off なら渡さない）。思考のトークンは出力として課金され、
     // maxTokens（予約額から計算した上限）の中に収まる
     const reasoning = this.reasoningOf(req.model);
     const guarded = guardProvider(access.provider, async () => ({
@@ -1234,6 +1243,8 @@ export class AgentDO extends DurableObject<Env> {
     ) {
       return "invalid_spec: budgetPolicy";
     }
+    // 思考レベルの上書きは、既知のレベル（EFFORT_LEVELS）だけ。知らない値を黙って「既定」にせず拒否する（fail-closed）
+    if (spec.effort !== undefined && !isEffort(spec.effort)) return "invalid_spec: effort";
     const gw = aiGatewayRejection(this.env as AgentEnv);
     if (gw) return gw;
     // start の時点では spec はまだ保存されていないので、届いた spec.model で判定する
@@ -2312,8 +2323,11 @@ export class AgentDO extends DurableObject<Env> {
     this.store.setMeta("inflight_context_bytes", contextBytes);
     // 呼び出し前の見積額を「進行中」として永続化する（abort を待ち切れずに確定するとき、これを計上する）
     this.store.setMeta("inflight", { baseCostUsd: spent.costUsd, estimateUsd: estimate });
-    // 思考レベルはモデルごとに固定。思考のトークンは出力として課金され、maxTokens の中に収まる（上の estimate が上限）
-    const reasoning = this.reasoningOf(spec.model ?? defaultModel(this.env as AgentEnv));
+    // 思考レベルは spec.effort（task_start の上書き）、無ければモデルごとの既定。思考のトークンは出力として課金され、maxTokens の中に収まる（上の estimate が上限）
+    const reasoning = this.reasoningOf(
+      spec.model ?? defaultModel(this.env as AgentEnv),
+      spec.effort,
+    );
     return {
       maxTokens: allowed,
       metadata: { userId: spec.userId, taskId: spec.taskId },

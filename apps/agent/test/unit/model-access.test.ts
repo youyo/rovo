@@ -1,5 +1,7 @@
 import { normalizeContext, Type } from "@earendil-works/pi-ai";
+import { type Effort, isEffort } from "@rovo/models";
 import { describe, expect, it } from "vitest";
+import { modelEffort, reasoningFor } from "../../src/agent/config";
 import { createModelAccess, sessionModelRef } from "../../src/agent/model-access";
 import { guardProvider } from "../../src/pi/guard-provider";
 
@@ -153,5 +155,55 @@ describe("createModelAccess: Workers AI のモデル（AI バインディング�
 
   it("AI バインディングが無ければエラー", () => {
     expect(() => createModelAccess({})).toThrow("AI binding is not configured");
+  });
+});
+
+// タスクの spec.effort（task_start の effort）を reasoningFor で Pi の reasoning にし、guardProvider 越しに Workers AI の
+// reasoning_effort として送るまで。gpt-oss-120b の既定は low（EFFORTS の初期値）。
+describe("spec.effort（タスクごとの思考レベル）→ reasoning → Workers AI の reasoning_effort", () => {
+  /** そのタスクの spec.effort（無ければ undefined）で 1 回呼び、AI.run に渡った input を返す */
+  async function runWith(specEffort: Effort | undefined, modelEfforts?: string) {
+    const { binding, calls } = fakeAI(toolCallResponse);
+    const access = createModelAccess({ AI: binding as never, AI_GATEWAY_ID: "gw-1" });
+    const reasoning = reasoningFor(specEffort, modelEffort({}, OSS, modelEfforts));
+    const guarded = guardProvider(access.provider, async () => ({
+      maxTokens: 300,
+      metadata: { taskId: "t1" },
+      ...(reasoning !== undefined ? { reasoning } : {}),
+    }));
+    await guarded.streamSimple(access.model(OSS), context(), {}).result();
+    return calls[0]?.input ?? {};
+  }
+
+  it("spec.effort があれば、モデルの既定（low）より優先して reasoning_effort に渡る", async () => {
+    for (const effort of ["medium", "high"] as const) {
+      expect((await runWith(effort)).reasoning_effort, effort).toBe(effort);
+    }
+  });
+
+  it("MODEL_EFFORTS の上書きよりも spec.effort が優先する", async () => {
+    expect((await runWith("high", `${OSS}=medium`)).reasoning_effort).toBe("high");
+    expect((await runWith(undefined, `${OSS}=medium`)).reasoning_effort).toBe("medium");
+  });
+
+  it("spec.effort が off なら reasoning を渡さない（reasoning_effort も送らない）。既定が low でも", async () => {
+    expect(reasoningFor("off", "low")).toBeUndefined();
+    expect(await runWith("off")).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("spec.effort が無ければ従来どおりモデルの既定（low）。既定が off なら渡さない", async () => {
+    expect(reasoningFor(undefined, "low")).toBe("low");
+    expect((await runWith(undefined)).reasoning_effort).toBe("low");
+    expect(reasoningFor(undefined, "off")).toBeUndefined();
+    expect(reasoningFor(undefined, undefined)).toBeUndefined();
+  });
+
+  it("start の検査（isEffort）: 既知のレベルだけ通し、知らない値は拒否する", () => {
+    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      expect(isEffort(level), level).toBe(true);
+    }
+    for (const bad of ["turbo", "", "HIGH", "none", 3, null, ["high"]]) {
+      expect(isEffort(bad), JSON.stringify(bad)).toBe(false);
+    }
   });
 });

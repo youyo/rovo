@@ -8,7 +8,7 @@ import {
   type SelectDeps,
   selectModel,
 } from "../model-selection";
-import { autoCandidates, type ModelEnv, resolveModel } from "../models";
+import { autoCandidates, effortRejection, type ModelEnv, resolveModel } from "../models";
 import type { ProviderKeysDeps } from "../provider-keys";
 import { maxConcurrentTasks } from "./budget";
 import { BUDGET_EXTENSION_KIND } from "./budget-question";
@@ -399,6 +399,12 @@ export function createTaskService(
               selection: { mode: "explicit", chosen: model.model, reason: "explicit" },
             }
           : await chooseModel(input, model.model, principal.githubUserId);
+      // 思考レベルの上書きは、最終のモデル（指定したモデル、または rovo が選んだモデル）が受け付けるものだけ。予約より前に拒否する
+      // （予約のあとで拒否すると、idempotency_key と同時実行の枠が使われたままになる）
+      if (input.effort !== undefined) {
+        const rejection = effortRejection(choice.model, input.effort);
+        if (rejection !== undefined) return fail("invalid_input", rejection);
+      }
       // 省略時はサーバーで生成する（再試行の重複排除は保証しない）。':' を含むので利用者のキーと衝突しない。
       const requestKey = key ?? `auto:${ulid()}`;
 
@@ -435,7 +441,7 @@ export function createTaskService(
           case "conflict":
             return fail("conflict", "idempotency_key was already used with different input");
           default:
-            return fail("invalid_input", "invalid task input");
+            return fail("invalid_input", created.message ?? "invalid task input");
         }
       }
       // 子エージェントへの start を 1 回試みる。失敗・応答喪失でも TaskDO の alarm が再送するので、

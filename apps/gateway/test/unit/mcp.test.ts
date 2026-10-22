@@ -1830,6 +1830,117 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
   });
 });
 
+describe("task_start の effort（タスクごとの思考レベルの上書き）", () => {
+  const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const list = async (client: Client) => (await client.listTools()).tools;
+
+  it("task_start の入力に effort（省略可。off / minimal / low / medium / high / xhigh / max）がある", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const start = (await list(client)).find((t) => t.name === "task_start");
+    const props = start?.inputSchema.properties as Record<string, { enum?: string[] }>;
+    expect(props.effort).toBeDefined();
+    expect(props.effort?.enum).toEqual(LEVELS);
+    expect(start?.inputSchema.required ?? []).not.toContain("effort");
+    // 説明: 上書きできる。対応しないレベルは invalid_input
+    expect(start?.description).toContain("effort");
+    expect(start?.description).toContain("invalid_input");
+    await client.close();
+  });
+
+  it("effort を渡すと、task_status・task_result の effort に出る（モデルの既定より優先）。AgentDO への spec にも入る", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const started = body(
+      await client.callTool({
+        name: "task_start",
+        arguments: startArgs("t", { model: "anthropic/claude-haiku-5-5", effort: "xhigh" }),
+      }),
+    );
+    const taskId = String(started.task_id);
+    const status = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+    );
+    expect(status.model).toBe("anthropic/claude-haiku-5-5");
+    expect(status.effort).toBe("xhigh"); // haiku の MODEL_EFFORTS（minimal）ではなく指定の値
+    expect((await fakeAgent(taskId).calls()).specs[0]?.effort).toBe("xhigh");
+    await fakeAgent(taskId).setPhase("completed");
+    await taskStub(taskId).advance();
+    const result = body(
+      await client.callTool({ name: "task_result", arguments: { task_id: taskId } }),
+    );
+    expect(result.effort).toBe("xhigh");
+    await client.close();
+  });
+
+  it("未指定は従来どおり MODEL_EFFORTS の値（haiku = Unit の上書き minimal）", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const started = body(
+      await client.callTool({
+        name: "task_start",
+        arguments: startArgs("t", { model: "anthropic/claude-haiku-5-5" }),
+      }),
+    );
+    const status = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: started.task_id } }),
+    );
+    expect(status.effort).toBe("minimal");
+    await client.close();
+  });
+
+  it("そのモデルが対応しないレベルは invalid_input（message に使えるレベル）。知らない値も invalid_input", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    // gpt-6-sol は minimal を受け付けない
+    const ng = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { model: "openai/gpt-6-sol", effort: "minimal" }),
+    });
+    expect(ng.isError).toBe(true);
+    expect(body(ng)).toMatchObject({ code: "invalid_input" });
+    expect(String(body(ng).message)).toContain("off, low, medium, high, xhigh, max");
+    const unknown = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { effort: "turbo" }),
+    });
+    expect(unknown.isError).toBe(true);
+    expect(body(unknown)).toMatchObject({ code: "invalid_input" });
+    // 失敗では何も予約しない（そのまま同じ利用者が始められる）
+    const ok = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { model: "openai/gpt-6-sol", effort: "low" }),
+    });
+    expect(ok.isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("説明文から「タスクごとには変えられない」が消え、既定はモデルごと・task_start の effort で上書きできると書いてある", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tools = await list(client);
+    const texts: [string, string][] = [
+      ["instructions", client.getInstructions() ?? ""],
+      ...["task_start", "models_list", "task_status", "task_result"].map(
+        (name): [string, string] => [name, tools.find((t) => t.name === name)?.description ?? ""],
+      ),
+    ];
+    for (const [name, text] of texts) {
+      expect(text, name).not.toContain("タスクごとには変えられない");
+      expect(text, name).toContain("effort");
+    }
+    for (const [name, text] of texts) {
+      if (name === "task_start") continue;
+      expect(text, name).toContain("task_start の effort で上書きできる");
+    }
+    for (const [name, text] of texts) {
+      if (name === "task_status" || name === "task_result") continue;
+      expect(text, name).toContain("invalid_input");
+    }
+    await client.close();
+  });
+});
+
 describe("D10: AI への伝え方（instructions と説明）", () => {
   it("instructions に models_list・budget_status・consult の使い方と、キャッシュのコツ、助言であることを書く", async () => {
     const u = await user("alice");

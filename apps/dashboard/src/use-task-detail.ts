@@ -37,7 +37,7 @@ export const TERMINAL_CHASE_MS = 30_000;
 /** 1 回の更新で続けて取るページ数の上限（200 件ずつ） */
 const MAX_CATCH_UP_PAGES = 5;
 /** events の 1 ページの上限（契約の EVENTS_PER_PAGE と同じ。契約のランタイムは画面に入れない） */
-const EVENTS_PER_PAGE = 200;
+export const EVENTS_PER_PAGE = 200;
 
 /**
  * タスクの詳細と events を取り、自動更新する（D15）。
@@ -171,6 +171,12 @@ export function useTaskDetail(id: string, autoRefresh: boolean, deps: TaskDetail
       const oldest = data.events[0]?.seq;
       if (oldest === undefined) return patch({ loadingOlder: false, olderError: false });
       const r = await fetchTaskEvents(id, { before: oldest }, depsRef.current.fetchImpl);
+      if (r.kind === "unauthorized" || r.kind === "not_found") {
+        // ポーリングと同じ。401 はログインへ、404 は 404 画面へ（止める）
+        pollerRef.current?.stop();
+        setState({ phase: r.kind });
+        return;
+      }
       if (r.kind !== "ok") return patch({ loadingOlder: false, olderError: true });
       data.events = mergeEvents(data.events, r.data.events);
       data.hasOlder = r.data.has_older;

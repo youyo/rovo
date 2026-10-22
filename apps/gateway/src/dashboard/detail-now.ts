@@ -190,13 +190,27 @@ function looksLikeJson(v: string): boolean {
 
 /** 場所の 1 区切りに許す文字（素直なディレクトリ名だけ。空白・引用符・変数・シェルの記号は許さない） */
 const DIR_SEGMENT = /^[\p{L}\p{N}_.@+-]+$/u;
-const CD_PREFIX = /^cd\s+(\/workspace(?:\/\S*)?)\s+&&\s+(\S.*)$/;
+const CD_PREFIX = /^cd\s+(\S+)\s+&&\s+(\S.*)$/;
+const WORKSPACE = "/workspace";
 
-/** /workspace からの相対パス。/workspace 自身は ""。素直なパスでない（.. や // を含む・変な文字がある）ものは undefined */
-function relativeDir(abs: string): string | undefined {
-  const rest = abs.slice("/workspace".length);
+/**
+ * cd の行き先を /workspace からの相対パスにする。/workspace 自身・`.`・`./` は ""。
+ * `/workspace/...` の絶対パスと、`/` `~` `-` `$` で始まらない相対パス（/workspace からの相対として読む。先頭の `./` は 1 つだけ外す）を読む。
+ * 素直なパスでない（.. や // を含む・変な文字がある・/workspace の外・~ や $HOME や - など）ものは undefined
+ */
+function relativeDir(path: string): string | undefined {
+  let rest: string;
+  if (path === WORKSPACE || path.startsWith(`${WORKSPACE}/`)) {
+    rest = path.slice(WORKSPACE.length + 1);
+  } else if (/^[/~$-]/.test(path)) {
+    return undefined;
+  } else if (path === ".") {
+    return "";
+  } else {
+    rest = path.startsWith("./") ? path.slice(2) : path;
+  }
   if (rest === "") return "";
-  const parts = rest.slice(1).split("/");
+  const parts = rest.split("/");
   if (parts.at(-1) === "") parts.pop();
   for (const p of parts) {
     if (p === "." || p === ".." || !DIR_SEGMENT.test(p)) return undefined;
@@ -205,9 +219,10 @@ function relativeDir(abs: string): string | undefined {
 }
 
 /**
- * コマンドの 1 行（マスク前）。先頭の `cd /workspace/<相対パス> && ` を外し、場所を「<相対パス> で 」と先頭に添える
- * （prompt はその次、コマンドの直前）。`cd /workspace && ` は前置きだけ外す（場所なし）。ほかの形（.. を含む・
- * /workspace の外・引用符つきなど）は触らない。dashboard の steps.ts と同じ見せ方。
+ * コマンドの 1 行（マスク前）。先頭の `cd /workspace/<相対パス> && ` と `cd <相対パス> && `（/workspace からの相対。
+ * `./` 付きも）を外し、場所を「<相対パス> で 」と先頭に添える（prompt はその次、コマンドの直前）。
+ * `cd /workspace && ` と `cd . && ` は前置きだけ外す（場所なし）。ほかの形（.. を含む・/workspace の外・
+ * ~ や $HOME や - ・引用符つきなど）は触らない。dashboard の steps.ts と同じ見せ方。
  */
 function commandLine(raw: string, prompt: string): string {
   const text = sanitizeText(raw, { singleLine: true }).trim();

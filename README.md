@@ -141,7 +141,7 @@ mise run lint         # Biome + 型検査
 
 | タスク | 内容 |
 |---|---|
-| `mise run test:unit` | gateway・agent・web の Unit。vitest + `@cloudflare/vitest-plugin`（workerd 上で実行）。個別は `test:unit:gateway` / `test:unit:agent` / `test:unit:web`。agent の Unit ではコンテナが使えないので、`SandboxPort` を fake にする。web の Unit は `WebSearchSource` / fetch / `AI.run` をすべて fake にする（実アカウントは呼ばない）。Unit では `WEB` の service binding を差し替えている（gateway は env に fake を渡し、agent は `AgentTestOverrides.web`） |
+| `mise run test:unit` | gateway・agent・web の Unit。vitest + `@cloudflare/vitest-plugin`（workerd 上で実行）。個別は `test:unit:gateway` / `test:unit:agent` / `test:unit:web`。agent の push 前の秘密の検査は、一時ディレクトリの本物の git でも確かめる（`test:unit:agent-git`。workerd では child_process が使えないので node 環境の `apps/agent/vitest.node.config.ts`）。agent の Unit ではコンテナが使えないので、`SandboxPort` を fake にする。web の Unit は `WebSearchSource` / fetch / `AI.run` をすべて fake にする（実アカウントは呼ばない）。Unit では `WEB` の service binding を差し替えている（gateway は env に fake を渡し、agent は `AgentTestOverrides.web`） |
 | `mise run test:fake-github` | 偽 GitHub サーバーと GitHub クライアントの結合テスト（Node） |
 | `mise run test:e2e` | `test:e2e:gateway` + `test:e2e:docker` |
 | `mise run test:e2e:gateway` | `wrangler dev` で実 Worker と偽 GitHub を起動し、MCP SDK の Client から DCR → `/authorize` → 偽 GitHub → `/callback` → token(PKCE) → 4 つのツールまで通す |

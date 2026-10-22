@@ -27,11 +27,11 @@
 
 #### 書体の同梱
 
-- 取得は npm の `@fontsource`（`@fontsource/familjen-grotesk`・`@fontsource/zen-kaku-gothic-new`・`@fontsource/jetbrains-mono`）。`apps/dashboard/src/main.tsx` が CSS を読み、ビルドで `dist/assets/` に出る。外部の CDN は使わない（CSP は `font-src 'self'`）。ライセンスは SIL OFL 1.1 で、全文を `dist/assets/licenses/` に同梱する。
+- 取得は npm の `@fontsource`（`@fontsource/m-plus-1-code` の 400 と 700。2026-10-22 の改装で、Familjen Grotesk・Zen Kaku Gothic New・JetBrains Mono から置き換えた）。`apps/dashboard/src/main.tsx` が CSS を読み、ビルドで `dist/assets/` に出る。外部の CDN は使わない（CSP は `font-src 'self'`）。ライセンスは SIL OFL 1.1 で、全文を `dist/assets/licenses/` に同梱する。
 - Vite のプラグイン（`vite.config.ts`）で、woff2 だけにし（woff の予備は外す）、キリル・ギリシャ・ベトナム語の分割は同梱しない。unicode-range の分割は残し、ブラウザは使う文字を含む分割だけを読む。`assetsInlineLimit: 0` で `data:` URI に埋め込まない。
 - 容量の上限は 2 つに分けた。書体（woff2 と `@font-face`）は別枠で 6 MB、書体以外は 400 KB のまま据え置く（`scripts/dashboard-dist.test.mjs`）。和文が大きいため、1 つの枠にすると、アプリ本体の肥大に気づけなくなる。
 
-**デザインの正は、承認済みの見本**（https://claude.ai/artifact/RPWqojr9ySJ7DvdBaqZG3m の `Main.dc.html` = 一覧、`Task.dc.html` = 詳細）。実装はこの見本に合わせる。この文書の「画面」の節は、見本から読み取れる要点だけを書く。
+**デザインの正は、承認済みの見本**。2026-10-22 の改装で「制御卓」（https://claude.ai/artifact/MfPBzrNbEPWcxpJhvXHSEJ の `Console.dc.html`。配色はライト `paper`・ダーク `indigo`）に置き換えた。以前の見本（https://claude.ai/artifact/RPWqojr9ySJ7DvdBaqZG3m）は使わない。この文書の「画面」の節は、見本から読み取れる要点だけを書く。
 
 ## 目的と要件（承認済み）
 
@@ -42,11 +42,11 @@
 
 ## 画面（見本から）
 
-- 色: 地 `#EEF1F3`、インク `#17212B`、補助 `#3B4652` / `#5B6773`、線 `#C9D1D8` / `#DCE2E7`、面 `#DDE3E8`。合図はコバルト `#2840C4`（マージ済み・いま）とオレンジ `#C8661A`（失敗）だけ。出力の枠だけ暗い面 `#17212B` に `#DCE2E7`。
-- 文字: Familjen Grotesk（欧文・数字、tnum）+ Zen Kaku Gothic New（和文）。出力の枠だけ JetBrains Mono。
-- 一覧: 主役は「今日のタイムライン」（人ごとのレーン、開始時刻に棒、高さ＝費用、塗り＝マージ済み・中空＝レビュー待ち・オレンジ中空＝失敗、灰の点＝consult、破線＝いま）。下に表（状態の印は図と同じ形）。右に今月の予算（あと何件始められるか）・モデル別の費用・Cloudflare（開くリンク）。「全員 / 自分」の切り替え。
-- 詳細: 状態（青い点の脈動は `prefers-reduced-motion` で止める）、題名、「いまは X を実行中」、準備→実行→検証→完了の帯、進み具合（人の言葉の動詞で時系列。いまの手順は青）、出力の末尾（秘密を伏せた旨）、費用、設定、Draft PR。自動更新のチェック。
-- 避けるもの: SaaS カード・影・グラデーション、クリーム＋テラコッタ、黒＋ネオン、全部大文字のラベル、等幅のラベル、「·」区切り、矢印付きリンク、**色だけの区別**（状態は形・文字でも区別する。アクセシビリティの受入条件にする）。
+- 骨格（一覧と詳細で同じ）: 上にヘッダ（全員 / 自分、その日の要約）と今日のタイムラインの細い帯。左にタスクのレール（1 行 1 タスク、状態の印 ・ – ✕ ● ? と走行中の脈動）。中央にコンソール。下に tmux 風のステータスバー（今月の予算・全員の実績・モデル別・Cloudflare・クレジット）、「内訳」で詳しい表の引き出しを開く。広い画面はビューポートの高さいっぱいで、スクロールするのはレールとコンソールの中だけ。720px 以下は縦に積み、ページ全体がスクロールする。
+- コンソール: 見出し（題名・モデルと選ばれ方・所要・費用・Draft PR）→ 準備→実行→検証→完了の帯（止まった段階は失敗色）→ 画面（構造化イベントを時刻つきの行で、コマンドは `$ コマンド`、実行中は `output.running` の経過時間と点滅カーソル。`prefers-reduced-motion` では点滅しない）。新しい行で末尾へ追従し、利用者が上にスクロールしている間は追従しない。一覧のコンソールは、最新の走行中のタスク（なければ最新のタスク）。
+- 色: `:root` のトークンだけで持ち、`prefers-color-scheme` で切り替える。ライト `paper`（地 `#E3E6E9`、墨 `#1E2932`、藍 `#2D4BA0`、失敗 `#B83A1E`）、ダーク `indigo`（地 `#1B2238`、文字 `#DCE4EE`、白緑 `#7FD6B5`、失敗 `#FF8E72`）。文字のコントラストは全組み合わせで 4.5:1 以上（テストで計算して固定）。
+- 文字: 全体を M PLUS 1 Code（和文が半角 2 文字分の等幅で、コンソールの桁がずれない）。
+- 避けるもの: SaaS カード・影・グラデーション、クリーム＋テラコッタ、黒＋ネオン、全部大文字のラベル、「·」区切り、矢印付きリンク、**色だけの区別**（状態は形・文字でも区別する。アクセシビリティの受入条件にする）。
 
 ## 現状（調査で分かったこと）
 

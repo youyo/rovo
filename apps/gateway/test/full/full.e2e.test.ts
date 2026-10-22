@@ -773,11 +773,17 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     const client = await newClient("xavier");
     const tokensBefore = tokensNow();
     // 1 回目の呼び出しで $10（タスクの予算）を使い切る。次のモデル呼び出しは、呼び出し前のハードキャップで止まる
-    const { taskId } = await startTask(client, "x-budget", [
-      { ...tool("read_file", { path: "calc.js" }), usage: { input: 10_000_000 } },
-      tool("read_file", { path: "calc.js" }),
-      report("到達しない"),
-    ]);
+    // （budget_policy の既定は ask で延長の質問になるので、止まる経路を確かめるため stop を指定する）
+    const { taskId } = await startTask(
+      client,
+      "x-budget",
+      [
+        { ...tool("read_file", { path: "calc.js" }), usage: { input: 10_000_000 } },
+        tool("read_file", { path: "calc.js" }),
+        report("到達しない"),
+      ],
+      { budget_policy: "stop" },
+    );
     const { status, events } = await collect(client, taskId);
     expect(status, JSON.stringify(events)).toBe("BUDGET_EXCEEDED");
     expect(

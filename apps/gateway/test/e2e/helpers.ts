@@ -164,6 +164,23 @@ export async function finishAgent(
 }
 
 /**
+ * 偽の子エージェントにイベントを 1 つ積ませる（ENVIRONMENT=test のときだけある /__test/agent/emit）。
+ * 構造化イベント（command / edit / commit / web）の台本に使う。秘密入りの値も、そのまま（マスクせずに）送れる。
+ */
+export async function emitAgentEvent(
+  taskId: string,
+  type: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/__test/agent/emit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId, type, data }),
+  });
+  if (!res.ok) throw new Error(`/__test/agent/emit failed: ${res.status}`);
+}
+
+/**
  * consult の台本を預ける（ENVIRONMENT=test のときだけある /__test/agent/set-script）。key は consult の最初の user メッセージ。
  * 偽の AgentDO が text と usage をそのまま返し、費用はキャッシュ込みの scripted の単価（$1/100万、cacheRead $0.1、cacheWrite $1.25）で計算する。
  */

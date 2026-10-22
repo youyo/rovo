@@ -12,6 +12,11 @@ export interface ToolContext {
   branch?: string;
   /** git_commit の push の結果（best-effort。失敗しても git_commit は失敗にならない）。 */
   onPush?: (result: PushResult) => Promise<void>;
+  /**
+   * 構造化イベント（command / edit / commit。D14）の出口。ツールが成功したときに、許可した項目だけを渡す。
+   * 渡す前にツール側で正規化（マスク・整形・上限）する。ここが例外を投げてもツールの結果には影響させない。
+   */
+  onEvent?: (type: string, data: Record<string, unknown>) => void;
 }
 
 export type PushResult = { ok: true; sha: string } | { ok: false; sha: string; error: string };

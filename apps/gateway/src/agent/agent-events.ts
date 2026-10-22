@@ -1,4 +1,4 @@
-import { SANDBOX_OPS } from "@rovo/audit";
+import { normalizeStructuredEvent, SANDBOX_OPS, type StructuredEvent } from "@rovo/audit";
 import { isSandboxPromotionReason } from "@rovo/models";
 import {
   sandboxInstanceName,
@@ -330,7 +330,39 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
       if (payload !== undefined) return { kind: "event", type: "audit", payload };
       return { kind: "event", type: "agent_event", payload: { agent_type: "audit" } };
     }
+    case "command":
+    case "edit":
+    case "commit":
+    case "web": {
+      // 構造化イベント（D14）。agent と同じ正規化（ANSI・制御文字の除去 → 秘密のマスク → 型ごとの上限）を、取り込み時にもう一度かける。
+      // 許可リストに無い項目は落ち、必須の項目が不正なら中身を出さず既存の縮退（agent_event）に落ちる
+      const s = normalizeStructuredEvent(e.type, d);
+      if (s === undefined) {
+        return { kind: "event", type: "agent_event", payload: { agent_type: e.type } };
+      }
+      return { kind: "event", type: s.type, payload: structuredPayload(s) };
+    }
     default:
       return { kind: "event", type: "agent_event", payload: { agent_type: text(e.type, 100) } };
+  }
+}
+
+/** 構造化イベントを、保存・公開用の snake_case の平らな payload に写す（値はプリミティブだけ。無い項目は付けない） */
+function structuredPayload(s: StructuredEvent): PublicPayload {
+  switch (s.type) {
+    case "command":
+      return {
+        command: s.command,
+        ...(s.cwd !== undefined ? { cwd: s.cwd } : {}),
+        exit_code: s.exitCode,
+        ...(s.durationMs !== undefined ? { duration_ms: s.durationMs } : {}),
+        ...(s.outputTail !== undefined ? { output_tail: s.outputTail } : {}),
+      };
+    case "edit":
+      return { path: s.path, op: s.op, added: s.added, removed: s.removed };
+    case "commit":
+      return { message: s.message, sha: s.sha, files: s.files };
+    case "web":
+      return { kind: s.kind, ...(s.host !== undefined ? { host: s.host } : {}) };
   }
 }

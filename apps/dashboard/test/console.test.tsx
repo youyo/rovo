@@ -182,6 +182,35 @@ describe("画面（screen）", () => {
     expect(cmd.querySelector(".sr-only")?.textContent).toContain("コマンドを実行した");
   });
 
+  it("cd /workspace/<相対パス> && の前置きは行に出さず、「<相対パス> で」を `$` の前に添える", () => {
+    const at = "2026-10-21T05:50:00Z";
+    const events: TaskEventDto[] = [
+      { seq: 1, at, type: "command", command: "cd /workspace/apps/agent && pnpm test", exit_code: 0 },
+      { seq: 2, at, type: "command", command: "cd /workspace && git status", exit_code: 0 },
+      {
+        seq: 3,
+        at,
+        type: "tool_start",
+        call_id: "c",
+        name: "bash",
+        summary: '{"command":"cd /workspace/apps/gateway && pnpm exec vitest ru',
+      },
+    ];
+    const c = mount(taskDetailRunningFixture, events);
+    const rows = [...c.querySelectorAll("ol.steps > li.step")] as HTMLElement[];
+    const text = (r: HTMLElement | undefined, sel: string) => r?.querySelector(sel)?.textContent;
+    expect(text(rows[0], ".step-where")).toBe("apps/agent で ");
+    expect(text(rows[0], ".step-target")).toBe("pnpm test");
+    expect(rows[1]?.querySelector(".step-where")).toBeNull();
+    expect(text(rows[1], ".step-target")).toBe("git status");
+    // 切れた JSON の実行中の行（「いま」）も、生の JSON ではなく同じ見せ方
+    expect(text(rows[2], ".step-where")).toBe("apps/gateway で ");
+    expect(text(rows[2], ".step-target")).toBe("pnpm exec vitest ru…");
+    expect(rows[2]?.getAttribute("data-current")).toBe("true");
+    expect(c.textContent).not.toContain("cd /workspace");
+    expect(c.textContent).not.toContain('{"command"');
+  });
+
   it("コマンドが失敗した行は失敗の印（fail の行）と終了コード", () => {
     const failing: TaskEventDto[] = [
       {

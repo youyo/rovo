@@ -154,11 +154,13 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
     expect(running).toMatchObject({ what: "コマンドを実行中", target: "pnpm test" });
   });
 
-  it("tool_start: JSON でない・切れている・未知のキーだけのときは、sanitize した文字列のまま", () => {
+  it("tool_start: JSON でない・既知のキーで始まらない切れ方・未知のキーだけのときは、sanitize した文字列のまま", () => {
     const start = (name: string, summary: string) =>
       describeEvent(ev(1, { type: "tool_start", call_id: "c", name, summary }), { current: false });
-    const cut = start("read_file", '{"path":"src/very-long');
-    expect(cut?.target).toBe('{"path":"src/very-long');
+    // 既知のキーで始まる切れた JSON は値を取り出す（… 付き）。そうでない切れ方は生のまま
+    expect(start("read_file", '{"path":"src/very-long')?.target).toBe("src/very-long…");
+    const cut = start("read_file", '{"start_line":3,"path":"src/very-long');
+    expect(cut?.target).toBe('{"start_line":3,"path":"src/very-long');
     const weird = start("read_file", '{"foo":"bar"}');
     expect(weird?.target).toBe('{"foo":"bar"}');
     const wrongType = start("read_file", '{"path":{"a":1}}');

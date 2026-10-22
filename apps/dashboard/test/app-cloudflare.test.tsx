@@ -137,9 +137,19 @@ describe("Cloudflare の推定の金額", () => {
     const { container } = await mount(f);
     const p = panel(container);
     const head = p.querySelector("[data-cf-total]");
-    expect(head?.textContent).toContain("推定 $1.34（無料枠を引く前）");
+    expect(head?.textContent).toContain("Cloudflare の請求（推定）$0.0892（無料枠を引く前）");
     expect(head?.textContent).toContain("一部の項目は含まない");
-    expect(p.querySelector("[data-cf='ai_gateway'] .cf-cost")?.textContent).toBe("推定 $1.25");
+    // AI Gateway は合計の内訳に見えないよう、別の文言で出す（合計の見出しには含めない）
+    expect(head?.textContent).not.toContain("1.25");
+    expect(p.querySelector("[data-cf='ai_gateway'] .cf-cost")?.textContent).toBe(
+      "モデルの費用 $1.25",
+    );
+    expect(p.querySelector("[data-cf='ai_gateway'] .cf-basis")?.textContent).toContain(
+      "BYOK。Anthropic などに請求され、rovo の予算に含まれる",
+    );
+    expect(p.querySelector("[data-cf='credit_balance'] .cf-basis")?.textContent).toBe(
+      "Unified Billing のクレジット（Web 検索など。BYOK のモデル費用は含まない）",
+    );
     expect(p.querySelector("[data-cf='containers'] .cf-cost")?.textContent).toBe("推定 $0.0806");
     expect(p.querySelector("[data-cf='credit_balance'] .cf-cost")).toBeNull();
   });

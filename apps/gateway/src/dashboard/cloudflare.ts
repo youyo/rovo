@@ -11,7 +11,7 @@ import { buildCostEstimate } from "./cloudflare-pricing";
  *   workersInvocationsAdaptive（sum.requests / sum.errors。filter.scriptName_in）、
  *   aiGatewayRequestsAdaptiveGroups（count / sum.cost / sum.cachedRequests / sum.erroredRequests。filter.gateway）、
  *   aiInferenceAdaptiveGroups（sum.totalNeurons = Workers AI）。AI Gateway のログ（prompt / body / metadata）は取らない
- * - 推定の金額（`cost_estimate`）: 単価 × 使用量。**無料枠・プランに含まれる分を引く前**の推定で、AI Gateway の費用を含む合計。
+ * - 推定の金額（`cost_estimate`）: 単価 × 使用量。**無料枠・プランに含まれる分を引く前**の推定。合計は Cloudflare に払う分（Workers・コンテナ・Workers AI）で、AI Gateway の費用（BYOK のモデル費用）は `items.ai_gateway` の別の項目
  *   単価・出典・確認日は `cloudflare-pricing.ts` の定数だけ。取れない項目は推定 null で合計に含めない。コンテナのディスクは取っていない
  * - クレジット残高: GET /accounts/{id}/ai-gateway/billing/credit-balance（AI Gateway Read で読める）
  * - トークン: secret の CLOUDFLARE_API_TOKEN（Terraform の cloudflare_api_token.ai_gateway_read。AI Gateway Read + Account Analytics Read）。

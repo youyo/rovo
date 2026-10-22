@@ -477,6 +477,39 @@ describe("詳細・Cloudflare・エラー", () => {
       }),
     ).toBe(false);
   });
+  it("合計は Cloudflare の請求の推定だけ（AI Gateway を含まない）。古い応答（excluded_items に ai_gateway）も通る", () => {
+    const withEstimate = clone(cloudflareSummaryWithEstimateFixture) as Record<string, unknown>;
+    const est = withEstimate.cost_estimate as Record<string, unknown>;
+    const items = est.items as Record<string, Record<string, unknown>>;
+    // 合計 = Cloudflare の 5 項目の取れた推定の和（AI Gateway の cost_usd は含まない）
+    const cfKeys = [
+      "workers_requests",
+      "containers_vcpu",
+      "containers_memory",
+      "containers_disk",
+      "workers_ai",
+    ];
+    const sum = cfKeys.reduce(
+      (acc, k) => acc + ((items[k]?.estimated_usd_before_free_tier as number | null) ?? 0),
+      0,
+    );
+    expect(est.total_estimated_usd_before_free_tier as number).toBeCloseTo(sum, 9);
+    expect(items.ai_gateway?.cost_usd).toBe(1.25);
+    expect(ok(CloudflareSummaryDtoSchema, withEstimate)).toBe(true);
+    // AI Gateway だけが取れない応答は、partial にならない（excluded_items に ai_gateway は出ない）
+    const gwOnly = clone(withEstimate) as Record<string, unknown>;
+    const gwEst = gwOnly.cost_estimate as Record<string, unknown>;
+    (gwEst.items as Record<string, Record<string, unknown>>).ai_gateway = { cost_usd: null };
+    gwEst.excluded_items = [];
+    gwEst.partial = false;
+    gwEst.total_estimated_usd_before_free_tier = 0.0892225;
+    expect(ok(CloudflareSummaryDtoSchema, gwOnly)).toBe(true);
+    // 古い応答: excluded_items に ai_gateway が入っていても通る（列挙は残す）
+    const legacy = clone(withEstimate) as Record<string, unknown>;
+    (legacy.cost_estimate as Record<string, unknown>).excluded_items = ["ai_gateway"];
+    expect(ok(CloudflareSummaryDtoSchema, legacy)).toBe(true);
+  });
+
   it("推定の金額（cost_estimate）は省略でき、古い応答（無し）も通る。出すなら『無料枠を引く前』の形で固定", () => {
     // 古い応答（cost_estimate が無い fixtures・M9 の応答）は通る
     const old = clone(cloudflareSummaryFixture) as Record<string, unknown>;

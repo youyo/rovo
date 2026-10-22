@@ -62,6 +62,26 @@ export function formatClock(ms: number): string {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
+/** ローカル時刻の HH:MM:SS。 */
+export function formatClockSeconds(ms: number): string {
+  const d = new Date(ms);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+/** 経過時間。1 秒未満 / N 秒 / M 分 S 秒 / H 時間 M 分。負と NaN は 0 として扱う。 */
+export function formatDuration(ms: number): string {
+  const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
+  if (total < 1) return "1 秒未満";
+  if (total < 60) return `${total} 秒`;
+  if (total < 3600) return `${Math.floor(total / 60)} 分 ${total % 60} 秒`;
+  return `${Math.floor(total / 3600)} 時間 ${Math.floor((total % 3600) / 60)} 分`;
+}
+
+/** 桁区切りの整数（ロケールに依存しない）。 */
+export function formatCount(n: number): string {
+  return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 /** ローカル日付の「M月D日」。 */
 export function formatDayHeading(ms: number): string {
   const d = new Date(ms);

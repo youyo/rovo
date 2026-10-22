@@ -5,10 +5,11 @@
  * - タブが hidden の間は予約せず、visible に戻ったら即 1 回取る
  * - 同時に 2 本走らせない（取得中の refresh は、終わってからもう 1 回）
  * - 401（unauthorized）と 404（not_found）は止まる。手動の refresh だけが再開できる
+ * - finished（終端のタスクを追い終えた）も同じく止まる
  * - 自動更新を切ると予約を消す。手動の refresh は取れる
  */
 
-export type PollOutcome = "ok" | "error" | "unauthorized" | "not_found";
+export type PollOutcome = "ok" | "error" | "unauthorized" | "not_found" | "finished";
 
 export type PollerDeps = {
   setTimer: (fn: () => void, ms: number) => unknown;

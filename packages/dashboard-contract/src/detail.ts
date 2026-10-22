@@ -30,11 +30,21 @@ export const TaskDetailDtoSchema = z.strictObject({
   task: VisibleTaskDtoSchema,
   phase: z.enum(PHASES),
   /** 最新の command / edit などから作る一言。無ければ null（画面は「待機中」等） */
-  now: z.strictObject({ kind: z.enum(NOW_KINDS), text: singleLineText(LIMITS.nowText) }).nullable(),
+  now: z
+    .strictObject({
+      kind: z.enum(NOW_KINDS),
+      text: singleLineText(LIMITS.nowText),
+      /** その手順の記録時刻（command / edit / commit / web は完了時刻、tool は開始時刻）。無ければ省く */
+      at: isoTimeSchema.optional(),
+    })
+    .nullable(),
   settings: SettingsDtoSchema,
   /** 出力の末尾。`redacted` は常に true（秘密を常に伏せている旨を表示する） */
   output: z.strictObject({
     tail: untrustedText(LIMITS.outputTail).nullable(),
+    /** 末尾の出力を出した command（1 行に整形・300 字まで）と、その記録時刻。tail が null のときは省く */
+    command: singleLineText(LIMITS.nowText).optional(),
+    at: isoTimeSchema.optional(),
     redacted: z.literal(true),
   }),
 });

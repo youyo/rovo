@@ -407,6 +407,20 @@ export type DashboardEventsResult =
     }
   | { ok: false; code: "not_found" };
 
+/** dashboardLatest の結果。recent は seq の昇順（直近 DASHBOARD_LATEST_RECENT 件）、latest_command は最新の command 1 件 */
+export type DashboardLatestResult =
+  | {
+      ok: true;
+      recent: { seq: number; type: string; payload: EventPayload; created_at: number }[];
+      latest_command: {
+        seq: number;
+        type: string;
+        payload: EventPayload;
+        created_at: number;
+      } | null;
+    }
+  | { ok: false; code: "not_found" };
+
 type TaskRow = {
   id: string;
   owner_id: number;
@@ -505,6 +519,12 @@ const STRUCTURED_TYPES_SQL = STRUCTURED_EVENT_TYPES.map((t) => `'${t}'`).join(",
 const DASHBOARD_TYPES_SQL = DASHBOARD_EVENT_TYPES.map((t) => `'${t}'`).join(",");
 /** dashboardEvents の 1 回の上限（契約の LIMITS.eventsPerPage と同じ） */
 const DASHBOARD_EVENTS_MAX = LIMITS.eventsPerPage;
+/** dashboardLatest が読む直近の件数（「いまの手順」を作るのに足りる数。全件は読まない） */
+const DASHBOARD_LATEST_RECENT = 30;
+/** 「いまの手順」の候補にする型（固定の定数だけ） */
+const DASHBOARD_NOW_TYPES_SQL = ["command", "edit", "commit", "web", "tool_start", "tool_end"]
+  .map((t) => `'${t}'`)
+  .join(",");
 
 type Waiter = { wake: () => void; timer?: ReturnType<typeof setTimeout> };
 
@@ -1247,6 +1267,43 @@ export class TaskDO extends DurableObject<Env> {
       })),
       has_older: hasOlder,
     };
+  }
+
+  /**
+   * 詳細の「いまの手順」と「出力の末尾」の材料（docs/specs/dashboard.md M8）。
+   * 直近 DASHBOARD_LATEST_RECENT 件の command / edit / commit / web / tool_start / tool_end と、最新の command 1 件だけを読む。
+   * 権限の流儀は dashboardEvents と同じ（gateway が閲覧者の集合で照合したあとに呼び、expectedRepositoryId が今の値と違えば not_found）。
+   * 何も書かない。payload は保存時に整形・マスク済みで、API の応答の前にもう一度かける。
+   */
+  async dashboardLatest(expectedRepositoryId: number): Promise<DashboardLatestResult> {
+    const row = this.getRow();
+    if (
+      !row ||
+      row.repository_id === null ||
+      row.repository_id !== expectedRepositoryId ||
+      !this.getLink()
+    ) {
+      return { ok: false, code: "not_found" };
+    }
+    const sql = this.ctx.storage.sql;
+    const cols = "seq, type, payload, created_at";
+    const toRow = (e: EventRow) => ({
+      seq: e.seq,
+      type: e.type,
+      payload: JSON.parse(e.payload) as EventPayload,
+      created_at: e.created_at,
+    });
+    const recent = sql
+      .exec<EventRow>(
+        `SELECT ${cols} FROM events WHERE type IN (${DASHBOARD_NOW_TYPES_SQL}) ORDER BY seq DESC LIMIT ?`,
+        DASHBOARD_LATEST_RECENT,
+      )
+      .toArray()
+      .reverse();
+    const cmd = sql
+      .exec<EventRow>(`SELECT ${cols} FROM events WHERE type = 'command' ORDER BY seq DESC LIMIT 1`)
+      .toArray()[0];
+    return { ok: true, recent: recent.map(toRow), latest_command: cmd ? toRow(cmd) : null };
   }
 
   /** CANCELLED に確定する。終端状態なら何もせず成功（イベントは追加しない）。 */

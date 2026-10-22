@@ -230,6 +230,14 @@ describe("ダッシュボードの読み取り API（2 ユーザーの見え方�
     if (!first) throw new Error("events が取れませんでした");
     expect(first.events.some((e) => e.type === "web")).toBe(true);
 
+    // 詳細: いまの手順（最新は web）
+    const nowDetail = await dashboardGet(s.cookies.b, `/tasks/${bTask}`);
+    expect(nowDetail.status).toBe(200);
+    expect(TaskDetailDtoSchema.parse(nowDetail.json()).now).toMatchObject({
+      kind: "web",
+      text: "web fetch docs.example.com",
+    });
+
     // 末尾（新しい側）から最大 200 件、seq の昇順
     expect(first.events).toHaveLength(200);
     expect(first.has_older).toBe(true);
@@ -309,6 +317,30 @@ describe("ダッシュボードの読み取り API（2 ユーザーの見え方�
     } finally {
       await client.close();
     }
+
+    // 出力の末尾: 秘密入りの出力を持つ command を足すと、伏せた形で tail に出る
+    await emitAgentEvent(bTask, "command", {
+      command: "pnpm test",
+      exitCode: 0,
+      outputTail: `PASS\n${GHS}\nAPI_KEY=plainvalue789\n${PAT}\n3 passed`,
+    });
+    let detail: ReturnType<typeof TaskDetailDtoSchema.parse> | undefined;
+    let detailRaw = "";
+    const detailDeadline = Date.now() + 90_000;
+    while (Date.now() < detailDeadline) {
+      const r = await dashboardGet(s.cookies.b, `/tasks/${bTask}`);
+      expect(r.status).toBe(200);
+      detailRaw = r.whole;
+      detail = TaskDetailDtoSchema.parse(r.json());
+      if (detail.output.tail !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    expect(detail?.output.tail).toContain("PASS");
+    expect(detail?.output.tail).toContain("3 passed");
+    expect(detail?.output.command).toBe("pnpm test");
+    expect(detail?.output.redacted).toBe(true);
+    expect(detail?.now).toMatchObject({ kind: "command", text: "pnpm test" });
+    for (const secret of SECRETS) expect(detailRaw).not.toContain(secret);
   }, 240_000);
 
   it("GitHub が落ちている間は fail closed（503）。中身は返さない。未ログイン・ヘッダ無しは拒否", async () => {

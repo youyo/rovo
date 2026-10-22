@@ -76,7 +76,7 @@ import { maskSecrets } from "./redact";
 import type { ExecResult, PeekedOutput, SandboxPort, WorkspaceSpec } from "./sandbox-port";
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createSandboxTools } from "./tools";
-import { createToolContext } from "./tools/context";
+import { COMMIT_AUTHOR, createToolContext } from "./tools/context";
 import type { PushResult, SandboxToolsFactory } from "./tools/types";
 import { stripUntrustedMarkers, wrapUntrusted } from "./tools/untrusted";
 import {
@@ -103,6 +103,18 @@ const PATCH_LIMIT = 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_000;
 /** 残額に収まる出力がこれを割るなら、モデルを呼ばずに budget_exceeded にする（応答が途中で切れるだけで費用が無駄になる） */
 const MIN_OUTPUT_TOKENS = 1_024;
+/**
+ * 前回の cacheRead を次の呼び出しでも読める前提にする、前回の応答からの経過時間の上限。Anthropic のプロンプト
+ * キャッシュの既定の TTL は 5 分（読まれるたびに延びる）。時計のずれや応答後の遅れを見込み、4 分で切る。
+ * 超えたら割り引かない（全量を通常の単価で見積もる）。
+ */
+const CACHE_READ_TRUST_MS = 4 * 60_000;
+/** 予算超過の停止時に、システムが作る WIP commit のメッセージ（固定文。子の自由文は入れない） */
+const WIP_COMMIT_MESSAGE = "wip: budget exceeded（rovo が自動で commit）";
+/** WIP の commit・push 全体の上限（ms）。超えたら諦めて今までどおり止まる */
+const WIP_COMMIT_WAIT_MS = 90_000;
+/** WIP commit の前に、取り込む差分を秘密のパターンで確かめる上限（バイト）。超えたら確かめられないので commit しない */
+const WIP_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 /** consult（D10）: 出力の既定の上限と、これ未満しか出せないなら呼ばない下限（入力が予約額をほぼ使い切っている） */
 const CONSULT_DEFAULT_OUTPUT_TOKENS = 8192;
 const CONSULT_MIN_OUTPUT_TOKENS = 64;
@@ -145,6 +157,20 @@ type StoredSpec = Omit<TaskSpec, "gitCredential">;
 const sandboxDestroyedBy = (intents: readonly StopIntent[]): boolean =>
   intents.some((i) => i !== "budget_exceeded");
 
+/** WIP commit の結果を task_result の warnings に載せる 1 行にする。 */
+function wipWarning(w: WipCommit): string {
+  switch (w.outcome) {
+    case "committed":
+      return w.pushed
+        ? `予算超過で止まる前に、未 commit の変更を rovo が WIP として自動で commit し、作業ブランチへ push しました（${w.sha}）。内容を確認してください`
+        : `予算超過で止まる前に、未 commit の変更を rovo が WIP として自動で commit しましたが、push できませんでした（${w.sha}。patch には含まれています）`;
+    case "secret":
+      return "予算超過で止まる前の WIP commit は、変更に秘密らしき文字列があるため行いませんでした（未 commit の変更は失われます）";
+    case "failed":
+      return `予算超過で止まる前の WIP commit に失敗しました（${w.reason}）。未 commit の変更は失われた可能性があります`;
+  }
+}
+
 /** 直前のモデル呼び出しの実測。次の呼び出しの入力の見積もりの基準にする。 */
 interface CallBasis {
   /** 実測したモデルの id（モデルが変わるとトークナイザーが違うので、基準を捨てる） */
@@ -153,7 +179,19 @@ interface CallBasis {
   inputTokens: number;
   /** その呼び出しのときの context のバイト数 */
   contextBytes: number;
+  /**
+   * プロバイダーが返した cacheRead（キャッシュから読めたトークン数）。次の呼び出しでも読める見込みが高い分として、
+   * cacheRead の単価で見積もる。無い（古い形の basis）ときは割り引かない。
+   */
+  cacheReadTokens?: number;
+  /** その呼び出しが返った時刻（ms）。キャッシュの TTL を過ぎたものは当てにしない。無ければ割り引かない */
+  at?: number;
 }
+/** 予算超過の停止時の WIP commit の結果（task_result の warnings に反映する）。変更が無ければ残さない。 */
+type WipCommit =
+  | { outcome: "committed"; sha: string; pushed: boolean }
+  | { outcome: "secret" }
+  | { outcome: "failed"; reason: string };
 interface BranchSync {
   pushedSha?: string;
   error?: string;
@@ -312,6 +350,8 @@ export class AgentDO extends DurableObject<Env> {
   private launching: Promise<void> | undefined;
   private watching: Promise<void> | undefined;
   private finalizing: Promise<void> | undefined;
+  /** 予算超過の停止で進行中の WIP commit（確定はこれを待つ。失敗しても解決する） */
+  private wipCommit: Promise<void> | undefined;
   private aborting: Promise<boolean> | undefined;
   private sandboxStopping: Promise<{ stopped: boolean }> | undefined;
   /** 進行中の Sandbox の起動（ensureSandboxReady）。同時の呼び出しは 1 つを共有する。 */
@@ -445,6 +485,8 @@ export class AgentDO extends DurableObject<Env> {
         inputTokens: input,
         contextBytes,
         model: this.modelId(),
+        cacheReadTokens: finiteCount(u.cacheRead),
+        at: this.now(),
       } satisfies CallBasis);
     } catch {
       // 記録の失敗でモデル呼び出しの結果を失わない
@@ -1627,14 +1669,116 @@ export class AgentDO extends DurableObject<Env> {
     if (reason === "budget_exceeded") {
       // 予算の超過はモデル呼び出しの前に見つかる（実行中のツールは無い）ので、Sandbox は生きたまま patch を取ってから止める。
       // Sandbox の破棄は確定の後（取得に失敗・タイムアウトしても止める）
+      // 作業が失われないよう、patch を取る前に、未 commit の変更をシステム側で WIP として commit・push する
+      // （モデルは呼ばない。失敗・時間切れでも止める処理は進める。deadline・cancel・input_timeout では行わない）
       const abort = this.abortRun();
-      void this.finalize(undefined, abort)
+      // 確定（doFinalize）は WIP の完了を待つ: run の終了を見張る側（onRunSettled）が先に確定して Sandbox を破棄しないように
+      const wip = this.commitWipOnBudgetStop().catch(() => undefined);
+      this.wipCommit = wip;
+      void wip
+        .then(() => this.finalize(undefined, abort))
         .catch(() => undefined)
         .finally(() => void this.beginStop("finished", false).sandbox.catch(() => undefined));
       return;
     }
     const { abort } = this.beginStop(reason === "deadline" ? "deadline" : "finished");
     void this.finalize(undefined, abort).catch(() => undefined);
+  }
+
+  /**
+   * 予算超過で止めるときに、作業ツリーの未 commit の変更を WIP として commit し、作業ブランチへ push する。
+   * モデルは呼ばない。fail-soft: Sandbox が起動していない・止まっている、git の失敗、時間切れ（WIP_COMMIT_WAIT_MS）は
+   * 結果を wip_commit に残して戻る（止める処理を妨げない）。
+   */
+  private async commitWipOnBudgetStop(): Promise<void> {
+    const spec = this.spec();
+    // Sandbox を一度も起動していない（ファイルにも git にも触れなかった）なら、変更は無い。commit のために起動しない
+    if (!spec || !this.sandboxBooted()) return;
+    const limit = this.overrides().wipCommitWaitMs ?? WIP_COMMIT_WAIT_MS;
+    const timedOut = await this.raceTimeout(this.runWipCommit(spec), limit);
+    if (timedOut && !this.store.meta<WipCommit>("wip_commit")) {
+      this.store.setMeta("wip_commit", {
+        outcome: "failed",
+        reason: "timed out",
+      } satisfies WipCommit);
+    }
+  }
+
+  private async runWipCommit(spec: StoredSpec): Promise<void> {
+    const fail = (reason: string) =>
+      this.store.setMeta("wip_commit", {
+        outcome: "failed",
+        reason: tail(maskSecrets(reason), 200),
+      } satisfies WipCommit);
+    try {
+      // 予算超過より先に cancel・期限が来ていれば、Sandbox は破棄される（利用者の停止や時間切れは尊重する）
+      const interrupted = () => sandboxDestroyedBy(this.stopIntents());
+      if (interrupted()) return;
+      const sb = this.lazySandbox();
+      const git = (argv: string[], timeoutMs = 60_000, maxOutputBytes = 32 * 1024) =>
+        sb.exec(["git", ...argv], { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes });
+      const okRun = (r: ExecResult) => r.exitCode === 0 && !r.timedOut;
+      const why = (r: ExecResult) =>
+        r.timedOut ? "timed out" : `exit ${r.exitCode}: ${(r.stderr || r.stdout).trim()}`;
+
+      const status = await git(["status", "--porcelain"]);
+      if (!okRun(status)) return fail(`git status ${why(status)}`);
+      if (status.stdout.trim() === "") return; // 変更なし。何もしない
+
+      const add = await git(["add", "-A"]);
+      if (!okRun(add)) return fail(`git add ${why(add)}`);
+      // 秘密を commit しない: 取り込む差分を、ログ・イベントと同じ秘密のパターン（maskSecrets）で確かめる。
+      // マスクで文字列が変わる = 秘密らしきものがある。差分が大きすぎて確かめ切れないときも commit しない
+      const staged = await git(["diff", "--cached", "--no-color"], 120_000, WIP_SCAN_MAX_BYTES);
+      const scanned = okRun(staged) && staged.truncated !== true;
+      if (!scanned || maskSecrets(staged.stdout) !== staged.stdout) {
+        await git(["reset", "-q"]).catch(() => undefined);
+        this.store.setMeta(
+          "wip_commit",
+          scanned
+            ? ({ outcome: "secret" } satisfies WipCommit)
+            : ({
+                outcome: "failed",
+                reason: "could not scan the staged changes",
+              } satisfies WipCommit),
+        );
+        return;
+      }
+      if (interrupted()) return;
+      const commit = await git([
+        "-c",
+        `user.name=${COMMIT_AUTHOR.name}`,
+        "-c",
+        `user.email=${COMMIT_AUTHOR.email}`,
+        "commit",
+        "--no-verify",
+        "--no-gpg-sign",
+        "-q",
+        "-m",
+        WIP_COMMIT_MESSAGE,
+      ]);
+      if (!okRun(commit)) return fail(`git commit ${why(commit)}`);
+      const head = await git(["rev-parse", "HEAD"]);
+      const sha = head.stdout.trim();
+      if (!okRun(head) || !SHA_RE.test(sha)) return fail("could not read HEAD after commit");
+      // push は git_commit と同じ経路（作業ブランチへ HEAD を push し、pushed / push_failed イベントと branch_sync を更新）
+      const push = await git(["push", "origin", `HEAD:refs/heads/${spec.branch}`]).catch(
+        (e: unknown) => e,
+      );
+      const pushed = !(push instanceof Error) && okRun(push as ExecResult);
+      await this.onCheckpointPush(
+        pushed
+          ? { ok: true, sha }
+          : {
+              ok: false,
+              sha,
+              error: push instanceof Error ? push.message : why(push as ExecResult),
+            },
+      );
+      this.store.setMeta("wip_commit", { outcome: "committed", sha, pushed } satisfies WipCommit);
+    } catch (e) {
+      fail(e instanceof Error ? e.message : String(e));
+    }
   }
 
   /**
@@ -1647,9 +1791,11 @@ export class AgentDO extends DurableObject<Env> {
     // 呼び出し側は事前に stopIntents() を確かめ、意図があれば await せずに戻る。
     if (isTerminal(this.store.phase())) return Promise.resolve();
     if (request) this.requests.push(request);
-    this.finalizing ??= this.doFinalize(waitFor).finally(() => {
-      this.finalizing = undefined;
-    });
+    this.finalizing ??= (this.wipCommit ?? Promise.resolve())
+      .then(() => this.doFinalize(waitFor))
+      .finally(() => {
+        this.finalizing = undefined;
+      });
     return this.finalizing;
   }
 
@@ -1734,6 +1880,9 @@ export class AgentDO extends DurableObject<Env> {
           `push_failed: 作業ブランチを検証済みの SHA に揃えられませんでした（${sync.error ?? "unknown"}）。patch は結果に残っています`,
         );
       }
+      // 予算超過の停止で、システムが未 commit の変更を WIP として commit した（できなかった）ことを伝える
+      const wip = this.store.meta<WipCommit>("wip_commit");
+      if (wip && decision.reason === "budget_exceeded") warnings.push(wipWarning(wip));
       // 完了以外で report_completion が呼ばれていないとき、固定の文で止まった理由と最後の push を伝える
       const summary =
         this.store.meta<string>("last_summary") ||
@@ -2038,12 +2187,32 @@ export class AgentDO extends DurableObject<Env> {
     const basis = this.store.meta<CallBasis>("last_call_basis");
     // 基準を使うのは、同じモデルで context が前回より縮んでいないときだけ（縮んだ後に伸びた場合の増分は、
     // 前回との差では測れない。モデルが違えばトークナイザーも違う）。それ以外は全量をバイト数で見積もる
+    const usable =
+      basis && basis.model === this.modelId() && contextBytes >= basis.contextBytes
+        ? basis
+        : undefined;
     const inputTokens =
-      (basis && basis.model === this.modelId() && contextBytes >= basis.contextBytes
-        ? basis.inputTokens + (contextBytes - basis.contextBytes)
-        : contextBytes) + REQUEST_OVERHEAD_TOKENS;
+      (usable ? usable.inputTokens + (contextBytes - usable.contextBytes) : contextBytes) +
+      REQUEST_OVERHEAD_TOKENS;
+    // キャッシュの割り引き: 前回の実測で cacheRead があった分だけ、cacheRead の単価で見積もる（推測で割り引かない）。
+    // 前回の通常の入力・cacheWrite の分、増分、枠の余裕は割り引かない（通常の入力と cacheWrite の高い方の単価）。
+    // basis が使えない・古い形（cacheReadTokens / at が無い）・TTL を過ぎている、のどれかなら 0（全量を通常の単価）。
+    const age = typeof usable?.at === "number" ? this.now() - usable.at : Number.NaN;
+    const cachedTokens =
+      usable &&
+      typeof usable.cacheReadTokens === "number" &&
+      Number.isFinite(usable.cacheReadTokens) &&
+      age >= 0 &&
+      age <= CACHE_READ_TRUST_MS
+        ? Math.min(Math.max(0, usable.cacheReadTokens), usable.inputTokens)
+        : 0;
     // 出力は残額に収まる量まで絞る。下限（収まる出力が少なすぎて、まともに応答できない）を割るときだけ止める
-    const fits = maxOutputTokensWithin(price, inputTokens, spec.budgetUsd - spent.costUsd);
+    const fits = maxOutputTokensWithin(
+      price,
+      inputTokens,
+      spec.budgetUsd - spent.costUsd,
+      cachedTokens,
+    );
     const allowed = Math.min(maxTokens, fits);
     if (allowed < Math.min(maxTokens, MIN_OUTPUT_TOKENS)) {
       this.requestStop("budget_exceeded");

@@ -155,3 +155,68 @@ describe("思考レベル（effort）を含めた予算の上限", () => {
     }
   });
 });
+
+describe("キャッシュの読み出しを割り引く見積もり（cachedTokens）", () => {
+  const sonnet = priceFor("anthropic/claude-sonnet-5-5", false);
+  const haiku = priceFor("anthropic/claude-haiku-5-5", false);
+  if (!sonnet || !haiku) throw new Error("price missing");
+
+  it("cachedTokens が 0（省略）なら従来どおり全量を最悪の入力単価で見積もる", () => {
+    expect(estimateCallCostUsd(sonnet, 100_000, 16_000, 0)).toBe(
+      estimateCallCostUsd(sonnet, 100_000, 16_000),
+    );
+    expect(maxOutputTokensWithin(sonnet, 100_000, 1, 0)).toBe(
+      maxOutputTokensWithin(sonnet, 100_000, 1),
+    );
+  });
+
+  it("cachedTokens の分は cacheRead の最悪の単価、残りは最悪の入力単価で見積もる", () => {
+    // cacheRead は base / tier の最大値。残り 10k は max(input, cacheWrite) = $2.5/M
+    const worstRead = Math.max(
+      sonnet.cacheReadPerMTok,
+      ...sonnet.tiers.map((t) => t.cacheReadPerMTok),
+    );
+    const expected = (90_000 * worstRead + 10_000 * 2.5 + 1_000 * 10) / 1_000_000;
+    expect(estimateCallCostUsd(sonnet, 100_000, 1_000, 90_000)).toBeCloseTo(expected, 9);
+    expect(estimateCallCostUsd(sonnet, 100_000, 1_000, 90_000)).toBeLessThan(
+      estimateCallCostUsd(sonnet, 100_000, 1_000),
+    );
+  });
+
+  it("cachedTokens が入力より大きくても、入力を超えて割り引かない", () => {
+    expect(estimateCallCostUsd(sonnet, 1_000, 0, 5_000)).toBe(
+      estimateCallCostUsd(sonnet, 1_000, 0, 1_000),
+    );
+  });
+
+  it("見積もりは、その入力の分け方での実費（computeCostUsd）を下回らない（全モデル・価格帯をまたぐ）", () => {
+    for (const id of ALLOWED_MODEL_IDS) {
+      const price = priceFor(id, false);
+      if (!price) throw new Error(id);
+      for (const total of [10_000, 150_000, 300_000, 1_000_000]) {
+        for (const readRatio of [0, 0.5, 0.95, 1]) {
+          const cached = Math.floor(total * readRatio);
+          const rest = total - cached;
+          // 残りの内訳は、全部 input の場合と全部 cacheWrite の場合の両方
+          for (const usage of [
+            { input: rest, output: 1_000, cacheRead: cached, cacheWrite: 0 },
+            { input: 0, output: 1_000, cacheRead: cached, cacheWrite: rest },
+          ]) {
+            expect(
+              estimateCallCostUsd(price, total, 1_000, cached),
+              `${id} ${total} ${readRatio}`,
+            ).toBeGreaterThanOrEqual(computeCostUsd(price, usage) - 1e-12);
+          }
+        }
+      }
+    }
+  });
+
+  it("maxOutputTokensWithin は割り引いた入力の見積もりを使い、見積もりが予算を超えない", () => {
+    const budget = 0.5;
+    const full = maxOutputTokensWithin(sonnet, 190_000, budget);
+    const cached = maxOutputTokensWithin(sonnet, 190_000, budget, 180_000);
+    expect(cached).toBeGreaterThan(full);
+    expect(estimateCallCostUsd(sonnet, 190_000, cached, 180_000)).toBeLessThanOrEqual(budget);
+  });
+});

@@ -17,7 +17,9 @@ import {
   SESSION_COOKIE,
   sealSession,
 } from "../../src/dashboard/session";
+import { dashboardUrl } from "../../src/dashboard/url";
 import { encryptString, importEncryptionKey } from "../../src/github/crypto";
+import { ulid } from "../../src/tasks/ulid";
 import { json, routerFetch, tokenResponse } from "./github/helpers";
 import { clearWorkerAudit, newUserId, userStub } from "./helpers";
 
@@ -173,6 +175,69 @@ describe("safeReturnTo（戻り先は固定。オープンリダイレクトに�
     ];
     for (const raw of bad) {
       expect(safeReturnTo(raw), String(raw)).toBe("/dashboard/");
+    }
+  });
+});
+
+describe("dashboard_url が戻り先として通る（M10。オープンリダイレクトにならない）", () => {
+  const publicEnv = { PUBLIC_BASE_URL: BASE };
+
+  it("dashboard_url の path（/dashboard/tasks/<ULID>）は戻り先として通る", () => {
+    for (const id of [TASK_ID, ulid(), ulid(0), ulid(Date.UTC(2099, 0, 1))]) {
+      const url = dashboardUrl(publicEnv, id);
+      expect(url, id).toBeDefined();
+      const { pathname, search, hash } = new URL(url ?? "");
+      expect(pathname).toBe(`/dashboard/tasks/${id}`);
+      expect(search + hash).toBe("");
+      expect(safeReturnTo(pathname)).toBe(`/dashboard/tasks/${id}`);
+    }
+  });
+
+  it("dashboard_url の絶対 URL そのものは戻り先にならない（既定に倒す。外部ホストへ飛ばない）", () => {
+    const url = dashboardUrl(publicEnv, TASK_ID) ?? "";
+    expect(url).toBe(`${BASE}/dashboard/tasks/${TASK_ID}`);
+    expect(safeReturnTo(url)).toBe("/dashboard/");
+    expect(safeReturnTo(`https://evil.example${new URL(url).pathname}`)).toBe("/dashboard/");
+  });
+
+  it("ULID の形でないタスクの path・区切りを偽装した path は既定に倒す", () => {
+    const bad = [
+      `/dashboard/tasks/${TASK_ID.toLowerCase()}`,
+      `/dashboard/tasks/${TASK_ID.slice(0, 25)}`,
+      `/dashboard/tasks/${TASK_ID}0`,
+      `/dashboard/tasks/${TASK_ID.slice(0, 25)}I`,
+      `/dashboard/tasks/${TASK_ID.slice(0, 25)}L`,
+      `/dashboard/tasks/${TASK_ID.slice(0, 25)}O`,
+      `/dashboard/tasks/${TASK_ID.slice(0, 25)}U`,
+      `/dashboard/tasks/${TASK_ID.slice(0, 25)}a`,
+      `/dashboard/tasks/${TASK_ID}/`,
+      `/dashboard/tasks/${TASK_ID}%0d%0a`,
+      `/dashboard/tasks/${TASK_ID}\\`,
+      `/dashboard/tasks//${TASK_ID}`,
+      `/dashboard/tasks/${TASK_ID.slice(0, 10)}%2F${TASK_ID.slice(11)}`,
+      `/dashboard/tasks/../tasks/${TASK_ID}`,
+      `//evil.example/dashboard/tasks/${TASK_ID}`,
+      `/\\evil.example/dashboard/tasks/${TASK_ID}`,
+      `/dashboard/tasks/${TASK_ID}@evil.example`,
+      `/Dashboard/tasks/${TASK_ID}`,
+    ];
+    for (const raw of bad) {
+      expect(safeReturnTo(raw), raw).toBe("/dashboard/");
+    }
+  });
+
+  it("ログインの開始から完了まで、dashboard_url の path に戻る。絶対 URL を return_to に渡しても既定に戻る", async () => {
+    const { env } = makeEnv();
+    const path = new URL(dashboardUrl(publicEnv, TASK_ID) ?? "").pathname;
+    for (const [returnTo, expected] of [
+      [path, `/dashboard/tasks/${TASK_ID}`],
+      [dashboardUrl(publicEnv, TASK_ID) ?? "", "/dashboard/"],
+    ] as const) {
+      const user = newGithubUser();
+      const { state, cookie } = await beginLogin(env, `?return_to=${encodeURIComponent(returnTo)}`);
+      const res = await callback(env, githubFetch(user), cb(state), cookie);
+      expect(res.status, returnTo).toBe(302);
+      expect(res.headers.get("location"), returnTo).toBe(expected);
     }
   });
 });

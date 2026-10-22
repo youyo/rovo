@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { addMember, admin, bodyOf, installApp, login, newUser, startArgs } from "./helpers";
+import {
+  addMember,
+  admin,
+  baseUrl,
+  bodyOf,
+  installApp,
+  login,
+  newUser,
+  startArgs,
+  waitForResult,
+} from "./helpers";
 
 beforeEach(async () => {
   await admin.reset();
@@ -170,6 +180,49 @@ describe("ツール（偽 GitHub 経由の本物のログイン後）", () => {
       const done = await client.callTool({ name: "task_result", arguments: { task_id: taskId } });
       expect(done.isError).toBeFalsy();
       expect(bodyOf(done)).toMatchObject({ task_id: taskId, status: "CANCELLED" });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("task_start・task_status・task_result の応答に dashboard_url（<PUBLIC_BASE_URL>/dashboard/tasks/<task_id>）が入り、task_wait・task_cancel には入らない", async () => {
+    const { client } = await memberClient();
+    try {
+      const started = bodyOf(
+        await client.callTool({ name: "task_start", arguments: startArgs("dashboard-url") }),
+      );
+      const taskId = started.task_id as string;
+      // PUBLIC_BASE_URL は、この E2E の gateway の公開 URL（global-setup.ts の baseUrl）。末尾の / は付かない
+      const expected = `${baseUrl}/dashboard/tasks/${taskId}`;
+      expect(started.dashboard_url).toBe(expected);
+      expect(String(started.note)).toContain("dashboard_url");
+
+      const status = bodyOf(
+        await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+      );
+      expect(status.dashboard_url).toBe(expected);
+
+      const wait = bodyOf(
+        await client.callTool({
+          name: "task_wait",
+          arguments: { task_id: taskId, cursor: "4", timeout_seconds: 0 },
+        }),
+      );
+      expect(wait).not.toHaveProperty("dashboard_url");
+
+      const cancelled = bodyOf(
+        await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } }),
+      );
+      expect(cancelled).toEqual({ task_id: taskId, status: "CANCELLED" });
+
+      const result = await waitForResult(client, taskId, { needHead: false });
+      expect(result).toMatchObject({ task_id: taskId, status: "CANCELLED" });
+      expect(result.dashboard_url).toBe(expected);
+
+      // 開くと SPA の HTML が返る（ログインの有無は SPA が /dashboard/api/me で判断する）。ログイン後の戻り先は auth の Unit で確かめる
+      const page = await fetch(expected, { redirect: "manual" });
+      expect(page.status).toBe(200);
+      expect(page.headers.get("content-type")).toContain("text/html");
     } finally {
       await client.close();
     }

@@ -39,10 +39,10 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 
 | ツール | 内容 |
 |---|---|
-| `task_start` | タスクを作り、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, note}`。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される。`merge_policy`（任意。`human_review`（既定）| `agent_merge`）で、完了後の PR の扱いを選ぶ。`model`（任意）で子のモデルを選ぶ（`models_list` の id。省略は既定）。`task_status`・`task_result` に `model` が返る。`sandbox_instance`（任意。`standard-1`〜`standard-4`。`sandbox_instances_list` で確かめる。省略は既定の大きさで小さく始まり、重いコマンド（テスト・型検査・ビルドなど）の初回に自動で昇格する。指定したらその大きさで固定され、昇格しない）で子の Sandbox の大きさを選ぶ。`task_status` に指定した値（省略は `null`）、`task_result` の `usage.sandbox_instance` に最初に起動した大きさ、昇格したタスクには `usage.sandbox_promoted_to` などが返る |
-| `task_status` | 状態を返す |
+| `task_start` | タスクを作り、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, note, dashboard_url?}`。`dashboard_url`（`<PUBLIC_BASE_URL>/dashboard/tasks/<task_id>`）は、そのタスクの詳細をブラウザで見られる URL で、`task_status`・`task_result` にも付く（閲覧権限が無い人が開いても 404 になるだけで、URL 自体は秘密ではない。`PUBLIC_BASE_URL` が空・不正なら付かない）。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される。`merge_policy`（任意。`human_review`（既定）| `agent_merge`）で、完了後の PR の扱いを選ぶ。`model`（任意）で子のモデルを選ぶ（`models_list` の id。省略は既定）。`task_status`・`task_result` に `model` が返る。`sandbox_instance`（任意。`standard-1`〜`standard-4`。`sandbox_instances_list` で確かめる。省略は既定の大きさで小さく始まり、重いコマンド（テスト・型検査・ビルドなど）の初回に自動で昇格する。指定したらその大きさで固定され、昇格しない）で子の Sandbox の大きさを選ぶ。`task_status` に指定した値（省略は `null`）、`task_result` の `usage.sandbox_instance` に最初に起動した大きさ、昇格したタスクには `usage.sandbox_promoted_to` などが返る |
+| `task_status` | 状態を返す（`dashboard_url?` が付く） |
 | `task_wait` | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling）。待機中に子エージェントのイベントを取り込む |
-| `task_result` | 終端になったタスクの成果（要約・検証結果・patch・費用・`merge_policy`・PR の `draft` / `merged`）を返す。終端でなければ `not_ready`。応答の `next_steps` が、状態に応じた次の一手（差分のレビュー → `task_pr_ready` → `task_pr_merge`、または人のレビュー待ち）を案内する |
+| `task_result` | 終端になったタスクの成果（要約・検証結果・patch・費用・`merge_policy`・PR の `draft` / `merged`・`dashboard_url?`）を返す。終端でなければ `not_ready`。応答の `next_steps` が、状態に応じた次の一手（差分のレビュー → `task_pr_ready` → `task_pr_merge`、または人のレビュー待ち）を案内する |
 | `task_cancel` | キャンセルする（終端状態でも冪等）。子エージェントの停止を確認するまで Gateway が再送する |
 | `task_answer` | 子エージェントの質問（`INPUT_REQUIRED`）に答える |
 | `task_steer` | 実行中の子エージェントに追加の指示を送る |

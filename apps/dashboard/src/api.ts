@@ -1,4 +1,4 @@
-import type { CloudflareSummaryDto, OverviewDto } from "@rovo/dashboard-contract";
+import type { BudgetMeDto, CloudflareSummaryDto, OverviewDto } from "@rovo/dashboard-contract";
 
 /** 読み取り API の呼び出し（同一オリジン・Cookie のセッション）。契約は型だけ取り込む（zod を画面に入れない）。 */
 
@@ -96,6 +96,36 @@ export async function fetchOverview(
     if (res.status !== 200) return { kind: "error" };
     const body: unknown = await res.json();
     return looksLikeOverview(body) ? { kind: "ok", data: body } : { kind: "error" };
+  } catch {
+    return { kind: "error" };
+  }
+}
+
+const BUDGET = "/dashboard/api/budget";
+
+export type BudgetResult =
+  | { kind: "ok"; data: BudgetMeDto }
+  | { kind: "unauthorized" }
+  | { kind: "error" };
+
+/** 自分の予算だけ（軽い）。一覧より先にステータスバーの予算を出すのに使う。 */
+export async function fetchBudget(fetchImpl: typeof fetch = fetch): Promise<BudgetResult> {
+  try {
+    const res = await fetchImpl(BUDGET, {
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    if (res.status === 401) return { kind: "unauthorized" };
+    if (res.status !== 200) return { kind: "error" };
+    const b: unknown = await res.json();
+    const o = b as Record<string, unknown> | null;
+    return o !== null &&
+      typeof o === "object" &&
+      typeof o.spent_usd === "number" &&
+      typeof o.remaining_usd === "number" &&
+      typeof o.startable === "number"
+      ? { kind: "ok", data: b as BudgetMeDto }
+      : { kind: "error" };
   } catch {
     return { kind: "error" };
   }

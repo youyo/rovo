@@ -298,6 +298,8 @@ for (const [name, path] of [
     await page.setViewportSize({ width: 390, height: 844 });
     await loginAs(page, s.users.alice, path);
     await expect(page.locator(".console h1")).toBeVisible();
+    // 一覧・コンソールは届いたものから描かれるので、レールの行が出て配置が落ち着いてから測る
+    await expect(page.locator("a.rail-row").first()).toBeVisible();
 
     const railBox = await box(page, "nav.rail");
     const consoleBox = await box(page, ".console");

@@ -434,7 +434,8 @@ describe("自動更新（D15）", () => {
     };
     const s = server({ events: (_u, n) => json(200, n === 0 ? taskEventsFixture : more) });
     const { c, env } = await mount(s);
-    expect(s.calls).toEqual(["", "/events"]);
+    // 開いた最初の 1 回の詳細だけ fresh（D6）。以降のポーリングは付けない
+    expect(s.calls).toEqual(["?fresh=1", "/events"]);
     expect(env.pending()).toEqual([5000]);
     await env.fire();
     expect(s.calls.slice(2)).toEqual(["", "/events?cursor=9"]);
@@ -498,6 +499,25 @@ describe("自動更新（D15）", () => {
     const before = s.calls.length;
     await env.setHidden(false);
     expect(s.calls.length).toBe(before + 2);
+  });
+
+  it("最初の詳細の取得が失敗したら、成功するまで fresh を付け続ける（成功のあとは付けない）", async () => {
+    const s = server({
+      detail: (n) =>
+        n === 0 ? json(503, { error: "unavailable" }) : json(200, taskDetailRunningFixture),
+    });
+    const { env } = await mount(s);
+    await env.fire();
+    await env.fire();
+    expect(s.calls.filter((x) => !x.startsWith("/events"))).toEqual(["?fresh=1", "?fresh=1", ""]);
+  });
+
+  it("手動の更新（今すぐ更新）や hidden からの復帰は fresh を付けない", async () => {
+    const s = server();
+    const { env } = await mount(s);
+    await env.setHidden(true);
+    await env.setHidden(false);
+    expect(s.calls.filter((x) => !x.startsWith("/events"))).toEqual(["?fresh=1", ""]);
   });
 
   it("detail と events を同時に走らせない（常に 1 本）", async () => {

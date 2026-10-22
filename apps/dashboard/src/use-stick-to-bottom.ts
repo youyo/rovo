@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { isNearBottom } from "./scroll";
 
 /**
@@ -24,6 +24,18 @@ export function useStickToBottom(changeKey: string) {
     const el = ref.current;
     if (el && followRef.current) el.scrollTop = el.scrollHeight;
   }, [changeKey]);
+
+  // 枠の大きさが変わった（一覧が届いて周りの表示が増え、コンソールが縮んだなど）ときも、追従中なら末尾に留まる。
+  // 大きさの変化ではスクロールのイベントが出ないので、ここで合わせる
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (followRef.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const jumpToEnd = useCallback(() => {
     const el = ref.current;

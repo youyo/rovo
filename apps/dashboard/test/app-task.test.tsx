@@ -42,7 +42,8 @@ async function mount(
   const f = vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/dashboard/api/me") return me();
-    if (url.pathname === "/dashboard/api/overview") return json(200, overviewFixture);
+    if (url.pathname === "/dashboard/api/overview")
+      return json(200, { ...overviewFixture, scope: "me" });
     if (url.pathname === `/dashboard/api/tasks/${ID}`) return json(detailStatus, detailBody);
     if (url.pathname === `/dashboard/api/tasks/${ID}/events`) return json(200, taskEventsFixture);
     return json(404, { error: "not_found" });

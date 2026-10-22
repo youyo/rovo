@@ -348,21 +348,21 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
     rows.push(...page.rows);
     if (offset + page.rows.length >= page.total || page.rows.length === 0) break;
   }
-  const summary = await directory.summarize({ repoIds, from: monthStart, to: monthEnd });
-  const visibleModels = await directory.visibleModels({ repoIds, from: monthStart, to: monthEnd });
-  if (!summary.ok || !visibleModels.ok) return errorJson(503, "unavailable");
-
-  const budget = toBudgetMe(await env.USER_DO.getByName(String(session.uid)).dashboardBudget());
-
-  // consult（D9）: 対象のリポジトリが無いので、見えるリポジトリの集合では絞らない（全員分。「自分」では所有者で絞る）
+  // 以降は互いに依存しないので並行に読む（認可の集合 visible を取ったあと）。PR の状態は見える行（rows）が決まってから
+  const tasks = rows.map(snapshotToVisibleTask);
   const consultOwner = scope === "me" ? { ownerId: session.uid } : {};
-  const consultList = await directory.listConsults({
-    from,
-    to,
-    ...consultOwner,
-    limit: LIMITS.overviewConsults,
-  });
-  const consultSummary = await directory.summarizeConsults({ from: monthStart, to: monthEnd });
+  const [summary, visibleModels, budgetRaw, consultList, consultSummary] = await Promise.all([
+    directory.summarize({ repoIds, from: monthStart, to: monthEnd }),
+    directory.visibleModels({ repoIds, from: monthStart, to: monthEnd }),
+    env.USER_DO.getByName(String(session.uid)).dashboardBudget(),
+    // consult（D9）: 対象のリポジトリが無いので、見えるリポジトリの集合では絞らない（全員分。「自分」では所有者で絞る）
+    directory.listConsults({ from, to, ...consultOwner, limit: LIMITS.overviewConsults }),
+    directory.summarizeConsults({ from: monthStart, to: monthEnd }),
+    // PR の状態: 見えるタスク（見える集合で絞った行）の分だけ、閲覧者のトークンで GitHub から取る（fail-soft）
+    attachPrStates(env, session.uid, tasks),
+  ]);
+  if (!summary.ok || !visibleModels.ok) return errorJson(503, "unavailable");
+  const budget = toBudgetMe(budgetRaw);
   if (!consultList.ok || !consultSummary.ok) return errorJson(503, "unavailable");
 
   // モデル別の費用（月・全員分）。タスク分は、見えないタスクだけが使うモデルの名前を出さず "other" にまとめる。
@@ -405,10 +405,6 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
   }
   const totalMicro = summary.visible.cost_micro + summary.hidden.cost_micro;
 
-  // PR の状態: 見えるタスク（見える集合で絞った行）の分だけ、閲覧者のトークンで GitHub から取る（fail-soft）
-  const tasks = rows.map(snapshotToVisibleTask);
-  await attachPrStates(env, session.uid, tasks);
-
   const dto: OverviewDto = {
     generated_at: iso(at),
     range: { from: iso(from), to: iso(to) },
@@ -442,22 +438,27 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
 async function handleTaskDetail(request: Request, env: Env, taskId: string): Promise<Response> {
   const auth = await authenticate(request, env);
   if (!auth.ok) return auth.response;
-  // 詳細を開いた最初の 1 回は、GitHub で取り直す（権限の取り消しを厳密に反映。D6）
-  const read = await readAuthorizedTask(env, auth.session, taskId, { fresh: true });
+  // 開いた最初の 1 回だけ GitHub で取り直す（権限の取り消しを厳密に反映。D6）。画面が最初の取得にだけ ?fresh=1 を付ける。
+  // 付かない（ポーリング）ときは events と同じ 30 秒のキャッシュ。取り消しの反映は最大でそのキャッシュの TTL（UserDO の VISIBLE_CACHE_TTL_MS）
+  const fresh = new URL(request.url).searchParams.get("fresh") === "1";
+  const read = await readAuthorizedTask(env, auth.session, taskId, { fresh });
   if (!read.ok) return read.response;
   const { view, merge_policy, sandbox_instance, model_selection, reached } = read.detail;
 
   // 「いまの手順」と出力の末尾の材料（直近の数十件と最新の command だけ）。照合に使った repository_id を渡し、TaskDO が突き合わせる
   const repositoryId = view.repository_id;
   if (repositoryId === null) return errorJson(404, "not_found");
-  const latest = await env.TASK_DO.getByName(taskId).dashboardLatest(repositoryId);
+  // 権限の照合（readAuthorizedTask）に通ったあとで、PR の状態を閲覧者のトークンで取る（fail-soft）。
+  // 材料の読み取り（TaskDO）と PR の状態（GitHub）は互いに待たない。
+  const task = snapshotToVisibleTask(view);
+  const [latest] = await Promise.all([
+    env.TASK_DO.getByName(taskId).dashboardLatest(repositoryId),
+    attachPrStates(env, auth.session.uid, [task]),
+  ]);
   if (!latest.ok) return errorJson(404, "not_found");
   const phase = phaseOf(view.status);
 
   const deps = view.deps_cache;
-  // 権限の照合（readAuthorizedTask）に通ったあとで、PR の状態を閲覧者のトークンで取る（fail-soft）
-  const task = snapshotToVisibleTask(view);
-  await attachPrStates(env, auth.session.uid, [task]);
   const dto: TaskDetailDto = {
     generated_at: iso(Date.now()),
     task,

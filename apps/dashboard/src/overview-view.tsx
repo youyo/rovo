@@ -1,7 +1,7 @@
-import type { OverviewDto } from "@rovo/dashboard-contract";
+import type { BudgetMeDto, OverviewDto } from "@rovo/dashboard-contract";
 import type { ReactNode } from "react";
 import { TaskRail } from "./rail-view";
-import { StatusBar } from "./status-bar";
+import { PendingStatusBar, StatusBar } from "./status-bar";
 import { buildLanes, HOUR, taskTime, timelineDomain } from "./timeline";
 import { TimelineView } from "./timeline-view";
 import type { CloudflareState } from "./use-cloudflare";
@@ -9,7 +9,7 @@ import type { CloudflareState } from "./use-cloudflare";
 /**
  * 骨格の本体（純粋な表示。データ取得は use-overview）。
  * 細いタイムライン帯 → 左のレール + 中央のコンソール（console は呼び出し側が渡す）→ 下のステータスバー。
- * data が null（一覧をまだ取れていない）のときは、帯とステータスバーを出さず、レールに railNote を出す。
+ * data が null（一覧をまだ取れていない）のときは、帯を出さず、レールに railNote を、ステータスバーには予算と Cloudflare だけを出す。
  * 要素の並びは data の有無で変えない（中央のコンソールを作り直さない）。
  */
 export function OverviewView(props: {
@@ -23,6 +23,8 @@ export function OverviewView(props: {
   stale: boolean;
   /** Cloudflare の枠の状態（無ければ枠を出さない） */
   cloudflare?: CloudflareState;
+  /** 一覧が届くまでのステータスバーに出す予算（/budget）。一覧が届いたら使わない */
+  budget?: BudgetMeDto | null;
   /** レールで選択中のタスク（コンソールに出しているタスク） */
   selectedId: string | null;
   /** 中央のコンソール */
@@ -101,7 +103,9 @@ export function OverviewView(props: {
           onRefresh={props.onRefresh}
           showRefreshControls={props.showRefreshControls ?? true}
         />
-      ) : null}
+      ) : (
+        <PendingStatusBar budget={props.budget ?? null} cloudflare={props.cloudflare} />
+      )}
     </>
   );
 }

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import type { TaskDetailDto } from "@rovo/dashboard-contract";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
 import { TaskView } from "./task-view";
 import { type TaskDetailDeps, useTaskDetail } from "./use-task-detail";
@@ -15,11 +16,20 @@ export function TaskScreen(props: {
   onAutoRefreshChange?: (on: boolean) => void;
   /** 「今すぐ更新」で詳細のほかに取り直したいもの（一覧など） */
   onRefreshAlso?: () => void;
+  /** 最初の取得が決着したとき 1 回だけ呼ぶ。ready はタスク、404・失敗は null（一覧の日を決めるのに使う） */
+  onSettled?: (task: TaskDetailDto["task"] | null) => void;
 }) {
   const [ownAutoRefresh, setOwnAutoRefresh] = useState(() => loadAutoRefresh());
   const autoRefresh = props.autoRefresh ?? ownAutoRefresh;
   const { state, refresh, loadOlder } = useTaskDetail(props.id, autoRefresh, props.deps);
-  const { onUnauthorized } = props;
+  const { onUnauthorized, onSettled } = props;
+  const settledRef = useRef(false);
+
+  useEffect(() => {
+    if (settledRef.current || state.phase === "loading" || state.phase === "unauthorized") return;
+    settledRef.current = true;
+    onSettled?.(state.phase === "ready" ? state.detail.task : null);
+  }, [state, onSettled]);
 
   useEffect(() => {
     if (state.phase === "unauthorized") onUnauthorized();

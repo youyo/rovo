@@ -25,7 +25,8 @@ export type OverviewDeps = {
  */
 export function useOverview(
   scope: Scope,
-  day: DayKey,
+  /** undefined は「日がまだ決まらない」（タスクの URL で、詳細が届くまで）。決まるまで取りに行かない */
+  day: DayKey | undefined,
   autoRefresh: boolean,
   deps: OverviewDeps = {},
 ) {
@@ -49,6 +50,7 @@ export function useOverview(
       run: async (): Promise<PollOutcome> => {
         const sc = scopeRef.current;
         const d = dayRef.current;
+        if (d === undefined) return "ok"; // 日が決まったら wantedKey の変化で取りに行く
         const key = `${sc}|${d ?? "today"}`;
         fetchedKey.current = key;
         const now = depsRef.current.now ?? Date.now;
@@ -76,7 +78,7 @@ export function useOverview(
     };
   }, []);
 
-  const wantedKey = `${scope}|${day ?? "today"}`;
+  const wantedKey = day === undefined ? `${scope}|pending` : `${scope}|${day ?? "today"}`;
   useEffect(() => {
     if (fetchedKey.current !== wantedKey) pollerRef.current?.refresh();
   }, [wantedKey]);

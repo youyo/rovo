@@ -57,6 +57,29 @@ test("dist のどのファイルにも外部ホストへの参照が無い", () 
   }
 });
 
+test("CSS に @import と外部の url() が無い（フォントの外部読み込みをしない）", () => {
+  for (const f of files.filter((f) => f.endsWith(".css"))) {
+    const css = readFileSync(f, "utf8");
+    assert.doesNotMatch(css, /@import/i, `${relative(dist, f)} に @import`);
+    for (const m of css.matchAll(/url\(\s*["']?([^"')\s]+)/gi)) {
+      assert.doesNotMatch(m[1], /^(https?:)?\/\//i, `${relative(dist, f)} に外部の url(): ${m[1]}`);
+    }
+  }
+});
+
+test("HTML に外部の <link>（Google Fonts など）が無い", () => {
+  for (const m of html.matchAll(/<link\b[^>]*>/gi)) {
+    assert.doesNotMatch(m[0], /href="(https?:)?\/\//i, `外部の link: ${m[0]}`);
+  }
+});
+
+test("JS に style 属性を文字列で組み立てる箇所が無い（位置は SVG の属性と CSS のクラスで渡す）", () => {
+  for (const f of files.filter((f) => f.endsWith(".js"))) {
+    const js = readFileSync(f, "utf8");
+    assert.doesNotMatch(js, /\sstyle=["']/, `${relative(dist, f)} に style= の文字列`);
+  }
+});
+
 test("dist の容量が上限以内", () => {
   const total = files.reduce((n, f) => n + statSync(f).size, 0);
   assert.ok(total <= MAX_TOTAL_BYTES, `dist が ${total} バイト（上限 ${MAX_TOTAL_BYTES}）`);

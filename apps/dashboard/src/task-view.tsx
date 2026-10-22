@@ -179,6 +179,58 @@ function Fact(props: { k: string; v: string; title?: string }) {
   );
 }
 
+/** 見出しの属性の行（状態・モデル・経過・費用・リポジトリ・依頼者・PR）。一覧の行（VisibleTaskDto）だけで描ける */
+function ConMeta(props: {
+  task: VisibleTaskDto;
+  /** 経過時間の基準（詳細の generated_at。一覧の行だけのときは一覧の generated_at） */
+  generatedAt: number;
+  /** 詳細の設定にだけある（一覧の行には無い） */
+  modelSelection?: NonNullable<TaskDetailDto["settings"]["model_selection"]>;
+}) {
+  const { task } = props;
+  const model = shortModel(task.model);
+  return (
+    <div className="con-meta">
+      <StatusLine task={task} />
+      <span className="con-model">
+        <span data-model="" title={model.full}>
+          {model.name}
+        </span>
+        {props.modelSelection === undefined ? null : (
+          <span className="soft"> {modelSelectionText(props.modelSelection)}</span>
+        )}
+      </span>
+      <span>{elapsedText(task, props.generatedAt)}</span>
+      <span>{formatUsd(task.cost.cost_usd)}</span>
+      <span className="soft">{singleLine(task.repository)}</span>
+      <span className="soft">{singleLine(task.owner_login)} が依頼</span>
+      {task.reason === undefined ? null : (
+        <span className="soft">理由 {singleLine(task.reason)}</span>
+      )}
+      <span className="grow" />
+      <PrInline task={task} />
+    </div>
+  );
+}
+
+/**
+ * 切り替えた瞬間のコンソール。詳細（と events）が届くまで、一覧の行にある情報（題名・状態・モデル・費用・PR など）だけで見出しを描く。
+ * 一覧の行は一覧の取得で権限を確かめ済みのもの。表示する文字列は詳細と同じ関数を通す。
+ */
+export function TaskPreview(props: { task: VisibleTaskDto; at: number }) {
+  return (
+    <section className="console" aria-labelledby="task-h" aria-busy="true" data-preview="">
+      <div className="con-head">
+        <h1 id="task-h">{singleLine(props.task.title)}</h1>
+        <ConMeta task={props.task} generatedAt={props.at} />
+      </div>
+      <p className="soft con-loading" role="status">
+        読み込み中…
+      </p>
+    </section>
+  );
+}
+
 export function TaskView(props: {
   detail: TaskDetailDto;
   events: TaskEventDto[];
@@ -218,26 +270,7 @@ export function TaskView(props: {
 
       <div className="con-head">
         <h1 id="task-h">{singleLine(task.title)}</h1>
-        <div className="con-meta">
-          <StatusLine task={task} />
-          <span className="con-model">
-            <span data-model="" title={model.full}>
-              {model.name}
-            </span>
-            {settings.model_selection === undefined ? null : (
-              <span className="soft"> {modelSelectionText(settings.model_selection)}</span>
-            )}
-          </span>
-          <span>{elapsedText(task, generatedAt)}</span>
-          <span>{formatUsd(task.cost.cost_usd)}</span>
-          <span className="soft">{singleLine(task.repository)}</span>
-          <span className="soft">{singleLine(task.owner_login)} が依頼</span>
-          {task.reason === undefined ? null : (
-            <span className="soft">理由 {singleLine(task.reason)}</span>
-          )}
-          <span className="grow" />
-          <PrInline task={task} />
-        </div>
+        <ConMeta task={task} generatedAt={generatedAt} modelSelection={settings.model_selection} />
         <p className="now-line">
           {now.before}
           {now.prompt === undefined ? null : (

@@ -49,6 +49,29 @@ describe("fetchTaskDetail", () => {
       `/dashboard/api/tasks/${ID}`,
     ]);
   });
+  it("signal を渡すと fetch に引き渡す（前の取得を止められる）。渡さなければ付けない", async () => {
+    const fetchImpl = f(() => json(200, taskDetailRunningFixture));
+    const ac = new AbortController();
+    await fetchTaskDetail(ID, fetchImpl, { signal: ac.signal });
+    await fetchTaskDetail(ID, fetchImpl);
+    const inits = fetchImpl.mock.calls.map((c) => (c as unknown as [string, RequestInit])[1]);
+    expect(inits[0]?.signal).toBe(ac.signal);
+    expect(inits[1]?.signal).toBeUndefined();
+  });
+  it("止めた取得は error（例外にしない）", async () => {
+    const ac = new AbortController();
+    const fetchImpl = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("a", "AbortError")),
+          );
+        }),
+    );
+    const p = fetchTaskDetail(ID, fetchImpl as unknown as typeof fetch, { signal: ac.signal });
+    ac.abort();
+    expect(await p).toEqual({ kind: "error" });
+  });
   it("401 / 404 / その他", async () => {
     expect(
       await fetchTaskDetail(
@@ -104,6 +127,13 @@ describe("fetchTaskDetail", () => {
 });
 
 describe("fetchTaskEvents", () => {
+  it("signal を渡すと fetch に引き渡す", async () => {
+    const fetchImpl = f(() => json(200, taskEventsFixture));
+    const ac = new AbortController();
+    await fetchTaskEvents(ID, {}, fetchImpl, ac.signal);
+    const init = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.signal).toBe(ac.signal);
+  });
   it("200 で ok", async () => {
     const r = await fetchTaskEvents(
       ID,

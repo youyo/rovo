@@ -7,6 +7,7 @@ import { formatClock } from "../src/format";
 import { TaskRail } from "../src/rail-view";
 import { MARKS } from "../src/status";
 import { taskTime } from "../src/timeline";
+import { BROWSER_CLICKS, clickLink } from "./click-link";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -16,13 +17,17 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-function mount(tasks: VisibleTaskDto[], selectedId: string | null = null) {
+function mount(
+  tasks: VisibleTaskDto[],
+  selectedId: string | null = null,
+  onSelect?: (id: string) => void,
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   roots.push(root);
   act(() => {
-    root.render(createElement(TaskRail, { tasks, selectedId }));
+    root.render(createElement(TaskRail, { tasks, selectedId, onSelect }));
   });
   return container;
 }
@@ -134,5 +139,35 @@ describe("タスクのレール（1 行 1 タスク）", () => {
     expect(text.includes("\u0007")).toBe(false);
     expect(/[‪-‮⁦-⁩]/.test(text)).toBe(false);
     expect(text).toContain("<img src=x onerror=alert(1)>");
+  });
+});
+
+describe("行のクリック（ページを読み直さず、画面の中で切り替える）", () => {
+  const target = overviewFixture.tasks[1] as VisibleTaskDto;
+  const rowOf = (c: HTMLElement, id: string) =>
+    rows(c).find((a) => a.getAttribute("data-task-id") === id) as HTMLAnchorElement;
+
+  it("左クリックは preventDefault して、そのタスクの ID で onSelect を呼ぶ。href は残る", () => {
+    const calls: string[] = [];
+    const c = mount(overviewFixture.tasks, null, (id) => calls.push(id));
+    const a = rowOf(c, target.task_id);
+    expect(clickLink(a)).toBe(true);
+    expect(calls).toEqual([target.task_id]);
+    expect(a.getAttribute("href")).toBe(`/dashboard/tasks/${target.task_id}`);
+  });
+
+  it("修飾キー（Ctrl・Cmd・Shift・Alt）付きと中クリックは、preventDefault も onSelect もしない（ブラウザが新しいタブで開く）", () => {
+    const calls: string[] = [];
+    const c = mount(overviewFixture.tasks, null, (id) => calls.push(id));
+    const a = rowOf(c, target.task_id);
+    for (const { name, init } of BROWSER_CLICKS) {
+      expect(clickLink(a, init), name).toBe(false);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("onSelect が無い（単体の表示）なら、普通のリンクのまま", () => {
+    const c = mount(overviewFixture.tasks);
+    expect(clickLink(rowOf(c, target.task_id))).toBe(false);
   });
 });

@@ -29,9 +29,13 @@ test("(L1) 詳細の応答が遅くても、一覧（レール・帯・ステー
   await expect(page.locator(".tlband .tl-scroll").first()).toBeVisible();
   await expect(page.locator(".statusbar [data-sb='budget-me']")).toContainText("今月");
   await expect(page.locator(".console-col")).toContainText("読み込み中");
-  await expect(page.locator(".console h1")).toHaveCount(0);
+  // 詳細が届くまでは、一覧の行の情報だけの見出し（preview）。詳細の中身（今の行）はまだ無い
+  await expect(page.locator(".console[data-preview]")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator(".console[data-preview] h1")).toBeVisible();
+  await expect(page.locator(".console .now-line")).toHaveCount(0);
   release();
-  await expect(page.locator(".console h1")).toBeVisible();
+  await expect(page.locator(".console .now-line")).toBeVisible();
+  await expect(page.locator(".console[data-preview]")).toHaveCount(0);
 });
 
 test("(L2) Cloudflare の応答が遅くても、一覧とコンソールが先に出て、バーの Cloudflare の場所だけ読み込み中", async ({

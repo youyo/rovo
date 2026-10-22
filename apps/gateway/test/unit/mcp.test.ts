@@ -2292,6 +2292,7 @@ describe("task_console（mod が画面に進み具合を出すための読み取
     const desc = tools.find((t) => t.name === "task_console")?.description ?? "";
     expect(desc).toContain("読み取り専用");
     expect(desc).toContain("画面");
+    expect(desc).toMatch(/pr[^。]*number[^。]*url/);
     expect(desc).toContain("task_wait");
     expect(desc).toContain("task_result");
     expect(desc).toMatch(/繰り返し呼ばない/);

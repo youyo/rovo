@@ -378,9 +378,10 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 ### D19. `task_console`（Claude Code の mod 向けの読み取り専用ツール）
 
 - 目的: Claude Code の会話の横のペイン（mod）が、4 秒ごとに呼んで、実行中のタスクの状態とコンソールの出力を画面に出す。MCP のツールとして `apps/gateway/src/mcp/server.ts` に置き、実装は `createTaskService` の `console`（`apps/gateway/src/tasks/service.ts`）。
-- 入力: `{task_id}`。応答: `{task_id, status, phase, stopped_phase, now, output, dashboard_url?, generated_at}`。
+- 入力: `{task_id}`。応答: `{task_id, status, phase, stopped_phase, now, output, pr, dashboard_url?, generated_at}`。
   - `status` は `task_status` と同じ文字列。`phase`（`prepare` / `run` / `verify` / `done`）と `stopped_phase`（`prepare` / `run` / `verify` / `null`）は、詳細 API と同じ関数（`dashboard/detail-now.ts` の `phaseOf` / `stoppedPhaseOf`）で求める。
   - `now` は詳細 API の `now`（`buildNow`）、`output` は同じく `output`（`buildOutput`。実行中の `command_progress` を `running: true` つきで含む）。出す内容が無ければ `null`（`output` は command も末尾も無いとき）。
+  - `pr` は `{number, url}`（Draft PR の作成前は `null`）。`url` は `task_status` の `draft_pr_url` と同じ値（TaskDO が PR 作成時に `number` と同じ transaction で保存した GitHub の PR の URL。子が書いた文字列ではないので非信頼の囲みはしない）。mod がヘッダーに PR のリンクを出すために足した（`task_status` を別に呼ばせない）。
   - `dashboard_url` は `task_status` と同じ規則（`PUBLIC_BASE_URL` が不正・空なら、キー自体を付けない）。
 - 権限は `task_status` と同じ。**自分のタスクだけ**（TaskDO の `getStatus` が所有者を照合し、他人・未知の `task_id` は `not_found`）。ダッシュボードの「閲覧者が GitHub で見られるリポジトリなら全員のタスク」とは違う。照合に通ったあとで、詳細と同じ読み取り専用の RPC（`dashboardDetail` / `dashboardLatest`）で材料を集める。TaskDO は変えない。
 - 非信頼データ: 子が書いた文字列（`now.text`、`output.command`、`output.tail`）は、`task_status` / `task_result` / `task_wait` と同じ `<<<UNTRUSTED_CHILD_QUESTION ...>>>` 〜 `<<<END_UNTRUSTED_CHILD_QUESTION>>>` で囲む（`null` は囲まない）。マスク・整形・長さの制限は、詳細 API と同じ関数を通る。

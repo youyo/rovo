@@ -124,6 +124,8 @@ export type ConsoleValue = {
     at?: string;
     redacted: true;
   } | null;
+  /** Draft PR。作成前は null。url は task_status の draft_pr_url と同じ値 */
+  pr: { number: number; url: string } | null;
   generated_at: string;
 } & WithDashboardUrl;
 export type WaitValue = {
@@ -489,6 +491,10 @@ export function createTaskService(
       const phase = phaseOf(view.status);
       const now = buildNow(latest.recent, view.status, phase);
       const out = buildOutput(latest.latest_command, latest.progress);
+      // url は task_status と同じ出どころ（task 行の draft_pr_url。TaskDO が PR 作成時に number と同じ transaction で書く GitHub の PR の URL）
+      const prUrl = owned.task.draft_pr_url;
+      const pr =
+        view.pr_number !== null && prUrl !== null ? { number: view.pr_number, url: prUrl } : null;
       return {
         ok: true,
         value: {
@@ -507,6 +513,7 @@ export function createTaskService(
                     ? { command: wrapUntrustedQuestion(out.command) }
                     : {}),
                 },
+          pr,
           generated_at: new Date().toISOString(),
           ...withDashboardUrl(taskId),
         },

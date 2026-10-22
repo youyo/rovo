@@ -485,6 +485,12 @@ describe("task_console（mod 用の読み取り専用ツール。本物のログ
         output: null,
         dashboard_url: `${baseUrl}/dashboard/tasks/${taskId}`,
       });
+      // pr は task_status の draft_pr_url と同じ値（作成前は null）
+      const statusBody = bodyOf(
+        await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+      );
+      if (statusBody.draft_pr_url === null) expect(first.pr).toBeNull();
+      else expect(first.pr).toMatchObject({ url: statusBody.draft_pr_url });
       expect(new Date(first.generated_at as string).toISOString()).toBe(first.generated_at);
 
       await emitAgentEvent(taskId, "command_progress", {

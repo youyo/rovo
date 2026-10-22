@@ -38,6 +38,7 @@ type Console = {
     at?: string;
     redacted: true;
   } | null;
+  pr: { number: number; url: string } | null;
   dashboard_url?: string;
   generated_at: string;
 };
@@ -166,6 +167,26 @@ describe("task console: now / output", () => {
     await t.stub.advance();
     const tail = (await consoleOf(t.id)).output?.tail ?? "";
     expect(tail.split(UNTRUSTED_QUESTION_END)).toHaveLength(2);
+  });
+});
+
+describe("task console: pr", () => {
+  it("PR 作成前（start の前）は pr=null", async () => {
+    const t = await createTask({}, OWNER);
+    expect((await consoleOf(t.id)).pr).toBeNull();
+  });
+
+  it("Draft PR の作成後は {number, url} が入り、url は task_status の draft_pr_url と一致する", async () => {
+    const t = await started();
+    const c = await consoleOf(t.id);
+    const s = await svc().status(me, t.id);
+    expect(s.ok).toBe(true);
+    if (!s.ok) return;
+    expect(s.value.draft_pr_url).toMatch(/\/pull\/\d+$/);
+    expect(c.pr).toEqual({
+      number: Number(/\/pull\/(\d+)$/.exec(s.value.draft_pr_url ?? "")?.[1]),
+      url: s.value.draft_pr_url,
+    });
   });
 });
 

@@ -40,3 +40,15 @@ export function modelEffort(
   if (ignored.length > 0) console.error("model_efforts_ignored", ignored.length);
   return Object.hasOwn(efforts, modelId) ? efforts[modelId] : undefined;
 }
+
+/**
+ * Pi に渡す思考レベル（options.reasoning）を決める。タスクごとの指定（spec.effort。task_start の effort）があればそれ、
+ * 無ければモデルごとの既定（modelEffort）。off・不明は undefined（渡さない = 思考オフ）。
+ */
+export function reasoningFor(
+  specEffort: Effort | undefined,
+  modelDefault: Effort | undefined,
+): Exclude<Effort, "off"> | undefined {
+  const effort = specEffort ?? modelDefault;
+  return effort === undefined || effort === "off" ? undefined : effort;
+}

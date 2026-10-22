@@ -37,7 +37,7 @@ import {
   resolveGitHubBaseUrls,
 } from "../github";
 import { type ModelSelection, modelSelectionSchema } from "../model-selection";
-import { agentModelsOf, defaultModelOf, effortOf } from "../models";
+import { agentModelsOf, defaultModelOf, effortOf, effortRejection } from "../models";
 import {
   type PublicPromotion,
   type PublicPromotionFailure,
@@ -170,7 +170,7 @@ export type TaskView = {
   budget_policy: BudgetPolicy;
   /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
   model: string;
-  /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値。考える量が多いほど出力トークン＝費用が増える） */
+  /** 子のモデルの思考レベル（task_start の effort で上書きした値、無ければモデルごとの既定。タスクの開始時の値。考える量が多いほど出力トークン＝費用が増える） */
   effort: Effort;
   /** モデルの選び方（task_start の mode: explicit | auto と、理由の固定コード）。記録の無いタスク（古いタスク）には付かない */
   model_selection?: ModelSelection;
@@ -202,7 +202,9 @@ export type TaskEvent = {
 
 export type EnsureCreatedResult =
   | { ok: true; created: boolean; task: TaskView }
-  | { ok: false; code: "conflict" | "expired" | "invalid_input" };
+  | { ok: false; code: "conflict" | "expired" }
+  /** message は、入力を直すための説明（effort がそのモデルに対応していないときの、使えるレベルの一覧など）。無いこともある */
+  | { ok: false; code: "invalid_input"; message?: string };
 
 /** UserDO が予約を照合するための最小の問い合わせ結果。 */
 export type TaskInspection =
@@ -250,7 +252,7 @@ export type ResultView = {
   budget_policy: BudgetPolicy;
   /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
   model: string;
-  /** 子のモデルの思考レベル（モデルごとに固定。タスクの開始時の値） */
+  /** 子のモデルの思考レベル（task_start の effort で上書きした値、無ければモデルごとの既定。タスクの開始時の値） */
   effort: Effort;
   /** モデルの選び方（task_start と同じ記録。無いタスクには付かない） */
   model_selection?: ModelSelection;
@@ -1147,8 +1149,12 @@ export class TaskDO extends DurableObject<Env> {
       if (!sel.success || sel.data.chosen !== model) return { ok: false, code: "invalid_input" };
       modelSelection = sel.data;
     }
-    // 思考レベルはモデルごとに固定。開始時の値を保存する（あとで MODEL_EFFORTS を変えても、このタスクの表示は変わらない）
-    const effort = effortOf(this.env, model);
+    // 思考レベル: task_start で指定されたらそれ（最終のモデルが受け付けるレベルだけ。service が予約の前に見ているが、
+    // TaskDO への直接の呼び出しにも効かせる）。省略はモデルごとの既定（MODEL_EFFORTS）。開始時の値を保存する
+    // （あとで MODEL_EFFORTS を変えても、このタスクの表示は変わらない）。
+    // 同じ idempotency_key の再試行（既存のタスクがある）では、この検査より先に既存のタスクを返す（下の transactionSync）
+    const effortError = data.effort !== undefined ? effortRejection(model, data.effort) : undefined;
+    const effort = data.effort ?? effortOf(this.env, model);
     // await のあいだに他の呼び出しが進みうるので、状態の判定は await の後の同期区間で行う。
     // fingerprint は「利用者が入力したもの」で決める。rovo が選んだモデル（mode: auto）は入力ではないので含めない
     // （同じ idempotency_key の再試行で Clef の答えが変わっても、同じタスクとして扱うため）。明示した model は従来どおり含める。
@@ -1176,6 +1182,9 @@ export class TaskDO extends DurableObject<Env> {
           : { ok: false, code: "conflict" };
       }
       if (this.isAbandoned()) return { ok: false, code: "expired" };
+      if (effortError !== undefined) {
+        return { ok: false, code: "invalid_input", message: effortError };
+      }
 
       const at = this.now();
       this.ctx.storage.sql.exec(
@@ -1225,6 +1234,8 @@ export class TaskDO extends DurableObject<Env> {
           : {}),
         constraints: data.constraints,
         model,
+        // 明示したときだけ載せる（省略は agent が、モデルごとの既定 MODEL_EFFORTS で決める）
+        ...(data.effort !== undefined ? { effort: data.effort } : {}),
         // 明示したときだけ載せる（省略は agent の既定。後段の自動の昇格も、明示したタスクでは行わない）
         ...(data.sandbox_instance !== undefined ? { sandboxInstance: data.sandbox_instance } : {}),
         budgetUsd: taskBudgetUsd(this.env),

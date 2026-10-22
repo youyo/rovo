@@ -159,18 +159,21 @@ describe("内訳の引き出し（情報を消さない。開閉できる）", (
     expect(mount(zero).textContent).not.toContain("権限の無いリポジトリ");
   });
 
-  it("予算は 2 つの数字を分けて出す（自分と全員を足し合わせない・予約額を出さない）", () => {
+  it("予算は 1 つの欄にまとめる（自分の使った額・残り・上限・全員の実績・あと N 件）。予約額を出さない", () => {
     const c = mount(overviewFixture);
-    const mine = c.querySelector(".drawer [data-budget='me']");
-    const all = c.querySelector(".drawer [data-budget='all']");
-    expect(mine?.textContent).toContain("あなたの今月の予算");
-    expect(mine?.textContent).toContain("$11.40");
-    expect(mine?.textContent).toContain("$38.50");
-    expect(mine?.textContent).toContain("あと 2 件始められます");
-    expect(all?.textContent).toContain("全員の今月の実績");
-    expect(all?.textContent).toContain("UTC の月");
-    expect(all?.textContent).toContain("$43.90");
+    const panels = c.querySelectorAll(".drawer [data-budget]");
+    expect(panels).toHaveLength(1);
+    const budget = panels[0];
+    expect(budget?.querySelector("h2")?.textContent).toBe("今月の予算と実績");
+    expect(budget?.textContent).toContain("UTC の月");
+    expect(budget?.textContent).toContain("$11.40");
+    expect(budget?.textContent).toContain("$38.50");
+    expect(budget?.textContent).toContain("$49.90");
+    expect(budget?.textContent).toContain("$43.90");
+    expect(budget?.textContent).toContain("あと 2 件始められます");
     const text = c.textContent ?? "";
+    expect(text).not.toContain("あなたの今月の予算"); // 別々の欄の見出しは無い
+    expect(text).not.toContain("全員の今月の実績");
     expect(text).not.toContain("$55.30"); // 11.4 + 43.9 の足し算
     expect(text).not.toContain("$5.00");
     expect(text).not.toContain("予約");
@@ -182,6 +185,8 @@ describe("内訳の引き出し（情報を消さない。開閉できる）", (
     expect(models?.textContent).toContain("example-model-large");
     expect(models?.textContent).toContain("$30.60");
     expect(models?.textContent).toContain("$2.10");
+    // 欄の言葉は変えない（タスクと「相談」。consult の説明は凡例とタイムラインだけ）
+    expect(models?.textContent).toContain("タスク $30.60、相談 $2.10");
     expect(models?.textContent).not.toMatch(/\d+ 件/);
   });
 
@@ -196,7 +201,7 @@ describe("内訳の引き出し（情報を消さない。開閉できる）", (
     expect(side?.getAttribute("title")).toBe("anthropic/claude-haiku-5-5");
   });
 
-  it("凡例: 閉じた PR は「閉じた」、取れなかった(unknown)は「PR あり」。マージ件数に入らない", () => {
+  it("凡例: 閉じた PR は「閉じた（マージせず）」、取れなかった(unknown)は「PR あり」。マージ件数に入らない", () => {
     const withState = (state: "open" | "merged" | "closed" | "unknown"): OverviewDto => ({
       ...overviewFixture,
       tasks: overviewFixture.tasks.map((t) =>
@@ -205,7 +210,9 @@ describe("内訳の引き出し（情報を消さない。開閉できる）", (
     });
     const closed = mount(withState("closed"));
     expect(closed.querySelector('[data-mark="closed"]')).not.toBeNull();
-    expect(closed.querySelector('[aria-label="凡例"]')?.textContent).toContain("閉じた");
+    expect(closed.querySelector('[aria-label="凡例"]')?.textContent).toContain(
+      "閉じた（マージせず）",
+    );
     document.body.innerHTML = "";
     const unknown = mount(withState("unknown"));
     expect(unknown.querySelector('[aria-label="凡例"]')?.textContent).toContain("PR あり");
@@ -219,6 +226,86 @@ describe("内訳の引き出し（情報を消さない。開閉できる）", (
     const box = c.querySelector(".drawer input[type='checkbox']") as HTMLInputElement;
     expect(box.checked).toBe(true);
     expect(box.closest("label")?.textContent).toContain("自動で更新する");
+  });
+});
+
+describe("凡例・レーンの見出し・点の title は、初めて見た人にも分かる言葉", () => {
+  const CONSULT = "consult（モデルに意見を聞いた）";
+  const closedData: OverviewDto = {
+    ...overviewFixture,
+    tasks: overviewFixture.tasks.map((t) =>
+      t.status === "COMPLETED" && t.pr && !t.pr.merged
+        ? { ...t, pr: { ...t.pr, state: "closed" as const } }
+        : t,
+    ),
+  };
+  const legend = (c: HTMLElement) => c.querySelector('[aria-label="凡例"]') as HTMLElement;
+
+  it("凡例: consult は「consult（モデルに意見を聞いた）」", () => {
+    const c = mount(overviewFixture);
+    const item = [...legend(c).querySelectorAll("li")].find((li) => li.querySelector(".consult"));
+    expect(item?.textContent).toBe(CONSULT);
+    expect(legend(c).textContent).not.toContain("相談");
+  });
+
+  it("凡例: 閉じた は「閉じた（マージせず）」。ほかの状態は今の言葉のまま", () => {
+    const c = mount(closedData);
+    const texts = [...legend(c).querySelectorAll("li")].map((li) => li.textContent);
+    expect(texts).toContain("閉じた（マージせず）");
+    expect(texts).toContain("マージ済み（高さは費用）");
+    expect(texts).toContain("レビュー待ち");
+    expect(texts).toContain("実行中");
+    expect(texts).toContain("失敗");
+  });
+
+  it("凡例の印は、レールと同じ記号（MarkSymbol）。状態ごとに形が違う", () => {
+    const c = mount(closedData);
+    const inLegend = [...legend(c).querySelectorAll("svg.mark-sym")].map((e) => ({
+      mark: e.getAttribute("data-mark"),
+      shape: e.getAttribute("data-shape"),
+    }));
+    expect(inLegend.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(inLegend.map((m) => m.shape)).size).toBe(inLegend.length);
+    for (const m of inLegend) {
+      const row = c.querySelector(`a.rail-row[data-mark="${m.mark}"]`);
+      expect(row?.querySelector("svg.mark-sym")?.getAttribute("data-shape")).toBe(m.shape);
+    }
+  });
+
+  it("レーンの見出し（読み上げ）: 「N 件、consult（モデルに意見を聞いた） M 回」", () => {
+    const c = mount(overviewFixture);
+    const notes = [...c.querySelectorAll("[data-lane] .lane-name .sr-only")].map(
+      (e) => e.textContent,
+    );
+    expect(notes).toHaveLength(3);
+    for (const n of notes) expect(n).toMatch(/^\d+ 件、consult（モデルに意見を聞いた） \d+ 回$/);
+    expect(c.querySelector(".tlband")?.textContent).not.toContain("相談");
+  });
+
+  it("consult の点の title: 「consult（モデルに意見を聞いた） HH:MM」", () => {
+    const c = mount(overviewFixture);
+    const dots = [...c.querySelectorAll("[data-consult]")];
+    expect(dots).toHaveLength(3);
+    for (const d of dots) {
+      expect(d.parentElement?.querySelector("title")?.textContent).toMatch(
+        /^consult（モデルに意見を聞いた） \d{2}:\d{2}$/,
+      );
+    }
+  });
+
+  it("タスクの点の title と aria-label: 閉じた は説明つき（閉じた（マージせず））", () => {
+    const c = mount(closedData);
+    const dot = c.querySelector('svg a[data-task][data-mark="closed"]') as Element;
+    expect(dot.getAttribute("aria-label")).toContain("閉じた（マージせず）");
+    expect(dot.querySelector("title")?.textContent).toContain("閉じた（マージせず）");
+    expect(dot.querySelector("title")?.textContent).toBe(dot.getAttribute("aria-label"));
+  });
+
+  it("狭い場所の label は短いまま: レールの印は「閉じた」", () => {
+    const c = mount(closedData);
+    const row = c.querySelector('a.rail-row[data-mark="closed"]') as Element;
+    expect(row.querySelector("svg.mark-sym")?.getAttribute("aria-label")).toBe("閉じた");
+    expect(row.textContent).not.toContain("マージせず");
   });
 });
 

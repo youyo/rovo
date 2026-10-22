@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDay, parseRoute } from "../src/route";
+import { parseDay, parseRoute, taskPath } from "../src/route";
 
 const ID = "01K8ZF00000000000000000004";
 
@@ -48,5 +48,12 @@ describe("parseRoute（/dashboard/tasks/<ULID> で詳細、それ以外は一覧
     ]) {
       expect(parseRoute(p), p).toEqual({ kind: "overview" });
     }
+  });
+});
+
+describe("taskPath（レール・タイムラインの行の href と pushState の行き先）", () => {
+  it("/dashboard/tasks/<ID>。parseRoute で同じ ID に戻る", () => {
+    expect(taskPath(ID)).toBe(`/dashboard/tasks/${ID}`);
+    expect(parseRoute(taskPath(ID))).toEqual({ kind: "task", id: ID });
   });
 });

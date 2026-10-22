@@ -44,15 +44,41 @@ function Sb(props: { alt?: boolean; strong?: boolean; children: React.ReactNode;
   );
 }
 
-/** モデル別をバーに収める短い文字列（合計の大きい順。多いときは上位だけ） */
-function modelLine(models: OverviewDto["models"]): string {
-  const rows = models
-    .map((m) => ({ name: shortModel(m.model).name, total: m.task_cost_usd + m.consult_cost_usd }))
+/** バー用のモデル名。sonnet / haiku / opus はその名前に縮める（同じ系統が複数あるときは区別のため短縮前の名前） */
+function barModelName(id: string): string {
+  const name = shortModel(id).name;
+  const m = /(sonnet|haiku|opus)/i.exec(name);
+  return m?.[1] !== undefined ? m[1].toLowerCase() : name;
+}
+
+/** モデル別をバーに収める短い項目（合計の大きい順。多いときは上位だけ）。項目の途中では折り返さない */
+function ModelLine(props: { models: OverviewDto["models"] }) {
+  const all = props.models
+    .map((m) => ({
+      id: m.model,
+      total: m.task_cost_usd + m.consult_cost_usd,
+    }))
     .sort((a, b) => b.total - a.total)
     .slice(0, 4);
-  return rows.length === 0
-    ? "モデル別 まだありません"
-    : rows.map((r) => `${r.name} ${formatUsd(r.total)}`).join("  ");
+  const short = all.map((r) => barModelName(r.id));
+  const rows = all.map((r, i) => ({
+    ...r,
+    // 縮めた名前が重なるときは、重なった側を元の名前に戻す
+    name: short.filter((n) => n === short[i]).length > 1 ? shortModel(r.id).name : short[i],
+  }));
+  if (rows.length === 0) return <>モデル別 まだありません</>;
+  return (
+    <>
+      {rows.map((r, i) => (
+        <span key={r.id}>
+          {i === 0 ? "" : "  "}
+          <span className="sb-item" data-model-part="">
+            {r.name} {formatUsd(r.total)}
+          </span>
+        </span>
+      ))}
+    </>
+  );
 }
 
 export function StatusBar(props: {
@@ -122,7 +148,7 @@ export function StatusBar(props: {
         </Sb>
         <Sb k="budget-all">全員 {formatUsd(data.month.budget_actual.spent_usd)}</Sb>
         <Sb k="models" alt>
-          {modelLine(data.models)}
+          <ModelLine models={data.models} />
         </Sb>
         <span className="sb-grow" />
         <Sb k="cloudflare">{cf.workers}</Sb>

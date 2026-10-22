@@ -94,12 +94,59 @@ export function buildNow(
   return null;
 }
 
+/** 引数の JSON から文字列の項目を取り出す。要約は 200 字で切られていて JSON として壊れていることがあるので、正規表現でも拾う */
+function argString(summary: string, key: string): string | undefined {
+  try {
+    const v: unknown = JSON.parse(summary);
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+      const f = (v as Record<string, unknown>)[key];
+      return typeof f === "string" ? f : undefined;
+    }
+    return undefined;
+  } catch {
+    const m = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`).exec(summary);
+    if (m?.[1] === undefined) return undefined;
+    const raw = m[1].replace(/\\$/, "");
+    try {
+      const u: unknown = JSON.parse(`"${raw}"`);
+      return typeof u === "string" ? u : raw;
+    } catch {
+      return raw;
+    }
+  }
+}
+
+/** 引数が JSON のオブジェクト・配列に見える（生のまま画面に出さない） */
+function looksLikeJson(v: string): boolean {
+  return /^\s*[{[]/.test(v);
+}
+
+/** ツールの種類ごとの、人が読める 1 行（マスク前）。bash は「$ コマンド」、ファイル系はパス、search はパターン */
+function toolText(name: string, summary: string): string {
+  const arg = (key: string) => argString(summary, key);
+  switch (name) {
+    case "bash": {
+      const c = arg("command") ?? (looksLikeJson(summary) ? "" : summary);
+      return c === "" ? name : `$ ${c}`;
+    }
+    case "read_file":
+    case "write_file":
+    case "edit_file":
+    case "list_files": {
+      const p = arg("path");
+      return p === undefined || p === "" ? name : `${name}: ${p}`;
+    }
+    case "search": {
+      const p = arg("pattern");
+      return p === undefined || p === "" ? name : `${name}: ${p}`;
+    }
+    default:
+      return summary === "" || looksLikeJson(summary) ? name : `${name}: ${summary}`;
+  }
+}
+
 function toolNow(e: Extract<TaskEventDto, { type: "tool_start" }>, at: string): NowDto {
-  return {
-    kind: "tool",
-    text: oneLine(e.summary === "" ? e.name : `${e.name}: ${e.summary}`),
-    at,
-  };
+  return { kind: "tool", text: oneLine(toolText(e.name, e.summary)), at };
 }
 
 /** 実行中のコマンドの最新の進捗（TaskDO が 1 件だけ上書きで持つもの。時刻は epoch ms） */

@@ -457,6 +457,15 @@ describe("nowSentence（「いまは X を実行しています」）", () => {
     expect(sentence(now("web", "example.com"), "RUNNING").after).toBe(" を調べています。");
     expect(sentence(now("tool", "x"), "RUNNING").after).toBe(" を実行しています。");
   });
+  it("「$ 」で始まる text はプロンプトとコマンドに分ける（コンソールと同じ見た目にするため）", () => {
+    expect(sentence(now("tool", "$ ls -la"), "RUNNING")).toEqual({
+      before: "いまは ",
+      prompt: "$ ",
+      target: "ls -la",
+      after: " を実行しています。",
+    });
+    expect(sentence(now("tool", "read_file: a.ts"), "RUNNING")).not.toHaveProperty("prompt");
+  });
   it("waiting は固定の文（英語の text をそのまま出さない）", () => {
     expect(sentence(now("waiting", "waiting for input"), "INPUT_REQUIRED")).toEqual({
       before: "入力を待っています。",

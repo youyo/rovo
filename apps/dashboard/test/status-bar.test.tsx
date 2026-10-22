@@ -76,6 +76,24 @@ describe("ステータスバー（tmux 風。下に 1 行、狭いと折り返�
     expect(models.indexOf("large")).toBeLessThan(models.indexOf("small"));
   });
 
+  it("モデル別は sonnet / haiku / opus に縮め、金額は formatUsd の丸め", () => {
+    const c = mount({
+      ...overviewFixture,
+      models: [
+        { model: "claude-sonnet-5-5", task_cost_usd: 3.7, consult_cost_usd: 0.04 },
+        { model: "anthropic/claude-haiku-5-5", task_cost_usd: 0.0629, consult_cost_usd: 0 },
+        { model: "claude-opus-5-5", task_cost_usd: 0.0258, consult_cost_usd: 0 },
+      ],
+    });
+    expect(item(c, "models")?.textContent).toBe("sonnet $3.74  haiku $0.0629  opus $0.0258");
+  });
+
+  it("モデル別の各項目は途中で折り返さない（項目ごとの span・nowrap）", () => {
+    const c = mount();
+    const parts = item(c, "models")?.querySelectorAll("[data-model-part]") ?? [];
+    expect(parts.length).toBe(2);
+  });
+
   it("Cloudflare の要約とクレジット残高", () => {
     const c = mount();
     expect(item(c, "cloudflare")?.textContent).toBe("Workers 2,489 件  エラー 15 件");

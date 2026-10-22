@@ -248,6 +248,9 @@ export function TaskView(props: {
         </div>
         <p className="now-line">
           {now.before}
+          {now.prompt === undefined ? null : (
+            <span className="prompt now-prompt">{now.prompt}</span>
+          )}
           {now.target === "" ? null : <strong>{now.target}</strong>}
           {now.after}
         </p>

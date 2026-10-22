@@ -1,7 +1,7 @@
 /*
  * 一覧の見た目（見本 Main.dc.html の再現）。インライン style は使わない（CSP の style-src 'self'）。
  * 色・文字のトークンはこの :root の 1 か所に置く。外部ホストは参照しない。
- * 書体は見本の名前 + system のフォールバック（フォントの同梱は M6b）。
+ * 書体は見本の名前 + system のフォールバック。実体は main.tsx が @fontsource から同梱する（OFL。dist/assets/licenses/）。
  */
 :root {
   color-scheme: light;

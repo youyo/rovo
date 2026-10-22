@@ -5,6 +5,8 @@ import {
   LIMITS,
   type OverviewDto,
   OverviewDtoSchema,
+  PR_STATES,
+  type PrDto,
   SCOPES,
   type TaskDetailDto,
   TaskDetailDtoSchema,
@@ -43,6 +45,15 @@ const MAX_RANGE_MS = 36 * HOUR_MS;
 const PAGE = 500;
 /** 見えないタスクだけが使うモデルの名前の代わりに出す名前（モデル別の費用の表） */
 const OTHER_MODEL = "other";
+
+/** 調整値（テストで差し替える）。 */
+export const readApiTuning = {
+  /** PR の状態の照会を待つ上限（ms）。超えたら state を unknown のまま返す（画面の応答を GitHub の遅れに付き合わせない） */
+  pullStateDeadlineMs: 5_000,
+};
+/** 1 回の応答で GitHub に聞く PR の上限（重複を除く）。超える分は unknown */
+const MAX_PR_LOOKUPS = 200;
+const PR_STATE_VALUES: ReadonlySet<string> = new Set(PR_STATES);
 
 export interface ReadApiDeps {
   /** 時刻（テスト用）。月（UTC）の範囲と generated_at に使う */
@@ -90,7 +101,14 @@ function clipText(text: string, max: number): string {
 export function snapshotToVisibleTask(s: TaskIndexSnapshot | TaskIndexRow): VisibleTaskDto {
   const pr =
     s.pr_number !== null && s.pr_url !== null && PR_URL_RE.test(s.pr_url)
-      ? { number: s.pr_number, url: s.pr_url, draft: s.pr_draft, merged: s.pr_merged }
+      ? {
+          number: s.pr_number,
+          url: s.pr_url,
+          draft: s.pr_draft,
+          merged: s.pr_merged,
+          // rovo の記録でマージ済みなら確定。それ以外は GitHub に聞くまで unknown（attachPrStates が重ねる）
+          state: s.pr_merged ? ("merged" as const) : ("unknown" as const),
+        }
       : null;
   return {
     task_id: s.task_id,
@@ -117,6 +135,58 @@ export function snapshotToVisibleTask(s: TaskIndexSnapshot | TaskIndexRow): Visi
       : {}),
     ...(s.failure_phase === "setup" ? { failure_phase: "setup" as const } : {}),
   };
+}
+
+// --- PR の状態（GitHub） ---
+
+/**
+ * 表示するタスクの PR の状態を GitHub から取って、pr.state に入れる（その場で書き換える）。
+ *
+ * **権限の判定に通ったタスクだけを渡すこと**（呼び出し側の約束。overview は見える集合で絞った行、詳細は readAuthorizedTask の後）。
+ * 取得は閲覧者本人の UserDO（ユーザートークン・キャッシュ・GraphQL のまとめ・同時実行の抑制はそちら）。
+ * 照会するのは COMPLETED で rovo の記録が未マージの PR だけ（印を決めるのはそこだけ。merged の記録は照会せず確定）。
+ * fail-soft: 例外・不正な応答・時間切れは何もしない（state は unknown のまま）。画面の他の部分を壊さない。
+ */
+async function attachPrStates(env: Env, uid: number, tasks: VisibleTaskDto[]): Promise<void> {
+  const keyOf = (repository: string, n: number) => `${repository.toLowerCase()}#${n}`;
+  const targets = tasks.filter((t) => t.status === "COMPLETED" && t.pr !== null && !t.pr.merged);
+  const refs = new Map<string, { repository: string; number: number }>();
+  for (const t of targets) {
+    const k = keyOf(t.repository, (t.pr as { number: number }).number);
+    if (!refs.has(k) && refs.size < MAX_PR_LOOKUPS) {
+      refs.set(k, { repository: t.repository, number: (t.pr as { number: number }).number });
+    }
+  }
+  if (refs.size === 0) return;
+  const list = [...refs.values()];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const call = Promise.resolve(env.USER_DO.getByName(String(uid)).dashboardPullStates(uid, list));
+    call.catch(() => {}); // 時間切れのあとに失敗しても、未処理の拒否にしない
+    const states = await Promise.race([
+      call,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), readApiTuning.pullStateDeadlineMs);
+      }),
+    ]);
+    if (!Array.isArray(states) || states.length !== list.length) return;
+    const byKey = new Map<string, PrDto["state"]>();
+    list.forEach((r, i) => {
+      const v: unknown = states[i];
+      if (typeof v === "string" && PR_STATE_VALUES.has(v)) {
+        byKey.set(keyOf(r.repository, r.number), v as PrDto["state"]);
+      }
+    });
+    for (const t of targets) {
+      const pr = t.pr as PrDto;
+      pr.state = byKey.get(keyOf(t.repository, pr.number)) ?? pr.state;
+    }
+  } catch (e) {
+    // 内容（トークンが入りうる）は出さず、名前だけを記録する
+    console.error("dashboard_pr_state_error", e instanceof Error ? e.name : typeof e);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 // --- 認証・認可 ---
@@ -323,12 +393,16 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
   }
   const totalMicro = summary.visible.cost_micro + summary.hidden.cost_micro;
 
+  // PR の状態: 見えるタスク（見える集合で絞った行）の分だけ、閲覧者のトークンで GitHub から取る（fail-soft）
+  const tasks = rows.map(snapshotToVisibleTask);
+  await attachPrStates(env, session.uid, tasks);
+
   const dto: OverviewDto = {
     generated_at: iso(at),
     range: { from: iso(from), to: iso(to) },
     scope,
     viewer: { login: session.login },
-    tasks: rows.map(snapshotToVisibleTask),
+    tasks,
     consults: consultList.rows.map((r) => ({
       consult_id: r.consult_id,
       owner_login: r.owner_login,
@@ -370,9 +444,12 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
   const { view, merge_policy, sandbox_instance } = read.detail;
 
   const deps = view.deps_cache;
+  // 権限の照合（readAuthorizedTask）に通ったあとで、PR の状態を閲覧者のトークンで取る（fail-soft）
+  const task = snapshotToVisibleTask(view);
+  await attachPrStates(env, auth.session.uid, [task]);
   const dto: TaskDetailDto = {
     generated_at: iso(Date.now()),
-    task: snapshotToVisibleTask(view),
+    task,
     phase: PHASE_OF[view.status] ?? "done",
     // 実行中の一言は、構造化イベント（M7）が入ってから作る。ここでは待機中だけ
     now: view.status === "INPUT_REQUIRED" ? { kind: "waiting", text: "waiting for input" } : null,

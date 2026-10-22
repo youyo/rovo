@@ -178,6 +178,8 @@ export class FakeGitHubApp {
   private faults: Fault[] = [];
   private log: FakeAppRequest[] = [];
   private tokenSeq = 0;
+  /** PR の html_url の host。既定は github.test。ダッシュボードの契約は github.com の URL だけを通すので、E2E で切り替える */
+  prHost = "github.test";
   /** 利用者のトークンで呼んだときの App の権限（Installation Token の permissions と同じ形）。 */
   private userPermissions: Record<string, string> = { contents: "write", pull_requests: "write" };
 
@@ -199,6 +201,12 @@ export class FakeGitHubApp {
     this.draftUnsupported = false;
     this.beforeHandle = undefined;
     this.userPermissions = { contents: "write", pull_requests: "write" };
+    this.prHost = "github.test";
+  }
+
+  /** PR の html_url の host を変える（"github.com" など。reset で github.test に戻る）。 */
+  setPrHost(host: string): void {
+    this.prHost = host;
   }
 
   /** 利用者のトークンで呼んだときの App の権限を変える（Pull requests: write が無い App の再現など）。 */
@@ -570,7 +578,7 @@ export class FakeGitHubApp {
     return {
       number: p.number,
       node_id: this.nodeId(repo, p),
-      html_url: `https://github.test/${repo.fullName}/pull/${p.number}`,
+      html_url: `https://${this.prHost}/${repo.fullName}/pull/${p.number}`,
       title: p.title,
       body: p.body,
       draft: p.draft,
@@ -619,6 +627,13 @@ export class FakeGitHubApp {
     if (typeof b.query !== "string") return fail(400, "Problems parsing JSON");
     const errors = (type: string, message: string) =>
       res(200, { data: null, errors: [{ type, message }] });
+    if (/\bpullRequest\(number:/.test(b.query) && /\brepository\(owner:/.test(b.query)) {
+      return this.pullStates(
+        b.query,
+        (body as { variables?: Record<string, unknown> }).variables ?? {},
+        user,
+      );
+    }
     if (!/markPullRequestReadyForReview/.test(b.query)) {
       return errors("UNSUPPORTED", "fake github: unsupported GraphQL operation");
     }
@@ -641,6 +656,40 @@ export class FakeGitHubApp {
       }
     }
     return errors("NOT_FOUND", `Could not resolve to a node with the global id of '${String(id)}'`);
+  }
+
+  /**
+   * ダッシュボードの PR の状態の照会: `rN: repository(owner: $oI, name: $nI) { pullRequest(number: $pI) { state merged } }` を並べた GraphQL。
+   * 見えない・無いリポジトリは GitHub と同じく data の alias が null + errors に NOT_FOUND（HTTP は 200）。無い PR は pullRequest: null。
+   */
+  private pullStates(query: string, variables: Record<string, unknown>, user: FakeUser): Response {
+    const data: Record<string, unknown> = {};
+    const errors: { type: string; path: string[]; message: string }[] = [];
+    const re =
+      /\b(r\d+): repository\(owner: \$(o\d+), name: \$(n\d+)\)\s*\{\s*pullRequest\(number: \$(p\d+)\)/g;
+    for (const m of query.matchAll(re)) {
+      const [, alias, o, n, p] = m as unknown as [string, string, string, string, string];
+      const repo = this.repos.get(`${String(variables[o])}/${String(variables[n])}`.toLowerCase());
+      if (!repo || !user.canPush(repo.fullName)) {
+        data[alias] = null;
+        errors.push({
+          type: "NOT_FOUND",
+          path: [alias],
+          message: "Could not resolve to a Repository",
+        });
+        continue;
+      }
+      const pull = repo.pulls.find((x) => x.number === variables[p]);
+      data[alias] = {
+        pullRequest: pull
+          ? {
+              state: pull.merged ? "MERGED" : pull.state === "closed" ? "CLOSED" : "OPEN",
+              merged: pull.merged,
+            }
+          : null,
+      };
+    }
+    return res(200, { data, ...(errors.length > 0 ? { errors } : {}) });
   }
 
   private resolve(repo: FakeRepoRec, nameOrSha: string): string {

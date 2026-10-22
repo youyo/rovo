@@ -9,11 +9,12 @@ const task = (status: VisibleTaskDto["status"], pr: VisibleTaskDto["pr"]): Visib
   status,
   pr,
 });
-const pr = (merged: boolean) => ({
+const pr = (merged: boolean, state?: NonNullable<VisibleTaskDto["pr"]>["state"]) => ({
   number: 1,
   url: "https://github.com/a/b/pull/1",
   draft: false,
   merged,
+  state: state ?? (merged ? ("merged" as const) : ("open" as const)),
 });
 
 describe("状態の印（色だけで区別しない。形 + 文字）", () => {
@@ -31,6 +32,28 @@ describe("状態の印（色だけで区別しない。形 + 文字）", () => {
     expect(MARKS.merged.label).toBe("マージ済み");
     expect(MARKS.review.label).toBe("レビュー待ち");
     expect(MARKS.failed.label).toBe("失敗");
+  });
+
+  it("COMPLETED + PR の状態: merged=マージ済み / open=レビュー待ち / closed=閉じた / unknown=今の判定（pr_merged があればマージ済み、なければ PR あり）", () => {
+    expect(markKindOf(task("COMPLETED", pr(false, "merged")))).toBe("merged");
+    expect(markKindOf(task("COMPLETED", pr(false, "open")))).toBe("review");
+    expect(markKindOf(task("COMPLETED", pr(false, "closed")))).toBe("closed");
+    expect(markKindOf(task("COMPLETED", pr(false, "unknown")))).toBe("pr");
+    expect(markKindOf(task("COMPLETED", pr(true, "unknown")))).toBe("merged");
+    // rovo の記録（pr_merged）が先。GitHub が open と答えても、マージ済みの記録を覆さない
+    expect(markKindOf(task("COMPLETED", pr(true, "open")))).toBe("merged");
+    expect(MARKS.closed.label).toBe("閉じた");
+    expect(MARKS.pr.label).toBe("PR あり");
+  });
+
+  it("COMPLETED 以外は PR の状態に影響されない（失敗したタスクの closed な PR は失敗のまま）", () => {
+    expect(markKindOf(task("FAILED", pr(false, "closed")))).toBe("failed");
+    expect(markKindOf(task("RUNNING", pr(false, "open")))).toBe("running");
+  });
+
+  it("閉じた=灰の中空、マージ済みの塗り青とも、レビュー待ちの中空青とも形が違う", () => {
+    expect(MARKS.closed).toMatchObject({ tone: "gray", fill: "hollow", edge: "solid" });
+    expect(MARKS.pr).toMatchObject({ tone: "ink", fill: "hollow", edge: "dotted" });
   });
 
   it("見本どおり: マージ済み=塗り青、レビュー待ち=中空青、失敗=中空オレンジ", () => {

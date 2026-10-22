@@ -182,8 +182,28 @@ describe("URL の scheme と形", () => {
   });
   it("タスクの pr.url に危険な scheme は入らない", () => {
     const row = clone(overviewFixture.tasks[0]) as Record<string, unknown>;
-    row.pr = { number: 1, url: "javascript:alert(1)", draft: true, merged: false };
+    row.pr = {
+      number: 1,
+      url: "javascript:alert(1)",
+      draft: true,
+      merged: false,
+      state: "open",
+    };
     expect(ok(VisibleTaskDtoSchema, row)).toBe(false);
+  });
+  it("pr.state は open / merged / closed / unknown だけ。必須（欠けても、別の値でも弾く）", () => {
+    const withState = (state: unknown) => {
+      const row = clone(overviewFixture.tasks[0]) as { pr: Record<string, unknown> };
+      if (state === undefined) row.pr.state = undefined;
+      else row.pr.state = state;
+      return row;
+    };
+    for (const good of ["open", "merged", "closed", "unknown"]) {
+      expect(ok(VisibleTaskDtoSchema, withState(good)), good).toBe(true);
+    }
+    for (const bad of [undefined, "OPEN", "MERGED", "draft", "", null, 1]) {
+      expect(ok(VisibleTaskDtoSchema, withState(bad)), String(bad)).toBe(false);
+    }
   });
   it("Cloudflare の開くリンクは https://dash.cloudflare.com/ 配下だけ", () => {
     const s = clone(cloudflareSummaryFixture) as Record<string, unknown>;

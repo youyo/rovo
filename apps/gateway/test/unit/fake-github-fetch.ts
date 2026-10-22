@@ -34,6 +34,21 @@ export class FakeGitHubFetch {
   /** パス（クエリなし）+ ページ番号 → 返すステータス。"/user/installations/77/repositories#2" のように指定 */
   pathFaults = new Map<string, number>();
   apiFault: number | null = null;
+  /**
+   * PR の状態の照会（POST /graphql。ダッシュボード）の偽物。キーは "owner/name#番号"（小文字）。
+   * 無い PR は pullRequest: null（GitHub が見えない・存在しないときに返す形）。
+   */
+  pulls = new Map<string, { state: string; merged?: boolean }>();
+  /** /graphql だけを失敗させるステータス（他の API は動く） */
+  graphqlFault: number | null = null;
+  /** 渡すと、/graphql の応答をこの Promise が解決するまで待たせる（同時呼び出しの束ねの確認用） */
+  graphqlGate: Promise<void> | null = null;
+  /** /graphql 1 回ごとの alias の数と、同時に進行していた最大数 */
+  graphqlBatches: number[] = [];
+  graphqlMaxParallel = 0;
+  private graphqlRunning = 0;
+  /** /graphql の要求から取り出した Authorization と変数（確認用） */
+  graphqlSeen: { auth: string | null; variables: Record<string, unknown>; query: string }[] = [];
   tokenFault: number | null = null;
   calls: { method: string; path: string }[] = [];
   private seq = 0;
@@ -55,6 +70,38 @@ export class FakeGitHubFetch {
       accessExpiresAt: now + expiresInMs,
       refreshExpiresAt: now + 180 * 24 * 3600_000,
     };
+  }
+
+  private async pullStatesGraphql(
+    req: Request,
+    json: (body: unknown, status?: number) => Response,
+  ): Promise<Response> {
+    const body = (await req.json()) as { query?: string; variables?: Record<string, unknown> };
+    const variables = body.variables ?? {};
+    this.graphqlSeen.push({
+      auth: req.headers.get("authorization"),
+      variables,
+      query: body.query ?? "",
+    });
+    const n = Object.keys(variables).filter((k) => k.startsWith("o")).length;
+    this.graphqlBatches.push(n);
+    this.graphqlRunning++;
+    this.graphqlMaxParallel = Math.max(this.graphqlMaxParallel, this.graphqlRunning);
+    try {
+      if (this.graphqlGate) await this.graphqlGate;
+      if (this.graphqlFault) return json({ message: "fault" }, this.graphqlFault);
+      const data: Record<string, unknown> = {};
+      for (let i = 0; i < n; i++) {
+        const key = `${String(variables[`o${i}`])}/${String(variables[`n${i}`])}#${String(variables[`p${i}`])}`;
+        const pull = this.pulls.get(key.toLowerCase());
+        data[`r${i}`] = pull
+          ? { pullRequest: { state: pull.state, merged: pull.merged ?? pull.state === "MERGED" } }
+          : { pullRequest: null };
+      }
+      return json({ data });
+    } finally {
+      this.graphqlRunning--;
+    }
   }
 
   fetch: typeof fetch = async (input, init) => {
@@ -86,6 +133,10 @@ export class FakeGitHubFetch {
     if (this.apiFault) return json({ message: "fault" }, this.apiFault);
     const token = /^Bearer (.+)$/.exec(req.headers.get("authorization") ?? "")?.[1];
     if (!token || !this.validTokens.has(token)) return json({ message: "Bad credentials" }, 401);
+
+    if (!this.app && req.method === "POST" && url.pathname === "/graphql") {
+      return this.pullStatesGraphql(req, json);
+    }
 
     if (this.app && /^\/(repos\/|graphql$)/.test(url.pathname)) {
       const r = await this.app.handle(req, { login: this.user.login, canPush: () => true });

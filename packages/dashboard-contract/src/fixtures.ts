@@ -30,6 +30,7 @@ const pr = (n: number, repo: string, merged: boolean, draft: boolean | null) => 
   url: `https://github.com/example-org/${repo}/pull/${n}`,
   draft,
   merged,
+  state: merged ? ("merged" as const) : ("open" as const),
 });
 
 const tasks: VisibleTaskDto[] = [

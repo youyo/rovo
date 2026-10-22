@@ -8,12 +8,12 @@ import {
   TaskEventsPageDtoSchema,
 } from "@rovo/dashboard-contract";
 import { describe, expect, it } from "vitest";
-import { snapshotToVisibleTask } from "../../src/dashboard/api";
+import { readApiTuning, snapshotToVisibleTask } from "../../src/dashboard/api";
 import { handleDashboard } from "../../src/dashboard/serve";
 import { SESSION_COOKIE, sealSession } from "../../src/dashboard/session";
 import { DIRECTORY_NAME, type TaskIndexSnapshot } from "../../src/directory/types";
 import { ulid } from "../../src/tasks/ulid";
-import { createTask } from "./pr-helpers";
+import { createTask, runToCompleted } from "./pr-helpers";
 
 // ダッシュボードの読み取り API（docs/specs/dashboard.md M5b）。認可の最後の関門なので、
 // 「見えないタスクが応答のどこにも出ない」「失敗は fail closed」を、実 TaskDO・実 DirectoryDO で確かめる。
@@ -36,6 +36,12 @@ interface Viewer {
   visible: VisibleResult;
   budget: Record<string, unknown>;
   visibleCalls: { fresh: boolean }[];
+  /** dashboardPullStates に渡された呼び出し（権限の判定の後に、見えるタスクの PR だけが渡る） */
+  pullCalls: { uid: number; refs: { repository: string; number: number }[] }[];
+  /** dashboardPullStates の応答（キーは "owner/name#番号"。無ければ unknown）。関数なら任意の戻り値・例外にできる */
+  pullStates:
+    | Record<string, string>
+    | ((refs: { repository: string; number: number }[]) => unknown | Promise<unknown>);
 }
 
 let nextUid = 70_000_000 + Math.floor(Math.random() * 1_000_000);
@@ -63,6 +69,8 @@ function newViewer(visibleIds: number[] = []): Viewer {
       running_slots: 1,
     },
     visibleCalls: [],
+    pullCalls: [],
+    pullStates: {},
   };
 }
 
@@ -82,6 +90,15 @@ function envFor(viewer: Viewer): Env {
         },
         async dashboardBudget() {
           return viewer.budget;
+        },
+        async dashboardPullStates(
+          uid: number,
+          refs: { repository: string; number: number }[],
+        ): Promise<unknown> {
+          viewer.pullCalls.push({ uid, refs });
+          const src = viewer.pullStates;
+          if (typeof src === "function") return src(refs);
+          return refs.map((r) => src[`${r.repository}#${r.number}`] ?? "unknown");
         },
       };
     },
@@ -887,6 +904,195 @@ describe("漏れ: 権限の無いタスクの値が応答の全体のどこに�
   });
 });
 
+describe("PR の状態（GitHub から閲覧者のトークンで取る）", () => {
+  const PR = (n: number, repository = "acme/widgets") => ({
+    pr_number: n,
+    pr_url: `https://github.com/${repository}/pull/${n}`,
+    pr_draft: false,
+    repository,
+  });
+  const prOf = (dto: { tasks: { task_id: string; pr: { state: string } | null }[] }, id: string) =>
+    dto.tasks.find((t) => t.task_id === id)?.pr?.state;
+
+  it("overview: COMPLETED で rovo が未マージの PR だけを、見えるタスクの分だけ照会する。結果が state に入る", async () => {
+    const repo = newRepoId();
+    const hiddenRepo = newRepoId();
+    const v = newViewer([repo]);
+    const open = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PR(11, "acme/pr-open") } },
+    );
+    const closed = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PR(12, "acme/pr-closed") } },
+    );
+    const mergedByRovo = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", pr_merged: true, ...PR(13, "acme/pr-rovo") } },
+    );
+    const running = await seedTask(
+      { repository_id: repo },
+      { index: { status: "RUNNING", ...PR(14, "acme/pr-running") } },
+    );
+    const noPr = await seedTask({ repository_id: repo }, { index: { status: "COMPLETED" } });
+    const hidden = await seedTask(
+      { repository_id: hiddenRepo },
+      { index: { status: "COMPLETED", ...PR(15, "acme/pr-hidden-zq") } },
+    );
+    v.pullStates = { "acme/pr-open#11": "open", "acme/pr-closed#12": "closed" };
+
+    const r = await api(v, overviewPath());
+    expect(r.status).toBe(200);
+    const dto = OverviewDtoSchema.parse(r.json());
+    expect(prOf(dto, open.id)).toBe("open");
+    expect(prOf(dto, closed.id)).toBe("closed");
+    expect(prOf(dto, mergedByRovo.id)).toBe("merged"); // 記録が先。照会しない
+    expect(prOf(dto, running.id)).toBe("unknown"); // COMPLETED 以外は照会しない
+    expect(noPr.id && dto.tasks.find((t) => t.task_id === noPr.id)?.pr).toBeNull();
+    expect(dto.tasks.map((t) => t.task_id)).not.toContain(hidden.id);
+
+    // 照会したのは、見えるタスクの未マージの COMPLETED の PR だけ。閲覧者の uid で、権限のないタスクの PR は含まない
+    expect(v.pullCalls).toHaveLength(1);
+    expect(v.pullCalls[0]?.uid).toBe(v.uid);
+    const asked = (v.pullCalls[0]?.refs ?? []).map((x) => `${x.repository}#${x.number}`).sort();
+    expect(asked).toEqual(["acme/pr-closed#12", "acme/pr-open#11"]);
+    expect(JSON.stringify(v.pullCalls)).not.toContain("pr-hidden-zq");
+    expect(r.text).not.toContain("pr-hidden-zq");
+  });
+
+  it("照会するタスクが無ければ UserDO を呼ばない。見える集合が空でも呼ばない", async () => {
+    const v = newViewer([newRepoId()]);
+    await api(v, overviewPath());
+    expect(v.pullCalls).toEqual([]);
+    const none = newViewer([]);
+    await seedTask({ repository_id: newRepoId() }, { index: { status: "COMPLETED", ...PR(21) } });
+    await api(none, overviewPath());
+    expect(none.pullCalls).toEqual([]);
+  });
+
+  it("同じ PR は 1 回だけ渡す。1 回の上限（200 件）を超える分は渡さず unknown", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const a = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PR(31, "acme/dup") } },
+    );
+    const b = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PR(31, "acme/dup") } },
+    );
+    v.pullStates = { "acme/dup#31": "closed" };
+    const dto = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
+    expect(prOf(dto, a.id)).toBe("closed");
+    expect(prOf(dto, b.id)).toBe("closed");
+    expect(v.pullCalls[0]?.refs).toEqual([{ repository: "acme/dup", number: 31 }]);
+  });
+
+  it("fail-soft: UserDO が例外でも、不正な応答（件数違い・未知の値）でも、200 で state=unknown。pr_merged があれば merged", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const t = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PR(41, "acme/soft") } },
+    );
+    const m = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", pr_merged: true, ...PR(42, "acme/soft") } },
+    );
+    const modes: (() => unknown)[] = [
+      () => {
+        throw new Error("UserDO down: ghu_secretvalue");
+      },
+      () => ["open", "open", "open"], // 件数が違う
+      () => ["weird"],
+      () => "oops",
+      () => null,
+    ];
+    for (const mode of modes) {
+      v.pullStates = mode;
+      const r = await api(v, overviewPath());
+      expect(r.status).toBe(200);
+      expect(r.text).not.toContain("ghu_secretvalue");
+      const dto = OverviewDtoSchema.parse(r.json());
+      expect(prOf(dto, t.id)).toBe("unknown");
+      expect(prOf(dto, m.id)).toBe("merged");
+    }
+  });
+
+  it("照会が遅くても、画面の応答は待たない（上限の時間で打ち切って unknown）", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const t = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PR(51, "acme/slow") } },
+    );
+    v.pullStates = () => new Promise(() => {}); // 返ってこない
+    const original = readApiTuning.pullStateDeadlineMs;
+    readApiTuning.pullStateDeadlineMs = 50;
+    const started = Date.now();
+    let r: Awaited<ReturnType<typeof api>>;
+    try {
+      r = await api(v, overviewPath());
+    } finally {
+      readApiTuning.pullStateDeadlineMs = original;
+    }
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(r.status).toBe(200);
+    expect(prOf(OverviewDtoSchema.parse(r.json()), t.id)).toBe("unknown");
+  });
+
+  /** 偽 GitHub の PR の URL は github.test。契約の URL（github.com）に直して、画面に出る PR にする */
+  async function completedWithPr() {
+    const t = await runToCompleted({ repository_id: 4242 });
+    await runInDurableObject(t.stub, (_i, state) => {
+      state.storage.sql.exec(
+        "UPDATE github_link SET pr_url = 'https://github.com/acme/widgets/pull/' || pr_number",
+      );
+    });
+    return t;
+  }
+
+  it("tasks/:id: COMPLETED の PR の状態が入る。権限のないタスクの詳細は 404 で、照会しない", async () => {
+    const v = newViewer([4242]);
+    const t = await completedWithPr();
+    const detail0 = TaskDetailDtoSchema.parse((await api(v, `/tasks/${t.id}`)).json());
+    expect(detail0.task.pr).not.toBeNull();
+    const pr = detail0.task.pr as { number: number; url: string };
+    const key = `acme/widgets#${pr.number}`;
+    v.pullStates = { [key]: "closed" };
+    v.pullCalls.length = 0;
+    const detail = TaskDetailDtoSchema.parse((await api(v, `/tasks/${t.id}`)).json());
+    expect(detail.task.pr?.state).toBe("closed");
+    expect(v.pullCalls).toEqual([
+      { uid: v.uid, refs: [{ repository: "acme/widgets", number: pr.number }] },
+    ]);
+
+    const outsider = newViewer([newRepoId()]);
+    outsider.pullStates = { [key]: "open" };
+    const denied = await api(outsider, `/tasks/${t.id}`);
+    expect(denied.status).toBe(404);
+    expect(outsider.pullCalls).toEqual([]);
+    const missing = await api(outsider, "/tasks/01JZ0000000000000000000099");
+    expect(missing.status).toBe(404);
+    expect(outsider.pullCalls).toEqual([]);
+  });
+
+  it("tasks/:id の照会が失敗しても 200（state=unknown）。events・budget は照会しない（5 秒ごとのポーリングで GitHub を叩かない）", async () => {
+    const v = newViewer([4242]);
+    const t = await completedWithPr();
+    v.pullStates = () => {
+      throw new Error("down");
+    };
+    const r = await api(v, `/tasks/${t.id}`);
+    expect(r.status).toBe(200);
+    expect(TaskDetailDtoSchema.parse(r.json()).task.pr?.state).toBe("unknown");
+    v.pullCalls.length = 0;
+    expect((await api(v, `/tasks/${t.id}/events`)).status).toBe(200);
+    expect((await api(v, "/budget")).status).toBe(200);
+    expect(v.pullCalls).toEqual([]);
+  });
+});
+
 describe("snapshotToVisibleTask（索引・TaskDO の値を契約の形に整える）", () => {
   const base = (): TaskIndexSnapshot => ({
     task_id: "01JZ0000000000000000000000",
@@ -926,8 +1132,14 @@ describe("snapshotToVisibleTask（索引・TaskDO の値を契約の形に整え
       url: "https://github.com/acme/widgets/pull/7",
       draft: true,
       merged: false,
+      state: "unknown", // GitHub の状態は、読み取り API が権限の判定の後に重ねる
     });
     expect(snapshotToVisibleTask({ ...base(), pr_number: null }).pr).toBeNull();
+    // rovo の記録でマージ済みなら、GitHub に聞かなくても merged
+    expect(snapshotToVisibleTask({ ...base(), pr_merged: true }).pr).toMatchObject({
+      merged: true,
+      state: "merged",
+    });
   });
 
   it("契約の形でない任意の文字列は、画面に流さず落とす（reason は理由コードだけ・PR は GitHub の PR の URL だけ）", () => {

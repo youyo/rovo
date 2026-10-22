@@ -62,6 +62,14 @@ describe("fixtures の内容（見本に合わせた今日のデータ）", () =
     expect(overviewFixture.consults.length).toBeGreaterThan(0);
     expect(overviewFixture.models.some((m) => m.consult_cost_usd > 0)).toBe(true);
   });
+  it("pr.state が付く（merged は state=merged と食い違わない）", () => {
+    for (const t of tasks) {
+      if (t.pr === null) continue;
+      expect(["open", "merged", "closed", "unknown"]).toContain(t.pr.state);
+      expect(t.pr.merged, t.task_id).toBe(t.pr.state === "merged");
+    }
+    expect(tasks.some((t) => t.pr?.state === "open")).toBe(true);
+  });
   it("時刻は固定の ISO 文字列", () => {
     for (const t of tasks) expect(t.created_at).toMatch(/^2026-10-21T\d\d:\d\d:\d\dZ$/);
   });

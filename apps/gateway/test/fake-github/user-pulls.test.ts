@@ -199,3 +199,62 @@ describe("偽 GitHub: 利用者のトークンでの Pulls", () => {
     expect(next.status).toBe(200);
   });
 });
+
+// ダッシュボードが PR の状態を取る GraphQL（repository(owner,name){ pullRequest(number){ state merged } } を alias で並べる）。
+const STATE_QUERY =
+  "query($o0: String!, $n0: String!, $p0: Int!, $o1: String!, $n1: String!, $p1: Int!) { r0: repository(owner: $o0, name: $n0) { pullRequest(number: $p0) { state merged } } r1: repository(owner: $o1, name: $n1) { pullRequest(number: $p1) { state merged } } }";
+
+describe("偽 GitHub: PR の状態の GraphQL（ダッシュボード）", () => {
+  const ask = async (variables: Record<string, unknown>, tok: string | null = token) =>
+    (await call("POST", "/graphql", { query: STATE_QUERY, variables }, tok)).json() as Promise<{
+      data: Record<string, { pullRequest: { state: string; merged: boolean } | null } | null>;
+      errors?: { type: string; path: string[] }[];
+    }>;
+
+  it("open は OPEN、閉じたら CLOSED。無い PR は pullRequest: null", async () => {
+    const vars = { o0: "acme", n0: "widgets", p0: 1, o1: "acme", n1: "widgets", p1: 99 };
+    expect((await ask(vars)).data).toEqual({
+      r0: { pullRequest: { state: "OPEN", merged: false } },
+      r1: { pullRequest: null },
+    });
+    gh.app?.closePull(REPO.fullName, 1);
+    expect((await ask(vars)).data.r0).toEqual({ pullRequest: { state: "CLOSED", merged: false } });
+  });
+
+  it("マージ済みは MERGED（merged: true）", async () => {
+    // Draft のままだとマージできないので、Ready にしてから
+    await call("POST", "/graphql", { query: READY_QUERY, variables: { id: await nodeId() } });
+    const merge = await call("PUT", "/repos/acme/widgets/pulls/1/merge", {
+      sha: headSha,
+      merge_method: "squash",
+    });
+    expect(merge.status).toBe(200);
+    const vars = { o0: "acme", n0: "widgets", p0: 1, o1: "acme", n1: "widgets", p1: 1 };
+    expect((await ask(vars)).data.r0).toEqual({ pullRequest: { state: "MERGED", merged: true } });
+  });
+
+  it("見えないリポジトリは data が null + NOT_FOUND（存在を隠す）。トークン無しは 401", async () => {
+    await admin("users", { id: 2, login: "bob" });
+    await admin("installations", {
+      id: 77,
+      repositories: [{ ...REPO, visibleTo: ["alice"] }],
+    });
+    const bob = await loginAs("bob");
+    const body = await ask({ o0: "acme", n0: "widgets", p0: 1, o1: "x", n1: "y", p1: 1 }, bob);
+    expect(body.data.r0).toBeNull();
+    expect(body.errors?.map((e) => e.type)).toContain("NOT_FOUND");
+    const none = await call("POST", "/graphql", { query: STATE_QUERY, variables: {} }, null);
+    expect(none.status).toBe(401);
+  });
+
+  it("PR の URL の host を変えられる（setPrHost）。reset で既定に戻る", async () => {
+    const url = async () =>
+      ((await (await call("GET", "/repos/acme/widgets/pulls/1")).json()) as { html_url: string })
+        .html_url;
+    expect(await url()).toBe("https://github.test/acme/widgets/pull/1");
+    gh.app?.setPrHost("github.com");
+    expect(await url()).toBe("https://github.com/acme/widgets/pull/1");
+    gh.app?.reset();
+    expect(gh.app?.prHost).toBe("github.test");
+  });
+});

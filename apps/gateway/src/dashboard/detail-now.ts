@@ -29,7 +29,7 @@ function isoOf(ms: number): string | undefined {
 function nowOfStructured(e: TaskEventDto, at: string): NowDto | null {
   switch (e.type) {
     case "command":
-      return { kind: "command", text: oneLine(e.command), at };
+      return { kind: "command", text: oneLine(commandLine(e.command, "")), at };
     case "edit":
       return { kind: "edit", text: oneLine(`${e.op} ${e.path}`), at };
     case "commit":
@@ -94,7 +94,73 @@ export function buildNow(
   return null;
 }
 
-/** 引数の JSON から文字列の項目を取り出す。要約は 200 字で切られていて JSON として壊れていることがあるので、正規表現でも拾う */
+const MARK = "…";
+
+/** 先頭が `{"<キー>":"` で始まる（文字列の値の手前まで）。キーは JSON のエスケープを含まないものだけ */
+const STRING_HEAD = /^\s*\{\s*"([^"\\]*)"\s*:\s*"/;
+const HEX4 = /^[0-9a-fA-F]{4}$/;
+const HEX_PART = /^[0-9a-fA-F]*$/;
+const SIMPLE_ESCAPE: Record<string, string> = {
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+};
+
+/**
+ * JSON の文字列の中身（開き " の次から）を読み、エスケープを戻す。閉じる " が無ければ、途中で切れている（cut）。
+ * 切れているときは、切り詰めの印（agent の "..."・gateway の "…"）を外し、末尾の中途半端なエスケープ
+ * （\ や \u12）と、対の片方だけのサロゲートは捨てる。エスケープが壊れていれば undefined。
+ * dashboard の steps.ts と同じ振る舞い（別のパッケージなので、それぞれに実装している）。
+ */
+function readJsonString(body: string): { value: string; cut: boolean } | undefined {
+  let end = -1;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "\\") i++;
+    else if (c === '"') {
+      end = i;
+      break;
+    }
+  }
+  const cut = end < 0;
+  const raw = cut ? body.replace(/(?:\.\.\.|…)$/, "") : body.slice(0, end);
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i] as string;
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    const n = raw[i + 1];
+    if (n === undefined) break; // 切れた位置が \ の直後
+    if (n === "u") {
+      const hex = raw.slice(i + 2, i + 6);
+      if (hex.length < 4) {
+        if (cut && HEX_PART.test(hex)) break; // 切れた位置が \uXX の途中
+        return undefined;
+      }
+      if (!HEX4.test(hex)) return undefined;
+      out += String.fromCharCode(Number.parseInt(hex, 16));
+      i += 5;
+      continue;
+    }
+    const e = SIMPLE_ESCAPE[n];
+    if (e === undefined) return undefined;
+    out += e;
+    i++;
+  }
+  return { value: cut ? out.replace(/[\uD800-\uDBFF]$/, "") : out, cut };
+}
+
+/**
+ * 引数の JSON から文字列の項目を取り出す（マスク前）。要約は 200 字で切られていて JSON として壊れていることがあるので、
+ * 読めないときは、先頭が `{"<key>":"` のときだけ、その文字列を取り出す（切れていれば末尾に …）。取り出せなければ undefined。
+ */
 function argString(summary: string, key: string): string | undefined {
   try {
     const v: unknown = JSON.parse(summary);
@@ -104,21 +170,48 @@ function argString(summary: string, key: string): string | undefined {
     }
     return undefined;
   } catch {
-    const m = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`).exec(summary);
-    if (m?.[1] === undefined) return undefined;
-    const raw = m[1].replace(/\\$/, "");
-    try {
-      const u: unknown = JSON.parse(`"${raw}"`);
-      return typeof u === "string" ? u : raw;
-    } catch {
-      return raw;
-    }
+    // 切れた JSON かもしれない
   }
+  const head = STRING_HEAD.exec(summary);
+  if (head === null || head[1] !== key) return undefined;
+  const read = readJsonString(summary.slice(head[0].length));
+  if (read === undefined || read.value === "") return undefined;
+  // 切れているときは、sanitize して前後の空白を落としてから … を付ける（空白の直後に … が付かないように）
+  return read.cut ? `${sanitizeText(read.value, { singleLine: true }).trim()}${MARK}` : read.value;
 }
 
 /** 引数が JSON のオブジェクト・配列に見える（生のまま画面に出さない） */
 function looksLikeJson(v: string): boolean {
   return /^\s*[{[]/.test(v);
+}
+
+/** 場所の 1 区切りに許す文字（素直なディレクトリ名だけ。空白・引用符・変数・シェルの記号は許さない） */
+const DIR_SEGMENT = /^[\p{L}\p{N}_.@+-]+$/u;
+const CD_PREFIX = /^cd\s+(\/workspace(?:\/\S*)?)\s+&&\s+(\S.*)$/;
+
+/** /workspace からの相対パス。/workspace 自身は ""。素直なパスでない（.. や // を含む・変な文字がある）ものは undefined */
+function relativeDir(abs: string): string | undefined {
+  const rest = abs.slice("/workspace".length);
+  if (rest === "") return "";
+  const parts = rest.slice(1).split("/");
+  if (parts.at(-1) === "") parts.pop();
+  for (const p of parts) {
+    if (p === "." || p === ".." || !DIR_SEGMENT.test(p)) return undefined;
+  }
+  return parts.join("/");
+}
+
+/**
+ * コマンドの 1 行（マスク前）。先頭の `cd /workspace/<相対パス> && ` を外し、場所を「<相対パス> で 」と先頭に添える
+ * （prompt はその次、コマンドの直前）。`cd /workspace && ` は前置きだけ外す（場所なし）。ほかの形（.. を含む・
+ * /workspace の外・引用符つきなど）は触らない。dashboard の steps.ts と同じ見せ方。
+ */
+function commandLine(raw: string, prompt: string): string {
+  const text = sanitizeText(raw, { singleLine: true }).trim();
+  const m = CD_PREFIX.exec(text);
+  const dir = m === null ? undefined : relativeDir(m[1] as string);
+  if (m === null || dir === undefined) return `${prompt}${text}`;
+  return `${dir === "" ? "" : `${dir} で `}${prompt}${m[2]}`;
 }
 
 /** ツールの種類ごとの、人が読める 1 行（マスク前）。bash は「$ コマンド」、ファイル系はパス、search はパターン */
@@ -127,7 +220,7 @@ function toolText(name: string, summary: string): string {
   switch (name) {
     case "bash": {
       const c = arg("command") ?? (looksLikeJson(summary) ? "" : summary);
-      return c === "" ? name : `$ ${c}`;
+      return c === "" ? name : commandLine(c, "$ ");
     }
     case "read_file":
     case "write_file":

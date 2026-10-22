@@ -119,6 +119,21 @@ describe("task console: now / output", () => {
     expect(c.output).not.toHaveProperty("running");
   });
 
+  it("実行中の bash（要約が途中で切れた JSON）は、生の JSON ではなくコマンドを now.text に出す。cd /workspace/<相対パス> && は外して場所を添える", async () => {
+    const t = await started();
+    await t.agent.emit("tool_start", {
+      callId: "c1",
+      name: "bash",
+      summary: '{"command":"cd /workspace/apps/agent && pnpm exec vitest ru...',
+    });
+    await t.stub.advance();
+    const c = await consoleOf(t.id);
+    expect(c.now).toMatchObject({ kind: "tool" });
+    expect(c.now?.text).toContain("apps/agent で $ pnpm exec vitest ru…");
+    expect(c.now?.text).not.toContain('{"command"');
+    expect(c.now?.text).not.toContain("cd /workspace");
+  });
+
   it("実行中の command_progress は running・started_at つきで output に出て、終端で消える", async () => {
     const t = await started();
     await t.agent.emit("command_progress", {

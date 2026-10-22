@@ -676,6 +676,9 @@ fieldset {
 .prompt {
   color: var(--prompt);
 }
+.step-where {
+  color: var(--faint);
+}
 .step-note {
   margin-left: 1em;
   color: var(--faint);

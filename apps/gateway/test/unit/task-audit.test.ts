@@ -282,6 +282,16 @@ describe("task_ended_by_limit（上限による終了）", () => {
     expect((await auditEvents(stub)).some((e) => e.code === "task_ended_by_limit")).toBe(false);
   });
 
+  it("予算の延長の質問への無応答（BUDGET_EXCEEDED の reason: budget_extension_timeout）は、監査で budget_exceeded と区別できる", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    await agent.setPhase("budget_exceeded", "budget_extension_timeout");
+    await stub.advance();
+    expect((await sinkOf(stub, "task_ended_by_limit")).map((r) => r.reason)).toEqual([
+      "budget_extension_timeout",
+    ]);
+  });
+
   it("deadline と input_timeout（FAILED の reason）で出す。無関係な FAILED では出さない", async () => {
     for (const reason of ["deadline", "input_timeout"]) {
       const { stub, agent } = await createTask();

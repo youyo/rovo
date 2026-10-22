@@ -44,7 +44,7 @@ describe("budget_policy: ask は予算に近づいたら止めずに親へ聞く
   it("未 commit の変更を WIP として commit・push してから Sandbox を中断し、INPUT_REQUIRED（kind: budget_extension）にする。質問は数値だけの固定文", async () => {
     const fx = newFixture("bx-ask", [spend(), report()]);
     fx.statusResults.push({ stdout: " M src/a.ts\n" });
-    fx.revParse.push(SHA);
+    fx.revParse.push(SHA, SHA); // WIP の commit 後の HEAD と、中断の前の確認の HEAD（push 済み）
     await fx.stub.start(
       makeSpec("bx-ask", { budgetUsd: 1.0, budgetPolicy: "ask", verificationCommands: [] }),
     );
@@ -53,8 +53,8 @@ describe("budget_policy: ask は予算に近づいたら止めずに親へ聞く
     // WIP: commit と push が済んでいる
     expect(gitCalls(fx, "commit")).toHaveLength(1);
     expect(gitCalls(fx, "push")).toHaveLength(1);
-    // 中断は WIP の後。clean でも push 済みでもないので allowReclone は false
-    expect(fx.sandbox.suspendCalls).toEqual([{ allowReclone: false }]);
+    // 中断は WIP の後。WIP が push 済みで作業ツリーが clean なので中断する（snapshot は速く戻すためのもの）
+    expect(fx.sandbox.suspendCalls).toEqual([{ allowReclone: true }]);
     expect(fx.sandbox.suspended).toBe(true);
 
     const events = await allEvents(fx);
@@ -83,6 +83,7 @@ describe("budget_policy: ask は予算に近づいたら止めずに親へ聞く
 
   it("extend を受け取ると、予算が増えて続き、完了できる。モデルには rovo が書いた固定文が user メッセージとして渡る", async () => {
     const fx = newFixture("bx-extend", [spend(), spend(), report()]);
+    fx.revParse.push("1".repeat(40), "1".repeat(40)); // 質問ごとの中断の前の確認（push 済みの HEAD）
     await fx.stub.start(
       makeSpec("bx-extend", { budgetUsd: 1.0, budgetPolicy: "ask", verificationCommands: [] }),
     );
@@ -107,7 +108,7 @@ describe("budget_policy: ask は予算に近づいたら止めずに親へ聞く
   it("stop を受け取ると budget_exceeded（reason は budget_exceeded）。中断中の Sandbox を WIP のためだけに起こさない", async () => {
     const fx = newFixture("bx-stop", [spend(), report()]);
     fx.statusResults.push({ stdout: " M src/a.ts\n" });
-    fx.revParse.push(SHA);
+    fx.revParse.push(SHA, SHA);
     await fx.stub.start(
       makeSpec("bx-stop", { budgetUsd: 1.0, budgetPolicy: "ask", verificationCommands: [] }),
     );
@@ -194,7 +195,55 @@ describe("budget_policy: ask は予算に近づいたら止めずに親へ聞く
 });
 
 describe("待つ間の Sandbox", () => {
-  it("作業ツリーが clean で HEAD が push 済みなら、スナップショットに失敗しても止めてよい（allowReclone: true）", async () => {
+  it("WIP が push まで成功していない（push 失敗）なら中断せず、コンテナを止めずに待つ。質問は出て、結果の warnings に固定文が出る", async () => {
+    const fx = newFixture("bx-wip-fail", [spend(), report()]);
+    fx.statusResults.push({ stdout: " M src/a.ts\n" }, { stdout: " M src/a.ts\n" });
+    fx.pushResults.push({ exitCode: 1, stderr: "remote: denied" });
+    fx.revParse.push(SHA, SHA);
+    await fx.stub.start(
+      makeSpec("bx-wip-fail", { budgetUsd: 1.0, budgetPolicy: "ask", verificationCommands: [] }),
+    );
+    await waitForPhase(fx, "input_required");
+    expect(fx.sandbox.suspendCalls).toHaveLength(0);
+    expect(fx.sandbox.suspended).toBe(false);
+    await fx.stub.answer("q-1", "stop");
+    expect(await waitForTerminal(fx)).toBe("budget_exceeded");
+    const r = done(await fx.stub.getResult());
+    expect(r.warnings).toContain(
+      "途中の作業を push できなかったため、承認を待つ間も Sandbox を止めなかった",
+    );
+  });
+
+  it("作業ツリーが dirty のまま（WIP が見送られた）でも中断しない", async () => {
+    const fx = newFixture("bx-dirty", [spend(), report()]);
+    // WIP の status、中断の前の確認の status のどちらも dirty。秘密らしき文字列で WIP は見送り
+    fx.statusResults.push({ stdout: " M src/a.ts\n" }, { stdout: " M src/a.ts\n" });
+    await fx.stub.start(
+      makeSpec("bx-dirty", { budgetUsd: 1.0, budgetPolicy: "ask", verificationCommands: [] }),
+    );
+    await waitForPhase(fx, "input_required");
+    expect(fx.sandbox.suspendCalls).toHaveLength(0);
+    expect(fx.sandbox.suspended).toBe(false);
+  });
+
+  it("中断したときは、warnings に「止めなかった」の文は出ない", async () => {
+    const fx = newFixture("bx-suspend-nowarn", [spend(), report()]);
+    fx.revParse.push("1".repeat(40));
+    await fx.stub.start(
+      makeSpec("bx-suspend-nowarn", {
+        budgetUsd: 1.0,
+        budgetPolicy: "ask",
+        verificationCommands: [],
+      }),
+    );
+    await waitForPhase(fx, "input_required");
+    expect(fx.sandbox.suspendCalls).toHaveLength(1);
+    await fx.stub.answer("q-1", "stop");
+    expect(await waitForTerminal(fx)).toBe("budget_exceeded");
+    expect(done(await fx.stub.getResult()).warnings.join("\n")).not.toContain("止めなかった");
+  });
+
+  it("作業ツリーが clean で HEAD が push 済みのときだけ中断する。スナップショットに失敗しても止めてよい（allowReclone: true。再 clone しても何も失わない）", async () => {
     const fx = newFixture("bx-reclone", [spend(), report()]);
     fx.revParse.push("1".repeat(40)); // makeSpec の initialSha
     await fx.stub.start(
@@ -209,6 +258,7 @@ describe("待つ間の Sandbox", () => {
       const name = `bx-suspend-fail-${result instanceof Error ? "throw" : "running"}`;
       const fx = newFixture(name, [spend(), report()]);
       fx.sandbox.suspendResult = result;
+      fx.revParse.push("1".repeat(40));
       await fx.stub.start(
         makeSpec(name, { budgetUsd: 1.0, budgetPolicy: "ask", verificationCommands: [] }),
       );

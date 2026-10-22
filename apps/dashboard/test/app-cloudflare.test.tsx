@@ -1,4 +1,7 @@
-import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
+import {
+  cloudflareSummaryWithEstimateFixture,
+  overviewFixture,
+} from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -125,5 +128,28 @@ describe("Cloudflare の枠", () => {
       await vi.advanceTimersByTimeAsync(55_000);
     });
     expect(cfCalls(f)).toHaveLength(2);
+  });
+});
+
+describe("Cloudflare の推定の金額", () => {
+  it("欄の頭に合計と注記、各行に金額を出す", async () => {
+    const f = router(() => json(200, cloudflareSummaryWithEstimateFixture));
+    const { container } = await mount(f);
+    const p = panel(container);
+    const head = p.querySelector("[data-cf-total]");
+    expect(head?.textContent).toContain("推定 $1.34（無料枠を引く前）");
+    expect(head?.textContent).toContain("一部の項目は含まない");
+    expect(p.querySelector("[data-cf='ai_gateway'] .cf-cost")?.textContent).toBe("推定 $1.25");
+    expect(p.querySelector("[data-cf='containers'] .cf-cost")?.textContent).toBe("推定 $0.0806");
+    expect(p.querySelector("[data-cf='credit_balance'] .cf-cost")).toBeNull();
+  });
+
+  it("cost_estimate が無いときは合計を出さず、件数だけで壊れない", async () => {
+    const f = router(() => json(200, cfBody));
+    const { container } = await mount(f);
+    const p = panel(container);
+    expect(p.querySelector("[data-cf-total]")).toBeNull();
+    expect(p.querySelectorAll(".cf-cost")).toHaveLength(0);
+    expect(p.textContent).toContain("316 件、エラー 18 件、費用 $3.00");
   });
 });

@@ -2,6 +2,7 @@ import type { CloudflareSummaryDto } from "@rovo/dashboard-contract";
 import { describe, expect, it } from "vitest";
 import {
   CLOUDFLARE_DASH_URL,
+  cloudflareEstimateHead,
   cloudflareRows,
   formatGibHours,
   formatNeurons,
@@ -118,5 +119,116 @@ describe("isAllowedCloudflareUrl", () => {
       expect(isAllowedCloudflareUrl(bad), bad).toBe(false);
     }
     expect(isAllowedCloudflareUrl(null)).toBe(false);
+  });
+});
+
+describe("推定の金額（cost_estimate）", () => {
+  const withEstimate = (over: Partial<NonNullable<CloudflareSummaryDto["cost_estimate"]>> = {}) =>
+    ({
+      ...summary,
+      cost_estimate: {
+        basis: "before_free_tier",
+        pricing_checked_at: "2026-10-22",
+        items: {
+          workers_requests: {
+            quantity: 150,
+            unit: "request",
+            unit_price_usd: 0.0000003,
+            estimated_usd_before_free_tier: 0.000045,
+          },
+          containers_vcpu: {
+            quantity: 4_000,
+            unit: "vcpu_second",
+            unit_price_usd: 0.00002,
+            estimated_usd_before_free_tier: 0.08,
+          },
+          containers_memory: {
+            quantity: 250,
+            unit: "gib_second",
+            unit_price_usd: 0.0000025,
+            estimated_usd_before_free_tier: 0.000625,
+          },
+          containers_disk: {
+            quantity: null,
+            unit: "gb_second",
+            unit_price_usd: 0.00000007,
+            estimated_usd_before_free_tier: null,
+          },
+          workers_ai: {
+            quantity: 777.5,
+            unit: "neuron",
+            unit_price_usd: 0.000011,
+            estimated_usd_before_free_tier: 0.0085525,
+          },
+          ai_gateway: { cost_usd: 1.25 },
+        },
+        total_estimated_usd_before_free_tier: 1.3392225,
+        excluded_items: ["containers_disk"],
+        partial: true,
+        ...over,
+      },
+    }) satisfies CloudflareSummaryDto;
+
+  it("合計の見出しは「推定 $x（無料枠を引く前）」で、partial なら注記を添える", () => {
+    expect(cloudflareEstimateHead(withEstimate())).toEqual({
+      text: "推定 $1.34（無料枠を引く前）",
+      partial: true,
+    });
+    const full = withEstimate({ excluded_items: [], partial: false });
+    expect(cloudflareEstimateHead(full)).toEqual({
+      text: "推定 $1.34（無料枠を引く前）",
+      partial: false,
+    });
+  });
+
+  it("合計が null なら「推定できない」", () => {
+    const s = withEstimate({ total_estimated_usd_before_free_tier: null });
+    expect(cloudflareEstimateHead(s)?.text).toBe("推定できない（無料枠を引く前）");
+  });
+
+  it("cost_estimate が無い（古い応答）ときは見出しを出さず、行の金額も出さない", () => {
+    expect(cloudflareEstimateHead(summary)).toBeNull();
+    for (const r of cloudflareRows(summary)) expect(r.cost, r.key).toBeNull();
+  });
+
+  it("各行の金額。コンテナは vCPU とメモリの合計（ディスクは null なので足さない）、AI Gateway は cost_usd", () => {
+    const s = withEstimate();
+    expect(rowOf(s, "workers").cost).toBe("推定 <$0.0001");
+    expect(rowOf(s, "containers").cost).toBe("推定 $0.0806");
+    expect(rowOf(s, "ai_gateway").cost).toBe("推定 $1.25");
+    expect(rowOf(s, "workers_ai").cost).toBe("推定 $0.0086");
+    expect(rowOf(s, "credit_balance").cost).toBeNull();
+  });
+
+  it("null の項目は金額を出さない（取れない項目・使用量の無い項目）", () => {
+    const s = withEstimate();
+    const withNullAi: CloudflareSummaryDto = {
+      ...s,
+      cost_estimate: s.cost_estimate && {
+        ...s.cost_estimate,
+        items: {
+          ...s.cost_estimate.items,
+          workers_ai: { ...s.cost_estimate.items.workers_ai, estimated_usd_before_free_tier: null },
+        },
+      },
+    };
+    expect(rowOf(withNullAi, "workers_ai").cost).toBeNull();
+    expect(rowOf(withNullAi, "workers_ai").text).toBe("1,235 Neuron");
+    const containersNull: CloudflareSummaryDto = {
+      ...s,
+      cost_estimate: s.cost_estimate && {
+        ...s.cost_estimate,
+        items: {
+          ...s.cost_estimate.items,
+          containers_memory: {
+            ...s.cost_estimate.items.containers_memory,
+            estimated_usd_before_free_tier: null,
+          },
+        },
+      },
+    };
+    expect(rowOf(containersNull, "containers").cost).toBeNull();
+    const workersOff: CloudflareSummaryDto = { ...s, workers: { ok: false, reason: "forbidden" } };
+    expect(rowOf(workersOff, "workers").cost).toBeNull();
   });
 });

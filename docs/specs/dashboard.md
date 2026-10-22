@@ -326,6 +326,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 - **合計**（`total_estimated_usd_before_free_tier`）: 取れた項目の和で、**AI Gateway の費用（`items.ai_gateway.cost_usd`。Cloudflare の集計値）を含む**。クレジット残高は含めない。取れない項目（forbidden / unavailable / not_configured / empty、ディスク）は推定を null にして合計に含めず、`excluded_items` に項目名を出し、1 つでもあれば `partial: true`。1 つも取れなければ合計も null（0 USD と見せない）。
 - 契約: `cost_estimate` は optional（古い gateway・古い応答・fixtures でもスキーマを通る。既存の項目は変えない）。`pricing_checked_at` は単価を確認した日（未確認は null）。
 - 単価の出典（2026-10-22 に確認。Cloudflare の公式ドキュメント）: Workers `https://developers.cloudflare.com/workers/platform/pricing/`（$0.30 / 100 万リクエスト）、Containers `https://developers.cloudflare.com/containers/platform/pricing/`（vCPU $0.000020 / 秒、メモリ $0.0000025 / GiB 秒、ディスク $0.00000007 / GB 秒）、Workers AI `https://developers.cloudflare.com/workers-ai/platform/pricing/`（$0.011 / 1,000 Neurons）。単価が変わったら、定数・出典・確認日を一緒に直す。
+- **画面の表示**（Cloudflare の欄。`cost_estimate` の表示）: 欄の頭に 1 行「推定 $x（無料枠を引く前）」を出し、`partial` のときは小さく「一部の項目は含まない」を添える。合計が null なら「推定できない（無料枠を引く前）」。各行の右に「推定 $x」を添える（Workers のリクエスト、コンテナの vCPU とメモリの合計、AI Gateway の費用、Workers AI）。コンテナは vCPU かメモリが null なら金額を出さず、ディスクが null のときは vCPU とメモリだけを足す。取れない項目（ok でない）と null の項目は金額を出さない。クレジット残高には出さない。金額は `formatUsd`、色・書体は既存のトークンで、360px でも横にはみ出さない。`cost_estimate` が無い古い応答では、合計の行を出さず件数だけを出す。
 
 ### D14. 構造化イベント（agent → gateway → 詳細）
 

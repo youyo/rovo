@@ -32,6 +32,18 @@ describe("procedure セクションの TDD 手順", () => {
     expect(t).toContain("Do not edit test configuration or delete tests");
   });
 
+  it("失敗するテストを Red の後・実装の前に commit する手順が入っている", async () => {
+    const t = await procedureText();
+    const red = t.indexOf("FAILS for the expected reason");
+    const commit = t.indexOf("commit the failing test");
+    const impl = t.indexOf("implement the smallest change");
+    expect(red).toBeGreaterThan(-1);
+    expect(commit).toBeGreaterThan(red);
+    expect(impl).toBeGreaterThan(commit);
+    expect(t).toContain("sandbox restart");
+    expect(t).toContain("commit whenever the work is green");
+  });
+
   it("例外と summary の要件が入っている", async () => {
     const t = await procedureText();
     expect(t).toMatch(/documentation, comments, config values only, or research/);

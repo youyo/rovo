@@ -40,7 +40,7 @@ describe("procedure セクションの TDD 手順", () => {
     expect(red).toBeGreaterThan(-1);
     expect(commit).toBeGreaterThan(red);
     expect(impl).toBeGreaterThan(commit);
-    expect(t).toContain("restarts");
+    expect(t).toContain("sandbox restart");
     expect(t).toContain("commit whenever the work is green");
   });
 

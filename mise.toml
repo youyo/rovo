@@ -158,6 +158,12 @@ dir = "apps/dashboard"
 run = "pnpm exec playwright test"
 wait_for = ["test:e2e:gateway", "test:e2e:gateway:nologs", "test:e2e:gateway:userids"]
 
+[tasks."docs:screenshots"]
+description = "README 用のスクリーンショットを docs/assets/screenshots/ に撮り直す（Playwright + Chromium。通常の E2E と同じ仕組みで wrangler dev + 偽 GitHub + 偽 agent を起動し、撮影専用の架空のデータ acme/widgets を英語の表示で撮る。Light と Dark）。通常の test / test:e2e には含めない。Docker は要らない。dev registry の取り違えを避けるため E2E と同時には走らせない"
+depends = ["build:dashboard", "test:e2e:dashboard:install"]
+dir = "apps/dashboard"
+run = "pnpm exec playwright test -c playwright.docs.config.ts"
+
 [tasks."clef:model-experiment"]
 description = "モデルの自動選択の閾値の実験（実際の Clef に apps/gateway/test/fixtures/model-selection-samples.json の見本を投げて確率を JSON に書く）。使い方: mise run clef:model-experiment -- <出力パス>。接続は CLEF_PROXY_URL（AI バインディングを持つ wrangler dev --remote の Worker）か、CLOUDFLARE_API_TOKEN と CLOUDFLARE_ACCOUNT_ID（Workers AI の REST）。数セントかかる。CI では実行しない"
 run = "node scripts/clef-model-experiment.mjs"

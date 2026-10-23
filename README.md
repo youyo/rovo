@@ -4,15 +4,96 @@
 
 English | [日本語](README.ja.md)
 
-A Task Gateway (Cloudflare Workers) for delegating coding tasks from Claude Code / Cowork over Remote MCP.
+Rovo lets Claude Code / Cowork hand coding tasks to child agents over Remote MCP. Each task runs in an isolated Sandbox on your own Cloudflare account and comes back as a Draft PR, and you can watch it live in a dashboard.
 
-- The MCP server (gateway) accepts tasks from users who sign in through GitHub App user authorization.
-- Each task is run by a child agent (agent, running in an isolated Sandbox on Cloudflare Containers), which pushes to a working branch and opens a Draft PR.
-- Web search and fetch are handled by a separate Worker (web), which treats results as untrusted data and returns them with a safety verdict.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/dashboard-dark.png">
+    <img src="docs/assets/screenshots/dashboard-light.png" alt="The Rovo dashboard showing a running task: its stages (Prepare, Run, Verify, Complete) and the live log of commands" width="860">
+  </picture>
+</p>
 
-Licensed under [MIT](LICENSE).
+*The dashboard (read-only; it follows the system's light / dark setting).*
 
-Design: [docs/specs/design.md](docs/specs/design.md) (Japanese). Deployment guide (for downstream users who use rovo as their upstream): [docs/deploy.md](docs/deploy.md) (Japanese). Manual acceptance test: [docs/specs/acceptance.md](docs/specs/acceptance.md) (Japanese).
+## Quick start
+
+Deploy Rovo to your own Cloudflare account, connect it to Claude Code, and run your first task.
+
+### 0. What you need
+
+- A **Cloudflare account on the Workers Paid plan** (Containers, which run the Sandbox, need it). Rovo uses Workers, Durable Objects, Containers, KV, R2, Workers AI and AI Gateway.
+- A **Cloudflare API token for Terraform**. It is the only token you create by hand; its permissions are listed in [infra/README.md](infra/README.md) (Japanese).
+- A **GitHub account** to own the GitHub App (`mise run setup` creates the App; you only press "Create GitHub App" in the browser).
+- An **Anthropic API key** (it is stored in AI Gateway as BYOK; an OpenAI key is optional).
+- [mise](https://mise.jdx.dev/), **Docker** (running; it builds the agent's container image), and [Claude Code](https://claude.com/claude-code).
+
+### 1. Get the code and the tools
+
+```sh
+git clone https://github.com/youyo/rovo.git
+cd rovo
+mise install                                   # node / pnpm / terraform
+mise run install                               # dependencies
+(cd apps/gateway && pnpm exec wrangler login)  # for deploying (OAuth)
+export CLOUDFLARE_API_TOKEN=...                # the Terraform token. Also used by `mise run byok`
+```
+
+### 2. Write the config
+
+```sh
+cp rovo.config.example.json rovo.config.json
+```
+
+Fill in `accountId` (your Cloudflare account ID), `publicBaseUrl` (the `https` URL the gateway will be served from, for example `https://rovo.example.com` together with `customDomain`), and `allowed.userIds` (your numeric GitHub user ID: `gh api user --jq .id`). Everything else has a default. Details of every field: [docs/deploy.md](docs/deploy.md) section 4.
+
+### 3. Deploy (one command)
+
+```sh
+mise run setup
+```
+
+It checks the prerequisites, runs Terraform, deploys the three Workers (web, agent, gateway), puts in the secrets, and creates the GitHub App. **Your browser opens: press "Create GitHub App" on GitHub**, then install the App on your org / repositories on the page that opens next. It can be run again as many times as you need.
+
+Then register your Anthropic key in AI Gateway (hidden input; add `openai` too if you want OpenAI models):
+
+```sh
+mise run byok -- anthropic
+```
+
+Check that it is up: `curl -i https://<your-host>/mcp` returns `401` without credentials. The full guide (values, custom domain, GitHub App, troubleshooting) is [docs/deploy.md](docs/deploy.md) (Japanese).
+
+### 4. Connect Claude Code
+
+```sh
+claude mcp add --transport http rovo https://<your-host>/mcp
+```
+
+On first use you see Rovo's consent screen and sign in with GitHub. In claude.ai and other clients that take a connector URL, enter `https://<your-host>/mcp` as the remote MCP server URL.
+
+### 5. Install the mod (optional, recommended)
+
+The bundled mod shows task progress in a pane beside Claude Code, and adds `/rovo:create-task` and `/rovo:consult`. In Claude Code:
+
+```
+/plugin marketplace add youyo/rovo
+/plugin install rovo@rovo
+```
+
+### 6. Try it
+
+- In Claude Code, run `/rovo:create-task Fix the flaky pagination test in the widgets API` (the repository, branch and SHA come from the git repository you are in). The pane beside the chat shows the stages and the live log, and a Draft PR appears on GitHub.
+- Open the dashboard at `https://<your-host>/dashboard` and sign in with GitHub.
+- Ask another model for a second opinion with `/rovo:consult Is this migration plan safe?`
+
+## What you can do
+
+- **Hand off coding tasks over MCP**: `task_start` creates a working branch and a Draft PR, and a child agent does the work in an isolated Sandbox.
+- **Review and merge on your terms**: the calling AI reviews the diff and makes the PR Ready; whether it may also merge is a per-task choice (`merge_policy`), and GitHub branch protection always applies.
+- **Choose the model and the effort per task**: Claude, OpenAI (BYOK) and free Workers AI models, with prices from `models_list` and an automatic pick when you do not choose.
+- **Stay within budget**: a monthly allowance, a per-task budget that asks before extending, and a limit on concurrent tasks.
+- **Get a second opinion**: `consult` asks another model a single question, with prompt caching.
+- **Search and read the web safely**: `web_search` / `web_fetch` return third-party content as untrusted data with a safety verdict.
+- **Watch it all**: a read-only dashboard with the timeline, stages, logs, cost and the state of the Draft PR, plus a Claude Code mod that shows the same progress beside the chat.
 
 ## Architecture
 
@@ -39,6 +120,14 @@ The diagram below is generated from the code by [Sketio Arch](https://gh.sketio.
 
 [![Architecture overview](https://gh.sketio.app/youyo/rovo/overview.svg)](https://gh.sketio.app/youyo/rovo)
 
+## Reference
+
+The rest of this page is reference material.
+
+Licensed under [MIT](LICENSE).
+
+Design: [docs/specs/design.md](docs/specs/design.md) (Japanese). Deployment guide (for downstream users who use rovo as their upstream): [docs/deploy.md](docs/deploy.md) (Japanese). Manual acceptance test: [docs/specs/acceptance.md](docs/specs/acceptance.md) (Japanese).
+
 ## Tools
 
 Sign in with GitHub App user authorization, then use the following tools from `/mcp`.
@@ -61,7 +150,7 @@ Sign in with GitHub App user authorization, then use the following tools from `/
 | `consult` | write | A second opinion (a design advisor). Answers `{model?, system?, messages: [{role: user \| assistant, content}], max_output_tokens?}` in a single turn (does not store the conversation; does not write code; does not use a Sandbox). The response is `{text, model, usage: {input, output, cache_read, cache_write}, cost_usd}`. For Anthropic models, prompt caching is applied to `system` and everything before the last user message, so sending the same preamble makes the second and later calls cheaper. Before calling, it reserves `CONSULT_BUDGET_USD` (default $0.5) from the monthly allowance and settles at the actual cost |
 | `web_search` | read-only | Returns Web Search API results (url, title, description). See "Web Research Service" below |
 | `web_fetch` | read-only | Fetches a public page and returns it as Markdown (does not run JS) |
-| `web_browse` | read-only | **Experimental, disabled by default.** Fetches a page after rendering its JS |
+| `web_browse` | read-only | **Disabled by default.** Fetches a page after rendering its JS |
 
 **Constraints (also stated in the tool responses)**
 
@@ -103,11 +192,7 @@ The gateway serves a read-only dashboard (`/dashboard`) where you can see the st
 
 ## Claude Code mod
 
-A read-only mod that shows the progress of tasks in a pane beside Claude Code is bundled ([plugins/rovo/README.md](plugins/rovo/README.md)).
-
-```
-/plugin install rovo --marketplace youyo/rovo
-```
+A read-only mod that shows the progress of tasks in a pane beside Claude Code is bundled ([plugins/rovo/README.md](plugins/rovo/README.md)). It also adds `/rovo:create-task`, `/rovo:consult`, `/rovo:open-console` and `/rovo:close-console`. To install it, see step 5 of the [Quick start](#quick-start) (`/plugin marketplace add youyo/rovo` and `/plugin install rovo@rovo`). From a shell: `claude plugin install rovo --marketplace youyo/rovo`.
 
 ## Components
 
@@ -165,6 +250,7 @@ mise run lint         # Biome + type check
 | `mise run deploy:config` / `deploy:config:check` | Generates the wrangler config in `deploy/` from `rovo.config.json` and the non-secret Terraform outputs / checks that the generated files match what would be regenerated (no Terraform needed; for downstream CI) |
 | `mise run deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` / `deploy:secrets` | **Actually deploy** (using the downstream wrangler config in `ROVO_DEPLOY_DIR`; if it is unset they do nothing and fail). See [Deployment](#deployment) |
 | `mise run dev` | Local start (`http://localhost:8787`). Reads `apps/gateway/.dev.vars` |
+| `mise run docs:screenshots` | Retakes the README screenshots in `docs/assets/screenshots/` (Light and Dark, English UI, 1280 px wide). Playwright + Chromium start the dashboard with `wrangler dev`, a fake GitHub and a fake agent, as in the dashboard E2E, and photograph fictional data (acme/widgets). Docker is not needed. Not part of `test` |
 
 If an E2E test fails, `E2E_DEBUG=1 mise run test:e2e` also shows the output of `wrangler dev`. The E2E tests do not connect to GitHub (they use a fake GitHub).
 
@@ -255,7 +341,7 @@ These are things that a private repository using rovo as its upstream (downstrea
 
 #### Conditions for audit logs to count as "audit"
 
-Audit events emit one line of structured JSON (`{"audit":true,"event":...}`) to `console.log` (the list of events is in phase6.md). Merely appearing in Workers Logs is only **best-effort**, because lines can be lost to head sampling and short retention. To make it count as an audit, downstream must configure both of the following.
+Audit events emit one line of structured JSON (`{"audit":true,"event":...}`) to `console.log` (the list of events is in the specs under `docs/specs/`). Merely appearing in Workers Logs is only **best-effort**, because lines can be lost to head sampling and short retention. To make it count as an audit, downstream must configure both of the following.
 
 - Set Workers Logs head sampling to 100% (`head_sampling_rate: 1` in `observability`; `observability.logs.head_sampling_rate` also works). rovo's `wrangler.jsonc` does not contain `observability`.
 - Send logs through Logpush to a destination where you can decide the retention period yourself (the destination is downstream's decision).
@@ -288,7 +374,7 @@ The task summary (`summary.json`, and `task_summary` in the audit log) contains 
 | `WEB_USD_PER_1K_FETCH` | 0 | Per 1,000 `web_fetch` calls |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | Per 1,000 `web_browse` calls (browser time with 30 seconds per call as the upper bound) |
 
-The basis for the defaults (Cloudflare's official price list, retrieved 2026-10-19) is in the comments of `apps/gateway/wrangler.jsonc` and in phase6.md. They change when prices are revised, so review them downstream. The Web counts are **only what the child used** (what the parent uses from MCP is not tied to a task).
+The basis for the defaults (Cloudflare's official price list, retrieved 2026-10-19) is in the comments of `apps/gateway/wrangler.jsonc` and in the specs under `docs/specs/`. They change when prices are revised, so review them downstream. The Web counts are **only what the child used** (what the parent uses from MCP is not tied to a task).
 
 #### Enabling web_browse
 

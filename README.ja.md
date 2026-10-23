@@ -4,15 +4,96 @@
 
 [English](README.md) | 日本語
 
-Claude Code / Cowork から Remote MCP 経由でコーディングタスクを委譲するための Task Gateway（Cloudflare Workers）。
+Rovo は、Claude Code / Cowork から Remote MCP 経由でコーディングタスクを子エージェントに任せる仕組み。タスクは自分の Cloudflare アカウント上の隔離された Sandbox で実行され、成果は Draft PR として返り、進み具合はダッシュボードで見られる。
 
-- MCP サーバー（gateway）が、GitHub App のユーザー認可でログインした利用者のタスクを受け付ける。
-- タスクは子エージェント（agent。Cloudflare Containers の隔離された Sandbox で動く）が実行し、作業ブランチへ push して Draft PR を作る。
-- Web の検索・取得は、別の Worker（web）が非信頼データとして扱い、安全性を評価して返す。
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/dashboard-dark.png">
+    <img src="docs/assets/screenshots/dashboard-light.png" alt="Rovo のダッシュボード。実行中のタスクの段階（Prepare・Run・Verify・Complete）と、コマンドのログが流れている（画面の文字は英語）" width="860">
+  </picture>
+</p>
 
-ライセンスは [MIT](LICENSE)。
+*ダッシュボード（読み取り専用。OS の Light / Dark の設定に合わせて切り替わる。画面の文字は英語の表示）。*
 
-設計は [docs/specs/design.md](docs/specs/design.md)、デプロイ手順（rovo を upstream にする下流向け）は [docs/deploy.md](docs/deploy.md)、手動の受入試験は [docs/specs/acceptance.md](docs/specs/acceptance.md)。
+## クイックスタート
+
+自分の Cloudflare アカウントにデプロイし、Claude Code につないで、最初のタスクを動かすまで。
+
+### 0. 用意するもの
+
+- **Workers Paid プランの Cloudflare のアカウント**（Sandbox を動かす Containers に要る）。Rovo は Workers・Durable Objects・Containers・KV・R2・Workers AI・AI Gateway を使う。
+- **Terraform 用の Cloudflare API トークン**。人が手で作るトークンはこれだけで、権限は [infra/README.md](infra/README.md) にある。
+- GitHub App の持ち主になる **GitHub アカウント**（App は `mise run setup` が作る。ブラウザで「Create GitHub App」を押すだけ）。
+- **Anthropic の API キー**（AI Gateway に BYOK として入れる。OpenAI のキーは任意）。
+- [mise](https://mise.jdx.dev/)、**Docker**（起動しておく。agent のコンテナイメージのビルドに使う）、[Claude Code](https://claude.com/claude-code)。
+
+### 1. コードとツールを用意する
+
+```sh
+git clone https://github.com/youyo/rovo.git
+cd rovo
+mise install                                   # node / pnpm / terraform
+mise run install                               # 依存パッケージ
+(cd apps/gateway && pnpm exec wrangler login)  # デプロイ用（OAuth）
+export CLOUDFLARE_API_TOKEN=...                # Terraform 用のトークン。mise run byok でも使う
+```
+
+### 2. 設定を書く
+
+```sh
+cp rovo.config.example.json rovo.config.json
+```
+
+`accountId`（Cloudflare のアカウント ID）、`publicBaseUrl`（gateway を公開する `https` の URL。例: `customDomain` と合わせた `https://rovo.example.com`）、`allowed.userIds`（自分の数値の GitHub user ID。`gh api user --jq .id`）を埋める。あとは既定のままでよい。各項目の詳細は [docs/deploy.md](docs/deploy.md) の 4。
+
+### 3. デプロイする（1 コマンド）
+
+```sh
+mise run setup
+```
+
+前提の確認 → Terraform → web・agent・gateway の 3 つの Worker のデプロイ → secret の投入 → GitHub App の作成まで行う。**途中でブラウザが開くので、GitHub で「Create GitHub App」を押す**。続いて開く Install のページで、対象の org / リポジトリに App を入れる。何度でも再実行できる。
+
+そのあと、Anthropic のキーを AI Gateway に登録する（表示されない入力。OpenAI のモデルも使うなら `openai` も）。
+
+```sh
+mise run byok -- anthropic
+```
+
+動作の確認: `curl -i https://<your-host>/mcp` が、認証なしで `401` を返す。値の一覧・独自ドメイン・GitHub App・トラブルシューティングなどの全体は [docs/deploy.md](docs/deploy.md)。
+
+### 4. Claude Code につなぐ
+
+```sh
+claude mcp add --transport http rovo https://<your-host>/mcp
+```
+
+初回は Rovo の同意画面が出るので、GitHub でログインする。claude.ai などコネクタの URL を入れるクライアントでは、リモート MCP サーバーの URL に `https://<your-host>/mcp` を入れる。
+
+### 5. mod を入れる（任意・おすすめ）
+
+同梱の mod は、タスクの進み具合を Claude Code の横のペインに出し、`/rovo:create-task` と `/rovo:consult` を追加する。Claude Code で:
+
+```
+/plugin marketplace add youyo/rovo
+/plugin install rovo@rovo
+```
+
+### 6. 試す
+
+- Claude Code で `/rovo:create-task widgets API の不安定なページネーションのテストを直して` を実行する（リポジトリ・ブランチ・SHA は、いる git リポジトリから求める）。会話の横のペインに段階とログが流れ、GitHub に Draft PR ができる。
+- ダッシュボード `https://<your-host>/dashboard` を開き、GitHub でログインする。
+- `/rovo:consult この移行の手順は安全？` で、別のモデルに意見を聞く。
+
+## できること
+
+- **MCP でコーディングタスクを任せる**: `task_start` が作業ブランチと Draft PR を作り、子エージェントが隔離された Sandbox で作業する。
+- **レビューとマージは自分で決める**: 呼び出し元の AI が差分をレビューして PR を Ready にする。マージまで任せるかはタスクごとに選べ（`merge_policy`）、GitHub のブランチ保護は常に効く。
+- **モデルと思考レベルをタスクごとに選ぶ**: Claude、OpenAI（BYOK）、無料の Workers AI のモデル。単価は `models_list` で見られ、選ばなければ自動で選ぶ。
+- **予算を守る**: 月の枠、延長の前に聞くタスクごとの予算、同時に実行できるタスク数の上限。
+- **セカンドオピニオン**: `consult` が別のモデルに 1 回質問する（プロンプトキャッシュつき）。
+- **Web を安全に調べる**: `web_search` / `web_fetch` は、第三者の内容を非信頼データとして、安全性の判定つきで返す。
+- **全部を見渡せる**: タイムライン・段階・ログ・費用・Draft PR の状態を出す読み取り専用のダッシュボードと、同じ進み具合を会話の横に出す Claude Code の mod。
 
 ## 全体の構成
 
@@ -39,6 +120,14 @@ packages/audit  (監査ログの共通ライブラリ。3 つの Worker が使�
 
 [![構成図（全体）](https://gh.sketio.app/youyo/rovo/overview.svg)](https://gh.sketio.app/youyo/rovo?lang=ja)
 
+## リファレンス
+
+ここから先は、詳しい説明。
+
+ライセンスは [MIT](LICENSE)。
+
+設計は [docs/specs/design.md](docs/specs/design.md)、デプロイ手順（rovo を upstream にする下流向け）は [docs/deploy.md](docs/deploy.md)、手動の受入試験は [docs/specs/acceptance.md](docs/specs/acceptance.md)。
+
 ## 提供するツール
 
 GitHub App のユーザー認可でログインし、`/mcp` から次のツールを使える。
@@ -55,20 +144,20 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 | `task_steer` | 書き込み | 実行中の子エージェントに追加の指示を送る |
 | `task_pr_ready` | 書き込み | COMPLETED のタスクの Draft PR を Ready for review にする（冪等）。`{task_id}` だけを受け、対象の PR はタスクの記録から決まる。利用者本人の GitHub トークンで行う |
 | `task_pr_merge` | 書き込み | PR をマージする。`{task_id, merge_method?: squash \| merge \| rebase, delete_branch?}`。`merge_policy` が `agent_merge`、`head_matches_verified` が true、PR が Ready のときだけ。検証済みの head の sha を GitHub に渡し、ブランチ保護に拒否されたら `merge_blocked`（GitHub の理由つき）。利用者本人の GitHub トークンで行う |
-| `models_list` | 読み取り専用 | 使えるモデルの一覧と単価を返す（入力なし）。`{models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort, available, unavailable_reason?}]}`。単価は USD / 100 万トークン。`task_start` の `model` と `consult` の `model` に使える（D10）。`available` は AI Gateway にそのプロバイダーのキー（BYOK）が登録されているか（キーが無い Anthropic / OpenAI のモデルは `false`・`no_provider_key`。Workers AI は常に `true`）（D10b） |
+| `models_list` | 読み取り専用 | 使えるモデルの一覧と単価を返す（入力なし）。`{models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort, available, unavailable_reason?}]}`。単価は USD / 100 万トークン。`task_start` の `model` と `consult` の `model` に使える。`available` は AI Gateway にそのプロバイダーのキー（BYOK）が登録されているか（キーが無い Anthropic / OpenAI のモデルは `false`・`no_provider_key`。Workers AI は常に `true`） |
 | `sandbox_instances_list` | 読み取り専用 | 子の Sandbox の大きさの一覧と単価を返す（入力なし）。`{instances: [{name, vcpu, memory_gib, disk_gb, usd_per_hour, default, selectable, auto_scale_max}]}`。`task_start` の `sandbox_instance` に使えるのは `selectable: true`（`lite` は `false`）。`auto_scale_max: true` が、Clef（Workers AI の決定モデル）が Sandbox を自動で上げる上限（無効にしているデプロイではどれも `false`）。Sandbox は小さく始まり、子のコマンドの前に Clef が「今の大きさで足りるか」を判断して、足りなければ 2 → 3 → 4 と上がる（上げるだけ）。子が最初に使うときに起動する（web 検索だけのタスクでは起動しない） |
-| `budget_status` | 読み取り専用 | 自分の予算の状況を返す（入力なし）。`{monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, concurrency_limit, period}`。`concurrency_limit` は利用者ごとに同時に実行できるタスクの上限（設定値）で、実際に同時に実行できる数は `concurrency_limit` と `max_concurrent_tasks`（残りの予算 ÷ タスクの予約額）の小さいほう。rovo の月の枠だけで、Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する）（D10） |
-| `consult` | 書き込み | セカンドオピニオン（設計の相談役）。`{model?, system?, messages: [{role: user \| assistant, content}], max_output_tokens?}` を 1 回で完結して答える（会話は保存しない。コードは書かせず、Sandbox も使わない）。応答は `{text, model, usage: {input, output, cache_read, cache_write}, cost_usd}`。Anthropic のモデルでは system と最後の user より前にプロンプトキャッシュを付けるので、同じ前置きを送ると 2 回目以降は安くなる。呼ぶ前に `CONSULT_BUDGET_USD`（既定 $0.5）を月の枠から予約し、実費で精算する（D10） |
+| `budget_status` | 読み取り専用 | 自分の予算の状況を返す（入力なし）。`{monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, concurrency_limit, period}`。`concurrency_limit` は利用者ごとに同時に実行できるタスクの上限（設定値）で、実際に同時に実行できる数は `concurrency_limit` と `max_concurrent_tasks`（残りの予算 ÷ タスクの予約額）の小さいほう。rovo の月の枠だけで、Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する） |
+| `consult` | 書き込み | セカンドオピニオン（設計の相談役）。`{model?, system?, messages: [{role: user \| assistant, content}], max_output_tokens?}` を 1 回で完結して答える（会話は保存しない。コードは書かせず、Sandbox も使わない）。応答は `{text, model, usage: {input, output, cache_read, cache_write}, cost_usd}`。Anthropic のモデルでは system と最後の user より前にプロンプトキャッシュを付けるので、同じ前置きを送ると 2 回目以降は安くなる。呼ぶ前に `CONSULT_BUDGET_USD`（既定 $0.5）を月の枠から予約し、実費で精算する |
 | `web_search` | 読み取り専用 | Web Search API の結果（url・title・description）を返す。詳細は下の「Web Research Service」 |
 | `web_fetch` | 読み取り専用 | 公開ページを取得して Markdown で返す（JS は実行しない） |
-| `web_browse` | 読み取り専用 | **実験的・既定で無効。** JS を描画した後のページを取得する |
+| `web_browse` | 読み取り専用 | **既定で無効。** JS を描画した後のページを取得する |
 
 **制約（ツールの応答にも明記している）**
 
 - `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。成果は patch としても `task_result` で返る。
-- PR のレビューと Ready 化・マージ（D9）: rovo 自身は PR を Ready にもマージにもしない（Draft のまま返す）。呼び出し元の AI が `task_result` の差分をレビューし、問題が無ければ `task_pr_ready` で Ready にする。そのあとは `task_start` の `merge_policy` による: `human_review`（既定）は人のレビューを待ち（`task_pr_merge` は `forbidden`）、`agent_merge` は `task_pr_merge` でマージまでできる。ポリシーはデプロイ全体の env ではなくタスクごとの入力で、組織としての強制は GitHub のブランチ保護に任せる（操作は利用者本人の GitHub トークンで行うため、保護に拒否されたら `merge_blocked`）。使い方の流れは MCP の `instructions` と `task_result` の `next_steps` にも書かれる。
-- モデルの選択と予算（D10）: `models_list` で使えるモデルと単価を見て、`task_start` の `model` をタスクの難しさで選ぶ。使えるモデルは env の `AGENT_MODELS`（gateway と agent に同じ値。未設定なら `AGENT_MODEL` だけ）で決まり、単価は pi-ai のカタログ由来（許可リスト: `packages/models`）。OpenAI のモデルは AI Gateway に OpenAI のキーを BYOK 登録すると使える（対象リポジトリのコードが OpenAI にも送られる。利用上限は OpenAI 側で設定する。`docs/deploy.md`）。`budget_status` で月の残りを確かめられる。思考レベル（effort）の既定はモデルごとに決まっていて（初期値: haiku=low、sonnet=high、opus=medium、fable=low、gpt-6-luna=low、gpt-6-sol=medium、gpt-6-astra=low、Workers AI は gpt-oss・qwen・nemotron・glm-4.7-flash=low、gemma=high）、`models_list` と `task_status` / `task_result` に出る。思考のトークンは出力として課金されるので、レベルが高いほど費用が増える。既定は env の `MODEL_EFFORTS` で上書きでき、`task_start` の `effort`（off / minimal / low / medium / high / xhigh / max）でそのタスクだけ上書きもできる（そのモデルが対応していないレベルは `invalid_input`。message に使えるレベルが出る）。`consult` でモデルがリクエストを拒否した（4xx）ときは、再試行を促さない `model_rejected` を返す。
-- プロバイダーキーと Workers AI（D10b）: gateway が AI Gateway の BYOK のキー（Cloudflare API の List provider keys。secret `CLOUDFLARE_API_TOKEN` は Account / AI Gateway / Read だけの読み取り専用、vars `CLOUDFLARE_ACCOUNT_ID` / `AI_GATEWAY_ID`）を読み、alias が `default` のキーが無いプロバイダーのモデルを `available: false` にして、`task_start` / `consult` は `model_unavailable` で拒否する（結果は 5 分キャッシュ。API が失敗したら直前のキャッシュ、無ければ従来どおり `AGENT_MODELS` だけで決める）。キーが無くても使える Workers AI のモデル（無料プランで使えるものだけ: `workers-ai/@cf/openai/gpt-oss-120b`・`gpt-oss-20b`、`qwen/qwen3.8-27b`、`nvidia/nemotron-3-120b-a12b`、`zai-org/glm-4.7-flash`、`google/gemma-4-26b-a4b-it`。Workers AI は顧客データを学習に使わない）を `AGENT_MODELS` に入れると、キーが無いときの代わりになる。`model` を省略したときは `AGENT_MODEL` が available ならそれ、なければ Anthropic → `gpt-oss-120b` → 他の Workers AI → OpenAI の順で選ぶ。無料枠は 1 日 1 万 Neuron（`docs/deploy.md` の 7）。
+- PR のレビューと Ready 化・マージ: rovo 自身は PR を Ready にもマージにもしない（Draft のまま返す）。呼び出し元の AI が `task_result` の差分をレビューし、問題が無ければ `task_pr_ready` で Ready にする。そのあとは `task_start` の `merge_policy` による: `human_review`（既定）は人のレビューを待ち（`task_pr_merge` は `forbidden`）、`agent_merge` は `task_pr_merge` でマージまでできる。ポリシーはデプロイ全体の env ではなくタスクごとの入力で、組織としての強制は GitHub のブランチ保護に任せる（操作は利用者本人の GitHub トークンで行うため、保護に拒否されたら `merge_blocked`）。使い方の流れは MCP の `instructions` と `task_result` の `next_steps` にも書かれる。
+- モデルの選択と予算: `models_list` で使えるモデルと単価を見て、`task_start` の `model` をタスクの難しさで選ぶ。使えるモデルは env の `AGENT_MODELS`（gateway と agent に同じ値。未設定なら `AGENT_MODEL` だけ）で決まり、単価は pi-ai のカタログ由来（許可リスト: `packages/models`）。OpenAI のモデルは AI Gateway に OpenAI のキーを BYOK 登録すると使える（対象リポジトリのコードが OpenAI にも送られる。利用上限は OpenAI 側で設定する。`docs/deploy.md`）。`budget_status` で月の残りを確かめられる。思考レベル（effort）の既定はモデルごとに決まっていて（初期値: haiku=low、sonnet=high、opus=medium、fable=low、gpt-6-luna=low、gpt-6-sol=medium、gpt-6-astra=low、Workers AI は gpt-oss・qwen・nemotron・glm-4.7-flash=low、gemma=high）、`models_list` と `task_status` / `task_result` に出る。思考のトークンは出力として課金されるので、レベルが高いほど費用が増える。既定は env の `MODEL_EFFORTS` で上書きでき、`task_start` の `effort`（off / minimal / low / medium / high / xhigh / max）でそのタスクだけ上書きもできる（そのモデルが対応していないレベルは `invalid_input`。message に使えるレベルが出る）。`consult` でモデルがリクエストを拒否した（4xx）ときは、再試行を促さない `model_rejected` を返す。
+- プロバイダーキーと Workers AI: gateway が AI Gateway の BYOK のキー（Cloudflare API の List provider keys。secret `CLOUDFLARE_API_TOKEN` は Account / AI Gateway / Read だけの読み取り専用、vars `CLOUDFLARE_ACCOUNT_ID` / `AI_GATEWAY_ID`）を読み、alias が `default` のキーが無いプロバイダーのモデルを `available: false` にして、`task_start` / `consult` は `model_unavailable` で拒否する（結果は 5 分キャッシュ。API が失敗したら直前のキャッシュ、無ければ従来どおり `AGENT_MODELS` だけで決める）。キーが無くても使える Workers AI のモデル（無料プランで使えるものだけ: `workers-ai/@cf/openai/gpt-oss-120b`・`gpt-oss-20b`、`qwen/qwen3.8-27b`、`nvidia/nemotron-3-120b-a12b`、`zai-org/glm-4.7-flash`、`google/gemma-4-26b-a4b-it`。Workers AI は顧客データを学習に使わない）を `AGENT_MODELS` に入れると、キーが無いときの代わりになる。`model` を省略したときは `AGENT_MODEL` が available ならそれ、なければ Anthropic → `gpt-oss-120b` → 他の Workers AI → OpenAI の順で選ぶ。無料枠は 1 日 1 万 Neuron（`docs/deploy.md` の 7）。
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
 - 利用者ごとに同時に実行できるタスクの数には上限がある（設定値 `MAX_CONCURRENT_TASKS`。値は `budget_status` の `concurrency_limit` で見る）。上限に達していると `task_start` は `concurrency_limit` で断られる。タスクの停止を確認できるまで、そのタスクの枠は空かない。
 - タスクの予算はソフトリミット（`task_start` の `budget_policy`。既定 `ask`）: 予算に近づくと、止めずに `INPUT_REQUIRED` にして「あと `TASK_BUDGET_USD` 使って続けますか」を聞く（`kind: budget_extension` の質問。rovo が数値だけで書く固定文。利用者に確認してから `task_answer` で答える）。続けると月の枠からその場で延長分を予約する（1 タスク 2 回まで。月の枠はハードリミットで、足りなければ `BUDGET_EXCEEDED`）。待つ間は Sandbox を止めて費用を止める。`budget_policy: stop` は今までどおり聞かずに止まる（無人で回す用途）。
@@ -103,11 +192,7 @@ gateway は、タスクの状況をブラウザで見られる読み取り専用
 
 ## Claude Code の mod
 
-タスクの進み具合を Claude Code の横のペインに出す読み取り専用の mod を同梱している（[plugins/rovo/README.md](plugins/rovo/README.md)）。
-
-```
-/plugin install rovo --marketplace youyo/rovo
-```
+タスクの進み具合を Claude Code の横のペインに出す読み取り専用の mod を同梱している（[plugins/rovo/README.md](plugins/rovo/README.md)）。`/rovo:create-task`・`/rovo:consult`・`/rovo:open-console`・`/rovo:close-console` も追加される。導入は[クイックスタート](#クイックスタート)の 5（`/plugin marketplace add youyo/rovo` と `/plugin install rovo@rovo`）。シェルからは `claude plugin install rovo --marketplace youyo/rovo`。
 
 ## 構成
 
@@ -118,7 +203,7 @@ gateway は、タスクの状況をブラウザで見られる読み取り専用
   - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の枠（タスクごとに 1 行。上限は `MAX_CONCURRENT_TASKS`）、月額予算（タスクごとの予約・usage の冪等な精算・終了時の返却）。GitHub のトークンは DO の外へ返さない
   - `TaskDO`（タスクごと）: 状態とイベント。AgentDO への start / cancel の配送、イベントの取り込み、usage の精算を alarm で収束させる
 - `apps/agent`: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
-  - 依存関係のキャッシュ（D14）: ルート直下の lockfile（`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`）が同じなら、導入済みの `node_modules` を Containers のスナップショット（public beta）から復元して起動する。`DepsCacheDO`（鍵ごとに作成を 1 回にまとめる）と、SandboxDO の別インスタンス（作成）が行う。使えなくてもタスクは失敗せず今までどおり動く。結果は `task_result` の `usage.deps_cache`（`hit` / `miss` / `built` / `disabled`）と、作ったタスクの `cache_build_ms`。`rovo.config.json` の `depsCache.enabled` で無効にできる（docs/deploy.md の 17）
+  - 依存関係のキャッシュ: ルート直下の lockfile（`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`）が同じなら、導入済みの `node_modules` を Containers のスナップショット（public beta）から復元して起動する。`DepsCacheDO`（鍵ごとに作成を 1 回にまとめる）と、SandboxDO の別インスタンス（作成）が行う。使えなくてもタスクは失敗せず今までどおり動く。結果は `task_result` の `usage.deps_cache`（`hit` / `miss` / `built` / `disabled`）と、作ったタスクの `cache_build_ms`。`rovo.config.json` の `depsCache.enabled` で無効にできる（docs/deploy.md の 17）
 
 ## 同意画面（confused deputy 対策）
 
@@ -165,6 +250,7 @@ mise run lint         # Biome + 型検査
 | `mise run deploy:config` / `deploy:config:check` | `rovo.config.json` と Terraform の非秘密の出力から `deploy/` の wrangler 設定を生成する / 生成物が作り直した結果と一致するかを確かめる（Terraform 不要。下流の CI 用） |
 | `mise run deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` / `deploy:secrets` | **実際にデプロイする**（`ROVO_DEPLOY_DIR` の下流の wrangler 設定を使う。未設定なら何もせずに失敗する）。[デプロイ](#デプロイ)を見る |
 | `mise run dev` | ローカル起動（`http://localhost:8787`）。`apps/gateway/.dev.vars` を読む |
+| `mise run docs:screenshots` | README のスクリーンショット（`docs/assets/screenshots/`。Light と Dark、英語の表示、幅 1280px）を撮り直す。ダッシュボードの E2E と同じ仕組み（`wrangler dev` + 偽 GitHub + 偽 agent）を Playwright + Chromium で動かし、架空のデータ（acme/widgets）を撮る。Docker は要らない。`test` には含まれない |
 
 E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` の出力も表示される。E2E は GitHub に接続しない（偽 GitHub を使う）。
 
@@ -187,10 +273,10 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `ALLOWED_USER_IDS` | ログインと全ツール呼び出しを許す GitHub の数値の user ID（カンマ区切り。`gh api user --jq .id` で分かる）。team の無い個人アカウントで使うときはこちらを使う。org/team と両方を設定した場合は、どちらかを満たせば許可する。不正な要素が 1 つでもあれば全体が不正になり、ログインできない（fail closed） |
 | `GITHUB_APP_ID` | GitHub App の App ID（秘密ではない）。Installation Access Token の発行（JWT の `iss`）に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる（fail closed） |
 | `DRAFT_PR_FALLBACK` | Draft PR を作れないリポジトリ（Free プランの private リポジトリなど）での扱い。`fail`（既定。タスクを `draft_pr_unsupported` で FAILED にする）/ `ready`（`[WIP]` を付けた通常の PR を作り、本文冒頭に注記し、警告 `draft_pr_unavailable` を付ける）。**不正な値は `fail` として扱う**。判定は Draft に関する 422 のときだけ |
-| `AGENT_MODEL` / `AGENT_MODELS` | 既定のモデルと、`task_start` / `consult` の `model` に選べるモデル（カンマ区切り。空なら `AGENT_MODEL` だけ）。agent の同名の変数と同じ値にする（D10） |
+| `AGENT_MODEL` / `AGENT_MODELS` | 既定のモデルと、`task_start` / `consult` の `model` に選べるモデル（カンマ区切り。空なら `AGENT_MODEL` だけ）。agent の同名の変数と同じ値にする |
 | `MODEL_EFFORTS`（変数） | モデルごとの思考レベルの上書き（`<モデルの id>=<off\|minimal\|low\|medium\|high\|xhigh\|max>` のカンマ区切り。空なら既定）。agent の同名の変数と同じ値にする |
-| `AI_GATEWAY_ID` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`（Secret） | AI Gateway の BYOK のキーを読んで、キーが無いプロバイダーのモデルを選べなくする（D10b）。どれかが空なら判定せず `AGENT_MODELS` だけで決める。account id は公開しない値。トークンは Account / AI Gateway / Read だけ |
-| `CONSULT_BUDGET_USD` | `consult` 1 回に月額の枠から予約する額（USD。既定 0.5。実費で精算する。0 以下・不正な値は 0.5）（D10） |
+| `AI_GATEWAY_ID` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`（Secret） | AI Gateway の BYOK のキーを読んで、キーが無いプロバイダーのモデルを選べなくする。どれかが空なら判定せず `AGENT_MODELS` だけで決める。account id は公開しない値。トークンは Account / AI Gateway / Read だけ |
+| `CONSULT_BUDGET_USD` | `consult` 1 回に月額の枠から予約する額（USD。既定 0.5。実費で精算する。0 以下・不正な値は 0.5） |
 | `MAX_CONCURRENT_TASKS` | 利用者ごとに同時に実行できるタスクの上限（1 以上の整数。既定 2。不正な値・未設定は 2）。上限に達すると `task_start` は `concurrency_limit`。月額の枠とは別で、両方を満たすときだけ始められる。値は `budget_status` の `concurrency_limit` で見える |
 | `PR_SHOW_COST` | `true` のときだけ、費用を PR 本文に載せる（既定は載せない。公開リポジトリでは誰でも見られるため） |
 
@@ -255,7 +341,7 @@ rovo を upstream にする private リポジトリ（下流）が、自分の w
 
 #### 監査ログが「監査」として成立する条件
 
-監査イベントは 1 行の構造化 JSON（`{"audit":true,"event":...}`）を `console.log` に出す（イベントの一覧は phase6.md）。Workers Logs に出るだけでは head sampling と短い保持のために行が欠落しうるので、**best-effort** でしかない。監査として成立させるには、下流で次の両方を設定する。
+監査イベントは 1 行の構造化 JSON（`{"audit":true,"event":...}`）を `console.log` に出す（イベントの一覧は `docs/specs/` の設計文書）。Workers Logs に出るだけでは head sampling と短い保持のために行が欠落しうるので、**best-effort** でしかない。監査として成立させるには、下流で次の両方を設定する。
 
 - Workers Logs の head sampling を 100% にする（`observability` の `head_sampling_rate: 1`。`observability.logs.head_sampling_rate` でもよい）。rovo の `wrangler.jsonc` には `observability` を置かない。
 - Logpush で、保持期間を自分で決められる送り先へ流す（送り先は下流の判断）。
@@ -288,7 +374,7 @@ rovo を upstream にする private リポジトリ（下流）が、自分の w
 | `WEB_USD_PER_1K_FETCH` | 0 | `web_fetch` 1,000 回あたり |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | `web_browse` 1,000 回あたり（1 回 30 秒を上限としたブラウザ時間） |
 
-既定値の根拠（Cloudflare の公式料金表、取得日 2026-10-19）は `apps/gateway/wrangler.jsonc` のコメントと phase6.md にある。料金改定で変わるので、下流で見直す。Web の回数は**子が使った分だけ**（親が MCP から使う分はタスクに紐付かない）。
+既定値の根拠（Cloudflare の公式料金表、取得日 2026-10-19）は `apps/gateway/wrangler.jsonc` のコメントと `docs/specs/` の設計文書にある。料金改定で変わるので、下流で見直す。Web の回数は**子が使った分だけ**（親が MCP から使う分はタスクに紐付かない）。
 
 #### web_browse の有効化
 

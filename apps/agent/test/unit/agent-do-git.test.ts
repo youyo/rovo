@@ -197,7 +197,10 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     expect(await waitForTerminal(fx)).toBe("completed");
     const git = fx.sandbox.calls
       .map((c) => c.argv)
-      .filter((a) => a[0] === "git" && (a[1] === "ls-remote" || a[1] === "push"));
+      .filter(
+        (a) =>
+          a[0] === "git" && (a[1] === "push" || (a[1] === "ls-remote" && !a.includes("--heads"))),
+      );
     expect(git).toEqual([
       ["git", "ls-remote", "origin", REF("sync-ok")],
       [
@@ -247,7 +250,9 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     await fx.stub.start(makeSpec("sync-retry"));
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.pushCalls).toHaveLength(3);
-    const lsRemotes = fx.sandbox.calls.filter((c) => c.argv[1] === "ls-remote");
+    const lsRemotes = fx.sandbox.calls.filter(
+      (c) => c.argv[1] === "ls-remote" && !c.argv.includes("--heads"),
+    );
     expect(lsRemotes.length).toBeGreaterThanOrEqual(4); // 試行ごとに読み直し + 最後の確認
     const r = done(await fx.stub.getResult());
     expect(r).toMatchObject({ status: "completed", pushedSha: "c0ffee" });

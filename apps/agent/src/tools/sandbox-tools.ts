@@ -8,6 +8,13 @@ import {
 } from "@rovo/audit";
 import { maskSecrets } from "../redact";
 import type { ExecResult, SandboxPort } from "../sandbox-port";
+import {
+  blockedMessage,
+  remoteFor,
+  type ScanGit,
+  type ScanVerdict,
+  scanUnpushedForSecrets,
+} from "../secret-scan";
 import { stripAnsi } from "../text-util";
 import { resolveWorkspacePath } from "../workspace-path";
 import type { PushResult, ToolContext } from "./types";
@@ -475,12 +482,49 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
     ),
   });
 
+  /** 最後に push が成功した SHA（このツールが見たもの）。ToolContext.lastPushedSha が無いときの代わり */
+  let lastPushedLocal: string | undefined;
+  const scanGit: ScanGit = (argv, timeoutMs, maxOutputBytes) =>
+    port.exec(["git", ...argv], { ...cwdOpts, timeoutMs, maxOutputBytes });
+
+  /** 止めたときに子へ返す文（値は含めない）。commit は残り、push はしていない */
+  const blockedText = (v: Exclude<ScanVerdict, { status: "clean" | "aborted" }>): string => {
+    const head = `\npush skipped: the commit is kept locally but was NOT pushed (${blockedMessage(v)}).`;
+    if (v.status === "unscannable")
+      return `${head}\nThe diff since the last push could not be scanned for secrets (too large or git failed). Reduce the amount of changes in a commit, then call git_commit again.`;
+    const what =
+      v.status === "binary"
+        ? "A binary file that may hold a key or credential"
+        : `A possible secret (${v.category ?? "unknown"})`;
+    // パスにトークンが入っていることがある。イベントと同じく maskSecrets を通す（値は出さない）
+    const path = v.path ? maskSecrets(v.path) : undefined;
+    const line = v.status === "secret" && v.line ? `:${v.line}` : "";
+    const where = path ? ` at ${path}${line}` : "";
+    const commit = v.commit ? ` (commit ${v.commit.slice(0, 7)})` : "";
+    return `${head}\n${what} was found${where}${commit} in the commits that are not on the remote yet. Remove it from the git history: for example, redo the commits with git reset --soft <last pushed commit> and commit again. A new commit that only deletes it is NOT enough: every commit that is not on the remote is pushed, including the earlier one that holds the secret. Then call git_commit again (it scans every unpushed commit again).`;
+  };
+
   /**
    * commit のたびの push（チェックポイント）。best-effort: 失敗しても git_commit は失敗にしない。
-   * 結果の文面（モデルに返す）を返す。
+   * push の直前に、リモートに無い commit（HEAD --not 最後に push できた SHA）の追加行を commit ごとに検査し、確度の高い秘密があれば push しない（commit はローカルに残す）。
+   * 検査そのものの失敗も push しない（安全側）。結果の文面（モデルに返す）を返す。
    */
   const pushCheckpoint = async (sha: string): Promise<string> => {
     if (!context.branch || !context.onPush) return "";
+    const known = context.lastPushedSha?.() ?? lastPushedLocal;
+    // 基準が分からないとき（無い・SHA の形でない）は、HEAD から辿れる全部の commit を見る
+    const base = known && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(known) ? known : undefined;
+    const verdict = await scanUnpushedForSecrets(scanGit, "HEAD", base, {
+      remote: remoteFor(context.repository?.(), context.baseSha?.()),
+    });
+    if (verdict.status !== "clean" && verdict.status !== "aborted") {
+      try {
+        await context.onPush({ ok: false, sha, error: blockedMessage(verdict) });
+      } catch {
+        // 記録の失敗で commit を失敗にしない
+      }
+      return blockedText(verdict);
+    }
     const r = await port
       .exec(["git", "push", "origin", `HEAD:refs/heads/${context.branch}`], {
         ...cwdOpts,
@@ -493,6 +537,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
       result = { ok: false, sha, error: errMsg(r) };
     } else if (r.exitCode === 0 && !r.timedOut) {
       result = { ok: true, sha };
+      lastPushedLocal = sha;
     } else {
       const why = r.timedOut ? "timed out" : (r.stderr || r.stdout || `exit ${r.exitCode}`).trim();
       result = { ok: false, sha, error: maskSecrets(why).slice(-500) };
@@ -510,7 +555,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
   const git_commit = defineTool({
     name: "git_commit",
     description:
-      "Stage all changes (git add -A) and create a local commit with the given message. Reports when there is nothing to commit. The commit is pushed to the task branch automatically; never run git push yourself.",
+      "Stage all changes (git add -A) and create a local commit with the given message. Reports when there is nothing to commit. The commit is pushed to the task branch automatically; never run git push yourself. Before pushing, the changes since the last push are scanned for secrets (tokens, private keys); if one is found nothing is pushed and the result tells you where.",
     parameters: Type.Object({ message: Type.String({ minLength: 1, maxLength: 5000 }) }),
     replay: "unsafe",
     execute: guarded("git_commit", async (args: { message: string }) => {

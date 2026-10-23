@@ -109,7 +109,7 @@ describe("SandboxDO の constructor: DO の再起動で消えた期限を設定�
    * 本物の ctx（DurableObjectState でないと DurableObject の constructor が受け付けない）に、container と blockConcurrencyWhile だけ
    * 差し込んで SandboxDO を作る。blockConcurrencyWhile に渡された処理を記録して返す。
    */
-  function construct(inst: Inst, fake: FakeContainer) {
+  async function construct(inst: Inst, fake: FakeContainer) {
     const blocked: Promise<unknown>[] = [];
     const ctx = inst.ctx;
     const real = ctx.blockConcurrencyWhile.bind(ctx);
@@ -124,6 +124,7 @@ describe("SandboxDO の constructor: DO の再起動で消えた期限を設定�
     });
     try {
       new SandboxDO(ctx, inst.env);
+      await Promise.allSettled(blocked);
     } finally {
       // 差し込んだ own property を外して元に戻す
       delete ctx.container;
@@ -136,7 +137,7 @@ describe("SandboxDO の constructor: DO の再起動で消えた期限を設定�
     await runInDO(sandboxStub("inactivity-ctor-running"), async (inst) => {
       const fake = new FakeContainer();
       fake.running = true;
-      const blocked = construct(inst, fake);
+      const blocked = await construct(inst, fake);
       await Promise.all(blocked);
       expect(blocked).toHaveLength(1);
       expect(fake.inactivityMs).toEqual([TEN_MINUTES]);
@@ -147,7 +148,7 @@ describe("SandboxDO の constructor: DO の再起動で消えた期限を設定�
     await runInDO(sandboxStub("inactivity-ctor-stopped"), async (inst) => {
       const fake = new FakeContainer();
       fake.running = false;
-      const blocked = construct(inst, fake);
+      const blocked = await construct(inst, fake);
       await Promise.all(blocked);
       expect(fake.inactivityMs).toEqual([]);
     });
@@ -160,7 +161,7 @@ describe("SandboxDO の constructor: DO の再起動で消えた期限を設定�
       await inst.terminate();
       const again = new FakeContainer();
       again.running = true;
-      await Promise.all(construct(inst, again));
+      await Promise.all(await construct(inst, again));
       expect(again.inactivityMs).toEqual([]);
     });
   });
@@ -172,7 +173,7 @@ describe("SandboxDO の constructor: DO の再起動で消えた期限を設定�
       inst.ctx.storage.kv.put("spec", { ...spec(), deadlineAt: Date.now() - 1 });
       const again = new FakeContainer();
       again.running = true;
-      await Promise.all(construct(inst, again));
+      await Promise.all(await construct(inst, again));
       expect(again.inactivityMs).toEqual([]);
     });
   });
@@ -183,7 +184,7 @@ describe("SandboxDO の constructor: DO の再起動で消えた期限を設定�
       fake.running = true;
       fake.inactivityError = new Error("inactivity boom");
       const { value } = await capturingWarn(async () => {
-        const blocked = construct(inst, fake);
+        const blocked = await construct(inst, fake);
         return await Promise.allSettled(blocked);
       });
       expect(value).toHaveLength(1);

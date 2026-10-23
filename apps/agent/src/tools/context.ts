@@ -1,7 +1,24 @@
 import type { ToolContext } from "./types";
 
-/** git_commit と、予算超過の停止時の WIP commit が使う commit の作者。 */
-export const COMMIT_AUTHOR = { name: "rovo-agent", email: "rovo-agent@users.noreply.github.com" };
+/**
+ * git_commit と、予算超過の停止時の WIP commit が使う commit の作者の、代わりの値。
+ * 作者は gateway が spec で渡す（GitHub App の bot: `<slug>[bot]` / `<id>+<slug>[bot]@users.noreply.github.com`）。
+ * 渡されなかったとき（古い gateway・gateway が bot を引けなかったとき）はこれを使う。`.invalid` は RFC 2606 の予約で、
+ * GitHub のどのアカウントにも結び付かない。`@users.noreply.github.com` で bot の id が付かない形は、他人のアカウントとみなされるので使わない。
+ */
+export const COMMIT_AUTHOR = { name: "rovo", email: "rovo@noreply.invalid" };
+
+/** spec で渡された作者が使える形か（文字列で、改行や <> を含まない）。使えなければ代わりの作者にする。 */
+export function commitAuthorOf(given: { name: string; email: string } | undefined): {
+  name: string;
+  email: string;
+} {
+  const ok = (v: unknown): v is string =>
+    typeof v === "string" && v !== "" && v.length <= 200 && !/[\r\n<>\0]/.test(v);
+  return given && ok(given.name) && ok(given.email)
+    ? { name: given.name, email: given.email }
+    : COMMIT_AUTHOR;
+}
 
 /**
  * ツールに渡す ToolContext を作る。Pi のハーネスは start より前にツールを作るので、期限は固定値ではなく
@@ -17,6 +34,8 @@ export function createToolContext(
     baseSha?: ToolContext["baseSha"];
     repository?: ToolContext["repository"];
     onEvent?: ToolContext["onEvent"];
+    /** gateway が spec で渡した作者。呼び出し時に評価する（start より前にツールを作るため） */
+    commitAuthor?: () => { name: string; email: string } | undefined;
   } = {},
 ): ToolContext {
   const branch = extra.branch;
@@ -33,6 +52,8 @@ export function createToolContext(
     get deadlineAt() {
       return deadlineAt();
     },
-    commitAuthor: COMMIT_AUTHOR,
+    get commitAuthor() {
+      return commitAuthorOf(extra.commitAuthor?.());
+    },
   };
 }

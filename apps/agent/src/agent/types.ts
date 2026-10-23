@@ -99,6 +99,11 @@ export interface TaskSpec {
    * lockfile が無い・読めなかったときは null（キャッシュなし）。形が不正・表に無い導入コマンドは SandboxDO が無視する。
    */
   deps?: DepsSpec | null;
+  /**
+   * 子の commit の作者（GitHub App の bot: name `<slug>[bot]`、email `<id>+<slug>[bot]@users.noreply.github.com`）。
+   * gateway が決めて渡す（初期コミットと同じ作者にする）。無い・使えない形なら `rovo <rovo@noreply.invalid>`。
+   */
+  commitAuthor?: { name: string; email: string };
 }
 
 export type StartResult =

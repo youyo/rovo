@@ -509,6 +509,8 @@ Draft PRはタスク開始時に作成する。
 
 GitHubのPR作成にはベースブランチとの差分が必要なため、初期コミットには空コミット等を利用する。
 
+commit の作者（author / committer）は、この GitHub App の bot にする: name `<slug>[bot]`、email `<bot_user_id>+<slug>[bot]@users.noreply.github.com`（GitHub が App の bot として扱い、App のアイコンが出る）。slug と bot の id はデプロイごとに違うので、TaskDO が初回に App の JWT で `GET /app`（slug）→ `GET /users/<slug>[bot]`（id）を引き、タスクの DO に保存する（設定や secret は増えない）。初期コミットと、子（AgentDO）の commit（git_commit・予算超過の WIP commit）は同じ作者で、子へは start の spec の `commitAuthor` で渡す。引けなかったとき（障害・権限）は `rovo <rovo@noreply.invalid>`（`.invalid` は RFC 2606 の予約で、GitHub のどのアカウントにも結び付かない）にして、タスクは止めない。`<名前>@users.noreply.github.com` で bot の id が付かない形は、その名前の他人のアカウントの commit とみなされるので使わない（`scripts/commit-author.test.mjs` が全ソースで検査する）。
+
 PRタイトルにはタスク名を使用する。
 
 PR本文には以下を含める。

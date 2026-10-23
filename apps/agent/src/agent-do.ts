@@ -89,7 +89,7 @@ import {
 } from "./secret-scan";
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createSandboxTools } from "./tools";
-import { COMMIT_AUTHOR, createToolContext } from "./tools/context";
+import { commitAuthorOf, createToolContext } from "./tools/context";
 import type { PushResult, SandboxToolsFactory } from "./tools/types";
 import { stripUntrustedMarkers, wrapUntrusted } from "./tools/untrusted";
 import {
@@ -410,6 +410,7 @@ export class AgentDO extends DurableObject<Env> {
           lastPushedSha: () => this.lastPushedSha(),
           baseSha: () => this.spec()?.baseSha,
           repository: () => this.spec()?.repository,
+          commitAuthor: () => this.spec()?.commitAuthor,
           // 構造化イベント（D14: command / edit / commit）。ツール側で正規化済み。emit が終端後の追加を止める
           onEvent: (type, data) => this.emit(type, data),
         }),
@@ -1838,11 +1839,12 @@ export class AgentDO extends DurableObject<Env> {
         return;
       }
       if (interrupted()) return;
+      const author = commitAuthorOf(spec.commitAuthor);
       const commit = await git([
         "-c",
-        `user.name=${COMMIT_AUTHOR.name}`,
+        `user.name=${author.name}`,
         "-c",
-        `user.email=${COMMIT_AUTHOR.email}`,
+        `user.email=${author.email}`,
         "commit",
         "--no-verify",
         "--no-gpg-sign",

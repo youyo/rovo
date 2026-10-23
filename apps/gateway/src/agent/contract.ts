@@ -70,6 +70,11 @@ export interface TaskSpec {
    * lockfile が無い・読めなかった（GitHub の API の失敗を含む）ときは null（キャッシュなし）。
    */
   deps?: DepsDto | null;
+  /**
+   * 子の commit の作者（GitHub App の bot）。TaskDO が初期コミットと同じものを渡す。
+   * 引けなかったときは `rovo <rovo@noreply.invalid>`（GitHub のアカウントに結び付かない）。
+   */
+  commitAuthor?: { name: string; email: string };
 }
 
 /** ルート直下の lockfile から作る、依存関係のキャッシュの指定（agent の DepsSpec と同じ形） */

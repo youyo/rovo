@@ -23,9 +23,11 @@ import { indexBackoffMs } from "../directory/backoff";
 import { DIRECTORY_NAME, type TaskIndexSnapshot, type UpsertTaskResult } from "../directory/types";
 import {
   applyManagedBlock,
+  type BotAuthor,
   decryptString,
   detectDeps,
   encryptString,
+  FALLBACK_COMMIT_IDENTITY,
   GitHubApiError,
   GitHubAppClient,
   GitHubRepoApi,
@@ -129,7 +131,8 @@ const safeSha = (v: string | undefined): string | undefined =>
 /** GitHub が Draft PR を作れないときの 422 の文言（"Draft pull requests are not supported in this repository." など）。 */
 const DRAFT_UNSUPPORTED_RE =
   /draft pull requests? (are|is) (not (supported|available|allowed)|unavailable)/i;
-const BOT_IDENTITY = { name: "rovo", email: "rovo@users.noreply.github.com" };
+/** 作者（App の bot）を永続化するキー（DO の storage）。一度決めたら変えない（再送の spec と初期コミットを揃える） */
+const BOT_IDENTITY_KEY = "bot_identity";
 /** 1 回の取り込みで読むページ数の上限（残りは次の alarm / wait で取り込む）。 */
 const MAX_PAGES_PER_SYNC = 20;
 /** Directory への 1 回の配送を待つ上限。超えたら失敗として再試行に回す（alarm を固めない） */
@@ -2602,10 +2605,34 @@ export class TaskDO extends DurableObject<Env> {
     }
   }
 
+  /** 保存済みの作者（無ければ undefined。形が壊れていても undefined） */
+  private async storedBotIdentity(): Promise<BotAuthor | undefined> {
+    const v = await this.ctx.storage.get<BotAuthor>(BOT_IDENTITY_KEY);
+    return v && typeof v.name === "string" && typeof v.email === "string" ? v : undefined;
+  }
+
+  /**
+   * commit の作者: この App の bot（`<slug>[bot]` / `<id>+<slug>[bot]@users.noreply.github.com`）。
+   * 初回に GitHub から引いて保存し、以後は同じ値を返す。引けなかった（障害・権限・App 未設定）ときは
+   * GitHub のアカウントに結び付かない代わりの作者（rovo@noreply.invalid）にして、それも保存する（タスクを止めない）。
+   */
+  private async botIdentity(): Promise<BotAuthor> {
+    const stored = await this.storedBotIdentity();
+    if (stored) return stored;
+    let who = FALLBACK_COMMIT_IDENTITY;
+    try {
+      who = await this.appClient().getBotIdentity();
+    } catch {
+      // 代わりの作者のまま続ける（コミットの作者のために、タスクを失敗させない）
+    }
+    await this.ctx.storage.put(BOT_IDENTITY_KEY, who);
+    return who;
+  }
+
   /** start の taskSpec に入れる部分（branch・initialSha・最初のトークン）。再送でも同じ値になる。 */
   private async githubSpecPart(
     gl: GithubRow,
-  ): Promise<Pick<TaskSpec, "branch" | "initialSha" | "gitCredential" | "deps">> {
+  ): Promise<Pick<TaskSpec, "branch" | "initialSha" | "gitCredential" | "deps" | "commitAuthor">> {
     const start = this.tokenRows("kind = 'start'")[0];
     if (!start || gl.initial_sha === null) throw new Error("github setup is incomplete");
     return {
@@ -2614,6 +2641,8 @@ export class TaskDO extends DurableObject<Env> {
       gitCredential: { token: await this.decryptToken(start), expiresAt: start.expires_at },
       // 取得済みの値をそのまま送る（再送で変わらない）。未取得（この機能より前に始まったタスク）は載せない: 受理済みの spec と食い違わせない
       ...(gl.deps !== null ? { deps: JSON.parse(gl.deps) as TaskSpec["deps"] } : {}),
+      // 初期コミットで決めた作者（保存済みのときだけ。この機能より前に始まったタスクは載せない: 受理済みの spec と食い違わせない）
+      ...(await this.storedBotIdentity().then((who) => (who ? { commitAuthor: who } : {}))),
     };
   }
 
@@ -2673,11 +2702,12 @@ export class TaskDO extends DurableObject<Env> {
         throw e;
       }
       const date = new Date(row.created_at).toISOString().replace(/\.\d{3}Z$/, "Z");
+      const who = await this.botIdentity();
       const sha = await api.createCommit({
         message: `rovo: start task ${row.id}`,
         treeSha: base.treeSha,
         parents: [base.sha],
-        identity: { ...BOT_IDENTITY, date },
+        identity: { ...who, date },
       });
       sql.exec("UPDATE github_link SET initial_sha = ?", sha);
       gl = this.getGithub() as GithubRow;

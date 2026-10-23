@@ -117,6 +117,29 @@ export async function createAppJwt(args: {
   return `${header}.${payload}.${b64urlBytes(new Uint8Array(sig))}`;
 }
 
+/** commit の作者（name / email） */
+export interface BotAuthor {
+  name: string;
+  email: string;
+}
+
+/**
+ * bot の id が引けなかったときの作者。`.invalid` は RFC 2606 の予約で、GitHub のどのアカウントにも結び付かない。
+ * users.noreply.github.com の、名前だけで bot の id が付かない形は、その名前の他人のアカウントの commit とみなされるので使わない。
+ */
+export const FALLBACK_COMMIT_IDENTITY: BotAuthor = {
+  name: "rovo",
+  email: "rovo@noreply.invalid",
+};
+
+/** GitHub App の bot の正式な作者: name `<slug>[bot]`、email `<bot_user_id>+<slug>[bot]@users.noreply.github.com`。 */
+export function botIdentity(slug: string, botUserId: number): BotAuthor {
+  return {
+    name: `${slug}[bot]`,
+    email: `${botUserId}+${slug}[bot]@users.noreply.github.com`,
+  };
+}
+
 export interface InstallationToken {
   token: string;
   /** epoch ms */
@@ -200,6 +223,56 @@ export class GitHubAppClient {
       throw new GitHubApiError({ status: res.status, what, detail: "unexpected response" });
     }
     return { token: body.token, expiresAt };
+  }
+
+  /**
+   * この App の bot の作者。GET /app（App の JWT）で slug を、GET /users/<slug>[bot] で bot ユーザーの id を引く。
+   * 引けない・形が不正なら例外（呼び出し側が FALLBACK_COMMIT_IDENTITY にする）。
+   */
+  async getBotIdentity(): Promise<BotAuthor> {
+    this.key ??= parsePrivateKey(this.privateKey);
+    const jwt = await createAppJwt({
+      appId: this.appId,
+      key: await this.key,
+      nowMs: this.now(),
+    });
+    const headers = {
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2022-11-28",
+      "user-agent": "rovo-gateway",
+    };
+    const readJson = async (res: Response, what: string): Promise<Record<string, unknown>> => {
+      if (!res.ok) return throwApiError(res, what);
+      try {
+        return (await res.json()) as Record<string, unknown>;
+      } catch {
+        throw new GitHubApiError({ status: res.status, what, detail: "non-JSON response" });
+      }
+    };
+    const appWhat = "get app";
+    const app = await readJson(
+      await this.send(appWhat, `${this.apiBase}/app`, {
+        headers: { ...headers, authorization: `Bearer ${jwt}` },
+      }),
+      appWhat,
+    );
+    const slug = app.slug;
+    // slug は URL とメールに入るので、GitHub の slug の形（英数字とハイフン）だけを通す
+    if (typeof slug !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(slug)) {
+      throw new GitHubApiError({ status: 200, what: appWhat, detail: "unexpected slug" });
+    }
+    const userWhat = "get bot user";
+    const user = await readJson(
+      await this.send(userWhat, `${this.apiBase}/users/${encodeURIComponent(`${slug}[bot]`)}`, {
+        headers,
+      }),
+      userWhat,
+    );
+    const id = user.id;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+      throw new GitHubApiError({ status: 200, what: userWhat, detail: "unexpected id" });
+    }
+    return botIdentity(slug, id);
   }
 
   /** DELETE /installation/token。既に無効（401）も成功として扱う（冪等）。 */

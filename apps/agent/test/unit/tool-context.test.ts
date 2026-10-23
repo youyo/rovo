@@ -9,7 +9,17 @@ describe("createToolContext", () => {
     deadline = 1234;
     expect(ctx.deadlineAt).toBe(1234);
     expect(ctx.workspaceRoot).toBe("/workspace");
-    expect(ctx.commitAuthor.name).toBe("rovo-agent");
+  });
+
+  it("作者は gateway が spec で渡した値（呼び出し時に評価）。無ければ GitHub のアカウントに結び付かない代わりの作者", () => {
+    let author: { name: string; email: string } | undefined;
+    const ctx = createToolContext("/workspace", () => 1, { commitAuthor: () => author });
+    expect(ctx.commitAuthor).toEqual({ name: "rovo", email: "rovo@noreply.invalid" });
+    author = { name: "acme-rovo[bot]", email: "12345+acme-rovo[bot]@users.noreply.github.com" };
+    expect(ctx.commitAuthor).toEqual(author);
+    expect(createToolContext("/workspace", () => 1).commitAuthor.email).toBe(
+      "rovo@noreply.invalid",
+    );
   });
 
   it("branch と onPush を渡せる", () => {

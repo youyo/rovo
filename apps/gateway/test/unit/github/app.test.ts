@@ -106,6 +106,36 @@ describe("GitHubAppClient", () => {
     expect((await verifyJwt(jwt, pair.publicPem)).ok).toBe(true);
   });
 
+  it("bot の作者: GET /app の slug と GET /users/<slug>[bot] の id から <id>+<slug>[bot] の noreply を作る（JWT で /app を引く）", async () => {
+    const { c, calls } = await client({
+      "GET /app": () => json({ id: 12345, slug: "acme-rovo", name: "Acme Rovo" }),
+      "GET /users/acme-rovo%5Bbot%5D": () => json({ login: "acme-rovo[bot]", id: 98765 }),
+    });
+    await expect(c.getBotIdentity()).resolves.toEqual({
+      name: "acme-rovo[bot]",
+      email: "98765+acme-rovo[bot]@users.noreply.github.com",
+    });
+    const jwt = (calls[0] as Request).headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
+    expect((await verifyJwt(jwt, pair.publicPem)).ok).toBe(true);
+  });
+
+  it("bot の作者: slug や id が引けない・不正なら例外（呼び出し側が代わりの作者にする）", async () => {
+    const noUser = await client({
+      "GET /app": () => json({ slug: "acme-rovo" }),
+      "GET /users/acme-rovo%5Bbot%5D": () => json({ message: "Not Found" }, { status: 404 }),
+    });
+    await expect(noUser.c.getBotIdentity()).rejects.toBeInstanceOf(GitHubApiError);
+    const badSlug = await client({
+      "GET /app": () => json({ slug: "a/../b" }),
+    });
+    await expect(badSlug.c.getBotIdentity()).rejects.toThrow();
+    const badId = await client({
+      "GET /app": () => json({ slug: "acme-rovo" }),
+      "GET /users/acme-rovo%5Bbot%5D": () => json({ id: "x" }),
+    });
+    await expect(badId.c.getBotIdentity()).rejects.toThrow();
+  });
+
   it("失効は DELETE /installation/token（そのトークンで認証）。204 と、既に無効な 401 は成功扱い", async () => {
     const { c, calls } = await client({
       "DELETE /installation/token": [

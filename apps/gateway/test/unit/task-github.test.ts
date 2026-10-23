@@ -131,6 +131,28 @@ describe("CREATING: 初期コミット・ブランチ・Draft PR", () => {
     expect(specs[0]?.gitCredential.expiresAt).toBeGreaterThan(Date.now() + 50 * 60_000);
   });
 
+  it("作者は App の bot（<id>+<slug>[bot] の noreply）。初期コミットの author / committer と、agent へ渡す commitAuthor が同じ", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    const who = { name: "acme-rovo[bot]", email: "12345+acme-rovo[bot]@users.noreply.github.com" };
+    const c = app().commit(REPO, (await gl(stub)).initial_sha as string);
+    expect(c).toMatchObject({ author: who, committer: who });
+    const { specs } = await agent.calls();
+    expect(specs[0]?.commitAuthor).toEqual(who);
+  });
+
+  it("bot の id が引けない（障害）と、GitHub のアカウントに結び付かない rovo@noreply.invalid にする。タスクは止めない", async () => {
+    app().setFault({ pattern: "^GET /users/", status: 500 });
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    const who = { name: "rovo", email: "rovo@noreply.invalid" };
+    const c = app().commit(REPO, (await gl(stub)).initial_sha as string);
+    expect(c).toMatchObject({ author: who, committer: who });
+    expect((await status(stub)).status).toBe("RUNNING");
+    expect((await agent.calls()).specs[0]?.commitAuthor).toEqual(who);
+    app().setFault({ pattern: "^GET /users/", status: null });
+  });
+
   it("トークンは repository_ids と permissions を絞って発行され、JWT で認証される", async () => {
     const { stub } = await createTask();
     await stub.advance();

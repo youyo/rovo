@@ -35,6 +35,10 @@ export interface FakeAppOptions {
   publicKeyPem: string;
   now?: () => number;
   tokenTtlSeconds?: number;
+  /** App の slug（GET /app）。既定は架空の acme-rovo */
+  slug?: string;
+  /** App の bot ユーザーの id（GET /users/<slug>[bot]）。既定は架空の 12345 */
+  botId?: number;
 }
 
 export interface FakeCommit {
@@ -167,6 +171,8 @@ export class FakeGitHubApp {
   appId: string;
   now: () => number;
   tokenTtlSeconds: number;
+  slug: string;
+  botId: number;
   /** true なら draft:true の PR 作成を 422 で拒否する（Free プランの private リポジトリ相当） */
   draftUnsupported = false;
   /**
@@ -193,6 +199,8 @@ export class FakeGitHubApp {
     this.storeFor = opts.storeFor;
     this.now = opts.now ?? Date.now;
     this.tokenTtlSeconds = opts.tokenTtlSeconds ?? 3600;
+    this.slug = opts.slug ?? "acme-rovo";
+    this.botId = opts.botId ?? 12345;
   }
 
   // ---- 管理 ----
@@ -484,7 +492,7 @@ export class FakeGitHubApp {
   async handle(req: Request, user?: FakeUser): Promise<Response | null> {
     const url = new URL(req.url);
     const path = url.pathname;
-    if (!/^\/(app\/|repos\/|installation\/|graphql$)/.test(path)) return null;
+    if (!/^\/(app(\/|$)|users\/|repos\/|installation\/|graphql$)/.test(path)) return null;
     const auth = req.headers.get("authorization") ?? "";
     let body: unknown = null;
     if (req.method !== "GET" && req.method !== "DELETE") {
@@ -495,7 +503,7 @@ export class FakeGitHubApp {
         body = text;
       }
     }
-    const isJwtRoute = path.startsWith("/app/");
+    const isJwtRoute = path === "/app" || path.startsWith("/app/");
     this.log.push({
       method: req.method,
       path,
@@ -517,6 +525,12 @@ export class FakeGitHubApp {
       }
     }
 
+    // 公開のユーザー情報（認証なしでも引ける）。App の bot ユーザーだけを知っている
+    if (req.method === "GET" && path.startsWith("/users/")) {
+      return decodeURIComponent(path.slice("/users/".length)) === `${this.slug}[bot]`
+        ? res(200, { login: `${this.slug}[bot]`, id: this.botId, type: "Bot" })
+        : fail(404, "Not Found");
+    }
     if (isJwtRoute) return this.appRoute(req, path, auth, body);
     if (user) return this.userRoute(req.method, path, url, body, user);
     const rec = this.tokenFrom(auth);
@@ -543,6 +557,9 @@ export class FakeGitHubApp {
     const jwt = /^Bearer\s+(\S+)$/i.exec(auth)?.[1];
     if (!jwt || !(await this.verifyJwt(jwt))) {
       return fail(401, "A JSON web token could not be decoded");
+    }
+    if (path === "/app" && req.method === "GET") {
+      return res(200, { id: Number(this.appId), slug: this.slug, name: this.slug });
     }
     const m = /^\/app\/installations\/(\d+)\/access_tokens$/.exec(path);
     if (!m || req.method !== "POST") return fail(404, "Not Found");

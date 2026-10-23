@@ -1078,3 +1078,84 @@ describe("終端: PR の更新とトークンの失効", () => {
     ).toBe(false);
   });
 });
+
+describe("変更なしで終端: 空の Draft PR を閉じる", () => {
+  const COMMENT_RE = /^POST \/repos\/acme\/widgets\/issues\/\d+\/comments$/;
+  const reqs = (re: RegExp) =>
+    app()
+      .requests()
+      .filter((r) => re.test(`${r.method} ${r.path}`));
+  const CLOSE = /^PATCH \/repos\/acme\/widgets\/pulls\/\d+$/;
+  const DELETE_REF = /^DELETE \/repos\/acme\/widgets\/git\/refs\//;
+  const closeCalls = () => reqs(CLOSE).filter((r) => (r.body as { state?: string }).state);
+
+  async function finishUnchanged(over: Record<string, unknown> = {}, childCommit = false) {
+    const t = await createTask();
+    await t.stub.advance();
+    const initial = app().branch(REPO, t.branch) as string;
+    const head = childCommit ? await app().addCommit(REPO, initial, "child") : initial;
+    if (childCommit) app().setBranch(REPO, t.branch, head);
+    await t.agent.setProgram({ result: completedResult(head, over) });
+    await t.agent.setPhase("completed");
+    await t.stub.advance();
+    return { ...t, initial, head };
+  }
+
+  it("head が initial_sha のまま COMPLETED: コメント・close・ブランチ削除が 1 回ずつで、pr.closed_empty が true", async () => {
+    const t = await finishUnchanged();
+    const pr = pullOf(t.branch);
+    expect(pr?.state).toBe("closed");
+    expect(pr?.comments).toHaveLength(1);
+    expect(pr?.comments?.[0]).toContain(t.id);
+    expect(closeCalls()).toHaveLength(1);
+    expect(reqs(COMMENT_RE)).toHaveLength(1);
+    expect(reqs(DELETE_REF)).toHaveLength(1);
+    expect(app().branch(REPO, t.branch)).toBeNull();
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.status).toBe("COMPLETED");
+    expect(r.result.pr).toMatchObject({ closed_empty: true });
+  });
+
+  it("子の commit がある（head ≠ initial_sha）と何もしない", async () => {
+    const t = await finishUnchanged({}, true);
+    expect(pullOf(t.branch)?.state).toBe("open");
+    expect(closeCalls()).toHaveLength(0);
+    expect(reqs(COMMENT_RE)).toHaveLength(0);
+    expect(reqs(DELETE_REF)).toHaveLength(0);
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.pr?.closed_empty).toBeUndefined();
+  });
+
+  it("head を読めない（pushedSha なし）と何もしない", async () => {
+    const t = await finishUnchanged({ pushedSha: undefined });
+    expect(pullOf(t.branch)?.state).toBe("open");
+    expect(closeCalls()).toHaveLength(0);
+    expect(reqs(DELETE_REF)).toHaveLength(0);
+  });
+
+  it("閉じる API が失敗しても COMPLETED のまま。warnings に出て、ブランチは消さない", async () => {
+    app().setFault({ pattern: "^PATCH /repos/acme/widgets/pulls/\\d+$", status: 500 });
+    const t = await finishUnchanged();
+    expect(pullOf(t.branch)?.state).toBe("open");
+    expect(reqs(DELETE_REF)).toHaveLength(0);
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.status).toBe("COMPLETED");
+    expect(r.result.warnings).toContain("empty draft PR could not be closed: close_failed");
+    expect(r.result.pr?.closed_empty).toBeUndefined();
+  });
+
+  it("再試行（もう一度 advance / alarm）しても二重に閉じない", async () => {
+    const t = await finishUnchanged();
+    await t.stub.advance();
+    await runInDurableObject(t.stub, (_i, s) => {
+      s.storage.sql.exec("UPDATE github_link SET body_done = 0, finalize_done = 0");
+    });
+    await t.stub.advance();
+    expect(closeCalls()).toHaveLength(1);
+    expect(reqs(COMMENT_RE)).toHaveLength(1);
+    expect(reqs(DELETE_REF)).toHaveLength(1);
+  });
+});

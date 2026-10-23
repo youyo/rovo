@@ -62,6 +62,8 @@ export interface FakePull {
   mergeSha?: string;
   /** マージした時点の head。マージ後にブランチを消しても、PR の head.sha として残る（GitHub と同じ） */
   headAtMerge?: string;
+  /** POST /issues/:n/comments で付いたコメント（確認用） */
+  comments?: string[];
 }
 
 /** 利用者のトークン（GitHub App のユーザーアクセストークン）で呼んだ人。 */
@@ -896,6 +898,15 @@ export class FakeGitHubApp {
       return new Response(null, { status: 204 });
     }
 
+    const issueComment = method === "POST" ? match(/^\/issues\/(\d+)\/comments$/) : null;
+    if (issueComment) {
+      const p = repo.pulls.find((x) => x.number === Number(issueComment[1]));
+      if (!p) return fail(404, "Not Found");
+      if (!can("pull_requests")) return fail(403, "Resource not accessible by integration");
+      (p.comments ??= []).push(String(b.body ?? ""));
+      return res(201, { id: 1, body: b.body });
+    }
+
     const pullOne = match(/^\/pulls\/(\d+)$/);
     if (pullOne) {
       const p = repo.pulls.find((x) => x.number === Number(pullOne[1]));
@@ -909,6 +920,7 @@ export class FakeGitHubApp {
           p.body = b.body;
         }
         if (typeof b.title === "string") p.title = b.title;
+        if (b.state === "closed") p.state = "closed";
         return res(200, this.pullJson(repo, p));
       }
     }

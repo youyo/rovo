@@ -290,3 +290,16 @@ describe("recordPrAction: 記録と監査", () => {
     expect((await audits(stub)).some((a) => a.event === "pr_ready")).toBe(false);
   });
 });
+
+describe("closed_empty の PR", () => {
+  it("task_pr_ready / task_pr_merge は conflict（pr_denied: pr_closed_empty を監査）", async () => {
+    const { stub } = await runToCompleted({ merge_policy: "agent_merge" });
+    await runInDurableObject(stub, (_i, s) => {
+      s.storage.sql.exec("UPDATE github_link SET closed_empty = 1");
+    });
+    expect(await stub.prContext(OWNER, "ready")).toMatchObject({ ok: false, code: "conflict" });
+    expect(await stub.prContext(OWNER, "merge")).toMatchObject({ ok: false, code: "conflict" });
+    const denied = (await audits(stub)).filter((a) => a.event === "pr_denied");
+    expect(denied.map((a) => a.reason)).toEqual(["pr_closed_empty", "pr_closed_empty"]);
+  });
+});

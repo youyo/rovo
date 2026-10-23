@@ -55,7 +55,7 @@ test("(L3) タスクの URL: 詳細が遅くても、ヘッダ・予算・Cloudf
 }) => {
   const release = await hold(page, DETAIL);
   await loginAs(page, s.users.alice, taskPath(s.tasks.done as string));
-  await expect(page.locator("header.top fieldset.seg")).toBeVisible();
+  await expect(page.locator("header.top fieldset.seg:not(.lang)")).toBeVisible();
   await expect(page.locator(".statusbar [data-sb='budget-me']")).toContainText("今月");
   await expect(page.locator(".console-col")).toContainText("読み込み中");
   release();

@@ -1,4 +1,5 @@
 import type { TaskStatusDto, VisibleTaskDto } from "@rovo/dashboard-contract";
+import type { T } from "./i18n";
 
 /**
  * 状態の印（色だけで区別しない。色 + 塗り + 縁の形 + 文字）。
@@ -29,13 +30,6 @@ export type MarkKind =
 export type MarkShape = "check" | "cross" | "spinner" | "dot" | "dash" | "queued" | "bang";
 
 export type Mark = {
-  /** 短い名前。レール・見出し・バッジなど狭い場所で使う。凡例だけが長い説明（description）を使う */
-  label: string;
-  /**
-   * 長い説明（凡例・タイムラインの点の title）。label だけでは初めて見た人に分かりにくい印だけが持つ。
-   * 無ければ label がそのまま説明。label から始まる言葉にする（markDescription を使う）。
-   */
-  description?: string;
   /** 記号（形）。意味が同じ状態は同じ形 */
   shape: MarkShape;
   /** 回る輪の状態か（印を回転させる。reduced-motion では止めて破線にする） */
@@ -50,7 +44,6 @@ export type Mark = {
 /** 印の定義。MarkKind が増えたらここもコンパイルエラーになる。 */
 export const MARKS = {
   preparing: {
-    label: "準備中",
     shape: "queued",
     live: false,
     tone: "skip",
@@ -58,7 +51,6 @@ export const MARKS = {
     edge: "dotted",
   },
   running: {
-    label: "実行中",
     shape: "spinner",
     live: true,
     tone: "run",
@@ -66,7 +58,6 @@ export const MARKS = {
     edge: "dashed",
   },
   input: {
-    label: "入力待ち",
     shape: "bang",
     live: false,
     tone: "run",
@@ -74,7 +65,6 @@ export const MARKS = {
     edge: "solid",
   },
   verifying: {
-    label: "検証中",
     shape: "spinner",
     live: true,
     tone: "run",
@@ -82,7 +72,6 @@ export const MARKS = {
     edge: "dotted",
   },
   recovering: {
-    label: "復旧中",
     shape: "spinner",
     live: true,
     tone: "skip",
@@ -90,7 +79,6 @@ export const MARKS = {
     edge: "dashed",
   },
   merged: {
-    label: "マージ済み",
     shape: "check",
     live: false,
     tone: "ok",
@@ -98,7 +86,6 @@ export const MARKS = {
     edge: "solid",
   },
   review: {
-    label: "レビュー待ち",
     shape: "dot",
     live: false,
     tone: "wait",
@@ -108,8 +95,6 @@ export const MARKS = {
   // GitHub 上で閉じられた（マージされていない）PR。灰（–）で、マージ済みの緑・レビュー待ちの青と色も形も違う。
   // 「閉じた」だけでは何が閉じたのか分かりにくいので、凡例・点の title では説明をつける（レール・見出し・バッジは短い label のまま）
   closed: {
-    label: "閉じた",
-    description: "閉じた（マージせず）",
     shape: "dash",
     live: false,
     tone: "skip",
@@ -118,7 +103,6 @@ export const MARKS = {
   },
   // PR の状態が GitHub から取れなかった（rovo の記録ではマージ済みでもない）。断定しない言葉にする
   pr: {
-    label: "PR あり",
     shape: "dot",
     live: false,
     tone: "wait",
@@ -126,7 +110,6 @@ export const MARKS = {
     edge: "dotted",
   },
   done: {
-    label: "完了",
     shape: "check",
     live: false,
     tone: "ok",
@@ -134,7 +117,6 @@ export const MARKS = {
     edge: "solid",
   },
   failed: {
-    label: "失敗",
     shape: "cross",
     live: false,
     tone: "bad",
@@ -142,7 +124,6 @@ export const MARKS = {
     edge: "solid",
   },
   budget: {
-    label: "予算超過",
     shape: "cross",
     live: false,
     tone: "bad",
@@ -150,7 +131,6 @@ export const MARKS = {
     edge: "dotted",
   },
   cancelled: {
-    label: "キャンセル",
     shape: "dash",
     live: false,
     tone: "skip",
@@ -159,10 +139,17 @@ export const MARKS = {
   },
 } as const satisfies Record<MarkKind, Mark>;
 
-/** 長い説明（凡例・タイムラインの点の title）。説明が無い印は label がそのまま説明。 */
-export function markDescription(kind: MarkKind): string {
-  const m: Mark = MARKS[kind];
-  return m.description ?? m.label;
+/** 短い名前。レール・見出し・バッジなど狭い場所で使う。凡例だけが長い説明（markDescription）を使う */
+export function markLabel(kind: MarkKind, t: T): string {
+  return t(`mark.${kind}`);
+}
+
+/**
+ * 長い説明（凡例・タイムラインの点の title）。label だけでは初めて見た人に分かりにくい印（閉じた）だけが持つ。
+ * 無ければ label がそのまま説明。label から始まる言葉にする。
+ */
+export function markDescription(kind: MarkKind, t: T): string {
+  return kind === "closed" ? t("mark.closed.description") : markLabel(kind, t);
 }
 
 /**

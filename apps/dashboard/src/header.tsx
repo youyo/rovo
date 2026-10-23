@@ -1,15 +1,23 @@
 import type { ReactNode } from "react";
 import type { Scope } from "./api";
 import type { DayKey } from "./day";
+import type { Key, Lang } from "./i18n";
+import { useLang } from "./lang";
 import type { DaySummary } from "./rail";
 
-/** 表示範囲の切り替え。並びは「マイタスク」が先。API の scope の値（me / all）は変えない */
-const SCOPES: { value: Scope; label: string }[] = [
-  { value: "me", label: "マイタスク" },
-  { value: "all", label: "チーム" },
+/** 表示範囲の切り替え。並びは「マイタスク」が先。API の scope の値（me / all）は変えない（表示は辞書で引く） */
+const SCOPES: { value: Scope; label: Key }[] = [
+  { value: "me", label: "scope.me" },
+  { value: "all", label: "scope.all" },
 ];
 
-/** ヘッダ: Rovo・マイタスク/チーム・その日の要約・利用者名・ログアウト。 */
+/** 言語の切り替えのボタン。名前は言語自身の表記で、訳さない */
+const LANG_BUTTONS: { value: Lang; label: string }[] = [
+  { value: "en", label: "EN" },
+  { value: "ja", label: "日本語" },
+];
+
+/** ヘッダ: Rovo・マイタスク/チーム・その日の要約・言語の切り替え・利用者名・ログアウト。 */
 export function Header(props: {
   /** ログイン済みのときだけマイタスク/チームを出す */
   scope?: Scope;
@@ -20,13 +28,15 @@ export function Header(props: {
   /** 前の日・次の日・今日へ。delta は -1 / 1、"today" は今日へ */
   onDayChange?: (move: -1 | 1 | "today") => void;
   /** 利用者名とログアウト（ログインの案内） */
-  children: ReactNode;
+  children?: ReactNode;
 }) {
   const { summary } = props;
+  const { t, lang, setLang } = useLang();
   const summaryEl = summary ? (
     <p className="day-summary">
-      <span>{summary.day}</span> <span>{summary.total} 件</span>{" "}
-      <span>マージ {summary.merged}</span> <span>走行中 {summary.running}</span>
+      <span>{summary.day}</span> <span>{t("header.total", { n: summary.total })}</span>{" "}
+      <span>{t("header.merged", { n: summary.merged })}</span>{" "}
+      <span>{t("header.running", { n: summary.running })}</span>
     </p>
   ) : null;
   return (
@@ -42,7 +52,7 @@ export function Header(props: {
         Rovo
       </div>
       {props.scope !== undefined && props.onScopeChange ? (
-        <fieldset className="seg" aria-label="表示範囲（チーム / マイタスク）">
+        <fieldset className="seg" aria-label={t("scope.label")}>
           {SCOPES.map((s) => (
             <button
               key={s.value}
@@ -50,7 +60,7 @@ export function Header(props: {
               aria-pressed={props.scope === s.value}
               onClick={() => props.onScopeChange?.(s.value)}
             >
-              {s.label}
+              {t(s.label)}
             </button>
           ))}
         </fieldset>
@@ -60,29 +70,29 @@ export function Header(props: {
           <button
             type="button"
             className="day-btn"
-            aria-label="前の日"
+            aria-label={t("day.prevAria")}
             onClick={() => props.onDayChange?.(-1)}
           >
-            ◀<span className="day-btn-text"> 前の日</span>
+            ◀<span className="day-btn-text"> {t("day.prev")}</span>
           </button>
           {summaryEl}
           <button
             type="button"
             className="day-btn"
-            aria-label="次の日"
+            aria-label={t("day.nextAria")}
             disabled={props.day === null || props.day === undefined}
             onClick={() => props.onDayChange?.(1)}
           >
-            <span className="day-btn-text">次の日 </span>▶
+            <span className="day-btn-text">{t("day.next")} </span>▶
           </button>
           {props.day !== null && props.day !== undefined ? (
             <button
               type="button"
               className="day-btn day-today"
-              aria-label="今日へ"
+              aria-label={t("day.today")}
               onClick={() => props.onDayChange?.("today")}
             >
-              今日へ
+              {t("day.today")}
             </button>
           ) : null}
         </div>
@@ -90,6 +100,19 @@ export function Header(props: {
         summaryEl
       )}
       <div className="grow" />
+      <fieldset className="seg lang" aria-label={t("lang.label")}>
+        {LANG_BUTTONS.map((b) => (
+          <button
+            key={b.value}
+            type="button"
+            lang={b.value}
+            aria-pressed={lang === b.value}
+            onClick={() => setLang(b.value)}
+          >
+            {b.label}
+          </button>
+        ))}
+      </fieldset>
       <div className="user">{props.children}</div>
     </header>
   );

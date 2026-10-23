@@ -222,10 +222,10 @@ describe("Worker 全体の振り分け（実 Worker。ASSETS には触れない�
     expect(await res.json()).toEqual({ error: "not_found" });
   });
 
-  it("/dashboard 以外は今までどおり OAuthProvider（/ は defaultHandler、/mcp は 401）", async () => {
-    const root = await SELF.fetch(`${env.PUBLIC_BASE_URL}/`);
-    expect(root.status).toBe(200);
-    expect(await root.text()).toBe("rovo gateway");
+  it("/dashboard 以外は今までどおり OAuthProvider（/ は defaultHandler でダッシュボードへ移す、/mcp は 401）", async () => {
+    const root = await SELF.fetch(`${env.PUBLIC_BASE_URL}/`, { redirect: "manual" });
+    expect(root.status).toBe(302);
+    expect(root.headers.get("location")).toBe("/dashboard/");
 
     const mcp = await SELF.fetch(`${env.PUBLIC_BASE_URL}/mcp`, { method: "POST", body: "{}" });
     expect(mcp.status).toBe(401);

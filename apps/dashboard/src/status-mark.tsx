@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { MARKS, type Mark, type MarkKind, type MarkShape } from "./status";
+import { useT } from "./lang";
+import { MARKS, type Mark, type MarkKind, type MarkShape, markLabel } from "./status";
 
 /** 状態の印の矩形（SVG の中で使う）。色は CSS のクラスで決め、形（塗り・縁）と文字で色なしでも区別できる。 */
 export function MarkRect(props: {
@@ -116,13 +117,14 @@ export function ShapeSymbol(props: {
  */
 export function MarkSymbol(props: { kind: MarkKind; decorative?: boolean }) {
   const m: Mark = MARKS[props.kind];
+  const t = useT();
   return (
     <ShapeSymbol
       shape={m.shape}
       tone={m.tone}
       live={m.live}
       kind={props.kind}
-      {...(props.decorative ? {} : { label: m.label })}
+      {...(props.decorative ? {} : { label: markLabel(props.kind, t) })}
     />
   );
 }

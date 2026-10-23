@@ -8,6 +8,7 @@ import { TaskRail } from "../src/rail-view";
 import { MARKS } from "../src/status";
 import { taskTime } from "../src/timeline";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
+import { inJa, tJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -30,7 +31,7 @@ function mount(
   const root = createRoot(container);
   roots.push(root);
   act(() => {
-    root.render(createElement(TaskRail, { tasks, selectedId, onSelect, at: AT, ...extra }));
+    root.render(inJa(createElement(TaskRail, { tasks, selectedId, onSelect, at: AT, ...extra })));
   });
   return container;
 }
@@ -55,7 +56,7 @@ describe("タスクのレール（1 行 1 タスク）", () => {
       expect(a.querySelector(".rail-title")?.textContent).toBe(task.title);
       const start = Date.parse(task.started_at ?? task.created_at);
       const end = task.ended_at === null ? AT : Date.parse(task.ended_at);
-      expect(a.querySelector(".rail-time")?.textContent).toBe(formatDuration(end - start));
+      expect(a.querySelector(".rail-time")?.textContent).toBe(formatDuration(end - start, tJa));
       const mark = a.querySelector("svg.mark-sym");
       expect(mark?.getAttribute("role")).toBe("img");
       expect(mark?.getAttribute("aria-label")).toMatch(
@@ -82,7 +83,9 @@ describe("タスクのレール（1 行 1 タスク）", () => {
       expect(meta.querySelector(".rail-model")?.getAttribute("title")).toBe(
         shortModel(task.model).full,
       );
-      expect(meta.querySelector(".rail-cost")?.textContent).toBe(formatUsd(task.cost.cost_usd));
+      expect(meta.querySelector(".rail-cost")?.textContent).toBe(
+        formatUsd(task.cost.cost_usd, tJa),
+      );
     }
     // PR あり: 「#番号 状態の文字」
     const merged = overviewFixture.tasks[0] as VisibleTaskDto;
@@ -126,10 +129,12 @@ describe("タスクのレール（1 行 1 タスク）", () => {
   it("実行中の行の所要は一覧の更新時刻までの経過。終わった行は終了までの時間", () => {
     const running = overviewFixture.tasks[3] as VisibleTaskDto; // 05:40 開始、更新 06:00
     const c = mount([running]);
-    expect(c.querySelector(".rail-time")?.textContent).toBe(formatDuration(20 * 60_000));
+    expect(c.querySelector(".rail-time")?.textContent).toBe(formatDuration(20 * 60_000, tJa));
     const first = overviewFixture.tasks[0] as VisibleTaskDto; // 01:06:10 → 02:05:30
     const c2 = mount([first]);
-    expect(c2.querySelector(".rail-time")?.textContent).toBe(formatDuration(59 * 60_000 + 20_000));
+    expect(c2.querySelector(".rail-time")?.textContent).toBe(
+      formatDuration(59 * 60_000 + 20_000, tJa),
+    );
   });
 
   it("印: 回る輪は実行中だけが回る（spin）。状態ごとの形は MARKS の割り当て", () => {

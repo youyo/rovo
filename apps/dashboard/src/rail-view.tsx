@@ -1,8 +1,9 @@
 import type { VisibleTaskDto } from "@rovo/dashboard-contract";
 import { isPlainLeftClick } from "./click";
 import { formatDuration, formatUsd, modelFamily, shortModel, singleLine } from "./format";
+import { useT } from "./lang";
 import { taskPath } from "./route";
-import { isTerminal, MARKS, markKindOf } from "./status";
+import { isTerminal, markKindOf, markLabel } from "./status";
 import { MarkSymbol } from "./status-mark";
 import { taskTime } from "./timeline";
 
@@ -36,42 +37,41 @@ export function TaskRail(props: {
   at?: number;
 }) {
   const { onSelect } = props;
+  const t = useT();
   const at = props.at ?? Date.now();
   const rows = [...props.tasks].sort((a, b) => taskTime(b) - taskTime(a));
   return (
-    <nav className="rail" aria-label="タスク">
+    <nav className="rail" aria-label={t("rail.label")}>
       {rows.length === 0 ? (
         <p className="rail-empty">
-          {props.isToday === false
-            ? "この日のタスクはありません。"
-            : "今日のタスクはまだありません。"}
+          {props.isToday === false ? t("rail.emptyDay") : t("rail.emptyToday")}
         </p>
       ) : null}
-      {rows.map((t) => {
-        const kind = markKindOf(t);
-        const selected = t.task_id === props.selectedId;
-        const model = shortModel(t.model);
-        const login = singleLine(t.owner_login);
+      {rows.map((task) => {
+        const kind = markKindOf(task);
+        const selected = task.task_id === props.selectedId;
+        const model = shortModel(task.model);
+        const login = singleLine(task.owner_login);
         // PR があれば「#番号 状態」。無ければ、終端は状態の文字、実行中などはリポジトリ
-        const subject = isTerminal(t.status) ? MARKS[kind].label : singleLine(t.repository);
+        const subject = isTerminal(task.status) ? markLabel(kind, t) : singleLine(task.repository);
         return (
           <a
-            key={t.task_id}
+            key={task.task_id}
             className="rail-row"
-            href={taskPath(t.task_id)}
+            href={taskPath(task.task_id)}
             onClick={(e) => {
               if (onSelect === undefined || !isPlainLeftClick(e)) return;
               e.preventDefault();
-              onSelect(t.task_id);
+              onSelect(task.task_id);
             }}
-            data-task-id={t.task_id}
-            data-status={t.status}
+            data-task-id={task.task_id}
+            data-status={task.status}
             data-mark={kind}
             {...(selected ? { "aria-current": "true", "data-selected": "true" } : {})}
           >
             <MarkSymbol kind={kind} />
-            <span className="rail-title">{singleLine(t.title)}</span>
-            <span className="rail-time">{formatDuration(elapsedMs(t, at))}</span>
+            <span className="rail-title">{singleLine(task.title)}</span>
+            <span className="rail-time">{formatDuration(elapsedMs(task, at), t)}</span>
             <span className="rail-meta">
               {props.showOwner ? (
                 <span className="rail-owner">
@@ -82,13 +82,13 @@ export function TaskRail(props: {
                 </span>
               ) : null}
               <span className="rail-subject">
-                {t.pr ? <span className="rail-pr">#{t.pr.number}</span> : null}
-                {t.pr ? ` ${MARKS[kind].label}` : subject}
+                {task.pr ? <span className="rail-pr">#{task.pr.number}</span> : null}
+                {task.pr ? ` ${markLabel(kind, t)}` : subject}
               </span>
               <span className="rail-model" title={model.full}>
-                {modelFamily(t.model)}
+                {modelFamily(task.model)}
               </span>
-              <span className="rail-cost">{formatUsd(t.cost.cost_usd)}</span>
+              <span className="rail-cost">{formatUsd(task.cost.cost_usd, t)}</span>
             </span>
           </a>
         );

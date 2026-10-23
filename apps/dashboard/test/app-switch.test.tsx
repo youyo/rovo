@@ -9,8 +9,10 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app";
 import { formatUsd } from "../src/format";
-import { MARKS, markKindOf } from "../src/status";
+import { LANG_KEY } from "../src/prefs";
+import { markKindOf, markLabel } from "../src/status";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
+import { tJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -57,7 +59,10 @@ const roots: { unmount: () => void }[] = [];
 let setItem: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   setItem = vi.fn();
-  vi.stubGlobal("localStorage", { getItem: () => null, setItem });
+  vi.stubGlobal("localStorage", {
+    getItem: (k: string) => (k === LANG_KEY ? "ja" : null),
+    setItem,
+  });
 });
 afterEach(() => {
   for (const r of roots.splice(0)) act(() => r.unmount());
@@ -330,8 +335,8 @@ describe("切り替えた瞬間の表示: 一覧の行の情報と、キャッ�
     const row = rowOf(B);
     expect(consoleTitle(c)).toBe(row.title);
     const head = c.querySelector(".console .con-head")?.textContent ?? "";
-    expect(head).toContain(MARKS[markKindOf(row)].label);
-    expect(head).toContain(formatUsd(row.cost.cost_usd));
+    expect(head).toContain(markLabel(markKindOf(row), tJa));
+    expect(head).toContain(formatUsd(row.cost.cost_usd, tJa));
     expect(head).toContain(row.repository);
     expect(c.querySelector(".console")?.textContent).toContain("読み込み中");
     expect(c.querySelector(".console [data-seq]")).toBeNull();

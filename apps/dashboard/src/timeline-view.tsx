@@ -1,5 +1,7 @@
 import { isPlainLeftClick } from "./click";
 import { formatClock, formatUsd, singleLine } from "./format";
+import type { T } from "./i18n";
+import { useT } from "./lang";
 import { taskPath } from "./route";
 import { MARKS, type MarkKind, markDescription } from "./status";
 import { MarkRect, MarkSymbol } from "./status-mark";
@@ -28,18 +30,28 @@ export function laneHeight(laneCount: number): number {
 }
 
 /** consult の呼び名。初めて見た人にも分かるよう、意味を添える（凡例・レーンの見出し・点の title で同じ言葉） */
-export const CONSULT_LABEL = "consult（モデルに意見を聞いた）";
+export const consultLabel = (t: T): string => t("timeline.consult");
 
-function laneNote(lane: Lane, isToday: boolean): string {
+function laneNote(lane: Lane, isToday: boolean, t: T): string {
   if (lane.tasks.length === 0 && lane.consults.length === 0)
-    return isToday ? "今日のタスクはまだありません" : "この日のタスクはありません";
-  return `${lane.tasks.length} 件、${CONSULT_LABEL} ${lane.consults.length} 回`;
+    return isToday ? t("timeline.laneEmptyToday") : t("timeline.laneEmptyDay");
+  return t("timeline.laneNote", {
+    tasks: lane.tasks.length,
+    consult: consultLabel(t),
+    consults: lane.consults.length,
+  });
 }
 
-function taskLabel(l: Lane["tasks"][number]): string {
+function taskLabel(l: Lane["tasks"][number], t: T): string {
   const { task } = l;
-  const pr = task.pr ? `PR ${task.pr.number}、` : "";
-  return `${singleLine(task.title)}（${pr}${markDescription(l.kind)}、${formatUsd(task.cost.cost_usd)}）`;
+  const details = [
+    task.pr ? t("timeline.pr", { n: task.pr.number }) : null,
+    markDescription(l.kind, t),
+    formatUsd(task.cost.cost_usd, t),
+  ]
+    .filter((d): d is string => d !== null)
+    .join(t("common.sep"));
+  return t("timeline.taskLabel", { title: singleLine(task.title), details });
 }
 
 /** buildLanes の棒の高さ（12〜92）を、レーンの高さに収まる範囲に写す */
@@ -61,8 +73,9 @@ export function TimelineView(props: {
   onSelect?: (id: string) => void;
 }) {
   const { lanes, domain, nowMs, onSelect } = props;
+  const t = useT();
   const isToday = props.isToday ?? true;
-  const ticks = hourTicks(domain);
+  const ticks = hourTicks(domain, t);
   const nowFrac = nowMs === null ? null : xFraction(nowMs, domain);
   const laneH = laneHeight(lanes.length);
   return (
@@ -72,14 +85,14 @@ export function TimelineView(props: {
           <div className="lane" key={lane.login} data-lane={lane.login}>
             <div className="lane-name">
               <span className="lane-login">{singleLine(lane.login)}</span>
-              <span className="sr-only">{laneNote(lane, isToday)}</span>
+              <span className="sr-only">{laneNote(lane, isToday, t)}</span>
             </div>
             {/* biome-ignore lint/a11y/useSemanticElements: SVG にはグループを表す要素が無い */}
             <svg
               className="lane-svg"
               height={laneH}
               role="group"
-              aria-label={`${singleLine(lane.login)} のタスク`}
+              aria-label={t("timeline.laneAria", { login: singleLine(lane.login) })}
             >
               {ticks.map((t) => (
                 <line
@@ -103,7 +116,7 @@ export function TimelineView(props: {
               )}
               {lane.consults.map((c) => (
                 <svg className="pin" key={c.consult.consult_id} x={pct(c.frac)} y={0}>
-                  <title>{`${CONSULT_LABEL} ${formatClock(Date.parse(c.consult.at))}`}</title>
+                  <title>{`${consultLabel(t)} ${formatClock(Date.parse(c.consult.at), t)}`}</title>
                   <circle className="consult" data-consult="" cx={0} cy={laneH - 4} r={2.5} />
                 </svg>
               ))}
@@ -120,7 +133,7 @@ export function TimelineView(props: {
                       e.preventDefault();
                       onSelect(l.task.task_id);
                     }}
-                    aria-label={taskLabel(l)}
+                    aria-label={taskLabel(l, t)}
                     data-task={l.task.task_id}
                     data-status={l.task.status}
                     data-mark={l.kind}
@@ -129,7 +142,7 @@ export function TimelineView(props: {
                     <svg className="pin" x={pct(l.frac)} y={0}>
                       <rect className="hit" x={dx - 6} y={0} width={12} height={laneH} />
                       <MarkRect kind={l.kind} x={dx - 3} y={laneH - h - 1} width={6} height={h} />
-                      <title>{taskLabel(l)}</title>
+                      <title>{taskLabel(l, t)}</title>
                     </svg>
                   </a>
                 );
@@ -151,7 +164,7 @@ export function TimelineView(props: {
             ))}
             {nowFrac === null ? null : (
               <text className="lbl lbl--now" x={pct(nowFrac)} y={10} textAnchor="middle">
-                いま
+                {t("timeline.now")}
               </text>
             )}
           </svg>
@@ -163,15 +176,16 @@ export function TimelineView(props: {
 
 /** 凡例。出ている状態の印（レールと同じ記号 + 長い説明）+ consult の点。 */
 export function Legend(props: { kinds: MarkKind[] }) {
+  const t = useT();
   const order = Object.keys(MARKS) as MarkKind[];
   const kinds = order.filter((k) => props.kinds.includes(k));
   return (
-    <ul className="legend" aria-label="凡例">
+    <ul className="legend" aria-label={t("legend.label")}>
       {kinds.map((k) => (
         <li key={k}>
           <MarkSymbol kind={k} decorative />
-          {markDescription(k)}
-          {k === "merged" ? "（高さは費用）" : ""}
+          {markDescription(k, t)}
+          {k === "merged" ? t("legend.height") : ""}
         </li>
       ))}
       <li>
@@ -185,7 +199,7 @@ export function Legend(props: { kinds: MarkKind[] }) {
         >
           <circle className="consult" cx={4} cy={4} r={3.5} />
         </svg>
-        {CONSULT_LABEL}
+        {consultLabel(t)}
       </li>
     </ul>
   );

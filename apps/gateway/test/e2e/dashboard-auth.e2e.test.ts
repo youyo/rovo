@@ -185,12 +185,12 @@ describe("MCP のログインとの共存", () => {
 });
 
 describe("ダッシュボードのログインの失敗", () => {
-  it("許可外のユーザー（team のメンバーではない）は 403 でセッションを作らない。監査は caller: dashboard", async () => {
+  it("許可外のユーザー（team のメンバーではない）は 303（denied）でセッションを作らない。監査は caller: dashboard", async () => {
     const user = newUser("outsider");
     await admin.addUser(user); // team には入れない
     const { res, session } = await completeLogin(user);
-    expect(res.status).toBe(403);
-    expect(res.headers.get("location")).toBeNull();
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/dashboard/?login_error=denied");
     expect(session).toBe("");
     const hit = await waitForAudit((r) => r.event === "authz_denied" && r.caller === "dashboard");
     expect(hit.userId).toBe(user.id);
@@ -201,22 +201,22 @@ describe("ダッシュボードのログインの失敗", () => {
     expect(body).not.toContain("ghu_");
   });
 
-  it("GitHub のトークン交換が障害（503）のときは 503 でセッションを作らない。認証の失敗としては記録しない", async () => {
+  it("GitHub のトークン交換が障害（503）のときは 303（unavailable）でセッションを作らない。認証の失敗としては記録しない", async () => {
     const startedAt = Date.now();
     const user = newUser("flaky");
     await addMember(user);
     await admin.setFault("token", 503, 1);
     const { res, session } = await completeLogin(user);
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(303);
     expect(session).toBe("");
-    expect(res.headers.get("location")).toBeNull();
+    expect(res.headers.get("location")).toBe("/dashboard/?login_error=unavailable");
     expect((await auditSince(startedAt)).filter((r) => r.caller === "dashboard")).toEqual([]);
     // 障害が直れば、最初からやり直せる
     const retry = await completeLogin(user);
     expect(retry.res.status).toBe(302);
   });
 
-  it("state の不一致: 開始していない（偽造した）state・別のブラウザの Cookie は 400。MCP の監査は汚れない", async () => {
+  it("state の不一致: 開始していない（偽造した）state・別のブラウザの Cookie は 303（invalid）。MCP の監査は汚れない", async () => {
     const startedAt = Date.now();
     const user = newUser("csrf");
     await addMember(user);
@@ -227,16 +227,17 @@ describe("ダッシュボードのログインの失敗", () => {
 
     // 別のブラウザの Cookie（b の開始の値）
     const wrongCookie = await callCallback(callbackA, b.cookie);
-    expect(wrongCookie.status).toBe(400);
+    expect(wrongCookie.status).toBe(303);
+    expect(wrongCookie.headers.get("location")).toBe("/dashboard/?login_error=invalid");
     expect(cookieNamed(wrongCookie, SESSION_COOKIE)).toBe("");
     // Cookie 無し
     const noCookie = await callCallback(callbackA, "");
-    expect(noCookie.status).toBe(400);
+    expect(noCookie.status).toBe(303);
     // 偽造した state（KV に無い）
     const forged = new URL(callbackA);
     forged.searchParams.set("state", `rovo-dash.${"A".repeat(43)}`);
     const forgedRes = await callCallback(forged.toString(), a.cookie);
-    expect(forgedRes.status).toBe(400);
+    expect(forgedRes.status).toBe(303);
     // 接頭辞付きの state の不一致は、MCP の経路に落ちない（MCP の監査 caller: parent / invalid_state が出ない）
     const records = await auditSince(startedAt);
     expect(records.filter((r) => r.caller === "parent")).toEqual([]);
@@ -246,16 +247,17 @@ describe("ダッシュボードのログインの失敗", () => {
     ).toBeGreaterThanOrEqual(3);
     // 最初の試行で a の state は消費されている（不一致でも消費する）
     const retry = await callCallback(callbackA, a.cookie);
-    expect(retry.status).toBe(400);
+    expect(retry.status).toBe(303);
   });
 
-  it("同じ callback の再送は 2 回目が 400。1 回目のセッションは残る", async () => {
+  it("同じ callback の再送は 2 回目が 303（invalid）。1 回目のセッションは残る", async () => {
     const user = newUser("replay");
     await addMember(user);
     const { callbackUrl, start, res, session } = await completeLogin(user);
     expect(res.status).toBe(302);
     const again = await callCallback(callbackUrl, start.cookie);
-    expect(again.status).toBe(400);
+    expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toBe("/dashboard/?login_error=invalid");
     expect(cookieNamed(again, SESSION_COOKIE)).toBe("");
     expect((await me(session)).status).toBe(200);
   });

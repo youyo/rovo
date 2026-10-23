@@ -24,7 +24,8 @@ export function createApiApp() {
 export function createDefaultApp(deps: LoginDeps = {}) {
   const app = new Hono<AppEnv>();
 
-  app.get("/", (c) => c.text("rovo gateway"));
+  // ドメイン名だけで開いた人をダッシュボードへ（MCP の URL は /mcp なので、/ は人が開く入口）
+  app.get("/", (c) => c.redirect("/dashboard/", 302));
   registerLoginRoutes(app, deps);
   // ENVIRONMENT=test のときだけ有効な E2E 用ルート（それ以外は 404）
   registerTestRoutes(app);

@@ -5,6 +5,14 @@ import { AuthView } from "./auth-view";
 import { type DayKey, dayHref, dayOfTask, routeDay, shiftDay } from "./day";
 import { createDetailCache } from "./detail-cache";
 import { Header } from "./header";
+import { LangProvider, useT } from "./lang";
+import {
+  clearLoginErrorFromUrl,
+  hasLoginError,
+  loginErrorMessage,
+  readLoginErrorCode,
+} from "./login-error";
+import { LoginView } from "./login-view";
 import { parseRoute, type Route, taskPath } from "./route";
 import { type AuthState, fetchMe, loginHref, logout } from "./session";
 import { Workspace } from "./workspace";
@@ -16,8 +24,18 @@ import { Workspace } from "./workspace";
  * レール・タイムラインでの切り替えと日付の前後送りは、ページを読み直さず history.pushState で URL を変え、popstate に追従する。
  * 修飾キー付き・中クリックは通常のリンクのまま（ブラウザが新しいタブで開く）。
  * ?fresh=1 は、URL を直接開いたときのそのタスクの最初の取得だけ（切り替えとポーリングには付けない。D6）。
+ * 表示の言語（英語が既定。日本語に切り替えられる）は LangProvider が持つ。
  */
 export function App() {
+  return (
+    <LangProvider>
+      <Dashboard />
+    </LangProvider>
+  );
+}
+
+function Dashboard() {
+  const t = useT();
   const [auth, setAuth] = useState<AuthState>({ state: "loading" });
   // 既定は「マイタスク」（scope = me。切り替えは使える）
   const [scope, setScope] = useState<Scope>("me");
@@ -36,6 +54,15 @@ export function App() {
   );
   // 開いたことのあるタスクの最後の詳細。メモリだけ（ページを読み直すと空。ログアウト・期限切れで捨てる）
   const [detailCache] = useState(() => createDetailCache());
+
+  // ログインに失敗して戻ってきたときの code（?login_error= を許可リストで引く。読んだらクエリは消す）。
+  // 文は表示のたびに言語で引く（言語を切り替えたら文も変わる）
+  const [loginErrorCode] = useState(() =>
+    typeof location === "undefined" ? null : readLoginErrorCode(location.search),
+  );
+  useEffect(() => {
+    if (hasLoginError(location.search)) clearLoginErrorFromUrl();
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -127,17 +154,17 @@ export function App() {
         />
       ) : (
         <>
-          <Header summary={null}>{user}</Header>
-          <div className="state">
-            <h1>{route.kind === "task" ? "タスクの詳細" : "ダッシュボード"}</h1>
-            {auth.state === "loading" ? null : (
-              <p>
-                {route.kind === "task"
-                  ? "ログインすると、このタスクの詳細を見られます。"
-                  : "ログインすると、今日のタスクと費用を見られます。"}
-              </p>
-            )}
-          </div>
+          {/* 未ログインのヘッダにログインのリンクは出さない（画面の中のボタンと重複させない） */}
+          <Header summary={null}>{null}</Header>
+          {auth.state === "loading" ? null : (
+            <LoginView
+              variant={auth.state === "error" ? "error" : "signed-out"}
+              taskDetail={route.kind === "task"}
+              loginHref={href}
+              message={loginErrorMessage(loginErrorCode, t)}
+              onReload={() => location.reload()}
+            />
+          )}
         </>
       )}
     </main>

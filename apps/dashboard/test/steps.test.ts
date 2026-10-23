@@ -17,6 +17,7 @@ import {
   phaseTimings,
   stepTimings,
 } from "../src/steps";
+import { tJa } from "./lang";
 
 type Phase = TaskDetailDto["phase"];
 type Now = TaskDetailDto["now"];
@@ -48,15 +49,15 @@ const usage = (seq: number) =>
 describe("describeEvent（人の言葉の動詞への変換。全イベントの型 × 成功 / 失敗 / 実行中）", () => {
   it("command: 成功・失敗・実行中", () => {
     const base = { type: "command", command: "pnpm test", exit_code: 0, duration_ms: 42_000 };
-    const ok = describeEvent(ev(1, base), { current: false });
+    const ok = describeEvent(ev(1, base), { current: false }, tJa);
     expect(ok).toMatchObject({ what: "コマンドを実行した", target: "pnpm test", tone: "normal" });
     expect(ok?.note).toContain("42 秒");
-    const fail = describeEvent(ev(1, { ...base, exit_code: 2 }), { current: false });
+    const fail = describeEvent(ev(1, { ...base, exit_code: 2 }), { current: false }, tJa);
     expect(fail).toMatchObject({ what: "コマンドが失敗した", tone: "fail" });
     expect(fail?.note).toContain("終了コード 2");
-    const run = describeEvent(ev(1, { ...base, exit_code: null }), { current: true });
+    const run = describeEvent(ev(1, { ...base, exit_code: null }), { current: true }, tJa);
     expect(run).toMatchObject({ what: "コマンドを実行中", tone: "normal" });
-    const stale = describeEvent(ev(1, { ...base, exit_code: null }), { current: false });
+    const stale = describeEvent(ev(1, { ...base, exit_code: null }), { current: false }, tJa);
     expect(stale?.what).toBe("コマンドを実行した");
     expect(stale?.note).toContain("終了コード不明");
   });
@@ -65,15 +66,20 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
     const d = describeEvent(
       ev(1, { type: "command", command: "echo a\nrm‮ -rf\u0007 b", exit_code: 0 }),
       { current: false },
+      tJa,
     );
     expect(d?.target).toBe("echo a rm -rf b");
   });
 
   it("edit: 作った / 編集した / 消した", () => {
     const e = (op: string) =>
-      describeEvent(ev(1, { type: "edit", path: "src/a.ts", op, added: 12, removed: 3 }), {
-        current: false,
-      });
+      describeEvent(
+        ev(1, { type: "edit", path: "src/a.ts", op, added: 12, removed: 3 }),
+        {
+          current: false,
+        },
+        tJa,
+      );
     expect(e("create")).toMatchObject({ what: "ファイルを作った", target: "src/a.ts" });
     expect(e("modify")).toMatchObject({ what: "ファイルを編集した", target: "src/a.ts" });
     expect(e("delete")).toMatchObject({ what: "ファイルを消した", target: "src/a.ts" });
@@ -86,14 +92,19 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
       {
         current: true,
       },
+      tJa,
     );
     expect(d?.tone).toBe("normal");
   });
 
   it("commit", () => {
-    const d = describeEvent(ev(1, { type: "commit", message: "fix: 直す", sha: SHA, files: 2 }), {
-      current: false,
-    });
+    const d = describeEvent(
+      ev(1, { type: "commit", message: "fix: 直す", sha: SHA, files: 2 }),
+      {
+        current: false,
+      },
+      tJa,
+    );
     expect(d).toMatchObject({ what: "コミットした", target: "fix: 直す" });
     expect(d?.note).toContain("2 ファイル");
     expect(d?.note).toContain("aaaaaaa");
@@ -101,7 +112,11 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
 
   it("web: 検索した / ページを読んだ / ページを開いた（host は無くてもよい）", () => {
     const w = (kind: string, host?: string) =>
-      describeEvent(ev(1, { type: "web", kind, ...(host ? { host } : {}) }), { current: false });
+      describeEvent(
+        ev(1, { type: "web", kind, ...(host ? { host } : {}) }),
+        { current: false },
+        tJa,
+      );
     expect(w("search", "example.com")).toMatchObject({ what: "検索した", target: "example.com" });
     expect(w("fetch", "registry.npmjs.org")).toMatchObject({ what: "ページを読んだ" });
     expect(w("browse", "example.com")).toMatchObject({ what: "ページを開いた" });
@@ -110,17 +125,19 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
 
   it("status_changed: 全状態に文がある。reason は note に出る", () => {
     for (const s of TASK_STATUSES) {
-      const d = describeEvent(ev(1, { type: "status_changed", to: s }), { current: false });
+      const d = describeEvent(ev(1, { type: "status_changed", to: s }), { current: false }, tJa);
       expect(d?.what.length, s).toBeGreaterThan(0);
     }
     const f = describeEvent(
       ev(1, { type: "status_changed", to: "FAILED", reason: "base_sha_not_found" }),
       { current: false },
+      tJa,
     );
     expect(f).toMatchObject({ what: "失敗した", tone: "fail" });
     expect(f?.note).toContain("base_sha_not_found");
     expect(
-      describeEvent(ev(1, { type: "status_changed", to: "COMPLETED" }), { current: false })?.tone,
+      describeEvent(ev(1, { type: "status_changed", to: "COMPLETED" }), { current: false }, tJa)
+        ?.tone,
     ).toBe("normal");
   });
 
@@ -128,13 +145,18 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
     const d = describeEvent(
       ev(1, { type: "draft_pr_created", pr_number: 23, pr_url: "https://github.com/a/b/pull/23" }),
       { current: false },
+      tJa,
     );
     expect(d).toMatchObject({ what: "Draft PR を作った", target: "#23" });
   });
 
   it("tool_start: 既知のツールは summary の JSON から既知のキーだけ取り出して人の言葉にする", () => {
     const start = (name: string, summary: string) =>
-      describeEvent(ev(1, { type: "tool_start", call_id: "c", name, summary }), { current: false });
+      describeEvent(
+        ev(1, { type: "tool_start", call_id: "c", name, summary }),
+        { current: false },
+        tJa,
+      );
     expect(start("read_file", '{"path":"src/x.ts","start_line":3}')).toMatchObject({
       what: "ファイルを読んだ",
       target: "src/x.ts",
@@ -165,13 +187,18 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
     const running = describeEvent(
       ev(1, { type: "tool_start", call_id: "c", name: "bash", summary: '{"command":"pnpm test"}' }),
       { current: true },
+      tJa,
     );
     expect(running).toMatchObject({ what: "コマンドを実行中", target: "pnpm test" });
   });
 
   it("tool_start: JSON でない・既知のキーで始まらない切れ方・未知のキーだけのときは、sanitize した文字列のまま", () => {
     const start = (name: string, summary: string) =>
-      describeEvent(ev(1, { type: "tool_start", call_id: "c", name, summary }), { current: false });
+      describeEvent(
+        ev(1, { type: "tool_start", call_id: "c", name, summary }),
+        { current: false },
+        tJa,
+      );
     // 既知のキーで始まる切れた JSON は値を取り出す（… 付き）。そうでない切れ方は生のまま
     expect(start("read_file", '{"path":"src/very-long')?.target).toBe("src/very-long…");
     const cut = start("read_file", '{"start_line":3,"path":"src/very-long');
@@ -189,9 +216,13 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
 
   describe("tool_start（bash）: 切れた JSON からコマンドを取り出す", () => {
     const bash = (summary: string, current = false) =>
-      describeEvent(ev(1, { type: "tool_start", call_id: "c", name: "bash", summary }), {
-        current,
-      });
+      describeEvent(
+        ev(1, { type: "tool_start", call_id: "c", name: "bash", summary }),
+        {
+          current,
+        },
+        tJa,
+      );
 
     it("完全な JSON は今までどおり。「…」は付けない", () => {
       const d = bash('{"command":"pnpm test --filter agent"}');
@@ -259,15 +290,20 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
       const read = describeEvent(
         ev(1, { type: "tool_start", call_id: "c", name: "read_file", summary: '{"command":"ls' }),
         { current: false },
+        tJa,
       );
       expect(read?.target).toBe('{"command":"ls');
     });
 
     it("read_file など bash 以外も、切れた JSON から既知のキーの値を取り出す", () => {
       const start = (name: string, summary: string) =>
-        describeEvent(ev(1, { type: "tool_start", call_id: "c", name, summary }), {
-          current: false,
-        });
+        describeEvent(
+          ev(1, { type: "tool_start", call_id: "c", name, summary }),
+          {
+            current: false,
+          },
+          tJa,
+        );
       expect(start("read_file", '{"path":"src/very-long/pa')?.target).toBe("src/very-long/pa…");
       expect(start("search", '{"pattern":"foo.*ba')?.target).toBe("foo.*ba…");
       expect(start("web_fetch", '{"url":"https://example.com/a?b=1')?.target).toBe(
@@ -291,11 +327,15 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
 
   describe("コマンドの cd /workspace の前置き", () => {
     const bash = (summary: string) =>
-      describeEvent(ev(1, { type: "tool_start", call_id: "c", name: "bash", summary }), {
-        current: false,
-      });
+      describeEvent(
+        ev(1, { type: "tool_start", call_id: "c", name: "bash", summary }),
+        {
+          current: false,
+        },
+        tJa,
+      );
     const command = (c: string) =>
-      describeEvent(ev(1, { type: "command", command: c, exit_code: 0 }), { current: false });
+      describeEvent(ev(1, { type: "command", command: c, exit_code: 0 }), { current: false }, tJa);
 
     it("cd /workspace/<相対パス> && は外し、場所（<相対パス>）を添える", () => {
       const d = bash('{"command":"cd /workspace/apps/agent && pnpm exec vitest run"}');
@@ -473,6 +513,7 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
           }),
         ],
         true,
+        tJa,
       );
       expect(steps[0]).toMatchObject({
         what: "コマンドを実行中",
@@ -488,25 +529,27 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
     const ok = describeEvent(
       ev(2, { type: "tool_end", call_id: "c", is_error: false, summary: "ok" }),
       { current: false },
+      tJa,
     );
     expect(ok).toBeNull();
     const bad = describeEvent(
       ev(2, { type: "tool_end", call_id: "c", is_error: true, summary: "x" }),
       { current: false },
+      tJa,
     );
     expect(bad).toMatchObject({ what: "失敗した", target: "x", tone: "fail" });
   });
 
   it("agent_event（gateway が知らない型）は型名だけ。usage は進み具合に出さない（null）", () => {
     expect(
-      describeEvent(ev(1, { type: "agent_event", agent_type: "future" }), { current: false }),
+      describeEvent(ev(1, { type: "agent_event", agent_type: "future" }), { current: false }, tJa),
     ).toMatchObject({ what: "その他の処理", target: "future" });
-    expect(describeEvent(usage(1), { current: false })).toBeNull();
+    expect(describeEvent(usage(1), { current: false }, tJa)).toBeNull();
   });
 
   it("fixtures の全イベントを変換できる（usage 以外は null にならない）", () => {
     for (const e of taskEventsFixture.events) {
-      const d = describeEvent(e, { current: false });
+      const d = describeEvent(e, { current: false }, tJa);
       if (e.type === "usage") expect(d).toBeNull();
       else expect(d?.what.length, e.type).toBeGreaterThan(0);
     }
@@ -515,9 +558,13 @@ describe("describeEvent（人の言葉の動詞への変換。全イベントの
   it("<script>・<img onerror>・javascript: のリンク記法は文字のまま。制御文字・双方向文字だけ除く", () => {
     const evil =
       "<script>window.__xss=1</script><img src=x onerror=alert(1)>[x](javascript:alert(1))";
-    const d = describeEvent(ev(1, { type: "commit", message: `${evil}‮`, sha: SHA, files: 1 }), {
-      current: false,
-    });
+    const d = describeEvent(
+      ev(1, { type: "commit", message: `${evil}‮`, sha: SHA, files: 1 }),
+      {
+        current: false,
+      },
+      tJa,
+    );
     expect(d?.target).toBe(evil);
   });
 });
@@ -547,32 +594,34 @@ describe("mergeEvents（seq で重複排除・昇順）", () => {
 
 describe("buildSteps", () => {
   it("時系列で、実行中のタスクは最後の手順が「いま」。usage は含めない", () => {
-    const steps = buildSteps(taskEventsFixture.events, true);
+    const steps = buildSteps(taskEventsFixture.events, true, tJa);
     expect(steps.map((s) => s.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 9]);
     expect(steps.filter((s) => s.current).map((s) => s.seq)).toEqual([9]);
   });
   it("終端のタスクには「いま」が無い", () => {
-    expect(buildSteps(taskEventsFixture.events, false).some((s) => s.current)).toBe(false);
+    expect(buildSteps(taskEventsFixture.events, false, tJa).some((s) => s.current)).toBe(false);
   });
   it("最後が usage でも、その前の手順が「いま」", () => {
     const evs = [ev(1, { type: "web", kind: "search" }), usage(2)];
-    expect(buildSteps(evs, true).map((s) => [s.seq, s.current])).toEqual([[1, true]]);
+    expect(buildSteps(evs, true, tJa).map((s) => [s.seq, s.current])).toEqual([[1, true]]);
   });
   it("空なら空", () => {
-    expect(buildSteps([], true)).toEqual([]);
+    expect(buildSteps([], true, tJa)).toEqual([]);
   });
   it("コマンドの手順には command の印（画面で `$ コマンド` の行にする）。ほかの手順には付けない", () => {
-    const steps = buildSteps(taskEventsFixture.events, false);
+    const steps = buildSteps(taskEventsFixture.events, false, tJa);
     expect(steps.filter((s) => s.command).map((s) => s.seq)).toEqual([6]);
     // 古い履歴の bash の tool_start も、コマンドの行
     const legacy = buildSteps(
       [ev(1, { type: "tool_start", call_id: "a", name: "bash", summary: '{"command":"ls"}' })],
       false,
+      tJa,
     );
     expect(legacy[0]?.command).toBe(true);
     const other = buildSteps(
       [ev(1, { type: "tool_start", call_id: "b", name: "read_file", summary: '{"path":"a"}' })],
       false,
+      tJa,
     );
     expect(other[0]?.command).toBe(false);
   });
@@ -584,7 +633,7 @@ describe("buildSteps", () => {
   const command = (seq: number, c: string) =>
     ev(seq, { type: "command", command: c, exit_code: 0, duration_ms: 44_000 });
   const whats = (evs: TaskEventDto[], active = false) =>
-    buildSteps(evs, active).map((s) => `${s.what}|${s.target}`);
+    buildSteps(evs, active, tJa).map((s) => `${s.what}|${s.target}`);
 
   describe("構造化イベントのあるツールは 1 行に畳む", () => {
     it("bash: tool_start / tool_end を出さず、command の 1 行だけ", () => {
@@ -613,7 +662,7 @@ describe("buildSteps", () => {
         ev(17, { type: "web", kind: "browse", host: "example.com" }),
         end(18, "f"),
       ];
-      expect(buildSteps(evs, false).map((s) => s.seq)).toEqual([2, 5, 8, 11, 14, 17]);
+      expect(buildSteps(evs, false, tJa).map((s) => s.seq)).toEqual([2, 5, 8, 11, 14, 17]);
     });
 
     it("同じ call の失敗の tool_end も、構造化イベントがあれば出さない", () => {
@@ -622,7 +671,7 @@ describe("buildSteps", () => {
         ev(2, { type: "command", command: "false", exit_code: 1 }),
         end(3, "a", true),
       ];
-      expect(buildSteps(evs, false).map((s) => s.seq)).toEqual([2]);
+      expect(buildSteps(evs, false, tJa).map((s) => s.seq)).toEqual([2]);
     });
 
     it("構造化イベントが来ていない古い履歴は、縮退して出す（開始は人の言葉、成功の終了は出さない）", () => {
@@ -635,7 +684,7 @@ describe("buildSteps", () => {
     it("実行中（start だけ）は「実行中」の 1 行。command が来たら置き換わる", () => {
       const running = [start(1, "a", "bash", '{"command":"pnpm test"}')];
       expect(whats(running, true)).toEqual(["コマンドを実行中|pnpm test"]);
-      expect(buildSteps(running, true)[0]?.current).toBe(true);
+      expect(buildSteps(running, true, tJa)[0]?.current).toBe(true);
       const done = [...running, command(2, "pnpm test")];
       expect(whats(done, true)).toEqual(["コマンドを実行した|pnpm test"]);
     });
@@ -669,14 +718,14 @@ describe("buildSteps", () => {
 
 describe("phaseBand: gateway の stopped_phase を優先する", () => {
   const stoppedAt = (stopped: "prepare" | "run" | "verify" | null | undefined) =>
-    phaseBand(task({ status: "FAILED" }), "done", new Set(), stopped).findIndex(
+    phaseBand(task({ status: "FAILED" }), "done", tJa, new Set(), stopped).findIndex(
       (b) => b.state === "stopped",
     );
   it("stopped_phase があればそれで止まった段を決める（events からの推定より優先）", () => {
     expect(stoppedAt("prepare")).toBe(0);
     expect(stoppedAt("run")).toBe(1);
     expect(stoppedAt("verify")).toBe(2);
-    const b = phaseBand(task({ status: "FAILED" }), "done", new Set(["VERIFYING"]), "run");
+    const b = phaseBand(task({ status: "FAILED" }), "done", tJa, new Set(["VERIFYING"]), "run");
     expect(b.findIndex((x) => x.state === "stopped")).toBe(1);
   });
   it("無い（undefined / null）ときは従来の推定", () => {
@@ -687,9 +736,9 @@ describe("phaseBand: gateway の stopped_phase を優先する", () => {
 
 describe("phaseBand（準備 → 実行 → 検証 → 完了）", () => {
   const states = (s: TaskStatusDto, over: Partial<VisibleTaskDto> = {}, phase: Phase = "run") =>
-    phaseBand(task({ status: s, ...over }), phase).map((b) => b.state);
+    phaseBand(task({ status: s, ...over }), phase, tJa).map((b) => b.state);
   it("名前は 準備・実行・検証・完了 の 4 つ", () => {
-    expect(phaseBand(task({ status: "RUNNING" }), "run").map((b) => b.name)).toEqual([
+    expect(phaseBand(task({ status: "RUNNING" }), "run", tJa).map((b) => b.name)).toEqual([
       "準備",
       "実行",
       "検証",
@@ -733,33 +782,34 @@ describe("phaseBand（準備 → 実行 → 検証 → 完了）", () => {
     }
   });
   it("終端で phase が done のとき: VERIFYING に入った記録があれば検証で、無ければ実行で止まった", () => {
-    const withVerify = phaseBand(task({ status: "FAILED" }), "done", new Set(["VERIFYING"]));
+    const withVerify = phaseBand(task({ status: "FAILED" }), "done", tJa, new Set(["VERIFYING"]));
     expect(withVerify.map((b) => b.state)).toEqual(["done", "done", "stopped", "todo"]);
     const without = phaseBand(
       task({ status: "FAILED", started_at: "2026-10-21T01:06:10Z" }),
       "done",
+      tJa,
     );
     expect(without.map((b) => b.state)).toEqual(["done", "stopped", "todo", "todo"]);
-    const never = phaseBand(task({ status: "CANCELLED", started_at: null }), "done");
+    const never = phaseBand(task({ status: "CANCELLED", started_at: null }), "done", tJa);
     expect(never.map((b) => b.state)).toEqual(["stopped", "todo", "todo", "todo"]);
   });
   it("全状態で、色に頼らない文字（label）が全段にある", () => {
     for (const s of TASK_STATUSES) {
-      for (const b of phaseBand(task({ status: s }), "run")) {
+      for (const b of phaseBand(task({ status: s }), "run", tJa)) {
         expect(b.label.length, `${s}/${b.name}`).toBeGreaterThan(0);
       }
     }
   });
   it("止まった段の文字は状態ごとに違う（失敗 / 予算超過 / キャンセル）", () => {
     const l = (s: TaskStatusDto) =>
-      phaseBand(task({ status: s }), "run").find((b) => b.state === "stopped")?.label;
+      phaseBand(task({ status: s }), "run", tJa).find((b) => b.state === "stopped")?.label;
     expect(new Set([l("FAILED"), l("BUDGET_EXCEEDED"), l("CANCELLED")]).size).toBe(3);
   });
 });
 
 describe("nowSentence（「いまは X を実行しています」）", () => {
   const now = (kind: string, text: string) => ({ kind, text }) as unknown as Now;
-  const sentence = (n: Now, s: TaskStatusDto) => nowSentence(n, s);
+  const sentence = (n: Now, s: TaskStatusDto) => nowSentence(n, s, tJa);
   it("now がある: 種類ごとの動詞", () => {
     expect(sentence(now("command", "npm ci"), "RUNNING")).toEqual({
       before: "いまは ",
@@ -920,6 +970,7 @@ describe("stepTimings（ステップの所要 = 次のステップの時刻と�
         evAt(3, "2026-10-21T05:53:12Z"),
       ],
       false,
+      tJa,
     );
     expect(stepTimings(steps, T("2026-10-21T06:00:00Z"))).toEqual([
       { ms: 12_000, open: false },
@@ -932,6 +983,7 @@ describe("stepTimings（ステップの所要 = 次のステップの時刻と�
     const steps = buildSteps(
       [evAt(1, "2026-10-21T05:50:00Z"), evAt(2, "2026-10-21T05:50:10Z")],
       true,
+      tJa,
     );
     expect(stepTimings(steps, T("2026-10-21T05:50:16Z"))).toEqual([
       { ms: 10_000, open: false },
@@ -943,6 +995,7 @@ describe("stepTimings（ステップの所要 = 次のステップの時刻と�
     const steps = buildSteps(
       [evAt(1, "2026-10-21T05:50:00Z"), usage(2), evAt(3, "2026-10-21T05:50:30Z")],
       false,
+      tJa,
     );
     expect(stepTimings(steps, 0)[0]).toEqual({ ms: 30_000, open: false });
   });
@@ -951,6 +1004,7 @@ describe("stepTimings（ステップの所要 = 次のステップの時刻と�
     const steps = buildSteps(
       [evAt(1, "2026-10-21T05:50:10Z"), evAt(2, "2026-10-21T05:50:00Z")],
       true,
+      tJa,
     );
     const t = stepTimings(steps, Number.NaN);
     expect(t[0]).toEqual({ ms: 0, open: false });
@@ -971,7 +1025,7 @@ describe("phaseTimings（段階の所要 = status_changed の時刻から。デ�
     status: TaskStatusDto,
     phase: Phase = "run",
     stopped?: "prepare" | "run" | "verify",
-  ) => phaseBand(task({ status }), phase, new Set(), stopped);
+  ) => phaseBand(task({ status }), phase, tJa, new Set(), stopped);
   const done = (ms: number): PhaseTiming => ({ ms, open: false });
 
   it("完了したタスク: 準備 = CREATING → RUNNING、実行 = RUNNING → VERIFYING、検証 = VERIFYING → COMPLETED。完了段階には所要が無い", () => {

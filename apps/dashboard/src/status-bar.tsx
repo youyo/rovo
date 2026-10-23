@@ -2,7 +2,9 @@ import type { BudgetMeDto, CloudflareSummaryDto, OverviewDto } from "@rovo/dashb
 import { useId, useState } from "react";
 import { cloudflareRows } from "./cloudflare";
 import { CloudflarePanel } from "./cloudflare-panel";
-import { formatClock, formatCount, formatUsd, modelFamily, shortModel } from "./format";
+import { formatClock, formatUsd, modelFamily, shortModel } from "./format";
+import type { T } from "./i18n";
+import { useT } from "./lang";
 import { budgetLimit } from "./rail";
 import { BudgetPanel, ModelCosts } from "./side-panels";
 import { markKindOf } from "./status";
@@ -18,20 +20,23 @@ function cloudflareData(state: CloudflareState | undefined): CloudflareSummaryDt
 }
 
 /** バーに出す Cloudflare の要約（Workers とクレジット残高）。取れない項目は引き出しと同じ理由の言葉。 */
-function cloudflareBar(state: CloudflareState | undefined): { workers: string; credit: string } {
+function cloudflareBar(
+  state: CloudflareState | undefined,
+  t: T,
+): { workers: string; credit: string } {
   const data = cloudflareData(state);
   if (data === null) {
-    const text = state?.phase === "failed" ? "取得できませんでした" : "読み込み中…";
-    return { workers: `Cloudflare ${text}`, credit: "" };
+    const text = state?.phase === "failed" ? t("bar.cloudflareFailed") : t("common.loading");
+    return { workers: t("bar.cloudflare", { text }), credit: "" };
   }
-  const rows = cloudflareRows(data);
+  const rows = cloudflareRows(data, t);
   const workers = rows.find((r) => r.key === "workers");
   const credit = rows.find((r) => r.key === "credit_balance");
   return {
-    workers: workers?.ok
-      ? `Workers ${workers.text.replace("、", "  ")}`
-      : `Workers ${workers?.text ?? ""}`,
-    credit: credit?.ok ? `クレジット ${credit.text}` : `クレジット ${credit?.text ?? ""}`,
+    workers: t("bar.workers", {
+      text: workers?.ok ? workers.text.replace(t("common.sep"), "  ") : (workers?.text ?? ""),
+    }),
+    credit: t("bar.credit", { text: credit?.text ?? "" }),
   };
 }
 
@@ -46,6 +51,7 @@ function Sb(props: { alt?: boolean; strong?: boolean; children: React.ReactNode;
 
 /** モデル別をバーに収める短い項目（合計の大きい順。多いときは上位だけ）。項目の途中では折り返さない */
 function ModelLine(props: { models: OverviewDto["models"] }) {
+  const t = useT();
   const all = props.models
     .map((m) => ({
       id: m.model,
@@ -59,14 +65,14 @@ function ModelLine(props: { models: OverviewDto["models"] }) {
     // 縮めた名前が重なるときは、重なった側を元の名前に戻す
     name: short.filter((n) => n === short[i]).length > 1 ? shortModel(r.id).name : short[i],
   }));
-  if (rows.length === 0) return <>モデル別 まだありません</>;
+  if (rows.length === 0) return <>{t("bar.modelsNone")}</>;
   return (
     <>
       {rows.map((r, i) => (
         <span key={r.id}>
           {i === 0 ? "" : "  "}
           <span className="sb-item" data-model-part="">
-            {r.name} {formatUsd(r.total)}
+            {r.name} {formatUsd(r.total, t)}
           </span>
         </span>
       ))}
@@ -80,6 +86,7 @@ function ModelLine(props: { models: OverviewDto["models"] }) {
  */
 function Meter(props: { spent: number; limit: number | null }) {
   const { spent, limit } = props;
+  const t = useT();
   if (limit === null || !(limit > 0)) return null;
   const ratio = Math.min(1, Math.max(0, spent / limit));
   return (
@@ -88,7 +95,7 @@ function Meter(props: { spent: number; limit: number | null }) {
       width={80}
       height={6}
       role="img"
-      aria-label={`今月の使用量 ${formatUsd(spent)} / ${formatUsd(limit)}`}
+      aria-label={t("bar.meter", { spent: formatUsd(spent, t), limit: formatUsd(limit, t) })}
     >
       <rect className="meter-bg" x={0} y={0} width="100%" height={6} rx={3} />
       <rect
@@ -116,10 +123,11 @@ export function StatusBar(props: {
   initialOpen?: boolean;
 }) {
   const { data } = props;
+  const t = useT();
   const [open, setOpen] = useState(props.initialOpen ?? false);
   const drawerId = useId();
   const limit = budgetLimit(data.budget);
-  const cf = cloudflareBar(props.cloudflare);
+  const cf = cloudflareBar(props.cloudflare, t);
   const kinds = data.tasks.map(markKindOf);
 
   return (
@@ -127,7 +135,7 @@ export function StatusBar(props: {
       <section
         id={drawerId}
         className="drawer"
-        aria-label="内訳"
+        aria-label={t("bar.details")}
         hidden={!open}
         data-open={String(open)}
       >
@@ -138,10 +146,7 @@ export function StatusBar(props: {
         </div>
         <Legend kinds={kinds} />
         <div className="drawer-foot">
-          <p>
-            {formatClock(props.nowMs)} に更新。あなたが GitHub
-            で見られるリポジトリのタスクだけを表示しています。
-          </p>
+          <p>{t("drawer.updated", { time: formatClock(props.nowMs, t) })}</p>
           {props.showRefreshControls === false ? null : (
             <div className="drawer-controls">
               <label>
@@ -150,26 +155,35 @@ export function StatusBar(props: {
                   checked={props.autoRefresh}
                   onChange={(e) => props.onAutoRefreshChange(e.currentTarget.checked)}
                 />
-                自動で更新する
+                {t("common.autoRefresh")}
               </label>
               <button type="button" className="link-button" onClick={props.onRefresh}>
-                今すぐ更新
+                {t("common.refreshNow")}
               </button>
             </div>
           )}
         </div>
       </section>
 
-      <section className="statusbar" aria-label="費用と枠">
+      <section className="statusbar" aria-label={t("bar.label")}>
         <Sb k="budget-me" strong>
-          今月 {formatUsd(data.budget.spent_usd)}
-          {limit === null ? "" : ` / ${formatUsd(limit)}`}
+          {limit === null
+            ? t("bar.month", { spent: formatUsd(data.budget.spent_usd, t) })
+            : t("bar.monthLimit", {
+                spent: formatUsd(data.budget.spent_usd, t),
+                limit: formatUsd(limit, t),
+              })}
         </Sb>
         <Meter spent={data.budget.spent_usd} limit={limit} />
         <Sb k="budget-left" alt>
-          {`残り ${formatUsd(data.budget.remaining_usd)}  あと ${formatCount(data.budget.startable)} 件`}
+          {t("bar.left", {
+            remaining: formatUsd(data.budget.remaining_usd, t),
+            n: data.budget.startable,
+          })}
         </Sb>
-        <Sb k="budget-all">全員 {formatUsd(data.month.budget_actual.spent_usd)}</Sb>
+        <Sb k="budget-all">
+          {t("bar.all", { amount: formatUsd(data.month.budget_actual.spent_usd, t) })}
+        </Sb>
         <Sb k="models" alt>
           <ModelLine models={data.models} />
         </Sb>
@@ -187,7 +201,7 @@ export function StatusBar(props: {
           aria-controls={drawerId}
           onClick={() => setOpen((v) => !v)}
         >
-          内訳
+          {t("bar.details")}
         </button>
       </section>
     </div>
@@ -203,25 +217,31 @@ export function PendingStatusBar(props: {
   cloudflare?: CloudflareState;
 }) {
   const { budget } = props;
-  const cf = cloudflareBar(props.cloudflare);
+  const t = useT();
+  const cf = cloudflareBar(props.cloudflare, t);
   const limit = budget ? budgetLimit(budget) : null;
   return (
     <div className="bar-wrap">
-      <section className="statusbar" aria-label="費用と枠">
+      <section className="statusbar" aria-label={t("bar.label")}>
         <Sb k="budget-me" strong>
           {budget
-            ? `今月 ${formatUsd(budget.spent_usd)}${limit === null ? "" : ` / ${formatUsd(limit)}`}`
-            : "今月 読み込み中…"}
+            ? limit === null
+              ? t("bar.month", { spent: formatUsd(budget.spent_usd, t) })
+              : t("bar.monthLimit", {
+                  spent: formatUsd(budget.spent_usd, t),
+                  limit: formatUsd(limit, t),
+                })
+            : t("bar.monthLoading")}
         </Sb>
         {budget ? <Meter spent={budget.spent_usd} limit={limit} /> : null}
         <Sb k="budget-left" alt>
           {budget
-            ? `残り ${formatUsd(budget.remaining_usd)}  あと ${formatCount(budget.startable)} 件`
-            : "残り 読み込み中…"}
+            ? t("bar.left", { remaining: formatUsd(budget.remaining_usd, t), n: budget.startable })
+            : t("bar.leftLoading")}
         </Sb>
-        <Sb k="budget-all">全員 読み込み中…</Sb>
+        <Sb k="budget-all">{t("bar.allLoading")}</Sb>
         <Sb k="models" alt>
-          モデル別 読み込み中…
+          {t("bar.modelsLoading")}
         </Sb>
         <span className="sb-grow" />
         <Sb k="cloudflare">{cf.workers}</Sb>

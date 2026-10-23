@@ -1,8 +1,9 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
-import { MARKS, type MarkKind } from "../src/status";
+import { MARKS, type MarkKind, markLabel } from "../src/status";
 import { MarkSymbol } from "../src/status-mark";
+import { inJa, tJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -18,7 +19,7 @@ function symbol(kind: MarkKind, decorative = false): SVGSVGElement {
   const root = createRoot(container);
   roots.push(root);
   act(() => {
-    root.render(createElement(MarkSymbol, { kind, decorative }));
+    root.render(inJa(createElement(MarkSymbol, { kind, decorative })));
   });
   return container.querySelector("svg") as SVGSVGElement;
 }
@@ -73,8 +74,8 @@ describe("MarkSymbol（レール・見出し・凡例で共通の状態の印）
     for (const k of KINDS) {
       const svg = symbol(k);
       expect(svg.getAttribute("role"), k).toBe("img");
-      expect(svg.getAttribute("aria-label"), k).toBe(MARKS[k].label);
-      expect(svg.querySelector("title")?.textContent, k).toBe(MARKS[k].label);
+      expect(svg.getAttribute("aria-label"), k).toBe(markLabel(k, tJa));
+      expect(svg.querySelector("title")?.textContent, k).toBe(markLabel(k, tJa));
       expect(svg.getAttribute("aria-hidden"), k).toBeNull();
     }
   });

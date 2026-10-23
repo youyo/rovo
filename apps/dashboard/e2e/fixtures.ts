@@ -11,7 +11,28 @@ export interface NetworkLog {
   external: string[];
 }
 
-export const test = base.extend<{ net: NetworkLog }>({
+/** 言語の保存先（src/prefs.ts の LANG_KEY と同じ。e2e は src を読み込まないので文字列で持つ） */
+export const LANG_STORAGE_KEY = "rovo.dashboard.lang";
+
+export const test = base.extend<{ net: NetworkLog; lang: "ja" | "en" | null }>({
+  // 既存の E2E は日本語の文言で探すので、最初に日本語を保存しておく（保存が無いときだけ。切り替え後の読み直しを上書きしない）。
+  // 初回は英語であること自体を確かめる E2E は test.use({ lang: null }) で外す
+  lang: ["ja", { option: true }],
+  context: async ({ context, lang }, use) => {
+    if (lang !== null) {
+      await context.addInitScript(
+        ({ key, value }) => {
+          try {
+            if (localStorage.getItem(key) === null) localStorage.setItem(key, value);
+          } catch {
+            // 保存できない環境では既定のまま
+          }
+        },
+        { key: LANG_STORAGE_KEY, value: lang },
+      );
+    }
+    await use(context);
+  },
   baseURL: async ({ browserName: _ }, use) => {
     await use(readState().baseUrl);
   },
@@ -42,7 +63,7 @@ export async function setGitHubUser(user: E2eUser): Promise<void> {
 export async function loginAs(page: Page, user: E2eUser, path = "/dashboard/"): Promise<void> {
   await setGitHubUser(user);
   await page.goto(path);
-  await page.getByRole("link", { name: "GitHub でログイン" }).click();
+  await page.getByRole("link", { name: /^(GitHub でログイン|Sign in with GitHub)$/ }).click();
   await expect(page.locator("header .user").getByText(user.login, { exact: true })).toBeVisible();
 }
 

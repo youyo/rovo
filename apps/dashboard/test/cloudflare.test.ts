@@ -10,6 +10,7 @@ import {
   reasonText,
 } from "../src/cloudflare";
 import { isAllowedCloudflareUrl } from "../src/format";
+import { tJa } from "./lang";
 
 const period = { start: "2026-10-21T00:00:00Z", end: "2026-10-22T00:00:00Z" };
 const summary: CloudflareSummaryDto = {
@@ -30,28 +31,28 @@ const summary: CloudflareSummaryDto = {
 };
 
 const rowOf = (s: CloudflareSummaryDto, key: string) => {
-  const r = cloudflareRows(s).find((x) => x.key === key);
+  const r = cloudflareRows(s, tJa).find((x) => x.key === key);
   if (!r) throw new Error(`行が無い: ${key}`);
   return r;
 };
 
 describe("単位の整形", () => {
   it("vCPU 時間・GiB 時間は秒から時間へ（小数 2 桁まで、末尾の 0 を落とす）", () => {
-    expect(formatVcpuHours(5_400)).toBe("1.5 vCPU 時間");
-    expect(formatGibHours(21_600)).toBe("6 GiB 時間");
-    expect(formatVcpuHours(0)).toBe("0 vCPU 時間");
-    expect(formatVcpuHours(10)).toBe("<0.01 vCPU 時間");
-    expect(formatGibHours(3_700_000)).toBe("1,027.78 GiB 時間");
+    expect(formatVcpuHours(5_400, tJa)).toBe("1.5 vCPU 時間");
+    expect(formatGibHours(21_600, tJa)).toBe("6 GiB 時間");
+    expect(formatVcpuHours(0, tJa)).toBe("0 vCPU 時間");
+    expect(formatVcpuHours(10, tJa)).toBe("<0.01 vCPU 時間");
+    expect(formatGibHours(3_700_000, tJa)).toBe("1,027.78 GiB 時間");
   });
   it("neurons は整数に丸めて桁区切り", () => {
-    expect(formatNeurons(1234.6)).toBe("1,235 Neuron");
-    expect(formatNeurons(0)).toBe("0 Neuron");
+    expect(formatNeurons(1234.6, tJa)).toBe("1,235 Neuron");
+    expect(formatNeurons(0, tJa)).toBe("0 Neuron");
   });
 });
 
 describe("cloudflareRows", () => {
   it("表示順と項目名", () => {
-    expect(cloudflareRows(summary).map((r) => r.name)).toEqual([
+    expect(cloudflareRows(summary, tJa).map((r) => r.name)).toEqual([
       "Workers のリクエスト",
       "Sandbox コンテナの稼働",
       "AI Gateway のリクエスト",
@@ -69,10 +70,10 @@ describe("cloudflareRows", () => {
     expect(rowOf(summary, "credit_balance").text).toBe("$954.63");
   });
   it("取得できない理由ごとの言葉", () => {
-    expect(reasonText("forbidden")).toBe("取得できない（トークンの権限を確認）");
-    expect(reasonText("unavailable")).toBe("取得できない（一時的）");
-    expect(reasonText("not_configured")).toBe("未設定");
-    expect(reasonText("empty")).toBe("データなし");
+    expect(reasonText("forbidden", tJa)).toBe("取得できない（トークンの権限を確認）");
+    expect(reasonText("unavailable", tJa)).toBe("取得できない（一時的）");
+    expect(reasonText("not_configured", tJa)).toBe("未設定");
+    expect(reasonText("empty", tJa)).toBe("データなし");
     const s: CloudflareSummaryDto = {
       ...summary,
       workers: { ok: false, reason: "forbidden" },
@@ -80,7 +81,7 @@ describe("cloudflareRows", () => {
       ai_gateway: { ok: false, reason: "not_configured" },
       workers_ai: { ok: false, reason: "empty" },
     };
-    expect(rowOf(s, "workers")).toMatchObject({ ok: false, text: reasonText("forbidden") });
+    expect(rowOf(s, "workers")).toMatchObject({ ok: false, text: reasonText("forbidden", tJa) });
     expect(rowOf(s, "containers").text).toBe("取得できない（一時的）");
     expect(rowOf(s, "ai_gateway").text).toBe("未設定");
     expect(rowOf(s, "workers_ai").text).toBe("データなし");
@@ -95,7 +96,7 @@ describe("cloudflareRows", () => {
       ...summary,
       open_url: `https://dash.cloudflare.com/${"0123456789abcdef".repeat(2)}/workers`,
     };
-    for (const r of cloudflareRows(withAccount)) {
+    for (const r of cloudflareRows(withAccount, tJa)) {
       expect(r.href).toBe(CLOUDFLARE_DASH_URL);
       expect(r.href).not.toMatch(/[0-9a-f]{32}/);
       expect(r.ariaLabel).toMatch(/を Cloudflare で開く$/);
@@ -170,12 +171,12 @@ describe("推定の金額（cost_estimate）", () => {
     }) satisfies CloudflareSummaryDto;
 
   it("欄の頭は「Cloudflare の請求（推定）$x（無料枠を引く前）」で、partial なら注記を添える", () => {
-    expect(cloudflareEstimateHead(withEstimate())).toEqual({
+    expect(cloudflareEstimateHead(withEstimate(), tJa)).toEqual({
       text: "Cloudflare の請求（推定）$0.0892（無料枠を引く前）",
       partial: true,
     });
     const full = withEstimate({ excluded_items: [], partial: false });
-    expect(cloudflareEstimateHead(full)).toEqual({
+    expect(cloudflareEstimateHead(full, tJa)).toEqual({
       text: "Cloudflare の請求（推定）$0.0892（無料枠を引く前）",
       partial: false,
     });
@@ -183,22 +184,22 @@ describe("推定の金額（cost_estimate）", () => {
 
   it("合計は AI Gateway を含まない（Cloudflare の 5 項目の和。AI Gateway の 1.25 は含まれない）", () => {
     const s = withEstimate({ total_estimated_usd_before_free_tier: 0.0892225 });
-    expect(cloudflareEstimateHead(s)?.text).toBe(
+    expect(cloudflareEstimateHead(s, tJa)?.text).toBe(
       "Cloudflare の請求（推定）$0.0892（無料枠を引く前）",
     );
-    expect(cloudflareEstimateHead(s)?.text).not.toContain("1.34");
+    expect(cloudflareEstimateHead(s, tJa)?.text).not.toContain("1.34");
   });
 
   it("合計が null なら「推定できない」", () => {
     const s = withEstimate({ total_estimated_usd_before_free_tier: null });
-    expect(cloudflareEstimateHead(s)?.text).toBe(
+    expect(cloudflareEstimateHead(s, tJa)?.text).toBe(
       "Cloudflare の請求（推定）推定できない（無料枠を引く前）",
     );
   });
 
   it("cost_estimate が無い（古い応答）ときは見出しを出さず、行の金額も出さない", () => {
-    expect(cloudflareEstimateHead(summary)).toBeNull();
-    for (const r of cloudflareRows(summary)) expect(r.cost, r.key).toBeNull();
+    expect(cloudflareEstimateHead(summary, tJa)).toBeNull();
+    for (const r of cloudflareRows(summary, tJa)) expect(r.cost, r.key).toBeNull();
   });
 
   it("各行の金額。コンテナは vCPU とメモリの合計（ディスクは null なので足さない）、AI Gateway は cost_usd", () => {

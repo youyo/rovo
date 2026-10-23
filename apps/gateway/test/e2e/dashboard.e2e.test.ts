@@ -124,10 +124,10 @@ describe("ダッシュボードが OAuthProvider の経路を飲み込まない"
     expect(await res.text()).not.toContain('<div id="root">');
   });
 
-  it("/ は defaultHandler のまま", async () => {
+  it("/ はダッシュボード（/dashboard/）へ移す", async () => {
     const res = await get("/");
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("rovo gateway");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/dashboard/");
   });
 
   it("未知のパスは SPA の HTML にならず 404（assets の自動フォールバックを使っていない）", async () => {

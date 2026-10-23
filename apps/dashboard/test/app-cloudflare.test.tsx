@@ -6,6 +6,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app";
+import { LANG_KEY } from "../src/prefs";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -45,7 +46,7 @@ const cfCalls = (f: ReturnType<typeof router>) =>
 
 const roots: { unmount: () => void }[] = [];
 beforeEach(() => {
-  const store = new Map<string, string>();
+  const store = new Map<string, string>([[LANG_KEY, "ja"]]);
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => store.get(k) ?? null,
     setItem: (k: string, v: string) => void store.set(k, v),

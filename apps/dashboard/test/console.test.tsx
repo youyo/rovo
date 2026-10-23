@@ -9,6 +9,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { formatClockSeconds } from "../src/format";
 import { TaskView } from "../src/task-view";
+import { inJa, tJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -24,19 +25,21 @@ function render(c: HTMLElement, detail: TaskDetailDto, events: TaskEventDto[], e
   const root = roots.at(-1) as ReturnType<typeof createRoot>;
   act(() => {
     root.render(
-      createElement(TaskView, {
-        detail,
-        events,
-        hasOlder: false,
-        stale: false,
-        loadingOlder: false,
-        olderError: false,
-        autoRefresh: true,
-        onAutoRefreshChange: () => {},
-        onRefresh: () => {},
-        onLoadOlder: () => {},
-        ...extra,
-      }),
+      inJa(
+        createElement(TaskView, {
+          detail,
+          events,
+          hasOlder: false,
+          stale: false,
+          loadingOlder: false,
+          olderError: false,
+          autoRefresh: true,
+          onAutoRefreshChange: () => {},
+          onRefresh: () => {},
+          onLoadOlder: () => {},
+          ...extra,
+        }),
+      ),
     );
   });
   return c;
@@ -289,7 +292,7 @@ describe("画面（screen）", () => {
     expect(rows).toHaveLength(8);
     const first = rows[0] as HTMLElement;
     expect(first.querySelector(".step-time")?.textContent).toBe(
-      formatClockSeconds(Date.parse(taskEventsFixture.events[0]?.at as string)),
+      formatClockSeconds(Date.parse(taskEventsFixture.events[0]?.at as string), tJa),
     );
     const cmd = rows.find((r) => r.querySelector(".prompt")) as HTMLElement;
     expect(cmd.querySelector(".prompt")?.textContent).toBe("$ ");

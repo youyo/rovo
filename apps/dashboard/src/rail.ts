@@ -1,5 +1,6 @@
 import type { OverviewDto, VisibleTaskDto } from "@rovo/dashboard-contract";
 import { formatDayHeading } from "./format";
+import type { T } from "./i18n";
 import { isTerminal, markKindOf } from "./status";
 import { taskTime } from "./timeline";
 
@@ -19,10 +20,10 @@ export function pickConsoleTask(tasks: readonly VisibleTaskDto[]): VisibleTaskDt
 
 export type DaySummary = { day: string; total: number; merged: number; running: number };
 
-/** ヘッダの要約。「10月22日  12 件  マージ 0  走行中 0」 */
-export function daySummary(data: OverviewDto): DaySummary {
+/** ヘッダの要約。「10月22日  12 件  マージ 0  走行中 0」（en は「October 22  12 tasks  Merged 0  Running 0」） */
+export function daySummary(data: OverviewDto, t: T): DaySummary {
   return {
-    day: formatDayHeading(Date.parse(data.range.from)),
+    day: formatDayHeading(Date.parse(data.range.from), t),
     total: data.tasks.length,
     merged: data.tasks.filter((t) => markKindOf(t) === "merged").length,
     running: data.tasks.filter((t) => !isTerminal(t.status)).length,

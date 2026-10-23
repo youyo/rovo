@@ -41,7 +41,7 @@ test("(2) チーム / マイタスクの切り替え: 最初は「マイタス�
 
   // マイタスクでは依頼者を出さない。並びは「マイタスク」が先
   await expect(page.locator(".rail-owner")).toHaveCount(0);
-  expect(await page.locator("fieldset.seg button").allTextContents()).toEqual([
+  expect(await page.locator("fieldset.seg:not(.lang) button").allTextContents()).toEqual([
     "マイタスク",
     "チーム",
   ]);

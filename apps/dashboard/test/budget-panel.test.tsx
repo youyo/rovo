@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { BudgetPanel } from "../src/side-panels";
+import { inJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -19,7 +20,7 @@ function mount(data: OverviewDto = overviewFixture) {
   const root = createRoot(container);
   roots.push(root);
   act(() => {
-    root.render(createElement(BudgetPanel, { data }));
+    root.render(inJa(createElement(BudgetPanel, { data })));
   });
   return container;
 }

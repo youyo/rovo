@@ -8,6 +8,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app";
+import { LANG_KEY } from "../src/prefs";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -44,7 +45,7 @@ const roots: { unmount: () => void }[] = [];
 let store: Map<string, string>;
 
 beforeEach(() => {
-  store = new Map();
+  store = new Map([[LANG_KEY, "ja"]]);
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => store.get(k) ?? null,
     setItem: (k: string, v: string) => void store.set(k, v),
@@ -280,7 +281,9 @@ describe("App: 自動更新（D15）", () => {
       box.click();
     });
     expect(box.checked).toBe(false);
-    expect(store.size).toBe(1);
+    // 保存されるのは自動更新の「切」だけ（ほかは最初に入れた言語の設定）
+    expect([...store.keys()].sort()).toEqual(["rovo.dashboard.autoRefresh", LANG_KEY].sort());
+    expect(store.get("rovo.dashboard.autoRefresh")).toBe("0");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });

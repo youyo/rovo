@@ -12,6 +12,7 @@ import {
   timelineDomain,
   xFraction,
 } from "../src/timeline";
+import { tJa } from "./lang";
 
 const at = (h: number, m = 0) => new Date(2026, 9, 21, h, m).getTime();
 const DAY_START = at(0);
@@ -82,7 +83,7 @@ describe("xFraction / stemHeight / hourTicks", () => {
   });
 
   it("hourTicks: 範囲内の毎時（ローカル）。ラベルは H:00", () => {
-    const t = hourTicks(domain);
+    const t = hourTicks(domain, tJa);
     expect(t.map((x) => x.label)).toEqual([
       "10:00",
       "11:00",

@@ -1,10 +1,12 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app";
 import { AuthView } from "../src/auth-view";
+import { LANG_KEY } from "../src/prefs";
 import { fetchMe, loginHref, logout } from "../src/session";
+import { inJa } from "./lang";
 
 // React の act() を使うテスト環境の宣言
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -83,10 +85,12 @@ describe("loginHref（ログイン後の戻り先）", () => {
 describe("AuthView", () => {
   it("未ログイン: 「GitHub でログイン」のリンク（/dashboard/auth/login）だけを出す", () => {
     const html = renderToStaticMarkup(
-      createElement(AuthView, {
-        auth: { state: "signed-out" },
-        loginHref: "/dashboard/auth/login",
-      }),
+      inJa(
+        createElement(AuthView, {
+          auth: { state: "signed-out" },
+          loginHref: "/dashboard/auth/login",
+        }),
+      ),
     );
     expect(html).toContain('href="/dashboard/auth/login"');
     expect(html).toContain("GitHub でログイン");
@@ -95,11 +99,13 @@ describe("AuthView", () => {
 
   it("ログイン済み: login とログアウトのボタンを出す。login は文字として出力される（HTML を解釈しない）", () => {
     const html = renderToStaticMarkup(
-      createElement(AuthView, {
-        auth: { state: "signed-in", login: "<img src=x onerror=alert(1)>" },
-        loginHref: "/dashboard/auth/login",
-        onLogout: () => {},
-      }),
+      inJa(
+        createElement(AuthView, {
+          auth: { state: "signed-in", login: "<img src=x onerror=alert(1)>" },
+          loginHref: "/dashboard/auth/login",
+          onLogout: () => {},
+        }),
+      ),
     );
     expect(html).toContain("ログアウト");
     expect(html).not.toContain("<img");
@@ -109,11 +115,15 @@ describe("AuthView", () => {
 
   it("読み込み中・エラー: ログイン済みの表示にならない", () => {
     const loading = renderToStaticMarkup(
-      createElement(AuthView, { auth: { state: "loading" }, loginHref: "/dashboard/auth/login" }),
+      inJa(
+        createElement(AuthView, { auth: { state: "loading" }, loginHref: "/dashboard/auth/login" }),
+      ),
     );
     expect(loading).not.toContain("ログアウト");
     const error = renderToStaticMarkup(
-      createElement(AuthView, { auth: { state: "error" }, loginHref: "/dashboard/auth/login" }),
+      inJa(
+        createElement(AuthView, { auth: { state: "error" }, loginHref: "/dashboard/auth/login" }),
+      ),
     );
     expect(error).not.toContain("ログアウト");
     expect(error).toContain("GitHub でログイン"); // 再試行の導線
@@ -127,7 +137,9 @@ describe("AuthView", () => {
       { state: "signed-in", login: "a" },
     ] as const) {
       const html = renderToStaticMarkup(
-        createElement(AuthView, { auth, loginHref: "/dashboard/auth/login", onLogout: () => {} }),
+        inJa(
+          createElement(AuthView, { auth, loginHref: "/dashboard/auth/login", onLogout: () => {} }),
+        ),
       );
       expect(html).not.toMatch(/<style/i);
       expect(html).not.toMatch(/\sstyle=/i);
@@ -137,6 +149,8 @@ describe("AuthView", () => {
 
 describe("App（jsdom）", () => {
   const roots: { unmount: () => void }[] = [];
+  // 言語は日本語で描く（既定は英語。保存された言語を読む）
+  beforeEach(() => localStorage.setItem(LANG_KEY, "ja"));
   afterEach(() => {
     for (const r of roots.splice(0)) act(() => r.unmount());
     vi.unstubAllGlobals();

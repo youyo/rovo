@@ -1,5 +1,6 @@
 import type { BudgetMeDto, OverviewDto } from "@rovo/dashboard-contract";
 import type { ReactNode } from "react";
+import { useT } from "./lang";
 import { TaskRail } from "./rail-view";
 import { PendingStatusBar, StatusBar } from "./status-bar";
 import { buildLanes, HOUR, taskTime, timelineDomain } from "./timeline";
@@ -37,6 +38,7 @@ export function OverviewView(props: {
   showRefreshControls?: boolean;
 }) {
   const { data } = props;
+  const t = useT();
   let band: ReactNode = null;
   let nowMs = 0; // 更新時刻（引き出しの表示）。タイムラインの「いま」は今日のときだけ使う
   if (data) {
@@ -52,13 +54,11 @@ export function OverviewView(props: {
     band = (
       <section
         className="tlband"
-        aria-label={props.isToday ? "今日のタイムライン" : "この日のタイムライン"}
+        aria-label={props.isToday ? t("timeline.today") : t("timeline.day")}
       >
         {empty ? (
           <p className="empty">
-            {props.isToday
-              ? "タスクを始めると、ここにタイムラインが出ます。"
-              : "この日のタスクはありません。"}
+            {props.isToday ? t("timeline.emptyToday") : t("timeline.emptyDay")}
           </p>
         ) : (
           <TimelineView
@@ -77,7 +77,7 @@ export function OverviewView(props: {
     <>
       {props.stale ? (
         <p className="notice" role="status">
-          更新できませんでした。前の内容を表示しています（自動で再試行します）。
+          {t("console.stale")}
         </p>
       ) : null}
 
@@ -94,7 +94,7 @@ export function OverviewView(props: {
             at={nowMs}
           />
         ) : (
-          <nav className="rail" aria-label="タスク">
+          <nav className="rail" aria-label={t("rail.label")}>
             <p className="rail-empty" role="status">
               {props.railNote ?? ""}
             </p>

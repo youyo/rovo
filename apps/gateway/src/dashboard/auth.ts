@@ -42,6 +42,23 @@ const NO_STORE_TEXT = {
   "referrer-policy": "no-referrer",
 } as const;
 
+/** ログインの失敗の理由（ダッシュボードの `?login_error=` に載せる固定の許可リスト。SPA が同じ値で日本語の文に引く）。 */
+export type LoginErrorCode = "denied" | "invalid" | "unavailable";
+
+/**
+ * ログインの失敗を、素の text ではなくダッシュボードへ戻す（303。利用者が行き止まりにならない）。
+ * クエリに載せるのは固定の code だけ（GitHub の応答・state・ユーザー情報は載せない）。ログイン Cookie は消す。
+ */
+function loginFailed(code: LoginErrorCode, cookies: string[]): Response {
+  const headers = new Headers({
+    location: `/dashboard/?login_error=${code}`,
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+  });
+  for (const c of cookies) headers.append("set-cookie", c);
+  return new Response(null, { status: 303, headers });
+}
+
 /** /callback の state が接頭辞付きか。複数の state のどれかが接頭辞付きなら true（MCP の経路に落とさない）。 */
 export function isDashboardState(url: URL): boolean {
   return url.searchParams.getAll("state").some((s) => s.startsWith(DASH_STATE_PREFIX));
@@ -164,11 +181,7 @@ export async function finishDashboardLogin(
       caller: "dashboard",
       reason: "dashboard_invalid_state",
     });
-    return text(
-      400,
-      "The sign-in session is invalid or has expired. Please start again.",
-      clearLogin,
-    );
+    return loginFailed("invalid", clearLogin);
   };
 
   const states = url.searchParams.getAll("state");
@@ -188,20 +201,18 @@ export async function finishDashboardLogin(
     auditFromWorker(env, "auth_failed", { caller: "dashboard", reason });
   if (url.searchParams.get("error")) {
     await failed("github_denied");
-    return text(403, "Sign-in was denied.", clearLogin);
+    return loginFailed("denied", clearLogin);
   }
   const code = url.searchParams.get("code");
   if (!code) {
     await failed("missing_code");
-    return text(400, "The sign-in response is invalid. Please start again.", clearLogin);
+    return loginFailed("invalid", clearLogin);
   }
 
   // 身元確認（交換 → 本人 → 許可ルール → 資格の保存）は MCP と共通。ルールを通らなければセッションは作らない
   const identity = await verifyIdentity(env, config, code, "dashboard");
   if (!identity.ok) {
-    return identity.kind === "unavailable"
-      ? text(503, "GitHub is temporarily unavailable. Please try again.", clearLogin)
-      : text(403, "Sign-in was denied.", clearLogin);
+    return loginFailed(identity.kind === "unavailable" ? "unavailable" : "denied", clearLogin);
   }
 
   // セッションは常に新しく作る（ログイン前の Cookie・sid は引き継がない = セッション固定の対策）。古い sid は全部失効する

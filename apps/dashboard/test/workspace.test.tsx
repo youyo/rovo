@@ -9,6 +9,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app";
+import { LANG_KEY } from "../src/prefs";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -19,7 +20,7 @@ const json = (status: number, body: unknown) =>
 const roots: { unmount: () => void }[] = [];
 let store: Map<string, string>;
 beforeEach(() => {
-  store = new Map();
+  store = new Map([[LANG_KEY, "ja"]]);
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => store.get(k) ?? null,
     setItem: (k: string, v: string) => void store.set(k, v),
@@ -95,10 +96,12 @@ describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
     expect(mark.getAttribute("src")).toBe("/dashboard/assets/brand/rovo-mark.svg");
     expect(mark.getAttribute("alt")).toBe("");
     expect(mark.getAttribute("width")).toBe("24");
-    const seg = [...head.querySelectorAll("fieldset.seg button")].map((b) => b.textContent);
+    const seg = [...head.querySelectorAll("fieldset.seg:not(.lang) button")].map(
+      (b) => b.textContent,
+    );
     // 並びは「マイタスク」が先。表示範囲の切り替えの名前（aria-label）も合わせる
     expect(seg).toEqual(["マイタスク", "チーム"]);
-    expect(head.querySelector("fieldset.seg")?.getAttribute("aria-label")).toBe(
+    expect(head.querySelector("fieldset.seg:not(.lang)")?.getAttribute("aria-label")).toBe(
       "表示範囲（チーム / マイタスク）",
     );
     expect(text(head.querySelector(".day-summary"))).toMatch(

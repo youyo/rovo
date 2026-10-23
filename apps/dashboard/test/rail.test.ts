@@ -2,6 +2,7 @@ import type { OverviewDto, VisibleTaskDto } from "@rovo/dashboard-contract";
 import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it } from "vitest";
 import { budgetLimit, daySummary, pickConsoleTask } from "../src/rail";
+import { tJa } from "./lang";
 
 const task = (over: Partial<VisibleTaskDto>): VisibleTaskDto => ({
   ...(overviewFixture.tasks[0] as VisibleTaskDto),
@@ -45,7 +46,7 @@ describe("pickConsoleTask（一覧のコンソールに出すタスク）", () =
 
 describe("daySummary（ヘッダの要約「10月22日 12 件 マージ 0 走行中 0」）", () => {
   it("件数・マージ・走行中を数える", () => {
-    const s = daySummary(overviewFixture);
+    const s = daySummary(overviewFixture, tJa);
     expect(s.total).toBe(5);
     expect(s.merged).toBe(2);
     expect(s.running).toBe(1);
@@ -59,15 +60,15 @@ describe("daySummary（ヘッダの要約「10月22日 12 件 マージ 0 走行
         t.status === "COMPLETED" && t.pr && !t.pr.merged ? { ...t, pr: { ...t.pr, state } } : t,
       ),
     });
-    expect(daySummary(withState("closed")).merged).toBe(2);
-    expect(daySummary(withState("open")).merged).toBe(2);
-    expect(daySummary(withState("unknown")).merged).toBe(2);
-    expect(daySummary(withState("merged")).merged).toBe(3);
+    expect(daySummary(withState("closed"), tJa).merged).toBe(2);
+    expect(daySummary(withState("open"), tJa).merged).toBe(2);
+    expect(daySummary(withState("unknown"), tJa).merged).toBe(2);
+    expect(daySummary(withState("merged"), tJa).merged).toBe(3);
   });
 
   it("タスクが無ければ 0 件", () => {
     const empty: OverviewDto = { ...overviewFixture, tasks: [] };
-    expect(daySummary(empty)).toMatchObject({ total: 0, merged: 0, running: 0 });
+    expect(daySummary(empty, tJa)).toMatchObject({ total: 0, merged: 0, running: 0 });
   });
 });
 

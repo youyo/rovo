@@ -1,6 +1,7 @@
 import type { TaskDetailDto, VisibleTaskDto } from "@rovo/dashboard-contract";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DetailCache } from "./detail-cache";
+import { useT } from "./lang";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
 import { TaskPreview, TaskView } from "./task-view";
 import { type TaskDetailDeps, useTaskDetail } from "./use-task-detail";
@@ -29,6 +30,7 @@ export function TaskScreen(props: {
   /** 最初の取得が決着したとき 1 回だけ呼ぶ。ready はタスク、404・失敗は null（一覧の日を決めるのに使う） */
   onSettled?: (task: TaskDetailDto["task"] | null) => void;
 }) {
+  const t = useT();
   const [ownAutoRefresh, setOwnAutoRefresh] = useState(() => loadAutoRefresh());
   const autoRefresh = props.autoRefresh ?? ownAutoRefresh;
   const { state, refresh, loadOlder } = useTaskDetail(props.id, autoRefresh, {
@@ -68,34 +70,34 @@ export function TaskScreen(props: {
       if (props.preview) return <TaskPreview task={props.preview.task} at={props.preview.at} />;
       return (
         <div className="state">
-          <h1>タスクの詳細</h1>
-          <p role="status">読み込み中…</p>
+          <h1>{t("detail.title")}</h1>
+          <p role="status">{t("common.loading")}</p>
         </div>
       );
     case "unauthorized":
       return (
         <div className="state">
-          <h1>タスクの詳細</h1>
-          <p>ログインの有効期限が切れました。もう一度ログインしてください。</p>
+          <h1>{t("detail.title")}</h1>
+          <p>{t("state.expired")}</p>
         </div>
       );
     case "not_found":
       return (
         <div className="state">
-          <h1>このタスクは見られません</h1>
-          <p role="alert">権限が無いか、存在しません。</p>
+          <h1>{t("state.notFoundTitle")}</h1>
+          <p role="alert">{t("state.notFound")}</p>
           <p>
-            <a href={BACK}>ダッシュボードに戻る</a>
+            <a href={BACK}>{t("state.backToDashboard")}</a>
           </p>
         </div>
       );
     case "error":
       return (
         <div className="state">
-          <h1>タスクの詳細</h1>
-          <p role="alert">読み込めませんでした。自動で再試行します。</p>
+          <h1>{t("detail.title")}</h1>
+          <p role="alert">{t("state.error")}</p>
           <button type="button" onClick={refresh}>
-            再読み込み
+            {t("common.reload")}
           </button>
         </div>
       );

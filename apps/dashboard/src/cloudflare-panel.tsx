@@ -1,5 +1,7 @@
+import type { CloudflareSummaryDto } from "@rovo/dashboard-contract";
 import { cloudflareEstimateHead, cloudflareRows } from "./cloudflare";
 import { isAllowedCloudflareUrl } from "./format";
+import { useT } from "./lang";
 import type { CloudflareState } from "./use-cloudflare";
 
 /**
@@ -8,34 +10,32 @@ import type { CloudflareState } from "./use-cloudflare";
  */
 export function CloudflarePanel(props: { state: CloudflareState }) {
   const { state } = props;
+  const t = useT();
+  const head = (d: CloudflareSummaryDto) => cloudflareEstimateHead(d, t);
   const data = state.phase === "ready" ? state.data : state.phase === "failed" ? state.stale : null;
   return (
     <section className="panel" data-cloudflare="" aria-labelledby="cf-h">
-      <h2 id="cf-h">Cloudflare</h2>
-      <p className="caption">直近 24 時間</p>
-      {data !== null && cloudflareEstimateHead(data) !== null ? (
+      <h2 id="cf-h">{t("cf.title")}</h2>
+      <p className="caption">{t("cf.window")}</p>
+      {data !== null && head(data) !== null ? (
         <p className="cf-total" data-cf-total="">
-          <span>{cloudflareEstimateHead(data)?.text}</span>
-          {cloudflareEstimateHead(data)?.partial ? (
-            <span className="cf-note">一部の項目は含まない</span>
-          ) : null}
+          <span>{head(data)?.text}</span>
+          {head(data)?.partial ? <span className="cf-note">{t("cf.partial")}</span> : null}
         </p>
       ) : null}
       {state.phase === "failed" ? (
         <p className="soft" role="status">
-          {data === null
-            ? "取得できませんでした。自動で再試行します。"
-            : "更新できませんでした。前の内容を表示しています。"}
+          {data === null ? t("cf.failed") : t("cf.stale")}
         </p>
       ) : null}
       {state.phase === "loading" || state.phase === "unauthorized" ? (
         <p className="soft" role="status">
-          読み込み中…
+          {t("common.loading")}
         </p>
       ) : null}
       {data !== null ? (
         <ul className="cf-rows">
-          {cloudflareRows(data).map((r) => (
+          {cloudflareRows(data, t).map((r) => (
             <li key={r.key} data-cf={r.key} data-ok={r.ok ? "true" : "false"}>
               <span className="cf-name">{r.name}</span>
               <span className="cf-value">
@@ -48,7 +48,7 @@ export function CloudflarePanel(props: { state: CloudflareState }) {
                     rel="noopener noreferrer"
                     aria-label={r.ariaLabel}
                   >
-                    開く
+                    {t("cf.open")}
                   </a>
                 ) : null}
               </span>

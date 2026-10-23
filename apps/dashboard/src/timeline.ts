@@ -1,4 +1,5 @@
 import type { ConsultPointDto, OverviewDto, VisibleTaskDto } from "@rovo/dashboard-contract";
+import { localeOf, type T } from "./i18n";
 import { type MarkKind, markKindOf } from "./status";
 
 /** タイムラインの座標・高さ・重なりの純関数（DOM に依存しない）。時刻はエポック ms。 */
@@ -62,11 +63,12 @@ export function stemHeight(cost: number, maxCost: number, min = 12, max = 92): n
 
 export type Tick = { t: number; frac: number; label: string };
 
-/** 範囲内の毎時（ローカル）の目盛り。 */
-export function hourTicks(d: Domain): Tick[] {
+/** 範囲内の毎時（ローカル）の目盛り。ラベルは言語の時刻の書式（ja は 14:00、en は 2:00 PM）。 */
+export function hourTicks(d: Domain, tr: T): Tick[] {
+  const fmt = new Intl.DateTimeFormat(localeOf(tr.lang), { hour: "numeric", minute: "2-digit" });
   const ticks: Tick[] = [];
   for (let t = ceilHour(d.start); t <= d.end; t += HOUR) {
-    ticks.push({ t, frac: xFraction(t, d), label: `${new Date(t).getHours()}:00` });
+    ticks.push({ t, frac: xFraction(t, d), label: fmt.format(t) });
   }
   return ticks;
 }

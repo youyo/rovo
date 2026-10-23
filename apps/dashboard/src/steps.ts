@@ -5,6 +5,7 @@ import type {
   VisibleTaskDto,
 } from "@rovo/dashboard-contract";
 import { formatDuration, singleLine } from "./format";
+import type { T } from "./i18n";
 
 /**
  * 詳細の画面の純関数: イベント → 人の言葉の動詞、イベントのマージ、段階の帯、「いまは X」の文。
@@ -33,36 +34,37 @@ export type Step = StepText & {
   command: boolean;
 };
 
-const STATUS_VERB: Record<TaskStatusDto, { what: string; tone: Tone }> = {
-  CREATING: { what: "準備を始めた", tone: "normal" },
-  RUNNING: { what: "実行を始めた", tone: "normal" },
-  INPUT_REQUIRED: { what: "入力を待っている", tone: "normal" },
-  VERIFYING: { what: "検証を始めた", tone: "normal" },
-  RECOVERING: { what: "復旧している", tone: "normal" },
-  COMPLETED: { what: "完了した", tone: "normal" },
-  FAILED: { what: "失敗した", tone: "fail" },
-  BUDGET_EXCEEDED: { what: "予算を超えた", tone: "fail" },
-  CANCELLED: { what: "キャンセルされた", tone: "normal" },
+/** 状態の変化の手順の色（文言は辞書の status.<状態>） */
+const STATUS_TONE: Record<TaskStatusDto, Tone> = {
+  CREATING: "normal",
+  RUNNING: "normal",
+  INPUT_REQUIRED: "normal",
+  VERIFYING: "normal",
+  RECOVERING: "normal",
+  COMPLETED: "normal",
+  FAILED: "fail",
+  BUDGET_EXCEEDED: "fail",
+  CANCELLED: "normal",
 };
 
-const join = (parts: (string | false | null | undefined)[]) =>
-  parts.filter((p): p is string => typeof p === "string" && p !== "").join("、");
+const join = (t: T, parts: (string | false | null | undefined)[]) =>
+  parts.filter((p): p is string => typeof p === "string" && p !== "").join(t("common.sep"));
 
-type ToolSpec = { done: string; running: string; keys: readonly string[] };
-
-/** 子のツール名 → 人の言葉。keys は summary（JSON）から取り出してよいキー（先に見つかったものを使う） */
-const TOOL_TEXT: Record<string, ToolSpec> = {
-  bash: { done: "コマンドを実行した", running: "コマンドを実行中", keys: ["command"] },
-  read_file: { done: "ファイルを読んだ", running: "ファイルを読んでいる", keys: ["path"] },
-  list_files: { done: "一覧を見た", running: "一覧を見ている", keys: ["path"] },
-  search: { done: "検索した", running: "検索している", keys: ["pattern", "query"] },
-  write_file: { done: "ファイルを書いた", running: "ファイルを書いている", keys: ["path"] },
-  edit_file: { done: "ファイルを編集した", running: "ファイルを編集している", keys: ["path"] },
-  git_commit: { done: "コミットした", running: "コミットしている", keys: ["message"] },
-  web_search: { done: "検索した", running: "検索している", keys: ["query"] },
-  web_fetch: { done: "ページを読んだ", running: "ページを読んでいる", keys: ["url"] },
-  web_browse: { done: "ページを開いた", running: "ページを開いている", keys: ["url"] },
-};
+/** 子のツール名 → 辞書の文言（tool.<名前>.done / running）。keys は summary（JSON）から取り出してよいキー（先に見つかったものを使う） */
+const TOOL_KEYS = {
+  bash: ["command"],
+  read_file: ["path"],
+  list_files: ["path"],
+  search: ["pattern", "query"],
+  write_file: ["path"],
+  edit_file: ["path"],
+  git_commit: ["message"],
+  web_search: ["query"],
+  web_fetch: ["url"],
+  web_browse: ["url"],
+} as const satisfies Record<string, readonly string[]>;
+type ToolName = keyof typeof TOOL_KEYS;
+const isToolName = (name: string): name is ToolName => Object.hasOwn(TOOL_KEYS, name);
 
 /** 構造化イベント（command / edit / commit / web）を別に出すツール → その型 */
 const STRUCTURED_OF: Record<string, TaskEventDto["type"]> = {
@@ -227,21 +229,20 @@ function commandText(text: string, base: { what: string; note: string; tone: Ton
   };
 }
 
-function describeToolStart(name: string, summary: string, current: boolean): StepText {
+function describeToolStart(name: string, summary: string, current: boolean, t: T): StepText {
   if (name === "report_completion") {
-    return { what: "完了を報告した", target: "", note: "", tone: "normal" };
+    return { what: t("step.reportCompletion"), target: "", note: "", tone: "normal" };
   }
-  const spec = TOOL_TEXT[name];
-  if (spec === undefined) {
+  if (!isToolName(name)) {
     return {
-      what: `${singleLine(name)} を${current ? "実行中" : "実行した"}`,
+      what: t(current ? "tool.other.running" : "tool.other.done", { name: singleLine(name) }),
       target: singleLine(summary),
       note: "",
       tone: "normal",
     };
   }
-  const what = current ? spec.running : spec.done;
-  const target = pickTarget(summary, spec.keys);
+  const what = t(current ? `tool.${name}.running` : `tool.${name}.done`);
+  const target = pickTarget(summary, TOOL_KEYS[name]);
   if (name === "bash") return commandText(target, { what, note: "", tone: "normal" });
   return { what, target, note: "", tone: "normal" };
 }
@@ -250,72 +251,71 @@ function describeToolStart(name: string, summary: string, current: boolean): Ste
  * イベント 1 件を、人の言葉の動詞にする。進み具合に出さないイベント（usage）は null。
  * `current` はそのイベントが「いまの手順」か（実行中のコマンドは「実行中」と言える）。
  */
-export function describeEvent(ev: TaskEventDto, opts: { current: boolean }): StepText | null {
+export function describeEvent(ev: TaskEventDto, opts: { current: boolean }, t: T): StepText | null {
   switch (ev.type) {
     case "command": {
       const failed = ev.exit_code !== null && ev.exit_code !== 0;
       const running = ev.exit_code === null && opts.current;
       return commandText(singleLine(ev.command), {
-        what: failed ? "コマンドが失敗した" : running ? "コマンドを実行中" : "コマンドを実行した",
-        note: join([
-          failed && `終了コード ${ev.exit_code}`,
-          ev.exit_code === null && !opts.current && "終了コード不明",
-          ev.duration_ms !== undefined && formatDuration(ev.duration_ms),
+        what: failed
+          ? t("step.commandFailed")
+          : running
+            ? t("tool.bash.running")
+            : t("tool.bash.done"),
+        note: join(t, [
+          failed && t("step.exitCode", { code: String(ev.exit_code) }),
+          ev.exit_code === null && !opts.current && t("step.exitUnknown"),
+          ev.duration_ms !== undefined && formatDuration(ev.duration_ms, t),
         ]),
         tone: failed ? "fail" : "normal",
       });
     }
     case "edit": {
-      const what = {
-        create: "ファイルを作った",
-        modify: "ファイルを編集した",
-        delete: "ファイルを消した",
-      }[ev.op];
+      const what = t(`step.edit.${ev.op}`);
       return {
         what,
         target: singleLine(ev.path),
-        note: join([
-          ev.added > 0 && `${ev.added} 行追加`,
-          ev.removed > 0 && `${ev.removed} 行削除`,
+        note: join(t, [
+          ev.added > 0 && t("step.linesAdded", { n: ev.added }),
+          ev.removed > 0 && t("step.linesRemoved", { n: ev.removed }),
         ]),
         tone: "normal",
       };
     }
     case "commit":
       return {
-        what: "コミットした",
+        what: t("tool.git_commit.done"),
         target: singleLine(ev.message),
-        note: join([`${ev.files} ファイル`, ev.sha.slice(0, 7)]),
+        note: join(t, [t("step.files", { n: ev.files }), ev.sha.slice(0, 7)]),
         tone: "normal",
       };
     case "web":
       return {
-        what: { search: "検索した", fetch: "ページを読んだ", browse: "ページを開いた" }[ev.kind],
+        what: t(`step.web.${ev.kind}`),
         target: ev.host === undefined ? "" : singleLine(ev.host),
         note: "",
         tone: "normal",
       };
     case "status_changed": {
-      const v = STATUS_VERB[ev.to];
       return {
-        what: v.what,
+        what: t(`status.${ev.to}`),
         target: "",
-        note: ev.reason === undefined ? "" : `理由 ${singleLine(ev.reason)}`,
-        tone: v.tone,
+        note: ev.reason === undefined ? "" : t("step.reason", { reason: singleLine(ev.reason) }),
+        tone: STATUS_TONE[ev.to],
       };
     }
     case "draft_pr_created":
-      return { what: "Draft PR を作った", target: `#${ev.pr_number}`, note: "", tone: "normal" };
+      return { what: t("step.draftPr"), target: `#${ev.pr_number}`, note: "", tone: "normal" };
     case "tool_start":
-      return describeToolStart(ev.name, ev.summary, opts.current);
+      return describeToolStart(ev.name, ev.summary, opts.current, t);
     case "tool_end":
       // 成功は出さない（構造化イベント・次の手順で分かる）。失敗のときだけ出す
       return ev.is_error
-        ? { what: "失敗した", target: singleLine(ev.summary), note: "", tone: "fail" }
+        ? { what: t("step.toolFailed"), target: singleLine(ev.summary), note: "", tone: "fail" }
         : null;
     case "agent_event":
       return {
-        what: "その他の処理",
+        what: t("step.other"),
         target: singleLine(ev.agent_type),
         note: "",
         tone: "normal",
@@ -366,7 +366,7 @@ function pairedCalls(events: readonly TaskEventDto[]): Set<string> {
  * 構造化イベントがまだ来ていない実行中の tool_start は「実行中」の 1 行で、来たら置き換わる。
  * 構造化イベントが無い古い履歴は、tool_start を人の言葉にして出す（成功の tool_end は出さない）。
  */
-export function buildSteps(events: readonly TaskEventDto[], active: boolean): Step[] {
+export function buildSteps(events: readonly TaskEventDto[], active: boolean, t: T): Step[] {
   const paired = pairedCalls(events);
   const shown = events.filter(
     (e) =>
@@ -377,7 +377,7 @@ export function buildSteps(events: readonly TaskEventDto[], active: boolean): St
   const steps: Step[] = [];
   for (const e of shown) {
     const current = active && e.seq === lastSeq;
-    const d = describeEvent(e, { current });
+    const d = describeEvent(e, { current }, t);
     const command = e.type === "command" || (e.type === "tool_start" && e.name === "bash");
     if (d) steps.push({ ...d, seq: e.seq, at: Date.parse(e.at), current, command });
   }
@@ -463,26 +463,7 @@ export type BandKey = "prepare" | "run" | "verify" | "done";
 export type BandState = "done" | "now" | "waiting" | "recovering" | "todo" | "stopped";
 export type BandStep = { key: BandKey; name: string; state: BandState; label: string };
 
-const BAND: { key: BandKey; name: string }[] = [
-  { key: "prepare", name: "準備" },
-  { key: "run", name: "実行" },
-  { key: "verify", name: "検証" },
-  { key: "done", name: "完了" },
-];
-
-const STOP_LABEL: Partial<Record<TaskStatusDto, string>> = {
-  FAILED: "失敗",
-  BUDGET_EXCEEDED: "予算超過",
-  CANCELLED: "キャンセル",
-};
-
-const LABEL: Record<Exclude<BandState, "stopped">, string> = {
-  done: "済み",
-  now: "いま",
-  waiting: "入力待ち",
-  recovering: "復旧中",
-  todo: "これから",
-};
+const BAND_KEYS: readonly BandKey[] = ["prepare", "run", "verify", "done"];
 
 /**
  * 準備 → 実行 → 検証 → 完了の帯。状態から決める:
@@ -494,9 +475,12 @@ const LABEL: Record<Exclude<BandState, "stopped">, string> = {
 export function phaseBand(
   task: VisibleTaskDto,
   phase: TaskDetailDto["phase"],
+  t: T,
   reached: ReadonlySet<TaskStatusDto> = new Set(),
   stopped?: TaskDetailDto["stopped_phase"],
 ): BandStep[] {
+  const BAND = BAND_KEYS.map((key) => ({ key, name: t(`band.${key}`) }));
+  const LABEL = (s: Exclude<BandState, "stopped">) => t(`band.state.${s}`);
   const indexOf = (p: TaskDetailDto["phase"]) => BAND.findIndex((b) => b.key === p);
   let at: number;
   let state: BandState = "now";
@@ -519,7 +503,7 @@ export function phaseBand(
       state = "recovering";
       break;
     case "COMPLETED":
-      return BAND.map((b) => ({ ...b, state: "done", label: LABEL.done }));
+      return BAND.map((b) => ({ ...b, state: "done", label: LABEL("done") }));
     case "FAILED":
     case "BUDGET_EXCEEDED":
     case "CANCELLED":
@@ -532,37 +516,38 @@ export function phaseBand(
       else at = task.started_at === null ? 0 : 1;
       break;
   }
-  const stopLabel = STOP_LABEL[task.status] ?? "止まった";
+  const stopLabel =
+    task.status === "FAILED" || task.status === "BUDGET_EXCEEDED" || task.status === "CANCELLED"
+      ? t(`band.stopped.${task.status}`)
+      : t("band.state.stopped");
   return BAND.map((b, i) => {
-    if (i < at) return { ...b, state: "done", label: LABEL.done };
-    if (i > at) return { ...b, state: "todo", label: LABEL.todo };
-    return { ...b, state, label: state === "stopped" ? stopLabel : LABEL[state] };
+    if (i < at) return { ...b, state: "done", label: LABEL("done") };
+    if (i > at) return { ...b, state: "todo", label: LABEL("todo") };
+    return { ...b, state, label: state === "stopped" ? stopLabel : LABEL(state) };
   });
 }
 
 export type NowSentence = { before: string; prompt?: string; target: string; after: string };
 
-const NOW_AFTER = {
-  command: " を実行しています。",
-  edit: " を編集しています。",
-  commit: " をコミットしています。",
-  web: " を調べています。",
-  tool: " を実行しています。",
+/** 「いまは X を…しています」の文の種類 → 辞書のキー（場所なし・場所あり）。 */
+const NOW_KEY = {
+  command: ["now.command", "now.commandIn"],
+  edit: ["now.edit", "now.editIn"],
+  commit: ["now.commit", "now.commitIn"],
+  web: ["now.web", "now.webIn"],
+  tool: ["now.tool", "now.toolIn"],
 } as const;
 
-const STATE_SENTENCE: Record<TaskStatusDto, string> = {
-  CREATING: "リポジトリと実行環境を準備しています。",
-  RUNNING: "作業を進めています。",
-  INPUT_REQUIRED: "入力を待っています。",
-  VERIFYING: "検証コマンドを実行しています。",
-  RECOVERING: "実行環境を復旧しています。",
-  COMPLETED: "完了しました。",
-  FAILED: "失敗しました。",
-  BUDGET_EXCEEDED: "予算を超えたため止まりました。",
-  CANCELLED: "キャンセルされました。",
-};
+/** 文の型の {target} の前後に分ける（target は強調するので文字列に混ぜない） */
+const TARGET_MARK = "{target}";
+function splitAtTarget(sentence: string): { before: string; after: string } {
+  const i = sentence.indexOf(TARGET_MARK);
+  return i < 0
+    ? { before: sentence, after: "" }
+    : { before: sentence.slice(0, i), after: sentence.slice(i + TARGET_MARK.length) };
+}
 
-/** gateway が添える「<相対パス> で 」（now.text の先頭）。素直なパス 1 つだけ */
+/** gateway が添える「<相対パス> で 」（now.text の先頭。gateway の固定の書式で、言語によらない）。素直なパス 1 つだけ */
 const NOW_WHERE = /^([\p{L}\p{N}_.@+-]+(?:\/[\p{L}\p{N}_.@+-]+)*) で (\S.*)$/u;
 
 /**
@@ -570,14 +555,12 @@ const NOW_WHERE = /^([\p{L}\p{N}_.@+-]+(?:\/[\p{L}\p{N}_.@+-]+)*) で (\S.*)$/u;
  * コマンド（command・tool）は、タイムラインと同じ見せ方にする: `cd /workspace/<相対パス> && ` や `cd <相対パス> && ` の前置きを外し、
  * 場所を「いまは <相対パス> で $ コマンド を実行しています。」と添える（gateway が添えた「<相対パス> で 」も読む）。
  */
-export function nowSentence(now: TaskDetailDto["now"], status: TaskStatusDto): NowSentence {
-  if (now === null) return { before: STATE_SENTENCE[status], target: "", after: "" };
+export function nowSentence(now: TaskDetailDto["now"], status: TaskStatusDto, t: T): NowSentence {
+  if (now === null) return { before: t(`now.state.${status}`), target: "", after: "" };
   if (now.kind === "waiting") {
     // gateway が固定で返す text。予算の延長の承認待ちには一言添える（入力待ちの一種）
     const before =
-      now.text === "waiting for budget approval"
-        ? "予算の承認を待っています（入力待ち）。"
-        : "入力を待っています。";
+      now.text === "waiting for budget approval" ? t("now.waitingBudget") : t("now.waiting");
     return { before, target: "", after: "" };
   }
   let text = singleLine(now.text);
@@ -597,7 +580,7 @@ export function nowSentence(now: TaskDetailDto["now"], status: TaskStatusDto): N
     text = c.command;
     where = c.where;
   }
-  const before = where === undefined ? "いまは " : `いまは ${where} で `;
-  const after = NOW_AFTER[now.kind];
+  const key = NOW_KEY[now.kind][where === undefined ? 0 : 1];
+  const { before, after } = splitAtTarget(t(key, { target: TARGET_MARK, where: where ?? "" }));
   return prompt ? { before, prompt: "$ ", target: text, after } : { before, target: text, after };
 }

@@ -414,6 +414,26 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 - 使い方: 画面用。エージェントの作業の流れでは `task_wait` と `task_result` を使い、`task_console` を繰り返し呼ばない（会話が止まり、出力がコンテキストに入る）。`task_wait` の構造化イベントの除外（`STRUCTURED_TYPES_SQL`）、`task_wait` / `task_status` / `task_result` の応答は変えない。
 - テスト: Unit は `apps/gateway/test/unit/task-console.test.ts` と `mcp.test.ts`、E2E は `apps/gateway/test/e2e/tools.e2e.test.ts`（実行中の出力・終端・他人のタスクの拒否）。
 
+### D20. 未ログインの画面と、ログインの失敗の戻り方
+
+- 未ログインの画面（SPA）: 画面中央のカード 1 つに、ロゴ（同梱の固定の SVG）・見出し「Rovo ダッシュボード」（英語は Rovo Dashboard）・説明・主ボタン「GitHub でログイン」（英語は Sign in with GitHub。文言の言語は D21）（`/dashboard/auth/login`。タスク詳細を開いていたら `return_to` 付き）・補足（許可された GitHub のアカウント・組織だけがログインできる）を出す。タスク詳細の URL から来たときは説明が「ログインすると、このタスクの詳細を見られます。」に変わる。未ログインのときヘッダにはログインのリンクを出さない（ボタンと重複させない）。
+- 状態の出し分け: 確認中は何も出さない（ログイン済みの人にログインの画面をチラつかせない）、未ログイン（401）はログインの画面、確認できなかった（障害・別サイトの扱い・壊れた応答）は「ログインの状態を確認できませんでした。」＋「再読み込み」＋ログインのボタン。
+- ログインの失敗: `/dashboard/auth/callback` ではなく、共有の `/callback` の `rovo-dash.` 付きの state の流れ（`finishDashboardLogin`）だけが、失敗を素の text ではなく `303` で `/dashboard/?login_error=<code>` に戻す（ログイン Cookie の消去と監査の記録はそのまま）。接頭辞付きの state を持つ要求は、state の形が不正でも MCP の経路には落ちないので、この流れだと確定できる。MCP 側の失敗（接頭辞の無い state）は今までどおり 400 の text。
+- `code` は固定の許可リスト: `denied`（GitHub 側の拒否、許可ルールに当たらない、code の拒否）、`invalid`（state の不一致・期限切れ・再使用・code 無し）、`unavailable`（GitHub に問い合わせられない）。GitHub の応答・state・利用者の情報はクエリに載せない。
+- SPA は `login_error` の値を許可リストで照合して、表示言語（D21）の文を出す。言語を切り替えたら文も切り替わる。それ以外の値は無視し、値を画面に出さない。読んだらすぐ `history.replaceState` でそのクエリだけを消す（パス・ほかのクエリは残す）。
+- テスト: Unit は `apps/dashboard/test/login.test.tsx`・`apps/gateway/test/unit/dashboard-auth.test.ts`、E2E は `apps/dashboard/e2e/login.spec.ts`（スクリーンショットを含む）と `apps/gateway/test/e2e/dashboard-auth.e2e.test.ts`。
+
+### D21. 表示言語（英語が基本、日本語に切り替え）
+
+- 既定は**英語**。ブラウザの言語（`navigator.language`・`Accept-Language`）は見ない。選んだ言語は localStorage の `rovo.dashboard.lang`（`"en"` | `"ja"`）に保存し、次回はそれを使う。読み書きはすべて try/catch で、保存できなくても動く（その画面の間だけ効く）。未知の値は英語。
+- 切り替えは、ヘッダの右端付近の小さな 2 ボタン（`EN` と `日本語`。`aria-pressed`、グループの名前は言語の `aria-label`）。ボタンの名前は言語自身の表記で、訳さない。未ログインの画面でもヘッダに出るので、ログイン前に切り替えられる。切り替えは画面を読み直さない。
+- 仕組みは自前で小さく、ライブラリは足さない。`apps/dashboard/src/i18n.ts` に en と ja の辞書（ja は `Record<Key, string>` で en と同じキー集合を型で強制し、片方の欠けは `tsc` で落ちる）と `t(key, params?)`、`src/lang.tsx` に現在の言語を配る Context（`LangProvider` / `useLang` / `useT`）。`t` は `{name}` を値で置き換える（単一パス・文字列のまま。HTML として解釈せず、`dangerouslySetInnerHTML` は使わない）。単複は `one|other`（英語だけ）。表示に使う純関数（`describeEvent`・`phaseBand`・`cloudflareRows`・`formatUsd` など）は `t` を引数に取り、Context に依存しない。
+- 対象は画面に出る文言すべて（ヘッダ・マイタスク/チーム〔英語は My tasks / Team〕・日付の前後送り・レール・タスクの要約・段階とステップの名前・状態の名前と凡例・予算のバー・Cloudflare の欄・空の状態・エラーの文・ログイン画面と `login_error` の 3 種・`aria-label`・`title` 属性・`<title>`）。`<html lang>` は言語に合わせて切り替える（`index.html` の既定は `en`）。
+- 日付・時刻・金額・数の書式は `Intl` に言語のロケール（英語は `en-US`、日本語は `ja-JP`）を渡す。経過時間（`2m 5s` / `2 分 5 秒`）は辞書の文言。月の予算の基準（UTC の月）は D18 のまま。
+- 訳さないもの: 子やユーザーが書いたデータ（タスクの題名・ログ・summary・`output.tail`・login 名・リポジトリ名・モデル名）。API の値（状態の enum など）は表示時に辞書で引く。gateway が固定の書式で添える文（`now.text` の「<相対パス> で 」）は、その書式のまま読んで、画面の文は言語に合わせて組み直す。
+- 英語の状態の語は GitHub Actions の語彙に寄せる（In progress / Succeeded / Failed / Cancelled / Awaiting review / Merged など）。日本語は従来の文言のまま。書体は IBM Plex Sans JP / JetBrains Mono のまま（新しい書体は足さない）。
+- テスト: Unit は `apps/dashboard/test/i18n.test.ts`（キー集合の一致・差し込み・単複・英語に日本語の文字が無い）・`lang-prefs.test.ts`・`format-locale.test.ts`・`lang-switch.test.tsx`・`en-render.test.tsx`。既存の Unit は日本語で描く（`test/lang.ts` の `inJa` / `tJa`、App は保存された言語を `ja` にする）。E2E は `apps/dashboard/e2e/i18n.spec.ts`（初回は英語・日本語への切り替えと読み直し・`<html lang>`）。既存の E2E は最初に日本語を保存する（`e2e/fixtures.ts` の `lang`）。
+
 ## マイルストーン
 
 各 M は、先に失敗するテストを書いてから実装する（TDD。Unit と E2E の両方）。規模の目安は S（半日未満）/ M（1 日前後）/ L（数日）。

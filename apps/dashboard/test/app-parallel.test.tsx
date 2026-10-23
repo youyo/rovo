@@ -8,6 +8,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app";
+import { LANG_KEY } from "../src/prefs";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -23,7 +24,10 @@ type Script = Partial<Record<Part, () => Promise<Response> | Response>>;
 
 const roots: { unmount: () => void }[] = [];
 beforeEach(() => {
-  vi.stubGlobal("localStorage", { getItem: () => null, setItem: () => {} });
+  vi.stubGlobal("localStorage", {
+    getItem: (k: string) => (k === LANG_KEY ? "ja" : null),
+    setItem: () => {},
+  });
 });
 afterEach(() => {
   for (const r of roots.splice(0)) act(() => r.unmount());

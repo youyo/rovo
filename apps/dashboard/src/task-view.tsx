@@ -16,13 +16,15 @@ import {
   shortModel,
   singleLine,
 } from "./format";
+import type { T } from "./i18n";
+import { useT } from "./lang";
 import {
   completedKind,
   isTerminal,
-  MARKS,
   type MarkKind,
   markDescription,
   markKindOf,
+  markLabel,
 } from "./status";
 import { MarkSymbol, ShapeSymbol } from "./status-mark";
 import {
@@ -45,61 +47,59 @@ import { useStickToBottom } from "./use-stick-to-bottom";
  * 表示する文字列はすべて format / steps の関数を通す（D14）。
  */
 
-const MERGE_POLICY: Record<TaskDetailDto["settings"]["merge_policy"], string> = {
-  human_review: "人のレビューを待つ",
-  agent_merge: "依頼した AI がマージしてよい",
-};
-
-/** モデルの選び方の理由のコード（gateway の model-selection.ts の reason）の日本語。知らないコードはそのまま出す */
-const MODEL_SELECTION_REASON: Record<string, string> = {
-  clef_flash: "Clef が内容から選んだ",
-  clef_cascade: "Clef が聞き直して選んだ",
-  single_candidate: "選べるモデルが 1 つだった",
-  no_candidates: "選べるモデルが無く既定のモデル",
-  fallback_unconfigured: "Clef を使えず既定のモデル",
-  fallback_timeout: "時間切れで既定のモデル",
-  fallback_error: "Clef の失敗で既定のモデル",
-  fallback_invalid: "Clef の答えが想定外で既定のモデル",
-};
+/** モデルの選び方の理由のコード（gateway の model-selection.ts の reason）。知らないコードはそのまま出す */
+const MODEL_SELECTION_REASONS = [
+  "clef_flash",
+  "clef_cascade",
+  "single_candidate",
+  "no_candidates",
+  "fallback_unconfigured",
+  "fallback_timeout",
+  "fallback_error",
+  "fallback_invalid",
+] as const;
+type ModelSelectionReason = (typeof MODEL_SELECTION_REASONS)[number];
+const isKnownReason = (r: string): r is ModelSelectionReason =>
+  (MODEL_SELECTION_REASONS as readonly string[]).includes(r);
 
 function modelSelectionText(
   sel: NonNullable<TaskDetailDto["settings"]["model_selection"]>,
+  t: T,
 ): string {
-  if (sel.mode === "explicit") return "指定（依頼した側が選んだ）";
-  return `自動（${MODEL_SELECTION_REASON[sel.reason] ?? sel.reason}）`;
+  if (sel.mode === "explicit") return t("modelSelection.explicit");
+  const reason = isKnownReason(sel.reason) ? t(`modelSelection.${sel.reason}`) : sel.reason;
+  return t("modelSelection.auto", { reason });
 }
-
-const DEPS_CACHE: Record<NonNullable<TaskDetailDto["settings"]["deps_cache"]>, string> = {
-  hit: "再利用した",
-  miss: "見つからなかった",
-  built: "新しく作った",
-  disabled: "使わない",
-};
 
 /** 見出しの状態。印はレール・凡例と同じ記号。名前は短い label のまま、title で長い説明（無ければ label）を出す */
 function StatusLine(props: { task: VisibleTaskDto }) {
+  const t = useT();
   const kind = markKindOf(props.task);
   return (
-    <span className="state-name" title={markDescription(kind)}>
+    <span className="state-name" title={markDescription(kind, t)}>
       <MarkSymbol kind={kind} decorative />
-      {MARKS[kind].label}
+      {markLabel(kind, t)}
     </span>
   );
 }
 
 /** 経過時間のラベルと値。終わったタスクは「所要」、続いているタスクは「開始から」 */
-function elapsedFact(task: VisibleTaskDto, generatedAt: number): { label: string; value: string } {
+function elapsedFact(
+  task: VisibleTaskDto,
+  generatedAt: number,
+  t: T,
+): { label: string; value: string } {
   const start = Date.parse(task.started_at ?? task.created_at);
   if (isTerminal(task.status)) {
     const end = task.ended_at === null ? generatedAt : Date.parse(task.ended_at);
-    return { label: "所要", value: formatDuration(end - start) };
+    return { label: t("meta.duration"), value: formatDuration(end - start, t) };
   }
-  return { label: "開始から", value: formatDuration(generatedAt - start) };
+  return { label: t("meta.elapsed"), value: formatDuration(generatedAt - start, t) };
 }
 
 /** 所要の文字。終わっていない（今までの経過）なら末尾に … */
-const timingText = (t: StepTiming | PhaseTiming): string =>
-  `${formatDuration(t.ms)}${t.open ? "…" : ""}`;
+const timingText = (timing: StepTiming | PhaseTiming, t: T): string =>
+  `${formatDuration(timing.ms, t)}${timing.open ? "…" : ""}`;
 
 /** 段階の箱の印。済み=✓、いま=回る輪、入力待ち=！、復旧中=灰の回る輪、止まった=✕、これから=点線の輪 */
 function JobIcon(props: { state: BandStep["state"] }) {
@@ -121,7 +121,12 @@ function JobIcon(props: { state: BandStep["state"] }) {
 
 /** 段階の帯: job の箱を線でつないだ図。済んだ区間の線は緑。箱の文字は所要（無ければ状態の文字） */
 function Band(props: { band: BandStep[]; timings: Partial<Record<BandStep["key"], PhaseTiming>> }) {
-  const label = `段階: ${props.band.map((b) => `${b.name}は${b.label}`).join("、")}`;
+  const t = useT();
+  const label = t("band.aria", {
+    list: props.band
+      .map((b) => t("band.item", { name: b.name, label: b.label }))
+      .join(t("common.sep")),
+  });
   return (
     <ol className="band" data-band="" aria-label={label}>
       {props.band.map((b, i) => {
@@ -131,8 +136,8 @@ function Band(props: { band: BandStep[]; timings: Partial<Record<BandStep["key"]
           timing === undefined
             ? b.label
             : b.state === "stopped" || b.state === "waiting" || b.state === "recovering"
-              ? `${b.label} ${timingText(timing)}`
-              : timingText(timing);
+              ? `${b.label} ${timingText(timing, t)}`
+              : timingText(timing, t);
         return (
           <li key={b.key} className={`band-item band-item--${b.state}`} data-state={b.state}>
             {i > 0 ? (
@@ -141,7 +146,7 @@ function Band(props: { band: BandStep[]; timings: Partial<Record<BandStep["key"]
                 aria-hidden="true"
               />
             ) : null}
-            <span className="job" title={`${b.name}: ${b.label}`}>
+            <span className="job" title={t("band.item", { name: b.name, label: b.label })}>
               <JobIcon state={b.state} />
               <span className="band-name">{b.name}</span>
               <small>{small}</small>
@@ -179,6 +184,7 @@ function StepItem(props: {
   below?: ReactNode;
 }) {
   const { step } = props;
+  const t = useT();
   const cls = `step${step.current ? " step--now" : ""}${step.tone === "fail" ? " step--fail" : ""}${
     step.command ? " step--cmd" : ""
   }`;
@@ -197,7 +203,9 @@ function StepItem(props: {
         {step.command ? (
           <>
             <span className="sr-only">{step.what} </span>
-            {step.where === undefined ? null : <span className="step-where">{step.where} で </span>}
+            {step.where === undefined ? null : (
+              <span className="step-where">{t("step.in", { where: step.where })}</span>
+            )}
             <span className="prompt">$ </span>
             <span className="step-target">{step.target}</span>
           </>
@@ -207,14 +215,14 @@ function StepItem(props: {
             {step.target === "" ? null : <span className="step-target"> {step.target}</span>}
           </>
         )}
-        {step.current ? <span className="step-tag">いま</span> : null}
+        {step.current ? <span className="step-tag">{t("step.now")}</span> : null}
       </span>
-      <span className="step-time">{formatClockSeconds(step.at)}</span>
+      <span className="step-time">{formatClockSeconds(step.at, t)}</span>
       {props.timing === undefined ? (
         <span className="step-dur step-dur--none" />
       ) : (
         <span className={`step-dur${props.timing.open ? " step-dur--open" : ""}`}>
-          {timingText(props.timing)}
+          {timingText(props.timing, t)}
         </span>
       )}
     </>
@@ -262,16 +270,17 @@ function prMark(task: VisibleTaskDto): MarkKind | null {
 /** 見出しの Draft PR（リンクと状態）。外部リンクは GitHub の PR の URL に厳密に一致するものだけ（D14）。 */
 function PrInline(props: { task: VisibleTaskDto }) {
   const { task } = props;
+  const t = useT();
   const pr = task.pr;
   if (pr === null) {
     return (
       <span className="con-pr" data-pr="">
-        <span className="soft">Draft PR はまだありません。</span>
+        <span className="soft">{t("pr.none")}</span>
       </span>
     );
   }
   const kind = prMark(task);
-  const label = `${pr.draft === false ? "PR" : "Draft PR"} #${pr.number}`;
+  const label = t(pr.draft === false ? "pr.label" : "pr.draftLabel", { n: pr.number });
   return (
     <span className="con-pr" data-pr="">
       {isAllowedPrUrl(pr.url) ? (
@@ -282,9 +291,9 @@ function PrInline(props: { task: VisibleTaskDto }) {
         <span>{label}</span>
       )}
       {kind === null ? null : (
-        <span className="status" title={markDescription(kind)}>
+        <span className="status" title={markDescription(kind, t)}>
           <MarkSymbol kind={kind} decorative />
-          {MARKS[kind].label}
+          {markLabel(kind, t)}
         </span>
       )}
       {pr.draft === true ? <span className="soft">Draft</span> : null}
@@ -321,27 +330,30 @@ function ConMeta(props: {
   modelSelection?: NonNullable<TaskDetailDto["settings"]["model_selection"]>;
 }) {
   const { task } = props;
+  const t = useT();
   const model = shortModel(task.model);
-  const elapsed = elapsedFact(task, props.generatedAt);
+  const elapsed = elapsedFact(task, props.generatedAt, t);
   return (
     <dl className="con-meta">
-      <MetaItem k="状態">
+      <MetaItem k={t("meta.status")}>
         <StatusLine task={task} />
       </MetaItem>
-      <MetaItem k="モデル">
+      <MetaItem k={t("meta.model")}>
         <span data-model="" title={model.full}>
           {model.name}
         </span>
         {props.modelSelection === undefined ? null : (
-          <span className="soft"> {modelSelectionText(props.modelSelection)}</span>
+          <span className="soft"> {modelSelectionText(props.modelSelection, t)}</span>
         )}
       </MetaItem>
       <MetaItem k={elapsed.label}>{elapsed.value}</MetaItem>
-      <MetaItem k="費用">{formatUsd(task.cost.cost_usd)}</MetaItem>
-      <MetaItem k="リポジトリ">{singleLine(task.repository)}</MetaItem>
-      <MetaItem k="依頼者">{singleLine(task.owner_login)}</MetaItem>
-      {task.reason === undefined ? null : <MetaItem k="理由">{singleLine(task.reason)}</MetaItem>}
-      <MetaItem k="PR">
+      <MetaItem k={t("meta.cost")}>{formatUsd(task.cost.cost_usd, t)}</MetaItem>
+      <MetaItem k={t("meta.repository")}>{singleLine(task.repository)}</MetaItem>
+      <MetaItem k={t("meta.requester")}>{singleLine(task.owner_login)}</MetaItem>
+      {task.reason === undefined ? null : (
+        <MetaItem k={t("meta.reason")}>{singleLine(task.reason)}</MetaItem>
+      )}
+      <MetaItem k={t("meta.pr")}>
         <PrInline task={task} />
       </MetaItem>
     </dl>
@@ -363,6 +375,7 @@ function ConTitle(props: { task: VisibleTaskDto }) {
  * 一覧の行は一覧の取得で権限を確かめ済みのもの。表示する文字列は詳細と同じ関数を通す。
  */
 export function TaskPreview(props: { task: VisibleTaskDto; at: number }) {
+  const t = useT();
   return (
     <section className="console" aria-labelledby="task-h" aria-busy="true" data-preview="">
       <div className="con-head">
@@ -370,7 +383,7 @@ export function TaskPreview(props: { task: VisibleTaskDto; at: number }) {
         <ConMeta task={props.task} generatedAt={props.at} />
       </div>
       <p className="soft con-loading" role="status">
-        読み込み中…
+        {t("common.loading")}
       </p>
     </section>
   );
@@ -389,17 +402,18 @@ export function TaskView(props: {
   onLoadOlder: () => void;
 }) {
   const { detail, events } = props;
+  const t = useT();
   const { task, settings, output } = detail;
   const generatedAt = Date.parse(detail.generated_at);
   const active = !isTerminal(task.status);
   const reached = new Set(
     events.flatMap((e) => (e.type === "status_changed" ? [e.to] : [])),
   ) as ReadonlySet<TaskStatusDto>;
-  const band = phaseBand(task, detail.phase, reached, detail.stopped_phase);
-  const steps = buildSteps(events, active);
+  const band = phaseBand(task, detail.phase, t, reached, detail.stopped_phase);
+  const steps = buildSteps(events, active, t);
   const timings = stepTimings(steps, generatedAt);
   const phases = phaseTimings(events, band, generatedAt);
-  const now = nowSentence(detail.now, task.status);
+  const now = nowSentence(detail.now, task.status, t);
   const model = shortModel(task.model);
   const running = output.running === true;
   const waiting = task.status === "INPUT_REQUIRED";
@@ -417,22 +431,26 @@ export function TaskView(props: {
     <div className="output-box">
       <h3>
         {output.command === undefined
-          ? "出力の末尾"
-          : `${singleLine(output.command)} の出力（${running ? "途中" : "末尾"}）`}
+          ? t("output.tail")
+          : t(running ? "output.ofRunning" : "output.ofTail", {
+              command: singleLine(output.command),
+            })}
       </h3>
       {output.tail === null ? null : <OutputLines tail={output.tail} />}
       {running && (
         <p className="output-running">
-          実行中
+          {t("output.running")}
           {output.started_at !== undefined && !Number.isNaN(generatedAt)
-            ? `（経過 ${formatDuration(generatedAt - Date.parse(output.started_at))}）`
+            ? t("output.elapsed", {
+                duration: formatDuration(generatedAt - Date.parse(output.started_at), t),
+              })
             : ""}
           <span className="cursor" aria-hidden="true" />
         </p>
       )}
       <p className="output-note">
-        子エージェントが実行したコマンドの出力の一部です。トークンなどの秘密は伏せて表示しています。
-        {output.tail === null ? "いまは表示できる出力がありません。" : ""}
+        {t("output.note")}
+        {output.tail === null ? t("output.none") : ""}
       </p>
     </div>
   );
@@ -441,7 +459,7 @@ export function TaskView(props: {
     <section className="console" aria-labelledby="task-h">
       {props.stale ? (
         <p className="notice" role="status">
-          更新できませんでした。前の内容を表示しています（自動で再試行します）。
+          {t("console.stale")}
         </p>
       ) : null}
 
@@ -463,53 +481,55 @@ export function TaskView(props: {
       <div className="logbox">
         <div className="loghd">
           <span className="loghd-title">
-            進み具合{" "}
+            {t("log.title")}{" "}
             <span className="loghd-count">
-              {steps.length}
-              {props.hasOlder ? "+" : ""} ステップ
+              {t("log.count", { n: steps.length, plus: props.hasOlder ? "+" : "" })}
             </span>
           </span>
           <details className="con-more">
-            <summary>設定と費用の内訳</summary>
+            <summary>{t("log.settings")}</summary>
             <p>
-              入力 {formatCount(task.cost.input_tokens)} トークン、出力{" "}
-              {formatCount(task.cost.output_tokens)} トークン。キャッシュは読み出し{" "}
-              {formatCount(task.cost.cache_read_tokens)}、書き込み{" "}
-              {formatCount(task.cost.cache_write_tokens)} トークン。
+              {t("log.tokens", {
+                input: formatCount(task.cost.input_tokens, t),
+                output: formatCount(task.cost.output_tokens, t),
+                read: formatCount(task.cost.cache_read_tokens, t),
+                write: formatCount(task.cost.cache_write_tokens, t),
+              })}
             </p>
             <dl className="facts">
-              <Fact k="モデル" v={model.name} title={model.full} />
+              <Fact k={t("fact.model")} v={model.name} title={model.full} />
               {settings.model_selection === undefined ? null : (
                 <Fact
-                  k="モデルの選び方"
-                  v={singleLine(modelSelectionText(settings.model_selection))}
+                  k={t("fact.modelSelection")}
+                  v={singleLine(modelSelectionText(settings.model_selection, t))}
                 />
               )}
-              <Fact k="思考" v={task.effort} />
-              <Fact k="マージの方針" v={MERGE_POLICY[settings.merge_policy]} />
+              <Fact k={t("fact.effort")} v={task.effort} />
+              <Fact k={t("fact.mergePolicy")} v={t(`mergePolicy.${settings.merge_policy}`)} />
               {settings.deps_cache === undefined ? null : (
                 <Fact
-                  k="依存キャッシュ"
-                  v={`${DEPS_CACHE[settings.deps_cache]}${
+                  k={t("fact.depsCache")}
+                  v={`${t(`depsCache.${settings.deps_cache}`)}${
                     settings.deps_cache === "built" && settings.cache_build_ms !== undefined
-                      ? `（${formatDuration(settings.cache_build_ms)}）`
+                      ? t("depsCache.builtTime", {
+                          duration: formatDuration(settings.cache_build_ms, t),
+                        })
                       : ""
                   }`}
                 />
               )}
               {settings.sandbox_runtime_ms === undefined ? null : (
-                <Fact k="Sandbox の稼働" v={formatDuration(settings.sandbox_runtime_ms)} />
+                <Fact
+                  k={t("fact.sandboxRuntime")}
+                  v={formatDuration(settings.sandbox_runtime_ms, t)}
+                />
               )}
               {settings.sandbox_instance === undefined ? null : (
-                <Fact k="Sandbox の大きさ" v={singleLine(settings.sandbox_instance)} />
+                <Fact k={t("fact.sandboxSize")} v={singleLine(settings.sandbox_instance)} />
               )}
-              <Fact k="作成" v={formatClock(Date.parse(task.created_at))} />
+              <Fact k={t("fact.created")} v={formatClock(Date.parse(task.created_at), t)} />
             </dl>
-            {task.pr !== null && active ? (
-              <p className="soft">
-                完了して検証に通ったら、依頼した AI がレビューして Ready にします。
-              </p>
-            ) : null}
+            {task.pr !== null && active ? <p className="soft">{t("log.readyNote")}</p> : null}
           </details>
         </div>
 
@@ -518,7 +538,7 @@ export function TaskView(props: {
           ref={scroll.ref}
           onScroll={scroll.onScroll}
           data-following={String(scroll.following)}
-          aria-label="進み具合のコンソール"
+          aria-label={t("screen.label")}
           // biome-ignore lint/a11y/noNoninteractiveTabindex: スクロールする領域はキーボードで焦点を当てて読めるようにする（WCAG 2.1.1）
           tabIndex={0}
         >
@@ -530,16 +550,14 @@ export function TaskView(props: {
                 disabled={props.loadingOlder}
                 onClick={props.onLoadOlder}
               >
-                さらに読む
+                {t("screen.older")}
               </button>
-              {props.loadingOlder ? <span role="status"> 読み込み中…</span> : null}
-              {props.olderError ? (
-                <span role="alert"> 古い手順を読み込めませんでした。</span>
-              ) : null}
+              {props.loadingOlder ? <span role="status"> {t("common.loading")}</span> : null}
+              {props.olderError ? <span role="alert"> {t("screen.olderError")}</span> : null}
             </div>
           ) : null}
           {steps.length === 0 ? (
-            <p className="screen-empty">進み具合はまだありません。</p>
+            <p className="screen-empty">{t("screen.empty")}</p>
           ) : (
             <ol className="steps">
               {steps.map((s, i) => (
@@ -566,21 +584,23 @@ export function TaskView(props: {
       </div>
 
       <div className="con-foot">
-        <span className="soft">{formatClockSeconds(generatedAt)} に更新。</span>
+        <span className="soft">
+          {t("foot.updated", { time: formatClockSeconds(generatedAt, t) })}
+        </span>
         <label>
           <input
             type="checkbox"
             checked={props.autoRefresh}
             onChange={(e) => props.onAutoRefreshChange(e.currentTarget.checked)}
           />
-          自動で更新する
+          {t("common.autoRefresh")}
         </label>
         <button type="button" className="link-button" onClick={props.onRefresh}>
-          今すぐ更新
+          {t("common.refreshNow")}
         </button>
         {scroll.following ? null : (
           <button type="button" className="link-button" onClick={scroll.jumpToEnd}>
-            末尾へ
+            {t("foot.jumpToEnd")}
           </button>
         )}
       </div>

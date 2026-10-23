@@ -1,4 +1,6 @@
-/** 表示用の純関数（テキスト整形・リンクの許可・金額と時刻の書式）。React に依存しない。 */
+import { localeOf, type T } from "./i18n";
+
+/** 表示用の純関数（テキスト整形・リンクの許可・金額と時刻の書式）。React に依存しない。書式は t.lang のロケールで Intl に渡す。 */
 
 /**
  * 表示してはいけない文字か。改行（\n \r）とタブ以外の C0、DEL、C1、双方向の制御文字（U+202A-202E・U+2066-2069）。
@@ -53,48 +55,56 @@ export function isAllowedCloudflareUrl(url: unknown): url is string {
   return url === CLOUDFLARE_DASH_URL;
 }
 
-/** 金額（USD）。0 は $0、1 ドル以上は小数 2 桁、未満は 4 桁まで（末尾の 0 を落とし、2 桁は残す）。 */
-export function formatUsd(v: number): string {
+/** Intl に渡すロケール（t の言語。en は en-US、ja は ja-JP）。 */
+const locale = (t: T) => localeOf(t.lang);
+
+/** 金額（USD）。0 は $0、1 ドル以上は小数 2 桁、未満は 4 桁まで（末尾の 0 を落とし、2 桁は残す）。数字の書式はロケールの Intl。 */
+export function formatUsd(v: number, t: T): string {
   if (!Number.isFinite(v) || v === 0) return "$0";
-  if (v >= 1) return `$${v.toFixed(2)}`;
   if (v < 0.00005) return "<$0.0001";
-  const fixed = v.toFixed(4).replace(/0+$/, "");
-  const [int = "0", frac = ""] = fixed.split(".");
-  return `$${int}.${frac.padEnd(2, "0")}`;
+  const digits =
+    v >= 1
+      ? { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+      : { minimumFractionDigits: 2, maximumFractionDigits: 4 };
+  return new Intl.NumberFormat(locale(t), {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "narrowSymbol",
+    ...digits,
+  }).format(v);
 }
 
-const pad2 = (n: number) => String(n).padStart(2, "0");
-
-/** ローカル時刻の HH:MM。 */
-export function formatClock(ms: number): string {
-  const d = new Date(ms);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+/** ローカル時刻の時:分（ja は 24 時間の 14:05、en は 12 時間の 02:05 PM）。 */
+export function formatClock(ms: number, t: T): string {
+  return new Intl.DateTimeFormat(locale(t), { hour: "2-digit", minute: "2-digit" }).format(ms);
 }
 
-/** ローカル時刻の HH:MM:SS。 */
-export function formatClockSeconds(ms: number): string {
-  const d = new Date(ms);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+/** ローカル時刻の時:分:秒。 */
+export function formatClockSeconds(ms: number, t: T): string {
+  return new Intl.DateTimeFormat(locale(t), {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(ms);
 }
 
 /** 経過時間。1 秒未満 / N 秒 / M 分 S 秒 / H 時間 M 分。負と NaN は 0 として扱う。 */
-export function formatDuration(ms: number): string {
+export function formatDuration(ms: number, t: T): string {
   const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
-  if (total < 1) return "1 秒未満";
-  if (total < 60) return `${total} 秒`;
-  if (total < 3600) return `${Math.floor(total / 60)} 分 ${total % 60} 秒`;
-  return `${Math.floor(total / 3600)} 時間 ${Math.floor((total % 3600) / 60)} 分`;
+  if (total < 1) return t("duration.lessThanSecond");
+  if (total < 60) return t("duration.seconds", { s: total });
+  if (total < 3600) return t("duration.minutes", { m: Math.floor(total / 60), s: total % 60 });
+  return t("duration.hours", { h: Math.floor(total / 3600), m: Math.floor((total % 3600) / 60) });
 }
 
-/** 桁区切りの整数（ロケールに依存しない）。 */
-export function formatCount(n: number): string {
-  return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+/** 桁区切りの整数（ロケールの Intl）。 */
+export function formatCount(n: number, t: T): string {
+  return new Intl.NumberFormat(locale(t), { maximumFractionDigits: 0 }).format(Math.trunc(n));
 }
 
-/** ローカル日付の「M月D日」。 */
-export function formatDayHeading(ms: number): string {
-  const d = new Date(ms);
-  return `${d.getMonth() + 1}月${d.getDate()}日`;
+/** ローカル日付の見出し（ja は 10月22日、en は October 22）。 */
+export function formatDayHeading(ms: number, t: T): string {
+  return new Intl.DateTimeFormat(locale(t), { month: "long", day: "numeric" }).format(ms);
 }
 
 /** モデル名の表示用。最後の / より後ろ（プロバイダなどの接頭辞を省く）を名前にし、全体は title 用に残す。 */

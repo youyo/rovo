@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDetailCache } from "../src/detail-cache";
 import { formatUsd } from "../src/format";
 import { TaskScreen } from "../src/task-screen";
+import { inJa, tJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -121,12 +122,14 @@ async function mount(
   roots.push(root);
   await act(async () => {
     root.render(
-      createElement(TaskScreen, {
-        id: ID,
-        onUnauthorized,
-        deps: { fetchImpl: s.fn as unknown as typeof fetch, pollerDeps: env.deps },
-        ...extra,
-      }),
+      inJa(
+        createElement(TaskScreen, {
+          id: ID,
+          onUnauthorized,
+          deps: { fetchImpl: s.fn as unknown as typeof fetch, pollerDeps: env.deps },
+          ...extra,
+        }),
+      ),
     );
     await settle();
   });
@@ -926,7 +929,7 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
     expect(c.querySelector("h1")?.textContent).toBe(row.title);
     const head = c.querySelector(".con-head")?.textContent ?? "";
     expect(head).toContain("実行中");
-    expect(head).toContain(formatUsd(row.cost.cost_usd));
+    expect(head).toContain(formatUsd(row.cost.cost_usd, tJa));
     expect(head).toContain(row.repository);
     expect(head).toContain(row.owner_login);
     expect(text(c)).toContain("読み込み中");

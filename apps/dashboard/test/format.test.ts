@@ -12,6 +12,7 @@ import {
   shortModel,
   singleLine,
 } from "../src/format";
+import { tJa } from "./lang";
 
 describe("sanitizeText（D14: 表示前に制御文字を除く）", () => {
   it("改行・タブ以外の C0・DEL・C1 を除く", () => {
@@ -78,24 +79,24 @@ describe("isAllowedPrUrl（D14: GitHub の PR の URL だけをリンクにす�
 
 describe("表示用の整形", () => {
   it("formatUsd: 0 は $0、1 ドル以上は小数 2 桁、未満は 4 桁まで（末尾の 0 は落とすが 2 桁は残す）", () => {
-    expect(formatUsd(0)).toBe("$0");
-    expect(formatUsd(1.84)).toBe("$1.84");
-    expect(formatUsd(11.4)).toBe("$11.40");
-    expect(formatUsd(0.0043)).toBe("$0.0043");
-    expect(formatUsd(0.62)).toBe("$0.62");
-    expect(formatUsd(0.018)).toBe("$0.018");
-    expect(formatUsd(0.00001)).toBe("<$0.0001"); // 0 ではない額を $0.00 と見せない
-    expect(formatUsd(0.0001)).toBe("$0.0001");
+    expect(formatUsd(0, tJa)).toBe("$0");
+    expect(formatUsd(1.84, tJa)).toBe("$1.84");
+    expect(formatUsd(11.4, tJa)).toBe("$11.40");
+    expect(formatUsd(0.0043, tJa)).toBe("$0.0043");
+    expect(formatUsd(0.62, tJa)).toBe("$0.62");
+    expect(formatUsd(0.018, tJa)).toBe("$0.018");
+    expect(formatUsd(0.00001, tJa)).toBe("<$0.0001"); // 0 ではない額を $0.00 と見せない
+    expect(formatUsd(0.0001, tJa)).toBe("$0.0001");
   });
 
   it("formatClock: ローカル時刻の HH:MM（0 埋め）", () => {
-    expect(formatClock(new Date(2026, 9, 21, 5, 7).getTime())).toBe("05:07");
-    expect(formatClock(new Date(2026, 9, 21, 15, 40).getTime())).toBe("15:40");
+    expect(formatClock(new Date(2026, 9, 21, 5, 7).getTime(), tJa)).toBe("05:07");
+    expect(formatClock(new Date(2026, 9, 21, 15, 40).getTime(), tJa)).toBe("15:40");
   });
 
   it("formatDayHeading: ローカル日付の「M月D日」", () => {
-    expect(formatDayHeading(new Date(2026, 9, 21, 0, 0).getTime())).toBe("10月21日");
-    expect(formatDayHeading(new Date(2026, 0, 5, 23, 59).getTime())).toBe("1月5日");
+    expect(formatDayHeading(new Date(2026, 9, 21, 0, 0).getTime(), tJa)).toBe("10月21日");
+    expect(formatDayHeading(new Date(2026, 0, 5, 23, 59).getTime(), tJa)).toBe("1月5日");
   });
 });
 
@@ -120,29 +121,29 @@ describe("shortModel（モデル名の表示。プロバイダなどの接頭辞
 
 describe("formatDuration（経過時間。日本語）", () => {
   it("1 秒未満・秒・分秒・時間分", () => {
-    expect(formatDuration(0)).toBe("1 秒未満");
-    expect(formatDuration(999)).toBe("1 秒未満");
-    expect(formatDuration(42_000)).toBe("42 秒");
-    expect(formatDuration(252_000)).toBe("4 分 12 秒");
-    expect(formatDuration(60_000)).toBe("1 分 0 秒");
-    expect(formatDuration(3_600_000)).toBe("1 時間 0 分");
-    expect(formatDuration(3_600_000 * 2 + 5 * 60_000 + 59_000)).toBe("2 時間 5 分");
+    expect(formatDuration(0, tJa)).toBe("1 秒未満");
+    expect(formatDuration(999, tJa)).toBe("1 秒未満");
+    expect(formatDuration(42_000, tJa)).toBe("42 秒");
+    expect(formatDuration(252_000, tJa)).toBe("4 分 12 秒");
+    expect(formatDuration(60_000, tJa)).toBe("1 分 0 秒");
+    expect(formatDuration(3_600_000, tJa)).toBe("1 時間 0 分");
+    expect(formatDuration(3_600_000 * 2 + 5 * 60_000 + 59_000, tJa)).toBe("2 時間 5 分");
   });
   it("負・NaN は 0 として扱う", () => {
-    expect(formatDuration(-5)).toBe("1 秒未満");
-    expect(formatDuration(Number.NaN)).toBe("1 秒未満");
+    expect(formatDuration(-5, tJa)).toBe("1 秒未満");
+    expect(formatDuration(Number.NaN, tJa)).toBe("1 秒未満");
   });
 });
 
 describe("formatClockSeconds / formatCount", () => {
   it("ローカル時刻の HH:MM:SS", () => {
     const d = new Date(2026, 9, 21, 4, 5, 6).getTime();
-    expect(formatClockSeconds(d)).toBe("04:05:06");
+    expect(formatClockSeconds(d, tJa)).toBe("04:05:06");
   });
   it("桁区切り", () => {
-    expect(formatCount(0)).toBe("0");
-    expect(formatCount(9412)).toBe("9,412");
-    expect(formatCount(1234567)).toBe("1,234,567");
+    expect(formatCount(0, tJa)).toBe("0");
+    expect(formatCount(9412, tJa)).toBe("9,412");
+    expect(formatCount(1234567, tJa)).toBe("1,234,567");
   });
 });
 

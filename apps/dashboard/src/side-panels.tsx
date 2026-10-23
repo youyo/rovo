@@ -1,5 +1,6 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
 import { formatUsd, shortModel } from "./format";
+import { useT } from "./lang";
 
 /**
  * 月の上限（USD）。契約の monthly_budget_usd が先。無い古い応答だけ、今の逆算（使った額 + 予約 + 残り）に戻す。
@@ -18,17 +19,22 @@ function monthlyLimit(budget: OverviewDto["budget"]): number | null {
  */
 export function BudgetPanel(props: { data: OverviewDto }) {
   const { budget, month } = props.data;
+  const t = useT();
   const limit = monthlyLimit(budget);
   const rows = [
-    { key: "spent", name: "あなたの使った額", value: formatUsd(budget.spent_usd) },
-    { key: "remaining", name: "あなたの残り", value: formatUsd(budget.remaining_usd) },
-    { key: "limit", name: "あなたの上限", value: limit === null ? "不明" : formatUsd(limit) },
-    { key: "all", name: "全員の実績", value: formatUsd(month.budget_actual.spent_usd) },
+    { key: "spent", name: t("budget.spent"), value: formatUsd(budget.spent_usd, t) },
+    { key: "remaining", name: t("budget.remaining"), value: formatUsd(budget.remaining_usd, t) },
+    {
+      key: "limit",
+      name: t("budget.limit"),
+      value: limit === null ? t("common.unknown") : formatUsd(limit, t),
+    },
+    { key: "all", name: t("budget.all"), value: formatUsd(month.budget_actual.spent_usd, t) },
   ];
   return (
     <section className="panel" data-budget="month" aria-labelledby="budget-month-h">
-      <h2 id="budget-month-h">今月の予算と実績</h2>
-      <p className="caption">UTC の月</p>
+      <h2 id="budget-month-h">{t("budget.title")}</h2>
+      <p className="caption">{t("budget.utc")}</p>
       <dl className="budget-rows">
         {rows.map((r) => (
           <div
@@ -41,10 +47,10 @@ export function BudgetPanel(props: { data: OverviewDto }) {
           </div>
         ))}
       </dl>
-      <p data-budget-startable="">あと {budget.startable} 件始められます。</p>
+      <p data-budget-startable="">{t("budget.startable", { n: budget.startable })}</p>
       {month.hidden_tasks.count > 0 ? (
         <p className="soft" data-hidden-tasks={month.hidden_tasks.count}>
-          権限の無いリポジトリのタスクが {month.hidden_tasks.count} 件、費用の合計に含まれます。
+          {t("budget.hidden", { n: month.hidden_tasks.count })}
         </p>
       ) : null}
     </section>
@@ -53,13 +59,14 @@ export function BudgetPanel(props: { data: OverviewDto }) {
 
 /** モデル別の費用（今月・UTC・全員分）。タスクと相談を分けて出し、バーは合計に対する比率だけ。 */
 export function ModelCosts(props: { models: OverviewDto["models"] }) {
+  const t = useT();
   const totals = props.models.map((m) => m.task_cost_usd + m.consult_cost_usd);
   const max = Math.max(0, ...totals);
   return (
     <section className="panel" data-models="" aria-labelledby="models-h">
-      <h2 id="models-h">モデル別の費用</h2>
-      <p className="caption">UTC の月</p>
-      {props.models.length === 0 ? <p className="soft">まだありません。</p> : null}
+      <h2 id="models-h">{t("models.title")}</h2>
+      <p className="caption">{t("budget.utc")}</p>
+      {props.models.length === 0 ? <p className="soft">{t("common.none")}</p> : null}
       <ul className="models">
         {props.models.map((m, i) => (
           <li key={m.model}>
@@ -67,7 +74,10 @@ export function ModelCosts(props: { models: OverviewDto["models"] }) {
               {shortModel(m.model).name}
             </span>
             <span className="model-cost">
-              タスク {formatUsd(m.task_cost_usd)}、相談 {formatUsd(m.consult_cost_usd)}
+              {t("models.cost", {
+                task: formatUsd(m.task_cost_usd, t),
+                consult: formatUsd(m.consult_cost_usd, t),
+              })}
             </span>
             <svg className="model-bar" height={4} aria-hidden="true" focusable="false">
               <rect className="model-bar-bg" x={0} y={0} width="100%" height={4} />

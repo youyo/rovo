@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { OverviewView } from "../src/overview-view";
 import { TL_AXIS_H, TL_BAND_H, TL_MIN_LANE_H } from "../src/timeline-view";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
+import { inJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -30,17 +31,19 @@ function mount(
   roots.push(root);
   act(() => {
     root.render(
-      createElement(OverviewView, {
-        data,
-        autoRefresh: true,
-        onAutoRefreshChange: () => {},
-        onRefresh: () => {},
-        stale: extra.stale ?? false,
-        isToday: extra.isToday ?? true,
-        selectedId: extra.selectedId ?? null,
-        onSelectTask: extra.onSelectTask,
-        console: createElement("section", { className: "console" }, "コンソールの場所"),
-      }),
+      inJa(
+        createElement(OverviewView, {
+          data,
+          autoRefresh: true,
+          onAutoRefreshChange: () => {},
+          onRefresh: () => {},
+          stale: extra.stale ?? false,
+          isToday: extra.isToday ?? true,
+          selectedId: extra.selectedId ?? null,
+          onSelectTask: extra.onSelectTask,
+          console: createElement("section", { className: "console" }, "コンソールの場所"),
+        }),
+      ),
     );
   });
   return container;

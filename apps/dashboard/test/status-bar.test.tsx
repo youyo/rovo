@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { StatusBar } from "../src/status-bar";
 import type { CloudflareState } from "../src/use-cloudflare";
+import { inJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -36,14 +37,16 @@ function mount(
   roots.push(root);
   act(() => {
     root.render(
-      createElement(StatusBar, {
-        data,
-        nowMs: Date.parse(data.generated_at),
-        cloudflare,
-        autoRefresh: true,
-        onAutoRefreshChange: () => {},
-        onRefresh: () => {},
-      }),
+      inJa(
+        createElement(StatusBar, {
+          data,
+          nowMs: Date.parse(data.generated_at),
+          cloudflare,
+          autoRefresh: true,
+          onAutoRefreshChange: () => {},
+          onRefresh: () => {},
+        }),
+      ),
     );
   });
   return container;

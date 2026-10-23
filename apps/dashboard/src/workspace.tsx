@@ -4,6 +4,8 @@ import type { Scope } from "./api";
 import type { DayKey } from "./day";
 import type { DetailCache } from "./detail-cache";
 import { Header } from "./header";
+import type { T } from "./i18n";
+import { useT } from "./lang";
 import { OverviewView } from "./overview-view";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
 import { daySummary, pickConsoleTask } from "./rail";
@@ -44,6 +46,7 @@ export function Workspace(props: {
   cloudflareDeps?: CloudflareDeps;
 }) {
   const { route, scope, day, onUnauthorized } = props;
+  const t = useT();
   const [autoRefresh, setAutoRefresh] = useState(() => loadAutoRefresh());
   const { state, refresh } = useOverview(scope, day, autoRefresh, props.deps);
   // Cloudflare は一覧とは別の 60 秒間隔。失敗しても一覧は出す（401 だけは一覧と同じ扱い）
@@ -69,7 +72,7 @@ export function Workspace(props: {
     <Header
       scope={scope}
       onScopeChange={props.onScopeChange}
-      summary={data ? daySummary(data) : null}
+      summary={data ? daySummary(data, t) : null}
       day={day ?? null}
       onDayChange={props.onDayChange}
     >
@@ -103,13 +106,13 @@ export function Workspace(props: {
 
   const consoleNode =
     consoleId === null ? (
-      <section className="console console--empty" aria-label="コンソール">
+      <section className="console console--empty" aria-label={t("console.label")}>
         {data === null ? (
           <p className="soft" role="status">
-            読み込み中…
+            {t("common.loading")}
           </p>
         ) : (
-          <p className="soft">タスクを選ぶと、ここに進み具合が流れます。</p>
+          <p className="soft">{t("console.selectHint")}</p>
         )}
       </section>
     ) : (
@@ -142,21 +145,21 @@ export function Workspace(props: {
         selectedId={consoleId}
         onSelectTask={props.onSelectTask}
         console={consoleNode}
-        railNote={railNote(state.phase)}
+        railNote={railNote(state.phase, t)}
         showRefreshControls={consoleId === null}
       />
     </>
   );
 }
 
-function railNote(phase: ReturnType<typeof useOverview>["state"]["phase"]): string {
+function railNote(phase: ReturnType<typeof useOverview>["state"]["phase"], t: T): string {
   switch (phase) {
     case "loading":
-      return "読み込み中…";
+      return t("common.loading");
     case "error":
-      return "タスクの一覧を読み込めませんでした。自動で再試行します。";
+      return t("state.railError");
     case "not_found":
-      return "タスクの一覧は見られません。";
+      return t("state.railNotFound");
     default:
       return "";
   }
@@ -167,36 +170,37 @@ function OverviewState(props: {
   phase: "loading" | "ready" | "error" | "unauthorized" | "not_found";
   onRetry: () => void;
 }) {
+  const t = useT();
   switch (props.phase) {
     case "unauthorized":
       return (
         <div className="state">
-          <h1>ダッシュボード</h1>
-          <p>ログインの有効期限が切れました。もう一度ログインしてください。</p>
+          <h1>{t("dashboard.title")}</h1>
+          <p>{t("state.expired")}</p>
         </div>
       );
     case "not_found":
       return (
         <div className="state">
-          <h1>ダッシュボード</h1>
-          <p role="alert">この内容は見られません。権限が無いか、存在しません。</p>
+          <h1>{t("dashboard.title")}</h1>
+          <p role="alert">{t("state.overviewNotFound")}</p>
         </div>
       );
     case "error":
       return (
         <div className="state">
-          <h1>ダッシュボード</h1>
-          <p role="alert">読み込めませんでした。自動で再試行します。</p>
+          <h1>{t("dashboard.title")}</h1>
+          <p role="alert">{t("state.error")}</p>
           <button type="button" onClick={props.onRetry}>
-            再読み込み
+            {t("common.reload")}
           </button>
         </div>
       );
     default:
       return (
         <div className="state">
-          <h1>ダッシュボード</h1>
-          <p role="status">読み込み中…</p>
+          <h1>{t("dashboard.title")}</h1>
+          <p role="status">{t("common.loading")}</p>
         </div>
       );
   }

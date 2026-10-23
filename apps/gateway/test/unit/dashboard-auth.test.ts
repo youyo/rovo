@@ -421,7 +421,7 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
     expect(await sessionRows(user.userId)).toBe(2);
   });
 
-  describe("state / Cookie の不一致は 400（fail closed）。MCP の経路・監査に落とさない", () => {
+  describe("state / Cookie の不一致は /dashboard/?login_error=invalid への 303（fail closed）。MCP の経路・監査に落とさない", () => {
     async function expectRejected(
       res: Response,
       env: Env,
@@ -429,9 +429,12 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
       github: ReturnType<typeof githubFetch>,
       userId: number,
     ) {
-      expect(res.status).toBe(400);
-      expect(res.headers.get("location")).toBeNull();
+      expect(res.status).toBe(303);
+      expect(res.headers.get("location")).toBe("/dashboard/?login_error=invalid");
+      expect(res.headers.get("cache-control")).toBe("no-store");
       expect(sessionCookieOf(res)).toBe("");
+      // ログイン Cookie は消す
+      expect(res.headers.getSetCookie().some((c) => c.startsWith(`${LOGIN_COOKIE}=;`))).toBe(true);
       expect(provider.finishUpstream).not.toHaveBeenCalled();
       expect(provider.completeAuthorization).not.toHaveBeenCalled();
       // GitHub へは行かない・資格も保存しない・セッションも作らない
@@ -559,7 +562,7 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
       );
     });
 
-    it("再使用（同じ callback の再送）は 2 回目が 400。1 回目のセッションは残る", async () => {
+    it("再使用（同じ callback の再送）は 2 回目が 303（invalid）。1 回目のセッションは残る", async () => {
       const { env, provider } = makeEnv();
       const user = newGithubUser();
       const github = githubFetch(user);
@@ -569,7 +572,8 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
       const callsAfterFirst = github.calls.length;
       await clearWorkerAudit();
       const second = await callback(env, github, cb(state), cookie);
-      expect(second.status).toBe(400);
+      expect(second.status).toBe(303);
+      expect(second.headers.get("location")).toBe("/dashboard/?login_error=invalid");
       expect(sessionCookieOf(second)).toBe("");
       expect(github.calls).toHaveLength(callsAfterFirst); // 2 回目は GitHub へ行かない
       expect(provider.finishUpstream).not.toHaveBeenCalled();
@@ -586,30 +590,38 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
       const a = await beginLogin(env);
       const b = await beginLogin(env);
       const bad = await callback(env, github, cb(a.state), b.cookie); // 別の Cookie
-      expect(bad.status).toBe(400);
+      expect(bad.status).toBe(303);
+      expect(bad.headers.get("location")).toBe("/dashboard/?login_error=invalid");
       // 正しい Cookie でも、消費済みの state は通らない
       const retry = await callback(env, github, cb(a.state), a.cookie);
-      expect(retry.status).toBe(400);
+      expect(retry.status).toBe(303);
+      expect(retry.headers.get("location")).toBe("/dashboard/?login_error=invalid");
     });
   });
 
   describe("身元確認の失敗（セッションを作らない・資格を保存しない）", () => {
-    async function expectNoSession(res: Response, userId: number) {
+    async function expectNoSession(
+      res: Response,
+      userId: number,
+      code: "denied" | "invalid" | "unavailable",
+    ) {
+      expect(res.status).toBe(303);
       expect(sessionCookieOf(res)).toBe("");
-      expect(res.headers.get("location")).toBeNull();
+      // 失敗はダッシュボードへ戻す（素の text ではなく、固定の許可リストの code だけをクエリに載せる）
+      expect(res.headers.get("location")).toBe(`/dashboard/?login_error=${code}`);
+      expect(res.headers.get("cache-control")).toBe("no-store");
       expect(await credentialGeneration(userId)).toBe(0);
       expect(await sessionRows(userId)).toBe(0);
       // ログイン Cookie は消す
       expect(res.headers.getSetCookie().some((c) => c.startsWith(`${LOGIN_COOKIE}=;`))).toBe(true);
     }
 
-    it("許可ルール外のユーザー（team のメンバーではない）は 403。authz_denied が caller: dashboard で残る", async () => {
+    it("許可ルール外のユーザー（team のメンバーではない）は 303（denied）。authz_denied が caller: dashboard で残る", async () => {
       const { env, provider } = makeEnv();
       const user = newGithubUser({ team: "none" });
       const { state, cookie } = await beginLogin(env);
       const res = await callback(env, githubFetch(user), cb(state), cookie);
-      expect(res.status).toBe(403);
-      await expectNoSession(res, user.userId);
+      await expectNoSession(res, user.userId, "denied");
       expect(provider.completeAuthorization).not.toHaveBeenCalled();
       const audit = await readWorkerAudit(env);
       expect(audit).toHaveLength(1);
@@ -636,20 +648,18 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
         cb(denied.state),
         denied.cookie,
       );
-      expect(r1.status).toBe(403);
-      await expectNoSession(r1, other.userId);
+      await expectNoSession(r1, other.userId, "denied");
       const ok = await beginLogin(env);
       const r2 = await callback(env, githubFetch(allowed), cb(ok.state), ok.cookie);
       expect(r2.status).toBe(302);
     });
 
-    it("GitHub が code を拒否する（4xx）は 403。監査は code_exchange_rejected（caller: dashboard）", async () => {
+    it("GitHub が code を拒否する（4xx）は 303（denied）。監査は code_exchange_rejected（caller: dashboard）", async () => {
       const { env } = makeEnv();
       const user = newGithubUser({ tokenError: "bad_verification_code" });
       const { state, cookie } = await beginLogin(env);
       const res = await callback(env, githubFetch(user), cb(state), cookie);
-      expect(res.status).toBe(403);
-      await expectNoSession(res, user.userId);
+      await expectNoSession(res, user.userId, "denied");
       const audit = await readWorkerAudit(env);
       expect(audit).toHaveLength(1);
       expect(audit[0]).toMatchObject({
@@ -661,17 +671,16 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
       expect(JSON.stringify(audit)).not.toContain("ghu_");
     });
 
-    it("GitHub の一時的な障害（5xx）は 503。認証の失敗としては記録しない", async () => {
+    it("GitHub の一時的な障害（5xx）は 303（unavailable）。認証の失敗としては記録しない", async () => {
       const { env } = makeEnv();
       const user = newGithubUser({ tokenStatus: 503 });
       const { state, cookie } = await beginLogin(env);
       const res = await callback(env, githubFetch(user), cb(state), cookie);
-      expect(res.status).toBe(503);
-      await expectNoSession(res, user.userId);
+      await expectNoSession(res, user.userId, "unavailable");
       expect(await readWorkerAudit(env)).toEqual([]);
     });
 
-    it("GitHub 側でユーザーが拒否した（error=access_denied）は 403。GitHub へは行かない", async () => {
+    it("GitHub 側でユーザーが拒否した（error=access_denied）は 303（denied）。GitHub へは行かない", async () => {
       const { env } = makeEnv();
       const user = newGithubUser();
       const github = githubFetch(user);
@@ -682,8 +691,7 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
         `error=access_denied&state=${encodeURIComponent(state)}`,
         cookie,
       );
-      expect(res.status).toBe(403);
-      await expectNoSession(res, user.userId);
+      await expectNoSession(res, user.userId, "denied");
       expect(github.calls).toHaveLength(0);
       const audit = await readWorkerAudit(env);
       expect(audit[0]).toMatchObject({
@@ -693,14 +701,13 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
       });
     });
 
-    it("code が無い callback は 400", async () => {
+    it("code が無い callback は 303（invalid）", async () => {
       const { env } = makeEnv();
       const user = newGithubUser();
       const github = githubFetch(user);
       const { state, cookie } = await beginLogin(env);
       const res = await callback(env, github, `state=${encodeURIComponent(state)}`, cookie);
-      expect(res.status).toBe(400);
-      await expectNoSession(res, user.userId);
+      await expectNoSession(res, user.userId, "invalid");
       expect(github.calls).toHaveLength(0);
       const audit = await readWorkerAudit(env);
       expect(audit[0]).toMatchObject({

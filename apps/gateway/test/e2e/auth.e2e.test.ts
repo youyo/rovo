@@ -114,6 +114,14 @@ describe("ログイン（本物のフロー: DCR -> /authorize -> 偽 GitHub -> 
         "web_fetch",
         "web_search",
       ]);
+      // annotations が実際の HTTP 経路でも返る（読み取り専用 / 書き込みの分類）
+      const byName = new Map(tools.map((t) => [t.name, t]));
+      expect(byName.get("task_status")?.annotations?.readOnlyHint).toBe(true);
+      expect(byName.get("task_pr_merge")?.annotations).toMatchObject({
+        readOnlyHint: false,
+        destructiveHint: true,
+      });
+      expect(tools.every((t) => t.title && t.annotations?.readOnlyHint !== undefined)).toBe(true);
     } finally {
       await client.close();
     }

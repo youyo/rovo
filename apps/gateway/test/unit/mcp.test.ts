@@ -2530,3 +2530,69 @@ describe("task_console（mod が画面に進み具合を出すための読み取
     await Promise.all([ca.close(), cb.close()]);
   });
 });
+
+describe("tools/list の annotations（読み取り専用 / 書き込みの分類）", () => {
+  type Hints = {
+    readOnlyHint: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint: boolean;
+  };
+  const READ = (openWorldHint: boolean): Hints => ({ readOnlyHint: true, openWorldHint });
+  const WRITE = (
+    destructiveHint: boolean,
+    idempotentHint: boolean,
+    openWorldHint: boolean,
+  ): Hints => ({ readOnlyHint: false, destructiveHint, idempotentHint, openWorldHint });
+  // 利用者の決定した分類。ここに無いツールが登録されたらテストが落ちる
+  const EXPECTED: Record<string, Hints> = {
+    task_status: READ(false),
+    task_wait: READ(false),
+    task_result: READ(false),
+    task_console: READ(false),
+    models_list: READ(false),
+    budget_status: READ(false),
+    sandbox_instances_list: READ(false),
+    web_search: READ(true),
+    web_fetch: READ(true),
+    web_browse: READ(true),
+    task_start: WRITE(false, false, true),
+    task_answer: WRITE(false, false, false),
+    task_steer: WRITE(false, false, false),
+    task_cancel: WRITE(true, true, false),
+    task_pr_ready: WRITE(false, true, true),
+    task_pr_merge: WRITE(true, false, true),
+    consult: WRITE(false, false, true),
+  };
+
+  it("17 ツール（web_browse 有効）すべてに title と annotations があり、分類が決定どおり", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props, withBrowse(fakeWeb().port));
+    const { tools } = await client.listTools();
+    // 表に無いツールが登録されたら落ちる（名前の集合が一致すること）
+    expect(tools.map((t) => t.name).sort()).toEqual(Object.keys(EXPECTED).sort());
+    for (const t of tools) {
+      expect(t.title?.trim(), `${t.name} の title`).toBeTruthy();
+      expect(t.annotations, `${t.name} の annotations`).toMatchObject(EXPECTED[t.name] as Hints);
+    }
+    // destructiveHint: true は task_cancel と task_pr_merge だけ
+    expect(
+      tools
+        .filter((t) => t.annotations?.destructiveHint === true)
+        .map((t) => t.name)
+        .sort(),
+    ).toEqual(["task_cancel", "task_pr_merge"]);
+    await client.close();
+  });
+
+  it("web_browse が無効（既定）なら 16 ツールで、それぞれに annotations がある", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    expect(tools).toHaveLength(16);
+    for (const t of tools) {
+      expect(t.annotations, t.name).toMatchObject(EXPECTED[t.name] as Hints);
+    }
+    await client.close();
+  });
+});

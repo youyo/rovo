@@ -17,6 +17,7 @@ import {
   shapeFetchResult,
   shapeSearchResult,
 } from "../web/tools";
+import { toolConfig } from "./annotations";
 
 /**
  * ツールが返すエラーコード（phase1.md の一覧 + 想定外の internal）。
@@ -512,6 +513,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "task_start",
     {
+      ...toolConfig("task_start"),
       description: START_DESCRIPTION,
       inputSchema: publishedSchema(startSchema),
     },
@@ -541,7 +543,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "models_list",
-    { description: MODELS_LIST_DESCRIPTION, inputSchema: publishedSchema(noInputSchema) },
+    {
+      ...toolConfig("models_list"),
+      description: MODELS_LIST_DESCRIPTION,
+      inputSchema: publishedSchema(noInputSchema),
+    },
     async () =>
       runTool(env, "models_list", async (principal, userDo) => {
         const denied = await requireMember(env, principal, userDo);
@@ -552,6 +558,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "sandbox_instances_list",
     {
+      ...toolConfig("sandbox_instances_list"),
       description: SANDBOX_INSTANCES_LIST_DESCRIPTION,
       inputSchema: publishedSchema(noInputSchema),
     },
@@ -574,7 +581,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "budget_status",
-    { description: BUDGET_STATUS_DESCRIPTION, inputSchema: publishedSchema(noInputSchema) },
+    {
+      ...toolConfig("budget_status"),
+      description: BUDGET_STATUS_DESCRIPTION,
+      inputSchema: publishedSchema(noInputSchema),
+    },
     async () =>
       runTool(env, "budget_status", async (principal, userDo) => {
         const denied = await requireMember(env, principal, userDo);
@@ -584,7 +595,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "consult",
-    { description: CONSULT_DESCRIPTION, inputSchema: publishedSchema(consultSchema) },
+    {
+      ...toolConfig("consult"),
+      description: CONSULT_DESCRIPTION,
+      inputSchema: publishedSchema(consultSchema),
+    },
     async (args) =>
       runTool(env, "consult", async (principal, userDo) => {
         // 入力の検証は consult サービスの中（zod）。不正な入力で team の再検証や予約を行わないよう、先に型だけ見る
@@ -598,6 +613,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "task_status",
     {
+      ...toolConfig("task_status"),
       description: `タスクの現在の状態を返す。{task_id, status, repository, title, draft_pr_url, merge_policy, budget_policy, model, model_selection?, effort, sandbox_instance, created_at, updated_at, latest_cursor, pending_question, dashboard_url?}。model は子のモデル（task_start の model。省略時は rovo が選んだモデル）、model_selection はモデルの選び方（task_start の応答と同じ {mode: "auto" | "explicit", chosen, reason, scores?, latency_ms?}。記録の無い古いタスクには付かない）、effort はそのタスクの思考レベル（task_start の effort で上書きできる。上書きしていなければ、モデルごとの既定 = models_list の effort。考える量が多いほど出力トークン＝費用が増える）。sandbox_instance は task_start で指定した Sandbox の大きさ（省略したタスクは null = 既定。task_status は指定した値で、実際に起動した大きさは task_result の usage.sandbox_instance だけに出る）。draft_pr_url は Draft PR の作成後に入る。pending_question は未回答の質問 {question_id, message, options, kind?} で、無ければ null（INPUT_REQUIRED のときは task_answer で答える）。kind: "budget_extension" は予算の延長の承認の質問（rovo が書いた固定文で囲まれない。利用者に確認してから答える）。子の質問には kind が付かない。budget_policy は task_start の指定（ask | stop。この機能より前のタスクは stop）。${QUESTION_NOTICE} 自分のタスクだけ参照できる。${DASHBOARD_URL_NOTICE}`,
       inputSchema: publishedSchema(taskIdSchema),
     },
@@ -614,6 +630,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "task_console",
     {
+      ...toolConfig("task_console"),
       description: TASK_CONSOLE_DESCRIPTION,
       inputSchema: publishedSchema(taskIdSchema),
     },
@@ -630,6 +647,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "task_wait",
     {
+      ...toolConfig("task_wait"),
       description: `タスクの新しいイベントを待つ（long polling）。子が質問すると status が INPUT_REQUIRED になり question イベントが届くので、task_answer で答える（答えるまでタスクは止まる）。steer_accepted は task_steer の指示を子が受け付けたことを示す。${QUESTION_NOTICE}cursor より後のイベントがあれば即座に返し、無ければ最大 timeout_seconds（既定 30、上限 50（クライアント側の 60 秒の時間切れに当たらないため））待つ。これは 1 回あたりの待ち時間（long polling）で、タスク全体は数分〜数十分かかるので、繰り返し呼ぶことになる。会話を止めないよう、できるならバックグラウンド（サブエージェントなど）でこのループを回す。途中の様子を見るだけなら task_status で足りる。終端状態のタスクは待たずに返す。返った cursor を次回の cursor に渡す。デプロイ等で待機が切れても、同じ cursor で再試行すればイベントを取りこぼさない。同時待機が多すぎる場合は retry_after_seconds 付きで空の結果を返す。`,
       inputSchema: publishedSchema(waitSchema),
     },
@@ -645,6 +663,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "task_result",
     {
+      ...toolConfig("task_result"),
       description: `終端になったタスクの成果を返す。{task_id, status, reason?, failure_phase?, summary, verification: {commands, results, verified, attempts, commit_sha?}, warnings, merge_policy, budget_policy, model, model_selection?, effort, pr: {number, url, draft, merged, head_sha, head_matches_verified, closed_empty?} | null, patch | diffstat, patch_too_large, usage, next_steps, dashboard_url?}。reason は失敗・上限超過などの理由のコード（あるときだけ付く）。failure_phase が "setup" のときは、エージェントが動く前の準備（ブランチ・Draft PR の作成など）で FAILED になったことを表し、reason は準備の失敗のコード（base_sha_not_found: base_sha がリポジトリに無い。github_forbidden / github_not_found: GitHub の権限・見えない。branch_conflict・pr_base_mismatch・existing_pr_not_draft・draft_pr_unsupported・github_unprocessable・setup_timeout など）で、このときは summary が空で warnings は "the agent produced no result" だけになる。next_steps は reason に合わせた案内になる（base_sha_not_found は 40 桁の SHA を確かめて task_start し直す）。pr は PR の情報で、draft は Draft か（task_pr_ready で false になる）、merged は task_pr_merge でマージ済みか、head_sha は終端で GitHub から読んだ PR の head（終了処理の完了までは task_result が not_ready を返すので、通常は値が入る。終了処理が長引いて上限を過ぎたときだけ、読めるまで null のことがある）、head_matches_verified は検証済みの commit と一致するか（head が動いていれば false で、warnings にも出る。false のとき task_pr_merge は使えない）。closed_empty: true は、子が commit を 1 つも push せずに終わったので rovo が空の Draft PR を閉じて作業ブランチを消したことを表す（結果は summary を見る。task_pr_ready / task_pr_merge は conflict）。merge_policy は task_start で指定した値（human_review | agent_merge）。model は子のモデル、model_selection はモデルの選び方（task_start と同じ {mode, chosen, reason, scores?, latency_ms?}。無いタスクには付かない）、effort はそのタスクの思考レベル（タスクの開始時の値。task_start の effort で上書きできる。上書きしていなければ、モデルごとの既定）。next_steps は、status・merge_policy・PR の draft 状態・head_matches_verified に応じた次の一手（差分をレビューして task_pr_ready / task_pr_merge を使うか、人のレビューを待つか、新しいタスクを始めるか）の案内文で、これに従う。verified が false のときは検証コマンドを通っていない（未指定、またはモデルの申告のみ）。verification.results[] は検証コマンドごとの {argv, exit_code, timed_out, output, duration_ms} で、duration_ms はそのコマンド 1 本の所要時間（ms。タイムアウトしたものも含む）。どのコマンド（npm ci・typecheck・test など）が遅いかを分けて見られる。古い agent の結果など、計っていないときは duration_ms が付かない。warnings には、テスト設定ファイルの変更・テストファイルの削除・package.json の scripts の変更に加え、base にあった既存のテストファイルで行が削除または書き換えられた場合、テストに skip / only / todo が追加された場合、テストのタイムアウトが追加または延長された場合が記される（新規のテストファイルの追加と、既存テストへのテストの追加だけは記されない）。usage.deps_cache は依存関係のキャッシュ（Sandbox に導入済みの node_modules）の結果で、hit はキャッシュから起動、miss は使えず通常どおり、built はこのタスクが作った、disabled は対象外（lockfile なし・無効）で、miss のときは usage.deps_cache_miss_reason に使えなかった理由の固定コード（ensure_failed / ensure_timeout: キャッシュの用意の失敗・時間切れ、build_failed / build_timeout: 作成コンテナでの導入の失敗・時間切れ、cooldown: 直前の作成の失敗後の待ち、snapshot_unsupported / snapshot_failed: スナップショットが使えない・取れない、restore_failed / cert_missing / move_failed: 復元の失敗、invalid_deps: 入力が不正）も付き、deps_cache が付くときは cache_build_ms（作るのにかかった時間。Sandbox の時間の推定に含まれる。hit・miss・disabled は 0）も常に付く。usage.sandbox_runtime_ms は Sandbox を動かした累計の時間（ms。task_summary と同じ値。取得できたときだけ付く）。usage.sandbox_instance は最初に Sandbox を起動した大きさ（sandbox_instances_list の name。Sandbox は子が最初に使うときに起動するので、Sandbox を使わなかったタスクには付かない）。コマンドの前に Clef が上げると判断して Sandbox が大きく昇格したタスクには、usage.sandbox_promoted_to（昇格した先の大きさ）、usage.sandbox_promoted_at（昇格した時刻。epoch ms）、usage.sandbox_runtime_ms_before_promotion（昇格した時点までの Sandbox の時間。ms。sandbox_runtime_ms のうち、これまでが sandbox_instance の単価、残りが sandbox_promoted_to の単価で推定費用に按分される）が付く。usage.sandbox_promoted_to は最終の大きさ（複数回上がったときは最後）、sandbox_promoted_at と sandbox_runtime_ms_before_promotion は最初の昇格のものになる。成功した昇格は usage.sandbox_promotions に時系列で並ぶ（{to: 昇格先, at: 時刻, trigger: clef（Clef が上げると判断した。古いタスクは agent / rule / verification）, runtime_ms_before: その昇格までの Sandbox の時間, rule_match: 古いタスクの規則で上がったときだけ、一致した表の名前}）。Clef の判断の振り返り用に、判断した回数が usage.sandbox_scale_decisions、そのうち上げた回数が usage.sandbox_scale_raised、Clef が失敗して今の大きさのまま実行した回数が usage.sandbox_scale_clef_failures、上げなかったのに 60 秒を超えたコマンドの数（Clef の見落としの候補）が usage.sandbox_scale_slow_not_raised に付く（Clef を呼ばなかったタスクには付かない）。判断ごとの記録（古い順、直近 50 件）は usage.sandbox_scale_log に {at: 時刻, from: 判断したときの大きさ, to: 上げた先（上げなかった・昇格に失敗した・Clef が失敗したときは null）, heavy: 重い確率, fast4: 4 vCPU で 2 vCPU より速い確率, choice: 大きさの選択の確率 [standard-2, standard-3, standard-4], model: 答えを使ったモデル（flash は clef-flash、clef は聞き直したとき）, failed: Clef が失敗したときだけ true, clef_ms: Clef の所要, cmd_ms: そのコマンドの実行時間, exit_code: 終了コード, cmd: コマンドの先頭の語（argv の全体は残らない）} で並ぶ。昇格の試みが見送り・失敗になるたびに usage.sandbox_promotion_failures に {trigger, reason}（固定の値。最大 8 件）が 1 件ずつ付く（Clef の失敗は入らない）。昇格しなかった・失敗したときは usage.sandbox_promotion_reason に理由の固定コード（fixed_instance: task_start で大きさを指定したので固定 / already_large: 古いタスクの記録（すでに昇格先以上）/ state_unreadable: 作業ツリーの状態を読めなかった / snapshot_unsupported: スナップショットが使えない環境 / snapshot_failed: スナップショットに失敗・時間切れ / start_failed・cert_missing・workspace_mismatch: 昇格先の起動・確認に失敗したので、同じスナップショットから元の大きさで起動し直した / fallback_failed: 元の大きさでも起動し直せず、作業ツリーを作り直した）が付く（昇格を無効にしているデプロイでは付かない）。warnings が 1 件でもあると task_pr_merge は拒否される（warnings_present。task_pr_ready は使える）。${QUESTION_NOTICE}タスクが終端でない、またはエージェントの停止を確認できていない間は not_ready エラーを返す。終端になった直後も、エージェントの停止を確認するまで数秒は not_ready が返るので、task_wait で終端を待つか、数秒待ってから呼び直す。自分のタスクだけ参照できる。${DASHBOARD_URL_NOTICE}`,
       inputSchema: publishedSchema(taskIdSchema),
     },
@@ -661,6 +680,7 @@ export function createRovoServer(env: Env): McpServer {
   server.registerTool(
     "task_cancel",
     {
+      ...toolConfig("task_cancel"),
       description:
         "タスクをキャンセルする。終端状態のタスクに対しても冪等に成功し、現在の状態を返す。{task_id, status}。CANCELLED は即座に確定するが、子エージェントの停止の確認は Gateway が収束するまで再送する（確認できるまで次のタスクは始められない）。",
       inputSchema: publishedSchema(taskIdSchema),
@@ -677,7 +697,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "task_pr_ready",
-    { description: PR_READY_DESCRIPTION, inputSchema: publishedSchema(taskIdSchema) },
+    {
+      ...toolConfig("task_pr_ready"),
+      description: PR_READY_DESCRIPTION,
+      inputSchema: publishedSchema(taskIdSchema),
+    },
     async (args) =>
       runTool(env, "task_pr_ready", async (principal, userDo) => {
         const typed = parseToolInput(taskIdSchema, args);
@@ -689,7 +713,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "task_pr_merge",
-    { description: PR_MERGE_DESCRIPTION, inputSchema: publishedSchema(prMergeSchema) },
+    {
+      ...toolConfig("task_pr_merge"),
+      description: PR_MERGE_DESCRIPTION,
+      inputSchema: publishedSchema(prMergeSchema),
+    },
     async (args) =>
       runTool(env, "task_pr_merge", async (principal, userDo) => {
         const typed = parseToolInput(prMergeSchema, args);
@@ -701,7 +729,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "task_answer",
-    { description: ANSWER_DESCRIPTION, inputSchema: publishedSchema(answerSchema) },
+    {
+      ...toolConfig("task_answer"),
+      description: ANSWER_DESCRIPTION,
+      inputSchema: publishedSchema(answerSchema),
+    },
     async (args) =>
       runTool(env, "task_answer", async (principal, userDo) => {
         const typed = parseToolInput(answerSchema, args);
@@ -713,7 +745,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "task_steer",
-    { description: STEER_DESCRIPTION, inputSchema: publishedSchema(steerSchema) },
+    {
+      ...toolConfig("task_steer"),
+      description: STEER_DESCRIPTION,
+      inputSchema: publishedSchema(steerSchema),
+    },
     async (args) =>
       runTool(env, "task_steer", async (principal, userDo) => {
         const typed = parseToolInput(steerSchema, args);
@@ -725,7 +761,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "web_search",
-    { description: WEB_SEARCH_DESCRIPTION, inputSchema: publishedSchema(webSearchSchema) },
+    {
+      ...toolConfig("web_search"),
+      description: WEB_SEARCH_DESCRIPTION,
+      inputSchema: publishedSchema(webSearchSchema),
+    },
     async (args) =>
       runTool(env, "web_search", async (principal, userDo) => {
         const typed = parseToolInput(webSearchSchema, args);
@@ -744,7 +784,11 @@ export function createRovoServer(env: Env): McpServer {
 
   server.registerTool(
     "web_fetch",
-    { description: WEB_FETCH_DESCRIPTION, inputSchema: publishedSchema(webFetchSchema) },
+    {
+      ...toolConfig("web_fetch"),
+      description: WEB_FETCH_DESCRIPTION,
+      inputSchema: publishedSchema(webFetchSchema),
+    },
     async (args) =>
       runTool(env, "web_fetch", async (principal, userDo) => {
         const typed = parseToolInput(webFetchSchema, args);
@@ -769,7 +813,11 @@ export function createRovoServer(env: Env): McpServer {
   if (isWebBrowseEnabled(env)) {
     server.registerTool(
       "web_browse",
-      { description: WEB_BROWSE_DESCRIPTION, inputSchema: publishedSchema(webBrowseSchema) },
+      {
+        ...toolConfig("web_browse"),
+        description: WEB_BROWSE_DESCRIPTION,
+        inputSchema: publishedSchema(webBrowseSchema),
+      },
       async (args) =>
         runTool(env, "web_browse", async (principal, userDo) => {
           const typed = parseToolInput(webBrowseSchema, args);

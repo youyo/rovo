@@ -43,15 +43,30 @@ describe("MarkSymbol（レール・見出し・凡例で共通の状態の印）
     }
   });
 
-  it("形（図形の並び）が全ての状態で互いに違う。色を取り除いても区別できる", () => {
-    const shapes = KINDS.map((k) => geometry(symbol(k)));
-    expect(new Set(shapes).size).toBe(KINDS.length);
+  it("形（図形の並び）は MarkShape ごとに 1 つ。同じ形の状態は同じ図形、違う形の状態は違う図形（色を取り除いても区別できる）", () => {
+    const byShape = new Map<string, Set<string>>();
+    for (const k of KINDS) {
+      const set = byShape.get(MARKS[k].shape) ?? new Set<string>();
+      set.add(geometry(symbol(k)));
+      byShape.set(MARKS[k].shape, set);
+    }
+    for (const [shape, set] of byShape) expect(set.size, shape).toBe(1);
+    const all = [...byShape.values()].map((set) => [...set][0]);
+    expect(new Set(all).size).toBe(byShape.size);
+    expect(byShape.size).toBe(7);
   });
 
-  it("同じ色の状態どうしでも、形が違う（実行中 / マージ済み / レビュー待ち）", () => {
-    const blue = KINDS.filter((k) => MARKS[k].tone === "blue");
-    expect(blue.length).toBeGreaterThanOrEqual(3);
-    expect(new Set(blue.map((k) => geometry(symbol(k)))).size).toBe(blue.length);
+  it("成功は塗りの丸に ✓、失敗は丸に ✕、レビュー待ちは丸に ●、閉じたは丸に –、準備中は点線の輪、実行中は輪", () => {
+    const shape = (k: MarkKind) => symbol(k);
+    expect(shape("merged").querySelector("circle.mark-fill")).not.toBeNull();
+    expect(shape("merged").querySelector("path.mark-glyph")).not.toBeNull(); // ✓
+    expect(shape("failed").querySelector("circle.mark-fill")).not.toBeNull();
+    expect(shape("failed").querySelector("path.mark-glyph")?.getAttribute("d")).toMatch(/M.*M/); // ✕ は 2 本
+    expect(shape("review").querySelector("circle.mark-glyph")).not.toBeNull(); // ●
+    expect(shape("closed").querySelector("path.mark-glyph")).not.toBeNull(); // –
+    expect(shape("preparing").querySelector("circle.mark-ring--dotted")).not.toBeNull();
+    expect(shape("preparing").querySelector("circle.mark-fill")).toBeNull();
+    expect(shape("running").querySelector("circle.mark-ring--arc")).not.toBeNull();
   });
 
   it("ラベル付き: role=img と aria-label と <title>（マウスを乗せると状態の名前が出る）に label", () => {
@@ -74,11 +89,12 @@ describe("MarkSymbol（レール・見出し・凡例で共通の状態の印）
     }
   });
 
-  it("色は tone のクラスで決まる（色の直書きをしない）。動いている状態だけ pulse", () => {
+  it("色は tone のクラスで決まる（色の直書きをしない）。動いている状態だけ spin（回る。reduced-motion では止めて破線）", () => {
     for (const k of KINDS) {
       const svg = symbol(k);
       expect(svg.classList.contains(`mark-sym--${MARKS[k].tone}`), k).toBe(true);
-      expect(svg.classList.contains("pulse"), k).toBe(MARKS[k].live);
+      expect(svg.classList.contains("spin"), k).toBe(MARKS[k].live);
+      expect(svg.classList.contains("pulse"), k).toBe(false);
       expect(svg.outerHTML, k).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgb\(|style=/);
     }
   });

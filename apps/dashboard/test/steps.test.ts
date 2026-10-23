@@ -7,7 +7,16 @@ import {
 } from "@rovo/dashboard-contract";
 import { overviewFixture, taskEventsFixture } from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it } from "vitest";
-import { buildSteps, describeEvent, mergeEvents, nowSentence, phaseBand } from "../src/steps";
+import {
+  buildSteps,
+  describeEvent,
+  mergeEvents,
+  nowSentence,
+  type PhaseTiming,
+  phaseBand,
+  phaseTimings,
+  stepTimings,
+} from "../src/steps";
 
 type Phase = TaskDetailDto["phase"];
 type Now = TaskDetailDto["now"];
@@ -895,5 +904,151 @@ describe("nowSentence（「いまは X を実行しています」）", () => {
   });
   it("target は制御文字を除いた 1 行", () => {
     expect(sentence(now("command", "a\nb‮"), "RUNNING").target).toBe("a b");
+  });
+});
+
+describe("stepTimings（ステップの所要 = 次のステップの時刻との差。実行中の行は今までの経過）", () => {
+  const T = (iso: string) => Date.parse(iso);
+  const evAt = (seq: number, atIso: string, rest: Record<string, unknown> = {}) =>
+    ({ seq, at: atIso, type: "web", kind: "search", ...rest }) as unknown as TaskEventDto;
+
+  it("各ステップの所要は、次のステップの時刻との差", () => {
+    const steps = buildSteps(
+      [
+        evAt(1, "2026-10-21T05:50:00Z"),
+        evAt(2, "2026-10-21T05:50:12Z"),
+        evAt(3, "2026-10-21T05:53:12Z"),
+      ],
+      false,
+    );
+    expect(stepTimings(steps, T("2026-10-21T06:00:00Z"))).toEqual([
+      { ms: 12_000, open: false },
+      { ms: 180_000, open: false },
+      undefined, // 終端の最後のステップは、次が無いので所要を作らない
+    ]);
+  });
+
+  it("実行中（いま）の行は、更新時刻までの経過。open: true（画面は「6 秒…」）", () => {
+    const steps = buildSteps(
+      [evAt(1, "2026-10-21T05:50:00Z"), evAt(2, "2026-10-21T05:50:10Z")],
+      true,
+    );
+    expect(stepTimings(steps, T("2026-10-21T05:50:16Z"))).toEqual([
+      { ms: 10_000, open: false },
+      { ms: 6_000, open: true },
+    ]);
+  });
+
+  it("usage など進み具合に出ないイベントを挟んでも、出る行どうしの差", () => {
+    const steps = buildSteps(
+      [evAt(1, "2026-10-21T05:50:00Z"), usage(2), evAt(3, "2026-10-21T05:50:30Z")],
+      false,
+    );
+    expect(stepTimings(steps, 0)[0]).toEqual({ ms: 30_000, open: false });
+  });
+
+  it("更新時刻が読めない（NaN）なら、実行中の行の所要は作らない。負の差は 0", () => {
+    const steps = buildSteps(
+      [evAt(1, "2026-10-21T05:50:10Z"), evAt(2, "2026-10-21T05:50:00Z")],
+      true,
+    );
+    const t = stepTimings(steps, Number.NaN);
+    expect(t[0]).toEqual({ ms: 0, open: false });
+    expect(t[1]).toBeUndefined();
+  });
+
+  it("空なら空", () => {
+    expect(stepTimings([], 0)).toEqual([]);
+  });
+});
+
+describe("phaseTimings（段階の所要 = status_changed の時刻から。データに無いものは作らない）", () => {
+  const sc = (seq: number, atIso: string, to: TaskStatusDto) =>
+    ({ seq, at: atIso, type: "status_changed", to }) as unknown as TaskEventDto;
+  const T = (iso: string) => Date.parse(iso);
+  const GEN = T("2026-10-21T06:00:00Z");
+  const band = (
+    status: TaskStatusDto,
+    phase: Phase = "run",
+    stopped?: "prepare" | "run" | "verify",
+  ) => phaseBand(task({ status }), phase, new Set(), stopped);
+  const done = (ms: number): PhaseTiming => ({ ms, open: false });
+
+  it("完了したタスク: 準備 = CREATING → RUNNING、実行 = RUNNING → VERIFYING、検証 = VERIFYING → COMPLETED。完了段階には所要が無い", () => {
+    const events = [
+      sc(1, "2026-10-21T05:00:00Z", "CREATING"),
+      sc(2, "2026-10-21T05:00:38Z", "RUNNING"),
+      sc(3, "2026-10-21T05:04:12Z", "VERIFYING"),
+      sc(4, "2026-10-21T05:05:00Z", "COMPLETED"),
+    ];
+    expect(phaseTimings(events, band("COMPLETED", "done"), GEN)).toEqual({
+      prepare: done(38_000),
+      run: done(214_000),
+      verify: done(48_000),
+    });
+  });
+
+  it("実行中のタスク: 実行は更新時刻までの経過で open。まだ入っていない検証には所要が無い", () => {
+    const events = [
+      sc(1, "2026-10-21T05:58:00Z", "CREATING"),
+      sc(2, "2026-10-21T05:58:30Z", "RUNNING"),
+    ];
+    expect(phaseTimings(events, band("RUNNING"), GEN)).toEqual({
+      prepare: done(30_000),
+      run: { ms: 90_000, open: true },
+    });
+  });
+
+  it("入力待ち・復旧中も、実行の段階が open（同じ段階の中の状態の出入りで分割しない）", () => {
+    const events = [
+      sc(1, "2026-10-21T05:58:00Z", "CREATING"),
+      sc(2, "2026-10-21T05:58:30Z", "RUNNING"),
+      sc(3, "2026-10-21T05:59:00Z", "INPUT_REQUIRED"),
+    ];
+    expect(phaseTimings(events, band("INPUT_REQUIRED"), GEN).run).toEqual({
+      ms: 90_000,
+      open: true,
+    });
+    expect(phaseTimings(events, band("RECOVERING"), GEN).run?.open).toBe(true);
+  });
+
+  it("実行で失敗: 実行 = RUNNING → FAILED。検証は入っていないので無い", () => {
+    const events = [
+      sc(1, "2026-10-21T05:00:00Z", "CREATING"),
+      sc(2, "2026-10-21T05:00:10Z", "RUNNING"),
+      sc(3, "2026-10-21T05:02:10Z", "FAILED"),
+    ];
+    expect(phaseTimings(events, band("FAILED", "done", "run"), GEN)).toEqual({
+      prepare: done(10_000),
+      run: done(120_000),
+    });
+  });
+
+  it("準備で失敗: 準備 = CREATING → FAILED。実行は入っていないので無い", () => {
+    const events = [
+      sc(1, "2026-10-21T05:00:00Z", "CREATING"),
+      sc(2, "2026-10-21T05:00:20Z", "FAILED"),
+    ];
+    expect(phaseTimings(events, band("FAILED", "prepare", "prepare"), GEN)).toEqual({
+      prepare: done(20_000),
+    });
+  });
+
+  it("始まりの status_changed が無い段階（古い履歴を読んでいない・旧い記録）には所要を作らない", () => {
+    const events = [sc(2, "2026-10-21T05:58:30Z", "RUNNING")];
+    expect(phaseTimings(events, band("RUNNING"), GEN)).toEqual({
+      run: { ms: 90_000, open: true },
+    });
+    expect(phaseTimings([], band("RUNNING"), GEN)).toEqual({});
+  });
+
+  it("終端で、終わりの記録（次の段階も終端も）が無い段階には所要を作らない", () => {
+    const events = [sc(1, "2026-10-21T05:00:00Z", "CREATING")];
+    expect(phaseTimings(events, band("FAILED", "done", "prepare"), GEN)).toEqual({});
+  });
+
+  it("更新時刻が読めない（NaN）なら、open の段階の所要は作らない", () => {
+    const events = [sc(1, "2026-10-21T05:58:00Z", "CREATING")];
+    expect(phaseTimings(events, band("CREATING", "prepare"), Number.NaN)).toEqual({});
   });
 });

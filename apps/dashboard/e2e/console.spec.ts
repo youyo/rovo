@@ -3,14 +3,20 @@ import { emit } from "./api";
 import { expect, loginAs, openDrawer, rail, taskPath, test } from "./fixtures";
 import { LONG_STEPS, readState } from "./state";
 
-// 「B 制御卓」の骨格と、コンソールの流れ（実ブラウザ）。
+// GitHub Actions 型の骨格と、コンソールの流れ（実ブラウザ）。
 const s = readState();
 const id = (k: string) => s.tasks[k] as string;
 
 const box = async (page: Page, selector: string) => {
-  const b = await page.locator(selector).first().boundingBox();
-  if (!b) throw new Error(`${selector} の位置が取れない`);
-  return b;
+  // 描き終えてから測る。再描画で要素が差し替わる一瞬を挟んでも、位置が取れるまで測り直す
+  const loc = page.locator(selector).first();
+  await loc.waitFor({ state: "visible" });
+  let b: Awaited<ReturnType<typeof loc.boundingBox>> = null;
+  await expect(async () => {
+    b = await loc.boundingBox();
+    expect(b, `${selector} の位置が取れない`).not.toBeNull();
+  }).toPass({ timeout: 10_000 });
+  return b as unknown as { x: number; y: number; width: number; height: number };
 };
 
 /** 台本のイベントの取り込みは非同期なので、手順が揃うまで開き直す */
@@ -44,7 +50,8 @@ test("(12) 一覧の骨格: ヘッダ → 細いタイムライン帯 → レー
   const header = await box(page, "header.top");
   const band = await box(page, ".tlband");
   const railBox = await box(page, "nav.rail");
-  const consoleBox = await box(page, ".console");
+  // コンソールの領域（.console-col）。中身が高いときはこの領域の中でスクロールする
+  const consoleBox = await box(page, ".console-col");
   const bar = await box(page, ".statusbar");
 
   // 縦の並び
@@ -95,17 +102,28 @@ test("(13) ステータスバーに今月の自分・全員・モデル別・Clo
   await expect(drawer).toBeHidden();
 });
 
-test("(14) レールの選択: 選んだ行の左にアクセント線。行を押すとそのタスクのコンソールになり、見出しにリポジトリ・モデル・費用・PR が出る", async ({
+test("(14) レールの選択: 選んだ行の左に青い線。行を押すとそのタスクのコンソールになり、見出しにリポジトリ・モデル・費用・PR が出る", async ({
   page,
 }) => {
   await loginAs(page, s.users.alice, taskPath(id("done")));
   const selected = rail(page, id("done"));
   const other = rail(page, id("failed"));
   await expect(selected).toHaveAttribute("aria-current", "true");
-  const shadow = (loc: typeof selected) => loc.evaluate((el) => getComputedStyle(el).boxShadow);
-  expect(await shadow(selected)).toMatch(/3px/);
-  expect(await shadow(other)).toBe("none");
-  // 行にはツールチップ（title）を付けない。リポジトリ・モデル・費用はコンソールの見出しに出る
+  const border = (loc: typeof selected) =>
+    loc.evaluate((el) => {
+      const c = getComputedStyle(el);
+      return { width: c.borderLeftWidth, color: c.borderLeftColor };
+    });
+  const wait = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--wait").trim(),
+  );
+  const toRgb = (hex: string) => {
+    const n = Number.parseInt(hex.replace("#", ""), 16);
+    return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+  };
+  expect(await border(selected)).toEqual({ width: "3px", color: toRgb(wait) });
+  expect((await border(other)).color).not.toBe(toRgb(wait));
+  // 行にはツールチップ（title）を付けない。印の <title> と、モデル名の title だけが持つ
   await expect(selected).not.toHaveAttribute("title", /.+/);
   const head = page.locator(".con-head");
   await expect(head).toContainText("acme/widgets");
@@ -119,7 +137,7 @@ test("(14) レールの選択: 選んだ行の左にアクセント線。行を�
   await expect(rail(page, id("failed"))).toHaveAttribute("aria-current", "true");
 });
 
-test("(15) ダーク・ライトの配色: prefers-color-scheme で paper / indigo のトークンに切り替わる", async ({
+test("(15) ダーク・ライトの配色: prefers-color-scheme で GitHub のライト / ダークのトークンに切り替わる", async ({
   page,
 }) => {
   const colors = () =>
@@ -129,57 +147,68 @@ test("(15) ダーク・ライトの配色: prefers-color-scheme で paper / indi
         const c = getComputedStyle(el);
         return { bg: c.backgroundColor, fg: c.color };
       };
-      return { body: cs("body"), screen: cs(".screen"), bar: cs(".statusbar") };
+      return {
+        body: cs("body"),
+        screen: cs(".screen"),
+        logbox: cs(".logbox"),
+        bar: cs(".statusbar"),
+      };
     });
 
   await page.emulateMedia({ colorScheme: "light" });
   await loginAs(page, s.users.alice, taskPath(id("done")));
   await expect(page.locator(".screen")).toBeVisible();
   const light = await colors();
-  expect(light.body.bg).toBe("rgb(227, 230, 233)");
-  expect(light.body.fg).toBe("rgb(30, 41, 50)");
-  expect(light.screen.bg).toBe("rgb(246, 247, 248)");
-  expect(light.bar.bg).toBe("rgb(30, 41, 50)");
+  expect(light.body.bg).toBe("rgb(246, 248, 250)");
+  expect(light.body.fg).toBe("rgb(31, 35, 40)");
+  // ログの箱はライトでも暗い面
+  expect(light.logbox.bg).toBe("rgb(13, 17, 23)");
+  expect(light.bar.bg).toBe("rgb(255, 255, 255)");
 
   await page.emulateMedia({ colorScheme: "dark" });
   const dark = await colors();
-  expect(dark.body.bg).toBe("rgb(27, 34, 56)");
-  expect(dark.body.fg).toBe("rgb(220, 228, 238)");
-  expect(dark.screen.bg).toBe("rgb(20, 26, 44)");
-  expect(dark.bar.bg).toBe("rgb(46, 58, 97)");
-  // 失敗の色もトークン（ライト #B83A1E / ダーク #FF8E72）
+  expect(dark.body.bg).toBe("rgb(13, 17, 23)");
+  expect(dark.body.fg).toBe("rgb(230, 237, 243)");
+  expect(dark.logbox.bg).toBe("rgb(1, 4, 9)");
+  expect(dark.bar.bg).toBe("rgb(22, 27, 34)");
+  // 失敗の色もトークン（ライト #CF222E / ダーク #FF7B72）
   await page.goto(taskPath(id("failed")));
   await expect(page.locator(".band-item--stopped")).toBeVisible();
   const stopped = () =>
-    page.locator(".band-item--stopped").evaluate((el) => getComputedStyle(el).color);
-  expect(await stopped()).toBe("rgb(255, 142, 114)");
+    page.locator(".band-item--stopped .job small").evaluate((el) => getComputedStyle(el).color);
+  expect(await stopped()).toBe("rgb(255, 123, 114)");
   await page.emulateMedia({ colorScheme: "light" });
-  expect(await stopped()).toBe("rgb(184, 58, 30)");
+  expect(await stopped()).toBe("rgb(207, 34, 46)");
 });
 
-test("(16) 段階の帯: 到達した段階はアクセント、止まった段階 stopped_phase は失敗色", async ({
+test("(16) 段階の図: 済んだ区間の線は緑、止まった段階（stopped_phase）の箱は失敗色", async ({
   page,
 }) => {
   await loginAs(page, s.users.alice, taskPath(id("failed")));
   const stopped = page.locator("[data-band] li[data-state='stopped']");
   await expect(stopped).toHaveCount(1);
-  const bar = (loc: ReturnType<Page["locator"]>) =>
-    loc.locator(".band-bar").evaluate((el) => getComputedStyle(el).backgroundColor);
-  const accent = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
-  );
-  const fail = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue("--fail").trim(),
-  );
-  expect(accent).not.toBe(fail);
-  // 止まった段階だけ失敗色の線（色の値はトークンから）
+  const token = (name: string) =>
+    page.evaluate(
+      (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(),
+      name,
+    );
   const toRgb = (hex: string) => {
     const n = Number.parseInt(hex.replace("#", ""), 16);
     return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
   };
-  expect(await bar(stopped)).toBe(toRgb(fail));
-  const done = page.locator("[data-band] li[data-state='done']").first();
-  if ((await done.count()) > 0) expect(await bar(done)).toBe(toRgb(accent));
+  expect(await token("--ok")).not.toBe(await token("--fail"));
+  // 止まった段階の箱だけ失敗色の枠
+  expect(await stopped.locator(".job").evaluate((el) => getComputedStyle(el).borderTopColor)).toBe(
+    toRgb(await token("--fail")),
+  );
+  // 済んだ段階の次の線は緑（箱を結ぶ線）
+  const doneEdge = page.locator("[data-band] .band-edge.done").first();
+  if ((await doneEdge.count()) > 0)
+    expect(await doneEdge.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(
+      toRgb(await token("--ok")),
+    );
+  // 形でも区別できる: 済み=✓、止まった=✕、これから=点線の輪
+  await expect(stopped.locator("svg.mark-sym")).toHaveAttribute("data-shape", "cross");
 });
 
 test("(17) 実行中のコマンド: 経過時間と点滅カーソル。prefers-reduced-motion では点滅しない", async ({
@@ -325,3 +354,29 @@ for (const [name, path] of [
     expect(drawer.x + drawer.width).toBeLessThanOrEqual(390 + 1);
   });
 }
+
+test("(26) ステップの行: 印と所要。開ける行（中身がある行）だけに ▸。段階の各箱に印", async ({
+  page,
+}) => {
+  await openLong(page);
+  const rows = page.locator("ol.steps > li.step");
+  const n = await rows.count();
+  for (let i = 0; i < n; i++) {
+    const row = rows.nth(i);
+    await expect(row.locator("svg.mark-sym").first()).toBeVisible();
+    const hasDetails = (await row.locator("details").count()) > 0;
+    // ▸ は、開ける行（details）にだけある
+    expect(await row.locator(".step-car").count()).toBe(hasDetails ? 1 : 0);
+  }
+  // 最後の行を除き、所要がある（次の行との差）
+  const durs = await rows.locator(".step-dur:not(.step-dur--none)").count();
+  expect(durs).toBeGreaterThanOrEqual(n - 1);
+  // 段階の図: 4 つの箱が線でつながり、各箱に印がある
+  await expect(page.locator("[data-band] li .job svg.mark-sym")).toHaveCount(4);
+  await expect(page.locator("[data-band] .band-edge")).toHaveCount(3);
+  // 「設定と費用の内訳」は、ログの箱の見出しの右。開くと中身が見える
+  const more = page.locator(".logbox .loghd details.con-more");
+  await more.locator("summary").click();
+  await expect(more).toContainText("モデル");
+  await expect(more).toContainText("思考");
+});

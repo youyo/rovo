@@ -76,15 +76,15 @@ const text = (e: Element | null) => e?.textContent ?? "";
 const paths = (f: ReturnType<typeof vi.fn>) =>
   f.mock.calls.map((c) => new URL(String(c[0]), "http://localhost").pathname);
 
-describe("既定の表示は「自分」", () => {
-  it("scope の初期値は me。「自分」が押された状態で、overview も scope=me で取る", async () => {
+describe("既定の表示は「マイタスク」", () => {
+  it("scope の初期値は me。「マイタスク」が押された状態で、overview も scope=me で取る", async () => {
     const { c, f } = await mount("/dashboard/");
     const pressed = (label: string) =>
       [...c.querySelectorAll("fieldset.seg button")]
         .find((b) => b.textContent === label)
         ?.getAttribute("aria-pressed");
-    expect(pressed("自分")).toBe("true");
-    expect(pressed("全員")).toBe("false");
+    expect(pressed("マイタスク")).toBe("true");
+    expect(pressed("チーム")).toBe("false");
     const u = f.mock.calls
       .map((x) => new URL(String(x[0]), "http://localhost"))
       .find((x) => x.pathname === "/dashboard/api/overview");

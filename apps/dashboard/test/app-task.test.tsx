@@ -88,7 +88,9 @@ describe("App のルーティング（個別ページは無い。/dashboard/task
     expect(c.querySelector("a.rail-row[aria-current='true']")?.getAttribute("data-task-id")).toBe(
       ID,
     );
-    expect(c.querySelector("fieldset[aria-label='表示するタスク']")).not.toBeNull();
+    expect(
+      c.querySelector("fieldset[aria-label='表示範囲（チーム / マイタスク）']"),
+    ).not.toBeNull();
     expect(dayBtn(c, "前の日")).not.toBeNull();
     expect([...c.querySelectorAll("a")].some((a) => a.textContent === "詳細を開く")).toBe(false);
     expect(c.querySelector("header a[href='/dashboard/']")).toBeNull();

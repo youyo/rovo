@@ -95,17 +95,24 @@ test("(5) 自動更新を切ると取りに行かない。今すぐ更新では�
   }).toPass({ timeout: 30_000 });
 });
 
-test("(8) prefers-reduced-motion では脈動しない（通常は脈動する）", async ({ page }) => {
-  const pulse = page.locator(".console .state-name .pulse");
+test("(8) prefers-reduced-motion では実行中の輪が回らない（通常は回る。止めたときは破線の輪）", async ({
+  page,
+}) => {
+  const pulse = page.locator(".console .state-name .spin");
   const animation = () => pulse.evaluate((el) => getComputedStyle(el).animationName);
+  const dash = () =>
+    pulse.locator(".mark-ring--arc").evaluate((el) => getComputedStyle(el).strokeDasharray);
 
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await loginAs(page, s.users.alice, taskPath(id("running")));
   await expect(pulse).toBeVisible();
-  expect(await animation()).toBe("rovo-beat");
+  expect(await animation()).toBe("rovo-spin");
+  const arc = await dash();
 
   await page.emulateMedia({ reducedMotion: "reduce" });
   expect(await animation()).toBe("none");
+  // 止めた輪は破線の輪（4 分の 3 の弧とは別の形）
+  expect(await dash()).not.toBe(arc);
   // 開き直しても同じ
   await page.reload();
   await expect(pulse).toBeVisible();

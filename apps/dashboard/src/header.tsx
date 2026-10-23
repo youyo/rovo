@@ -3,14 +3,15 @@ import type { Scope } from "./api";
 import type { DayKey } from "./day";
 import type { DaySummary } from "./rail";
 
+/** 表示範囲の切り替え。並びは「マイタスク」が先。API の scope の値（me / all）は変えない */
 const SCOPES: { value: Scope; label: string }[] = [
-  { value: "all", label: "全員" },
-  { value: "me", label: "自分" },
+  { value: "me", label: "マイタスク" },
+  { value: "all", label: "チーム" },
 ];
 
-/** ヘッダ: rovo・全員/自分・その日の要約・利用者名・ログアウト。 */
+/** ヘッダ: Rovo・マイタスク/チーム・その日の要約・利用者名・ログアウト。 */
 export function Header(props: {
-  /** ログイン済みのときだけ全員/自分を出す */
+  /** ログイン済みのときだけマイタスク/チームを出す */
   scope?: Scope;
   onScopeChange?: (scope: Scope) => void;
   summary: DaySummary | null;
@@ -30,9 +31,18 @@ export function Header(props: {
   ) : null;
   return (
     <header className="top">
-      <div className="brand">rovo</div>
+      <div className="brand">
+        <img
+          className="brand-mark"
+          src="/dashboard/assets/brand/rovo-mark.svg"
+          alt=""
+          width={24}
+          height={24}
+        />
+        Rovo
+      </div>
       {props.scope !== undefined && props.onScopeChange ? (
-        <fieldset className="seg" aria-label="表示するタスク">
+        <fieldset className="seg" aria-label="表示範囲（チーム / マイタスク）">
           {SCOPES.map((s) => (
             <button
               key={s.value}

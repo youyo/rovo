@@ -103,3 +103,10 @@ export function shortModel(id: string): { name: string; full: string } {
   const name = full.slice(full.lastIndexOf("/") + 1);
   return { name: name === "" ? full : name, full };
 }
+
+/** 狭い場所（レール・ステータスバー）のモデル名。sonnet / haiku / opus はその系統名に縮め、ほかは shortModel の名前。 */
+export function modelFamily(id: string): string {
+  const name = shortModel(id).name;
+  const m = /(sonnet|haiku|opus)/i.exec(name);
+  return m?.[1] !== undefined ? m[1].toLowerCase() : name;
+}

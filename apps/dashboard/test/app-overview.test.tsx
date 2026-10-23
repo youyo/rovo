@@ -97,21 +97,21 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
     ]);
   });
 
-  it("最初は「自分」。「全員」にすると scope=all で取り直し、他の人のレーンも出る。「自分」で戻る", async () => {
+  it("最初は「マイタスク」。「チーム」にすると scope=all で取り直し、他の人のレーンも出る。「マイタスク」で戻る", async () => {
     const f = router(scoped);
     const c = await mount(f);
     const btn = (label: string) =>
       [...c.querySelectorAll("button")].find((b) => b.textContent === label) as HTMLButtonElement;
-    expect(btn("自分").getAttribute("aria-pressed")).toBe("true");
+    expect(btn("マイタスク").getAttribute("aria-pressed")).toBe("true");
     expect(lanesOf(c)).toEqual(["alice-example"]);
     await act(async () => {
-      btn("全員").click();
+      btn("チーム").click();
     });
-    expect(btn("全員").getAttribute("aria-pressed")).toBe("true");
+    expect(btn("チーム").getAttribute("aria-pressed")).toBe("true");
     expect(overviewCalls(f).at(-1)?.searchParams.get("scope")).toBe("all");
     expect(lanesOf(c)).toHaveLength(3);
     await act(async () => {
-      btn("自分").click();
+      btn("マイタスク").click();
     });
     expect(lanesOf(c)).toEqual(["alice-example"]);
   });
@@ -122,7 +122,7 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
     );
     const c = await mount(f);
     expect(lanesOf(c)).toEqual(["alice-example"]);
-    const all = [...c.querySelectorAll("button")].find((b) => b.textContent === "全員");
+    const all = [...c.querySelectorAll("button")].find((b) => b.textContent === "チーム");
     await act(async () => {
       all?.click();
     });
@@ -193,7 +193,7 @@ describe("App: 日付の前後送り", () => {
     history.replaceState(null, "", "/dashboard/");
     const f = router(byScope);
     const c = await mount(f);
-    const all = [...c.querySelectorAll("button")].find((b) => b.textContent === "全員");
+    const all = [...c.querySelectorAll("button")].find((b) => b.textContent === "チーム");
     await act(async () => {
       all?.click();
     });

@@ -25,25 +25,35 @@ test("(1) 偽 GitHub でログインすると一覧が出る（127.0.0.1 の __H
   await expect(page.locator('[data-budget="month"]')).toBeVisible();
 });
 
-test("(2) 全員 / 自分の切り替え: 最初は「自分」で他人のタスクが無く、「全員」にすると出る", async ({
+test("(2) チーム / マイタスクの切り替え: 最初は「マイタスク」で他人のタスクが無く、「チーム」にすると出る", async ({
   page,
 }) => {
   await loginAs(page, s.users.bob);
   const bobRow = rail(page, s.tasks.bob as string);
   const aliceRow = rail(page, s.tasks.done as string);
-  const all = page.getByRole("button", { name: "全員" });
-  const me = page.getByRole("button", { name: "自分" });
-  // 既定は「自分」
+  const all = page.getByRole("button", { name: "チーム" });
+  const me = page.getByRole("button", { name: "マイタスク" });
+  // 既定は「マイタスク」
   await expect(me).toHaveAttribute("aria-pressed", "true");
   await expect(all).toHaveAttribute("aria-pressed", "false");
   await expect(bobRow).toBeVisible();
   await expect(aliceRow).toHaveCount(0);
+
+  // マイタスクでは依頼者を出さない。並びは「マイタスク」が先
+  await expect(page.locator(".rail-owner")).toHaveCount(0);
+  expect(await page.locator("fieldset.seg button").allTextContents()).toEqual([
+    "マイタスク",
+    "チーム",
+  ]);
 
   await all.click();
   await expect(all).toHaveAttribute("aria-pressed", "true");
   await expect(me).toHaveAttribute("aria-pressed", "false");
   await expect(aliceRow).toBeVisible();
   await expect(bobRow).toBeVisible();
+  // チーム表示のときだけ、行に依頼者（頭文字の丸と login）
+  await expect(aliceRow.locator(".rail-owner .rail-avatar")).toBeVisible();
+  await expect(aliceRow.locator(".rail-owner .rail-login")).not.toHaveText("");
 
   await me.click();
   await expect(aliceRow).toHaveCount(0);

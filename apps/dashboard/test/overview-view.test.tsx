@@ -50,6 +50,19 @@ const lanesOf = (c: HTMLElement) =>
   [...c.querySelectorAll("[data-lane]")].map((e) => e.getAttribute("data-lane"));
 
 describe("OverviewView（骨格: 細いタイムライン帯・レール・コンソール・ステータスバー）", () => {
+  it("レールの行: チーム表示（scope=all）のときだけ依頼者を出す。マイタスク（scope=me）では出さない", () => {
+    const team = mount(overviewFixture);
+    expect(team.querySelectorAll("a.rail-row .rail-owner")).toHaveLength(
+      overviewFixture.tasks.length,
+    );
+    document.body.innerHTML = "";
+    const mine = mount(overviewMeFixture);
+    expect(mine.querySelector(".rail-owner")).toBeNull();
+    expect(mine.querySelectorAll("a.rail-row .rail-meta")).toHaveLength(
+      overviewMeFixture.tasks.length,
+    );
+  });
+
   it("構成: 帯 → レール + コンソール → ステータスバー の順", () => {
     const c = mount(overviewFixture);
     const band = c.querySelector(".tlband") as HTMLElement;

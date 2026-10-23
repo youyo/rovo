@@ -12,11 +12,18 @@ describe("ソースの禁止事項（D14）", () => {
     expect(files.length).toBeGreaterThan(5);
   });
 
-  it("dangerouslySetInnerHTML・innerHTML への代入・<img・eval を使わない", () => {
+  it("dangerouslySetInnerHTML・innerHTML への代入・<img・eval を使わない（<img は header.tsx のロゴ 1 つだけ。同梱の固定の SVG）", () => {
     for (const { name, text } of files) {
       expect(text, name).not.toMatch(/dangerouslySetInnerHTML/);
       expect(text, name).not.toMatch(/\.(inner|outer)HTML\s*=/);
-      expect(text, name).not.toMatch(/<img[\s>/]/);
+      if (name === "header.tsx") {
+        // 子エージェント由来の値が入らないよう、src は同梱の SVG の固定の文字列だけ
+        const imgs = [...text.matchAll(/<img\b[^>]*>/g)].map((m) => m[0]);
+        expect(imgs).toHaveLength(1);
+        expect(imgs[0]).toMatch(/src="\/dashboard\/assets\/brand\/rovo-mark\.svg"/);
+      } else {
+        expect(text, name).not.toMatch(/<img[\s>/]/);
+      }
       expect(text, name).not.toMatch(/\beval\s*\(|new Function\s*\(/);
     }
   });

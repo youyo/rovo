@@ -1,40 +1,58 @@
 /*
- * ダッシュボードの見た目（見本 Console.dc.html「B 制御卓」）。インライン style は使わない（CSP の style-src 'self'）。
- * 色はこの :root のトークンだけに置く（ライト = paper、ダーク = indigo。prefers-color-scheme で切り替える）。
+ * ダッシュボードの見た目（GitHub Actions 型。run の一覧 → job の図 → ステップのログ）。インライン style は使わない（CSP の style-src 'self'）。
+ * 色はこの :root のトークンだけに置く（ライト = 白と薄い灰、ダーク = GitHub のダーク。prefers-color-scheme で切り替える）。
  * コンポーネントの CSS にも TSX にも色の値を直書きしない（test/theme.test.ts が見張る）。外部ホストは参照しない。
- * 書体は M PLUS 1 Code（実体は main.tsx が @fontsource から同梱する。OFL。dist/assets/licenses/）。
+ * 書体は本文が IBM Plex Sans JP、ログ・コマンド・数字が JetBrains Mono（実体は main.tsx が @fontsource から同梱する。OFL。dist/assets/licenses/）。
  * 文字と地のコントラストは 4.5:1 以上（test/theme.test.ts が全部の組み合わせを計算する）。
  */
 :root {
   color-scheme: light;
 
-  /* 地・文字・線 */
-  --bg: #e3e6e9;
-  --fg: #1e2932;
-  --dim: #4f5b66;
-  --faint: #56626d;
-  --line: #c3cad1;
-  --panel: #eaedef;
-  --sel: #f0f2f4;
-  /* 画面（コンソールの本体）。ライトでは明るい面 */
-  --screen: #f6f7f8;
-  --screen-fg: #1e2932;
-  --prompt: #2d4ba0;
+  /* 地・カード・文字・線 */
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --fg: #1f2328;
+  --dim: #59636e;
+  --line: #d1d9e0;
+  /* 選んだ行 */
+  --sel: #eef3fb;
+  /* ログの箱（ライトでも暗い面） */
+  --screen: #0d1117;
+  --screen-fg: #e6edf3;
+  --prompt: #79c0ff;
+  --log-dim: #8d96a0;
+  --log-line: #21262d;
+  --log-hover: #161b22;
+  --log-head-line: #30363d;
+  --log-ok: #3fb950;
+  --log-bad: #f85149;
+  --log-run: #d29922;
+  --log-info: #79c0ff;
   /* 合図 */
-  --accent: #2d4ba0;
-  --link: #2d4ba0;
-  --mute: #56626d;
-  --fail: #b83a1e;
+  --accent: #0969da;
+  --link: #0969da;
+  --mute: #59636e;
+  --fail: #cf222e;
+  --ok: #1a7f37;
+  --run: #9a6700;
+  --run-ring: #bf8700;
+  --wait: #0969da;
+  --skip: #8c959f;
+  /* 状態の丸（塗り）の中の記号 */
+  --on-mark: #ffffff;
+  /* 「いま」の行（黄色の注意の枠） */
+  --now-bg: #fff8c5;
+  --now-line: #eedcab;
   /* ステータスバー */
-  --bar: #1e2932;
-  --bar2: #33404b;
-  --on-bar: #e3e6e9;
+  --bar: #ffffff;
+  --bar2: #f6f8fa;
+  --on-bar: #1f2328;
 
   /* 文字 */
-  --font: "M PLUS 1 Code", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --font: "IBM Plex Sans JP", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "IBM Plex Sans JP", ui-monospace, "SFMono-Regular", Menlo, monospace;
   --fs-body: 14px;
   --fs-small: 13px;
-  --fs-screen: 13.5px;
 
   font-family: var(--font);
 }
@@ -43,23 +61,38 @@
   :root {
     color-scheme: dark;
 
-    --bg: #1b2238;
-    --fg: #dce4ee;
-    --dim: #97a3bd;
-    --faint: #93a0ba;
-    --line: #353f5e;
-    --panel: #222a44;
-    --sel: #2b3554;
-    --screen: #141a2c;
-    --screen-fg: #d7f0e4;
-    --prompt: #7fd6b5;
-    --accent: #7fd6b5;
-    --link: #9cc3ff;
-    --mute: #93a0ba;
-    --fail: #ff8e72;
-    --bar: #2e3a61;
-    --bar2: #26304f;
-    --on-bar: #dce4ee;
+    --bg: #0d1117;
+    --panel: #161b22;
+    --fg: #e6edf3;
+    --dim: #8d96a0;
+    --line: #30363d;
+    --sel: #172033;
+    --screen: #010409;
+    --screen-fg: #e6edf3;
+    --prompt: #79c0ff;
+    --log-dim: #8d96a0;
+    --log-line: #21262d;
+    --log-hover: #161b22;
+    --log-head-line: #30363d;
+    --log-ok: #3fb950;
+    --log-bad: #ff7b72;
+    --log-run: #d29922;
+    --log-info: #79c0ff;
+    --accent: #58a6ff;
+    --link: #58a6ff;
+    --mute: #8d96a0;
+    --fail: #ff7b72;
+    --ok: #3fb950;
+    --run: #d29922;
+    --run-ring: #d29922;
+    --wait: #58a6ff;
+    --skip: #6e7681;
+    --on-mark: #0d1117;
+    --now-bg: #272115;
+    --now-line: #6b4e0b;
+    --bar: #161b22;
+    --bar2: #0d1117;
+    --on-bar: #e6edf3;
   }
 }
 
@@ -76,8 +109,9 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
+  font-family: var(--font);
   font-size: var(--fs-body);
-  line-height: 1.65;
+  line-height: 1.5;
 }
 
 a {
@@ -139,14 +173,11 @@ fieldset {
   color: var(--dim);
 }
 
-/* 全体 */
+/* 全体: ヘッダ → 細いタイムライン帯 → レール + コンソール → ステータスバー（余白は各部品が持つ） */
 .shell {
-  max-width: 1240px;
-  margin: 0 auto;
-  padding: 20px 28px 32px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  min-width: 0;
 }
 .shell > * {
   min-width: 0;
@@ -157,25 +188,38 @@ fieldset {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 24px;
-  padding-bottom: 14px;
+  gap: 8px 16px;
+  padding: 10px 20px;
+  background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
 .brand {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--fg);
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.brand-mark {
+  display: block;
+  width: 24px;
+  height: 24px;
 }
 .grow {
   flex: 1 1 auto;
 }
 .seg {
   display: flex;
-  gap: 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
 }
 .seg button,
 .user button {
-  min-height: 32px;
+  min-height: 28px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -183,17 +227,19 @@ fieldset {
   cursor: pointer;
 }
 .seg button {
+  padding: 3px 12px;
+  font-size: var(--fs-small);
   color: var(--dim);
 }
 .seg button[aria-pressed="true"] {
-  color: var(--fg);
-  text-decoration: underline;
-  text-underline-offset: 5px;
+  background: var(--fg);
+  color: var(--panel);
 }
 .day-summary {
   display: flex;
   flex-wrap: wrap;
   gap: 0 12px;
+  font-size: var(--fs-small);
   color: var(--dim);
 }
 /* 日付の前後送り: ◀ 前の日 ｜ 10月23日 N 件 ... ｜ 次の日 ▶ （今日以外では「今日へ」） */
@@ -205,12 +251,13 @@ fieldset {
   min-width: 0;
 }
 .day-btn {
-  min-height: 32px;
+  min-height: 28px;
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--link);
   font: inherit;
+  font-size: var(--fs-small);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -238,6 +285,7 @@ fieldset {
   }
 }
 .user {
+  font-size: var(--fs-small);
   color: var(--dim);
 }
 .user p {
@@ -259,9 +307,11 @@ fieldset {
 }
 
 .notice {
+  margin: 12px 20px 0;
   padding: 8px 12px;
   border: 1px solid var(--fail);
-  border-radius: 3px;
+  border-radius: 6px;
+  background: var(--panel);
   color: var(--fg);
 }
 
@@ -271,7 +321,7 @@ fieldset {
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
-  padding: 24px 0;
+  padding: 24px 20px;
 }
 .state h1 {
   font-size: 15px;
@@ -297,12 +347,12 @@ fieldset {
 .tlband {
   max-height: 56px;
   overflow-y: auto;
-  padding: 4px 12px;
+  padding: 4px 20px;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 3px;
+  border-bottom: 1px solid var(--line);
 }
 .tlband .empty {
+  font-size: 12px;
   color: var(--dim);
 }
 .tl-scroll {
@@ -316,7 +366,7 @@ fieldset {
 }
 .lane-name {
   min-width: 0;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.2;
   color: var(--dim);
 }
@@ -362,21 +412,24 @@ fieldset {
   outline: 2px solid var(--accent);
 }
 
-/* 状態の印（色 + 塗り + 縁の形。文字は隣に必ずある）。色はトークンだけ */
+/* タイムラインの棒（色 + 塗り + 縁の形。文字は隣に必ずある）。色はトークンだけ */
 .mk {
   stroke-width: 2;
 }
-.mk--blue {
-  --c: var(--accent);
+.mk--ok {
+  --c: var(--ok);
 }
-.mk--orange {
+.mk--bad {
   --c: var(--fail);
 }
-.mk--gray {
-  --c: var(--mute);
+.mk--run {
+  --c: var(--run-ring);
 }
-.mk--ink {
-  --c: var(--fg);
+.mk--wait {
+  --c: var(--wait);
+}
+.mk--skip {
+  --c: var(--skip);
 }
 .mk--solid {
   fill: var(--c);
@@ -396,7 +449,10 @@ fieldset {
   flex: none;
 }
 
-/* 状態の印（SVG の記号。色が分からなくても、形で見分けられる）。大きさは文字の高さに合わせ、色は tone ごとにトークンだけ */
+/*
+ * 状態の印（SVG の記号。色が分からなくても、形で見分けられる）。大きさは文字の高さに合わせ、色は tone ごとにトークンだけ。
+ * 緑の丸に ✓、赤の丸に ✕、黄の回る輪、青の丸に ●、灰の丸に –、点線の輪。
+ */
 .mark-sym {
   flex: none;
   width: 1.1em;
@@ -411,17 +467,41 @@ fieldset {
   fill: currentColor;
   stroke: none;
 }
-.mark-sym--blue {
-  color: var(--accent);
+.mark-sym .mark-glyph {
+  fill: none;
+  stroke: var(--on-mark);
+  stroke-width: 1.75;
 }
-.mark-sym--orange {
+.mark-sym circle.mark-glyph {
+  fill: var(--on-mark);
+  stroke: none;
+}
+.mark-sym .mark-ring {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.mark-sym .mark-ring--arc {
+  stroke-dasharray: 26 9;
+}
+.mark-sym .mark-ring--dotted {
+  stroke-dasharray: 0.1 3.4;
+}
+.mark-sym--ok {
+  color: var(--ok);
+}
+.mark-sym--bad {
   color: var(--fail);
 }
-.mark-sym--gray {
-  color: var(--mute);
+.mark-sym--run {
+  color: var(--run-ring);
 }
-.mark-sym--ink {
-  color: var(--fg);
+.mark-sym--wait {
+  color: var(--wait);
+}
+.mark-sym--skip {
+  color: var(--skip);
 }
 .status {
   display: inline-flex;
@@ -433,68 +513,128 @@ fieldset {
 .main {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
-  gap: 18px;
   align-items: start;
 }
 .console-col {
   min-width: 0;
+  padding: 20px 24px;
 }
 
-/* レール */
+/* レール（run の一覧）。1 行目: 印・題名・所要。2 行目: 依頼者（チーム表示）・PR と状態・モデル・費用 */
 .rail {
   display: flex;
   flex-direction: column;
-  gap: 2px;
   max-height: 72vh;
   overflow-y: auto;
+  padding: 12px 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
 }
 .rail-empty {
-  padding: 6px 10px;
+  padding: 6px 16px;
+  font-size: var(--fs-small);
   color: var(--dim);
 }
 .rail-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border-radius: 3px;
+  gap: 2px 8px;
+  padding: 9px 16px;
+  border-left: 3px solid transparent;
   color: var(--fg);
-  font-size: var(--fs-small);
   text-decoration: none;
 }
 .rail-row:hover {
-  background: var(--panel);
+  background: var(--bg);
 }
 .rail-row[data-selected="true"] {
   background: var(--sel);
-  box-shadow: inset 3px 0 0 var(--accent);
+  border-left-color: var(--wait);
 }
 .rail-title {
-  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 700;
+}
+.rail-time {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--dim);
+}
+.rail-meta {
+  grid-column: 2 / 4;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--dim);
+}
+.rail-meta > * + *::before {
+  content: "・";
+  margin: 0 4px;
+}
+.rail-meta > * {
+  flex: none;
+}
+.rail-meta > .rail-subject {
+  flex: 1 1 0;
+  min-width: 2em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-owner {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 3em;
+  max-width: 7em;
+}
+.rail-owner .rail-login {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.rail-pr,
-.rail-time {
-  color: var(--dim);
-}
-.rail-time {
+.rail-avatar {
+  display: inline-grid;
+  place-items: center;
   flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--mute);
+  color: var(--panel);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+.rail-cost {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.rail-model {
+  white-space: nowrap;
 }
 
-/* 走行中の印（脈動）。reduced-motion では止める */
-.pulse {
-  animation: rovo-beat 1.8s ease-in-out infinite;
+/* 回る輪（実行中）。reduced-motion では止めて破線の輪にする */
+.spin {
+  animation: rovo-spin 1s linear infinite;
 }
-@keyframes rovo-beat {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
+@keyframes rovo-spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 @keyframes rovo-blink {
@@ -508,48 +648,63 @@ fieldset {
   }
 }
 
-/* コンソール */
+/* コンソール: 要約のカード → 段階の図 → ログの箱 */
 .console {
   display: flex;
   flex-direction: column;
+  gap: 16px;
   min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  overflow: hidden;
 }
 .console--empty {
-  padding: 24px 16px;
+  padding: 24px 0;
 }
 .con-head {
-  padding: 10px 16px;
+  padding: 16px 20px;
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 6px;
 }
 .con-head h1 {
-  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
   font-weight: 700;
+  line-height: 1.3;
+}
+.con-title {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 .con-meta {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 18px;
+  gap: 4px 28px;
+  margin-top: 12px;
+}
+.meta-item {
+  min-width: 0;
+}
+.meta-item dt {
+  font-size: 12px;
   color: var(--dim);
 }
-.con-meta > * {
-  min-width: 0;
+.meta-item dd {
+  font-size: var(--fs-body);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
+.meta-item dd .soft {
+  font-weight: 400;
+}
 .con-loading {
-  padding: 12px 16px;
+  padding: 4px 0;
 }
 .state-name {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-weight: 700;
-  color: var(--fg);
 }
 .con-pr {
   display: inline-flex;
@@ -558,29 +713,148 @@ fieldset {
   gap: 2px 12px;
 }
 .now-line {
-  margin-top: 4px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: var(--now-bg);
+  border: 1px solid var(--now-line);
+  border-radius: 6px;
   font-size: var(--fs-small);
-  color: var(--dim);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.now-line[data-active="false"] {
+  background: var(--bg);
+  border-color: var(--line);
 }
 .now-line strong {
+  font-family: var(--mono);
+  font-size: 12.5px;
   font-weight: 700;
-  color: var(--fg);
 }
 .now-prompt {
   font-family: var(--mono);
   font-weight: 700;
 }
-.con-more {
-  margin-top: 4px;
+
+/* 段階の図（job の箱を線でつなぐ）。箱の印と所要。済んだ区間の線は緑 */
+.band {
+  display: flex;
+  align-items: center;
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.band-item {
+  display: flex;
+  align-items: center;
+  flex: 1 0 auto;
+  min-width: 0;
+}
+.band-item:first-child {
+  flex: 0 0 auto;
+}
+.band-edge {
+  flex: 1 1 24px;
+  min-width: 16px;
+  height: 2px;
+  background: var(--line);
+}
+.band-edge.done {
+  background: var(--ok);
+}
+.job {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
   font-size: var(--fs-small);
+  white-space: nowrap;
+}
+.job small {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
   color: var(--dim);
 }
+.band-item--todo .job {
+  color: var(--dim);
+}
+.band-item--now .job,
+.band-item--waiting .job,
+.band-item--recovering .job {
+  border-color: var(--run-ring);
+  box-shadow: 0 0 0 1px var(--run-ring);
+}
+.band-item--stopped .job {
+  border-color: var(--fail);
+  box-shadow: 0 0 0 1px var(--fail);
+}
+.band-item--now .band-name,
+.band-item--waiting .band-name,
+.band-item--stopped .band-name {
+  font-weight: 700;
+}
+.band-item--stopped .job small {
+  color: var(--fail);
+  font-weight: 700;
+}
+
+/* ログの箱（暗い面。ステップの行と、実行中のコマンドの出力の末尾） */
+.logbox {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 280px;
+  min-height: 0;
+  background: var(--screen);
+  color: var(--screen-fg);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.loghd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--log-head-line);
+  font-size: var(--fs-small);
+}
+.loghd-count {
+  margin-left: 8px;
+  color: var(--log-dim);
+}
+.con-more {
+  margin-left: auto;
+  color: var(--log-dim);
+}
+.con-more[open] {
+  flex: 1 0 100%;
+}
 .con-more summary {
-  color: var(--link);
+  display: block;
+  text-align: right;
+  color: var(--log-info);
   cursor: pointer;
+  list-style: none;
+}
+.con-more summary::-webkit-details-marker {
+  display: none;
+}
+.con-more summary::after {
+  content: " ▸";
+}
+.con-more[open] summary::after {
+  content: " ▾";
 }
 .con-more p {
-  margin-top: 6px;
+  margin-top: 8px;
 }
 .facts {
   margin-top: 6px;
@@ -592,89 +866,60 @@ fieldset {
   justify-content: space-between;
   gap: 16px;
   padding: 4px 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--log-line);
 }
 .fact dd {
   text-align: right;
   overflow-wrap: anywhere;
-  color: var(--fg);
-}
-
-/* 段階の帯 */
-.band {
-  display: flex;
-  gap: 4px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
-  font-size: var(--fs-small);
-}
-.band-item {
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0 8px;
-  color: var(--dim);
-}
-.band-bar {
-  flex: 1 0 100%;
-  height: 3px;
-  margin-bottom: 4px;
-  background: var(--line);
-}
-.band-item--done .band-bar,
-.band-item--now .band-bar,
-.band-item--waiting .band-bar {
-  background: var(--accent);
-}
-.band-item--recovering .band-bar {
-  background: var(--mute);
-}
-.band-item--stopped .band-bar {
-  background: var(--fail);
-}
-.band-item--done .band-name,
-.band-item--now .band-name,
-.band-item--waiting .band-name {
-  color: var(--fg);
-}
-.band-item--now .band-name {
-  font-weight: 700;
-}
-.band-item--stopped {
-  color: var(--fail);
-  font-weight: 700;
-}
-.band-label {
-  font-size: 12px;
-}
-
-/* 画面（端末の面。暗くない screen トークン） */
-.screen {
-  height: clamp(300px, 52vh, 560px);
-  padding: 16px;
-  overflow: auto;
-  background: var(--screen);
   color: var(--screen-fg);
-  font-size: var(--fs-screen);
-  line-height: 1.75;
+}
+
+.screen {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.65;
 }
 .steps {
   display: flex;
   flex-direction: column;
 }
 .step {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 0 14px;
-  color: var(--faint);
+  border-bottom: 1px solid var(--log-line);
 }
-.step-time {
-  color: var(--faint);
+.step-row {
+  display: grid;
+  grid-template-columns: 14px 16px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0 8px;
+  padding: 7px 16px;
+  list-style: none;
+}
+summary.step-row {
+  cursor: pointer;
+}
+summary.step-row::-webkit-details-marker {
+  display: none;
+}
+summary.step-row:hover {
+  background: var(--log-hover);
+}
+.step-car {
+  color: var(--log-dim);
+  transition: transform 0.15s;
+}
+.step-details[open] .step-car {
+  transform: rotate(90deg);
 }
 .step-body {
-  white-space: pre;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.step-what {
+  font-family: var(--font);
 }
 .step--cmd .step-target {
   color: var(--screen-fg);
@@ -683,62 +928,96 @@ fieldset {
   color: var(--prompt);
 }
 .step-where {
-  color: var(--faint);
+  color: var(--log-dim);
 }
-.step-note {
-  margin-left: 1em;
-  color: var(--faint);
-}
-.step--fail .step-what,
-.step--fail .step-note {
-  color: var(--fail);
+.step--fail .step-what {
+  color: var(--log-bad);
 }
 .step-tag {
   margin-left: 1em;
   padding: 0 6px;
-  border: 1px solid var(--prompt);
+  border: 1px solid var(--log-run);
   border-radius: 2px;
-  color: var(--prompt);
-  font-size: 12px;
+  color: var(--log-run);
+  font-family: var(--font);
+  font-size: 11px;
+}
+.step-time {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--log-dim);
+}
+.step-dur {
+  min-width: 6em;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--log-dim);
+}
+.step-more {
+  padding: 0 16px 8px 54px;
+}
+.step-detail {
+  padding: 2px 0;
+  color: var(--log-dim);
+}
+.step--fail .step-detail {
+  color: var(--log-bad);
 }
 .screen-empty,
 .older {
-  color: var(--faint);
-}
-.older {
-  margin-bottom: 8px;
+  padding: 8px 16px;
+  color: var(--log-dim);
 }
 .older .link-button {
   min-height: 0;
-  color: var(--link);
+  color: var(--log-info);
 }
 .older .link-button:disabled {
-  color: var(--faint);
+  color: var(--log-dim);
 }
-.output-box {
-  margin-top: 8px;
+.screen > .output-box {
+  padding: 8px 16px;
 }
 .output-box h3 {
   font-size: inherit;
   font-weight: 400;
-  color: var(--faint);
+  color: var(--log-dim);
   overflow-wrap: anywhere;
 }
 .output {
   margin: 2px 0 6px;
+  padding: 4px 0 8px;
   font: inherit;
   white-space: pre;
   color: var(--screen-fg);
+  counter-reset: ln;
+  overflow-x: auto;
+}
+.out-line {
+  display: block;
+  position: relative;
+  padding: 0 16px 0 48px;
+}
+.out-line::before {
+  counter-increment: ln;
+  content: counter(ln);
+  position: absolute;
+  left: 0;
+  width: 34px;
+  text-align: right;
+  color: var(--log-dim);
 }
 .output-running {
-  color: var(--faint);
+  color: var(--log-dim);
 }
 .output-note {
+  font-family: var(--font);
   font-size: 12px;
-  color: var(--faint);
+  color: var(--log-dim);
 }
 .prompt-line {
-  margin-top: 8px;
+  padding: 8px 16px;
 }
 .cursor {
   display: inline-block;
@@ -754,9 +1033,6 @@ fieldset {
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 18px;
-  padding: 6px 16px;
-  background: var(--panel);
-  border-top: 1px solid var(--line);
   font-size: var(--fs-small);
   color: var(--dim);
 }
@@ -770,24 +1046,24 @@ fieldset {
   min-height: 28px;
 }
 
-/* ステータスバー（tmux 風）と内訳の引き出し */
+/* ステータスバー（下に 1 行。メーター付き）と内訳の引き出し */
 .bar-wrap {
   display: flex;
   flex-direction: column;
-  gap: 8px;
 }
 .statusbar {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 14px;
+  padding: 8px 16px;
   background: var(--bar);
   color: var(--on-bar);
-  border-radius: 3px;
-  font-size: var(--fs-small);
-  overflow: hidden;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
 }
 .sb {
   min-width: 0;
-  padding: 6px 14px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -796,7 +1072,7 @@ fieldset {
   white-space: nowrap;
 }
 .sb--alt {
-  background: var(--bar2);
+  color: var(--on-bar);
 }
 .sb--strong {
   font-weight: 700;
@@ -804,24 +1080,32 @@ fieldset {
 .sb-grow {
   flex: 1 1 auto;
 }
+.meter {
+  flex: none;
+  display: block;
+}
+.meter-bg {
+  fill: var(--line);
+}
+.meter-fill {
+  fill: var(--fg);
+}
 .sb-button {
-  padding: 6px 14px;
-  border: 0;
-  background: var(--bar);
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
   color: var(--on-bar);
   font: inherit;
-  text-decoration: underline;
-  text-underline-offset: 3px;
   cursor: pointer;
 }
 .sb-button:focus-visible {
-  outline-offset: -2px;
+  outline-offset: 1px;
 }
 .drawer {
-  padding: 14px 16px;
+  padding: 14px 20px;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 3px;
+  border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -868,6 +1152,7 @@ fieldset {
   flex: none;
   white-space: nowrap;
   text-align: right;
+  font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: 16px;
   line-height: 1.3;
@@ -987,8 +1272,8 @@ fieldset {
   gap: 4px 18px;
 }
 
-/* 広い画面: ワークスペースをビューポートの高さいっぱいに広げる（制御卓）。
-   ヘッダと帯は上、ステータスバーは下端、レールとコンソールが残りを埋め、画面（screen）とレールだけが内部でスクロールする */
+/* 広い画面: ワークスペースをビューポートの高さいっぱいに広げる。
+   ヘッダと帯は上、ステータスバーは下端、レールとコンソールが残りを埋め、ログの箱（screen）・レール・コンソールだけが内部でスクロールする */
 @media (min-width: 721px) {
   /* ステータスバーの項目は途中で切らない（狭くなったら項目と項目の間で折り返す）。モデル別は中の項目ごと */
   .sb:not([data-sb="models"]) {
@@ -1011,56 +1296,95 @@ fieldset {
     display: flex;
     flex-direction: column;
     min-height: 0;
+    overflow-y: auto;
   }
   .console {
-    flex: 1 1 0;
-    min-height: 0;
-  }
-  .screen {
-    flex: 1 1 0;
-    height: auto;
-    min-height: 120px;
+    flex: 1 0 auto;
   }
 }
 
-/* スマホ幅（390px）: レールはコンソールの上に積む。ステータスバーは折り返す。横スクロールはコンソールの中だけ */
+/* スマホ幅（390px）: レールはコンソールの上に積む。ステータスバーは折り返す。横スクロールは段階の図とログの中だけ */
 @media (max-width: 720px) {
-  .shell {
-    padding: 14px 16px 24px;
-    gap: 14px;
+  .top {
+    padding: 10px 16px;
+  }
+  .tlband {
+    padding: 4px 16px;
   }
   .main {
     grid-template-columns: minmax(0, 1fr);
-    gap: 14px;
   }
   .rail {
-    max-height: 220px;
+    max-height: 240px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .console-col {
+    padding: 14px 16px;
   }
   .lane {
     grid-template-columns: 5em minmax(0, 1fr);
     column-gap: 8px;
   }
-  .screen {
-    height: clamp(260px, 50vh, 460px);
-    padding: 12px;
+  .con-head {
+    padding: 14px 16px;
   }
-  .con-head,
-  .band,
-  .con-foot {
-    padding-left: 12px;
-    padding-right: 12px;
+  .con-head h1 {
+    font-size: 18px;
+  }
+  .band {
+    padding: 14px 12px;
+  }
+  .job {
+    gap: 6px;
+    padding: 6px 10px;
+  }
+  .job small {
+    margin-left: 2px;
+  }
+  .logbox {
+    flex-basis: clamp(300px, 55vh, 520px);
+  }
+  .step-row {
+    grid-template-columns: 14px 16px minmax(0, 1fr) auto;
+    padding: 7px 12px;
+  }
+  .step-time {
+    grid-column: 3;
+    grid-row: 2;
+  }
+  .step-dur {
+    grid-column: 4;
+    grid-row: 1;
+    min-width: 0;
+  }
+  .step-more {
+    padding-left: 38px;
+  }
+  .statusbar {
+    padding: 8px 16px;
+  }
+  .drawer {
+    padding: 14px 16px;
   }
   .sb-grow {
     display: none;
   }
 }
 
-/* 動きの抑制。上の .pulse / .cursor の指定より後ろに置く（同じ重みなので、後のものが勝つ） */
+/* 動きの抑制。上の .spin / .cursor の指定より後ろに置く（同じ重みなので、後のものが勝つ） */
 @media (prefers-reduced-motion: reduce) {
-  .pulse {
+  .spin {
     animation: none;
+  }
+  /* 回る輪は、止めて破線の輪にする */
+  .mark-sym .mark-ring--arc {
+    stroke-dasharray: 2.6 2.6;
   }
   .cursor {
     animation: none;
+  }
+  .step-car {
+    transition: none;
   }
 }

@@ -102,11 +102,11 @@ describe("save / 暗号化", () => {
 
   it("再ログインは既存の資格を上書きし、version が増える（新しいものが勝つ）", async () => {
     const { mgr, storage } = setup();
-    await mgr.save(tokens({ accessToken: "old", refreshToken: "old-r" }));
+    await mgr.save(tokens({ accessToken: "old token", refreshToken: "old r" }));
     await mgr.save(tokens({ accessToken: "new", refreshToken: "new-r" }));
     expect(await mgr.getToken()).toBe("new");
     expect(storage.value?.version).toBe(2);
-    expect(JSON.stringify(storage.value)).not.toContain("old");
+    expect(JSON.stringify(storage.value)).not.toContain("old ");
   });
 
   it("資格が無ければ reauth_required", async () => {

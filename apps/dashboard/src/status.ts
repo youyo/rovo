@@ -20,23 +20,13 @@ export type MarkKind =
   | "cancelled";
 
 /**
- * 印の記号（形）。色や濃さに頼らず、形だけで状態を見分けられるように、全ての印で違う記号にする。
- * 図形は status-mark.tsx の MarkSymbol が描く。記号が増えたらそちらもコンパイルエラーになる。
+ * 印の記号（形）。GitHub Actions の見た目に合わせ、意味が同じ状態は同じ形にする:
+ * check = 緑の丸に ✓（成功）、cross = 赤の丸に ✕（失敗）、spinner = 黄の回る輪（動いている）、
+ * dot = 青の丸に ●（レビュー待ち）、dash = 灰の丸に –（閉じた・キャンセル）、
+ * queued = 点線の輪（未着手・準備中）、bang = 黄の丸に ！（入力待ち）。
+ * 色だけに頼らず、形と隣の文字（label）で区別する。図形は status-mark.tsx の MarkSymbol が描く。記号が増えたらそちらもコンパイルエラーになる。
  */
-export type MarkShape =
-  | "dots"
-  | "spinner"
-  | "bang"
-  | "magnifier"
-  | "return"
-  | "disc"
-  | "ring"
-  | "slash"
-  | "target"
-  | "check"
-  | "cross"
-  | "rise"
-  | "square";
+export type MarkShape = "check" | "cross" | "spinner" | "dot" | "dash" | "queued" | "bang";
 
 export type Mark = {
   /** 短い名前。レール・見出し・バッジなど狭い場所で使う。凡例だけが長い説明（description）を使う */
@@ -46,14 +36,14 @@ export type Mark = {
    * 無ければ label がそのまま説明。label から始まる言葉にする（markDescription を使う）。
    */
   description?: string;
-  /** 記号（形）。全ての印で違う */
+  /** 記号（形）。意味が同じ状態は同じ形 */
   shape: MarkShape;
-  /** 動いている状態か（印を脈動させる。reduced-motion では止まる） */
+  /** 回る輪の状態か（印を回転させる。reduced-motion では止めて破線にする） */
   live: boolean;
-  /** 色。見本の合図はコバルト（blue）とオレンジ（orange）だけ。ほかは灰とインク */
-  tone: "blue" | "orange" | "gray" | "ink";
+  /** 色。ok = 緑、bad = 赤、run = 黄、wait = 青、skip = 灰 */
+  tone: "ok" | "bad" | "run" | "wait" | "skip";
+  /** タイムラインの棒の塗りと縁の形。(tone, fill, edge) は全ての印で違い、色を無視しても棒を区別できる */
   fill: "solid" | "hollow";
-  /** 縁の形（実線・破線・点線）。色を無視しても分かるように使う */
   edge: "solid" | "dashed" | "dotted";
 };
 
@@ -61,9 +51,9 @@ export type Mark = {
 export const MARKS = {
   preparing: {
     label: "準備中",
-    shape: "dots",
-    live: true,
-    tone: "gray",
+    shape: "queued",
+    live: false,
+    tone: "skip",
     fill: "hollow",
     edge: "dotted",
   },
@@ -71,7 +61,7 @@ export const MARKS = {
     label: "実行中",
     shape: "spinner",
     live: true,
-    tone: "blue",
+    tone: "run",
     fill: "hollow",
     edge: "dashed",
   },
@@ -79,59 +69,59 @@ export const MARKS = {
     label: "入力待ち",
     shape: "bang",
     live: false,
-    tone: "orange",
+    tone: "run",
     fill: "hollow",
-    edge: "dashed",
+    edge: "solid",
   },
   verifying: {
     label: "検証中",
-    shape: "magnifier",
+    shape: "spinner",
     live: true,
-    tone: "blue",
+    tone: "run",
     fill: "hollow",
     edge: "dotted",
   },
   recovering: {
     label: "復旧中",
-    shape: "return",
+    shape: "spinner",
     live: true,
-    tone: "gray",
+    tone: "skip",
     fill: "hollow",
     edge: "dashed",
   },
   merged: {
     label: "マージ済み",
-    shape: "disc",
+    shape: "check",
     live: false,
-    tone: "blue",
+    tone: "ok",
     fill: "solid",
     edge: "solid",
   },
   review: {
     label: "レビュー待ち",
-    shape: "ring",
+    shape: "dot",
     live: false,
-    tone: "blue",
+    tone: "wait",
     fill: "hollow",
     edge: "solid",
   },
-  // GitHub 上で閉じられた（マージされていない）PR。灰の中空（実線）で、マージ済みの塗り青・レビュー待ちの中空青と形も色も違う。
+  // GitHub 上で閉じられた（マージされていない）PR。灰（–）で、マージ済みの緑・レビュー待ちの青と色も形も違う。
   // 「閉じた」だけでは何が閉じたのか分かりにくいので、凡例・点の title では説明をつける（レール・見出し・バッジは短い label のまま）
   closed: {
     label: "閉じた",
     description: "閉じた（マージせず）",
-    shape: "slash",
+    shape: "dash",
     live: false,
-    tone: "gray",
+    tone: "skip",
     fill: "hollow",
     edge: "solid",
   },
   // PR の状態が GitHub から取れなかった（rovo の記録ではマージ済みでもない）。断定しない言葉にする
   pr: {
     label: "PR あり",
-    shape: "target",
+    shape: "dot",
     live: false,
-    tone: "ink",
+    tone: "wait",
     fill: "hollow",
     edge: "dotted",
   },
@@ -139,7 +129,7 @@ export const MARKS = {
     label: "完了",
     shape: "check",
     live: false,
-    tone: "ink",
+    tone: "ok",
     fill: "hollow",
     edge: "solid",
   },
@@ -147,23 +137,23 @@ export const MARKS = {
     label: "失敗",
     shape: "cross",
     live: false,
-    tone: "orange",
+    tone: "bad",
     fill: "hollow",
     edge: "solid",
   },
   budget: {
     label: "予算超過",
-    shape: "rise",
+    shape: "cross",
     live: false,
-    tone: "orange",
+    tone: "bad",
     fill: "hollow",
     edge: "dotted",
   },
   cancelled: {
     label: "キャンセル",
-    shape: "square",
+    shape: "dash",
     live: false,
-    tone: "gray",
+    tone: "skip",
     fill: "solid",
     edge: "solid",
   },

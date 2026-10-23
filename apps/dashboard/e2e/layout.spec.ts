@@ -7,9 +7,15 @@ const s = readState();
 const id = (k: string) => s.tasks[k] as string;
 
 const box = async (page: Page, selector: string) => {
-  const b = await page.locator(selector).first().boundingBox();
-  if (!b) throw new Error(`${selector} の位置が取れない`);
-  return b;
+  // 描き終えてから測る。再描画で要素が差し替わる一瞬を挟んでも、位置が取れるまで測り直す
+  const loc = page.locator(selector).first();
+  await loc.waitFor({ state: "visible" });
+  let b: Awaited<ReturnType<typeof loc.boundingBox>> = null;
+  await expect(async () => {
+    b = await loc.boundingBox();
+    expect(b, `${selector} の位置が取れない`).not.toBeNull();
+  }).toPass({ timeout: 10_000 });
+  return b as unknown as { x: number; y: number; width: number; height: number };
 };
 
 /** 台本のイベントの取り込みは非同期なので、手順が揃うまで開き直す */
@@ -100,10 +106,16 @@ test("(25) 幅 1,200px: モデル別が長くてもステータスバーは 1 �
   await page.reload();
   await expect(page.locator(".statusbar [data-sb='models']")).toContainText("sonnet $3.74");
   await expect(page.locator(".statusbar [data-sb='models']")).toContainText("opus $0.0258");
-  // 1 行 = ステータスバーの高さが、項目 1 つ分の高さに等しい
-  const bar = await box(page, ".statusbar");
+  // 1 行 = ステータスバーの子（項目・メーター・ボタン）の縦の中心がそろう（中央揃えなので、折り返すと中心がずれる）
   const first = await box(page, ".statusbar .sb");
-  expect(bar.height).toBeLessThanOrEqual(first.height + 2);
+  const centers = await page
+    .locator(".statusbar > *")
+    .evaluateAll((els) =>
+      els
+        .filter((el) => el.getBoundingClientRect().width > 0)
+        .map((el) => el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2),
+    );
+  expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(2);
   // どの項目も途中で折り返さない（1 行の高さ）。nowrap の項目は nowrap
   const items = await page.locator(".statusbar .sb, .statusbar .sb-item").evaluateAll((els) =>
     els.map((el) => ({

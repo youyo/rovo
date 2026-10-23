@@ -19,7 +19,7 @@ import { Workspace } from "./workspace";
  */
 export function App() {
   const [auth, setAuth] = useState<AuthState>({ state: "loading" });
-  // 既定は「自分」（切り替えは使える）
+  // 既定は「マイタスク」（scope = me。切り替えは使える）
   const [scope, setScope] = useState<Scope>("me");
   const [route, setRoute] = useState<Route>(() =>
     parseRoute(typeof location === "undefined" ? "/dashboard/" : location.pathname),

@@ -4,6 +4,7 @@ import type {
   TaskStatusDto,
   VisibleTaskDto,
 } from "@rovo/dashboard-contract";
+import type { ReactNode } from "react";
 import {
   formatClock,
   formatClockSeconds,
@@ -23,13 +24,24 @@ import {
   markDescription,
   markKindOf,
 } from "./status";
-import { MarkSymbol } from "./status-mark";
-import { type BandStep, buildSteps, nowSentence, phaseBand, type Step } from "./steps";
+import { MarkSymbol, ShapeSymbol } from "./status-mark";
+import {
+  type BandStep,
+  buildSteps,
+  nowSentence,
+  type PhaseTiming,
+  phaseBand,
+  phaseTimings,
+  type Step,
+  type StepTiming,
+  stepTimings,
+} from "./steps";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
 /**
- * コンソール（詳細の本体。純粋な表示。データ取得は use-task-detail）。
- * 見出し（題名・モデル・所要・費用・Draft PR）→ 段階の帯 → 画面（構造化イベントの行と、出力の末尾）。
+ * コンソール（詳細の本体。純粋な表示。データ取得は use-task-detail）。GitHub Actions の run の形:
+ * 要約のカード（印付きの題名・状態・モデル・所要・費用・リポジトリ・依頼者・PR・「いま」）→ 段階（job の箱を線でつないだ図）
+ * → ログの箱（ステップの行と、いま実行中のコマンドの出力の末尾）。
  * 表示する文字列はすべて format / steps の関数を通す（D14）。
  */
 
@@ -75,38 +87,112 @@ function StatusLine(props: { task: VisibleTaskDto }) {
   );
 }
 
-function elapsedText(task: VisibleTaskDto, generatedAt: number): string {
+/** 経過時間のラベルと値。終わったタスクは「所要」、続いているタスクは「開始から」 */
+function elapsedFact(task: VisibleTaskDto, generatedAt: number): { label: string; value: string } {
   const start = Date.parse(task.started_at ?? task.created_at);
   if (isTerminal(task.status)) {
     const end = task.ended_at === null ? generatedAt : Date.parse(task.ended_at);
-    return `所要 ${formatDuration(end - start)}`;
+    return { label: "所要", value: formatDuration(end - start) };
   }
-  return `開始から ${formatDuration(generatedAt - start)}`;
+  return { label: "開始から", value: formatDuration(generatedAt - start) };
 }
 
-function Band(props: { band: BandStep[] }) {
+/** 所要の文字。終わっていない（今までの経過）なら末尾に … */
+const timingText = (t: StepTiming | PhaseTiming): string =>
+  `${formatDuration(t.ms)}${t.open ? "…" : ""}`;
+
+/** 段階の箱の印。済み=✓、いま=回る輪、入力待ち=！、復旧中=灰の回る輪、止まった=✕、これから=点線の輪 */
+function JobIcon(props: { state: BandStep["state"] }) {
+  switch (props.state) {
+    case "done":
+      return <ShapeSymbol shape="check" tone="ok" />;
+    case "now":
+      return <ShapeSymbol shape="spinner" tone="run" live />;
+    case "waiting":
+      return <ShapeSymbol shape="bang" tone="run" />;
+    case "recovering":
+      return <ShapeSymbol shape="spinner" tone="skip" live />;
+    case "stopped":
+      return <ShapeSymbol shape="cross" tone="bad" />;
+    case "todo":
+      return <ShapeSymbol shape="queued" tone="skip" />;
+  }
+}
+
+/** 段階の帯: job の箱を線でつないだ図。済んだ区間の線は緑。箱の文字は所要（無ければ状態の文字） */
+function Band(props: { band: BandStep[]; timings: Partial<Record<BandStep["key"], PhaseTiming>> }) {
   const label = `段階: ${props.band.map((b) => `${b.name}は${b.label}`).join("、")}`;
   return (
     <ol className="band" data-band="" aria-label={label}>
-      {props.band.map((b) => (
-        <li key={b.key} className={`band-item band-item--${b.state}`} data-state={b.state}>
-          <span className="band-bar" aria-hidden="true" />
-          <span className="band-name">{b.name}</span>
-          <span className="band-label">{b.label}</span>
-        </li>
-      ))}
+      {props.band.map((b, i) => {
+        const timing = props.timings[b.key];
+        // 所要があればそれ。止まった・入力待ち・復旧中は、所要の前に状態の文字も添える。所要が無ければ状態の文字
+        const small =
+          timing === undefined
+            ? b.label
+            : b.state === "stopped" || b.state === "waiting" || b.state === "recovering"
+              ? `${b.label} ${timingText(timing)}`
+              : timingText(timing);
+        return (
+          <li key={b.key} className={`band-item band-item--${b.state}`} data-state={b.state}>
+            {i > 0 ? (
+              <span
+                className={`band-edge${props.band[i - 1]?.state === "done" ? " done" : ""}`}
+                aria-hidden="true"
+              />
+            ) : null}
+            <span className="job" title={`${b.name}: ${b.label}`}>
+              <JobIcon state={b.state} />
+              <span className="band-name">{b.name}</span>
+              <small>{small}</small>
+            </span>
+          </li>
+        );
+      })}
     </ol>
   );
 }
 
-function StepItem(props: { step: Step }) {
+/** ステップの行の印。失敗=✕、いま=回る輪（入力待ちのタスクでは ！）、そのほか=✓ */
+function StepIcon(props: { step: Step; waiting: boolean }) {
+  const { step } = props;
+  if (step.tone === "fail") return <ShapeSymbol shape="cross" tone="bad" />;
+  if (step.current) {
+    return props.waiting ? (
+      <ShapeSymbol shape="bang" tone="run" />
+    ) : (
+      <ShapeSymbol shape="spinner" tone="run" live />
+    );
+  }
+  return <ShapeSymbol shape="check" tone="ok" />;
+}
+
+/**
+ * ステップ 1 行（▸・印・内容・時刻・所要）。中身（note、実行中のコマンドの出力の末尾）があるときだけ開ける（details）。
+ * 無ければ ▸ も出さない。失敗した行と、出力を載せる行は最初から開く。
+ */
+function StepItem(props: {
+  step: Step;
+  timing: StepTiming | undefined;
+  waiting: boolean;
+  /** この行の下に開いて見せるもの（実行中のコマンドの出力の末尾） */
+  below?: ReactNode;
+}) {
   const { step } = props;
   const cls = `step${step.current ? " step--now" : ""}${step.tone === "fail" ? " step--fail" : ""}${
     step.command ? " step--cmd" : ""
   }`;
-  return (
-    <li className={cls} data-seq={step.seq} data-current={String(step.current)}>
-      <span className="step-time">{formatClockSeconds(step.at)}</span>
+  const expandable = step.note !== "" || props.below !== undefined;
+  const cells = (
+    <>
+      {expandable ? (
+        <span className="step-car" aria-hidden="true">
+          ▸
+        </span>
+      ) : (
+        <span className="step-gap" aria-hidden="true" />
+      )}
+      <StepIcon step={step} waiting={props.waiting} />
       <span className="step-body">
         {step.command ? (
           <>
@@ -121,10 +207,47 @@ function StepItem(props: { step: Step }) {
             {step.target === "" ? null : <span className="step-target"> {step.target}</span>}
           </>
         )}
-        {step.note === "" ? null : <span className="step-note">{step.note}</span>}
         {step.current ? <span className="step-tag">いま</span> : null}
       </span>
+      <span className="step-time">{formatClockSeconds(step.at)}</span>
+      {props.timing === undefined ? (
+        <span className="step-dur step-dur--none" />
+      ) : (
+        <span className={`step-dur${props.timing.open ? " step-dur--open" : ""}`}>
+          {timingText(props.timing)}
+        </span>
+      )}
+    </>
+  );
+  return (
+    <li className={cls} data-seq={step.seq} data-current={String(step.current)}>
+      {expandable ? (
+        <details className="step-details" open={props.below !== undefined || step.tone === "fail"}>
+          <summary className="step-row">{cells}</summary>
+          <div className="step-more">
+            {step.note === "" ? null : <p className="step-detail">{step.note}</p>}
+            {props.below}
+          </div>
+        </details>
+      ) : (
+        <div className="step-row">{cells}</div>
+      )}
     </li>
+  );
+}
+
+/** 出力の末尾（1 行 1 要素。行番号は CSS の counter で付ける）。改行は各行の末尾に残し、元の文字列と同じにする */
+function OutputLines(props: { tail: string }) {
+  const lines = sanitizeText(props.tail).split(/(?<=\n)/);
+  return (
+    <pre className="output">
+      {lines.map((line, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: 行は並びが全てで、並べ替えない
+        <span className="out-line" key={i}>
+          {line}
+        </span>
+      ))}
+    </pre>
   );
 }
 
@@ -179,7 +302,17 @@ function Fact(props: { k: string; v: string; title?: string }) {
   );
 }
 
-/** 見出しの属性の行（状態・モデル・経過・費用・リポジトリ・依頼者・PR）。一覧の行（VisibleTaskDto）だけで描ける */
+/** 要約のカードの「小さなラベルと値」の 1 組 */
+function MetaItem(props: { k: string; children: ReactNode }) {
+  return (
+    <div className="meta-item">
+      <dt>{props.k}</dt>
+      <dd>{props.children}</dd>
+    </div>
+  );
+}
+
+/** 要約のカードの属性（状態・モデル・経過・費用・リポジトリ・依頼者・PR）。一覧の行（VisibleTaskDto）だけで描ける */
 function ConMeta(props: {
   task: VisibleTaskDto;
   /** 経過時間の基準（詳細の generated_at。一覧の行だけのときは一覧の generated_at） */
@@ -189,39 +322,51 @@ function ConMeta(props: {
 }) {
   const { task } = props;
   const model = shortModel(task.model);
+  const elapsed = elapsedFact(task, props.generatedAt);
   return (
-    <div className="con-meta">
-      <StatusLine task={task} />
-      <span className="con-model">
+    <dl className="con-meta">
+      <MetaItem k="状態">
+        <StatusLine task={task} />
+      </MetaItem>
+      <MetaItem k="モデル">
         <span data-model="" title={model.full}>
           {model.name}
         </span>
         {props.modelSelection === undefined ? null : (
           <span className="soft"> {modelSelectionText(props.modelSelection)}</span>
         )}
-      </span>
-      <span>{elapsedText(task, props.generatedAt)}</span>
-      <span>{formatUsd(task.cost.cost_usd)}</span>
-      <span className="soft">{singleLine(task.repository)}</span>
-      <span className="soft">{singleLine(task.owner_login)} が依頼</span>
-      {task.reason === undefined ? null : (
-        <span className="soft">理由 {singleLine(task.reason)}</span>
-      )}
-      <span className="grow" />
-      <PrInline task={task} />
-    </div>
+      </MetaItem>
+      <MetaItem k={elapsed.label}>{elapsed.value}</MetaItem>
+      <MetaItem k="費用">{formatUsd(task.cost.cost_usd)}</MetaItem>
+      <MetaItem k="リポジトリ">{singleLine(task.repository)}</MetaItem>
+      <MetaItem k="依頼者">{singleLine(task.owner_login)}</MetaItem>
+      {task.reason === undefined ? null : <MetaItem k="理由">{singleLine(task.reason)}</MetaItem>}
+      <MetaItem k="PR">
+        <PrInline task={task} />
+      </MetaItem>
+    </dl>
+  );
+}
+
+/** 要約のカードの題名。印は状態の印（装飾。隣に題名と、状態の文字がある） */
+function ConTitle(props: { task: VisibleTaskDto }) {
+  return (
+    <h1 id="task-h">
+      <MarkSymbol kind={markKindOf(props.task)} decorative />
+      <span className="con-title">{singleLine(props.task.title)}</span>
+    </h1>
   );
 }
 
 /**
- * 切り替えた瞬間のコンソール。詳細（と events）が届くまで、一覧の行にある情報（題名・状態・モデル・費用・PR など）だけで見出しを描く。
+ * 切り替えた瞬間のコンソール。詳細（と events）が届くまで、一覧の行にある情報（題名・状態・モデル・費用・PR など）だけで要約のカードを描く。
  * 一覧の行は一覧の取得で権限を確かめ済みのもの。表示する文字列は詳細と同じ関数を通す。
  */
 export function TaskPreview(props: { task: VisibleTaskDto; at: number }) {
   return (
     <section className="console" aria-labelledby="task-h" aria-busy="true" data-preview="">
       <div className="con-head">
-        <h1 id="task-h">{singleLine(props.task.title)}</h1>
+        <ConTitle task={props.task} />
         <ConMeta task={props.task} generatedAt={props.at} />
       </div>
       <p className="soft con-loading" role="status">
@@ -252,12 +397,44 @@ export function TaskView(props: {
   ) as ReadonlySet<TaskStatusDto>;
   const band = phaseBand(task, detail.phase, reached, detail.stopped_phase);
   const steps = buildSteps(events, active);
+  const timings = stepTimings(steps, generatedAt);
+  const phases = phaseTimings(events, band, generatedAt);
   const now = nowSentence(detail.now, task.status);
   const model = shortModel(task.model);
   const running = output.running === true;
+  const waiting = task.status === "INPUT_REQUIRED";
+  // 実行中のコマンドの出力の末尾は、そのコマンドの行（いまの行）の下に開いて見せる。
+  // 実行中でない（終わったコマンドの末尾）、またはいまの行がコマンドでないときは、手順の外の出力の枠に出す
+  // （終わったコマンドの出力がどの行のものかは、決めつけない）
+  const lastStep = steps.at(-1);
+  const attachSeq = running && lastStep?.current && lastStep.command ? lastStep.seq : null;
 
   const scroll = useStickToBottom(
     `${events.at(-1)?.seq ?? 0}:${steps.length}:${output.tail?.length ?? -1}:${running}:${props.hasOlder}`,
+  );
+
+  const outputBox = (
+    <div className="output-box">
+      <h3>
+        {output.command === undefined
+          ? "出力の末尾"
+          : `${singleLine(output.command)} の出力（${running ? "途中" : "末尾"}）`}
+      </h3>
+      {output.tail === null ? null : <OutputLines tail={output.tail} />}
+      {running && (
+        <p className="output-running">
+          実行中
+          {output.started_at !== undefined && !Number.isNaN(generatedAt)
+            ? `（経過 ${formatDuration(generatedAt - Date.parse(output.started_at))}）`
+            : ""}
+          <span className="cursor" aria-hidden="true" />
+        </p>
+      )}
+      <p className="output-note">
+        子エージェントが実行したコマンドの出力の一部です。トークンなどの秘密は伏せて表示しています。
+        {output.tail === null ? "いまは表示できる出力がありません。" : ""}
+      </p>
+    </div>
   );
 
   return (
@@ -269,9 +446,9 @@ export function TaskView(props: {
       ) : null}
 
       <div className="con-head">
-        <h1 id="task-h">{singleLine(task.title)}</h1>
+        <ConTitle task={task} />
         <ConMeta task={task} generatedAt={generatedAt} modelSelection={settings.model_selection} />
-        <p className="now-line">
+        <p className="now-line" data-active={String(active)}>
           {now.before}
           {now.prompt === undefined ? null : (
             <span className="prompt now-prompt">{now.prompt}</span>
@@ -279,114 +456,114 @@ export function TaskView(props: {
           {now.target === "" ? null : <strong>{now.target}</strong>}
           {now.after}
         </p>
-        <details className="con-more">
-          <summary>設定と費用の内訳</summary>
-          <p>
-            入力 {formatCount(task.cost.input_tokens)} トークン、出力{" "}
-            {formatCount(task.cost.output_tokens)} トークン。キャッシュは読み出し{" "}
-            {formatCount(task.cost.cache_read_tokens)}、書き込み{" "}
-            {formatCount(task.cost.cache_write_tokens)} トークン。
-          </p>
-          <dl className="facts">
-            <Fact k="モデル" v={model.name} title={model.full} />
-            {settings.model_selection === undefined ? null : (
-              <Fact
-                k="モデルの選び方"
-                v={singleLine(modelSelectionText(settings.model_selection))}
-              />
-            )}
-            <Fact k="思考" v={task.effort} />
-            <Fact k="マージの方針" v={MERGE_POLICY[settings.merge_policy]} />
-            {settings.deps_cache === undefined ? null : (
-              <Fact
-                k="依存キャッシュ"
-                v={`${DEPS_CACHE[settings.deps_cache]}${
-                  settings.deps_cache === "built" && settings.cache_build_ms !== undefined
-                    ? `（${formatDuration(settings.cache_build_ms)}）`
-                    : ""
-                }`}
-              />
-            )}
-            {settings.sandbox_runtime_ms === undefined ? null : (
-              <Fact k="Sandbox の稼働" v={formatDuration(settings.sandbox_runtime_ms)} />
-            )}
-            {settings.sandbox_instance === undefined ? null : (
-              <Fact k="Sandbox の大きさ" v={singleLine(settings.sandbox_instance)} />
-            )}
-            <Fact k="作成" v={formatClock(Date.parse(task.created_at))} />
-          </dl>
-          {task.pr !== null && active ? (
-            <p className="soft">
-              完了して検証に通ったら、依頼した AI がレビューして Ready にします。
-            </p>
-          ) : null}
-        </details>
       </div>
 
-      <Band band={band} />
+      <Band band={band} timings={phases} />
 
-      <section
-        className="screen"
-        ref={scroll.ref}
-        onScroll={scroll.onScroll}
-        data-following={String(scroll.following)}
-        aria-label="進み具合のコンソール"
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: スクロールする領域はキーボードで焦点を当てて読めるようにする（WCAG 2.1.1）
-        tabIndex={0}
-      >
-        {props.hasOlder ? (
-          <div className="older">
-            <button
-              type="button"
-              className="link-button"
-              disabled={props.loadingOlder}
-              onClick={props.onLoadOlder}
-            >
-              さらに読む
-            </button>
-            {props.loadingOlder ? <span role="status"> 読み込み中…</span> : null}
-            {props.olderError ? <span role="alert"> 古い手順を読み込めませんでした。</span> : null}
-          </div>
-        ) : null}
-        {steps.length === 0 ? (
-          <p className="screen-empty">進み具合はまだありません。</p>
-        ) : (
-          <ol className="steps">
-            {steps.map((s) => (
-              <StepItem key={s.seq} step={s} />
-            ))}
-          </ol>
-        )}
-
-        <div className="output-box">
-          <h3>
-            {output.command === undefined
-              ? "出力の末尾"
-              : `${singleLine(output.command)} の出力（${running ? "途中" : "末尾"}）`}
-          </h3>
-          {output.tail === null ? null : <pre className="output">{sanitizeText(output.tail)}</pre>}
-          {running && (
-            <p className="output-running">
-              実行中
-              {output.started_at !== undefined && !Number.isNaN(generatedAt)
-                ? `（経過 ${formatDuration(generatedAt - Date.parse(output.started_at))}）`
-                : ""}
-              <span className="cursor" aria-hidden="true" />
+      <div className="logbox">
+        <div className="loghd">
+          <span className="loghd-title">
+            進み具合{" "}
+            <span className="loghd-count">
+              {steps.length}
+              {props.hasOlder ? "+" : ""} ステップ
+            </span>
+          </span>
+          <details className="con-more">
+            <summary>設定と費用の内訳</summary>
+            <p>
+              入力 {formatCount(task.cost.input_tokens)} トークン、出力{" "}
+              {formatCount(task.cost.output_tokens)} トークン。キャッシュは読み出し{" "}
+              {formatCount(task.cost.cache_read_tokens)}、書き込み{" "}
+              {formatCount(task.cost.cache_write_tokens)} トークン。
             </p>
-          )}
-          <p className="output-note">
-            子エージェントが実行したコマンドの出力の一部です。トークンなどの秘密は伏せて表示しています。
-            {output.tail === null ? "いまは表示できる出力がありません。" : ""}
-          </p>
+            <dl className="facts">
+              <Fact k="モデル" v={model.name} title={model.full} />
+              {settings.model_selection === undefined ? null : (
+                <Fact
+                  k="モデルの選び方"
+                  v={singleLine(modelSelectionText(settings.model_selection))}
+                />
+              )}
+              <Fact k="思考" v={task.effort} />
+              <Fact k="マージの方針" v={MERGE_POLICY[settings.merge_policy]} />
+              {settings.deps_cache === undefined ? null : (
+                <Fact
+                  k="依存キャッシュ"
+                  v={`${DEPS_CACHE[settings.deps_cache]}${
+                    settings.deps_cache === "built" && settings.cache_build_ms !== undefined
+                      ? `（${formatDuration(settings.cache_build_ms)}）`
+                      : ""
+                  }`}
+                />
+              )}
+              {settings.sandbox_runtime_ms === undefined ? null : (
+                <Fact k="Sandbox の稼働" v={formatDuration(settings.sandbox_runtime_ms)} />
+              )}
+              {settings.sandbox_instance === undefined ? null : (
+                <Fact k="Sandbox の大きさ" v={singleLine(settings.sandbox_instance)} />
+              )}
+              <Fact k="作成" v={formatClock(Date.parse(task.created_at))} />
+            </dl>
+            {task.pr !== null && active ? (
+              <p className="soft">
+                完了して検証に通ったら、依頼した AI がレビューして Ready にします。
+              </p>
+            ) : null}
+          </details>
         </div>
 
-        {active && !running ? (
-          <div className="prompt-line">
-            <span className="prompt">$ </span>
-            <span className="cursor" aria-hidden="true" />
-          </div>
-        ) : null}
-      </section>
+        <section
+          className="screen"
+          ref={scroll.ref}
+          onScroll={scroll.onScroll}
+          data-following={String(scroll.following)}
+          aria-label="進み具合のコンソール"
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: スクロールする領域はキーボードで焦点を当てて読めるようにする（WCAG 2.1.1）
+          tabIndex={0}
+        >
+          {props.hasOlder ? (
+            <div className="older">
+              <button
+                type="button"
+                className="link-button"
+                disabled={props.loadingOlder}
+                onClick={props.onLoadOlder}
+              >
+                さらに読む
+              </button>
+              {props.loadingOlder ? <span role="status"> 読み込み中…</span> : null}
+              {props.olderError ? (
+                <span role="alert"> 古い手順を読み込めませんでした。</span>
+              ) : null}
+            </div>
+          ) : null}
+          {steps.length === 0 ? (
+            <p className="screen-empty">進み具合はまだありません。</p>
+          ) : (
+            <ol className="steps">
+              {steps.map((s, i) => (
+                <StepItem
+                  key={s.seq}
+                  step={s}
+                  timing={timings[i]}
+                  waiting={waiting}
+                  {...(s.seq === attachSeq ? { below: outputBox } : {})}
+                />
+              ))}
+            </ol>
+          )}
+
+          {attachSeq === null ? outputBox : null}
+
+          {active && !running ? (
+            <div className="prompt-line">
+              <span className="prompt">$ </span>
+              <span className="cursor" aria-hidden="true" />
+            </div>
+          ) : null}
+        </section>
+      </div>
 
       <div className="con-foot">
         <span className="soft">{formatClockSeconds(generatedAt)} に更新。</span>

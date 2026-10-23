@@ -1,4 +1,6 @@
-# rovo
+<p align="center"><img src="docs/assets/brand/rovo-logo.svg" alt="Rovo" width="240"></p>
+
+# Rovo
 
 Claude Code / Cowork から Remote MCP 経由でコーディングタスクを委譲するための Task Gateway（Cloudflare Workers）。
 

@@ -58,8 +58,8 @@ test("(day-2) 日付が進んだ画面（ブラウザの時計を 1 日進める
   // 過去の日はいまの破線を出さない
   await expect(page.locator(".tlband [data-now]")).toHaveCount(0);
 
-  // 全員 / 自分の切り替えと両立し、リロードしても同じ日（URL が持つ）
-  await page.getByRole("button", { name: "自分" }).click();
+  // チーム / マイタスクの切り替えと両立し、リロードしても同じ日（URL が持つ）
+  await page.getByRole("button", { name: "マイタスク" }).click();
   await expect(page).toHaveURL(new RegExp(`\\?day=${ymd(Date.now())}$`));
   await expect(rail(page, s.tasks.done as string)).toBeVisible();
   await page.reload();

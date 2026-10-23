@@ -51,18 +51,21 @@ describe("状態の印（色だけで区別しない。形 + 文字）", () => {
     expect(markKindOf(task("RUNNING", pr(false, "open")))).toBe("running");
   });
 
-  it("閉じた=灰の中空、マージ済みの塗り青とも、レビュー待ちの中空青とも形が違う", () => {
-    expect(MARKS.closed).toMatchObject({ tone: "gray", fill: "hollow", edge: "solid" });
-    expect(MARKS.pr).toMatchObject({ tone: "ink", fill: "hollow", edge: "dotted" });
+  it("閉じた=灰の中空。マージ済みの緑・レビュー待ちの青とも色が違う", () => {
+    expect(MARKS.closed).toMatchObject({ tone: "skip", fill: "hollow", edge: "solid" });
+    expect(MARKS.pr).toMatchObject({ tone: "wait", fill: "hollow", edge: "dotted" });
   });
 
-  it("見本どおり: マージ済み=塗り青、レビュー待ち=中空青、失敗=中空オレンジ", () => {
-    expect(MARKS.merged).toMatchObject({ tone: "blue", fill: "solid" });
-    expect(MARKS.review).toMatchObject({ tone: "blue", fill: "hollow" });
-    expect(MARKS.failed).toMatchObject({ tone: "orange", fill: "hollow" });
+  it("見本どおり: マージ済み=緑、レビュー待ち=青、失敗=赤、実行中=黄、閉じた・キャンセル=灰", () => {
+    expect(MARKS.merged).toMatchObject({ tone: "ok", fill: "solid" });
+    expect(MARKS.done).toMatchObject({ tone: "ok" });
+    expect(MARKS.review).toMatchObject({ tone: "wait", fill: "hollow" });
+    expect(MARKS.failed).toMatchObject({ tone: "bad", fill: "hollow" });
+    expect(MARKS.running).toMatchObject({ tone: "run" });
+    expect(MARKS.cancelled).toMatchObject({ tone: "skip" });
   });
 
-  it("すべての印は (色, 塗り, 縁) の組が互いに違い、文字も違う（色を無視しても区別できる）", () => {
+  it("すべての印は (色, 塗り, 縁) の組が互いに違い、文字も違う（タイムラインの棒は色を無視しても区別できる）", () => {
     const marks = Object.values(MARKS);
     expect(new Set(marks.map((m) => `${m.tone}/${m.fill}/${m.edge}`)).size).toBe(marks.length);
     expect(new Set(marks.map((m) => m.label)).size).toBe(marks.length);
@@ -103,26 +106,38 @@ describe("短い label（レール・見出し・バッジ）と、長い説明�
   });
 });
 
-describe("状態の印の形（記号）。色や濃さに頼らず、形だけで区別できる", () => {
-  it("すべての印の記号（shape）が互いに違う", () => {
-    const shapes = Object.values(MARKS).map((m) => m.shape);
-    expect(new Set(shapes).size).toBe(shapes.length);
+describe("状態の印の形（記号）。GitHub Actions の見た目に合わせ、意味が同じ状態は同じ形", () => {
+  it("種類ごとの形の割り当て: 成功=✓、失敗=✕、実行中=回る輪、レビュー待ち=●、閉じた・キャンセル=–、準備中=点線の輪、入力待ち=！", () => {
+    const shapes = Object.fromEntries(Object.entries(MARKS).map(([k, m]) => [k, m.shape]));
+    expect(shapes).toEqual({
+      preparing: "queued",
+      running: "spinner",
+      input: "bang",
+      verifying: "spinner",
+      recovering: "spinner",
+      merged: "check",
+      review: "dot",
+      closed: "dash",
+      pr: "dot",
+      done: "check",
+      failed: "cross",
+      budget: "cross",
+      cancelled: "dash",
+    });
   });
 
-  it("同じ色（tone）の印どうしも、記号が違う", () => {
-    for (const tone of ["blue", "orange", "gray", "ink"] as const) {
-      const same = Object.values(MARKS).filter((m) => m.tone === tone);
-      expect(new Set(same.map((m) => m.shape)).size, tone).toBe(same.length);
-    }
+  it("形は 7 種類。形が違っても色に頼らない（形 + 隣の文字 label）", () => {
+    expect(new Set(Object.values(MARKS).map((m) => m.shape)).size).toBe(7);
   });
 
-  it("実行中とマージ済みは、記号が違う（濃さの差だけにしない）", () => {
+  it("実行中と成功（マージ済み）は、形が違う（濃さの差だけにしない）", () => {
     expect(MARKS.running.shape).not.toBe(MARKS.merged.shape);
     expect(MARKS.running.fill).not.toBe(MARKS.merged.fill);
   });
 
-  it("動いている状態（準備中・実行中・検証中・復旧中）だけ live", () => {
+  it("回る輪（spinner）の状態だけ live（実行中・検証中・復旧中）。準備中は点線の輪で止まっている", () => {
     const live = (Object.keys(MARKS) as MarkKind[]).filter((k) => MARKS[k].live);
-    expect(live.sort()).toEqual(["preparing", "recovering", "running", "verifying"]);
+    expect(live.sort()).toEqual(["recovering", "running", "verifying"]);
+    for (const k of live) expect(MARKS[k].shape).toBe("spinner");
   });
 });

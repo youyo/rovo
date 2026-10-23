@@ -34,8 +34,8 @@ test("(6) 権限の無いタスクは、一覧の画面にもネットワーク�
   const api = collectApi(page);
   await loginAs(page, s.users.bob);
   await expect(rail(page, s.tasks.bob as string)).toBeVisible();
-  // 既定は「自分」。他人のタスクの権限を確かめるので「全員」にする
-  await page.getByRole("button", { name: "全員" }).click();
+  // 既定は「マイタスク」。他人のタスクの権限を確かめるので「チーム」にする
+  await page.getByRole("button", { name: "チーム" }).click();
   // alice の widgets のタスクは見える（権限がある）
   await expect(rail(page, id("done"))).toBeVisible();
   // secret のタスクはレールにもタイムラインにもない
@@ -110,14 +110,17 @@ test("(7) 題名・command・出力の悪意のある入力は文字として出
 
   const root = page.locator("#root");
   expect(await root.locator("script").count()).toBe(0);
-  expect(await root.locator("img").count()).toBe(0);
+  // img は同梱のロゴ（ヘッダの固定の SVG）以外に無い
+  expect(await root.locator("img:not(.brand-mark)").count()).toBe(0);
   expect(await root.locator('a[href^="javascript:" i]').count()).toBe(0);
   expect(await root.locator("[onerror]").count()).toBe(0);
 
   // 一覧でも同じ（題名がレールとタイムラインの名前に出る）
   await page.goto("/dashboard/");
   await expect(rail(page, id("xss"))).toContainText("<script>");
-  expect(await page.locator("#root script, #root img, #root [onerror]").count()).toBe(0);
+  expect(
+    await page.locator("#root script, #root img:not(.brand-mark), #root [onerror]").count(),
+  ).toBe(0);
 
   expect(
     await page.evaluate(() => (window as unknown as { __xss?: unknown }).__xss),

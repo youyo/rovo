@@ -384,6 +384,81 @@ export function buildSteps(events: readonly TaskEventDto[], active: boolean): St
   return steps;
 }
 
+/** 所要。open は終わっていない（今までの経過。画面は「6 秒…」のように末尾に … を付ける） */
+export type StepTiming = { ms: number; open: boolean };
+export type PhaseTiming = StepTiming;
+
+/**
+ * ステップの所要。次のステップの時刻との差（負は 0）。実行中（いま）の最後のステップだけ、更新時刻（generatedAt）までの経過で open。
+ * 終わったタスクの最後のステップは、次が無いので所要を作らない（データに無いものは作らない）。generatedAt が読めないときも作らない。
+ */
+export function stepTimings(
+  steps: readonly Step[],
+  generatedAt: number,
+): (StepTiming | undefined)[] {
+  return steps.map((step, i) => {
+    const next = steps[i + 1];
+    if (next !== undefined) return { ms: Math.max(0, next.at - step.at), open: false };
+    if (step.current && Number.isFinite(generatedAt)) {
+      return { ms: Math.max(0, generatedAt - step.at), open: true };
+    }
+    return undefined;
+  });
+}
+
+const TERMINAL_STATUSES: ReadonlySet<TaskStatusDto> = new Set([
+  "COMPLETED",
+  "FAILED",
+  "BUDGET_EXCEEDED",
+  "CANCELLED",
+]);
+
+/**
+ * 段階（準備・実行・検証）の所要。status_changed の時刻だけから出す:
+ * 準備 = 最初の CREATING から、実行 = 最初の RUNNING から、検証 = 最初の VERIFYING から、
+ * 次の段階の始まり（または終端）まで。始まりの記録が無い段階（古い履歴を読んでいない・旧い記録）と、
+ * 終わりの記録が無くて今も続いていない段階には、所要を作らない。今の段階（now・waiting・recovering）は更新時刻までの経過で open。
+ * 完了の段階には所要が無い。events は seq の昇順。
+ */
+export function phaseTimings(
+  events: readonly TaskEventDto[],
+  band: readonly BandStep[],
+  generatedAt: number,
+): Partial<Record<BandKey, PhaseTiming>> {
+  const firstAt = (match: (to: TaskStatusDto) => boolean): number | undefined => {
+    for (const e of events) {
+      if (e.type === "status_changed" && match(e.to)) {
+        const t = Date.parse(e.at);
+        return Number.isFinite(t) ? t : undefined;
+      }
+    }
+    return undefined;
+  };
+  const starts: [Exclude<BandKey, "done">, number | undefined][] = [
+    ["prepare", firstAt((to) => to === "CREATING")],
+    ["run", firstAt((to) => to === "RUNNING")],
+    ["verify", firstAt((to) => to === "VERIFYING")],
+  ];
+  const terminalAt = firstAt((to) => TERMINAL_STATUSES.has(to));
+  const out: Partial<Record<BandKey, PhaseTiming>> = {};
+  starts.forEach(([key, start], i) => {
+    if (start === undefined) return;
+    const ends = [...starts.slice(i + 1).map(([, t]) => t), terminalAt].filter(
+      (t): t is number => t !== undefined && t >= start,
+    );
+    if (ends.length > 0) {
+      out[key] = { ms: Math.min(...ends) - start, open: false };
+      return;
+    }
+    const state = band.find((b) => b.key === key)?.state;
+    const going = state === "now" || state === "waiting" || state === "recovering";
+    if (going && Number.isFinite(generatedAt)) {
+      out[key] = { ms: Math.max(0, generatedAt - start), open: true };
+    }
+  });
+  return out;
+}
+
 export type BandKey = "prepare" | "run" | "verify" | "done";
 export type BandState = "done" | "now" | "waiting" | "recovering" | "todo" | "stopped";
 export type BandStep = { key: BandKey; name: string; state: BandState; label: string };

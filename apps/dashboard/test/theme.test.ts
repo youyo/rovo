@@ -3,8 +3,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * 配色のトークン（B 制御卓）。色は :root のトークンに置き、コンポーネントの CSS・TSX に直接の色を書かない。
- * ライト（paper）が既定、ダーク（indigo）は prefers-color-scheme: dark で切り替える。
+ * 配色のトークン（GitHub Actions 型）。色は :root のトークンに置き、コンポーネントの CSS・TSX に直接の色を書かない。
+ * ライトが既定（背景 #f6f8fa・カード #fff）、ダークは GitHub のダーク（背景 #0d1117・カード #161b22）に寄せ、prefers-color-scheme: dark で切り替える。
+ * ログの箱（--screen）はライトでも暗い面（#0d1117）。
  */
 const SRC = join(import.meta.dirname, "..", "src");
 const css = readFileSync(join(SRC, "style.css"), "utf8");
@@ -53,7 +54,6 @@ const COLOR_TOKENS = [
   "bg",
   "fg",
   "dim",
-  "faint",
   "line",
   "panel",
   "sel",
@@ -64,26 +64,47 @@ const COLOR_TOKENS = [
   "link",
   "mute",
   "fail",
+  "ok",
+  "run",
+  "run-ring",
+  "wait",
+  "skip",
+  "on-mark",
+  "now-bg",
+  "now-line",
   "bar",
   "bar2",
   "on-bar",
+  "log-dim",
+  "log-line",
+  "log-hover",
+  "log-ok",
+  "log-bad",
+  "log-run",
+  "log-info",
 ];
 
 describe("配色のトークン", () => {
-  it("ライト（paper）の指定値: 地・墨・藍・失敗", () => {
-    expect(light.bg?.toLowerCase()).toBe("#e3e6e9");
-    expect(light.fg?.toLowerCase()).toBe("#1e2932");
-    expect(light.accent?.toLowerCase()).toBe("#2d4ba0");
-    expect(light.fail?.toLowerCase()).toBe("#b83a1e");
-    expect(light.screen?.toLowerCase()).toBe("#f6f7f8");
+  it("ライトの指定値: 背景・カード・文字・薄い文字・線・成功・失敗・実行中・レビュー待ち・ログ", () => {
+    expect(light.bg?.toLowerCase()).toBe("#f6f8fa");
+    expect(light.panel?.toLowerCase()).toBe("#ffffff");
+    expect(light.fg?.toLowerCase()).toBe("#1f2328");
+    expect(light.dim?.toLowerCase()).toBe("#59636e");
+    expect(light.line?.toLowerCase()).toBe("#d1d9e0");
+    expect(light.ok?.toLowerCase()).toBe("#1a7f37");
+    expect(light.fail?.toLowerCase()).toBe("#cf222e");
+    expect(light.run?.toLowerCase()).toBe("#9a6700");
+    expect(light["run-ring"]?.toLowerCase()).toBe("#bf8700");
+    expect(light.wait?.toLowerCase()).toBe("#0969da");
+    expect(light.screen?.toLowerCase()).toBe("#0d1117");
+    expect(light["screen-fg"]?.toLowerCase()).toBe("#e6edf3");
   });
 
-  it("ダーク（indigo）の指定値: 地・文字・白緑・失敗。prefers-color-scheme: dark で切り替える", () => {
-    expect(dark.bg?.toLowerCase()).toBe("#1b2238");
-    expect(dark.fg?.toLowerCase()).toBe("#dce4ee");
-    expect(dark.accent?.toLowerCase()).toBe("#7fd6b5");
-    expect(dark.fail?.toLowerCase()).toBe("#ff8e72");
-    expect(dark.screen?.toLowerCase()).toBe("#141a2c");
+  it("ダークの指定値（GitHub のダーク）: 背景・カード・線・文字。prefers-color-scheme: dark で切り替える", () => {
+    expect(dark.bg?.toLowerCase()).toBe("#0d1117");
+    expect(dark.panel?.toLowerCase()).toBe("#161b22");
+    expect(dark.line?.toLowerCase()).toBe("#30363d");
+    expect(dark.fg?.toLowerCase()).toBe("#e6edf3");
   });
 
   it("ライト・ダークとも、同じ名前のトークンが全部ある。color-scheme も宣言している", () => {
@@ -95,29 +116,51 @@ describe("配色のトークン", () => {
     expect(darkMedia).toMatch(/color-scheme:\s*dark/);
   });
 
-  // 文字の色 × 地の色。小さな dim・faint の文字も 4.5:1 以上
+  it("書体: 本文は IBM Plex Sans JP、ログ・コマンド・数字は JetBrains Mono（トークン --font / --mono）", () => {
+    const rootBlock = blockAfter(css, /(^|\n):root\s*\{/);
+    expect(rootBlock).toMatch(/--font:\s*"IBM Plex Sans JP"/);
+    expect(rootBlock).toMatch(/--mono:\s*"JetBrains Mono"/);
+    expect(css).not.toMatch(/M PLUS 1 Code/);
+  });
+
+  // 文字の色 × 地の色。小さな dim の文字も 4.5:1 以上
   const onBackgrounds = ["bg", "panel", "sel"];
-  const textOnBackground = ["fg", "dim", "faint", "link", "accent", "fail", "mute"];
-  const onScreen = ["screen-fg", "faint", "prompt", "fail", "dim", "accent", "link"];
+  const textOnBackground = ["fg", "dim", "link", "accent", "fail", "mute"];
+  // 状態の色の文字（成功・実行中・レビュー待ち）は、地とカードの上
+  const statusText = ["ok", "run", "wait"];
+  const onScreen = ["screen-fg", "log-dim", "prompt", "log-ok", "log-bad", "log-run", "log-info"];
 
   for (const [theme, t] of [
     ["ライト", light],
     ["ダーク", dark],
   ] as const) {
-    it(`${theme}: 文字のコントラストは 4.5:1 以上（地・見出しの面・選択行）`, () => {
+    it(`${theme}: 文字のコントラストは 4.5:1 以上（地・カード・選択行）`, () => {
       for (const bg of onBackgrounds) {
         for (const fg of textOnBackground) {
           const r = contrast(t[fg] as string, t[bg] as string);
           expect(r, `${theme} --${fg} on --${bg} = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
         }
       }
+      for (const bg of ["bg", "panel"]) {
+        for (const fg of statusText) {
+          const r = contrast(t[fg] as string, t[bg] as string);
+          expect(r, `${theme} --${fg} on --${bg} = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
     });
 
-    it(`${theme}: 画面（screen）の上の文字のコントラストは 4.5:1 以上`, () => {
+    it(`${theme}: 「いま」の行（黄色の注意の枠）の文字は 4.5:1 以上`, () => {
+      const r = contrast(t.fg as string, t["now-bg"] as string);
+      expect(r, `${theme} --fg on --now-bg = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it(`${theme}: ログの箱の上の文字のコントラストは 4.5:1 以上`, () => {
       for (const fg of onScreen) {
         const r = contrast(t[fg] as string, t.screen as string);
         expect(r, `${theme} --${fg} on --screen = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
       }
+      const hover = contrast(t["log-dim"] as string, t["log-hover"] as string);
+      expect(hover, `${theme} --log-dim on --log-hover`).toBeGreaterThanOrEqual(4.5);
     });
 
     it(`${theme}: ステータスバーの文字は 4.5:1 以上`, () => {
@@ -126,10 +169,17 @@ describe("配色のトークン", () => {
         expect(r, `${theme} --on-bar on --${bg} = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
       }
     });
+
+    it(`${theme}: 状態の丸（塗り）の中の記号（--on-mark）は、丸の色の上で 3:1 以上（記号は文字ではなく図形）`, () => {
+      for (const fill of ["ok", "fail", "wait", "run-ring", "skip"]) {
+        const r = contrast(t["on-mark"] as string, t[fill] as string);
+        expect(r, `${theme} --on-mark on --${fill} = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(3);
+      }
+    });
   }
 
-  it("画面（screen）は暗くない面ではなく、ライトでは明るい面・ダークでは暗い面（トークンで決まる）", () => {
-    expect(luminance(light.screen as string)).toBeGreaterThan(0.8);
+  it("ログの箱はライトでも暗い面（トークンで決まる）。ダークの地とも見分けがつく", () => {
+    expect(luminance(light.screen as string)).toBeLessThan(0.05);
     expect(luminance(dark.screen as string)).toBeLessThan(0.05);
   });
 });
@@ -156,15 +206,21 @@ describe("色の直書きをしない", () => {
 });
 
 describe("動きの抑制", () => {
-  it("prefers-reduced-motion では脈動・カーソルの点滅を止める", () => {
+  it("prefers-reduced-motion では回る輪（実行中）の回転・カーソルの点滅を止める。回る輪は破線の輪にする", () => {
     const reduced = blockAfter(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{/);
-    expect(reduced).toMatch(/\.pulse[^{]*\{[^}]*animation:\s*none/);
+    expect(reduced).toMatch(/\.spin[^{]*\{[^}]*animation:\s*none/);
     expect(reduced).toMatch(/\.cursor[^{]*\{[^}]*animation:\s*none/);
+    expect(reduced).toMatch(/\.mark-ring--arc[^{]*\{[^}]*stroke-dasharray/);
+  });
+
+  it("回る輪は 1 周 1 秒の線形の回転（rovo-spin）", () => {
+    expect(css).toMatch(/\.spin\s*\{[^}]*animation:\s*rovo-spin\s+1s\s+linear\s+infinite/);
+    expect(css).toMatch(/@keyframes rovo-spin\s*\{[^}]*rotate\(360deg\)/);
   });
 
   it("抑制の指定は、抑える側の元の指定より後ろに書く（同じ重みなので、前に書くと効かない）", () => {
     const at = css.search(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
-    for (const sel of [".pulse", ".cursor"]) {
+    for (const sel of [".spin", ".cursor"]) {
       const base = css.search(new RegExp(`(^|\\n)\\${sel}\\s*\\{`));
       expect(base, `${sel} の元の指定`).toBeGreaterThanOrEqual(0);
       expect(at, `${sel} より後ろ`).toBeGreaterThan(base);

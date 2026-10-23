@@ -16,7 +16,7 @@ function walk(dir) {
 const files = walk(dist);
 const html = readFileSync(join(dist, "index.html"), "utf8");
 
-// 容量の上限は 2 つに分ける。書体（woff2）は和文が大きい（M PLUS 1 Code は 1 太さで約 1.6MB の分割ファイル。400 と 700 の woff2 で約 3.3MB）が、
+// 容量の上限は 2 つに分ける。書体（woff2）は和文が大きい（IBM Plex Sans JP は 1 太さで約 2.3MB の分割ファイル。400 と 700 の woff2 で約 4.7MB）が、
 // ブラウザは unicode-range で使う文字を含む分割だけを読む。JS/CSS/HTML の上限（M1 の実測は数十 KB）を緩めると
 // アプリ本体の肥大に気づけなくなるので、書体は別枠の上限にして、書体以外の上限は据え置く。
 const MAX_APP_BYTES = 400 * 1024;
@@ -117,27 +117,28 @@ const css = files
   .map((f) => readFileSync(f, "utf8"))
   .join("\n");
 
-test("全体の書体 M PLUS 1 Code の @font-face がある（400 と 700。font-display: swap）。旧い 3 書体は外した", () => {
+test("書体は IBM Plex Sans JP（本文。400 と 700）と JetBrains Mono（ログ・コマンド・数字。400 と 700）。font-display: swap。旧い書体は外した", () => {
   const faces = [...css.matchAll(/@font-face\s*\{[^}]*\}/g)].map((m) => m[0]);
-  for (const w of [400, 700]) {
-    const hit = faces.filter(
-      (b) =>
-        /font-family:\s*["']?M PLUS 1 Code["']?/.test(b) &&
-        new RegExp(`font-weight:\\s*${w}\\b`).test(b),
-    );
-    assert.ok(hit.length > 0, `M PLUS 1 Code ${w} の @font-face が無い`);
-    for (const b of hit)
-      assert.match(b, /font-display:\s*swap/, `M PLUS 1 Code ${w} が swap でない`);
+  for (const family of ["IBM Plex Sans JP", "JetBrains Mono"]) {
+    for (const w of [400, 700]) {
+      const hit = faces.filter(
+        (b) =>
+          new RegExp(`font-family:\\s*["']?${family}["']?`).test(b) &&
+          new RegExp(`font-weight:\\s*${w}\\b`).test(b),
+      );
+      assert.ok(hit.length > 0, `${family} ${w} の @font-face が無い`);
+      for (const b of hit) assert.match(b, /font-display:\s*swap/, `${family} ${w} が swap でない`);
+    }
   }
-  for (const old of ["Familjen Grotesk", "Zen Kaku Gothic New", "JetBrains Mono"]) {
+  for (const old of ["M PLUS 1 Code", "Familjen Grotesk", "Zen Kaku Gothic New"]) {
     assert.ok(!faces.some((b) => b.includes(old)), `${old} の @font-face が残っている`);
   }
 });
 
 test("和文は unicode-range で分割されている（使う範囲だけブラウザが読む）", () => {
-  const mplus = [...css.matchAll(/@font-face\s*\{[^}]*M PLUS 1 Code[^}]*\}/g)].map((m) => m[0]);
-  assert.ok(mplus.length >= 100, `M PLUS 1 Code の分割が少ない: ${mplus.length}`);
-  for (const b of mplus) assert.match(b, /unicode-range:/);
+  const plex = [...css.matchAll(/@font-face\s*\{[^}]*IBM Plex Sans JP[^}]*\}/g)].map((m) => m[0]);
+  assert.ok(plex.length >= 100, `IBM Plex Sans JP の分割が少ない: ${plex.length}`);
+  for (const b of plex) assert.match(b, /unicode-range:/);
 });
 
 test("書体は woff2 だけで、/dashboard/assets/ 配下の同一オリジンから読まれる", () => {
@@ -152,14 +153,14 @@ test("書体は data: に埋め込まない（CSP の font-src 'self'）", () =>
 });
 
 test("書体の OFL のライセンスを同梱している", () => {
-  for (const name of ["M-PLUS-1-Code"]) {
+  for (const name of ["IBM-Plex-Sans-JP", "JetBrains-Mono"]) {
     const path = join(dist, "assets", "licenses", `OFL-${name}.txt`);
     const text = readFileSync(path, "utf8");
     assert.match(text, /SIL OPEN FONT LICENSE Version 1\.1/);
     assert.match(text, /Copyright/);
   }
   // 外した書体のライセンスは残さない
-  for (const name of ["Familjen-Grotesk", "Zen-Kaku-Gothic-New", "JetBrains-Mono"]) {
+  for (const name of ["M-PLUS-1-Code", "Familjen-Grotesk", "Zen-Kaku-Gothic-New"]) {
     assert.ok(
       !files.some((f) => f.endsWith(`OFL-${name}.txt`)),
       `${name} のライセンスが残っている`,

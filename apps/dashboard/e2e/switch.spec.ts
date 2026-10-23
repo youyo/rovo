@@ -23,7 +23,7 @@ test("(sw-1) レールで別のタスクを押すと、ページを読み直さ�
   const done = s.tasks.done as string;
   const failed = s.tasks.failed as string;
   await loginAs(page, s.users.alice);
-  await page.getByRole("button", { name: "全員" }).click();
+  await page.getByRole("button", { name: "チーム" }).click();
   await setMarker(page);
   const before = await navCount(page);
 
@@ -56,7 +56,7 @@ test("(sw-1) レールで別のタスクを押すと、ページを読み直さ�
 test("(sw-2) タイムラインの棒でも、ページを読み直さずに切り替わる", async ({ page }) => {
   const done = s.tasks.done as string;
   await loginAs(page, s.users.alice);
-  await page.getByRole("button", { name: "全員" }).click();
+  await page.getByRole("button", { name: "チーム" }).click();
   await setMarker(page);
   await page.locator(`a[data-task="${done}"]`).click();
   await expect(page).toHaveURL(new RegExp(`${taskPath(done)}$`));
@@ -80,7 +80,7 @@ test("(sw-3) ?fresh=1 は、URL を直接開いたときの最初の取得だけ
   await expect(page.getByRole("heading", { level: 1, name: "完了したタスク" })).toBeVisible();
   expect(urls[0]).toBe(`${done}?fresh=1`);
 
-  await page.getByRole("button", { name: "全員" }).click();
+  await page.getByRole("button", { name: "チーム" }).click();
   urls.length = 0;
   await rail(page, failed).click();
   await expect(page.getByRole("heading", { level: 1, name: "失敗したタスク" })).toBeVisible();
@@ -100,7 +100,7 @@ test("(sw-4) 修飾キー付きのクリックは同じタブで切り替えず�
 }) => {
   const done = s.tasks.done as string;
   await loginAs(page, s.users.alice);
-  await page.getByRole("button", { name: "全員" }).click();
+  await page.getByRole("button", { name: "チーム" }).click();
   const url = page.url();
   const popup = context.waitForEvent("page");
   await rail(page, done).click({ modifiers: ["ControlOrMeta"] });

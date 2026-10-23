@@ -2,7 +2,7 @@ import type { BudgetMeDto, CloudflareSummaryDto, OverviewDto } from "@rovo/dashb
 import { useId, useState } from "react";
 import { cloudflareRows } from "./cloudflare";
 import { CloudflarePanel } from "./cloudflare-panel";
-import { formatClock, formatCount, formatUsd, shortModel } from "./format";
+import { formatClock, formatCount, formatUsd, modelFamily, shortModel } from "./format";
 import { budgetLimit } from "./rail";
 import { BudgetPanel, ModelCosts } from "./side-panels";
 import { markKindOf } from "./status";
@@ -44,13 +44,6 @@ function Sb(props: { alt?: boolean; strong?: boolean; children: React.ReactNode;
   );
 }
 
-/** バー用のモデル名。sonnet / haiku / opus はその名前に縮める（同じ系統が複数あるときは区別のため短縮前の名前） */
-function barModelName(id: string): string {
-  const name = shortModel(id).name;
-  const m = /(sonnet|haiku|opus)/i.exec(name);
-  return m?.[1] !== undefined ? m[1].toLowerCase() : name;
-}
-
 /** モデル別をバーに収める短い項目（合計の大きい順。多いときは上位だけ）。項目の途中では折り返さない */
 function ModelLine(props: { models: OverviewDto["models"] }) {
   const all = props.models
@@ -60,7 +53,7 @@ function ModelLine(props: { models: OverviewDto["models"] }) {
     }))
     .sort((a, b) => b.total - a.total)
     .slice(0, 4);
-  const short = all.map((r) => barModelName(r.id));
+  const short = all.map((r) => modelFamily(r.id));
   const rows = all.map((r, i) => ({
     ...r,
     // 縮めた名前が重なるときは、重なった側を元の名前に戻す
@@ -78,6 +71,35 @@ function ModelLine(props: { models: OverviewDto["models"] }) {
         </span>
       ))}
     </>
+  );
+}
+
+/**
+ * 今月の使用量のメーター（使った額 / 上限）。SVG の属性で幅を持つ（CSP の style-src 'self' で style 属性は使えない）。
+ * 上限が分からないとき（古い応答で残りが 0）は出さない。比率は 0〜100% に収める。
+ */
+function Meter(props: { spent: number; limit: number | null }) {
+  const { spent, limit } = props;
+  if (limit === null || !(limit > 0)) return null;
+  const ratio = Math.min(1, Math.max(0, spent / limit));
+  return (
+    <svg
+      className="meter"
+      width={80}
+      height={6}
+      role="img"
+      aria-label={`今月の使用量 ${formatUsd(spent)} / ${formatUsd(limit)}`}
+    >
+      <rect className="meter-bg" x={0} y={0} width="100%" height={6} rx={3} />
+      <rect
+        className="meter-fill"
+        x={0}
+        y={0}
+        width={`${(ratio * 100).toFixed(1)}%`}
+        height={6}
+        rx={3}
+      />
+    </svg>
   );
 }
 
@@ -143,6 +165,7 @@ export function StatusBar(props: {
           今月 {formatUsd(data.budget.spent_usd)}
           {limit === null ? "" : ` / ${formatUsd(limit)}`}
         </Sb>
+        <Meter spent={data.budget.spent_usd} limit={limit} />
         <Sb k="budget-left" alt>
           {`残り ${formatUsd(data.budget.remaining_usd)}  あと ${formatCount(data.budget.startable)} 件`}
         </Sb>
@@ -190,6 +213,7 @@ export function PendingStatusBar(props: {
             ? `今月 ${formatUsd(budget.spent_usd)}${limit === null ? "" : ` / ${formatUsd(limit)}`}`
             : "今月 読み込み中…"}
         </Sb>
+        {budget ? <Meter spent={budget.spent_usd} limit={limit} /> : null}
         <Sb k="budget-left" alt>
           {budget
             ? `残り ${formatUsd(budget.remaining_usd)}  あと ${formatCount(budget.startable)} 件`

@@ -7,6 +7,7 @@ import {
   formatDuration,
   formatUsd,
   isAllowedPrUrl,
+  modelFamily,
   sanitizeText,
   shortModel,
   singleLine,
@@ -142,5 +143,23 @@ describe("formatClockSeconds / formatCount", () => {
     expect(formatCount(0)).toBe("0");
     expect(formatCount(9412)).toBe("9,412");
     expect(formatCount(1234567)).toBe("1,234,567");
+  });
+});
+
+describe("modelFamily（レールなど狭い場所のモデル名。sonnet / haiku / opus はその名前に縮める）", () => {
+  it("sonnet / haiku / opus を含む名前はその系統名（大文字小文字を問わず）", () => {
+    expect(modelFamily("claude-sonnet-5-5")).toBe("sonnet");
+    expect(modelFamily("anthropic/claude-haiku-5-5")).toBe("haiku");
+    expect(modelFamily("claude-OPUS-5")).toBe("opus");
+  });
+
+  it("系統が分からないモデルは shortModel の名前のまま（接頭辞は省く）", () => {
+    expect(modelFamily("example-model-large")).toBe("example-model-large");
+    expect(modelFamily("workers-ai/@cf/openai/gpt-oss-120b")).toBe("gpt-oss-120b");
+  });
+
+  it("制御文字は除く（sanitize 済みの名前から決める）", () => {
+    expect(modelFamily("claude-so\u0007nnet-5")).toBe("sonnet");
+    expect(modelFamily("my\u0007-model")).toBe("my-model");
   });
 });

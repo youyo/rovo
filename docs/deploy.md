@@ -507,7 +507,7 @@ gateway は、読み取り専用のダッシュボード（`apps/dashboard`。Vi
   - `/mcp`・`/authorize`・`/oauth/*`・`/.well-known/*` は、ダッシュボードとは別の経路で、今までの扱い（8）のまま。
   - Portal に入れるのは MCP の URL だけでよい。（実環境では未確認）ダッシュボードを Portal の外に出す必要はない（Portal は MCP のゲートウェイで、ブラウザの SPA は経由しない）。
 - **Cloudflare の API トークンの権限**: 下の「Cloudflare の概要」。**AI Gateway Read** と **Account Analytics Read**（どちらも読み取り）。既存の環境は `terraform apply` が要る。`plan` でトークンが置き換え（`must be replaced`）になる場合だけ、`mise run deploy:secrets -- --rotate cloudflare-token` で値を入れ直す。`WORKER_NAMES`（Workers の集計の対象。`rovo.config.json` の `workerNames`）は `deploy:config` が入れる（5 の表）。
-- **書体の同梱**: 書体（M PLUS 1 Code）は npm の `@fontsource` から `dist` に同梱し、同一オリジンから配信する（外部の CDN は使わない。ブラウザから外部への要求は 0 件）。ライセンスは SIL Open Font License 1.1 で、全文は `/dashboard/assets/licenses/` に同梱する。woff2 だけ、キリル・ギリシャ・ベトナム語は同梱しない。再配布する下流も、この `licenses/` を消さないこと。
+- **書体の同梱**: 書体（IBM Plex Sans JP と JetBrains Mono）は npm の `@fontsource` から `dist` に同梱し、同一オリジンから配信する（外部の CDN は使わない。ブラウザから外部への要求は 0 件）。ライセンスは SIL Open Font License 1.1 で、全文は `/dashboard/assets/licenses/` に同梱する。woff2 だけ、キリル・ギリシャ・ベトナム語は同梱しない。再配布する下流も、この `licenses/` を消さないこと。
 - **読み取り専用と安全**: 状態を変える API は無い（ログアウトの `POST` を除く）。表示する出力の末尾は、agent と gateway で秘密をマスクしてから出す。マスクの限界は `SECURITY.md`。
 
 ### Cloudflare の概要（`GET /dashboard/api/cloudflare`。M9）

@@ -90,6 +90,8 @@ export function OverviewView(props: {
             selectedId={props.selectedId}
             isToday={props.isToday}
             onSelect={props.onSelectTask}
+            showOwner={data.scope === "all"}
+            at={nowMs}
           />
         ) : (
           <nav className="rail" aria-label="タスク">

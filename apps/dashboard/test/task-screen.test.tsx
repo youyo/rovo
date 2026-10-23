@@ -142,10 +142,13 @@ describe("タスク詳細（実行中。値のある now / output）", () => {
     const t = taskDetailRunningFixture.task;
     expect(c.querySelector("h1")?.textContent).toBe(t.title);
     expect(text(c)).toContain("実行中");
-    expect(c.querySelector(".pulse")).not.toBeNull();
+    expect(c.querySelector(".spin")).not.toBeNull();
     expect(text(c)).toContain("開始から");
     expect(text(c)).toContain(t.repository);
-    expect(text(c)).toContain(`${t.owner_login} が依頼`);
+    const ownerFact = [...c.querySelectorAll(".con-head .meta-item")].find(
+      (i) => i.querySelector("dt")?.textContent === "依頼者",
+    );
+    expect(ownerFact?.querySelector("dd")?.textContent).toBe(t.owner_login);
     expect(c.querySelector(".now-line")?.textContent).toBe(
       "いまは pnpm exec vitest run を実行しています。",
     );
@@ -290,7 +293,7 @@ describe("タスク詳細（準備で失敗・終端）", () => {
     expect(band.getAttribute("aria-label")).toContain("準備は失敗");
     expect(text(c)).toContain("base_sha_not_found");
     expect(text(c)).toContain("失敗");
-    expect(c.querySelector(".pulse")).toBeNull();
+    expect(c.querySelector(".spin")).toBeNull();
     expect(c.querySelector("pre")).toBeNull();
     expect(text(c)).toContain("進み具合はまだありません");
     expect(text(c)).toContain("所要");

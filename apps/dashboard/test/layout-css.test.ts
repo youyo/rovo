@@ -68,20 +68,73 @@ describe("状態の印（SVG の記号）の大きさと色", () => {
     expect(m).toMatch(/stroke:\s*currentColor/);
   });
 
-  it("色は tone ごとに既存のトークンだけ（青=accent、オレンジ=fail、灰=mute、墨=fg）", () => {
-    expect(body(".mark-sym--blue")).toMatch(/color:\s*var\(--accent\)/);
-    expect(body(".mark-sym--orange")).toMatch(/color:\s*var\(--fail\)/);
-    expect(body(".mark-sym--gray")).toMatch(/color:\s*var\(--mute\)/);
-    expect(body(".mark-sym--ink")).toMatch(/color:\s*var\(--fg\)/);
+  it("色は tone ごとにトークンだけ（緑=ok、赤=fail、黄=run-ring、青=wait、灰=skip）", () => {
+    expect(body(".mark-sym--ok")).toMatch(/color:\s*var\(--ok\)/);
+    expect(body(".mark-sym--bad")).toMatch(/color:\s*var\(--fail\)/);
+    expect(body(".mark-sym--run")).toMatch(/color:\s*var\(--run-ring\)/);
+    expect(body(".mark-sym--wait")).toMatch(/color:\s*var\(--wait\)/);
+    expect(body(".mark-sym--skip")).toMatch(/color:\s*var\(--skip\)/);
   });
 
   it("レールの行は印と文字を縦の中央にそろえる（印が文字より上に飛び出さない）", () => {
     expect(body(".rail-row")).toMatch(/align-items:\s*center/);
   });
 
-  it("脈動（.pulse）は動きだけ。形は記号が持つ（点の見た目を持たない）", () => {
-    const pulse = body(".pulse");
-    expect(pulse).toMatch(/animation:\s*rovo-beat/);
-    expect(pulse).not.toMatch(/border-radius|background/);
+  it("回転（.spin）は動きだけ。形は記号が持つ（点の見た目を持たない）", () => {
+    const spin = body(".spin");
+    expect(spin).toMatch(/animation:\s*rovo-spin/);
+    expect(spin).not.toMatch(/border-radius|background/);
+  });
+});
+
+describe("レールの行（2 行）・数字の右揃え", () => {
+  it("行は「印・題名・所要」の 1 行目と、2 行目（rail-meta）の格子。印と題名は縦の中央", () => {
+    const row = body(".rail-row");
+    expect(row).toMatch(/display:\s*grid/);
+    expect(row).toMatch(/align-items:\s*center/);
+    expect(body(".rail-meta")).toMatch(/grid-column:\s*2\s*\/\s*4/);
+  });
+
+  it("選んだ行は左に青い線（wait のトークン）", () => {
+    expect(body('.rail-row[data-selected="true"]')).toMatch(/border-left-color:\s*var\(--wait\)/);
+  });
+
+  it("所要と費用は、数字の右揃え（tabular-nums）で JetBrains Mono", () => {
+    for (const sel of [".rail-time", ".rail-cost"]) {
+      const b = body(sel);
+      expect(b, sel).toMatch(/font-variant-numeric:\s*tabular-nums/);
+      expect(b, sel).toMatch(/text-align:\s*right/);
+      expect(b, sel).toMatch(/font-family:\s*var\(--mono\)/);
+    }
+  });
+});
+
+describe("段階の図・ログの箱", () => {
+  it("段階の線（band-edge）は灰、済んだ区間（.done）は緑（ok）", () => {
+    expect(body(".band-edge")).toMatch(/background:\s*var\(--line\)/);
+    expect(body(".band-edge.done")).toMatch(/background:\s*var\(--ok\)/);
+  });
+
+  it("「いま」の行は黄色の注意の枠（now-bg / now-line のトークン）", () => {
+    const b = body(".now-line");
+    expect(b).toMatch(/background:\s*var\(--now-bg\)/);
+    expect(b).toMatch(/border:\s*1px solid var\(--now-line\)/);
+  });
+
+  it("ログの箱は暗い面（screen）。ステップの所要は右寄せで数字をそろえる", () => {
+    expect(body(".logbox")).toMatch(/background:\s*var\(--screen\)/);
+    const dur = body(".step-dur");
+    expect(dur).toMatch(/text-align:\s*right/);
+    expect(dur).toMatch(/font-variant-numeric:\s*tabular-nums/);
+  });
+
+  it("出力の行番号は CSS の counter（文字列に混ぜない）", () => {
+    expect(css).toMatch(/\.out-line::before\s*\{[^}]*counter-increment:\s*ln/);
+    expect(body(".output")).toMatch(/counter-reset:\s*ln/);
+  });
+
+  it("本文は IBM Plex Sans JP、ログは JetBrains Mono（トークン経由）", () => {
+    expect(body("body")).toMatch(/font-family:\s*var\(--font\)/);
+    expect(css).toMatch(/\n\.screen\s*\{[^}]*font-family:\s*var\(--mono\)/);
   });
 });

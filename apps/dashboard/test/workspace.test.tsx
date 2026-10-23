@@ -86,12 +86,21 @@ const paths = (f: ReturnType<typeof vi.fn>) =>
 const text = (e: Element | null) => e?.textContent ?? "";
 
 describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
-  it("rovo・全員/自分・その日の要約・利用者名・ログアウト", async () => {
+  it("Rovo・マイタスク/チーム・その日の要約・利用者名・ログアウト", async () => {
     const { c } = await mount("/dashboard/");
     const head = c.querySelector("header.top") as HTMLElement;
-    expect(text(head.querySelector(".brand"))).toBe("rovo");
+    expect(text(head.querySelector(".brand"))).toBe("Rovo");
+    // 「Rovo」の左にロゴ（装飾。同一オリジンの SVG）
+    const mark = head.querySelector(".brand > img.brand-mark:first-child") as HTMLImageElement;
+    expect(mark.getAttribute("src")).toBe("/dashboard/assets/brand/rovo-mark.svg");
+    expect(mark.getAttribute("alt")).toBe("");
+    expect(mark.getAttribute("width")).toBe("24");
     const seg = [...head.querySelectorAll("fieldset.seg button")].map((b) => b.textContent);
-    expect(seg).toEqual(["全員", "自分"]);
+    // 並びは「マイタスク」が先。表示範囲の切り替えの名前（aria-label）も合わせる
+    expect(seg).toEqual(["マイタスク", "チーム"]);
+    expect(head.querySelector("fieldset.seg")?.getAttribute("aria-label")).toBe(
+      "表示範囲（チーム / マイタスク）",
+    );
     expect(text(head.querySelector(".day-summary"))).toMatch(
       /^\d+月\d+日 +5 件 +マージ 2 +走行中 1$/,
     );
@@ -101,7 +110,7 @@ describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
     );
   });
 
-  it("タスクの URL でも同じヘッダ（全員/自分・要約・日付の前後送り）。戻るリンクは無い", async () => {
+  it("タスクの URL でも同じヘッダ（チーム/マイタスク・要約・日付の前後送り）。戻るリンクは無い", async () => {
     const { c } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
     const head = c.querySelector("header.top") as HTMLElement;
     expect(head.querySelector("fieldset.seg")).not.toBeNull();
@@ -110,7 +119,7 @@ describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
     expect(head.querySelector("button[aria-label='前の日']")).not.toBeNull();
   });
 
-  it("最初は「自分」の分。「全員」に切り替えると、要約もレールも全員の分になる", async () => {
+  it("最初は「マイタスク」の分。「チーム」に切り替えると、要約もレールも全員の分になる", async () => {
     const { c } = await mount("/dashboard/", {
       overview: (url) =>
         url.searchParams.get("scope") === "me" ? overviewMeFixture : overviewFixture,
@@ -119,13 +128,13 @@ describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
       [...c.querySelectorAll("fieldset.seg button")].find(
         (b) => b.textContent === label,
       ) as HTMLButtonElement;
-    expect(btn("自分").getAttribute("aria-pressed")).toBe("true");
+    expect(btn("マイタスク").getAttribute("aria-pressed")).toBe("true");
     expect(c.querySelectorAll("a.rail-row")).toHaveLength(overviewMeFixture.tasks.length);
     await act(async () => {
-      btn("全員").click();
+      btn("チーム").click();
       await settle();
     });
-    expect(btn("全員").getAttribute("aria-pressed")).toBe("true");
+    expect(btn("チーム").getAttribute("aria-pressed")).toBe("true");
     expect(c.querySelectorAll("a.rail-row")).toHaveLength(overviewFixture.tasks.length);
     expect(text(c.querySelector(".day-summary"))).toContain(`${overviewFixture.tasks.length} 件`);
   });

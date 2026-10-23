@@ -59,6 +59,32 @@ describe("ステータスバー（tmux 風。下に 1 行、狭いと折り返�
     expect(item(c, "budget-left")?.textContent).toBe("残り $38.50  あと 2 件");
   });
 
+  it("今月の使用量のメーター（SVG。style 属性は使えない）: 使った額 / 上限の比率。上限が分からないときは出さない", () => {
+    const c = mount();
+    const meter = c.querySelector(".statusbar svg.meter") as SVGElement;
+    expect(meter).not.toBeNull();
+    expect(meter.getAttribute("role")).toBe("img");
+    expect(meter.getAttribute("aria-label")).toBe("今月の使用量 $11.40 / $49.90");
+    expect(meter.querySelector("rect.meter-bg")).not.toBeNull();
+    const fill = meter.querySelector("rect.meter-fill") as SVGRectElement;
+    expect(fill.getAttribute("width")).toBe(`${((11.4 / 49.9) * 100).toFixed(1)}%`);
+    expect(c.querySelector("[style]")).toBeNull();
+    // 「今月」の項目の文字は変えない（メーターは文字を持たない）
+    expect(item(c, "budget-me")?.textContent).toBe("今月 $11.40 / $49.90");
+    document.body.innerHTML = "";
+    const { monthly_budget_usd: _omit, ...legacy } = overviewFixture.budget;
+    const noLimit = mount({ ...overviewFixture, budget: { ...legacy, remaining_usd: 0 } });
+    expect(noLimit.querySelector("svg.meter")).toBeNull();
+  });
+
+  it("使い切った（使った額 >= 上限）メーターは 100% で止める", () => {
+    const c = mount({
+      ...overviewFixture,
+      budget: { ...overviewFixture.budget, spent_usd: 60, monthly_budget_usd: 50 },
+    });
+    expect(c.querySelector("rect.meter-fill")?.getAttribute("width")).toBe("100.0%");
+  });
+
   it("残りが 0 でも、契約の上限があれば上限を出す", () => {
     const c = mount({
       ...overviewFixture,

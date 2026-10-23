@@ -84,7 +84,12 @@ const BASE_ENV: Record<string, string> = {
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_MAX_OUTPUT = 64 * 1024;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
-const INACTIVITY_TIMEOUT_MS = 2 * 60 * 60_000;
+/**
+ * コンテナの無操作の期限（container.setInactivityTimeout）。設定しないと、DO が inactive になった直後にコンテナが止まり、
+ * push していない作業が消える。KEEPALIVE_MS（60 秒の alarm）の 10 倍あり、alarm が 1〜2 回遅れても止まらない。
+ * 期限は上限であり、タスクの期限・terminate では rovo 自身がこれまでどおり destroy する。DO が restart すると消えるので、constructor で設定し直す。
+ */
+const INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 const KEEPALIVE_MS = 60_000;
 const REAPER_TIMEOUT_MS = 10_000;
 const STREAM_GRACE_MS = 2_000;
@@ -148,6 +153,10 @@ const DEPS_STATUS_RANK: Record<DepsCacheStatus, number> = {
 const DEPS_KEY = /^[0-9a-f]{64}$/;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** 例外の文面（診断ログ用。長さを抑え、秘密を伏せる） */
+const errorText = (e: unknown): string =>
+  maskSecrets(e instanceof Error ? e.message : String(e)).slice(0, 300);
 
 /** キャッシュを作る途中の失敗。reason は固定コード（例外の文面は外へ出さない）。 */
 class DepsBuildError extends Error {
@@ -230,7 +239,30 @@ type DepsPlan =
   | { kind: "miss"; reason: DepsMissReason }
   | { kind: "snapshot"; key: string; snapshotId: string; built: boolean };
 
+/** start したコンテナ 1 つぶんの記録（メモリのみ。停止の診断に使う） */
+interface ContainerLife {
+  startGen: number;
+  /** rovo 自身が destroy を呼んだか */
+  destroyedByRovo: boolean;
+}
+
+/** monitor が観測した停止（メモリのみ） */
+interface ObservedExit {
+  at: number;
+  outcome: "resolved" | "rejected";
+  exitCode?: number;
+  destroyedByRovo: boolean;
+}
+
 export class SandboxDO extends DurableObject<Env> implements SandboxPort {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // DO が restart すると無操作の期限は消える。コンテナが動いていれば、最初のリクエストの前に設定し直す
+    if (ctx.container?.running) {
+      void ctx.blockConcurrencyWhile(() => this.rearmInactivityTimeout());
+    }
+  }
+
   /** 起動の世代。boot ごとに増える。古い boot の結果が新しい状態を上書きしないようにする。 */
   private gen = 0;
   private readyGen = -1;
@@ -256,6 +288,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private activeExec?: { startedAt: number; out: TailBuffer; err: TailBuffer };
   /** キャッシュを作る処理（builder として使われたとき）。同時の依頼は 1 つを共有する。 */
   private depsBuilding?: Promise<DepsBuildResult>;
+  /** 今のコンテナの記録と、monitor が最後に観測した停止（診断。永続しない） */
+  private life?: ContainerLife;
+  private lastExit?: ObservedExit;
 
   // ---- 永続状態 ----
 
@@ -854,6 +889,109 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (this.maybeContainer()?.running) await this.armAlarm();
   }
 
+  // ---- 無操作の期限と停止の診断 ----
+
+  /**
+   * start の直後に呼ぶ（start したすべての経路）。monitor を始め、無操作の期限を設定し、keepalive の alarm を張る。
+   * 期限の設定や alarm の失敗では起動を失敗にしない（警告だけ）。
+   */
+  private async onContainerStarted(
+    container: Container,
+    g: number,
+    timeoutMs = INACTIVITY_TIMEOUT_MS,
+  ): Promise<void> {
+    const life: ContainerLife = { startGen: g, destroyedByRovo: false };
+    this.life = life;
+    this.lastExit = undefined;
+    this.watchContainer(container, life);
+    try {
+      await container.setInactivityTimeout(timeoutMs);
+    } catch (e) {
+      console.warn(`[sandbox-boot] setInactivityTimeout failed: ${errorText(e)}`);
+    }
+    try {
+      // boot が途中で投げても keepalive の鎖が切れないように、start の直後に張る（armAlarm は spec が無い・terminated なら何もしない）
+      await this.armAlarm();
+    } catch (e) {
+      console.warn(`[sandbox-boot] armAlarm failed: ${errorText(e)}`);
+    }
+  }
+
+  /** DO の再起動の後、動いているコンテナの無操作の期限を設定し直す。terminated・期限切れのコンテナは延命しない。失敗しても投げない。 */
+  private async rearmInactivityTimeout(): Promise<void> {
+    try {
+      const container = this.maybeContainer();
+      if (!container?.running || this.terminated()) return;
+      const spec = this.spec();
+      if (spec && Date.now() >= spec.deadlineAt) return;
+      await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+    } catch (e) {
+      console.warn(`[sandbox-boot] setInactivityTimeout failed after restart: ${errorText(e)}`);
+    }
+  }
+
+  /**
+   * コンテナの停止を記録する（console のみ。監査ログには出さない）。monitor の promise は waitUntil に渡す
+   * （monitor が DO を最大 15 分 memory に留めることは既知の振る舞い）。
+   */
+  private watchContainer(container: Container, life: ContainerLife): void {
+    if (typeof container.monitor !== "function") return;
+    const observe = (outcome: "resolved" | "rejected", error?: unknown) => {
+      const text = error === undefined ? undefined : errorText(error);
+      const code = text?.match(/exit code:?\s*(\d+)/i)?.[1];
+      let exitCode: number | undefined;
+      if (outcome === "resolved") exitCode = 0;
+      else if (code !== undefined) exitCode = Number(code);
+      const exit: ObservedExit = {
+        at: Date.now(),
+        outcome,
+        destroyedByRovo: life.destroyedByRovo,
+        ...(exitCode !== undefined ? { exitCode } : {}),
+      };
+      if (this.life === life) this.lastExit = exit;
+      console.warn(
+        JSON.stringify({
+          event: "sandbox_container_exited",
+          at: exit.at,
+          outcome,
+          exit_code: exitCode,
+          error: text,
+          gen: this.gen,
+          start_gen: life.startGen,
+          destroyed_by_rovo: life.destroyedByRovo,
+        }),
+      );
+    };
+    try {
+      const watched = Promise.resolve(container.monitor()).then(
+        () => observe("resolved"),
+        (e: unknown) => observe("rejected", e),
+      );
+      this.ctx.waitUntil(watched);
+    } catch (e) {
+      console.warn(`[sandbox-boot] monitor failed: ${errorText(e)}`);
+    }
+  }
+
+  /** 止まっていたので起動した（作業ツリーが作り直された）。直前に alarm が見た時刻と、monitor で停止を観測していたかを残す。 */
+  private logRestartDetected(
+    g: number,
+    before: { rtSeen: number | undefined; lastExit: ObservedExit | undefined },
+  ): void {
+    console.warn(
+      JSON.stringify({
+        event: "sandbox_restart_detected",
+        at: Date.now(),
+        gen: g,
+        rt_seen: before.rtSeen ?? null,
+        monitor_observed_exit: before.lastExit !== undefined,
+        exit_at: before.lastExit?.at ?? null,
+        exit_code: before.lastExit?.exitCode ?? null,
+        destroyed_by_rovo: before.lastExit?.destroyedByRovo ?? null,
+      }),
+    );
+  }
+
   // ---- 起動 ----
 
   /** 起動直後の操作が「再起動した」ことを伝える。以降の操作は、最後に push した状態から再 clone した作業ツリーで動く。 */
@@ -877,8 +1015,15 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (this.booting) return this.booting.promise.then(() => false);
     if (this.readyGen === this.gen && container.running) return Promise.resolve(false);
     const g = ++this.gen;
+    // 起動の診断（止まっていたので起動した、と判定したときに出す）。boot が値を消す前に控える
+    const before = {
+      starts: this.num("starts"),
+      rtSeen: this.ctx.storage.kv.get<number>("rt_seen"),
+      lastExit: this.lastExit,
+    };
     const promise = this.boot(g).then((started) => {
       if (this.gen === g) this.readyGen = g;
+      if (started && before.starts > 0) this.logRestartDetected(g, before);
       return started;
     });
     const entry = { gen: g, promise };
@@ -974,6 +1119,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           });
         }
         this.recordStart();
+        await this.onContainerStarted(container, g);
         // 最初に start() に渡した大きさ（usage.sandbox.instance として gateway へ。単価の計算に使う）。昇格した後の作り直しでは上書きしない
         if (this.promotedTo() === undefined) this.ctx.storage.kv.put("instance", instance);
         started = true;
@@ -1068,7 +1214,6 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     this.assertBootCurrent(g);
     if (this.env.ENVIRONMENT === "test") this.ctx.storage.kv.put("ready_at", Date.now());
     if (started) {
-      await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
       // 信頼できる状態（ユーザーのコードを動かす前）で、残してよいプロセスを記録する
       const list = await this.rawExec(["bash", "-c", PROCESS_SCRIPT, "rovo-baseline", "list"], {
         timeoutMs: REAPER_TIMEOUT_MS,
@@ -1467,6 +1612,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         return "start_failed";
       }
       this.openRuntime();
+      await this.onContainerStarted(container, g);
       try {
         if (!(await this.waitContainerReady(g, spec))) return await fail("start_failed");
         // HTTPS 傍受の CA 証明書が読めること（無ければ git / npm が失敗する）
@@ -1477,7 +1623,6 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         const after = await this.workspaceState();
         alive();
         if (after !== before) return await fail("workspace_mismatch");
-        await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
         // 信頼できる状態（ユーザーのコードを動かす前）で、残してよいプロセスを記録し直す
         const list = await this.rawExec(["bash", "-c", PROCESS_SCRIPT, "rovo-baseline", "list"], {
           timeoutMs: REAPER_TIMEOUT_MS,
@@ -1558,6 +1703,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       return false;
     }
     this.openRuntime();
+    await this.onContainerStarted(container, g);
     try {
       if (!(await this.waitContainerReady(g, spec))) return await fail();
       const cert = await this.rawExec(["test", "-r", CA_CERT], { timeoutMs: 10_000, cwd: "/" });
@@ -1566,7 +1712,6 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       const after = await this.workspaceState();
       this.assertBootCurrent(g);
       if (after !== saved.state) return await fail();
-      await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
       const list = await this.rawExec(["bash", "-c", PROCESS_SCRIPT, "rovo-baseline", "list"], {
         timeoutMs: REAPER_TIMEOUT_MS,
       });
@@ -1910,7 +2055,12 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         instance,
         env: BASE_ENV,
       });
-      await container.setInactivityTimeout(timeoutMs + 60_000);
+      // 期限（timeoutMs）より長く待つ。alarm の鎖が無い builder は、この期限が上限になる
+      await this.onContainerStarted(
+        container,
+        this.gen,
+        Math.max(INACTIVITY_TIMEOUT_MS, timeoutMs + 60_000),
+      );
       // 傍受と許可リストはタスクのコンテナと同じ（github.com は対象リポジトリの git だけ、レジストリは GET だけ）
       const gateway = this.ctx.exports.OutboundGateway({
         props: { repo, task: req.branch, taskId: req.taskId },
@@ -2098,6 +2248,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       this.settleRuntime();
       return;
     }
+    if (this.life) this.life.destroyedByRovo = true;
     const destroyed = Promise.resolve()
       .then(() => container.destroy())
       .catch(() => {});

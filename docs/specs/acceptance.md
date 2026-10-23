@@ -103,7 +103,7 @@ Phase 1 のコードが揃った後に、利用者と一緒に実施して結果
 
 ## 前提
 
-- [ ] GitHub App を作成した（権限・コールバック URL は [README](../../README.md#github-app-の設定) のとおり）
+- [ ] GitHub App を作成した（権限・コールバック URL は [README](../../README.ja.md#github-app-の設定) のとおり）
 - [ ] App を対象 org / リポジトリに Install した（push できるリポジトリを 1 つ以上）
 - [ ] Worker をデプロイした（`PUBLIC_BASE_URL` は実 URL。`ENVIRONMENT` は `production`）
 - [ ] Secret を設定した: `GITHUB_APP_CLIENT_SECRET`、`TOKEN_ENC_KEY`

@@ -2,332 +2,336 @@
 
 # Rovo
 
-Claude Code / Cowork から Remote MCP 経由でコーディングタスクを委譲するための Task Gateway（Cloudflare Workers）。
+English | [日本語](README.ja.md)
 
-- MCP サーバー（gateway）が、GitHub App のユーザー認可でログインした利用者のタスクを受け付ける。
-- タスクは子エージェント（agent。Cloudflare Containers の隔離された Sandbox で動く）が実行し、作業ブランチへ push して Draft PR を作る。
-- Web の検索・取得は、別の Worker（web）が非信頼データとして扱い、安全性を評価して返す。
+A Task Gateway (Cloudflare Workers) for delegating coding tasks from Claude Code / Cowork over Remote MCP.
 
-**状態: 実験段階。** Phase 6 まで実装済みで、自動テスト（偽の GitHub・偽のモデルを使った E2E を含む）は通っている。実機（Claude Code / Cowork、GitHub、Cloudflare）での受入試験（[acceptance.md](docs/specs/acceptance.md)）が済むまでは、実験段階として扱ってほしい。`web_browse` は実験的で、既定では無効。
+- The MCP server (gateway) accepts tasks from users who sign in through GitHub App user authorization.
+- Each task is run by a child agent (agent, running in an isolated Sandbox on Cloudflare Containers), which pushes to a working branch and opens a Draft PR.
+- Web search and fetch are handled by a separate Worker (web), which treats results as untrusted data and returns them with a safety verdict.
 
-ライセンスは [MIT](LICENSE)。
+Licensed under [MIT](LICENSE).
 
-設計は [docs/specs/design.md](docs/specs/design.md)、デプロイ手順（rovo を upstream にする下流向け）は [docs/deploy.md](docs/deploy.md)、手動の受入試験は [docs/specs/acceptance.md](docs/specs/acceptance.md)、Phase ごとの実装計画は `docs/specs/phase*.md`。
+Design: [docs/specs/design.md](docs/specs/design.md) (Japanese). Deployment guide (for downstream users who use rovo as their upstream): [docs/deploy.md](docs/deploy.md) (Japanese). Manual acceptance test: [docs/specs/acceptance.md](docs/specs/acceptance.md) (Japanese).
 
-## 全体の構成
+## Architecture
 
 ```
 Claude Code / Cowork
-   |  Remote MCP（OAuth）
+   |  Remote MCP (OAuth)
    v
 apps/gateway  --- service binding --->  apps/web   (Web Research Service: search / fetch / browse)
    |  Durable Object                        ^
    v                                        | service binding
 apps/agent  (AgentDO -> SandboxDO + Container)
-packages/audit  (監査ログの共通ライブラリ。3 つの Worker が使う)
+packages/audit  (shared audit-log library, used by all 3 Workers)
 ```
 
-| ディレクトリ | 役割 |
+| Directory | Role |
 |---|---|
-| `apps/gateway` | MCP サーバー、OAuth、タスクの状態（`TaskDO`）、利用者の資格と予算（`UserDO`） |
-| `apps/agent` | 子エージェント（`AgentDO`）、Sandbox（`SandboxDO`）、外向き通信の制御（`OutboundGateway`） |
-| `apps/web` | Web Research Service（状態を持たない別 Worker） |
-| `packages/audit` | 監査イベントを 1 行の構造化 JSON で出す `audit()` |
-| `packages/models` | 使えるモデルの許可リストと、pi-ai のカタログから取る単価・費用計算（gateway と agent が共有） |
+| `apps/gateway` | MCP server, OAuth, task state (`TaskDO`), user credentials and budget (`UserDO`) |
+| `apps/agent` | Child agent (`AgentDO`), Sandbox (`SandboxDO`), outbound traffic control (`OutboundGateway`) |
+| `apps/web` | Web Research Service (a separate, stateless Worker) |
+| `packages/audit` | `audit()`, which emits audit events as one-line structured JSON |
+| `packages/models` | Allowlist of usable models, and prices and cost calculation taken from the pi-ai catalog (shared by gateway and agent) |
 
-## 提供するツール（Phase 6 まで実装済み。D9 で PR のツール、D10 でモデル・予算・consult のツールを追加）
+The diagram below is generated from the code by [Sketio Arch](https://gh.sketio.app/youyo/rovo) and updates on every analysis of `main`. Other views: [infrastructure](https://gh.sketio.app/youyo/rovo?view=infra) / [application](https://gh.sketio.app/youyo/rovo?view=app) / [deployment](https://gh.sketio.app/youyo/rovo?view=deploy).
 
-GitHub App のユーザー認可でログインし、`/mcp` から次のツールを使える。
+[![Architecture overview](https://gh.sketio.app/youyo/rovo/overview.svg)](https://gh.sketio.app/youyo/rovo)
 
-| ツール | 内容 |
+## Tools
+
+Sign in with GitHub App user authorization, then use the following tools from `/mcp`.
+
+| Tool | Description |
 |---|---|
-| `task_start` | タスクを作り（`budget_policy`: `ask`〔既定。予算に近づいたら親に延長を聞く〕/ `stop`）、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, model, model_selection?, note, dashboard_url?}`。`model` を省略すると rovo がタスクの内容から選ぶ（Workers AI の Clef。候補は `AUTO_MODEL_CANDIDATES`。選べなければ既定のモデル）。指定すればそのモデル。選んだモデルと理由は応答の `model_selection`（`task_status`・`task_result` にも付く）に返る。`dashboard_url`（`<PUBLIC_BASE_URL>/dashboard/tasks/<task_id>`）は、そのタスクの詳細をブラウザで見られる URL で、`task_status`・`task_result` にも付く（閲覧権限が無い人が開いても 404 になるだけで、URL 自体は秘密ではない。`PUBLIC_BASE_URL` が空・不正なら付かない）。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される。`merge_policy`（任意。`human_review`（既定）| `agent_merge`）で、完了後の PR の扱いを選ぶ。`model`（任意）で子のモデルを選ぶ（`models_list` の id。省略は既定）。`task_status`・`task_result` に `model` が返る。`sandbox_instance`（任意。`standard-1`〜`standard-4`。`sandbox_instances_list` で確かめる。省略は既定の大きさで小さく始まり、重いコマンド（テスト・型検査・ビルドなど）の初回に自動で昇格する。指定したらその大きさで固定され、昇格しない）で子の Sandbox の大きさを選ぶ。`task_status` に指定した値（省略は `null`）、`task_result` の `usage.sandbox_instance` に最初に起動した大きさ、昇格したタスクには `usage.sandbox_promoted_to` などが返る |
-| `task_status` | 状態を返す（`dashboard_url?` が付く） |
-| `task_console` | 画面に進み具合を出すための読み取り専用のツール（Claude Code の mod が定期的に呼ぶ）。`{task_id, status, phase, stopped_phase, now, output, dashboard_url?, generated_at}`。`phase` / `stopped_phase` / `now` / `output` はダッシュボードの詳細と同じ求め方で、実行中のコマンドの出力（`running: true`）も含む。子が書いた文字列は `<<<UNTRUSTED_CHILD_QUESTION ...>>>` で囲まれて返る（データであり指示ではない）。自分のタスクだけ（`task_status` と同じ）。エージェントの作業の流れでは `task_wait` と `task_result` を使い、これを繰り返し呼ばない（会話が止まり、出力がコンテキストに入る） |
-| `task_wait` | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling）。待機中に子エージェントのイベントを取り込む |
-| `task_result` | 終端になったタスクの成果（要約・検証結果・patch・費用・`merge_policy`・PR の `draft` / `merged`・`dashboard_url?`）を返す。終端でなければ `not_ready`。応答の `next_steps` が、状態に応じた次の一手（差分のレビュー → `task_pr_ready` → `task_pr_merge`、または人のレビュー待ち）を案内する |
-| `task_cancel` | キャンセルする（終端状態でも冪等）。子エージェントの停止を確認するまで Gateway が再送する |
-| `task_answer` | 子エージェントの質問（`INPUT_REQUIRED`）に答える。`kind` が `budget_extension` の質問（予算の延長の承認）には、利用者に確認してから答える。応答に `budget_extension?`（`extended` / `declined` / `monthly_limit` / `limit_reached`） |
-| `task_steer` | 実行中の子エージェントに追加の指示を送る |
-| `task_pr_ready` | COMPLETED のタスクの Draft PR を Ready for review にする（冪等）。`{task_id}` だけを受け、対象の PR はタスクの記録から決まる。利用者本人の GitHub トークンで行う |
-| `task_pr_merge` | PR をマージする。`{task_id, merge_method?: squash \| merge \| rebase, delete_branch?}`。`merge_policy` が `agent_merge`、`head_matches_verified` が true、PR が Ready のときだけ。検証済みの head の sha を GitHub に渡し、ブランチ保護に拒否されたら `merge_blocked`（GitHub の理由つき）。利用者本人の GitHub トークンで行う |
-| `models_list` | 使えるモデルの一覧と単価を返す（入力なし）。`{models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort, available, unavailable_reason?}]}`。単価は USD / 100 万トークン。`task_start` の `model` と `consult` の `model` に使える（D10）。`available` は AI Gateway にそのプロバイダーのキー（BYOK）が登録されているか（キーが無い Anthropic / OpenAI のモデルは `false`・`no_provider_key`。Workers AI は常に `true`）（D10b） |
-| `sandbox_instances_list` | 子の Sandbox の大きさの一覧と単価を返す（入力なし）。`{instances: [{name, vcpu, memory_gib, disk_gb, usd_per_hour, default, selectable, auto_scale_max}]}`。`task_start` の `sandbox_instance` に使えるのは `selectable: true`（`lite` は `false`）。`auto_scale_max: true` が、Clef（Workers AI の決定モデル）が Sandbox を自動で上げる上限（無効にしているデプロイではどれも `false`）。Sandbox は小さく始まり、子のコマンドの前に Clef が「今の大きさで足りるか」を判断して、足りなければ 2 → 3 → 4 と上がる（上げるだけ）。子が最初に使うときに起動する（web 検索だけのタスクでは起動しない） |
-| `budget_status` | 自分の予算の状況を返す（入力なし）。`{monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, concurrency_limit, period}`。`concurrency_limit` は利用者ごとに同時に実行できるタスクの上限（設定値）で、実際に同時に実行できる数は `concurrency_limit` と `max_concurrent_tasks`（残りの予算 ÷ タスクの予約額）の小さいほう。rovo の月の枠だけで、Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する）（D10） |
-| `consult` | セカンドオピニオン（設計の相談役）。`{model?, system?, messages: [{role: user \| assistant, content}], max_output_tokens?}` を 1 回で完結して答える（会話は保存しない。コードは書かせず、Sandbox も使わない）。応答は `{text, model, usage: {input, output, cache_read, cache_write}, cost_usd}`。Anthropic のモデルでは system と最後の user より前にプロンプトキャッシュを付けるので、同じ前置きを送ると 2 回目以降は安くなる。呼ぶ前に `CONSULT_BUDGET_USD`（既定 $0.5）を月の枠から予約し、実費で精算する（D10） |
-| `web_search` | Web Search API の結果（url・title・description）を返す。詳細は下の「Web Research Service」 |
-| `web_fetch` | 公開ページを取得して Markdown で返す（JS は実行しない） |
-| `web_browse` | **実験的・既定で無効。** JS を描画した後のページを取得する |
+| `task_start` | Creates a task (`budget_policy`: `ask` [default; asks the parent to extend when the budget is nearly used up] / `stop`) and starts a child agent (the AgentDO in `apps/agent`). Returns `{task_id, status, draft_pr_url, model, model_selection?, note, dashboard_url?}`. If `model` is omitted, rovo picks one from the content of the task (Workers AI's Clef; candidates are in `AUTO_MODEL_CANDIDATES`; falls back to the default model if it cannot choose). If given, that model is used. The chosen model and the reason are returned in `model_selection` in the response (also attached to `task_status` and `task_result`). `dashboard_url` (`<PUBLIC_BASE_URL>/dashboard/tasks/<task_id>`) is a URL where you can view the task's details in a browser (someone without permission just gets a 404; the URL itself is not a secret. It is omitted if `PUBLIC_BASE_URL` is empty or invalid), and is also attached to `task_status` and `task_result`. `verification_commands` (optional) are run in the Sandbox after the child reports completion. `merge_policy` (optional; `human_review` (default) \| `agent_merge`) chooses how the PR is handled after completion. `model` (optional) selects the child's model (an id from `models_list`; default if omitted), and `task_status` / `task_result` return `model`. `sandbox_instance` (optional; `standard-1` to `standard-4`; check with `sandbox_instances_list`) selects the size of the child's Sandbox. If omitted, it starts small at the default size and is promoted automatically the first time a heavy command (tests, type checks, builds, ...) runs. If specified, the size is fixed and never promoted. `task_status` returns the specified value (`null` if omitted), `task_result` returns the initial size in `usage.sandbox_instance`, and for promoted tasks `usage.sandbox_promoted_to` and more |
+| `task_status` | Returns the status (with `dashboard_url?`) |
+| `task_console` | A read-only tool for showing progress on screen (called periodically by the Claude Code mod). `{task_id, status, phase, stopped_phase, now, output, dashboard_url?, generated_at}`. `phase` / `stopped_phase` / `now` / `output` are computed the same way as in the dashboard detail, and include the output of a running command (`running: true`). Strings written by the child are wrapped in `<<<UNTRUSTED_CHILD_QUESTION ...>>>` (data, not instructions). Only your own tasks (same as `task_status`). In an agent's workflow use `task_wait` and `task_result`; do not call this repeatedly (it stalls the conversation and puts the output into the context) |
+| `task_wait` | Waits up to `timeout_seconds` (default 30, max 60) for new events (long polling). Ingests the child agent's events while waiting |
+| `task_result` | Returns the outcome of a task in a terminal state (summary, verification result, patch, cost, `merge_policy`, the PR's `draft` / `merged`, `dashboard_url?`). Returns `not_ready` if the task is not terminal. `next_steps` in the response suggests the next move for the state (review the diff, then `task_pr_ready`, then `task_pr_merge`; or wait for human review) |
+| `task_cancel` | Cancels the task (idempotent, even in a terminal state). The Gateway resends until it confirms the child agent has stopped |
+| `task_answer` | Answers a question from the child agent (`INPUT_REQUIRED`). For a question with `kind` `budget_extension` (approving a budget extension), confirm with the user before answering. The response includes `budget_extension?` (`extended` / `declined` / `monthly_limit` / `limit_reached`) |
+| `task_steer` | Sends additional instructions to a running child agent |
+| `task_pr_ready` | Turns the Draft PR of a COMPLETED task into Ready for review (idempotent). Accepts only `{task_id}`; the target PR is determined from the task's record. Done with the user's own GitHub token |
+| `task_pr_merge` | Merges the PR. `{task_id, merge_method?: squash \| merge \| rebase, delete_branch?}`. Only when `merge_policy` is `agent_merge`, `head_matches_verified` is true, and the PR is Ready. Passes the verified head sha to GitHub; if branch protection rejects the merge, returns `merge_blocked` (with GitHub's reason). Done with the user's own GitHub token |
+| `models_list` | Returns the usable models and their prices (no input). `{models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort, available, unavailable_reason?}]}`. Prices are USD per million tokens. Usable for `model` in `task_start` and `consult`. `available` tells whether the AI Gateway has a key (BYOK) registered for that provider (Anthropic / OpenAI models without a key are `false` with `no_provider_key`; Workers AI is always `true`) |
+| `sandbox_instances_list` | Returns the available sizes and prices of the child's Sandbox (no input). `{instances: [{name, vcpu, memory_gib, disk_gb, usd_per_hour, default, selectable, auto_scale_max}]}`. Only `selectable: true` sizes can be used for `sandbox_instance` in `task_start` (`lite` is `false`). `auto_scale_max: true` marks the upper limit to which Clef (a Workers AI decision model) automatically scales the Sandbox (all `false` in deployments where this is disabled). The Sandbox starts small; before the child's commands, Clef judges whether the current size is enough and, if not, scales up 2 → 3 → 4 (up only). It starts the first time the child uses it (it does not start for a task that only searches the web) |
+| `budget_status` | Returns the state of your own budget (no input). `{monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, concurrency_limit, period}`. `concurrency_limit` is the configured per-user limit on concurrently running tasks; the number that can actually run is the smaller of `concurrency_limit` and `max_concurrent_tasks` (remaining budget ÷ per-task reservation). This covers only rovo's monthly allowance; Anthropic / OpenAI balances cannot be retrieved (manage limits on each provider's console) |
+| `consult` | A second opinion (a design advisor). Answers `{model?, system?, messages: [{role: user \| assistant, content}], max_output_tokens?}` in a single turn (does not store the conversation; does not write code; does not use a Sandbox). The response is `{text, model, usage: {input, output, cache_read, cache_write}, cost_usd}`. For Anthropic models, prompt caching is applied to `system` and everything before the last user message, so sending the same preamble makes the second and later calls cheaper. Before calling, it reserves `CONSULT_BUDGET_USD` (default $0.5) from the monthly allowance and settles at the actual cost |
+| `web_search` | Returns Web Search API results (url, title, description). See "Web Research Service" below |
+| `web_fetch` | Fetches a public page and returns it as Markdown (does not run JS) |
+| `web_browse` | **Experimental, disabled by default.** Fetches a page after rendering its JS |
 
-**制約（ツールの応答にも明記している）**
+**Constraints (also stated in the tool responses)**
 
-- Phase 3（M1: Gateway 側）: `task_start` が作業ブランチ `agent/task-<id>` と Draft PR を作る。URL は `task_status`・`task_result`（`pr`）・イベント `draft_pr_created` で返る（`task_start` の応答の `draft_pr_url` は作成前なので `null`）。終端で PR 本文の rovo 管理範囲を更新し、Installation Token を失効する。成果は patch としても `task_result` で返る。
-- PR のレビューと Ready 化・マージ（D9）: rovo 自身は PR を Ready にもマージにもしない（Draft のまま返す）。呼び出し元の AI が `task_result` の差分をレビューし、問題が無ければ `task_pr_ready` で Ready にする。そのあとは `task_start` の `merge_policy` による: `human_review`（既定）は人のレビューを待ち（`task_pr_merge` は `forbidden`）、`agent_merge` は `task_pr_merge` でマージまでできる。ポリシーはデプロイ全体の env ではなくタスクごとの入力で、組織としての強制は GitHub のブランチ保護に任せる（操作は利用者本人の GitHub トークンで行うため、保護に拒否されたら `merge_blocked`）。使い方の流れは MCP の `instructions` と `task_result` の `next_steps` にも書かれる。
-- モデルの選択と予算（D10）: `models_list` で使えるモデルと単価を見て、`task_start` の `model` をタスクの難しさで選ぶ。使えるモデルは env の `AGENT_MODELS`（gateway と agent に同じ値。未設定なら `AGENT_MODEL` だけ）で決まり、単価は pi-ai のカタログ由来（許可リスト: `packages/models`）。OpenAI のモデルは AI Gateway に OpenAI のキーを BYOK 登録すると使える（対象リポジトリのコードが OpenAI にも送られる。利用上限は OpenAI 側で設定する。`docs/deploy.md`）。`budget_status` で月の残りを確かめられる。思考レベル（effort）の既定はモデルごとに決まっていて（初期値: haiku=low、sonnet=high、opus=medium、fable=low、gpt-6-luna=low、gpt-6-sol=medium、gpt-6-astra=low、Workers AI は gpt-oss・qwen・nemotron・glm-4.7-flash=low、gemma=high）、`models_list` と `task_status` / `task_result` に出る。思考のトークンは出力として課金されるので、レベルが高いほど費用が増える。既定は env の `MODEL_EFFORTS` で上書きでき、`task_start` の `effort`（off / minimal / low / medium / high / xhigh / max）でそのタスクだけ上書きもできる（そのモデルが対応していないレベルは `invalid_input`。message に使えるレベルが出る）。`consult` でモデルがリクエストを拒否した（4xx）ときは、再試行を促さない `model_rejected` を返す。
-- プロバイダーキーと Workers AI（D10b）: gateway が AI Gateway の BYOK のキー（Cloudflare API の List provider keys。secret `CLOUDFLARE_API_TOKEN` は Account / AI Gateway / Read だけの読み取り専用、vars `CLOUDFLARE_ACCOUNT_ID` / `AI_GATEWAY_ID`）を読み、alias が `default` のキーが無いプロバイダーのモデルを `available: false` にして、`task_start` / `consult` は `model_unavailable` で拒否する（結果は 5 分キャッシュ。API が失敗したら直前のキャッシュ、無ければ従来どおり `AGENT_MODELS` だけで決める）。キーが無くても使える Workers AI のモデル（無料プランで使えるものだけ: `workers-ai/@cf/openai/gpt-oss-120b`・`gpt-oss-20b`、`qwen/qwen3.8-27b`、`nvidia/nemotron-3-120b-a12b`、`zai-org/glm-4.7-flash`、`google/gemma-4-26b-a4b-it`。Workers AI は顧客データを学習に使わない）を `AGENT_MODELS` に入れると、キーが無いときの代わりになる。`model` を省略したときは `AGENT_MODEL` が available ならそれ、なければ Anthropic → `gpt-oss-120b` → 他の Workers AI → OpenAI の順で選ぶ。無料枠は 1 日 1 万 Neuron（`docs/deploy.md` の 7）。
-- `idempotency_key` を省略すると、再試行の重複排除は保証されない。
-- 利用者ごとに同時に実行できるタスクの数には上限がある（設定値 `MAX_CONCURRENT_TASKS`。値は `budget_status` の `concurrency_limit` で見る）。上限に達していると `task_start` は `concurrency_limit` で断られる。タスクの停止を確認できるまで、そのタスクの枠は空かない。
-- タスクの予算はソフトリミット（`task_start` の `budget_policy`。既定 `ask`）: 予算に近づくと、止めずに `INPUT_REQUIRED` にして「あと `TASK_BUDGET_USD` 使って続けますか」を聞く（`kind: budget_extension` の質問。rovo が数値だけで書く固定文。利用者に確認してから `task_answer` で答える）。続けると月の枠からその場で延長分を予約する（1 タスク 2 回まで。月の枠はハードリミットで、足りなければ `BUDGET_EXCEEDED`）。待つ間は Sandbox を止めて費用を止める。`budget_policy: stop` は今までどおり聞かずに止まる（無人で回す用途）。
-- 1 タスクにつき既定で $10（env `TASK_BUDGET_USD`。0 以下・不正な値は 10）を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。子エージェントの予算の上限（`budgetUsd`）にも同じ値を渡す。足りなければ `budget_exceeded`。月額の枠を 10 未満にするときは `TASK_BUDGET_USD` も下げる（受入試験で数ドルに抑えたいとき）。
+- Task branch and Draft PR (Gateway side): `task_start` creates a working branch `agent/task-<id>` and a Draft PR. The URL is returned by `task_status`, `task_result` (`pr`), and the `draft_pr_created` event (`draft_pr_url` in the `task_start` response is `null` because the PR is not created yet). At the terminal state, it updates the rovo-managed section of the PR body and revokes the Installation Token. The result is also returned as a patch in `task_result`.
+- Reviewing, readying, and merging the PR: rovo itself never makes a PR Ready or merges it (it returns it as a Draft). The calling AI reviews the diff in `task_result` and, if it finds no problem, makes the PR Ready with `task_pr_ready`. What happens next depends on `merge_policy` in `task_start`: `human_review` (default) waits for human review (`task_pr_merge` returns `forbidden`), and `agent_merge` lets `task_pr_merge` merge it. The policy is a per-task input rather than a deployment-wide env, and organization-level enforcement is left to GitHub branch protection (operations use the user's own GitHub token, so a rejection by protection returns `merge_blocked`). The flow is also written in the MCP `instructions` and in `next_steps` of `task_result`.
+- Model selection and budget: use `models_list` to see the usable models and prices, and choose `model` for `task_start` according to the difficulty of the task. The usable models are determined by the env `AGENT_MODELS` (the same value for gateway and agent; if unset, only `AGENT_MODEL`), and prices come from the pi-ai catalog (allowlist: `packages/models`). OpenAI models can be used by registering an OpenAI key as BYOK in the AI Gateway (the code of the target repository is sent to OpenAI too; set usage limits on the OpenAI side; see `docs/deploy.md`, Japanese). `budget_status` shows the remaining monthly amount. The default thinking level (effort) is set per model (initial values: haiku=low, sonnet=high, opus=medium, fable=low, gpt-6-luna=low, gpt-6-sol=medium, gpt-6-astra=low; for Workers AI, gpt-oss, qwen, nemotron, and glm-4.7-flash=low, gemma=high) and is shown in `models_list` and `task_status` / `task_result`. Thinking tokens are billed as output, so a higher level costs more. The default can be overridden by the env `MODEL_EFFORTS`, and for a single task by `effort` in `task_start` (off / minimal / low / medium / high / xhigh / max; a level the model does not support returns `invalid_input`, and the message lists the usable levels). When the model rejects a `consult` request (4xx), `model_rejected` is returned, which does not encourage retrying.
+- Provider keys and Workers AI: the gateway reads the AI Gateway BYOK keys (the Cloudflare API "List provider keys"; the secret `CLOUDFLARE_API_TOKEN` is read-only with only Account / AI Gateway / Read, and the vars are `CLOUDFLARE_ACCOUNT_ID` / `AI_GATEWAY_ID`), marks models of providers without a key whose alias is `default` as `available: false`, and `task_start` / `consult` reject them with `model_unavailable` (the result is cached for 5 minutes; if the API fails, the previous cache is used, and if there is none, the decision falls back to `AGENT_MODELS` alone as before). Workers AI models, which work without a key (only those available on the free plan: `workers-ai/@cf/openai/gpt-oss-120b`, `gpt-oss-20b`, `qwen/qwen3.8-27b`, `nvidia/nemotron-3-120b-a12b`, `zai-org/glm-4.7-flash`, `google/gemma-4-26b-a4b-it`; Workers AI does not use customer data for training), can be put in `AGENT_MODELS` as a substitute when no key exists. When `model` is omitted, `AGENT_MODEL` is used if it is available; otherwise models are chosen in the order Anthropic → `gpt-oss-120b` → other Workers AI → OpenAI. The free tier is 10,000 Neurons per day (section 7 of `docs/deploy.md`).
+- If you omit `idempotency_key`, de-duplication of retries is not guaranteed.
+- There is a limit on the number of tasks a user can run concurrently (the setting `MAX_CONCURRENT_TASKS`; see its value in `concurrency_limit` of `budget_status`). When the limit is reached, `task_start` is refused with `concurrency_limit`. A task's slot does not free up until its stop is confirmed.
+- The task budget is a soft limit (`budget_policy` in `task_start`; default `ask`): when the budget is nearly used up, instead of stopping, the task goes to `INPUT_REQUIRED` and asks "continue by using another `TASK_BUDGET_USD`?" (a question with `kind: budget_extension`; the text is a fixed sentence written by rovo with numbers only; confirm with the user and then answer with `task_answer`). If you continue, the extension is reserved from the monthly allowance on the spot (up to 2 times per task; the monthly allowance is a hard limit, and if it is not enough the task goes to `BUDGET_EXCEEDED`). While waiting, the Sandbox is stopped to stop the cost. `budget_policy: stop` stops without asking, as before (for unattended use).
+- By default, each task reserves $10 (env `TASK_BUDGET_USD`; values of 0 or less, or invalid values, become 10) from the monthly allowance (env `MONTHLY_BUDGET_USD`, default 100). The same value is passed to the child agent's budget limit (`budgetUsd`). If it is not enough, you get `budget_exceeded`. If you set the monthly allowance below 10, lower `TASK_BUDGET_USD` too (when you want to keep the acceptance test to a few dollars).
 
-### Web Research Service（`web_search` / `web_fetch` / `web_browse`）
+### Web Research Service (`web_search` / `web_fetch` / `web_browse`)
 
-親（MCP）の `web_search` / `web_fetch` の説明。子（`apps/agent` の Pi）にも同名のツールがある。どちらも `apps/web` を service binding で呼ぶ。
+The descriptions of the parent's (MCP) `web_search` / `web_fetch`. The child (Pi in `apps/agent`) has tools with the same names. Both call `apps/web` through a service binding.
 
-| ツール | 内容 |
+| Tool | Description |
 |---|---|
-| `web_search` | `{query, limit?}`。Web Search API の結果（url・title・description）を返す。private なアドレスなどを指す URL は結果から落とす |
-| `web_fetch` | `{url}`。公開ページを取得して Markdown で返す（JS は実行しない）。`status: "blocked"` は取得できなかった（bot チャレンジ・robots.txt の Disallow・redirect で private に飛ぶ） |
+| `web_search` | `{query, limit?}`. Returns Web Search API results (url, title, description). URLs that point to private addresses and the like are dropped from the results |
+| `web_fetch` | `{url}`. Fetches a public page and returns it as Markdown (does not run JS). `status: "blocked"` means it could not be fetched (bot challenge, robots.txt Disallow, redirect to a private address) |
 
-- 本文（`content`）・`title`・検索の description は、Web 上の第三者が書いた**非信頼データ**。親には `<<<UNTRUSTED_WEB_CONTENT ...>>>` と `<<<END_UNTRUSTED_WEB_CONTENT>>>` で囲んで返し（本文中の `<<<` は全角に置き換える）、子には既存の `<<<BEGIN_UNTRUSTED_OUTPUT>>>` で囲んで渡す。
-- `safety.verdict`: `allow`（問題なし）/ `caution`（不審な表現があるので慎重に）/ `block`（注入などを検出。本文は `null`）/ `unknown`（評価できなかった。本文は `null`）。検索は結果全体で 1 つの判定で、`block` / `unknown` のときは description を落とし、title も `(title withheld)` にして URL だけを返す。
-- 回数の上限
-  - 親: ユーザーごとに UTC の 1 日あたり search 200 回・fetch 500 回（`UserDO` が数える）。超えると `quota_exceeded`（`retry_after_seconds` は翌日 0 時 UTC まで）。env `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` で変える。
-  - web_browse は別枠: 親は 1 日 50 回（`WEB_BROWSE_DAILY_LIMIT`）、子はタスクごとに 20 回（`WEB_BROWSE_LIMIT_PER_TASK`）。
-  - 子: タスクごとに search 50 回・fetch 100 回（`AgentDO` が数える）。超えるとツールのエラー。`apps/agent` の env `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` で変える。回数は `usage` イベント（`web_search` / `web_fetch` / `web_browse`）と `task_result` の `usage.web` に出る。
-  - 回数は呼び出しの前に数える（失敗しても戻さない）。web 自体には回数の上限を持たない（AI Gateway のレート制限とアカウントの上限に頼る）。
-- `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効なら親の tools/list にも子の Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、`docs/specs/acceptance.md` の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを判断してほしい。** 実機のゲートは任意で、作者は行わずに有効にしている。
+- The body (`content`), `title`, and search descriptions are **untrusted data** written by third parties on the web. They are returned to the parent wrapped in `<<<UNTRUSTED_WEB_CONTENT ...>>>` and `<<<END_UNTRUSTED_WEB_CONTENT>>>` (any `<<<` inside the body is replaced with the full-width form), and passed to the child wrapped in the existing `<<<BEGIN_UNTRUSTED_OUTPUT>>>`.
+- `safety.verdict`: `allow` (no problem) / `caution` (suspicious wording; be careful) / `block` (injection or similar detected; the body is `null`) / `unknown` (could not be evaluated; the body is `null`). A search has one verdict for the whole result set; on `block` / `unknown`, descriptions are dropped, titles become `(title withheld)`, and only URLs are returned.
+- Rate limits
+  - Parent: per user, per UTC day, 200 searches and 500 fetches (counted by `UserDO`). Beyond that, `quota_exceeded` (`retry_after_seconds` runs until 00:00 UTC the next day). Change with the env `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT`.
+  - web_browse has its own quota: 50 per day for the parent (`WEB_BROWSE_DAILY_LIMIT`), and 20 per task for the child (`WEB_BROWSE_LIMIT_PER_TASK`).
+  - Child: per task, 50 searches and 100 fetches (counted by `AgentDO`). Beyond that the tool returns an error. Change with the `apps/agent` env `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK`. The counts appear in the `usage` events (`web_search` / `web_fetch` / `web_browse`) and in `usage.web` of `task_result`.
+  - Counts are taken before the call (not given back on failure). web itself has no limit on the number of calls (it relies on the AI Gateway rate limit and the account limits).
+- `web_browse` (fetches a page as Markdown after rendering its JS; Browser Run's Kitesurf) is **disabled by default**. Only Workers whose env `WEB_BROWSE_ENABLED` is `"true"` in `apps/web`, `apps/agent`, and `apps/gateway` enable it (when disabled it appears neither in the parent's tools/list nor in the child Pi's tools). It accepts only `{url}`, and `status` is `ok` / `blocked` (bot challenge, robots, redirect or destination that is private, not allowed, https→http, or a name that resolves to a private address) / `http_error` (4xx, 5xx; no body) / `unknown` (could not be determined; no body). What is guaranteed is only that "results from forbidden or undeterminable destinations are not returned"; it cannot prevent communication with a forbidden destination from happening. **Before enabling it, please read the residual risks in section 11 of `docs/specs/acceptance.md` (Japanese), "web_browse (gate before enabling)", and decide whether you accept them.** The gate on real systems is optional, and the author enabled it without performing it.
 
-## ダッシュボード
+## Dashboard
 
-gateway は、タスクの状況をブラウザで見られる読み取り専用のダッシュボード（`/dashboard`）を配信する。GitHub でログインすると、今日のタイムライン・タスクの表・あなたの予算・全員の実績・モデル別の費用・Cloudflare の使用状況（AI Gateway・Workers・コンテナなど）の一覧と、タスクごとの詳細（進み具合・出力の末尾・費用・Draft PR の状態）が見られる。
+The gateway serves a read-only dashboard (`/dashboard`) where you can see the state of tasks in a browser. After signing in with GitHub, you can see a list of today's timeline, a table of tasks, your budget, everyone's results, cost by model, and Cloudflare usage (AI Gateway, Workers, containers, and more), as well as the details of each task (progress, the tail of the output, cost, and the state of the Draft PR).
 
-- **読み取り専用**: 状態を変える操作は無い（ログアウトを除く）。
-- **見えるのは、ログインした人が GitHub で権限を持つリポジトリのタスクだけ**。権限のないリポジトリのタスクは、一覧にも詳細にも出ない（件数と費用の合計だけが出る）。
-- `task_start` などの応答の `dashboard_url` を開くと、そのタスクの詳細に入れる。
-- デプロイの手順は [docs/deploy.md](docs/deploy.md) の 18、設計は [docs/specs/dashboard.md](docs/specs/dashboard.md)。
+- **Read-only**: there are no operations that change state (except logging out).
+- **You see only tasks in repositories where you have permission on GitHub.** Tasks in repositories you lack permission for appear neither in the list nor in the details (only the counts and the cost totals are shown).
+- Opening the `dashboard_url` in the response of `task_start` and others takes you to that task's details.
+- Deployment steps are in section 18 of [docs/deploy.md](docs/deploy.md) (Japanese); the design is in [docs/specs/dashboard.md](docs/specs/dashboard.md) (Japanese).
 
-## Claude Code の mod
+## Claude Code mod
 
-タスクの進み具合を Claude Code の横のペインに出す読み取り専用の mod を同梱している（[plugins/rovo/README.md](plugins/rovo/README.md)）。
+A read-only mod that shows the progress of tasks in a pane beside Claude Code is bundled ([plugins/rovo/README.md](plugins/rovo/README.md)).
 
 ```
 /plugin install rovo --marketplace youyo/rovo
 ```
 
-## 構成
+## Components
 
-- `apps/web`（Phase 5）: Web Research Service の別 Worker。`WebResearch`（`WorkerEntrypoint`）の RPC `search` / `fetchUrl`（`fetch` は HTTP のハンドラ名なので使えない）。呼び出し元の種別は service binding の `props.caller`（gateway は `parent`、agent は `child`）から取り、props が無い・不正なら拒否する。状態を持たず、持つバインディングは `ai` だけ（GitHub のトークンや Anthropic のキーは持たない）。公開のルートは無い（`workers_dev: false`）
-- `apps/gateway`: Cloudflare Worker。Hono でルーティングし、`@cloudflare/workers-oauth-provider` で全体を包む。
-  - `/mcp`（要 OAuth）: `agents/mcp/server` の `createMcpHandler` + `@modelcontextprotocol/server`。リクエストごとに McpServer を作り、ユーザー情報は共有しない
-  - `/authorize`（同意画面）→ GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
-  - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の枠（タスクごとに 1 行。上限は `MAX_CONCURRENT_TASKS`）、月額予算（タスクごとの予約・usage の冪等な精算・終了時の返却）。GitHub のトークンは DO の外へ返さない
-  - `TaskDO`（タスクごと）: 状態とイベント。AgentDO への start / cancel の配送、イベントの取り込み、usage の精算を alarm で収束させる
-- `apps/agent`: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
-  - 依存関係のキャッシュ（D14）: ルート直下の lockfile（`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`）が同じなら、導入済みの `node_modules` を Containers のスナップショット（public beta）から復元して起動する。`DepsCacheDO`（鍵ごとに作成を 1 回にまとめる）と、SandboxDO の別インスタンス（作成）が行う。使えなくてもタスクは失敗せず今までどおり動く。結果は `task_result` の `usage.deps_cache`（`hit` / `miss` / `built` / `disabled`）と、作ったタスクの `cache_build_ms`。`rovo.config.json` の `depsCache.enabled` で無効にできる（docs/deploy.md の 17）
+- `apps/web`: a separate Worker for the Web Research Service. The RPC methods `search` / `fetchUrl` of `WebResearch` (a `WorkerEntrypoint`; `fetch` cannot be used because it is the name of the HTTP handler). The caller type is taken from the service binding's `props.caller` (`parent` for the gateway, `child` for the agent), and the call is rejected if props are missing or invalid. It holds no state, and its only binding is `ai` (it holds no GitHub token or Anthropic key). It has no public route (`workers_dev: false`)
+- `apps/gateway`: a Cloudflare Worker. Routing is done with Hono, and everything is wrapped by `@cloudflare/workers-oauth-provider`.
+  - `/mcp` (OAuth required): `createMcpHandler` from `agents/mcp/server` plus `@modelcontextprotocol/server`. A McpServer is created per request, and user information is not shared
+  - `/authorize` (consent screen) → GitHub App user authorization → `/callback`: the defaultHandler. For state (single-use, 10 minutes) and binding to the browser that started the flow via a cookie, it uses OAuthProvider's `beginUpstream` / `finishUpstream`
+  - `UserDO` (per user): GitHub credentials (encrypted with AES-GCM), a cache of team membership (TTL 5 minutes), concurrency slots (one row per task; the limit is `MAX_CONCURRENT_TASKS`), and the monthly budget (per-task reservation, idempotent settlement of usage, refund at the end). The GitHub token is never returned outside the DO
+  - `TaskDO` (per task): state and events. Converges, via alarms, the delivery of start / cancel to the AgentDO, the ingestion of events, and the settlement of usage
+- `apps/agent`: a separate Worker for the child agent. `SandboxDO` (starts `ctx.container` with `enableInternet:false` and has `OutboundGateway` intercept outbound traffic), `OutboundGateway` (the allow decision is a pure function in `src/outbound-policy.ts`), and `AgentDO` (a minimal implementation with `PiHarness` and a scripted fake model). The Gateway calls it through the DO binding `AGENT_DO` with `script_name`
+  - Dependency cache: if the lockfile at the root (`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`) is unchanged, it starts by restoring the installed `node_modules` from a Containers snapshot (public beta). `DepsCacheDO` (makes creation happen once per key) and a separate instance of SandboxDO (which builds it) do this. If it cannot be used, the task does not fail and runs as before. The result is `usage.deps_cache` in `task_result` (`hit` / `miss` / `built` / `disabled`), and `cache_build_ms` for the task that built it. It can be disabled with `depsCache.enabled` in `rovo.config.json` (section 17 of docs/deploy.md)
 
-## 同意画面（confused deputy 対策）
+## Consent screen (protection against the confused deputy problem)
 
-DCR（動的クライアント登録）が有効なため、`/authorize` は GitHub へ行く前に必ず同意画面を表示する。悪意あるクライアントが利用者に認可を開始させても、利用者が承認しない限り MCP のアクセストークンは渡らない。
+Because DCR (dynamic client registration) is enabled, `/authorize` always shows a consent screen before going to GitHub. Even if a malicious client makes a user start authorization, no MCP access token is handed over unless the user approves.
 
-- 表示: クライアント名（`client_name`。自己申告で未検証）、**`redirect_uri` のホスト**（目立たせて表示）とフル URI、要求 scope、「このアプリにあなたの rovo タスクの作成・操作を許可しますか」。送り先のホストに見覚えがなければ拒否する。
-- 承認すると GitHub のログインへ進む。拒否すると client の `redirect_uri` へ `error=access_denied` で戻る。
-- CSRF 対策: フォームの値は 1 回限りの handle で、`__Host-` の Cookie（Secure・HttpOnly・SameSite=Lax）と突き合わせる。別のサイトや別のブラウザからの送信、再送は 400 になる。
-- クリックジャッキング対策として `X-Frame-Options: DENY` と CSP（`default-src 'none'`・`frame-ancestors 'none'` など）を付ける。`form-action` は付けない（Chrome が POST 後の redirect 先にも適用し、承認・拒否後の redirect を壊すため）。
-- 承認の記憶はしない。ログインのたびに同意画面が出る。
+- Shown: the client name (`client_name`; self-declared and unverified), **the host of `redirect_uri`** (displayed prominently) and the full URI, the requested scope, and "Allow this app to create and operate your rovo tasks?". If you do not recognize the destination host, reject.
+- On approval, you proceed to the GitHub login. On rejection, you are sent back to the client's `redirect_uri` with `error=access_denied`.
+- CSRF protection: the form values are a single-use handle that is matched against a `__Host-` cookie (Secure, HttpOnly, SameSite=Lax). A submission from another site or another browser, or a resubmission, gets a 400.
+- As protection against clickjacking, it sets `X-Frame-Options: DENY` and a CSP (`default-src 'none'`, `frame-ancestors 'none'`, and so on). `form-action` is not set (Chrome applies it to the redirect target after a POST too, which would break the redirect after approval or rejection).
+- Approval is not remembered. The consent screen appears at every login.
 
-## 開発手順
+## Development
 
-ランタイム（node / pnpm）は [mise](https://mise.jdx.dev/) で固定している。コマンドはすべて `mise run` 経由で実行する。
+Runtimes (node / pnpm) are pinned with [mise](https://mise.jdx.dev/). Run every command through `mise run`.
 
-**Docker が必要**: `apps/agent` の E2E（`mise run test:e2e:docker`、したがって `mise run test`）は `wrangler dev` が Docker でコンテナ（`apps/agent/Dockerfile`）をビルド・起動する。Docker Desktop など、ローカルで Docker が動いていること。初回はイメージのビルド（`cloudflare/sandbox:1.0.1` の取得を含む）に数分かかる。
+**Docker is required**: the E2E tests for `apps/agent` (`mise run test:e2e:docker`, and therefore `mise run test`) have `wrangler dev` build and start a container (`apps/agent/Dockerfile`) with Docker. Docker must be running locally (Docker Desktop, for example). The first run takes a few minutes to build the image (including pulling `cloudflare/sandbox:1.0.1`).
 
-**E2E の実行中は `mise run dev:all` を起動しない**: E2E の後始末は「その起動中に増えた `workerd-rovo-agent-*` コンテナ」を `docker rm -f` で消す。E2E 同士はロック（`$TMPDIR/rovo-e2e-docker.lock`）で直列化されるが、`dev:all` はロックを取らないため、並走すると開発セッションのコンテナが消えることがある。また E2E は `apps/*/.dev.vars` を起動中だけ書き換える（元のファイルは `.dev.vars.rovo-e2e-backup` に退避し、異常終了した場合も次の起動の冒頭で元に戻す）。
+**Do not start `mise run dev:all` while E2E tests are running**: the E2E cleanup removes with `docker rm -f` the `workerd-rovo-agent-*` containers that were added during that run. E2E runs are serialized with each other by a lock (`$TMPDIR/rovo-e2e-docker.lock`), but `dev:all` does not take the lock, so running them in parallel can delete the containers of your development session. Also, E2E rewrites `apps/*/.dev.vars` only while it runs (the original file is moved aside to `.dev.vars.rovo-e2e-backup`, and it is restored at the start of the next run even after an abnormal exit).
 
 ```sh
-mise install          # node / pnpm を入れる
-mise run install      # 依存パッケージ（pnpm install --frozen-lockfile）
-mise run test         # Unit + 偽 GitHub + E2E
-mise run lint         # Biome + 型検査
+mise install          # install node / pnpm
+mise run install      # dependencies (pnpm install --frozen-lockfile)
+mise run test         # Unit + fake GitHub + E2E
+mise run lint         # Biome + type check
 ```
 
-| タスク | 内容 |
+| Task | Description |
 |---|---|
-| `mise run test:unit` | gateway・agent・web の Unit。vitest + `@cloudflare/vitest-plugin`（workerd 上で実行）。個別は `test:unit:gateway` / `test:unit:agent` / `test:unit:web`。agent の push 前の秘密の検査は、一時ディレクトリの本物の git でも確かめる（`test:unit:agent-git`。workerd では child_process が使えないので node 環境の `apps/agent/vitest.node.config.ts`）。agent の Unit ではコンテナが使えないので、`SandboxPort` を fake にする。web の Unit は `WebSearchSource` / fetch / `AI.run` をすべて fake にする（実アカウントは呼ばない）。Unit では `WEB` の service binding を差し替えている（gateway は env に fake を渡し、agent は `AgentTestOverrides.web`） |
-| `mise run test:fake-github` | 偽 GitHub サーバーと GitHub クライアントの結合テスト（Node） |
+| `mise run test:unit` | Unit tests for gateway, agent, and web. vitest + `@cloudflare/vitest-plugin` (runs on workerd). Individually: `test:unit:gateway` / `test:unit:agent` / `test:unit:web`. The agent's pre-push secret check is also verified with real git in a temporary directory (`test:unit:agent-git`; workerd cannot use child_process, so it uses the node-environment `apps/agent/vitest.node.config.ts`). Containers are unavailable in the agent's unit tests, so `SandboxPort` is faked. The web unit tests fake `WebSearchSource` / fetch / `AI.run` entirely (no real account is called). In unit tests the `WEB` service binding is replaced (the gateway receives a fake in env, and the agent uses `AgentTestOverrides.web`) |
+| `mise run test:fake-github` | Integration tests of the fake GitHub server and the GitHub client (Node) |
 | `mise run test:e2e` | `test:e2e:gateway` + `test:e2e:docker` |
-| `mise run test:e2e:gateway` | `wrangler dev` で実 Worker と偽 GitHub を起動し、MCP SDK の Client から DCR → `/authorize` → 偽 GitHub → `/callback` → token(PKCE) → 4 つのツールまで通す |
-| `mise run test:e2e:docker` | **Docker 必須**。`wrangler dev` で実コンテナを起動し、ローカルの偽サーバー（偽 GitHub の git smart HTTP と偽 npm レジストリ）を許可先にして、外向き通信の許可・拒否（非許可ホスト、push、内部 IP、非 80/443 ポート、IPv6、CONNECT、WebSocket、リダイレクト、ヘッダ除去、再起動後の傍受）と `npm install` / `git clone`、Gateway → Agent の DO RPC（`-c gateway -c agent` の同時起動）を検証する |
-| `mise run test:e2e:full` | **Docker 必須**。gateway・agent・**web の 3 つの Worker を同時に** `wrangler dev` で起動し、MCP SDK の Client から Gateway → AgentDO → 実コンテナ、Phase 5 の `web_search` / `web_fetch`（親の MCP と子の台本）まで通しで検証する。偽なのは GitHub・git / npm の上流・モデル（台本）と、web の外側（Web Search API・Clef・toMarkdown・公開ページ。`apps/web/test/support/fake-web.ts`）だけ。web には `ENVIRONMENT=test` と `TEST_FAKE_BASE`（偽サーバーの URL）を `.dev.vars` で渡す |
-| `mise run test:e2e:net` | **Docker 必須・実ネットワーク**。上の E2E の実ネットワーク版。実 registry.npmjs.org への GET / `npm install` が通ること、許可外のホストに出られないこと、github.com への通信はトークンが無ければ 401 で落ちる（認証なしの clone が通らない）ことだけを確かめる。git の clone / push の検証は偽 git の E2E が担う。CI で不安定になりうるため `test` には含めない。認証付きアクセスや push はしない |
-| `mise run lint` / `mise run fmt` | Biome の lint / 整形、`tsc` の型検査 |
-| `mise run typegen` | `wrangler.jsonc` を変えたら実行して両アプリの `worker-configuration.d.ts` を更新する |
-| `mise run dev:all` | gateway・agent・web を同時にローカル起動する（Docker 必須）。`AGENT_DO` は `script_name` 付きなので、片方だけ起動すると本番の DO を参照してしまう（wrangler の known issue）。`WEB` の service binding も web が起動していないと解決できない。必ず全部を同時に起動する。web の `AI` バインディングは実アカウントに繋がるため、`web_search` / `web_fetch` を実際に呼ぶと課金される（`wrangler login` が必要）。それ以外の用途ではデプロイは不要 |
-| `mise run build` | Worker のバンドル確認（`--dry-run`。デプロイはしない） |
-| `mise run test:infra` | `infra/` の Terraform のテスト（`terraform test` + `mock_provider`。Cloudflare の資格情報もアカウントも要らない。provider の取得にネットワークが要る）。`mise run test` に含まれる |
-| `mise run test:deploy` / `test:deploy:config` / `test:setup` | `scripts/deploy.sh`（偽の `pnpm` / `openssl` / `terraform`）、設定の生成器 `deploy:config`（本番相当の架空の入力から手書き相当の設定が出ること）、`setup`（偽物だけ。PATH から本物を外す）の自己確認。wrangler も Cloudflare も呼ばない。`test:unit` に含まれる |
-| `mise run infra:fmt` / `mise run infra:validate` | `infra/` の整形 / 検証（`lint` は `terraform fmt -check` を含む） |
-| `mise run setup` | **実際にデプロイする**。初回の通し（前提の確認 → terraform → `deploy:config` → `deploy:all` → `deploy:secrets` → GitHub App と BYOK の案内）。[デプロイ](#デプロイ)を見る |
-| `mise run deploy:config` / `deploy:config:check` | `rovo.config.json` と Terraform の非秘密の出力から `deploy/` の wrangler 設定を生成する / 生成物が作り直した結果と一致するかを確かめる（Terraform 不要。下流の CI 用） |
-| `mise run deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` / `deploy:secrets` | **実際にデプロイする**（`ROVO_DEPLOY_DIR` の下流の wrangler 設定を使う。未設定なら何もせずに失敗する）。[デプロイ](#デプロイ)を見る |
-| `mise run dev` | ローカル起動（`http://localhost:8787`）。`apps/gateway/.dev.vars` を読む |
+| `mise run test:e2e:gateway` | Starts the real Worker and a fake GitHub with `wrangler dev`, and goes from the MCP SDK Client through DCR → `/authorize` → fake GitHub → `/callback` → token (PKCE) to the tools |
+| `mise run test:e2e:docker` | **Docker required.** Starts a real container with `wrangler dev`, uses local fake servers (a fake GitHub git smart HTTP and a fake npm registry) as the allowed destinations, and verifies the allowing and denying of outbound traffic (non-allowed hosts, push, internal IPs, ports other than 80/443, IPv6, CONNECT, WebSocket, redirects, header stripping, interception after restart), `npm install` / `git clone`, and the Gateway → Agent DO RPC (starting `-c gateway -c agent` together) |
+| `mise run test:e2e:full` | **Docker required.** Starts the three Workers gateway, agent, and **web at the same time** with `wrangler dev`, and verifies end to end, from the MCP SDK Client through Gateway → AgentDO → a real container, up to `web_search` / `web_fetch` (the parent's MCP and the child's script). Only GitHub, the git / npm upstreams, the model (a script), and the outside of web (the Web Search API, Clef, toMarkdown, and public pages; `apps/web/test/support/fake-web.ts`) are fake. web receives `ENVIRONMENT=test` and `TEST_FAKE_BASE` (the URL of the fake server) through `.dev.vars` |
+| `mise run test:e2e:net` | **Docker required, real network.** The real-network version of the E2E above. It only checks that GET / `npm install` against the real registry.npmjs.org works, that the sandbox cannot reach non-allowed hosts, and that traffic to github.com fails with 401 without a token (an unauthenticated clone does not succeed). Verification of git clone / push is handled by the fake-git E2E. It is not part of `test` because it can be flaky on CI. It does not make authenticated access or push |
+| `mise run lint` / `mise run fmt` | Biome lint / formatting, and `tsc` type check |
+| `mise run typegen` | Run after changing `wrangler.jsonc` to update the `worker-configuration.d.ts` of both apps |
+| `mise run dev:all` | Starts gateway, agent, and web locally at the same time (Docker required). `AGENT_DO` has a `script_name`, so starting only one of them references the production DO (a known wrangler issue). The `WEB` service binding also cannot be resolved unless web is running. Always start all of them together. web's `AI` binding connects to a real account, so actually calling `web_search` / `web_fetch` is billed (`wrangler login` is required). Deployment is not needed for anything else |
+| `mise run build` | Checks that the Workers bundle (`--dry-run`; does not deploy) |
+| `mise run test:infra` | Tests for the Terraform in `infra/` (`terraform test` + `mock_provider`; needs no Cloudflare credentials or account; fetching the provider needs the network). Included in `mise run test` |
+| `mise run test:deploy` / `test:deploy:config` / `test:setup` | Self-checks of `scripts/deploy.sh` (fake `pnpm` / `openssl` / `terraform`), of the config generator `deploy:config` (that a hand-written-equivalent config comes out of production-like fictional input), and of `setup` (fakes only; the real tools are removed from PATH). They call neither wrangler nor Cloudflare. Included in `test:unit` |
+| `mise run infra:fmt` / `mise run infra:validate` | Format / validate `infra/` (`lint` includes `terraform fmt -check`) |
+| `mise run setup` | **Actually deploys.** The first-time end-to-end flow (check prerequisites → terraform → `deploy:config` → `deploy:all` → `deploy:secrets` → guidance for the GitHub App and BYOK). See [Deployment](#deployment) |
+| `mise run deploy:config` / `deploy:config:check` | Generates the wrangler config in `deploy/` from `rovo.config.json` and the non-secret Terraform outputs / checks that the generated files match what would be regenerated (no Terraform needed; for downstream CI) |
+| `mise run deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` / `deploy:secrets` | **Actually deploy** (using the downstream wrangler config in `ROVO_DEPLOY_DIR`; if it is unset they do nothing and fail). See [Deployment](#deployment) |
+| `mise run dev` | Local start (`http://localhost:8787`). Reads `apps/gateway/.dev.vars` |
 
-E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` の出力も表示される。E2E は GitHub に接続しない（偽 GitHub を使う）。
+If an E2E test fails, `E2E_DEBUG=1 mise run test:e2e` also shows the output of `wrangler dev`. The E2E tests do not connect to GitHub (they use a fake GitHub).
 
-**E2E の診断ログ**: E2E（Docker を使うもの）は、テストを流した場所の外に診断ログを常に残す。保存先は `$TMPDIR/rovo-e2e-logs/<タイムスタンプ>-xxxxxx/`（テストファイルごとに 1 つ。新しい 30 個を残して古いものは消える。`ROVO_E2E_LOG_DIR` でルートを変えられる）。
-- `wrangler-<設定名>.log`: `wrangler dev` の出力（stdout / stderr）。E2E の終了時に `[rovo-e2e] wrangler のログ: <パス>` と表示される。起動に失敗したときのエラーにもパスが入る
-- `timing.log`: 主要な段階（`wrangler ready` / `wrangler stop`、Sandbox の `ensure-ready` / `exec` / `stop`（reaper）/ `terminate` / `destroy`、Agent の各 RPC）の所要時間。失敗した段階は `failed` で記録される。`E2E_DEBUG=1` なら stderr にも出る（タイムアウトの値は変えていない）
+**E2E diagnostic logs**: E2E tests (those that use Docker) always leave diagnostic logs outside the place where the tests are run. They are saved in `$TMPDIR/rovo-e2e-logs/<timestamp>-xxxxxx/` (one per test file; the newest 30 are kept and older ones are removed; the root can be changed with `ROVO_E2E_LOG_DIR`).
+- `wrangler-<config name>.log`: the output (stdout / stderr) of `wrangler dev`. At the end of the E2E run, `[rovo-e2e] wrangler のログ: <path>` is printed. The path is also included in the error when startup fails
+- `timing.log`: the durations of the main stages (`wrangler ready` / `wrangler stop`, the Sandbox's `ensure-ready` / `exec` / `stop` (reaper) / `terminate` / `destroy`, and each Agent RPC). A failed stage is recorded as `failed`. With `E2E_DEBUG=1` it is also printed to stderr (timeout values are not changed)
 
-## 設定
+## Configuration
 
-デプロイ時に用意する値の完全な一覧は [docs/deploy.md](docs/deploy.md) の 5 にある（食い違う場合は deploy.md を正とする）。
+The complete list of values to prepare at deploy time is in section 5 of [docs/deploy.md](docs/deploy.md) (Japanese; if they disagree, deploy.md is authoritative).
 
-### 変数（`wrangler.jsonc` の `vars`、またはローカルは `.dev.vars`）
+### Variables (`vars` in `wrangler.jsonc`, or `.dev.vars` locally)
 
-| 変数 | 内容 |
+| Variable | Description |
 |---|---|
-| `ENVIRONMENT` | `production`（既定）。`test` のときだけ `GITHUB_OAUTH_BASE` / `GITHUB_API_BASE` の上書きを許す。**本番で `test` にしないこと**（本番で上書きを指定すると起動時に拒否される） |
-| `PUBLIC_BASE_URL` | 公開 URL。OAuth の issuer と `/mcp` の resource、GitHub のコールバック URL（`<PUBLIC_BASE_URL>/callback`）になる。本番は `https`、ローカルのみ loopback の `http` が許される |
-| `GITHUB_APP_CLIENT_ID` | GitHub App の Client ID（秘密ではない） |
-| `ALLOWED_ORG` / `ALLOWED_TEAM` | ログインと全ツール呼び出しを許す org と team の slug。子 team のメンバーも許可される。対で設定する（片方だけだとログインできない）。`ALLOWED_USER_IDS` のどちらかが必須 |
-| `ALLOWED_USER_IDS` | ログインと全ツール呼び出しを許す GitHub の数値の user ID（カンマ区切り。`gh api user --jq .id` で分かる）。team の無い個人アカウントで使うときはこちらを使う。org/team と両方を設定した場合は、どちらかを満たせば許可する。不正な要素が 1 つでもあれば全体が不正になり、ログインできない（fail closed） |
-| `GITHUB_APP_ID` | GitHub App の App ID（秘密ではない）。Installation Access Token の発行（JWT の `iss`）に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる（fail closed） |
-| `DRAFT_PR_FALLBACK` | Draft PR を作れないリポジトリ（Free プランの private リポジトリなど）での扱い。`fail`（既定。タスクを `draft_pr_unsupported` で FAILED にする）/ `ready`（`[WIP]` を付けた通常の PR を作り、本文冒頭に注記し、警告 `draft_pr_unavailable` を付ける）。**不正な値は `fail` として扱う**。判定は Draft に関する 422 のときだけ |
-| `AGENT_MODEL` / `AGENT_MODELS` | 既定のモデルと、`task_start` / `consult` の `model` に選べるモデル（カンマ区切り。空なら `AGENT_MODEL` だけ）。agent の同名の変数と同じ値にする（D10） |
-| `MODEL_EFFORTS`（変数） | モデルごとの思考レベルの上書き（`<モデルの id>=<off\|minimal\|low\|medium\|high\|xhigh\|max>` のカンマ区切り。空なら既定）。agent の同名の変数と同じ値にする |
-| `AI_GATEWAY_ID` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`（Secret） | AI Gateway の BYOK のキーを読んで、キーが無いプロバイダーのモデルを選べなくする（D10b）。どれかが空なら判定せず `AGENT_MODELS` だけで決める。account id は公開しない値。トークンは Account / AI Gateway / Read だけ |
-| `CONSULT_BUDGET_USD` | `consult` 1 回に月額の枠から予約する額（USD。既定 0.5。実費で精算する。0 以下・不正な値は 0.5）（D10） |
-| `MAX_CONCURRENT_TASKS` | 利用者ごとに同時に実行できるタスクの上限（1 以上の整数。既定 2。不正な値・未設定は 2）。上限に達すると `task_start` は `concurrency_limit`。月額の枠とは別で、両方を満たすときだけ始められる。値は `budget_status` の `concurrency_limit` で見える |
-| `PR_SHOW_COST` | `true` のときだけ、費用を PR 本文に載せる（既定は載せない。公開リポジトリでは誰でも見られるため） |
+| `ENVIRONMENT` | `production` (default). Only when it is `test` are overrides of `GITHUB_OAUTH_BASE` / `GITHUB_API_BASE` allowed. **Never set it to `test` in production** (specifying an override in production is rejected at startup) |
+| `PUBLIC_BASE_URL` | The public URL. It becomes the OAuth issuer, the `/mcp` resource, and the GitHub callback URL (`<PUBLIC_BASE_URL>/callback`). Production must use `https`; only loopback `http` is allowed locally |
+| `GITHUB_APP_CLIENT_ID` | The GitHub App's Client ID (not a secret) |
+| `ALLOWED_ORG` / `ALLOWED_TEAM` | The slugs of the org and team allowed to log in and call all tools. Members of child teams are also allowed. Set them as a pair (with only one, login is impossible). Either this pair or `ALLOWED_USER_IDS` is required |
+| `ALLOWED_USER_IDS` | Numeric GitHub user IDs allowed to log in and call all tools (comma-separated; you can find yours with `gh api user --jq .id`). Use this for a personal account without a team. If you set both org/team and this, satisfying either one is enough. If even one element is invalid, the whole value is invalid and login is impossible (fail closed) |
+| `GITHUB_APP_ID` | The GitHub App's App ID (not a secret). Used to issue Installation Access Tokens (the JWT's `iss`). If unset, tasks end in FAILED with `github_app_not_configured` (fail closed) |
+| `DRAFT_PR_FALLBACK` | What to do for repositories where Draft PRs cannot be created (such as private repositories on the Free plan). `fail` (default; the task goes to FAILED with `draft_pr_unsupported`) / `ready` (creates a normal PR prefixed with `[WIP]`, adds a note at the top of the body, and attaches the warning `draft_pr_unavailable`). **Invalid values are treated as `fail`**. The decision is made only on a 422 about Drafts |
+| `AGENT_MODEL` / `AGENT_MODELS` | The default model, and the models that can be chosen for `model` in `task_start` / `consult` (comma-separated; if empty, only `AGENT_MODEL`). Use the same value as the same-named variables of the agent |
+| `MODEL_EFFORTS` (variable) | Per-model overrides of the thinking level (comma-separated `<model id>=<off\|minimal\|low\|medium\|high\|xhigh\|max>`; if empty, the defaults). Use the same value as the agent's variable of the same name |
+| `AI_GATEWAY_ID` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` (Secret) | Read the AI Gateway BYOK keys so that models of providers without a key cannot be selected. If any of them is empty, no decision is made and only `AGENT_MODELS` decides. The account id is a value that is not published. The token has only Account / AI Gateway / Read |
+| `CONSULT_BUDGET_USD` | The amount reserved from the monthly allowance for each `consult` (USD; default 0.5; settled at actual cost; values of 0 or less, or invalid values, become 0.5) |
+| `MAX_CONCURRENT_TASKS` | The limit on tasks a user can run concurrently (an integer of 1 or more; default 2; invalid or unset values become 2). When the limit is reached, `task_start` returns `concurrency_limit`. It is separate from the monthly allowance, and a task can start only when both are satisfied. The value is visible in `concurrency_limit` of `budget_status` |
+| `PR_SHOW_COST` | Only when `true`, the cost is shown in the PR body (by default it is not, because anyone can see it in a public repository) |
 
-### Secret（`wrangler secret put <NAME>`、ローカルは `.dev.vars`）
+### Secrets (`wrangler secret put <NAME>`, or `.dev.vars` locally)
 
-| Secret | 内容 |
+| Secret | Description |
 |---|---|
-| `GITHUB_APP_CLIENT_SECRET` | GitHub App の Client secret |
-| `GITHUB_APP_PRIVATE_KEY` | GitHub App の秘密鍵（**PKCS#8** の PEM）。GitHub がダウンロードさせるのは PKCS#1（`BEGIN RSA PRIVATE KEY`）なので、`openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem -out app.pkcs8.pem` で変換して投入する（`wrangler secret put GITHUB_APP_PRIVATE_KEY < app.pkcs8.pem`）。リポジトリには置かない |
-| `TOKEN_ENC_KEY` | （gateway）GitHub のトークンを UserDO に暗号化して保存する鍵。base64 の 32 バイト（`openssl rand -base64 32`）。TaskDO が保存する Installation Token の暗号化にも使う。変えると保存済みの資格は復号できなくなり、全員が再ログインになる |
+| `GITHUB_APP_CLIENT_SECRET` | The GitHub App's Client secret |
+| `GITHUB_APP_PRIVATE_KEY` | The GitHub App's private key (a **PKCS#8** PEM). GitHub lets you download PKCS#1 (`BEGIN RSA PRIVATE KEY`), so convert it with `openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem -out app.pkcs8.pem` and put it in (`wrangler secret put GITHUB_APP_PRIVATE_KEY < app.pkcs8.pem`). Do not keep it in the repository |
+| `TOKEN_ENC_KEY` | (gateway) The key used to store GitHub tokens encrypted in UserDO. 32 bytes in base64 (`openssl rand -base64 32`). It is also used to encrypt the Installation Token that TaskDO stores. If you change it, the stored credentials can no longer be decrypted and everyone must log in again |
 
-#### agent（`apps/agent`）の secret / 変数
+#### Secrets / variables of the agent (`apps/agent`)
 
-| 名前 | 内容 |
+| Name | Description |
 |---|---|
-| `TOKEN_ENC_KEY`（secret） | Installation Token を SandboxDO の storage に暗号化して保存する鍵。base64 の 32 バイト（`openssl rand -base64 32`）。`cd apps/agent && wrangler secret put TOKEN_ENC_KEY`。gateway の同名の secret とは別の Worker の値で、同じでも違ってもよい。未設定だと Installation Token を預けられず、`start` は拒否される（fail closed）。トークンはコンテナには入らない |
-| `AI_GATEWAY_ID`（変数） | AI Gateway の ID。空だと `start` が `ai_gateway_not_configured` で拒否される |
-| `AGENT_MODEL`（変数） | 既定のモデル（既定 `anthropic/claude-sonnet-5-5`。許可リスト `packages/models` にあるものだけ） |
-| `AGENT_MODELS`（変数） | `task_start` の `model` と `consult` の `model` に使えるモデル（カンマ区切り。空なら `AGENT_MODEL` だけ）。gateway の同名の変数と同じ値にする |
-| `MODEL_EFFORTS`（変数） | モデルごとの思考レベルの上書き（空なら既定）。gateway の同名の変数と同じ値にする。実際に Pi へ渡すのはこの値 |
-| `ENVIRONMENT`（変数） | `production`（既定）。E2E だけ `test` |
+| `TOKEN_ENC_KEY` (secret) | The key used to store the Installation Token encrypted in SandboxDO's storage. 32 bytes in base64 (`openssl rand -base64 32`). `cd apps/agent && wrangler secret put TOKEN_ENC_KEY`. It is a value of a different Worker from the gateway's secret of the same name, and may be the same or different. If unset, the Installation Token cannot be deposited and `start` is rejected (fail closed). The token does not enter the container |
+| `AI_GATEWAY_ID` (variable) | The AI Gateway ID. If empty, `start` is rejected with `ai_gateway_not_configured` |
+| `AGENT_MODEL` (variable) | The default model (default `anthropic/claude-sonnet-5-5`; only those in the allowlist `packages/models`) |
+| `AGENT_MODELS` (variable) | The models usable for `model` in `task_start` and `consult` (comma-separated; if empty, only `AGENT_MODEL`). Use the same value as the gateway's variable of the same name |
+| `MODEL_EFFORTS` (variable) | Per-model overrides of the thinking level (if empty, the defaults). Use the same value as the gateway's variable of the same name. This is the value actually passed to Pi |
+| `ENVIRONMENT` (variable) | `production` (default). `test` only for E2E |
 
-| `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` / `WEB_BROWSE_LIMIT_PER_TASK`（変数） | 子の `web_search` / `web_fetch` / `web_browse` のタスクごとの回数の上限（既定 50 / 100 / 20）。0 以上の整数のみ。不正な値は既定に戻る |
-| `WEB_BROWSE_ENABLED`（変数） | 子に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
-| `WEB`（service binding） | `apps/web` の `WebResearch`（`props: {caller: "child"}`）。デプロイは web → agent → gateway の順 |
+| `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` / `WEB_BROWSE_LIMIT_PER_TASK` (variables) | The per-task limits on the child's `web_search` / `web_fetch` / `web_browse` (defaults 50 / 100 / 20). Integers of 0 or more only. Invalid values revert to the default |
+| `WEB_BROWSE_ENABLED` (variable) | Whether to expose `web_browse` to the child (only when `"true"`; default `"false"`) |
+| `WEB` (service binding) | `WebResearch` of `apps/web` (`props: {caller: "child"}`). Deploy in the order web → agent → gateway |
 
-ローカルは `apps/agent/.dev.vars.example` を `apps/agent/.dev.vars` にコピーして埋める（`mise run dev:all`）。
+Locally, copy `apps/agent/.dev.vars.example` to `apps/agent/.dev.vars` and fill it in (`mise run dev:all`).
 
-#### web（`apps/web`）の変数
+#### Variables of web (`apps/web`)
 
-secret は無い（GitHub のトークンも Anthropic のキーも持たせない）。バインディングは `ai`（Workers AI）だけ。
+There are no secrets (it holds neither a GitHub token nor an Anthropic key). Its only binding is `ai` (Workers AI).
 
-| 変数 | 内容 |
+| Variable | Description |
 |---|---|
-| `AI_GATEWAY_ID` | AI Gateway の ID。**必須**。空だと `websearch` も `AI.run`（Clef）も呼ばず、呼び出しは `misconfigured` のエラーになる（fail closed）。Clef の呼び出しには `userId` / `taskId` / `caller` を metadata に付ける |
-| `WEB_SEARCH_PROVIDER` | 検索プロバイダ（`ceramic` / `exa` / `linkup`。既定 `linkup`） |
-| `SAFETY_BLOCK_THRESHOLD` / `SAFETY_CAUTION_THRESHOLD` | Policy Engine の閾値（既定 0.8 / 0.4）。モデルのスコアがこれ以上なら block / caution。**仮の値**で、受入試験で調整する |
-| `ENVIRONMENT` / `TEST_FAKE_BASE` | E2E 専用。`ENVIRONMENT=test` のときだけ、`TEST_FAKE_BASE`（偽サーバーの URL）に AI（`run` / `websearch` / `toMarkdown`）と取得を向ける。本番は必ず `production` |
+| `AI_GATEWAY_ID` | The AI Gateway ID. **Required.** If empty, it calls neither `websearch` nor `AI.run` (Clef), and calls fail with a `misconfigured` error (fail closed). Calls to Clef attach `userId` / `taskId` / `caller` to the metadata |
+| `WEB_SEARCH_PROVIDER` | The search provider (`ceramic` / `exa` / `linkup`; default `linkup`) |
+| `SAFETY_BLOCK_THRESHOLD` / `SAFETY_CAUTION_THRESHOLD` | Thresholds of the Policy Engine (defaults 0.8 / 0.4). If the model's score is at or above them, the verdict is block / caution. These are **provisional values** to be tuned in the acceptance test |
+| `ENVIRONMENT` / `TEST_FAKE_BASE` | For E2E only. Only when `ENVIRONMENT=test`, AI (`run` / `websearch` / `toMarkdown`) and fetching are pointed at `TEST_FAKE_BASE` (the URL of the fake server). Production must always be `production` |
 
-#### gateway の web 関連
+#### Web-related settings of the gateway
 
-| 名前 | 内容 |
+| Name | Description |
 |---|---|
-| `WEB`（service binding） | `apps/web` の `WebResearch`（`props: {caller: "parent"}`） |
-| `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` / `WEB_BROWSE_DAILY_LIMIT`（変数） | 親の `web_search` / `web_fetch` / `web_browse` の、ユーザーごと・UTC の 1 日あたりの上限（既定 200 / 500 / 50） |
-| `WEB_BROWSE_ENABLED`（変数） | 親の MCP に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
+| `WEB` (service binding) | `WebResearch` of `apps/web` (`props: {caller: "parent"}`) |
+| `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` / `WEB_BROWSE_DAILY_LIMIT` (variables) | The per-user, per-UTC-day limits on the parent's `web_search` / `web_fetch` / `web_browse` (defaults 200 / 500 / 50) |
+| `WEB_BROWSE_ENABLED` (variable) | Whether to expose `web_browse` in the parent's MCP (only when `"true"`; default `"false"`) |
 
-**デプロイの順序**: web → agent → gateway。service binding は、参照される側の Worker（`rovo-web`）が先に存在している必要がある。agent は gateway から `script_name` で参照される。
+**Deployment order**: web → agent → gateway. A service binding requires the referenced Worker (`rovo-web`) to exist first. The agent is referenced from the gateway by `script_name`.
 
-### デプロイ
+### Deployment
 
-rovo は誰が clone しても、自分の値を渡せばデプロイできるようにしてある。upstream が次の 2 つを持つ。
+rovo is built so that anyone who clones it can deploy it by supplying their own values. The upstream provides these two things.
 
-- **`infra/`**: Cloudflare のリソース（R2 バケット 2 つ〔アーカイブ用・監査ログ用〕、KV、AI Gateway、監査ログの Logpush）を作る Terraform。使い方は [infra/README.md](infra/README.md)。
-- **`mise run setup` と `deploy:*` の mise タスク**: `rovo.config.json`（秘密でない値。雛形は [rovo.config.example.json](rovo.config.example.json)）を書いて `mise run setup` を実行する。`deploy:config` が [deploy.example/](deploy.example/) の雛形から `deploy/` の wrangler 設定を生成し（コミットする）、`deploy:all`（web → agent → gateway）と `deploy:secrets`（入っていない secret だけ入れる）が続く。`ROVO_DEPLOY_DIR` が未設定・設定ファイルが無ければ、`deploy:*` は何もせずに失敗する。
+- **`infra/`**: Terraform that creates the Cloudflare resources (two R2 buckets [archive and audit log], KV, AI Gateway, and the Logpush of the audit log). See [infra/README.md](infra/README.md) for usage.
+- **`mise run setup` and the `deploy:*` mise tasks**: write `rovo.config.json` (non-secret values; the template is [rovo.config.example.json](rovo.config.example.json)) and run `mise run setup`. `deploy:config` generates the wrangler config in `deploy/` from the templates in [deploy.example/](deploy.example/) (commit it), followed by `deploy:all` (web → agent → gateway) and `deploy:secrets` (puts in only the secrets that are not there yet). If `ROVO_DEPLOY_DIR` is unset or the config files are missing, `deploy:*` does nothing and fails.
 
-下流（デプロイする人の private リポジトリ）は、rovo を upstream として merge し、`rovo.config.json`、生成された `deploy/` の wrangler 設定、backend を**新しいファイルとして足す**だけで使う。人が作る Cloudflare のトークンは Terraform 用の 1 つだけ、人が入力する secret は GitHub App の Client secret と `.pem` のパスだけ。手順は [docs/deploy.md](docs/deploy.md) の 4（クイックスタート）。MCP Server Portal と Access の登録はこの範囲外。
+Downstream (the deployer's private repository) merges rovo as its upstream and only **adds as new files** `rovo.config.json`, the generated wrangler config in `deploy/`, and a backend. The only Cloudflare token a person creates is the one for Terraform, and the only secrets a person types are the GitHub App's Client secret and the path to the `.pem`. For the steps, see section 4 (quick start) of [docs/deploy.md](docs/deploy.md) (Japanese). Registering with an MCP Server Portal and Access is out of scope.
 
-### 運用設定（下流向け: 監査ログ・R2 アーカイブ・単価）
+### Operational settings (for downstream: audit logs, R2 archive, unit prices)
 
-rovo を upstream にする private リポジトリ（下流）が、自分の wrangler 設定とインフラで設定するもの。rovo の `wrangler.jsonc` は環境固有の値を持たない。まとまった手順は [docs/deploy.md](docs/deploy.md) にある。以下は要点で、食い違う場合は deploy.md を正とする。
+These are things that a private repository using rovo as its upstream (downstream) configures in its own wrangler config and infrastructure. rovo's `wrangler.jsonc` holds no environment-specific values. The consolidated procedure is in [docs/deploy.md](docs/deploy.md) (Japanese). What follows is the gist; if they disagree, deploy.md is authoritative.
 
-#### 監査ログが「監査」として成立する条件
+#### Conditions for audit logs to count as "audit"
 
-監査イベントは 1 行の構造化 JSON（`{"audit":true,"event":...}`）を `console.log` に出す（イベントの一覧は phase6.md）。Workers Logs に出るだけでは head sampling と短い保持のために行が欠落しうるので、**best-effort** でしかない。監査として成立させるには、下流で次の両方を設定する。
+Audit events emit one line of structured JSON (`{"audit":true,"event":...}`) to `console.log` (the list of events is in phase6.md). Merely appearing in Workers Logs is only **best-effort**, because lines can be lost to head sampling and short retention. To make it count as an audit, downstream must configure both of the following.
 
-- Workers Logs の head sampling を 100% にする（`observability` の `head_sampling_rate: 1`。`observability.logs.head_sampling_rate` でもよい）。rovo の `wrangler.jsonc` には `observability` を置かない。
-- Logpush で、保持期間を自分で決められる送り先へ流す（送り先は下流の判断）。
+- Set Workers Logs head sampling to 100% (`head_sampling_rate: 1` in `observability`; `observability.logs.head_sampling_rate` also works). rovo's `wrangler.jsonc` does not contain `observability`.
+- Send logs through Logpush to a destination where you can decide the retention period yourself (the destination is downstream's decision).
 
-どちらかを設定しなければ、監査ログは調査の補助として使う。
+If either is not set, use the audit logs only as an aid to investigation.
 
-#### R2 アーカイブ
+#### R2 archive
 
-終端になったタスクのイベントと結果を R2 に**コピー**する（正は TaskDO のまま。`task_wait` / `task_result` は TaskDO から返す）。
+The events and result of a task that has reached a terminal state are **copied** to R2 (the source of truth stays TaskDO; `task_wait` / `task_result` return from TaskDO).
 
-- バインディング名は `LOGS`。下流の wrangler 設定で **gateway にだけ**足す（agent・web には足さない）。rovo の `wrangler.jsonc` には `r2_buckets` を置かない。`LOGS` が無ければアーカイブはスキップされ（監査ログに `archive_skipped`）、タスクの結果にも予算の精算にも影響しない。
-- バケットは非公開にする（r2.dev の公開 URL もカスタムドメインも付けない）。ライフサイクル（例: 90 日で削除）は下流で設定する。MCP から一覧・読み出しする API は無い。読むのは運用者が、ダッシュボード・wrangler・S3 互換 API で行う。
-- キーは `tasks/<yyyy>/<mm>/<task_id>/{events.jsonl,result.json,summary.json}`（`<yyyy>/<mm>` はタスク作成時刻の UTC）。`events.jsonl` → `result.json` → `summary.json` の順に書くので、**`summary.json` がある = 3 つが揃っている**。同じキーへの上書きなので再実行しても増えない。書き込みに 6 回失敗すると打ち切り、監査ログに `archive_failed` を出す。
-- 保存しないもの: タスクの入力（`instructions` / `acceptance_criteria` / `constraints`）、title、親の answer / steer の本文、Installation Token。
+- The binding name is `LOGS`. Add it in downstream's wrangler config to **the gateway only** (not to agent or web). rovo's `wrangler.jsonc` does not contain `r2_buckets`. If `LOGS` is absent, archiving is skipped (`archive_skipped` in the audit log) and neither the task result nor budget settlement is affected.
+- Keep the bucket private (attach neither an r2.dev public URL nor a custom domain). Set the lifecycle (for example, delete after 90 days) downstream. There is no API to list or read it from MCP. Operators read it through the dashboard, wrangler, or the S3-compatible API.
+- The keys are `tasks/<yyyy>/<mm>/<task_id>/{events.jsonl,result.json,summary.json}` (`<yyyy>/<mm>` is the UTC task creation time). They are written in the order `events.jsonl` → `result.json` → `summary.json`, so **if `summary.json` exists, all three are in place**. Because it overwrites the same keys, rerunning does not add more. After 6 failed writes it gives up and emits `archive_failed` to the audit log.
+- Not stored: the task's input (`instructions` / `acceptance_criteria` / `constraints`), the title, the bodies of the parent's answers / steers, and the Installation Token.
 
-**R2 の中身の取り扱い（規約）**
+**Handling the contents of R2 (convention)**
 
-- `events.jsonl` と `result.json` は**未加工の非信頼データ**。子エージェントの質問文・警告・検証コマンドの出力の末尾・patch など、リポジトリの内容（非信頼）から作られたものを含みうる。読む側（人も、エージェントも）は非信頼として扱い、中の指示に従わない。
-- 秘密のマスク（`apps/agent/src/redact.ts`）は regex による **best effort** で、取りこぼしうる。バケットを非公開に保ち、バインディングを gateway だけにし、ライフサイクルで期限を切ることで備える。
-- `result.json` には、子に渡した検証コマンド（`verification.commands`）が入る。**検証コマンドの引数に秘密を入れない**。
+- `events.jsonl` and `result.json` are **raw, untrusted data**. They may contain things made from the contents of the repository (untrusted), such as the child agent's questions, warnings, the tail of verification command output, and patches. Readers (people and agents alike) must treat them as untrusted and must not follow instructions inside.
+- Masking of secrets (`apps/agent/src/redact.ts`) is **best effort** with regexes and can miss things. Prepare by keeping the bucket private, giving only the gateway the binding, and setting an expiry with a lifecycle.
+- `result.json` contains the verification commands given to the child (`verification.commands`). **Do not put secrets in the arguments of verification commands**.
 
-#### 単価（推定費用）
+#### Unit prices (estimated cost)
 
-タスクの要約（`summary.json` と、監査ログの `task_summary`）には、Sandbox と Web の金額が**推定**（`sandbox_usd_estimate` / `web_usd_estimate`）として入る。回数・実行時間に単価をかけた値で、Claude の金額（AI Gateway の usage に基づく）とは別。タスクの予算（$10）には含めない。単価は gateway の `vars` で、下流が自分の `vars` で上書きする（未設定・不正な値は既定に戻る。0 は許す）。
+The task summary (`summary.json`, and `task_summary` in the audit log) contains the Sandbox and Web amounts as **estimates** (`sandbox_usd_estimate` / `web_usd_estimate`). They are counts and run times multiplied by unit prices, and are separate from Claude's amount (based on the AI Gateway usage). They are not included in the task budget ($10). Unit prices are `vars` of the gateway, and downstream overrides them with its own `vars` (unset or invalid values revert to the default; 0 is allowed).
 
-| 変数 | 既定値 | 内容 |
+| Variable | Default | Description |
 |---|---|---|
-| `SANDBOX_USD_PER_HOUR` | 0.1291 | Sandbox コンテナの 1 時間あたり。既定の大きさ `standard-2`（1 vCPU、6 GiB、12 GB）で CPU を 100% 稼働とみなした値。`SANDBOX_INSTANCE`（agent）を変えたら合わせる（`deploy:config` は自動） |
-| `WEB_USD_PER_1K_SEARCH` | 5.00 | `web_search` 1,000 回あたり。既定のプロバイダ（linkup）の値。`WEB_SEARCH_PROVIDER` を変えたら上書きする |
-| `WEB_USD_PER_1K_FETCH` | 0 | `web_fetch` 1,000 回あたり |
-| `WEB_USD_PER_1K_BROWSE` | 0.75 | `web_browse` 1,000 回あたり（1 回 30 秒を上限としたブラウザ時間） |
+| `SANDBOX_USD_PER_HOUR` | 0.1291 | Per hour of a Sandbox container. The value assumes 100% CPU utilization for the default size `standard-2` (1 vCPU, 6 GiB, 12 GB). When you change `SANDBOX_INSTANCE` (agent), match it (`deploy:config` does so automatically) |
+| `WEB_USD_PER_1K_SEARCH` | 5.00 | Per 1,000 `web_search` calls. The value for the default provider (linkup). Override it when you change `WEB_SEARCH_PROVIDER` |
+| `WEB_USD_PER_1K_FETCH` | 0 | Per 1,000 `web_fetch` calls |
+| `WEB_USD_PER_1K_BROWSE` | 0.75 | Per 1,000 `web_browse` calls (browser time with 30 seconds per call as the upper bound) |
 
-既定値の根拠（Cloudflare の公式料金表、取得日 2026-10-19）は `apps/gateway/wrangler.jsonc` のコメントと phase6.md にある。料金改定で変わるので、下流で見直す。Web の回数は**子が使った分だけ**（親が MCP から使う分はタスクに紐付かない）。
+The basis for the defaults (Cloudflare's official price list, retrieved 2026-10-19) is in the comments of `apps/gateway/wrangler.jsonc` and in phase6.md. They change when prices are revised, so review them downstream. The Web counts are **only what the child used** (what the parent uses from MCP is not tied to a task).
 
-#### web_browse の有効化
+#### Enabling web_browse
 
-`web_browse` は既定で無効（`WEB_BROWSE_ENABLED`）。有効にする前に、[docs/specs/acceptance.md](docs/specs/acceptance.md) の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを判断して記録する。実機のゲート（付録 A）は任意。
+`web_browse` is disabled by default (`WEB_BROWSE_ENABLED`). Before enabling it, read the residual risks in section 11 of [docs/specs/acceptance.md](docs/specs/acceptance.md) (Japanese), "web_browse (gate before enabling)", and decide and record whether you accept them. The gate on real systems (Appendix A) is optional.
 
-### GitHub App の設定
+### GitHub App settings
 
-GitHub の Settings > Developer settings > GitHub Apps で作る（OAuth App は使わない）。
+Create it under GitHub's Settings > Developer settings > GitHub Apps (do not use an OAuth App).
 
-- **Callback URL**: `<PUBLIC_BASE_URL>/callback`（ローカル開発用に `http://localhost:8787/callback` も追加できる）
-- **Request user authorization (OAuth) during installation**: 不要。**Webhook**: 無効でよい
-- **Expire user authorization tokens**: 有効にする（既定）。トークンは 8 時間で切れ、refresh token（約 6 か月）で自動更新される。有効期限を無効にした場合も動く
+- **Callback URL**: `<PUBLIC_BASE_URL>/callback` (you can also add `http://localhost:8787/callback` for local development)
+- **Request user authorization (OAuth) during installation**: not needed. **Webhook**: can be disabled
+- **Expire user authorization tokens**: enable (default). The token expires in 8 hours and is renewed automatically with the refresh token (about 6 months). It also works if you disable expiry
 - **Repository permissions**
   - Metadata: Read-only
   - Contents: Read and write
   - Pull requests: Read and write
 - **Organization permissions**
-  - Members: Read-only（team 所属の確認に使う）
-- App を対象の org / リポジトリに **Install** する。`task_start` は、利用者のトークンで見える Installation に対象リポジトリが含まれ、利用者に push 権限があるときだけ成功する（公開リポジトリでも App が未導入なら `forbidden`）
+  - Members: Read-only (used to check team membership)
+- **Install** the App on the target org / repositories. `task_start` succeeds only when the target repository is included in an Installation visible with the user's token and the user has push permission (even for a public repository, if the App is not installed, you get `forbidden`)
 
-### ローカル開発
+### Local development
 
 ```sh
-cp apps/gateway/.dev.vars.example apps/gateway/.dev.vars   # 値を埋める（.dev.vars は gitignore 済み）
+cp apps/gateway/.dev.vars.example apps/gateway/.dev.vars   # fill in the values (.dev.vars is gitignored)
 mise run dev
 ```
 
-`__Host-` 付きの Cookie（state の紐付け）は `Secure` なので、ブラウザは Chrome のように loopback の `http` で Secure Cookie を受け付けるものを使う。
+The `__Host-` cookie (binding of state) is `Secure`, so use a browser that accepts Secure cookies over loopback `http`, such as Chrome.
 
-## エラー
+## Errors
 
-ツールのエラーは `isError: true` で、本文は `{"code", "message", "retry_after_seconds"?}` の JSON。`code` は
-`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded`（月額の枠が足りず `task_start` を拒否。待っても空かない）/ `quota_exceeded`（web の1日の上限）/ `not_ready`（`task_result` の対象がまだ終端でない）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。`consult` では、モデルがリクエストの中身を拒否した（4xx）ときの `model_rejected`（待っても直らない。`retry_after_seconds` なし）も返る。`task_pr_ready` / `task_pr_merge` では、GitHub の拒否を表す `merge_blocked`（ブランチ保護など。メッセージに GitHub の理由）/ `head_moved`（検証後にブランチが動いた）/ `github_rejected` も返る。
-`reauth_required` は GitHub 資格を回復できないとき（MCP のトークンが有効でも）で、再ログインが必要。`internal` は想定外の失敗で、詳細は応答に含めない。
+A tool error has `isError: true`, and the body is JSON of the form `{"code", "message", "retry_after_seconds"?}`. `code` is one of
+`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded` (the monthly allowance is not enough and `task_start` is rejected; waiting does not free it) / `quota_exceeded` (the daily web limit) / `not_ready` (the target of `task_result` is not yet terminal) / `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`. `consult` also returns `model_rejected` when the model rejects the contents of the request (4xx; waiting does not fix it; no `retry_after_seconds`). `task_pr_ready` / `task_pr_merge` also return `merge_blocked` (branch protection and the like; the message contains GitHub's reason) / `head_moved` (the branch moved after verification) / `github_rejected`, which represent rejections by GitHub.
+`reauth_required` means the GitHub credentials cannot be recovered (even if the MCP token is valid), and a new login is needed. `internal` is an unexpected failure, and the details are not included in the response.
 
-## セキュリティ
+## Security
 
-脆弱性は公開の Issue に書かず、GitHub の private vulnerability reporting で報告する。詳細は [SECURITY.md](SECURITY.md)。
+Do not report vulnerabilities in a public Issue; use GitHub's private vulnerability reporting. See [SECURITY.md](SECURITY.md) for details.
 
-## コントリビューション
+## Contributing
 
-個人プロジェクトとして公開している。Issue と Pull Request は歓迎するが、返信や取り込みの時期は約束できない。大きな変更は、先に Issue で相談してほしい。
+This is published as a personal project. Issues and Pull Requests are welcome, but I cannot promise when I will reply or merge. For large changes, please discuss in an Issue first.
 
-## ライセンス
+## License
 
 [MIT](LICENSE)

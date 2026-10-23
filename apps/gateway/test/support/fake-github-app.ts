@@ -111,6 +111,8 @@ interface Fault {
   pattern: RegExp;
   status: number;
   remaining: number;
+  /** 先頭のこの回数だけは通す（0 なら最初から失敗させる） */
+  skip: number;
   headers: Record<string, string>;
   message: string;
   /** 指定すると { message } の代わりにこの本文を返す（status 200 と組み合わせて「空の一覧」などを再現する） */
@@ -371,6 +373,7 @@ export class FakeGitHubApp {
     pattern: string;
     status: number | null;
     count?: number;
+    skip?: number;
     headers?: Record<string, string>;
     message?: string;
     body?: unknown;
@@ -381,6 +384,7 @@ export class FakeGitHubApp {
       pattern: new RegExp(args.pattern),
       status: args.status,
       remaining: args.count ?? Number.POSITIVE_INFINITY,
+      skip: args.skip ?? 0,
       headers: args.headers ?? {},
       message: args.message ?? "injected fault",
       ...(args.body !== undefined ? { body: args.body } : {}),
@@ -503,6 +507,10 @@ export class FakeGitHubApp {
     const key = `${req.method} ${path}`;
     await this.beforeHandle?.(key);
     for (const f of this.faults) {
+      if (f.pattern.test(key) && f.skip > 0) {
+        f.skip -= 1;
+        continue;
+      }
       if (f.pattern.test(key) && f.remaining > 0) {
         f.remaining -= 1;
         return res(f.status, f.body !== undefined ? f.body : { message: f.message }, f.headers);
@@ -903,7 +911,7 @@ export class FakeGitHubApp {
       const p = repo.pulls.find((x) => x.number === Number(issueComment[1]));
       if (!p) return fail(404, "Not Found");
       if (!can("pull_requests")) return fail(403, "Resource not accessible by integration");
-      (p.comments ??= []).push(String(b.body ?? ""));
+      p.comments = [...(p.comments ?? []), String(b.body ?? "")];
       return res(201, { id: 1, body: b.body });
     }
 

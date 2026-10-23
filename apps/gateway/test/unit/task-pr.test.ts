@@ -6,6 +6,7 @@ import {
   audits,
   completedResult,
   createTask,
+  pushChildCommit,
   REPO,
   runToCompleted,
   type TaskStub,
@@ -169,7 +170,7 @@ describe("prContext: 条件の判定", () => {
   it("merge: head が検証済みの commit と一致しない（head_matches_verified が false）なら conflict", async () => {
     const t = await createTask({ merge_policy: "agent_merge" });
     await t.stub.advance();
-    const head = app().branch(REPO, t.branch) as string;
+    const head = await pushChildCommit(t.branch);
     // 検証した commit と、push された commit が違う
     await t.agent.setProgram({ result: completedResult("f".repeat(40), { pushedSha: head }) });
     await t.agent.setPhase("completed");
@@ -187,7 +188,7 @@ describe("prContext: 条件の判定", () => {
   it("merge: task_result の warnings が 1 件でもあれば conflict（warnings_present）。ready は通る", async () => {
     const t = await createTask({ merge_policy: "agent_merge" });
     await t.stub.advance();
-    const head = app().branch(REPO, t.branch) as string;
+    const head = await pushChildCommit(t.branch);
     await t.agent.setProgram({
       result: completedResult(head, { warnings: ["test config changed: vitest.config.ts"] }),
     });

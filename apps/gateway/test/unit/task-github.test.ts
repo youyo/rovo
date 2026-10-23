@@ -651,7 +651,9 @@ describe("終端: PR の更新とトークンの失効", () => {
   ) {
     const t = await createTask();
     await t.stub.advance();
-    const head = app().branch(REPO, t.branch) as string;
+    const initial = app().branch(REPO, t.branch) as string;
+    const head = await app().addCommit(REPO, initial, "child commit");
+    app().setBranch(REPO, t.branch, head);
     await t.agent.setProgram({
       // 検証したコミットと違うコミットが push された（pushedSha は PR の head と同じ）
       result: completedResult(commitMatches ? head : "f".repeat(40), { pushedSha: head, ...over }),
@@ -1136,7 +1138,7 @@ describe("変更なしで終端: 空の Draft PR を閉じる", () => {
   });
 
   it("閉じる API が失敗しても COMPLETED のまま。warnings に出て、ブランチは消さない", async () => {
-    app().setFault({ pattern: "^PATCH /repos/acme/widgets/pulls/\\d+$", status: 500 });
+    app().setFault({ pattern: "^PATCH /repos/acme/widgets/pulls/\\d+$", status: 500, skip: 1 });
     const t = await finishUnchanged();
     expect(pullOf(t.branch)?.state).toBe("open");
     expect(reqs(DELETE_REF)).toHaveLength(0);

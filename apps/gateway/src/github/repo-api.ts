@@ -277,4 +277,22 @@ export class GitHubRepoApi {
   async updatePullBody(number: number, body: string): Promise<void> {
     await this.call("update pull", "PATCH", this.repoPath(`/pulls/${number}`), { body });
   }
+
+  /** PR を closed にする（マージはしない）。 */
+  async closePull(number: number): Promise<void> {
+    await this.call("close pull", "PATCH", this.repoPath(`/pulls/${number}`), { state: "closed" });
+  }
+
+  /** PR（issue）にコメントを 1 件付ける。 */
+  async commentPull(number: number, body: string): Promise<void> {
+    await this.call("comment pull", "POST", this.repoPath(`/issues/${number}/comments`), { body });
+  }
+
+  /** ブランチの先頭が expectedSha のときだけ消す。消したら true。 */
+  async deleteBranch(branch: string, expectedSha: string): Promise<boolean> {
+    const sha = await this.getBranchSha(branch);
+    if (sha !== expectedSha) return false;
+    await this.call("delete ref", "DELETE", this.repoPath(`/git/refs/heads/${encPath(branch)}`));
+    return true;
+  }
 }

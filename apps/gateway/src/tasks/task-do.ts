@@ -264,6 +264,8 @@ export type ResultView = {
     draft: boolean | null;
     /** task_pr_merge でマージ済みか */
     merged: boolean;
+    /** 変更なしで終わったので rovo が Draft PR を閉じた（閉じたときだけ true が付く） */
+    closed_empty?: true;
     /** GitHub から読んだ PR の head。まだ読めていなければ null */
     head_sha: string | null;
     /** head が検証済みの SHA と一致するか。比較できない（未読・検証済みの SHA なし）なら null */
@@ -538,6 +540,8 @@ type GithubRow = {
   revoke_attempts: number;
   /** task_pr_merge でマージ済み */
   pr_merged: number;
+  /** 変更なしで終わったので、空の Draft PR を rovo が閉じた */
+  closed_empty: number;
   /** D14: TaskSpec.deps の JSON。"null" は lockfile なし（または読めなかった）。NULL は未取得（spec に載せない） */
   deps: string | null;
 };
@@ -778,6 +782,12 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql,
       "github_link",
       "pr_merged",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "closed_empty",
       "INTEGER NOT NULL DEFAULT 0",
     );
     // D14: 依存関係のキャッシュの指定（TaskSpec.deps の JSON。"null" は lockfile なし・読めなかった。NULL は未取得で、spec に載せない）
@@ -1855,6 +1865,13 @@ export class TaskDO extends DurableObject<Env> {
     if (!gl || gl.pr_number === null || gl.pr_url === null) {
       return deny("conflict", "no_pr", "this task has no pull request");
     }
+    if (gl.closed_empty === 1) {
+      return deny(
+        "conflict",
+        "pr_closed_empty",
+        "the task finished without changes and rovo closed its empty draft pull request; read the summary in task_result",
+      );
+    }
     if (op === "merge") {
       if (policy !== "agent_merge") {
         return deny(
@@ -1971,6 +1988,7 @@ export class TaskDO extends DurableObject<Env> {
               url: gl.pr_url,
               draft: gl.pr_draft === null ? null : gl.pr_draft === 1,
               merged: gl.pr_merged === 1,
+              ...(gl.closed_empty === 1 ? { closed_empty: true as const } : {}),
               head_sha: gl.head_sha,
               head_matches_verified: gl.head_matches === null ? null : gl.head_matches === 1,
             }
@@ -3120,6 +3138,48 @@ export class TaskDO extends DurableObject<Env> {
       matches === null ? null : matches ? 1 : 0,
       JSON.stringify(own),
     );
+    this.notifyWaiters();
+    await this.closeEmptyPull(row, gl, status, api, pull, headSha);
+  }
+
+  /**
+   * 変更なし（PR の head が initial_sha のまま）で終端になった Draft PR を、コメント → close → ブランチ削除の順で片付ける。
+   * 失敗してもタスクの終端は変えず、warnings に固定のコードを足すだけ（再試行しない）。
+   */
+  private async closeEmptyPull(
+    row: TaskRow,
+    gl: GithubRow,
+    status: TaskStatus,
+    api: GitHubRepoApi,
+    pull: { number: number; draft: boolean; state: string; headSha: string },
+    headSha: string | null,
+  ): Promise<void> {
+    if (gl.closed_empty === 1 || gl.pr_merged === 1) return;
+    if (headSha === null || gl.initial_sha === null || headSha !== gl.initial_sha) return;
+    if (!pull.draft || pull.state !== "open") return;
+    if (status === "FAILED" && gl.setup_done === 0) return;
+    let code: string | undefined;
+    try {
+      code = "comment_failed";
+      await api.commentPull(
+        pull.number,
+        `このタスクは変更を作らずに終わったので、rovo が Draft PR を閉じました（task ${row.id}）`,
+      );
+      code = "close_failed";
+      await api.closePull(pull.number);
+      this.ctx.storage.sql.exec("UPDATE github_link SET closed_empty = 1");
+      code = "delete_branch_failed";
+      await api.deleteBranch(gl.branch, gl.initial_sha);
+      code = undefined;
+    } catch (e) {
+      console.error("task_do_close_empty_error", e instanceof GitHubApiError ? e.status : typeof e);
+    }
+    if (code !== undefined) {
+      const cur = this.getGithub() as GithubRow;
+      const own = JSON.parse(cur.warnings) as string[];
+      own.push(`empty draft PR could not be closed: ${code}`);
+      this.ctx.storage.sql.exec("UPDATE github_link SET warnings = ?", JSON.stringify(own));
+    }
     this.notifyWaiters();
   }
 

@@ -18,7 +18,7 @@ export type NextStepsInput = {
   verification: { verified: boolean };
   pr: Pick<
     NonNullable<ResultView["pr"]>,
-    "number" | "url" | "draft" | "merged" | "head_sha" | "head_matches_verified"
+    "number" | "url" | "draft" | "merged" | "head_sha" | "head_matches_verified" | "closed_empty"
   > | null;
 };
 
@@ -47,6 +47,9 @@ function setupFailureAdvice(reason: string | undefined): string {
 
 export function nextSteps(input: NextStepsInput): string {
   const { status, merge_policy: policy, pr } = input;
+  if (pr?.closed_empty === true && !(status === "FAILED" && input.failure_phase === "setup")) {
+    return "このタスクは変更を作らずに終わったので、rovo が Draft PR を閉じた（作業ブランチも削除済み）。task_pr_ready / task_pr_merge は使えない。結果は task_result の summary を見る。";
+  }
   if (status === "FAILED" && input.reason === "base_sha_not_found") {
     return setupFailureAdvice(input.reason);
   }

@@ -18,6 +18,7 @@ rovo のタスクを、Claude Code の会話の横のペインに出す mod。**
 | コマンド | 内容 |
 |---|---|
 | `/rovo:create-task <依頼>` | 依頼を rovo のタスクにする（`task_start`）。リポジトリ・ブランチ・SHA は作業ディレクトリの git から求める |
+| `/rovo:consult <相談>` | 別のモデルに意見を聞く（`consult`）。Claude が会話の文脈と質問をまとめて 1 回相談し、答えを確かめてから伝える |
 | `/rovo:open-console` | ペインを開く |
 | `/rovo:close-console` | ペインを閉じる |
 

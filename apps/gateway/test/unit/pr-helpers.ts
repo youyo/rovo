@@ -55,11 +55,19 @@ export function completedResult(sha: string, over: Record<string, unknown> = {})
   } as ResultDto;
 }
 
+/** 子の commit が 1 つ push された状態にする（head ≠ initial_sha。変更なしだと空の Draft PR は閉じられる）。新しい head を返す。 */
+export async function pushChildCommit(branch: string): Promise<string> {
+  const initial = app().branch(REPO, branch) as string;
+  const head = await app().addCommit(REPO, initial, "child commit");
+  app().setBranch(REPO, branch, head);
+  return head;
+}
+
 /** COMPLETED まで進める（PR の head = pushedSha = 検証済みの commit）。 */
 export async function runToCompleted(overrides: Record<string, unknown> = {}, owner = 801) {
   const t = await createTask(overrides, owner);
   await t.stub.advance();
-  const head = app().branch(REPO, t.branch) as string;
+  const head = await pushChildCommit(t.branch);
   await t.agent.setProgram({ result: completedResult(head) });
   await t.agent.setPhase("completed");
   await t.stub.advance();

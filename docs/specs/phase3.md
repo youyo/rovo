@@ -114,7 +114,7 @@ TaskDO の CREATING で、AgentDO.start の前に行う。各ステップは冪�
   - 本文は 65,536 文字を上限とする。
   - モデルの要約、検証の出力、警告は信用しないデータなので、コードフェンスで囲み、長さを切る。
   - 費用は既定では本文に載せない（公開リポジトリでは誰でも見られるため）。env `PR_SHOW_COST=true` のときだけ載せる。
-- PR は Draft のままにし、Ready for review にもしない。キャンセルされたタスクの PR は、閉じずに残す（design 4.7）。
+- PR は Draft のままにし、Ready for review にもしない。キャンセルされたタスクの PR は、閉じずに残す（design 4.7）。ただし、どの終端でも子の commit が 1 つも無い（作業ブランチの先頭が initial_sha のまま）ときは、空の Draft PR を閉じて作業ブランチを消す（2026-10-24 追加。`pr.closed_empty`）。
 - 更新は冪等にし、失敗したら alarm で再試行する。
 
 ## MCP の変更

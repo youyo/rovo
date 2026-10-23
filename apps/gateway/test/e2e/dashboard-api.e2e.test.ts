@@ -407,7 +407,9 @@ describe("ダッシュボードの PR の状態（GitHub から取る）", () =>
       const branch = `agent/task-${taskId}`;
       const sha = await admin.app<string | null>("branch", "acme/widgets", branch);
       if (!sha) throw new Error("作業ブランチがありません");
-      head = sha;
+      // 変更の無いまま終わると空の Draft PR が閉じられるので、子の commit を積んでから終端にする
+      head = await admin.app<string>("addCommit", "acme/widgets", sha, "child commit");
+      await admin.app("setBranch", "acme/widgets", branch, head);
       await finishAgent(taskId, "completed", completedResult(head));
       await waitForResult(client, taskId);
     } finally {

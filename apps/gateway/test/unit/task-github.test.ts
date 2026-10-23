@@ -651,7 +651,9 @@ describe("終端: PR の更新とトークンの失効", () => {
   ) {
     const t = await createTask();
     await t.stub.advance();
-    const head = app().branch(REPO, t.branch) as string;
+    const initial = app().branch(REPO, t.branch) as string;
+    const head = await app().addCommit(REPO, initial, "child commit");
+    app().setBranch(REPO, t.branch, head);
     await t.agent.setProgram({
       // 検証したコミットと違うコミットが push された（pushedSha は PR の head と同じ）
       result: completedResult(commitMatches ? head : "f".repeat(40), { pushedSha: head, ...over }),
@@ -756,9 +758,11 @@ describe("終端: PR の更新とトークンの失効", () => {
     expect((pullOf(t.branch)?.body ?? "").length).toBeLessThanOrEqual(65_536);
   });
 
-  it("キャンセルされたタスクの PR は閉じずに残し、本文だけ更新する", async () => {
+  it("キャンセルされたタスクの PR は、子の commit があれば閉じずに残し、本文だけ更新する", async () => {
     const { stub, branch } = await createTask();
     await stub.advance();
+    const initial = app().branch(REPO, branch) as string;
+    app().setBranch(REPO, branch, await app().addCommit(REPO, initial, "child"));
     await stub.cancel(OWNER);
     await stub.advance();
     const pr = pullOf(branch);
@@ -1076,5 +1080,178 @@ describe("終端: PR の更新とトークンの失効", () => {
         .tokenList()
         .find((t) => t.token === tokenOfA)?.revoked,
     ).toBe(false);
+  });
+});
+
+describe("変更なしで終端: 空の Draft PR を閉じる", () => {
+  const COMMENT_RE = /^POST \/repos\/acme\/widgets\/issues\/\d+\/comments$/;
+  const reqs = (re: RegExp) =>
+    app()
+      .requests()
+      .filter((r) => re.test(`${r.method} ${r.path}`));
+  const CLOSE = /^PATCH \/repos\/acme\/widgets\/pulls\/\d+$/;
+  const DELETE_REF = /^DELETE \/repos\/acme\/widgets\/git\/refs\//;
+  const closeCalls = () => reqs(CLOSE).filter((r) => (r.body as { state?: string }).state);
+
+  async function finishUnchanged(over: Record<string, unknown> = {}, childCommit = false) {
+    const t = await createTask();
+    await t.stub.advance();
+    const initial = app().branch(REPO, t.branch) as string;
+    const head = childCommit ? await app().addCommit(REPO, initial, "child") : initial;
+    if (childCommit) app().setBranch(REPO, t.branch, head);
+    await t.agent.setProgram({ result: completedResult(head, over) });
+    await t.agent.setPhase("completed");
+    await t.stub.advance();
+    return { ...t, initial, head };
+  }
+
+  it("head が initial_sha のまま COMPLETED: コメント・close・ブランチ削除が 1 回ずつで、pr.closed_empty が true", async () => {
+    const t = await finishUnchanged();
+    const pr = pullOf(t.branch);
+    expect(pr?.state).toBe("closed");
+    expect(pr?.comments).toHaveLength(1);
+    expect(pr?.comments?.[0]).toContain(t.id);
+    expect(closeCalls()).toHaveLength(1);
+    expect(reqs(COMMENT_RE)).toHaveLength(1);
+    expect(reqs(DELETE_REF)).toHaveLength(1);
+    expect(app().branch(REPO, t.branch)).toBeNull();
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.status).toBe("COMPLETED");
+    expect(r.result.pr).toMatchObject({ closed_empty: true });
+  });
+
+  it("子の commit がある（head ≠ initial_sha）と何もしない", async () => {
+    const t = await finishUnchanged({}, true);
+    expect(pullOf(t.branch)?.state).toBe("open");
+    expect(closeCalls()).toHaveLength(0);
+    expect(reqs(COMMENT_RE)).toHaveLength(0);
+    expect(reqs(DELETE_REF)).toHaveLength(0);
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.pr?.closed_empty).toBeUndefined();
+  });
+
+  // 終端の種類ごとに、子の commit が無い（pushedSha なし）/ ある場合を作る
+  async function finishWith(
+    phase: "completed" | "failed" | "budget_exceeded" | "cancelled",
+    childCommit: boolean,
+    over: Record<string, unknown> = {},
+  ) {
+    const t = await createTask();
+    await t.stub.advance();
+    const initial = app().branch(REPO, t.branch) as string;
+    let head = initial;
+    if (childCommit) {
+      head = await app().addCommit(REPO, initial, "child");
+      app().setBranch(REPO, t.branch, head);
+    }
+    if (phase === "cancelled") {
+      await t.stub.cancel(OWNER);
+    } else {
+      const base = completedResult(head, {
+        pushedSha: childCommit ? head : undefined,
+        ...(phase === "completed" ? {} : { reason: phase }),
+        ...over,
+      });
+      const result =
+        phase === "completed"
+          ? base
+          : ({
+              ...base,
+              status: phase,
+              verification: { commands: [], results: [], verified: false, attempts: 0 },
+            } as ResultDto);
+      await t.agent.setProgram({ result });
+      await t.agent.setPhase(phase);
+    }
+    await t.stub.advance();
+    return { ...t, initial, head };
+  }
+
+  for (const phase of ["failed", "budget_exceeded", "cancelled"] as const) {
+    it(`${phase} で子の commit が無い（pushedSha なし）と閉じる`, async () => {
+      const t = await finishWith(phase, false);
+      expect(pullOf(t.branch)?.state).toBe("closed");
+      expect(closeCalls()).toHaveLength(1);
+      expect(reqs(COMMENT_RE)).toHaveLength(1);
+      expect(reqs(DELETE_REF)).toHaveLength(1);
+      expect(app().branch(REPO, t.branch)).toBeNull();
+      const r = await t.stub.result(OWNER);
+      if (!r.ok) throw new Error("not ready");
+      expect(r.result.pr).toMatchObject({ closed_empty: true, head_sha: null });
+    });
+
+    it(`${phase} で子の commit があれば閉じない`, async () => {
+      const t = await finishWith(phase, true);
+      expect(pullOf(t.branch)?.state).toBe("open");
+      expect(closeCalls()).toHaveLength(0);
+      expect(reqs(COMMENT_RE)).toHaveLength(0);
+      expect(reqs(DELETE_REF)).toHaveLength(0);
+    });
+  }
+
+  it("Sandbox を起動しない COMPLETED（pushedSha なし）は閉じる", async () => {
+    const t = await finishWith("completed", false);
+    expect(pullOf(t.branch)?.state).toBe("closed");
+    expect(closeCalls()).toHaveLength(1);
+    expect(reqs(DELETE_REF)).toHaveLength(1);
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.pr).toMatchObject({ closed_empty: true });
+  });
+
+  it("pushedSha が無くても、利用者がブランチに手で push していた（head ≠ initial）なら閉じない", async () => {
+    const t = await createTask();
+    await t.stub.advance();
+    const initial = app().branch(REPO, t.branch) as string;
+    const manual = await app().addCommit(REPO, initial, "by hand");
+    app().setBranch(REPO, t.branch, manual);
+    await t.agent.setProgram({ result: completedResult(initial, { pushedSha: undefined }) });
+    await t.agent.setPhase("completed");
+    await t.stub.advance();
+    expect(pullOf(t.branch)?.state).toBe("open");
+    expect(closeCalls()).toHaveLength(0);
+    expect(reqs(DELETE_REF)).toHaveLength(0);
+  });
+
+  it("ブランチの先頭を読めない（get ref が失敗）と何もしない", async () => {
+    app().setFault({ pattern: "^GET /repos/acme/widgets/git/ref/heads/", status: 500, count: 20 });
+    const t = await finishWith("failed", false);
+    expect(pullOf(t.branch)?.state).toBe("open");
+    expect(closeCalls()).toHaveLength(0);
+    expect(reqs(COMMENT_RE)).toHaveLength(0);
+    expect(reqs(DELETE_REF)).toHaveLength(0);
+  });
+
+  it("close が失敗したら、閉じました、というコメントは残さない", async () => {
+    app().setFault({ pattern: "^PATCH /repos/acme/widgets/pulls/\\d+$", status: 500, skip: 1 });
+    const t = await finishUnchanged();
+    expect(pullOf(t.branch)?.state).toBe("open");
+    expect(pullOf(t.branch)?.comments ?? []).toHaveLength(0);
+  });
+
+  it("閉じる API が失敗しても COMPLETED のまま。warnings に出て、ブランチは消さない", async () => {
+    app().setFault({ pattern: "^PATCH /repos/acme/widgets/pulls/\\d+$", status: 500, skip: 1 });
+    const t = await finishUnchanged();
+    expect(pullOf(t.branch)?.state).toBe("open");
+    expect(reqs(DELETE_REF)).toHaveLength(0);
+    const r = await t.stub.result(OWNER);
+    if (!r.ok) throw new Error("not ready");
+    expect(r.result.status).toBe("COMPLETED");
+    expect(r.result.warnings).toContain("empty draft PR could not be closed: close_failed");
+    expect(r.result.pr?.closed_empty).toBeUndefined();
+  });
+
+  it("再試行（もう一度 advance / alarm）しても二重に閉じない", async () => {
+    const t = await finishUnchanged();
+    await t.stub.advance();
+    await runInDurableObject(t.stub, (_i, s) => {
+      s.storage.sql.exec("UPDATE github_link SET body_done = 0, finalize_done = 0");
+    });
+    await t.stub.advance();
+    expect(closeCalls()).toHaveLength(1);
+    expect(reqs(COMMENT_RE)).toHaveLength(1);
+    expect(reqs(DELETE_REF)).toHaveLength(1);
   });
 });

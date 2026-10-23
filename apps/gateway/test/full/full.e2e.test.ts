@@ -694,7 +694,7 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     expect(usageB.cache_build_ms).toBe(0);
   });
 
-  it("c. 実行中に task_cancel → CANCELLED。PR は閉じずに残って本文が更新され、トークンは失効する", async () => {
+  it("c. 実行中に task_cancel → CANCELLED。子の commit が無いので本文が更新されたあと空の Draft PR は閉じられ、トークンは失効する", async () => {
     const client = await newClient("carol");
     const tokensBefore = tokensNow();
     const { taskId } = await startTask(client, "c-cancel", [
@@ -715,9 +715,10 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     // 停止後でも usage が取れる（最終 usage を含めて確定済み）
     expect((r.usage as { cost_usd: number }).cost_usd).toBeGreaterThanOrEqual(0);
 
-    // PR は閉じない（design 4.7）。Draft のまま、本文だけ終端の内容になる
+    // 子の commit が無いまま終わったので、本文が終端の内容になったあと空の Draft PR は閉じられる
     const pr = pullOf(taskId);
-    expect(pr).toMatchObject({ state: "open", draft: true });
+    expect(pr).toMatchObject({ state: "closed", draft: true });
+    expect(r.pr).toMatchObject({ closed_empty: true });
     expect(pr?.body).toContain("Status: **CANCELLED**");
     expect(pr?.body).toContain("The task ended as CANCELLED.");
     await waitFor("tokens revoked", () => allRevoked(tokensSince(tokensBefore)));

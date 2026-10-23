@@ -1147,6 +1147,27 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - 出力は `packages/audit`（`@rovo/audit`）の `audit()` に一本化する。gateway・agent・web が workspace 依存で使い、閉じたイベント名の一覧と許可したフィールドだけを通す（呼び出し側は allowlist を渡せない）。web の block / unknown は `web_blocked` として出す。
 - **観測性（11.1）** の Sandbox 実行時間と復旧回数は、SandboxDO が永続化するカウンタから取る。Sandbox と Web の金額は単価をかけた**推定値**で、単価（`SANDBOX_USD_PER_HOUR`、`WEB_USD_PER_1K_SEARCH` / `FETCH` / `BROWSE`）は gateway の `vars` の既定値を下流が上書きできる（16）。要約（`summary.json` と監査ログの `task_summary`）の金額は `sandbox_usd_estimate` / `web_usd_estimate` で、タスクの予算には含めない。
 
+#### push 前の秘密の検査（2026-10-24）
+
+実装: `apps/agent/src/secret-scan.ts`（`scanUnpushedForSecrets`）と `packages/audit/src/redact.ts`（`findBlockingSecrets`）。
+
+- rovo が作業ブランチに push する 3 つの経路（`git_commit`、予算切れの WIP、完了時の `syncBranch`）の直前に、送る commit を 1 つずつ検査する。
+- 送る commit は `HEAD --not` の集合（最後に push した SHA と、リモートに実在する SHA）から辿れるもの。リモートに実在する SHA は、リポジトリの URL への `ls-remote --heads --tags` で得た値のうち、ローカルに commit として存在するもの。
+- 止めるのは確度の高いパターンだけ（秘密鍵ブロック、GitHub / Anthropic / OpenAI / AWS / Slack / Stripe / Google のトークン、JWT、URL に埋め込まれた資格）。ヘッダ・クエリ・CLI フラグ・環境変数の推測系は止めず、マスクだけ行う。
+- 鍵らしい拡張子（`.pem`・`.key`・`.p12` など）のバイナリは、中身が検査できないので止める。
+- 検査できないときも止める: 差分が 4MiB を超えたとき、git が失敗・時間切れになったとき。
+- 止めたときは push せず、既存の `push_failed` を固定の文（`blocked: possible secret (<category>) in <path>:<line> (commit <sha7>)` など）で出す。一致した値は出さない。パスも `maskSecrets` を通す。
+- 子が git の状態を書き換えても判定が変わらないように、次の処理をする。
+  - `--text` を付けて、`-diff` 属性や NUL があっても中身を行として読む。
+  - `--no-replace-objects` を付けて、`git replace` で秘密の commit を差し替えさせない。
+  - 出力の形に効く設定（`core.quotepath` など）を `-c` で固定する。
+  - `origin` を使わず、リポジトリの URL を直接指定して `ls-remote` する。`-C /` でリポジトリの外から呼ぶ。
+  - `baseSha` は、`ls-remote` で得た SHA の祖先のときだけ除外に使う。
+- 既知の課題（今回の対象外）:
+  - 子が bash で自分で `git push` する経路は、この検査を通らない。ただし外向きの gateway が認証を足すのはタスクのリポジトリだけなので、ほかのリポジトリへは送れない。
+  - 子は Sandbox の `~/.gitconfig`・システムの設定、または `/` に作った `.git` で、`ls-remote` の行き先や設定を変えられる。
+  - 本物の git を使うテストは `apps/agent/vitest.node.config.ts`（`mise run test:unit:agent-git`）で流れる。秘密の検査を変えるときは、rovo の検証コマンドに `pnpm exec vitest run --config vitest.node.config.ts`（`apps/agent` で実行）も入れる。
+
 ### 15.8 Phase 7: End-to-End Test と公開の準備（2026-10-19 決定）
 
 詳細は `phase7.md`。

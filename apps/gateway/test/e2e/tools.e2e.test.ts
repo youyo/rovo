@@ -417,7 +417,8 @@ describe("Draft PR（偽 GitHub の App API 経由）", () => {
       }
       expect((await tokens()).every((x) => x.revoked)).toBe(true);
       const after = (await pullsOf()).find((p) => p.head === branch);
-      expect(after).toMatchObject({ draft: true, state: "open" });
+      // 子の commit が無いままキャンセルされたので、本文を更新したあと空の Draft PR は閉じられる
+      expect(after).toMatchObject({ draft: true, state: "closed" });
       expect(after?.body).toContain("CANCELLED");
 
       const result = bodyOf(
@@ -429,6 +430,7 @@ describe("Draft PR（偽 GitHub の App API 経由）", () => {
         // キャンセルでは push しない（pushedSha なし）ので、PR の head は比べず記録もしない
         head_sha: null,
         head_matches_verified: null,
+        closed_empty: true,
       });
     } finally {
       await client.close();

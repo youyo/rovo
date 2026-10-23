@@ -1,6 +1,7 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { fakeAgent, newTaskId, newUserId, sampleInput, taskStub, userStub } from "./helpers";
+import { pushChildCommit } from "./pr-helpers";
 
 const OWNER = 601;
 
@@ -714,8 +715,9 @@ describe("TaskDO.result", () => {
   });
 
   it("終端なら AgentDO の結果を整形して返す", async () => {
-    const { stub, agent } = await createTask();
+    const { id, stub, agent } = await createTask();
     await stub.advance();
+    await pushChildCommit(`agent/task-${id}`);
     await agent.setProgram({
       result: {
         status: "completed",

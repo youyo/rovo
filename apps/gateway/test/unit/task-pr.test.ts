@@ -6,6 +6,7 @@ import {
   audits,
   completedResult,
   createTask,
+  pushChildCommit,
   REPO,
   runToCompleted,
   type TaskStub,
@@ -169,7 +170,7 @@ describe("prContext: 条件の判定", () => {
   it("merge: head が検証済みの commit と一致しない（head_matches_verified が false）なら conflict", async () => {
     const t = await createTask({ merge_policy: "agent_merge" });
     await t.stub.advance();
-    const head = app().branch(REPO, t.branch) as string;
+    const head = await pushChildCommit(t.branch);
     // 検証した commit と、push された commit が違う
     await t.agent.setProgram({ result: completedResult("f".repeat(40), { pushedSha: head }) });
     await t.agent.setPhase("completed");
@@ -187,7 +188,7 @@ describe("prContext: 条件の判定", () => {
   it("merge: task_result の warnings が 1 件でもあれば conflict（warnings_present）。ready は通る", async () => {
     const t = await createTask({ merge_policy: "agent_merge" });
     await t.stub.advance();
-    const head = app().branch(REPO, t.branch) as string;
+    const head = await pushChildCommit(t.branch);
     await t.agent.setProgram({
       result: completedResult(head, { warnings: ["test config changed: vitest.config.ts"] }),
     });
@@ -288,5 +289,18 @@ describe("recordPrAction: 記録と監査", () => {
     await stub.recordPrAction(OWNER + 1, { kind: "ready", outcome: "done" });
     expect((await gl(stub)).pr_draft).toBe(1);
     expect((await audits(stub)).some((a) => a.event === "pr_ready")).toBe(false);
+  });
+});
+
+describe("closed_empty の PR", () => {
+  it("task_pr_ready / task_pr_merge は conflict（pr_denied: pr_closed_empty を監査）", async () => {
+    const { stub } = await runToCompleted({ merge_policy: "agent_merge" });
+    await runInDurableObject(stub, (_i, s) => {
+      s.storage.sql.exec("UPDATE github_link SET closed_empty = 1");
+    });
+    expect(await stub.prContext(OWNER, "ready")).toMatchObject({ ok: false, code: "conflict" });
+    expect(await stub.prContext(OWNER, "merge")).toMatchObject({ ok: false, code: "conflict" });
+    const denied = (await audits(stub)).filter((a) => a.event === "pr_denied");
+    expect(denied.map((a) => a.reason)).toEqual(["pr_closed_empty", "pr_closed_empty"]);
   });
 });

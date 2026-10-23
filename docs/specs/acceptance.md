@@ -176,7 +176,7 @@ Phase 1 のコードが揃った後に、利用者と一緒に実施して結果
 - [ ] 完了時、PR の head が `task_result` の `verification.commit_sha` と一致し、`pr.head_matches_verified` が `true`
 - [ ] PR 本文の rovo の管理範囲（目印の間）が、状態・検証結果・未解決事項に更新される。目印の外側に手で書いた文章は残る
 - [ ] PR は Draft のまま。rovo 自身はマージも Ready for review もしない（呼び出し元の AI が行う Ready 化とマージは 21 節）
-- [ ] 実行中に `task_cancel` すると、PR は閉じずに残り、本文が `CANCELLED` で更新される
+- [ ] 実行中に `task_cancel` すると、本文が `CANCELLED` で更新される。子の commit があれば PR は閉じずに残り、子の commit が無ければ（作業ブランチの先頭が initial_sha のまま）rovo が空の Draft PR を閉じて作業ブランチを消す（`pr.closed_empty`）
 - [ ] 終端の後、Installation Token が失効している。トークンの値はログにも出ないので、通常は確認できない。確認が必要なら、検証用に一時的にログへ出す改造をして、終端の後にそのトークンで GitHub API を呼び 401 になることを見る（省略可）
 - [ ] 完了の後に作業ブランチへ別のコミットを手で push してから終端の処理を行わせると、`head_moved_after_verification` の警告が出る（再現が難しければ省略可）
 - [ ] 1 時間を超えるタスクで、トークンの更新（期限の 15 分前に再発行）後も push が続く

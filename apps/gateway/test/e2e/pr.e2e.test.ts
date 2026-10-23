@@ -22,7 +22,9 @@ beforeEach(async () => {
   await admin.reset();
 });
 
-async function setup(mergePolicy?: "agent_merge" | "human_review") {
+// childCommit: 子が commit を push した状態にする（既定 true）。変更の無いまま終わると rovo が空の Draft PR を閉じるので、
+// Ready・マージの流れを確かめるテストは、作業ブランチに子の commit を積んでから終端にする。
+async function setup(mergePolicy?: "agent_merge" | "human_review", childCommit = true) {
   const user = newUser("pr");
   await addMember(user);
   await installApp();
@@ -45,9 +47,14 @@ async function setup(mergePolicy?: "agent_merge" | "human_review") {
     await new Promise((r) => setTimeout(r, 200));
   }
   const branch = `agent/task-${taskId}`;
-  const head = await admin.app<string | null>("branch", "acme/widgets", branch);
-  if (!head) throw new Error("作業ブランチがありません");
-  return { user, client, taskId, branch, head };
+  const initial = await admin.app<string | null>("branch", "acme/widgets", branch);
+  if (!initial) throw new Error("作業ブランチがありません");
+  let head = initial;
+  if (childCommit) {
+    head = await admin.app<string>("addCommit", "acme/widgets", initial, "child commit");
+    await admin.app("setBranch", "acme/widgets", branch, head);
+  }
+  return { user, client, taskId, branch, head, initial };
 }
 
 async function complete(
@@ -270,6 +277,49 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
         expect((await pullOf(t.branch))?.merged).toBe(false);
       } finally {
         await otherClient.close();
+        await t.client.close();
+      }
+    },
+    LONG,
+  );
+
+  it(
+    "変更の無いまま COMPLETED: 空の Draft PR が閉じられ、作業ブランチが消え、task_result の pr.closed_empty が true。task_pr_ready / task_pr_merge は conflict",
+    async () => {
+      const t = await setup("agent_merge", false);
+      try {
+        // Sandbox を起動せず終わる COMPLETED（子の commit も pushedSha も無い）
+        await finishAgent(t.taskId, "completed", {
+          ...completedResult(t.head),
+          pushedSha: undefined,
+        });
+        const deadline = Date.now() + 90_000;
+        let result: Record<string, unknown> = {};
+        for (;;) {
+          const r = await t.client.callTool({
+            name: "task_result",
+            arguments: { task_id: t.taskId },
+          });
+          if (!r.isError) {
+            result = bodyOf(r);
+            const pr = result.pr as { closed_empty?: boolean } | null;
+            if (pr?.closed_empty === true) break;
+          }
+          if (Date.now() > deadline)
+            throw new Error(`closed_empty になりませんでした: ${JSON.stringify(result)}`);
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        expect(result).toMatchObject({ status: "COMPLETED", pr: { closed_empty: true } });
+        expect((await pullOf(t.branch))?.state).toBe("closed");
+        expect(await admin.app<string | null>("branch", "acme/widgets", t.branch)).toBeNull();
+        for (const name of ["task_pr_ready", "task_pr_merge"]) {
+          const r = await t.client.callTool({ name, arguments: { task_id: t.taskId } });
+          expect(r.isError).toBe(true);
+          expect(bodyOf(r).code).toBe("conflict");
+        }
+        const denied = (await auditRecords(t.taskId)).filter((x) => x.event === "pr_denied");
+        expect(denied.map((x) => x.reason)).toEqual(["pr_closed_empty", "pr_closed_empty"]);
+      } finally {
         await t.client.close();
       }
     },

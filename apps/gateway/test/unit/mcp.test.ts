@@ -16,7 +16,7 @@ import type {
 import { UNTRUSTED_WEB_BEGIN, UNTRUSTED_WEB_END } from "../../src/web/untrusted";
 import { FakeGitHubFetch, installFakeGitHub } from "./fake-github-fetch";
 import { clearWorkerAudit, fakeAgent, newUserId, taskStub, userStub } from "./helpers";
-import { completedResult, app as prApp } from "./pr-helpers";
+import { completedResult, app as prApp, pushChildCommit } from "./pr-helpers";
 
 // OAuthProvider が apiHandler に渡す ExecutionContext を模す（props はリクエスト単位）
 function ctxWithProps(props: Record<string, unknown>): ExecutionContext {
@@ -1495,7 +1495,7 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     );
     const taskId = String(started.task_id);
     const branch = `agent/task-${taskId}`;
-    const head = prApp().branch("acme/widgets", branch) as string;
+    const head = await pushChildCommit(branch);
     await fakeAgent(taskId).setProgram({ result: completedResult(head) });
     await fakeAgent(taskId).setPhase("completed");
     await taskStub(taskId).advance();

@@ -68,6 +68,11 @@ description = "agent の Unit テスト（vitest + workerd。コンテナは使�
 dir = "apps/agent"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
+[tasks."test:unit:agent-git"]
+description = "agent の push 前の秘密の検査（apps/agent/src/secret-scan.ts）を、一時ディレクトリの本物の git で確かめるテスト（vitest の node 環境。workerd の pool では child_process が使えないので test:unit:agent とは別）。Docker も Cloudflare もネットワークも使わない"
+dir = "apps/agent"
+run = "pnpm exec vitest run --config vitest.node.config.ts"
+
 [tasks."test:unit:web"]
 description = "web の Unit テスト（vitest + workerd。WebSearchSource / fetch / AI.run は fake。実アカウントは呼ばない）"
 dir = "apps/web"
@@ -110,8 +115,8 @@ description = "pnpm / yarn の本体の用意スクリプト（apps/agent/contai
 run = "node --test scripts/pm-prepare.test.mjs"
 
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + 昇格の判断に渡す事実の収集スクリプト + pnpm / yarn の本体の用意スクリプト）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:promote-state", "test:scale-facts", "test:pm-prepare"]
+description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + agent の本物の git のテスト + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + 昇格の判断に渡す事実の収集スクリプト + pnpm / yarn の本体の用意スクリプト）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:agent-git", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:promote-state", "test:scale-facts", "test:pm-prepare"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
@@ -158,7 +163,7 @@ description = "agent の E2E（Docker 必須）。wrangler dev で実コンテ�
 dir = "apps/agent"
 run = "pnpm exec vitest run --config vitest.e2e.config.ts"
 # 負荷によるタイムアウトを避けるため、Unit などの他のテストと同時には走らせない
-wait_for = ["test:unit:gateway", "test:unit:agent", "test:unit:web", "test:fake-github", "test:e2e:gateway", "test:e2e:gateway:nologs", "test:e2e:gateway:userids", "test:e2e:dashboard"]
+wait_for = ["test:unit:gateway", "test:unit:agent", "test:unit:agent-git", "test:unit:web", "test:fake-github", "test:e2e:gateway", "test:e2e:gateway:nologs", "test:e2e:gateway:userids", "test:e2e:dashboard"]
 
 [tasks."test:e2e:full"]
 description = "Gateway(MCP) → AgentDO → SandboxDO（実コンテナ）と、Web Research Service（apps/web。3つの Worker を同時に起動し、偽の Web / Clef / Web Search API を使う）の通しの E2E（Docker 必須）。Phase 3 のゴール（Draft PR・push・PR 本文の更新・トークンの失効）、Phase 4 の対話、Phase 5 の web_search / web_fetch の検証。test:e2e:docker と Docker コンテナの片付けが干渉しないよう、同時には走らせない"

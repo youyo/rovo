@@ -81,6 +81,12 @@ import {
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
 import type { ExecResult, PeekedOutput, SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import {
+  blockedMessage,
+  remoteFor,
+  scanRangeForSecrets,
+  scanUnpushedForSecrets,
+} from "./secret-scan";
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createSandboxTools } from "./tools";
 import { COMMIT_AUTHOR, createToolContext } from "./tools/context";
@@ -126,8 +132,6 @@ const BUDGET_KEPT_RUNNING_WARNING =
 const WIP_COMMIT_MESSAGE = "wip: budget exceeded（rovo が自動で commit）";
 /** WIP の commit・push 全体の上限（ms）。超えたら諦めて今までどおり止まる */
 const WIP_COMMIT_WAIT_MS = 90_000;
-/** WIP commit の前に、取り込む差分を秘密のパターンで確かめる上限（バイト）。超えたら確かめられないので commit しない */
-const WIP_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 /** consult（D10）: 出力の既定の上限と、これ未満しか出せないなら呼ばない下限（入力が予約額をほぼ使い切っている） */
 const CONSULT_DEFAULT_OUTPUT_TOKENS = 8192;
 const CONSULT_MIN_OUTPUT_TOKENS = 64;
@@ -402,6 +406,10 @@ export class AgentDO extends DurableObject<Env> {
         createToolContext(WORKSPACE_ROOT, () => this.deadlineAt(), {
           branch: () => this.spec()?.branch,
           onPush: (r) => this.onCheckpointPush(r),
+          // push 前の秘密の検査の範囲の始まり: 最後に push が成功した SHA（無ければタスク開始時の先頭）
+          lastPushedSha: () => this.lastPushedSha(),
+          baseSha: () => this.spec()?.baseSha,
+          repository: () => this.spec()?.repository,
           // 構造化イベント（D14: command / edit / commit）。ツール側で正規化済み。emit が終端後の追加を止める
           onEvent: (type, data) => this.emit(type, data),
         }),
@@ -1812,28 +1820,21 @@ export class AgentDO extends DurableObject<Env> {
       const add = await git(["add", "-A"]);
       if (!okRun(add)) return fail(`git add ${why(add)}`);
       if (interrupted()) return;
-      // 秘密を commit しない: 取り込む差分を、ログ・イベントと同じ秘密のパターン（maskSecrets）で確かめる。
-      // マスクで文字列が変わる = 秘密らしきものがある。差分が大きすぎて確かめ切れないときも commit しない
-      // バイナリ（numstat が "-\t-\t<path>"）は diff に中身が出ず検査できない（鍵・.p12 など）ので、安全側に倒して commit しない
-      const numstat = await git(["diff", "--cached", "--numstat"], 60_000, WIP_SCAN_MAX_BYTES);
-      const hasBinary =
-        okRun(numstat) &&
-        numstat.truncated !== true &&
-        numstat.stdout.split("\n").some((l) => l.startsWith("-\t-\t"));
-      if (interrupted()) return;
-      const staged = hasBinary
-        ? undefined
-        : await git(["diff", "--cached", "--no-color"], 120_000, WIP_SCAN_MAX_BYTES);
-      const scanned =
-        staged !== undefined &&
-        okRun(numstat) &&
-        numstat.truncated !== true &&
-        okRun(staged) &&
-        staged.truncated !== true;
-      if (!scanned || maskSecrets(staged.stdout) !== staged.stdout) {
+      // 秘密を commit しない: 取り込む差分（staged）を、ログ・イベントと同じ秘密のパターン（maskSecrets）で確かめる。
+      // マスクで文字列が変わる = 秘密らしきものがある。差分が大きすぎて確かめ切れないときも commit しない。
+      // バイナリ（numstat が "-\t-\t<path>"）は diff に中身が出ず検査できない（鍵・.p12 など）ので、安全側に倒して commit しない。
+      // WIP は git_commit の push 前の検査（確度の高いものだけ）より厳しいまま（strict）にする。同じ関数で判定する
+      const scan = await scanRangeForSecrets(
+        (argv, timeoutMs, maxOutputBytes) => git(argv, timeoutMs, maxOutputBytes),
+        ["--cached"],
+        "strict",
+        { shouldAbort: interrupted },
+      );
+      if (scan.status === "aborted") return;
+      if (scan.status !== "clean") {
         if (interrupted()) return;
         await git(["reset", "-q"]).catch(() => undefined);
-        record(scanned ? { outcome: "secret" } : { outcome: "unscannable" });
+        record(scan.status === "secret" ? { outcome: "secret" } : { outcome: "unscannable" });
         return;
       }
       if (interrupted()) return;
@@ -1854,6 +1855,20 @@ export class AgentDO extends DurableObject<Env> {
       const sha = head.stdout.trim();
       if (!okRun(head) || !SHA_RE.test(sha)) return fail("could not read HEAD after commit");
       if (interrupted()) return;
+      // push の前にも、git_commit と同じ検査をする。commit 前に見たのは staged の差分だけで、HEAD には子が自分で積んだ
+      // 未 push の commit（git_commit で止められたものなど）が残っていることがある。それらの秘密も送らない
+      const range = await scanUnpushedForSecrets(
+        (argv, timeoutMs, maxOutputBytes) => git(argv, timeoutMs, maxOutputBytes),
+        "HEAD",
+        this.lastPushedSha(),
+        { remote: remoteFor(spec.repository, spec.baseSha) },
+      );
+      if (interrupted()) return;
+      if (range.status !== "clean" && range.status !== "aborted") {
+        await this.onCheckpointPush({ ok: false, sha, error: blockedMessage(range) });
+        record({ outcome: "committed", sha, pushed: false });
+        return;
+      }
       // push は git_commit と同じ経路（作業ブランチへ HEAD を push し、pushed / push_failed イベントと branch_sync を更新）
       const push = await git(["push", "origin", `HEAD:refs/heads/${spec.branch}`]).catch(
         (e: unknown) => e,
@@ -3123,6 +3138,12 @@ export class AgentDO extends DurableObject<Env> {
   // ---- push ----
 
   /** git_commit のたびの push の結果（best-effort）をイベントにする。 */
+  /** 最後に push が成功した SHA。無ければタスク開始時の作業ブランチの先頭（リモートにある）。push 前の秘密の検査の範囲の始まり */
+  private lastPushedSha(): string | undefined {
+    const pushed = this.store.meta<BranchSync>("branch_sync")?.pushedSha;
+    return pushed && SHA_RE.test(pushed) ? pushed : this.spec()?.initialSha;
+  }
+
   private async onCheckpointPush(r: PushResult): Promise<void> {
     if (r.ok) {
       this.emit("pushed", { sha: r.sha });
@@ -3166,6 +3187,22 @@ export class AgentDO extends DurableObject<Env> {
     let lastError = "unknown";
     if (!SHA_RE.test(sha)) {
       this.finishSync({ error: "the verified commit is not a valid sha" }, sha);
+      return;
+    }
+    // push の前に、送る commit（sha から辿れて、最後に push できた SHA から辿れないもの）を、git_commit の push と同じく
+    // commit ごとに検査する。強制 push はリモートに無い commit をすべて送るので、途中の commit の秘密も公開される。
+    // 見つかったら push せず、既存の push_failed と同じ経路（固定の文）で記録する。検査は決まった結果なので再試行しない
+    if (this.stopIntents().length > 0 || isTerminal(this.store.phase())) return;
+    const scan = await scanUnpushedForSecrets(
+      (argv, timeoutMs, maxOutputBytes) =>
+        sb.exec(["git", ...argv], { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes }),
+      sha,
+      this.lastPushedSha(),
+      { remote: remoteFor(spec.repository, spec.baseSha) },
+    );
+    if (this.stopIntents().length > 0 || isTerminal(this.store.phase())) return;
+    if (scan.status !== "clean" && scan.status !== "aborted") {
+      this.finishSync({ error: blockedMessage(scan) }, sha);
       return;
     }
     for (let attempt = 1; attempt <= MAX_SYNC_ATTEMPTS; attempt++) {

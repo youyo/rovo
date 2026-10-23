@@ -180,8 +180,13 @@ export function newFixture(
   const pushCalls: string[][] = [];
 
   const sandbox = new FakeSandbox(async (argv) => {
-    // `git -c k=v <sub> ...` の -c を読み飛ばしてサブコマンドを見る
-    const gitArgs = argv[0] === "git" && argv[1] === "-c" ? ["git", ...argv.slice(3)] : argv;
+    // push 前の秘密の検査が読む、リモートの heads・tags 全体（git -C / ls-remote --heads --tags <url>）。公開済みの SHA は無い
+    if (argv[0] === "git" && argv.includes("ls-remote") && argv.includes("--heads")) return {};
+    // `git --no-replace-objects -c k=v <sub> ...` のオプションを読み飛ばしてサブコマンドを見る
+    const gitArgs =
+      argv[0] === "git"
+        ? ["git", ...argv.slice(1).filter((a, i, all) => !a.startsWith("-") && all[i - 1] !== "-c")]
+        : argv;
     const [a0, a1] = gitArgs;
     if (a0 === "git" && a1 === "rev-parse") return { stdout: `${revParse.shift() ?? "c0ffee"}\n` };
     if (a0 === "git" && (a1 === "status" || a1 === "switch")) {
@@ -223,6 +228,8 @@ export function newFixture(
     if (a0 === "git" && a1 === "diff" && argv.includes("-U0")) return { stdout: testDiff.value };
     if (a0 === "git" && a1 === "diff") return { stdout: " a.txt | 1 +\n" };
     if (a0 === "git" && a1 === "show") return { exitCode: 128, stderr: "fatal" };
+    // push 前の秘密の検査（git log -p / --numstat HEAD --not <last_pushed>）。送る commit は無い（clean）
+    if (a0 === "git" && a1 === "log") return {};
     verifyCalls.push(argv);
     clock.now += verifyAdvanceMs.shift() ?? 0;
     return verifyResults.shift() ?? {};

@@ -13,6 +13,16 @@ export interface ToolContext {
   /** git_commit の push の結果（best-effort。失敗しても git_commit は失敗にならない）。 */
   onPush?: (result: PushResult) => Promise<void>;
   /**
+   * 最後に push が成功した SHA（無ければタスク開始時の作業ブランチの先頭）。push の直前に、ここから HEAD までの差分を秘密の検査にかける。
+   * AgentDO が永続化した値（branch_sync / initialSha）を返す。未設定のときは、ツールが自分で覚えた SHA、
+   * それも無ければ空の木からの全体を検査する。
+   */
+  lastPushedSha?: () => string | undefined;
+  /** spec の base_sha（リモートにある）。push 前の秘密の検査で、リモートに実在する SHA として除外に足す */
+  baseSha?: () => string | undefined;
+  /** spec の repository（owner/name）。push 前の秘密の検査の ls-remote で、設定の origin ではなくこの URL を使う */
+  repository?: () => string | undefined;
+  /**
    * 構造化イベント（command / edit / commit。D14）の出口。ツールが成功したときに、許可した項目だけを渡す。
    * 渡す前にツール側で正規化（マスク・整形・上限）する。ここが例外を投げてもツールの結果には影響させない。
    */

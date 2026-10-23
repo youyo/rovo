@@ -18,6 +18,8 @@
     "../../src/sandbox-port.ts",
     "../../vitest.e2e.config.ts",
     "../../vitest.e2e-net.config.ts",
+    "../../vitest.node.config.ts",
+    "../node/**/*.ts",
     "../e2e-net/**/*.ts"
   ]
 }

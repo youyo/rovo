@@ -7,6 +7,11 @@
   "main": "../apps/gateway/src/index.ts",
   "compatibility_date": "2026-10-12",
   "compatibility_flags": ["nodejs_compat"],
+  // 独自ドメイン（rovo.config.json の customDomain。任意）。設定すると [{ "pattern": "<host>", "custom_domain": true }]、未設定は []。
+  // "<ROUTES>" は引用符ごと JSON で置き換わる（deploy:config）。
+  // workers_dev: true は明示する（routes があると既定が false になり、workers.dev の URL が無効になるため）。workers.dev の URL も引き続き使える。
+  "workers_dev": true,
+  "routes": "<ROUTES>",
   // ダッシュボード（SPA。/dashboard）の静的ファイル。mise の build:dashboard / scripts/deploy.sh が apps/dashboard/dist を作る。
   // run_worker_first: true は必須（Worker が /dashboard/* だけを assets に渡し、/mcp・/authorize などを飲み込ませない）。
   "assets": {

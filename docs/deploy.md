@@ -129,7 +129,8 @@ AI Gateway にプロバイダーのキーを、エイリアス `default` で登�
 | `accountId` | 必須 | | Cloudflare のアカウント ID（32 桁の 16 進数）。Terraform の `account_id` と gateway の `CLOUDFLARE_ACCOUNT_ID` になる |
 | `namePrefix` | | `rovo` | Terraform のリソース名の接頭辞（R2 バケット・KV・AI Gateway） |
 | `workerNames` | | `rovo-gateway` / `rovo-agent` / `rovo-web` | Worker の名前。各 wrangler 設定の `name`、gateway の `script_name` と `services`、Terraform の `worker_names`（Logpush の filter）に、1 か所から反映される |
-| `publicBaseUrl` | 必須 | | gateway の公開 URL（`https`）。`PUBLIC_BASE_URL` |
+| `publicBaseUrl` | 必須（`customDomain` があれば省略可） | `https://<customDomain>` | gateway の公開 URL（`https`）。`PUBLIC_BASE_URL`。`customDomain` と両方書くときはホストを一致させる（違えばエラー） |
+| `customDomain` | | なし（workers.dev のまま） | 任意の独自ドメイン（ホスト名だけ。小文字で、スキーム・パス・ポート・末尾のドットなし、ドットを 1 つ以上含む。例 `rovo.example.com`）。gateway の `routes` に `[{ "pattern": "<host>", "custom_domain": true }]` が出る（未設定は `[]`）。`workers_dev` は触らないので、workers.dev の URL も使える。agent・web には出ない。手順は下の「独自ドメインを使う」 |
 | `githubApp.id` / `.clientId` | 後で可 | 空 | `GITHUB_APP_ID` / `GITHUB_APP_CLIENT_ID`。空のあいだはログインできない（fail closed） |
 | `allowed.org` / `.team` / `.userIds` | どちらか必須 | | `ALLOWED_ORG` / `ALLOWED_TEAM`（対）/ `ALLOWED_USER_IDS`（数値の ID の配列かカンマ区切り） |
 | `budget.monthlyUsd` / `.taskUsd` / `.consultUsd` | | 100 / 10 / 0.5 | `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` / `CONSULT_BUDGET_USD` |
@@ -184,6 +185,16 @@ AI Gateway の ID・KV の id・アーカイブのバケット名は Terraform �
 > rovo の `apps/*/wrangler.jsonc` に本番の値を書かないこと。特に `r2_buckets` は下流の設定にだけ置く。
 
 確かめた範囲（2026-10-20）: `deploy.example/` の gateway と web を `wrangler deploy --dry-run -c <設定>`（`apps/<name>` で実行）でバンドルし、`main` が設定ファイルからの相対パスで解決されることを確かめた。agent も `--containers-rollout=none` で通った。コンテナのイメージのビルド（`dockerfile` の相対パスの解決）は、実際のデプロイでしか確かめられない。**【実機で確認して追記】** D12 の生成器を使った `setup` の通し（実アカウント）も未確認。**【実機で確認して追記】** D12b の manifest の受理（GitHub が manifest を受け付けるか、`redirect_url` が loopback で通るか）、User-to-server token expiration の既定、`byok` の権限（Secrets Store）と PUT（Rotate）の形も未確認。**【実機で確認して追記】**
+
+### 独自ドメインを使う（任意。`customDomain`）
+
+既定は workers.dev。独自ドメインを当てるなら `rovo.config.json` に `"customDomain": "rovo.example.com"` を足して `mise run deploy:config` を実行する（`publicBaseUrl` は省略でき、`https://rovo.example.com` になる）。
+
+- そのゾーンが gateway と同じ Cloudflare アカウントにあること。wrangler が DNS レコードと証明書を作る
+- GitHub App の Callback URL に `https://rovo.example.com/callback` を追加する（複数持てるので、古い workers.dev のものは残してよい）
+- MCP クライアントの URL を `https://rovo.example.com/mcp` に変える。OAuth の issuer が変わるので、再接続が要る
+- ダッシュボードの Cookie はホスト単位なので、新しいホストでは再ログインになる
+- workers.dev の URL も残る（`workers_dev: true` を明示しているため。routes があると既定は false になる）
 
 ### 個別のタスク
 
@@ -461,7 +472,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 
 ## 16. トラブルシューティング
 
-ツールのエラーの `code` と意味は、[README のエラーの節](../README.md#エラー)にある。よくある設定の誤り:
+ツールのエラーの `code` と意味は、[README のエラーの節](../README.ja.md#エラー)にある。よくある設定の誤り:
 
 | 症状 | 原因 |
 |---|---|

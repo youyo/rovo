@@ -60,6 +60,7 @@ const TOP_KEYS = [
   "namePrefix",
   "workerNames",
   "publicBaseUrl",
+  "customDomain",
   "githubApp",
   "allowed",
   "budget",
@@ -110,6 +111,8 @@ export function parseJsonc(text) {
 
 // ---- 検証 -------------------------------------------------------------------
 
+const CUSTOM_DOMAIN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const PLACEHOLDER = /<[A-Za-z_][A-Za-z0-9_]*>/;
 const isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStr = (v) => typeof v === "string";
@@ -175,9 +178,26 @@ export function validateConfig(raw, templates = loadTemplates()) {
     errors.push("workerNames: 3 つの名前は互いに異なる必要がある");
   }
 
+  // 任意の独自ドメイン（ホスト名だけ。小文字・ドット 1 つ以上・スキーム/パス/ポート/末尾のドットなし）
+  let customDomain = "";
+  if (raw.customDomain !== undefined) {
+    if (!isStr(raw.customDomain) || !CUSTOM_DOMAIN.test(raw.customDomain)) {
+      errors.push(
+        "customDomain: ホスト名だけにする（小文字。スキーム・パス・ポート・末尾のドットなし。例 rovo.example.com）",
+      );
+    } else {
+      customDomain = raw.customDomain;
+    }
+  }
+
   let publicBaseUrl = raw.publicBaseUrl;
+  if ((!isStr(publicBaseUrl) || publicBaseUrl === "") && customDomain !== "") {
+    publicBaseUrl = `https://${customDomain}`;
+  }
   if (!isStr(publicBaseUrl) || publicBaseUrl === "") {
-    errors.push("publicBaseUrl: 必須（gateway の公開 URL。例 https://rovo.example.com）");
+    errors.push(
+      "publicBaseUrl: 必須（gateway の公開 URL。例 https://rovo.example.com。customDomain があれば省略できる）",
+    );
   } else {
     publicBaseUrl = publicBaseUrl.replace(/\/+$/, "");
     let ok = false;
@@ -188,6 +208,11 @@ export function validateConfig(raw, templates = loadTemplates()) {
         u.search === "" &&
         u.hash === "" &&
         !PLACEHOLDER.test(publicBaseUrl);
+      if (ok && customDomain !== "" && u.host !== customDomain) {
+        errors.push(
+          `customDomain: publicBaseUrl のホスト（${u.host}）と customDomain（${customDomain}）を一致させる`,
+        );
+      }
     } catch {}
     if (!ok) errors.push("publicBaseUrl: https の URL にする（クエリ・フラグメントは付けない）");
   }
@@ -357,6 +382,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
       namePrefix,
       workerNames: wn,
       publicBaseUrl,
+      customDomain,
       githubApp: { id: githubAppId, clientId: githubClientId },
       allowed: { org, team, userIds },
       budget: b,
@@ -431,11 +457,21 @@ function placeholderValues(config, infra) {
   };
 }
 
+/** 値全体を JSON で埋めるプレースホルダ（雛形では "<NAME>" と引用符つきで書く。文字列用の esc() は通さない）。 */
+function jsonPlaceholderValues(config) {
+  return {
+    // 独自ドメインがあれば Custom Domain として当てる。無ければ空配列（workers.dev はそのまま）
+    ROUTES: config.customDomain ? [{ pattern: config.customDomain, custom_domain: true }] : [],
+  };
+}
+
 const HEADER =
   "// このファイルは `mise run deploy:config` が生成した（deploy.example/ の雛形 + rovo.config.json + infra.json）。直接編集しない。\n";
 
-function renderOne(app, text, values, overrides) {
+function renderOne(app, text, values, overrides, jsonValues = {}) {
   let out = text;
+  for (const [name, v] of Object.entries(jsonValues))
+    out = out.replaceAll(`"<${name}>"`, () => JSON.stringify(v));
   for (const [name, v] of Object.entries(values)) out = out.replaceAll(`<${name}>`, () => esc(v));
   for (const [k, v] of Object.entries(overrides)) {
     const re = new RegExp(`^(\\s*"${k}":\\s*)"[^"]*"`, "m");
@@ -457,8 +493,9 @@ function renderOne(app, text, values, overrides) {
 export function generateAll(config, infra, templates) {
   checkInfra(infra);
   const values = placeholderValues(config, infra);
+  const jsonValues = jsonPlaceholderValues(config);
   return Object.fromEntries(
-    APPS.map((a) => [a, renderOne(a, templates[a], values, config.vars[a])]),
+    APPS.map((a) => [a, renderOne(a, templates[a], values, config.vars[a], jsonValues)]),
   );
 }
 

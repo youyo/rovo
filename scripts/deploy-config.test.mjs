@@ -152,6 +152,65 @@ describe("回帰: 本番相当の入力から手書き相当の設定が出る",
   });
 });
 
+describe("customDomain（任意の独自ドメイン）", () => {
+  const gen = (patch) =>
+    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
+  const errs = (patch) => validateConfig({ ...productionLike(), ...patch }).errors;
+  it("未設定: gateway の routes は [] で、agent / web には routes が出ない", () => {
+    const o = gen({});
+    assert.deepEqual(parseJsonc(o.gateway).routes, []);
+    assert.equal(parseJsonc(o.agent).routes, undefined);
+    assert.equal(parseJsonc(o.web).routes, undefined);
+    assert.equal(parseJsonc(o.gateway).workers_dev, true);
+  });
+  it("設定: routes が custom_domain になり、PUBLIC_BASE_URL は https://<host>（publicBaseUrl 省略時）", () => {
+    const o = gen({ customDomain: "rovo.example.org", publicBaseUrl: undefined });
+    const g = parseJsonc(o.gateway);
+    assert.deepEqual(g.routes, [{ pattern: "rovo.example.org", custom_domain: true }]);
+    assert.equal(g.vars.PUBLIC_BASE_URL, "https://rovo.example.org");
+    assert.equal(parseJsonc(o.agent).routes, undefined);
+    assert.equal(parseJsonc(o.web).routes, undefined);
+    assert.equal(g.workers_dev, true); // routes があると既定が false になるので明示
+  });
+  it("publicBaseUrl と同じホストなら通る（末尾スラッシュは無視）", () => {
+    const o = gen({ customDomain: "rovo.example.com", publicBaseUrl: "https://rovo.example.com/" });
+    assert.equal(parseJsonc(o.gateway).vars.PUBLIC_BASE_URL, "https://rovo.example.com");
+  });
+  it("publicBaseUrl とホストが違うと検証エラー", () => {
+    const e = errs({ customDomain: "rovo.example.org" });
+    assert.ok(
+      e.some((x) => x.includes("customDomain") && x.includes("publicBaseUrl")),
+      e.join(),
+    );
+  });
+  it("どちらも無いと publicBaseUrl 必須のエラー", () => {
+    assert.ok(errs({ publicBaseUrl: undefined }).some((x) => x.includes("publicBaseUrl: 必須")));
+  });
+  it("不正なホスト（スキーム付き・大文字・ポート付き・パス・末尾ドット・ドット無し・プレースホルダ）はエラー", () => {
+    for (const v of [
+      "https://rovo.example.com",
+      "Rovo.Example.com",
+      "rovo.example.com:8443",
+      "rovo.example.com/mcp",
+      "rovo.example.com.",
+      "localhost",
+      "<YOUR_HOST>",
+      "",
+      42,
+    ]) {
+      const e = errs({ customDomain: v, publicBaseUrl: undefined });
+      assert.ok(
+        e.some((x) => x.startsWith("customDomain")),
+        `${v}: ${e.join()}`,
+      );
+    }
+  });
+  it("生成物が JSONC としてパースできる", () => {
+    const o = gen({ customDomain: "rovo.example.com" });
+    assert.doesNotThrow(() => parseJsonc(o.gateway));
+  });
+});
+
 describe("既定値", () => {
   const minimal = {
     accountId: ACCOUNT_ID,

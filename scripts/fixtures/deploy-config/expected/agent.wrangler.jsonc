@@ -8,6 +8,7 @@
   "compatibility_flags": ["nodejs_compat"],
   // gateway からは DO バインディングで呼ぶので workers.dev では公開しない
   "workers_dev": false,
+  "preview_urls": false,
   // 監査ログを Logpush（infra/ の Terraform が作るジョブ）に流す
   "logpush": true,
   "observability": { "enabled": true, "head_sampling_rate": 1 },

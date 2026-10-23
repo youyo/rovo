@@ -211,6 +211,51 @@ describe("customDomain（任意の独自ドメイン）", () => {
   });
 });
 
+describe("workersDev（workers.dev と preview URL の有効・無効）", () => {
+  const gen = (patch) =>
+    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
+  const errs = (patch) => validateConfig({ ...productionLike(), ...patch }).errors;
+  it("未設定: gateway の workers_dev と preview_urls は true", () => {
+    const g = parseJsonc(gen({}).gateway);
+    assert.equal(g.workers_dev, true);
+    assert.equal(g.preview_urls, true);
+  });
+  it("customDomain ありで workersDev: false: 両方 false", () => {
+    const g = parseJsonc(gen({ customDomain: "rovo.example.com", workersDev: false }).gateway);
+    assert.equal(g.workers_dev, false);
+    assert.equal(g.preview_urls, false);
+    assert.deepEqual(g.routes, [{ pattern: "rovo.example.com", custom_domain: true }]);
+  });
+  it("workersDev: true は未設定と同じ", () => {
+    const g = parseJsonc(gen({ workersDev: true }).gateway);
+    assert.equal(g.workers_dev, true);
+    assert.equal(g.preview_urls, true);
+  });
+  it("agent / web は workers_dev も preview_urls も false のまま", () => {
+    const o = gen({ customDomain: "rovo.example.com", workersDev: false });
+    for (const a of ["agent", "web"]) {
+      assert.equal(parseJsonc(o[a]).workers_dev, false);
+      assert.equal(parseJsonc(o[a]).preview_urls, false);
+    }
+  });
+  it("customDomain なしで workersDev: false はエラー", () => {
+    const e = errs({ workersDev: false });
+    assert.ok(
+      e.some((x) => x.startsWith("workersDev") && x.includes("customDomain")),
+      e.join(),
+    );
+  });
+  it("boolean 以外はエラー", () => {
+    for (const v of ["false", 0, 1, null, "true", {}]) {
+      const e = errs({ customDomain: "rovo.example.com", workersDev: v });
+      assert.ok(
+        e.some((x) => x.startsWith("workersDev")),
+        `${JSON.stringify(v)}: ${e.join()}`,
+      );
+    }
+  });
+});
+
 describe("既定値", () => {
   const minimal = {
     accountId: ACCOUNT_ID,

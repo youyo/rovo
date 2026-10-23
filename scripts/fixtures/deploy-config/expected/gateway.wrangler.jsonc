@@ -8,6 +8,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "routes": [],
   "workers_dev": true,
+  "preview_urls": true,
   // ダッシュボード（SPA。/dashboard）の静的ファイル。mise の build:dashboard / scripts/deploy.sh が apps/dashboard/dist を作る。
   // run_worker_first: true は必須（Worker が /dashboard/* だけを assets に渡し、/mcp・/authorize などを飲み込ませない）。
   "assets": {

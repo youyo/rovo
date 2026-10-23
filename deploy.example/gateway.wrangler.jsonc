@@ -9,8 +9,10 @@
   "compatibility_flags": ["nodejs_compat"],
   // 独自ドメイン（rovo.config.json の customDomain。任意）。設定すると [{ "pattern": "<host>", "custom_domain": true }]、未設定は []。
   // "<ROUTES>" は引用符ごと JSON で置き換わる（deploy:config）。
-  // workers_dev: true は明示する（routes があると既定が false になり、workers.dev の URL が無効になるため）。workers.dev の URL も引き続き使える。
-  "workers_dev": true,
+  // workers_dev は明示する（routes があると既定が false になり、workers.dev の URL が無効になるため）。
+  // "<WORKERS_DEV>" は引用符ごと true / false で置き換わる（rovo.config.json の workersDev。既定 true）。preview_urls も同じ値で明示する。
+  "workers_dev": "<WORKERS_DEV>",
+  "preview_urls": "<WORKERS_DEV>",
   "routes": "<ROUTES>",
   // ダッシュボード（SPA。/dashboard）の静的ファイル。mise の build:dashboard / scripts/deploy.sh が apps/dashboard/dist を作る。
   // run_worker_first: true は必須（Worker が /dashboard/* だけを assets に渡し、/mcp・/authorize などを飲み込ませない）。

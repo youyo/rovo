@@ -44,6 +44,8 @@ export const DEFAULTS = {
   // 依存関係のキャッシュ（D14。Containers のスナップショット）。public beta の機能なので、止められるようにしてある
   depsCache: { enabled: true },
   webBrowseEnabled: false,
+  // gateway の workers.dev（と preview / version の URL）を有効にするか。独自ドメインに移ったら false にできる
+  workersDev: true,
 };
 
 /** terraform の非秘密の出力。`terraform output -raw <名前>` を名前指定で読む（-json は sensitive の値も出すので使わない）。 */
@@ -61,6 +63,7 @@ const TOP_KEYS = [
   "workerNames",
   "publicBaseUrl",
   "customDomain",
+  "workersDev",
   "githubApp",
   "allowed",
   "budget",
@@ -188,6 +191,16 @@ export function validateConfig(raw, templates = loadTemplates()) {
     } else {
       customDomain = raw.customDomain;
     }
+  }
+
+  // workers.dev の URL を止めるか（既定は有効）。止めると gateway に届く URL が customDomain だけになる
+  const workersDev = raw.workersDev === undefined ? DEFAULTS.workersDev : raw.workersDev;
+  if (typeof workersDev !== "boolean") {
+    errors.push("workersDev: true / false にする");
+  } else if (!workersDev && customDomain === "") {
+    errors.push(
+      "workersDev: false には customDomain が要る（customDomain が無いと gateway に届く URL が無くなる）",
+    );
   }
 
   let publicBaseUrl = raw.publicBaseUrl;
@@ -383,6 +396,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
       workerNames: wn,
       publicBaseUrl,
       customDomain,
+      workersDev,
       githubApp: { id: githubAppId, clientId: githubClientId },
       allowed: { org, team, userIds },
       budget: b,
@@ -462,6 +476,8 @@ function jsonPlaceholderValues(config) {
   return {
     // 独自ドメインがあれば Custom Domain として当てる。無ければ空配列（workers.dev はそのまま）
     ROUTES: config.customDomain ? [{ pattern: config.customDomain, custom_domain: true }] : [],
+    // workers.dev の URL。preview / version の URL も同じ値で明示する（preview_urls は省略すると既存の設定を変えない）
+    WORKERS_DEV: config.workersDev,
   };
 }
 

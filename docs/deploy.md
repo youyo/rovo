@@ -130,7 +130,8 @@ AI Gateway にプロバイダーのキーを、エイリアス `default` で登�
 | `namePrefix` | | `rovo` | Terraform のリソース名の接頭辞（R2 バケット・KV・AI Gateway） |
 | `workerNames` | | `rovo-gateway` / `rovo-agent` / `rovo-web` | Worker の名前。各 wrangler 設定の `name`、gateway の `script_name` と `services`、Terraform の `worker_names`（Logpush の filter）に、1 か所から反映される |
 | `publicBaseUrl` | 必須（`customDomain` があれば省略可） | `https://<customDomain>` | gateway の公開 URL（`https`）。`PUBLIC_BASE_URL`。`customDomain` と両方書くときはホストを一致させる（違えばエラー） |
-| `customDomain` | | なし（workers.dev のまま） | 任意の独自ドメイン（ホスト名だけ。小文字で、スキーム・パス・ポート・末尾のドットなし、ドットを 1 つ以上含む。例 `rovo.example.com`）。gateway の `routes` に `[{ "pattern": "<host>", "custom_domain": true }]` が出る（未設定は `[]`）。`workers_dev` は触らないので、workers.dev の URL も使える。agent・web には出ない。手順は下の「独自ドメインを使う」 |
+| `customDomain` | | なし（workers.dev のまま） | 任意の独自ドメイン（ホスト名だけ。小文字で、スキーム・パス・ポート・末尾のドットなし、ドットを 1 つ以上含む。例 `rovo.example.com`）。gateway の `routes` に `[{ "pattern": "<host>", "custom_domain": true }]` が出る（未設定は `[]`）。既定では workers.dev の URL も使える（止めるなら `workersDev`）。agent・web には出ない。手順は下の「独自ドメインを使う」 |
+| `workersDev` | | `true` | gateway の workers.dev の URL（と preview / version の URL）を有効にするか（boolean）。`false` で gateway の `workers_dev` と `preview_urls` が `false` になる。`false` には `customDomain` が要る（無いとエラー。gateway に届く URL が無くなるため）。agent・web は常に `false` で変わらない。手順は下の「独自ドメインを使う」 |
 | `githubApp.id` / `.clientId` | 後で可 | 空 | `GITHUB_APP_ID` / `GITHUB_APP_CLIENT_ID`。空のあいだはログインできない（fail closed） |
 | `allowed.org` / `.team` / `.userIds` | どちらか必須 | | `ALLOWED_ORG` / `ALLOWED_TEAM`（対）/ `ALLOWED_USER_IDS`（数値の ID の配列かカンマ区切り） |
 | `budget.monthlyUsd` / `.taskUsd` / `.consultUsd` | | 100 / 10 / 0.5 | `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` / `CONSULT_BUDGET_USD` |
@@ -195,6 +196,7 @@ AI Gateway の ID・KV の id・アーカイブのバケット名は Terraform �
 - MCP クライアントの URL を `https://rovo.example.com/mcp` に変える。OAuth の issuer が変わるので、再接続が要る
 - ダッシュボードの Cookie はホスト単位なので、新しいホストでは再ログインになる
 - workers.dev の URL も残る（`workers_dev: true` を明示しているため。routes があると既定は false になる）
+- 独自ドメインに移ったら `"workersDev": false` で workers.dev を止められる（gateway の `workers_dev` と `preview_urls` が `false` になる。`customDomain` が要る）。止める前に、MCP クライアントとブラウザが新しい URL に移っていることを確かめる。GitHub App の古い callback は、止めたあとで消してよい
 
 ### 個別のタスク
 

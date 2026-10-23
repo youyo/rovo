@@ -95,8 +95,20 @@ export class FakeContainer {
     await this.onDestroy?.();
     this.running = false;
   }
+  /** 設定すると setInactivityTimeout がこの例外で失敗する */
+  inactivityError: Error | undefined;
   async setInactivityTimeout(ms: number) {
     this.inactivityMs.push(ms);
+    this.events.push(`inactivity:${ms}`);
+    if (this.inactivityError) throw this.inactivityError;
+  }
+  /** monitor() の promise の settle 用（start のたびに 1 つ増える。テストが resolve / reject する） */
+  monitors: { resolve: () => void; reject: (e: unknown) => void }[] = [];
+  monitor(): Promise<void> {
+    this.events.push("monitor");
+    return new Promise<void>((resolve, reject) => {
+      this.monitors.push({ resolve, reject });
+    });
   }
   async interceptOutboundHttps() {
     this.intercepts += 1;

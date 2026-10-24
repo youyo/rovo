@@ -492,6 +492,19 @@ describe("システムプロンプト", () => {
     await waitForTerminal(fx);
   });
 
+  it("no_push の節は、bash の cd ではなく cwd 引数を使うよう指示する", async () => {
+    const fx = newFixture("prompt-cwd", [call("gate")]);
+    await fx.stub.start(makeSpec("prompt-cwd"));
+    const section = await runInDO(fx.stub, (inst) =>
+      inst.promptSections().find((s: { key: string }) => s.key === "no_push"),
+    );
+    expect(section.text).toContain(
+      "Each bash call starts at the workspace root. Do not prefix commands with `cd <dir> &&`; pass the directory as the cwd argument instead.",
+    );
+    fx.gate.release();
+    await waitForTerminal(fx);
+  });
+
   it("no_push の節は「Draft PR は gateway が作る（子は作らない）」と書き、summary で「PR を作っていない」と誤解させない", async () => {
     const fx = newFixture("prompt-pr", [call("gate")]);
     await fx.stub.start(makeSpec("prompt-pr"));

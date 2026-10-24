@@ -84,7 +84,22 @@ describe("git_commit の push 前の秘密の検査", () => {
     t.git.stage(file("src/a.ts", "const a = 1;"));
     const first = await t.commit();
     expect(first.text).toMatch(/pushed to the task branch/);
-    expect(t.git.state.pushes).toEqual([["git", "push", "origin", `HEAD:refs/heads/${BRANCH}`]]);
+    expect(t.git.state.pushes).toEqual([
+      [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "credential.helper=",
+        "push",
+        "origin",
+        `${t.git.head()}:refs/heads/${BRANCH}`,
+      ],
+    ]);
+    expect(t.sandbox.calls.find((c) => c.argv.includes("push"))?.options.pushPermit).toEqual({
+      ref: `refs/heads/${BRANCH}`,
+      newSha: t.git.head(),
+    });
     expect(t.results).toEqual([{ ok: true, sha: t.git.head() }]);
     const pushedSha = t.git.head();
     t.git.stage(file("src/b.ts", "const b = 2;"));

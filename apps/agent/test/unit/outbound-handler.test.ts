@@ -47,6 +47,9 @@ interface Upstream {
   bodies: Promise<Uint8Array>[];
 }
 
+/** cmd() が送る更新（newSha は B）に一致する、SandboxDO の push の許可証 */
+const PERMIT = { ref: "refs/heads/agent/task-t1", newSha: B };
+
 function setup(over: Partial<OutboundDeps> = {}) {
   const up: Upstream = { calls: [], bodies: [] };
   const reads: string[] = [];
@@ -56,6 +59,7 @@ function setup(over: Partial<OutboundDeps> = {}) {
       reads.push(taskId);
       return CRED;
     },
+    readPushPermit: async () => PERMIT,
     fetchUpstream: async (url, init) => {
       up.calls.push({ url, init });
       if (init.body) up.bodies.push(new Response(init.body as BodyInit).bytes());
@@ -335,6 +339,82 @@ describe("receive-pack: GET info/refs", () => {
       deps,
     );
     expect(new Headers(up.calls[0]?.init.headers).get("git-protocol")).toBe("version=2");
+  });
+});
+
+describe("receive-pack: SandboxDO の push の許可証", () => {
+  const url = `${REPO}/git-receive-pack`;
+
+  it("許可証が無ければ 403（push_not_permitted）。認証を付けず、トークンも読まず、上流にも出ない", async () => {
+    const audits: { reason?: unknown }[] = [];
+    const { deps, up, reads } = setup({
+      readPushPermit: async () => undefined,
+      audit: (_e, fields) => void audits.push(fields),
+    });
+    const res = await handleOutbound(post(url, cat(cmd(), PACK)), deps);
+    expect(res.status).toBe(403);
+    expect(up.calls).toHaveLength(0);
+    expect(reads).toHaveLength(0);
+    expect(audits.map((a) => a.reason)).toEqual(["push_not_permitted"]);
+  });
+
+  it("許可証の読み出しが失敗したら 403", async () => {
+    const { deps, up } = setup({
+      readPushPermit: async () => {
+        throw new Error("boom");
+      },
+    });
+    const res = await handleOutbound(post(url, cat(cmd(), PACK)), deps);
+    expect(res.status).toBe(403);
+    expect(up.calls).toHaveLength(0);
+  });
+
+  it("許可証の ref が違えば 403", async () => {
+    const { deps, up } = setup({
+      readPushPermit: async () => ({ ref: "refs/heads/agent/task-other", newSha: B }),
+    });
+    const res = await handleOutbound(post(url, cat(cmd(), PACK)), deps);
+    expect(res.status).toBe(403);
+    expect(up.calls).toHaveLength(0);
+  });
+
+  it("許可証の newSha が、コマンドの newSha と違えば 403", async () => {
+    const { deps, up } = setup({
+      readPushPermit: async () => ({ ref: PERMIT.ref, newSha: A }),
+    });
+    const res = await handleOutbound(post(url, cat(cmd(), PACK)), deps);
+    expect(res.status).toBe(403);
+    expect(up.calls).toHaveLength(0);
+  });
+
+  it("ref と newSha が一致すれば通り、認証が付く", async () => {
+    const { deps, up, reads } = setup({ readPushPermit: async () => ({ ...PERMIT }) });
+    const res = await handleOutbound(post(url, cat(cmd(), PACK)), deps);
+    expect(res.status).toBe(200);
+    expect(up.calls).toHaveLength(1);
+    expect(new Headers(up.calls[0]?.init.headers).get("authorization")).toBe(AUTH);
+    expect(reads).toEqual(["t1"]);
+  });
+
+  it("許可証を読むときの taskId は props のものだけ", async () => {
+    const asked: string[] = [];
+    const { deps } = setup({
+      readPushPermit: async (taskId) => {
+        asked.push(taskId);
+        return PERMIT;
+      },
+    });
+    await handleOutbound(post(url, cat(cmd(), PACK)), deps);
+    expect(asked).toEqual(["t1"]);
+  });
+
+  it("許可証が無くても、fetch 系（upload-pack）と receive-pack の advert は今までどおり通る", async () => {
+    const { deps, up } = setup({ readPushPermit: async () => undefined });
+    const a = await handleOutbound(get(`${REPO}/info/refs?service=git-upload-pack`), deps);
+    const b = await handleOutbound(get(`${REPO}/info/refs?service=git-receive-pack`), deps);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(up.calls).toHaveLength(2);
   });
 });
 

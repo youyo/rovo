@@ -8,11 +8,14 @@ import {
   type CommandRunner,
   type ModelCaller,
   type ModelCallResult,
+  REVIEW_MAX_TOOL_ROUNDS,
+  REVIEW_TOOL_RESULT_TOTAL_MAX_BYTES,
   type ReviewMessage,
   reviewWarnings,
   runReviewCommands,
   runReviewModel,
 } from "../../src/review/stage";
+import type { ReviewToolRunner } from "../../src/review/tools";
 
 const T0 = 1_000_000;
 
@@ -149,7 +152,7 @@ const valid = JSON.stringify({
 });
 
 function caller(answers: ModelCallResult[]) {
-  const calls: { system: string; messages: ReviewMessage[] }[] = [];
+  const calls: Parameters<ModelCaller["call"]>[0][] = [];
   const m: ModelCaller = {
     call: async (req) => {
       calls.push(req);
@@ -249,5 +252,173 @@ describe("reviewWarnings", () => {
     expect(
       reviewWarnings({ unavailable: false, timedOut: false, redacted: false, failure: undefined }),
     ).toEqual([]);
+  });
+});
+
+// ---- 道具の往復 ----
+
+const toolCall = (id: string, name = "read_file", args: unknown = { path: "src/a.ts" }) => ({
+  ok: true as const,
+  text: "",
+  truncated: false,
+  toolCalls: [{ id, name, arguments: args }],
+});
+const jsonAnswer = { ok: true as const, text: valid, truncated: false };
+
+function toolRunner(text = "<wrapped result>") {
+  const ran: { name: string; arguments: unknown }[] = [];
+  const runner: ReviewToolRunner = {
+    definitions: [
+      { name: "read_file", description: "d", parameters: {} },
+      { name: "list_files", description: "d", parameters: {} },
+      { name: "search", description: "d", parameters: {} },
+    ],
+    run: async (call) => {
+      ran.push(call);
+      return { text, isError: false };
+    },
+    redacted: () => false,
+  };
+  return { runner, ran };
+}
+
+describe("runReviewModel: 道具の往復", () => {
+  it("往復の上限は 20 回（定数）", () => {
+    expect(REVIEW_MAX_TOOL_ROUNDS).toBe(20);
+  });
+
+  it("道具を 1 回呼んでから JSON を返す。道具の定義を渡し、結果は次の呼び出しの会話に入る", async () => {
+    const c = caller([toolCall("t1"), jsonAnswer]);
+    const t = toolRunner();
+    const out = await runReviewModel(c.m, input(), { tools: t.runner });
+    expect(out.ok).toBe(true);
+    expect(t.ran).toEqual([{ name: "read_file", arguments: { path: "src/a.ts" } }]);
+    expect(c.calls).toHaveLength(2);
+    expect(c.calls[0]?.tools?.map((d) => d.name)).toEqual(["read_file", "list_files", "search"]);
+    const second = c.calls[1]?.messages ?? [];
+    expect(second.map((m) => m.role)).toEqual(["user", "assistant", "tool"]);
+    expect(second[2]).toEqual({
+      role: "tool",
+      results: [{ id: "t1", name: "read_file", text: "<wrapped result>", isError: false }],
+    });
+  });
+
+  it("道具を渡さなければ、これまでと同じ 1 回呼び（tools は渡さない）", async () => {
+    const c = caller([jsonAnswer]);
+    await runReviewModel(c.m, input());
+    expect(c.calls[0]?.tools).toBeUndefined();
+  });
+
+  it("20 回往復しても JSON が出なければ、道具を外して 1 回だけ「JSON だけ」と求め、返れば成功", async () => {
+    const answers: ModelCallResult[] = [];
+    for (let i = 0; i < REVIEW_MAX_TOOL_ROUNDS; i++) answers.push(toolCall(`t${i}`));
+    answers.push(jsonAnswer);
+    const c = caller(answers);
+    const t = toolRunner();
+    const out = await runReviewModel(c.m, input(), { tools: t.runner });
+    expect(out.ok).toBe(true);
+    expect(t.ran).toHaveLength(REVIEW_MAX_TOOL_ROUNDS);
+    expect(c.calls).toHaveLength(REVIEW_MAX_TOOL_ROUNDS + 1);
+    // 20 回目までは道具つき、最後の 1 回は道具なし
+    for (const call of c.calls.slice(0, REVIEW_MAX_TOOL_ROUNDS)) expect(call.tools).toBeDefined();
+    const last = c.calls[REVIEW_MAX_TOOL_ROUNDS];
+    expect(last?.tools).toBeUndefined();
+    // 道具なしの求めの会話は、道具の呼び出し・結果のブロックを含まず（道具の定義が無いため）、最後は「JSON だけ」
+    expect(last?.messages.every((m) => m.role === "user" || m.role === "assistant")).toBe(true);
+    const lastMsg = last?.messages.at(-1);
+    expect(lastMsg?.role).toBe("user");
+    expect(lastMsg?.role === "user" && lastMsg.blocks.join("\n")).toContain(REVIEW_JSON_ONLY_RETRY);
+  });
+
+  it("最後の求めでも JSON にならなければ tool_rounds_exceeded（それ以上は呼ばない）", async () => {
+    const answers: ModelCallResult[] = [];
+    for (let i = 0; i < REVIEW_MAX_TOOL_ROUNDS; i++) answers.push(toolCall(`t${i}`));
+    answers.push({ ok: true, text: "I need to look more", truncated: false });
+    answers.push(jsonAnswer);
+    const c = caller(answers);
+    const out = await runReviewModel(c.m, input(), { tools: toolRunner().runner });
+    expect(out).toEqual({ ok: false, code: "tool_rounds_exceeded" });
+    expect(c.calls).toHaveLength(REVIEW_MAX_TOOL_ROUNDS + 1);
+  });
+
+  it("最後の求めで道具を呼んできても、実行せず tool_rounds_exceeded", async () => {
+    const answers: ModelCallResult[] = [];
+    for (let i = 0; i <= REVIEW_MAX_TOOL_ROUNDS; i++) answers.push(toolCall(`t${i}`));
+    const t = toolRunner();
+    const out = await runReviewModel(caller(answers).m, input(), { tools: t.runner });
+    expect(out).toEqual({ ok: false, code: "tool_rounds_exceeded" });
+    expect(t.ran).toHaveLength(REVIEW_MAX_TOOL_ROUNDS);
+  });
+
+  it("道具の結果が大きくなりすぎたら、残りの往復を待たずに道具を外して JSON を求める", async () => {
+    const big = "x".repeat(REVIEW_TOOL_RESULT_TOTAL_MAX_BYTES + 1);
+    const c = caller([toolCall("t1"), jsonAnswer]);
+    const out = await runReviewModel(c.m, input(), { tools: toolRunner(big).runner });
+    expect(out.ok).toBe(true);
+    expect(c.calls).toHaveLength(2);
+    expect(c.calls[1]?.tools).toBeUndefined();
+  });
+
+  it("1 回の応答で複数の道具を呼ぶと、順に実行して結果を 1 つにまとめて返す（1 往復と数える）", async () => {
+    const two = {
+      ok: true as const,
+      text: "",
+      truncated: false,
+      toolCalls: [
+        { id: "a", name: "list_files", arguments: {} },
+        { id: "b", name: "search", arguments: { pattern: "x" } },
+      ],
+    };
+    const c = caller([two, jsonAnswer]);
+    const t = toolRunner();
+    await runReviewModel(c.m, input(), { tools: t.runner });
+    expect(t.ran.map((r) => r.name)).toEqual(["list_files", "search"]);
+    const msg = c.calls[1]?.messages.at(-1);
+    expect(msg?.role === "tool" && msg.results.map((r) => r.id)).toEqual(["a", "b"]);
+  });
+
+  it("道具の往復のあとに JSON でない答えが来たら、道具なしで 1 回だけ「JSON だけ」と再要求する", async () => {
+    const c = caller([toolCall("t1"), { ok: true, text: "LGTM", truncated: false }, jsonAnswer]);
+    const out = await runReviewModel(c.m, input(), { tools: toolRunner().runner });
+    expect(out.ok).toBe(true);
+    expect(c.calls).toHaveLength(3);
+    expect(c.calls[2]?.tools).toBeUndefined();
+  });
+
+  it("往復の途中で予算が足りなくなったら budget で打ち切り、会話を持ち帰る（再開できる）", async () => {
+    const c = caller([toolCall("t1"), { ok: false, code: "budget" }, jsonAnswer]);
+    const t = toolRunner();
+    const out = await runReviewModel(c.m, input(), { tools: t.runner });
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.code).toBe("budget");
+    expect(c.calls).toHaveLength(2);
+    expect(out.resume?.rounds).toBe(1);
+    expect(out.resume?.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"]);
+    // 続きから: 会話と往復の数を引き継いで、もう一度呼ぶ
+    const c2 = caller([jsonAnswer]);
+    const again = await runReviewModel(c2.m, input(), { tools: t.runner, resume: out.resume });
+    expect(again.ok).toBe(true);
+    expect(c2.calls[0]?.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"]);
+  });
+
+  it("道具の往復の途中のモデルの失敗は 1 回だけ再試行する", async () => {
+    const c = caller([toolCall("t1"), { ok: false, code: "timeout" }, jsonAnswer]);
+    const out = await runReviewModel(c.m, input(), { tools: toolRunner().runner });
+    expect(out.ok).toBe(true);
+    expect(c.calls).toHaveLength(3);
+  });
+});
+
+describe("reviewWarnings: tool_rounds_exceeded", () => {
+  it("review_failed: tool_rounds_exceeded になる", () => {
+    expect(
+      reviewWarnings({
+        unavailable: false,
+        timedOut: false,
+        redacted: false,
+        failure: "tool_rounds_exceeded",
+      }),
+    ).toEqual(["review_failed: tool_rounds_exceeded"]);
   });
 });

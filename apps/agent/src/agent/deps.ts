@@ -59,6 +59,7 @@ export interface AgentTestOverrides {
     metadata?: Record<string, unknown>;
     systemText?: string;
     reasoning?: string;
+    toolNames?: string[];
   }) => void;
 }
 

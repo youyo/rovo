@@ -95,6 +95,23 @@ function toolResultTexts(context: TranscriptContext): string[] {
   );
 }
 
+/**
+ * そのとき transcript で使えるツールの名前（テストの観測用）。system メッセージを順に再生して、toolsAdded を足し、toolsRemoved を引く。
+ * 「レビューのモデルに渡る道具」の確認に使う。
+ */
+function toolNamesOf(context: TranscriptContext): string[] {
+  const names: string[] = [];
+  for (const m of context.messages) {
+    if (m.role !== "system") continue;
+    for (const t of m.toolsAdded ?? []) if (!names.includes(t.name)) names.push(t.name);
+    for (const r of m.toolsRemoved ?? []) {
+      const i = names.indexOf(r.name);
+      if (i >= 0) names.splice(i, 1);
+    }
+  }
+  return names;
+}
+
 const ZERO_USAGE = {
   input: 0,
   output: 0,
@@ -122,6 +139,8 @@ export function createScriptedProvider(
     systemText?: string;
     /** 呼び出し側が渡した思考レベル（options.reasoning。思考オフなら undefined） */
     reasoning?: string;
+    /** このリクエストでモデルに渡った道具の名前 */
+    toolNames?: string[];
   }) => void,
 ): Provider {
   const stream = (
@@ -142,6 +161,7 @@ export function createScriptedProvider(
       metadata: options?.metadata,
       systemText: systemText(context),
       reasoning: options?.reasoning,
+      toolNames: toolNamesOf(context),
     });
     const turn = context.messages.filter((m) => m.role === "assistant").length;
     const step = getScript(userText(context))[turn] ?? { text: "script exhausted" };

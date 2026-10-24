@@ -532,7 +532,7 @@ test("polls task_console every 4 seconds with the right server and prefix", asyn
   expect(r.calls).toContainEqual({
     server: "claude_ai_mcp_hubs_run",
     tool: "my-rovo_task_console",
-    args: { task_id: "t2", log_after: "0" }, // t2 is the newest, so it is the shown one
+    args: { task_id: "t2" }, // t1 stays the shown one while it runs, so only t1 asks for its log
   });
 });
 
@@ -757,7 +757,7 @@ test("awaiting budget_extension toasts once, and again after it cleared and came
   expect(r.toasts).toEqual([BUDGET_TOAST, BUDGET_TOAST]);
 });
 
-test("the pane says 予算の承認待ち for awaiting, 入力待ち otherwise, and ignores unknown values", async ($, on) => {
+test("the pane says 予算の承認待ち for awaiting, the question note otherwise, and ignores unknown values", async ($, on) => {
   const r = rig(on);
   await startOne($, r);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
@@ -774,15 +774,15 @@ test("the pane says 予算の承認待ち for awaiting, 入力待ち otherwise, 
   r.setHandler(() => ok(consoleBody("t1", { status: "INPUT_REQUIRED" })));
   await r.clock.advance(4_000);
   const plain = await textsOf();
-  expect(plain).toContain("入力待ち");
+  expect(plain).toContain("質問に答えてください");
   expect(plain).not.toContain("予算の承認待ち");
 
   r.setHandler(() => ok(consoleBody("t1", { status: "INPUT_REQUIRED", awaiting: { evil: true } })));
   await r.clock.advance(4_000);
-  expect(await textsOf()).toContain("入力待ち");
+  expect(await textsOf()).toContain("質問に答えてください");
   r.setHandler(() => ok(consoleBody("t1", { status: "INPUT_REQUIRED", awaiting: "future_kind" })));
   await r.clock.advance(4_000);
-  expect(await textsOf()).toContain("入力待ち");
+  expect(await textsOf()).toContain("質問に答えてください");
   expect(r.toasts).toEqual([BUDGET_TOAST]); // only the first, real one; unknown values never toast
   expect(r.calls.every((c) => !WRITE_TOOLS.test(c.tool))).toBe(true);
 });
@@ -891,33 +891,32 @@ test("the pane shows the list, the selected task, phases, command and tail on ev
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface });
 
-    // 3 rows per worker (name / lane / station names), all of them buttons
+    // a working worker has 2 rows, an ended one 1 row, all of them buttons
     const rows = await ui.findAll({ type: "Button" });
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(3);
     const first = await ui.find({ type: "Button", text: /First/ });
     const second = await ui.find({ type: "Button", text: /Second/ });
-    expect((await rowsOf(ui, "t1"))[1]).toContain("✓ 完了");
-    const lane2 = (await rowsOf(ui, "t2"))[1] ?? "";
-    expect(lane2).toMatch(/^ *●━━━━●━━━━[◐◓◑◒◉]/);
-    expect(lane2).toContain("now-t2");
+    expect((await rowsOf(ui, "t1"))[0]).toMatch(/✓ First.*完了/);
+    const [lane2, doing2] = await rowsOf(ui, "t2");
+    expect(lane2).toMatch(/●━━━━●━━━━[◐◓◑◒◉]/);
+    expect(doing2).toContain("now-t2");
 
-    // default: the latest running one (t2)
+    // default: the first one picked up stays on show, even though it has ended (its last output stays readable)
     let text = await allText(ui);
-    expect(text).not.toContain("now-t1");
-    expect(text).toContain("tail-t2");
-    expect(text).not.toContain("tail-t1");
+    expect(text).toContain("tail-t1");
+    expect(text).not.toContain("tail-t2");
     expect(text).toContain("pnpm test");
     expect(text).toContain("line1\nline2");
     expect(text).not.toContain("<<<");
-    expect((await rowsOf(ui, "t2"))[2]).toContain("準備 実行 検証 PR");
+    expect(text).toContain("準備 実行 検証 PR");
 
-    // pick the first one
-    await ui.press({ key: first?.key ?? "missing" });
+    // pick the second one
+    await ui.press({ key: second?.key ?? "missing" });
     text = await allText(ui);
-    expect(text).toContain("tail-t1");
-    expect(text).not.toContain("tail-t2");
+    expect(text).toContain("tail-t2");
+    expect(text).not.toContain("tail-t1");
 
-    await ui.press({ key: second?.key ?? "missing" }); // back to the default for the next surface
+    await ui.press({ key: first?.key ?? "missing" }); // back to the first for the next surface
     await ui.unmount();
   }
 });
@@ -1039,10 +1038,11 @@ test("an unknown phase draws no current station; stopped_phase marks the station
   await r.clock.advance(4_000);
 
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
-  const [, lane, labels] = await rowsOf(ui, "t1");
-  expect(lane).toMatch(/^ *●━━━━●━━━━✕┈┈┈┈○/);
-  expect(lane).toContain("✕ 失敗");
-  expect(labels).toContain("準備 実行 検証 PR");
+  const [lane] = await rowsOf(ui, "t1");
+  expect(lane).toMatch(/●━━━━●━━━━✕┈┈┈┈○/);
+  expect(lane).toContain("✕ A");
+  expect(lane).toContain("失敗");
+  expect(await allText(ui)).toContain("準備 実行 検証 PR");
   await ui.unmount();
 });
 
@@ -1139,7 +1139,7 @@ const startScrollRig = async ($: Engine, on: On, tail: string) => {
   return r;
 };
 
-test("the header (heading, worker rows, title, link) is drawn whatever the output, and the pane fits its rows", async ($, on) => {
+test("the header (heading, column header, worker rows, title line) is drawn whatever the output, and the pane fits its rows", async ($, on) => {
   await startScrollRig($, on, manyRows(0, 99).slice(0, 4000));
 
   for (const surface of SURFACES) {
@@ -1154,10 +1154,10 @@ test("the header (heading, worker rows, title, link) is drawn whatever the outpu
       /^row\d+$/.test(t.text ?? ""),
     );
     expect(outputRows.length).toBeGreaterThan(0);
-    // heading + the worker's 3 buttons + title + link + frame (2) + command + the output window
+    // heading + column header + the worker's 2 buttons + title line (links on its right) + frame (2) + command + the output window
     const buttonCount = (await ui.findAll({ type: "Button" })).length;
-    expect(buttonCount).toBe(3);
-    const rowsDrawn = 1 + buttonCount + 1 + 1 + 2 + 1 + outputRows.length;
+    expect(buttonCount).toBe(2);
+    const rowsDrawn = 1 + 1 + buttonCount + 1 + 2 + 1 + outputRows.length;
     expect(rowsDrawn).toBeLessThanOrEqual(12);
     await ui.unmount();
   }
@@ -1270,8 +1270,8 @@ test("the output is framed; the command sits inside the frame; the whole tree fi
       (b) => (b as { props?: { borderStyle?: string } }).props?.borderStyle !== undefined,
     );
     expect(framed).toHaveLength(1);
-    // list 1 + title + status + phase + now + link = 6; frame 2 + command 1; window = 14 - 9
-    expect(await outputRowsOf(ui)).toEqual(["row95", "row96", "row97", "row98", "row99"]);
+    // heading + column header + 2 worker rows + title line = 5; frame 2 + command 1; window = 14 - 8
+    expect(await outputRowsOf(ui)).toEqual(["row94", "row95", "row96", "row97", "row98", "row99"]);
     expect(await ui.find({ type: "Text", text: /^\$ make$/ })).toBeDefined();
     await ui.unmount();
   }
@@ -1291,7 +1291,7 @@ test("with no command the frame costs only its two border rows", async ($, on) =
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...small(14), surface: "terminal" });
-  expect(await outputRowsOf(ui)).toHaveLength(6);
+  expect(await outputRowsOf(ui)).toHaveLength(7);
   await ui.unmount();
 });
 
@@ -1305,8 +1305,8 @@ test("a PR link sits beside the dashboard link when pr is https", async ($, on) 
     expect(links).toHaveLength(2);
     expect(JSON.stringify(links)).toContain("PR #42");
     expect(JSON.stringify(links)).toContain("https://github.com/o/r/pull/42");
-    // same row as the dashboard link: the window keeps its size
-    expect(await outputRowsOf(ui)).toHaveLength(5);
+    // on the title line, not a row of its own: the window keeps its size
+    expect(await outputRowsOf(ui)).toHaveLength(6);
     await ui.unmount();
   }
 });
@@ -1331,7 +1331,7 @@ test("no PR link when pr is missing, null, malformed or not https", async ($, on
     await r.clock.advance(4_000);
     const ui = await $.ui.mount({ ...small(14), surface: "terminal" });
     expect(await ui.findAll({ type: "Link" })).toHaveLength(1);
-    expect(await outputRowsOf(ui)).toHaveLength(5);
+    expect(await outputRowsOf(ui)).toHaveLength(6);
     await ui.unmount();
   }
 });
@@ -1370,13 +1370,15 @@ test("the task_status fallback takes the PR from draft_pr_url", async ($, on) =>
   await ui.unmount();
 });
 
-test("an automatic switch of the shown task puts the window back to following", async ($, on) => {
+test("a switch of the shown worker (to the new task, when the old one has ended) puts the window back to following", async ($, on) => {
   const r = rig(on);
   on("ui.scroll", () => ({}));
+  const ended = { value: false };
   r.answers.set(START, startAnswer("t1"));
-  r.setHandler(() =>
+  r.setHandler((call) =>
     ok(
-      consoleBody("t1", {
+      consoleBody(String(call.args.task_id), {
+        status: ended.value && call.args.task_id === "t1" ? "COMPLETED" : "RUNNING",
         output: {
           command: wrap("make"),
           tail: wrap(manyRows(0, 99)),
@@ -1389,12 +1391,14 @@ test("an automatic switch of the shown task puts the window back to following", 
   await startSession($);
   await $.tool.call({ tool: START, title: "Old", repository: "o/r" });
   await r.clock.advance(4_000);
+  ended.value = true;
+  await r.clock.advance(4_000); // Old ends; the pane stays on it
   await scrollBy($, -8);
   let ui = await $.ui.mount({ ...small(12), surface: "terminal" });
   expect(await allText(ui)).not.toMatch(/^row99$/m);
   await ui.unmount();
 
-  // a newer running task takes over the pane by itself
+  // a new running task arrives; the shown one has ended, so the pane moves to it and follows again
   r.answers.set(START, startAnswer("t2"));
   await $.tool.call({ tool: START, title: "New", repository: "o/r" });
   await r.clock.advance(4_000);
@@ -1473,11 +1477,14 @@ test("the glyph of each state has its own theme color", async ($, on) => {
   const pairs = (await ui.findAll({ type: "Text" })).map(
     (n) => `${(n as { text?: string }).text}|${(n as { props?: { color?: string } }).props?.color}`,
   );
-  // the result at the right of each lane carries the state color
-  expect(pairs).toContain("✓ 完了|success");
-  expect(pairs).toContain("✕ 失敗|error");
-  expect(pairs).toContain("入力待ち|warning");
-  expect(pairs).toContain("– 取り消し|inactive");
+  // the glyph in front of an ended worker, and its result, carry the state color; the question note is warning
+  expect(pairs).toContain("✓|success");
+  expect(pairs).toContain("✕|error");
+  expect(pairs).toContain("–|inactive");
+  expect(pairs).toContain("完了|success");
+  expect(pairs).toContain("失敗|error");
+  expect(pairs).toContain("取り消し|inactive");
+  expect(pairs).toContain("? 質問に答えてください（会話で task_answer）|warning");
   await ui.unmount();
 });
 
@@ -1511,11 +1518,11 @@ test("the selected row mark, lane marks, links and frame are colored; body text 
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
 
-  expect(await colorOf(ui, /^▸$/)).toBe("claude");
+  expect(await colorOf(ui, /^▎$/)).toBe("claude");
   expect(await colorOf(ui, /^●$/)).toBe("success");
   expect(await colorOf(ui, /^[◐◓◑◒]$/)).toBe("suggestion");
   expect(await colorOf(ui, /^○$/)).toBe("subtle");
-  expect(await colorOf(ui, /ダッシュボードを開く/)).toBe("suggestion");
+  expect(await colorOf(ui, /^ダッシュボード$/)).toBe("suggestion");
   expect(await colorOf(ui, /^line1/)).toBeUndefined();
   expect(await colorOf(ui, /^\$ pnpm test$/)).toBeUndefined();
   expect(await colorOf(ui, /^editing src/)).toBeUndefined();
@@ -1571,7 +1578,7 @@ test("only terminal tasks stored: session.start then open fetches the console on
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   // a finished worker shows its result on the lane; the console below holds the fetched output
   expect(await allText(ui)).toContain("line1");
-  expect((await rowsOf(ui, "t1"))[1]).toContain("✓ 完了");
+  expect((await rowsOf(ui, "t1"))[0]).toMatch(/✓ .*完了/);
   expect(await allText(ui)).not.toContain("まだ取得していません。");
   await ui.unmount();
 });
@@ -1685,7 +1692,7 @@ const mountPane = ($: Engine, bodyRows = 30) =>
     surface: "terminal",
   });
 
-test("with task_list, workers from other sessions are listed: 3 rows each, counts in the heading", async ($, on) => {
+test("with task_list, workers from other sessions are listed: 2 rows working, 1 row ended, counts in the heading", async ($, on) => {
   const r = rig(on, { now: T0, store: ENDPOINT });
   r.setListHandler(() =>
     listOf(
@@ -1719,23 +1726,23 @@ test("with task_list, workers from other sessions are listed: 3 rows each, count
   expect(text).toContain("作業中 1 · 質問待ち 1 · 完了 1");
   expect(text).not.toMatch(/USD|費用|\$\d/);
 
-  const [a1, a2, a3] = await rowsOf(ui, "L1");
+  const [a1, a2] = await rowsOf(ui, "L1");
   expect(a1).toContain("Listed 1");
-  expect(a1).toContain("repo");
   expect(a1).toContain("sonnet");
-  expect(a2).toContain("●");
-  expect(a3).toContain("準備 実行 検証 PR");
+  expect(a1).toContain("●");
+  expect(a2).toContain("repo");
+  expect(text).toContain("準備 実行 検証 PR");
 
-  const [b1, b2, b3] = await rowsOf(ui, "L2");
+  const [b1, b2] = await rowsOf(ui, "L2");
   expect(b1).toContain("opus");
-  expect(b2).toContain("入力待ち");
-  expect(b3).toContain("取出 調査 投稿");
-  expect(b3).not.toContain("PR");
+  expect(b2).toContain("質問に答えてください");
+  expect(text).toContain("取出 調査 投稿"); // the review group has its own header
 
   const [c1, c2] = await rowsOf(ui, "L3");
-  expect(c1).toContain("Listed 3");
-  expect(c2).toContain("✓ PR #5");
-  expect(c2).not.toContain("┈");
+  expect(c1).toContain("✓ Listed 3");
+  expect(c1).toContain("PR #5");
+  expect(c1).not.toContain("┈");
+  expect(c2).toBe("");
   await ui.unmount();
 });
 
@@ -1771,11 +1778,12 @@ test("without task_list (today's server) it falls back: only tasks picked up fro
 
   const ui = await mountPane($);
   const all = await buttons(ui);
-  expect(all.filter((b) => (b.key ?? "").startsWith("row:"))).toHaveLength(3);
-  const [row1, row2, row3] = await rowsOf(ui, "t1");
+  expect(all.filter((b) => (b.key ?? "").startsWith("row:"))).toHaveLength(2);
+  const [row1, row2] = await rowsOf(ui, "t1");
   expect(row1).toContain("Mine");
-  expect(row2).toContain("●");
-  expect(row3).toContain("準備 実行 検証 PR");
+  expect(row1).toContain("●");
+  expect(row2).toContain("r");
+  expect(await allText(ui)).toContain("準備 実行 検証 PR");
   expect(r.calls.every((c) => c.tool === "task_console")).toBe(true);
   await ui.unmount();
 });
@@ -1824,8 +1832,8 @@ test("pressing a worker's row switches the console below to that worker", async 
   expect(text).toContain("tail-L1");
   expect(text).toContain("cmd-L1");
   expect(text).not.toContain("tail-L2");
-  // 3 行のどれを押しても選べる
-  const second = (await buttons(ui)).find((b) => b.key === "row:rovo-direct/L2:2");
+  // 2 行のどちらを押しても選べる
+  const second = (await buttons(ui)).find((b) => b.key === "row:rovo-direct/L2:1");
   await ui.press({ key: second?.key ?? "missing" });
   expect(await allText(ui)).toContain("tail-L2");
   await ui.unmount();
@@ -1841,18 +1849,21 @@ test("the light flows on a running worker and stops on one waiting for an answer
 
   const runLanes: string[] = [];
   const waitLanes: string[] = [];
+  const waitNotes: string[] = [];
   for (let i = 0; i < 8; i++) {
     await r.clock.advance(700);
     const ui = await mountPane($);
-    runLanes.push((await rowsOf(ui, "L1"))[1] ?? "");
-    waitLanes.push((await rowsOf(ui, "L2"))[1] ?? "");
+    runLanes.push((await rowsOf(ui, "L1"))[0] ?? "");
+    waitLanes.push((await rowsOf(ui, "L2"))[0] ?? "");
+    waitNotes.push((await rowsOf(ui, "L2"))[1] ?? "");
     await ui.unmount();
   }
   expect(runLanes.some((t) => t.includes("▶"))).toBe(true);
   expect(new Set(runLanes).size).toBeGreaterThan(2);
   for (const t of waitLanes) expect(t).not.toContain("▶");
   expect(waitLanes.some((t) => t.includes("?"))).toBe(true);
-  expect(waitLanes.some((t) => !t.includes("?") && t.includes("入力待ち"))).toBe(true);
+  expect(waitLanes.some((t) => !t.includes("?"))).toBe(true);
+  for (const n of waitNotes) expect(n).toContain("質問に答えてください");
 });
 
 test("a worker that just reached a station shows a bright ◉ for a moment", async ($, on) => {
@@ -1866,13 +1877,13 @@ test("a worker that just reached a station shows a bright ◉ for a moment", asy
   await r.clock.advance(4_000); // list を取り直す
   await r.clock.advance(700);
   let ui = await mountPane($);
-  const arrived = (await rowsOf(ui, "L1"))[1] ?? "";
+  const arrived = (await rowsOf(ui, "L1"))[0] ?? "";
   expect(arrived).toContain("◉");
   await ui.unmount();
 
   await r.clock.advance(700 * 4);
   ui = await mountPane($);
-  expect((await rowsOf(ui, "L1"))[1]).not.toContain("◉");
+  expect((await rowsOf(ui, "L1"))[0]).not.toContain("◉");
   await ui.unmount();
 });
 
@@ -1904,7 +1915,7 @@ test("the redraw timer stops when every worker is terminal and starts again for 
     for (let i = 0; i < n; i++) {
       await r.clock.advance(700);
       const ui = await mountPane($);
-      out.push((await rowsOf(ui, id))[1] ?? "");
+      out.push((await rowsOf(ui, id))[0] ?? "");
       await ui.unmount();
     }
     return out;
@@ -1916,7 +1927,7 @@ test("the redraw timer stops when every worker is terminal and starts again for 
   await r.clock.advance(8_000);
   const finished = await laneFrames("L1", 4);
   expect(new Set(finished).size).toBe(1);
-  expect(finished[0]).toContain("✓ 完了");
+  expect(finished[0]).toMatch(/✓ .*完了/);
 
   phase = "again";
   await r.clock.advance(21_000); // an idle list is read less often
@@ -1966,13 +1977,13 @@ test("a failed worker marks the station it stopped at with ✕", async ($, on) =
   await startSession($);
   await r.clock.settle();
   const ui = await mountPane($);
-  const row2 = (await rowsOf(ui, "L1"))[1] ?? "";
-  expect(row2).toContain("✕");
-  expect(row2).not.toContain("▶");
+  const row1 = (await rowsOf(ui, "L1"))[0] ?? "";
+  expect(row1).toContain("✕");
+  expect(row1).not.toContain("▶");
   await ui.unmount();
 });
 
-test("the list and console fit bodyRows; with little room fewer workers are listed and the selected one stays", async ($, on) => {
+test("the list and console fit bodyRows; with little room fewer workers are listed (ended rows first) and the shown one stays", async ($, on) => {
   const r = rig(on, { now: T0, store: ENDPOINT });
   r.setListHandler(() => listOf(item(1), item(2), item(3), item(4), item(5), item(6)));
   await startSession($);
@@ -1984,7 +1995,9 @@ test("the list and console fit bodyRows; with little room fewer workers are list
     const workers = new Set(all.map((b) => (b.key ?? "").split(":")[1]));
     expect(workers.size).toBeGreaterThanOrEqual(1);
     expect(workers.size).toBeLessThanOrEqual(4);
-    expect(all.length).toBe(workers.size * 3);
+    expect(all.length).toBe(workers.size * 2);
+    // list rows + heading + column header + title line + frame (2) + at least 6 output rows fit
+    expect(all.length + 2 + 1 + 2 + 6).toBeLessThanOrEqual(Math.max(rows, all.length + 11));
     expect(await ui.find({ type: "Text", text: /他 \d+ 件/ })).toBeDefined();
     await ui.unmount();
   }
@@ -2021,16 +2034,16 @@ test("without task_list a worker waiting for an answer (INPUT_REQUIRED) also sto
   await $.tool.call({ tool: START, title: "Asks", repository: "o/r" });
   await r.clock.advance(4_000);
   const lanes: string[] = [];
+  const notes: string[] = [];
   for (let i = 0; i < 6; i++) {
     await r.clock.advance(700);
     const ui = await mountPane($);
-    lanes.push((await rowsOf(ui, "t1"))[1] ?? "");
+    lanes.push((await rowsOf(ui, "t1"))[0] ?? "");
+    notes.push((await rowsOf(ui, "t1"))[1] ?? "");
     await ui.unmount();
   }
-  for (const l of lanes) {
-    expect(l).not.toContain("▶");
-    expect(l).toContain("入力待ち");
-  }
+  for (const l of lanes) expect(l).not.toContain("▶");
+  for (const n of notes) expect(n).toContain("質問に答えてください");
   expect(lanes.some((l) => l.includes("?"))).toBe(true);
   expect(lanes.some((l) => !l.includes("?"))).toBe(true);
 });
@@ -2312,15 +2325,15 @@ test("the buffer keeps the last 500 lines per worker, and a held window does not
 test("the frame fills the rest of the pane, with or without a log, and keeps a minimum when rows are short", async ($, on) => {
   const events: unknown[] = [cmdEv(1, "ls"), cmdEv(2, "pwd")];
   await startLogRig($, on, events);
-  // heading + the worker's 3 rows + title + links = 6 rows above the frame
+  // heading + column header + the worker's 2 rows + title line = 5 rows above the frame
   let ui = await mountPane($, 20);
   let boxes = await framedBoxes(ui);
   expect(boxes).toHaveLength(1);
-  expect(boxes[0]?.props?.height).toBe(20 - 6);
+  expect(boxes[0]?.props?.height).toBe(20 - 5);
   await ui.unmount();
   ui = await mountPane($, 40);
   boxes = await framedBoxes(ui);
-  expect(boxes[0]?.props?.height).toBe(40 - 6);
+  expect(boxes[0]?.props?.height).toBe(40 - 5);
   await ui.unmount();
   ui = await mountPane($, 3);
   boxes = await framedBoxes(ui);
@@ -2333,7 +2346,7 @@ test("without a log the frame also fills the rest, command row included", async 
   const ui = await mountPane($, 20);
   const boxes = await framedBoxes(ui);
   expect(boxes).toHaveLength(1);
-  expect(boxes[0]?.props?.height).toBe(20 - 6);
+  expect(boxes[0]?.props?.height).toBe(20 - 5);
   await ui.unmount();
 });
 
@@ -2368,7 +2381,7 @@ test("a restored log is shown after the first poll, which asks from the stored c
 
 test("the title takes the width the other columns leave, and model and repo are short", async ($, on) => {
   const r = rig(on, { now: T0, store: ENDPOINT });
-  const long = "task_list: 途中で切れない長い題名のワーカー";
+  const long = "task_list: 途中で切れない題名";
   r.setListHandler(() =>
     listOf(
       item(1, { title: long, repository: "youyo/rovo", model: "anthropic/claude-sonnet-5-5" }),
@@ -2377,12 +2390,12 @@ test("the title takes the width the other columns leave, and model and repo are 
   await startSession($);
   await r.clock.settle();
   const ui = await mountPane($);
-  const [row] = await rowsOf(ui, "L1");
+  const [row, row2] = await rowsOf(ui, "L1");
   expect(row).toContain(long);
   expect(row).toContain("sonnet-5.5");
   expect(row).not.toContain("anthropic");
-  expect(row).toContain("rovo");
-  expect(row).not.toContain("youyo/");
+  expect(row2).toContain("rovo");
+  expect(row2).not.toContain("youyo/");
   await ui.unmount();
 
   const narrow = await $.ui.mount({
@@ -2392,19 +2405,305 @@ test("the title takes the width the other columns leave, and model and repo are 
   });
   const [small1] = await rowsOf(narrow, "L1");
   expect(small1).toContain("…");
-  expect(small1).toContain("sonnet-5.5");
+  expect(small1).not.toContain("anthropic");
   await narrow.unmount();
 });
 
-test("repo and model show on the first row as soon as task_start gave them, before task_list answers", async ($, on) => {
+test("model (first row) and repo (second row) show as soon as task_start gave them, before task_list answers", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1", { model: "anthropic/claude-haiku-5-5" }));
   await startSession($);
   await $.tool.call({ tool: START, title: "Just started", repository: "youyo/rovo" });
   const ui = await mountPane($);
-  const [row] = await rowsOf(ui, "t1");
-  expect(row).toContain("rovo");
+  const [row, row2] = await rowsOf(ui, "t1");
   expect(row).toContain("haiku-5.5");
-  expect(row).not.toContain("youyo/");
+  expect(row2).toContain("rovo");
+  expect(row2).not.toContain("youyo/");
   await ui.unmount();
+});
+
+// --- 0.6.0: information design --------------------------------------------------
+
+const tailHandler = (call: McpCall) => {
+  const id = String(call.args.task_id);
+  return ok(
+    consoleBody(id, {
+      now: { text: wrap(`$ doing-${id}`), at: "x" },
+      output: { command: wrap(`cmd-${id}`), tail: wrap(`tail-${id}`), running: true },
+    }),
+  );
+};
+
+/** list を差し替えられる rig。items の中身を変えて clock を進める。 */
+const listRig = async ($: Engine, on: On, initial: unknown[]) => {
+  const items = [...initial];
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() => listOf(...items));
+  r.setHandler(tailHandler);
+  on("ui.scroll", () => ({}));
+  await startSession($);
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  return { r, items };
+};
+
+const buttonsOf = async (ui: Finder, taskId: string) =>
+  (await buttons(ui)).filter((b) => (b.key ?? "").startsWith(`row:rovo-direct/${taskId}:`));
+
+const done = (n: number, over: Record<string, unknown> = {}) =>
+  item(n, {
+    status: "COMPLETED",
+    stage: "done",
+    ended_at: "2026-01-01T00:07:00Z",
+    pr: { number: 80 + n, url: `https://github.com/o/r/pull/${80 + n}` },
+    ...over,
+  });
+
+test("the station names appear once, in the column header; workers have no station row", async ($, on) => {
+  await listRig($, on, [item(1), item(2), done(3)]);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text.split("準備 実行 検証 PR").length - 1).toBe(1);
+  expect(text).toContain("タイトル");
+  expect(text).toContain("モデル");
+  expect(text).toContain("経過");
+  expect(text).not.toContain("題名");
+  for (const b of await buttons(ui)) expect(b.text ?? "").not.toContain("準備");
+  expect(text).not.toContain("レビュー"); // no review worker: no review header
+  await ui.unmount();
+});
+
+test("review workers are grouped under their own header with their own stations", async ($, on) => {
+  await listRig($, on, [item(1), item(2, { kind: "review", stage: "investigate" })]);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text.split("レビュー").length - 1).toBe(1);
+  expect(text.split("取出 調査 投稿").length - 1).toBe(1);
+  expect(text.indexOf("準備 実行 検証 PR")).toBeLessThan(text.indexOf("取出 調査 投稿"));
+  await ui.unmount();
+});
+
+test("a working worker has two rows (title+track+model+time, then repo+doing); an ended one has one dim row", async ($, on) => {
+  await listRig($, on, [item(1, { model: "anthropic/claude-sonnet-5-5" }), done(3)]);
+  const ui = await mountPane($);
+  const w = await buttonsOf(ui, "L1");
+  expect(w.map((b) => b.key)).toEqual(["row:rovo-direct/L1:0", "row:rovo-direct/L1:1"]);
+  expect(w[0]?.text).toContain("Listed 1");
+  expect(w[0]?.text).toContain("sonnet-5.5");
+  expect(w[0]?.text).toMatch(/[◐◓◑◒◉]/);
+  expect(w[0]?.text).toMatch(/\d+分\d+秒$/);
+  expect(w[1]?.text).toMatch(/^(▎| ) {3}repo {2}\$ doing-L1/);
+  const e = await buttonsOf(ui, "L3");
+  expect(e.map((b) => b.key)).toEqual(["row:rovo-direct/L3:0"]);
+  expect(e[0]?.text).toContain("✓ Listed 3");
+  expect(e[0]?.text).toContain("PR #83");
+  expect(e[0]?.text).toMatch(/\d+分前$/);
+  expect(e[0]?.text).not.toContain("┈");
+  await ui.unmount();
+});
+
+test("a failed worker is one row too, and is not dimmed; a completed one is dim except ✓ and PR #", async ($, on) => {
+  await listRig($, on, [
+    done(1),
+    item(2, { status: "FAILED", stage: "verify", ended_at: "2026-01-01T00:08:00Z", model: "opus" }),
+  ]);
+  const ui = await mountPane($);
+  const texts = (await ui.findAll({ type: "Text" })) as {
+    text?: string;
+    props?: Record<string, unknown>;
+  }[];
+  const flags = (needle: RegExp) =>
+    texts.filter((t) => needle.test(t.text ?? "")).map((t) => t.props?.dimColor === true);
+  expect(flags(/^Listed 1/).every(Boolean)).toBe(true); // completed title: dim
+  expect(flags(/^Listed 2/).some(Boolean)).toBe(false); // failed title: not dim
+  expect((await buttonsOf(ui, "L2")).map((b) => b.key)).toHaveLength(1);
+  expect((await buttonsOf(ui, "L2"))[0]?.text).toContain("✕ Listed 2");
+  expect((await buttonsOf(ui, "L2"))[0]?.text).toContain("失敗");
+  await ui.unmount();
+});
+
+test("at most 5 ended rows, with a note for the rest", async ($, on) => {
+  const ended = [1, 2, 3, 4, 5, 6, 7].map((n) => done(n));
+  await listRig($, on, [item(8), ...ended]);
+  const ui = await mountPane($, 40);
+  const rows = (await buttons(ui)).filter(
+    (b) => b.key?.endsWith(":0") && (b.text ?? "").includes("✓"),
+  );
+  expect(rows).toHaveLength(5);
+  expect(await allText(ui)).toContain("他 2 件（完了。終わって 1 時間で消えます）");
+  await ui.unmount();
+});
+
+test("order: waiting, then working (newest first), then ended (newest first)", async ($, on) => {
+  await listRig($, on, [
+    item(1),
+    item(2),
+    item(3, { status: "INPUT_REQUIRED", waiting_for_answer: true }),
+    done(4, { ended_at: "2026-01-01T00:05:00Z" }),
+    done(5, { ended_at: "2026-01-01T00:09:00Z" }),
+  ]);
+  const ui = await mountPane($, 40);
+  const order = (await buttons(ui))
+    .filter((b) => b.key?.endsWith(":0"))
+    .map((b) => b.key?.split("/")[1]?.split(":")[0]);
+  expect(order).toEqual(["L3", "L2", "L1", "L5", "L4"]);
+  await ui.unmount();
+});
+
+test("a waiting worker's second row is the warning note", async ($, on) => {
+  await listRig($, on, [item(1, { status: "INPUT_REQUIRED", waiting_for_answer: true })]);
+  const ui = await mountPane($);
+  expect((await buttonsOf(ui, "L1"))[1]?.text).toContain(
+    "? 質問に答えてください（会話で task_answer）",
+  );
+  await ui.unmount();
+});
+
+test("the shown worker has a ▎ bar on every row and a bold title; the old ▸ is gone", async ($, on) => {
+  await listRig($, on, [item(1), item(2)]);
+  const ui = await mountPane($);
+  for (const b of await buttonsOf(ui, "L2")) expect(b.text ?? "").toMatch(/^▎/);
+  for (const b of await buttonsOf(ui, "L1")) expect(b.text ?? "").not.toContain("▎");
+  expect(await allText(ui)).not.toContain("▸");
+  const bars = (await ui.findAll({ type: "Text" })) as {
+    text?: string;
+    props?: Record<string, unknown>;
+  }[];
+  expect(bars.filter((t) => t.text === "▎").every((t) => t.props?.color === "claude")).toBe(true);
+  expect(bars.find((t) => t.text?.startsWith("Listed 2"))?.props?.weight).toBe("bold");
+  await ui.unmount();
+});
+
+test("the links sit at the right end of the shown worker's full-title line; no separate link row", async ($, on) => {
+  await listRig($, on, [
+    item(1, {
+      pr: { number: 9, url: "https://github.com/o/r/pull/9" },
+      dashboard_url: "https://dash.example/tasks/L1",
+      title: "A fairly long full title of the worker",
+    }),
+  ]);
+  const ui = await mountPane($, 30);
+  const text = await allText(ui);
+  expect(text).toContain("─ ");
+  expect(text).toContain("A fairly long full title of the worker");
+  expect(await ui.findAll({ type: "Link" })).toHaveLength(2);
+  expect(text.indexOf("A fairly long full title")).toBeLessThan(text.indexOf("PR #9"));
+  const bar = await ui.find({ type: "Box", key: "titlebar" });
+  expect(bar).toBeDefined();
+  // heading + column header + (2 worker rows) + title line + frame (+ window) fit the rows
+  const frameHeight = (await framedBoxes(ui))[0]?.props?.height ?? 0;
+  const rowsDrawn = 1 + 1 + 2 + 1 + frameHeight;
+  expect(rowsDrawn).toBeLessThanOrEqual(30);
+  await ui.unmount();
+});
+
+test("watching a working worker, a new task does not take the pane away", async ($, on) => {
+  const { r, items } = await listRig($, on, [item(1), item(2)]);
+  let ui = await mountPane($);
+  expect(await allText(ui)).toContain("tail-L2");
+  await ui.unmount();
+  items.push(item(3, { created_at: "2026-01-01T00:09:00Z" }));
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  expect(await allText(ui)).toContain("tail-L2");
+  expect(await allText(ui)).not.toContain("tail-L3");
+  await ui.unmount();
+});
+
+test("a worker turning to waiting does not take the pane from a working one either", async ($, on) => {
+  const { r, items } = await listRig($, on, [item(1), item(2)]);
+  items[0] = item(1, { status: "INPUT_REQUIRED", waiting_for_answer: true });
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).toContain("tail-L2");
+  expect(text).not.toContain("tail-L1");
+  await ui.unmount();
+});
+
+test("the pane stays on a worker that completes, and moves at the next new task", async ($, on) => {
+  const { r, items } = await listRig($, on, [item(1), item(2)]);
+  items[1] = done(2);
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  let ui = await mountPane($);
+  let text = await allText(ui);
+  expect(text).toContain("tail-L2"); // still L2, its last output and PR readable
+  await ui.unmount();
+
+  items.push(item(3, { created_at: "2026-01-01T00:09:00Z" }));
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  text = await allText(ui);
+  expect(text).toContain("tail-L3"); // newest working one
+  await ui.unmount();
+});
+
+test("watching an ended worker (picked by click), a new task takes the pane; waiting beats working", async ($, on) => {
+  const { r, items } = await listRig($, on, [item(1), done(2)]);
+  let ui = await mountPane($);
+  const ended = (await buttons(ui)).find((b) => b.key === "row:rovo-direct/L2:0");
+  await ui.press({ key: ended?.key ?? "missing" });
+  expect(await allText(ui)).toContain("tail-L2");
+  await ui.unmount();
+
+  items.push(item(3, { created_at: "2026-01-01T00:08:00Z" }));
+  items.push(
+    item(4, {
+      created_at: "2026-01-01T00:09:00Z",
+      status: "INPUT_REQUIRED",
+      waiting_for_answer: true,
+    }),
+  );
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).toContain("tail-L4");
+  expect(text).not.toContain("tail-L3");
+  await ui.unmount();
+});
+
+test("a click on a working worker pins it: new tasks do not move it, and it stays after it ends", async ($, on) => {
+  const { r, items } = await listRig($, on, [item(1), item(2)]);
+  let ui = await mountPane($);
+  const first = (await buttons(ui)).find((b) => b.key === "row:rovo-direct/L1:1");
+  await ui.press({ key: first?.key ?? "missing" });
+  expect(await allText(ui)).toContain("tail-L1");
+  await ui.unmount();
+
+  items.push(item(3, { created_at: "2026-01-01T00:09:00Z" }));
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  expect(await allText(ui)).toContain("tail-L1");
+  await ui.unmount();
+
+  items[0] = done(1);
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  expect(await allText(ui)).toContain("tail-L1");
+  await ui.unmount();
+});
+
+test("at start (nothing shown yet) the pane picks a waiting worker first, then the newest working one", async ($, on) => {
+  await listRig($, on, [item(1, { status: "INPUT_REQUIRED", waiting_for_answer: true }), item(2)]);
+  const ui = await mountPane($);
+  expect(await allText(ui)).toContain("tail-L1");
+  await ui.unmount();
+});
+
+test("the pane does not jump while rendering: the shown worker is the same across redraws", async ($, on) => {
+  const { r, items } = await listRig($, on, [item(1), item(2)]);
+  for (let i = 0; i < 3; i++) {
+    items.push(item(10 + i, { created_at: `2026-01-01T00:0${3 + i}:00Z` }));
+    await r.clock.advance(4_000);
+    const ui = await mountPane($);
+    expect(await allText(ui)).toContain("tail-L2");
+    await ui.unmount();
+  }
 });

@@ -434,12 +434,7 @@ export const logStyle = (kind: LogKind): { color?: ThemeKey; dim?: boolean; bold
   }
 };
 
-// --- 列の幅 -------------------------------------------------------------------------
-
-const MARK_W = 2;
-const GAPS_W = 3;
-const MIN_TITLE = 8;
-const MIN_SHRUNK = 6;
+// --- 列の幅 ---------------------------------------------------------------------------
 
 /** `anthropic/claude-sonnet-5-5` → `sonnet-5.5`。provider/ と claude- を落とし、末尾の -N-N を -N.N に。 */
 export const shortModel = (model: string): string =>
@@ -451,23 +446,6 @@ export const shortModel = (model: string): string =>
 /** `owner/name` → `name`。 */
 export const repoName = (repository: string | undefined): string =>
   (repository ?? "").split("/").pop() ?? "";
-
-/**
- * 1 行目の列の幅。題名は、全体の幅から選択の印・列の間・他の列を引いた残り。
- * 題名が狭くなりすぎるときは、リポジトリ、モデルの順に縮める（それぞれ 6 桁まで）。
- */
-export const laneColumns = (
-  total: number,
-  want: { repo: number; model: number; elapsed: number },
-): { title: number; repo: number; model: number; elapsed: number } => {
-  let { repo, model } = want;
-  const elapsed = want.elapsed;
-  const room = (): number => total - MARK_W - GAPS_W - repo - model - elapsed;
-  if (room() < MIN_TITLE) repo = Math.max(Math.min(repo, MIN_SHRUNK), repo - (MIN_TITLE - room()));
-  if (room() < MIN_TITLE)
-    model = Math.max(Math.min(model, MIN_SHRUNK), model - (MIN_TITLE - room()));
-  return { title: Math.max(1, room()), repo, model, elapsed };
-};
 
 /** 末尾の n 行。長い行は切る。 */
 export const tailLines = (s: string, n: number = TAIL_LINES): string =>
@@ -1027,4 +1005,197 @@ export const matchRovoTool = (tool: string): { server: string; prefix: string } 
   const server = parts.slice(1, -1).join("__");
   if (hit === null || server === "") return null;
   return { server, prefix: hit[1] ?? "" };
+};
+
+// --- ペインの情報設計（0.6.0） -------------------------------------------------------
+
+/** 線路の列の幅（線路 16 桁 + あき 2）。 */
+export const TRACK_COL = 18;
+const MODEL_COL = 10;
+const ELAPSED_COL = 9;
+const MARK_COL = 2;
+
+export type PaneCols = { title: number; model: number; elapsed: number };
+
+/**
+ * 1 行目の列の幅。選択の帯 2 + タイトル + あき 1 + 線路 18 + モデル + あき 1 + 経過。
+ * タイトルは残りを使う。狭くてタイトルが 12 桁を割るときは、モデルの列をやめる。
+ */
+export const paneColumns = (total: number): PaneCols => {
+  const rest = (model: number): number =>
+    total - MARK_COL - 1 - TRACK_COL - model - (model > 0 ? 1 : 0) - ELAPSED_COL;
+  let model = MODEL_COL;
+  if (rest(model) < 12) model = 0;
+  return { title: Math.max(1, rest(model)), model, elapsed: ELAPSED_COL };
+};
+
+const stationNames = (kind: TaskKind): string =>
+  STATIONS[kind]
+    .map((name, i, all) => (i === all.length - 1 ? name : padWidth(name, COLUMN)))
+    .join("");
+
+/** 列見出しの 1 行（駅の名前はここに 1 回だけ）。 */
+export const columnHeader = (cols: PaneCols, kind: TaskKind): string => {
+  const title = padWidth(`${" ".repeat(MARK_COL)}タイトル`, MARK_COL + cols.title);
+  const track = padWidth(stationNames(kind), TRACK_COL);
+  const model = cols.model > 0 ? padWidth("モデル", cols.model) + " " : "";
+  const elapsed = " ".repeat(Math.max(0, cols.elapsed - displayWidth("経過"))) + "経過";
+  return `${title} ${track}${model}${elapsed}`;
+};
+
+/** review のワーカーをまとめた直前の見出し（そのグループ専用の駅の名前）。 */
+export const reviewHeader = (cols: PaneCols): string =>
+  `${padWidth(`${" ".repeat(MARK_COL)}レビュー`, MARK_COL + cols.title)} ${stationNames("review")}`;
+
+/** 終了からの時間。1 分未満は「たった今」。 */
+export const agoText = (ms: number): string => {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000);
+  if (minutes < 1) return "たった今";
+  return minutes < 60 ? `${minutes}分前` : `${Math.floor(minutes / 60)}時間前`;
+};
+
+const isDone = (t: RovoTask): boolean => isTerminal(t.status);
+
+/** 並び: 質問待ち → 作業中（開始が新しい順）→ 終端（終了が新しい順）。同じなら元の順。 */
+export const orderTasks = (tasks: readonly RovoTask[]): RovoTask[] => {
+  const rank = (t: RovoTask): number => (isDone(t) ? 2 : isWaiting(t) ? 0 : 1);
+  return tasks
+    .map((t, i) => ({ t, i }))
+    .sort((a, b) => {
+      const ra = rank(a.t);
+      const rb = rank(b.t);
+      if (ra !== rb) return ra - rb;
+      const ka = ra === 2 ? (a.t.terminalAt ?? a.t.startedAt) : a.t.startedAt;
+      const kb = rb === 2 ? (b.t.terminalAt ?? b.t.startedAt) : b.t.startedAt;
+      return kb - ka || a.i - b.i;
+    })
+    .map(({ t }) => t);
+};
+
+/** 自動で出すワーカー: 質問待ち > 最新の実行中 > 最新（開始が新しいもの。同じなら後に入ったもの）。 */
+export const bestWorker = (tasks: readonly RovoTask[]): RovoTask | undefined => {
+  const newest = (list: RovoTask[]): RovoTask | undefined =>
+    list.reduce<RovoTask | undefined>(
+      (a, t) => (a === undefined || t.startedAt >= a.startedAt ? t : a),
+      undefined,
+    );
+  return (
+    newest(tasks.filter((t) => !isDone(t) && isWaiting(t))) ??
+    newest(tasks.filter((t) => !isDone(t))) ??
+    newest([...tasks])
+  );
+};
+
+/**
+ * イベント（新しい作業中のタスクを拾った・質問待ちに入った）のときに出すワーカー。
+ * いま出しているワーカーが作業中・質問待ちなら動かさない。終端か、一覧に無いか、何も出していないときだけ best に移る。
+ */
+export const moveTarget = (tasks: readonly RovoTask[], current: string | null): string | null => {
+  const cur = current === null ? undefined : tasks.find((t) => taskKey(t) === current);
+  if (cur !== undefined && !isDone(cur)) return current;
+  const best = bestWorker(tasks);
+  return best === undefined ? null : taskKey(best);
+};
+
+/** 終端の行の右（モデルの列）に出す文字。完了は PR、それ以外は結果。 */
+export const terminalCell = (t: RovoTask, pr?: PrLink): { text: string; color?: ThemeKey } => {
+  const color = statusColor(t.status);
+  const out = (text: string): { text: string; color?: ThemeKey } => ({
+    text,
+    ...(color !== undefined ? { color } : {}),
+  });
+  if (t.status === "COMPLETED") {
+    const link = pr ?? t.pr;
+    return out(link === undefined ? "完了" : link.number === null ? "PR" : `PR #${link.number}`);
+  }
+  return out(statusLabel(t.status));
+};
+
+const QUESTION_NOTE = "? 質問に答えてください（会話で task_answer）";
+const BUDGET_NOTE = "? 予算の承認待ち（利用者に確認してから task_answer）";
+
+/** 2 行目に出すいまの動き。質問待ちは warning、検証中は [n/m] を前に。 */
+export const detailText = (
+  t: RovoTask,
+  nowText: string | null,
+): { text: string; color?: ThemeKey } => {
+  if (isWaiting(t)) {
+    return {
+      text:
+        t.status === "INPUT_REQUIRED" && t.awaiting === "budget_extension"
+          ? BUDGET_NOTE
+          : QUESTION_NOTE,
+      color: "warning",
+    };
+  }
+  const attempt =
+    t.stage === "verify" && t.verifyAttempt !== undefined
+      ? `[${t.verifyAttempt}${t.verifyMax !== undefined ? `/${t.verifyMax}` : ""}]`
+      : "";
+  return { text: [attempt, nowText ?? ""].filter((x) => x !== "").join(" ") };
+};
+
+export const MIN_WINDOW = 6;
+const MAX_WORKING = 4;
+const MAX_ENDED = 5;
+/** 一覧以外の行: 見出し 1 + 列見出し 1 + タイトル/リンク 1 + 枠 2。 */
+const LIST_OVERHEAD = 5;
+
+export type WorkerPlan = {
+  shown: RovoTask[];
+  hidden: number;
+  hiddenAllTerminal: boolean;
+  rows: number;
+};
+
+/**
+ * 出すワーカーと行の予算。作業中は 2 行、終端は 1 行、review 見出し（あれば）と「他 n 件」が各 1 行。
+ * 作業中は 4、終端は 5 まで（出しているワーカーは必ず入れる）。残りが MIN_WINDOW を割るときは、終端の行 → 作業中の行の順に減らす。
+ * ordered は orderTasks の並び。
+ */
+export const planWorkers = (
+  ordered: readonly RovoTask[],
+  shownKey: string | null,
+  bodyRows: number,
+): WorkerPlan => {
+  const budget = bodyRows - LIST_OVERHEAD - MIN_WINDOW;
+  const sel = ordered.find((t) => taskKey(t) === shownKey);
+  const pick = (list: RovoTask[], n: number): Set<RovoTask> => {
+    const first = list.slice(0, n);
+    if (sel !== undefined && list.includes(sel) && !first.includes(sel))
+      first.splice(n - 1, 1, sel);
+    return new Set(first);
+  };
+  const working = pick(
+    ordered.filter((t) => !isDone(t)),
+    MAX_WORKING,
+  );
+  const ended = pick(ordered.filter(isDone), MAX_ENDED);
+  const rowsOf = (): number => {
+    const kept = ordered.filter((t) => working.has(t) || ended.has(t));
+    const hidden = ordered.length - kept.length;
+    return (
+      working.size * 2 +
+      ended.size +
+      (kept.some((t) => t.kind === "review") ? 1 : 0) +
+      (hidden > 0 ? 1 : 0)
+    );
+  };
+  const dropLast = (set: Set<RovoTask>): boolean => {
+    const victim = [...ordered].reverse().find((t) => set.has(t) && t !== sel);
+    if (victim === undefined) return false;
+    set.delete(victim);
+    return true;
+  };
+  while (rowsOf() > budget && (dropLast(ended) || dropLast(working))) {
+    // 予算に収まるか、出しているワーカーだけになるまで減らす。
+  }
+  const shown = ordered.filter((t) => working.has(t) || ended.has(t));
+  const hiddenList = ordered.filter((t) => !working.has(t) && !ended.has(t));
+  return {
+    shown,
+    hidden: hiddenList.length,
+    hiddenAllTerminal: hiddenList.length > 0 && hiddenList.every(isDone),
+    rows: rowsOf(),
+  };
 };

@@ -72,11 +72,9 @@ declare module "claude-code" {
       tasks: RovoTask[];
       /** キーは taskKey(task) = `${server}/${taskId}`。 */
       consoles: Record<string, RovoConsole>;
-      /** 選択中のタスクの taskKey。null は既定（最新の実行中、無ければ最新）。 */
-      selected: string | null;
       /** 出力の窓。follow は末尾に追従中。offset は追従を止めたときの先頭行（出力の中の行番号）。 */
       scroll: { follow: boolean; offset: number };
-      /** 直近にペインへ出していたタスクの taskKey。自動の切り替えを見つけて追従に戻すために持つ。 */
+      /** いまペインに出しているワーカーの taskKey。描くたびには選び直さず、クリックとイベント（新しい作業中のタスク・質問待ち）のときだけ替わる。替わったら窓を追従に戻す。 */
       shown: string | null;
       /** /rovo-create-task が実行された時刻（ms）。タスクを拾うと null に戻る。10 分たつと表示しない。 */
       creating: number | null;

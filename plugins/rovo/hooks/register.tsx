@@ -2,12 +2,15 @@ import type { EngineInterface, McpToolResult, Register, Timer } from "claude-cod
 import { atom, read, update } from "claude-code";
 
 import type { RovoConsole, RovoTask } from "../types";
-import type { Awaiting, LaneState, ParsedConsole, PrLink, TaskKind } from "./lib";
+import type { Awaiting, LaneState, LogLine, ParsedConsole, PrLink, TaskKind } from "./lib";
 import {
+  appendLines,
   budgetToastText,
   CONSOLE_RETRY_MS,
   cleanTitle,
+  coerceLogs,
   coerceTasks,
+  displayWidth,
   formatElapsed,
   headingText,
   httpsOnly,
@@ -15,6 +18,9 @@ import {
   isWaiting,
   labelRow,
   laneCells,
+  laneColumns,
+  logStyle,
+  MAX_LOG_PAGES,
   matchRovoTool,
   matchTaskStart,
   mergeListed,
@@ -24,8 +30,12 @@ import {
   parseStatus,
   parseTaskList,
   pruneTasks,
+  repoName,
   rightText,
   STATIONS,
+  STORED_LOG_LINES,
+  shortModel,
+  shortText,
   slideShift,
   stageIndex,
   statusColor,
@@ -40,6 +50,7 @@ type Dollar = EngineInterface;
 const PANE_ID = "rovo";
 const POLL_MS = 4000;
 const STORE_KEY = "tasks";
+const LOGS_KEY = "logs";
 
 // 読み取り専用: 呼ぶ MCP ツールはこの 3 つだけ（task_start は model が呼んだ結果を見るだけ）。
 const TOOL_CONSOLE = "task_console";
@@ -62,6 +73,9 @@ const frameAtom = atom({ plugin: "rovo", key: "frame" } as const, 0);
 const arrivalsAtom = atom({ plugin: "rovo", key: "arrivals" } as const, {});
 const listsAtom = atom({ plugin: "rovo", key: "lists" } as const, {});
 const endpointsAtom = atom({ plugin: "rovo", key: "endpoints" } as const, []);
+// 積み上がるログ（ワーカーごと）と、log_after を受け付けなかった接続先。
+const logsAtom = atom({ plugin: "rovo", key: "logs" } as const, {});
+const logOffAtom = atom({ plugin: "rovo", key: "logOff" } as const, {});
 const selectedAtom = atom({ plugin: "rovo", key: "selected" } as const, null);
 // 出力の窓。follow が true の間は末尾に追従する。offset は追従を止めたときの先頭行（出力の中の行番号）。
 const scrollAtom = atom({ plugin: "rovo", key: "scroll" } as const, { follow: true, offset: 0 });
@@ -86,9 +100,12 @@ const LIST_MAX = 4;
 const FIXED_ROWS = 7;
 const MIN_WINDOW = 3;
 const LANE_ROWS = 3;
-const TITLE_W = 18;
-const REPO_W = 12;
-const MODEL_W = 10;
+// 1 行目の列の幅の上限（題名は残りを使う）。
+const REPO_MAX = 16;
+const MODEL_MAX = 14;
+const ELAPSED_MAX = 12;
+
+const endpointKey = (e: { server: string; prefix: string }): string => `${e.server}/${e.prefix}`;
 
 const textOf = (result: McpToolResult): string =>
   result.content
@@ -117,6 +134,16 @@ const pickSelected = (
   tasks.find((t) => taskKey(t) === selectedKey) ??
   [...tasks].reverse().find((t) => !isTerminal(t.status)) ??
   tasks[tasks.length - 1];
+
+/** いまペインに出しているタスクの taskKey（無ければ null）。 */
+const shownKeyNow = async ($: Dollar): Promise<string | null> => {
+  const now = await $.clock.now();
+  const visible = (await read($, tasksAtom)).filter(
+    (t) => t.terminalAt === undefined || now - t.terminalAt < 60 * 60 * 1000,
+  );
+  const picked = pickSelected(visible, await read($, selectedAtom));
+  return picked === undefined ? null : taskKey(picked);
+};
 
 /** 出しているタスクが変わっていたら、窓を追従に戻す（ボタンで選んだときは押した側が shown も更新する）。 */
 const syncShown = async ($: Dollar, tasks: readonly RovoTask[]): Promise<void> => {
@@ -169,21 +196,128 @@ const stopIfIdle = async ($: Dollar): Promise<void> => {
   }
 };
 
+/** task_console 自体が無いサーバーのエラー（引数を変えても直らない）。 */
+const UNKNOWN_TOOL = /unknown tool|no such tool|tool not found|method not found/i;
+
+const callConsole = async (
+  $: Dollar,
+  t: RovoTask,
+  args: Record<string, unknown>,
+): Promise<{ parsed: ParsedConsole | null; toolMissing: boolean }> => {
+  try {
+    const res = await $.mcp.call(t.server, t.prefix + TOOL_CONSOLE, args);
+    if (res.isError) return { parsed: null, toolMissing: UNKNOWN_TOOL.test(textOf(res)) };
+    return { parsed: parseConsole(textOf(res)), toolMissing: false };
+  } catch {
+    return { parsed: null, toolMissing: false };
+  }
+};
+
+/** ログを取り込んだ結果。logSeen はこのサーバーが log を返したこと。 */
+type LogOutcome = { seen: boolean; added: LogLine[]; cursor: string; rejected: boolean };
+
+/** 取り込んだログを buffer に足す。古い行が落ちたぶんだけ、追従を止めている窓も前へ寄せる。 */
+const applyLog = async (
+  $: Dollar,
+  key: string,
+  outcome: LogOutcome | null,
+  parsedOk: boolean,
+): Promise<void> => {
+  const cur = (await read($, logsAtom))[key];
+  if (outcome === null) return;
+  if (!outcome.seen) {
+    // log を返さない（古いサーバー・受け付けなかった・取得に失敗）: 無ければ印だけ作り、あれば触らない。
+    // 取れたのに log が無いときは、前に積んだログがあっても最新のコマンドだけの表示に戻す。
+    if (cur === undefined || (parsedOk && cur.supported)) {
+      await update($, logsAtom, (m) => ({
+        ...m,
+        [key]: { supported: false, cursor: cur?.cursor ?? "0", lines: cur?.lines ?? [] },
+      }));
+    }
+    return;
+  }
+  const { lines, dropped } = appendLines(cur?.lines ?? [], outcome.added);
+  await update($, logsAtom, (m) => ({
+    ...m,
+    [key]: { supported: true, cursor: outcome.cursor, lines },
+  }));
+  if (dropped > 0 && (await shownKeyNow($)) === key) {
+    await update($, scrollAtom, (s) =>
+      s.follow ? s : { ...s, offset: Math.max(0, s.offset - dropped) },
+    );
+  }
+  await persistLogs($);
+};
+
+/** ログを $.store に小さく残す（追跡中のワーカーの、最後の STORED_LOG_LINES 行とカーソル）。 */
+const persistLogs = async ($: Dollar): Promise<void> => {
+  const keys = new Set((await read($, tasksAtom)).map(taskKey));
+  let kept: Record<string, { cursor: string; lines: LogLine[] }> = {};
+  await update($, logsAtom, (m) => {
+    const next: typeof m = {};
+    kept = {};
+    for (const [k, v] of Object.entries(m)) {
+      if (!keys.has(k)) continue;
+      next[k] = v;
+      if (v.supported) kept[k] = { cursor: v.cursor, lines: v.lines.slice(-STORED_LOG_LINES) };
+    }
+    return Object.keys(next).length === Object.keys(m).length ? m : next;
+  });
+  await $.store.set(LOGS_KEY, kept);
+};
+
 const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   let parsed: ParsedConsole | null = null;
   const startedAt = await $.clock.now();
   // task_console が使えないタスクも、60 秒に 1 回は試し直す（同時 1 本は tick の isPolling が守る）。
   const isRetry = t.noConsole === true && startedAt >= (t.consoleRetryAt ?? 0);
   let isConsoleMissing = t.noConsole === true && !isRetry;
+  const key = taskKey(t);
+  const epKey = endpointKey(t);
+  // ログ（log_after）を頼むのは、ペインに出しているワーカーだけ。受け付けなかったサーバーは 1 分あきらめる。
+  const wantLog =
+    !isConsoleMissing &&
+    (await shownKeyNow($)) === key &&
+    startedAt >= ((await read($, logOffAtom))[epKey] ?? 0);
+  let outcome: LogOutcome | null = null;
   if (!isConsoleMissing) {
-    try {
-      const res = await $.mcp.call(t.server, t.prefix + TOOL_CONSOLE, { task_id: t.taskId });
-      parsed = res.isError ? null : parseConsole(textOf(res));
-    } catch {
-      parsed = null;
+    if (!wantLog) {
+      parsed = (await callConsole($, t, { task_id: t.taskId })).parsed;
+    } else {
+      outcome = {
+        seen: false,
+        added: [],
+        cursor: (await read($, logsAtom))[key]?.cursor ?? "0",
+        rejected: false,
+      };
+      for (let page = 0; page < MAX_LOG_PAGES; page++) {
+        const { parsed: p, toolMissing } = await callConsole($, t, {
+          task_id: t.taskId,
+          log_after: outcome.cursor,
+        });
+        if (p === null) {
+          if (page === 0 && !toolMissing) {
+            // log_after を受け付けないサーバーかもしれない: 付けずにもう一度。
+            parsed = (await callConsole($, t, { task_id: t.taskId })).parsed;
+            outcome.rejected = parsed !== null;
+          }
+          break;
+        }
+        parsed = p;
+        if (p.log === undefined) break;
+        outcome.seen = true;
+        outcome.added.push(...p.log.lines);
+        const advanced = p.log.nextCursor !== outcome.cursor;
+        outcome.cursor = p.log.nextCursor;
+        if (!p.log.truncated || !advanced) break;
+      }
+      if (outcome.rejected) {
+        await update($, logOffAtom, (m) => ({ ...m, [epKey]: startedAt + CONSOLE_RETRY_MS }));
+      }
     }
     if (parsed === null) isConsoleMissing = true;
   }
+  await applyLog($, key, outcome, parsed !== null);
 
   let status: string;
   let dashboardUrl: string | undefined;
@@ -237,7 +371,6 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   const becameTerminal = !isTerminal(t.status) && isTerminal(status);
   const shouldToast = becameTerminal && t.notified !== true;
   const shouldToastBudget = awaiting !== undefined && t.awaiting === undefined;
-  const key = taskKey(t);
   await mutate($, (list) =>
     list.map((x) =>
       taskKey(x) !== key
@@ -260,7 +393,7 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   );
   // 追従を止めて読んでいる間は、末尾が前へずれた分だけ窓も前へ寄せ、同じ行を見せ続ける。
   const old = (await read($, consolesAtom))[key];
-  if (old?.tail != null && view.tail !== null) {
+  if (outcome?.seen !== true && old?.tail != null && view.tail !== null) {
     const shift = slideShift(tailLines(old.tail).split("\n"), tailLines(view.tail).split("\n"));
     const stand = await read($, scrollAtom);
     if (shift > 0 && !stand.follow) {
@@ -274,8 +407,6 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   if (shouldToast) $.ui.toast(toastText(t.title, status));
   if (shouldToastBudget) $.ui.toast(budgetToastText(t.title));
 };
-
-const endpointKey = (e: { server: string; prefix: string }): string => `${e.server}/${e.prefix}`;
 
 /**
  * 呼んだ人の全タスク（task_list）を取って追跡リストに混ぜる。task_list が無いサーバー
@@ -390,7 +521,12 @@ const fetchMissingNow = async ($: Dollar, only?: string, listedOnly = false): Pr
     if (listedOnly && t.listed !== true) continue;
     // 実行中のタスクはタイマーが取る。
     if (!isTerminal(t.status)) continue;
-    if ((await read($, consolesAtom))[key] !== undefined) continue;
+    // 中身がある終端のタスクは取り直さない。ただし出しているものは、ログをまだ頼んでいなければ 1 回頼む。
+    const needsLog =
+      key === pickedKey &&
+      (await read($, logsAtom))[key] === undefined &&
+      now >= ((await read($, logOffAtom))[endpointKey(t)] ?? 0);
+    if ((await read($, consolesAtom))[key] !== undefined && !needsLog) continue;
     try {
       await pollOne($, t);
     } catch {
@@ -518,11 +654,15 @@ const rememberEndpoint = async (
 const track = async (
   $: Dollar,
   hit: { server: string; prefix: string },
-  started: { taskId: string; status?: string; dashboardUrl?: string },
+  started: { taskId: string; status?: string; dashboardUrl?: string; model?: string },
   title: unknown,
+  input: { repository?: unknown; model?: unknown } = {},
 ): Promise<void> => {
   const now = await $.clock.now();
   const status = started.status ?? "RUNNING";
+  // task_list が答える前でも、1 行目にリポジトリとモデルを出せるよう、task_start の入力と応答から取る。
+  const repository = shortText(input.repository, 100);
+  const model = started.model ?? shortText(input.model, 60);
   const added: RovoTask = {
     taskId: started.taskId,
     title: cleanTitle(title, started.taskId),
@@ -531,6 +671,8 @@ const track = async (
     startedAt: now,
     status,
     ...(started.dashboardUrl !== undefined ? { dashboardUrl: started.dashboardUrl } : {}),
+    ...(repository !== undefined ? { repository } : {}),
+    ...(model !== undefined ? { model } : {}),
     ...(isTerminal(status) ? { terminalAt: now, notified: true as const } : {}),
   };
   const isNew = !(await read($, tasksAtom)).some((x) => taskKey(x) === taskKey(added));
@@ -556,8 +698,12 @@ type PaneModel = {
   prLink: RovoConsole["pr"];
   /** ヘッダーの行数（枠の外）。 */
   headerRows: number;
-  /** 出力の全行（TAIL_LINES まで）と、窓の高さ（枠の行を除く）・先頭行の範囲。 */
-  lines: string[];
+  /** 出力の全行（ログがあればログ + いま流れている出力、無ければ末尾 TAIL_LINES まで）と、窓の高さ（枠の行を除く）・先頭行の範囲。 */
+  lines: LogLine[];
+  /** ログ（積み上がる表示）か。false なら最新のコマンドだけ（`$ コマンド` を枠の先頭に固定）。 */
+  stacked: boolean;
+  /** 枠の行数（上下の辺と、固定する `$ コマンド`）。枠の高さは frameRows + windowRows。 */
+  frameRows: number;
   windowRows: number;
   maxStart: number;
   /** タスクを作成中（10 分以内）。true の間は案内だけを描き、一覧・詳細は出さない。 */
@@ -581,6 +727,8 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
       prLink: undefined,
       headerRows: CREATING_ROWS,
       lines: [],
+      stacked: false,
+      frameRows: 0,
       windowRows: Math.max(1, bodyRows - CREATING_ROWS),
       maxStart: 0,
       creating: true,
@@ -616,12 +764,35 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
     if (view === undefined || !view.hasOutput) headerRows += 1;
     if (link !== undefined || prLink !== undefined) headerRows += 1;
   }
-  const lines =
+  const worker = selected === undefined ? undefined : (await read($, logsAtom))[taskKey(selected)];
+  const stacked = view !== undefined && view.hasOutput && worker?.supported === true;
+  const tailOf = (): LogLine[] =>
     view !== undefined && view.hasOutput && view.tail !== null
-      ? tailLines(view.tail).split("\n")
+      ? tailLines(view.tail)
+          .split("\n")
+          .map((text) => ({ kind: "out" as const, text }))
       : [];
-  // 出力は枠で囲む: 上下の辺で 2 行、`$ コマンド` は枠の中の 1 行目に固定して 1 行。
-  const frameRows = view !== undefined && view.hasOutput ? 2 + (view.command !== null ? 1 : 0) : 0;
+  let lines: LogLine[];
+  if (stacked && view !== undefined) {
+    // ログの末尾に、いま流れている出力を続ける（終わったコマンドは entries のほうにある）。
+    const live: LogLine[] = [];
+    if (view.isRunning) {
+      if (view.command !== null) {
+        live.push({
+          kind: "cmd",
+          text: `$ ${view.command}`,
+          ...(view.commandWhere !== undefined ? { where: view.commandWhere } : {}),
+        });
+      }
+      live.push(...tailOf());
+    }
+    lines = [...(worker?.lines ?? []), ...live];
+  } else {
+    lines = tailOf();
+  }
+  // 出力は枠で囲む: 上下の辺で 2 行。ログでなければ `$ コマンド` を枠の中の 1 行目に固定して 1 行。
+  const frameRows =
+    view !== undefined && view.hasOutput ? 2 + (!stacked && view.command !== null ? 1 : 0) : 0;
   const windowRows = Math.max(1, bodyRows - headerRows - frameRows);
   return {
     tasks,
@@ -634,6 +805,8 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
     prLink,
     headerRows,
     lines,
+    stacked,
+    frameRows,
     windowRows,
     maxStart: Math.max(0, lines.length - windowRows),
     creating: false,
@@ -650,6 +823,19 @@ export const register: Register = (on) => {
       await mutate($, () => stored);
     } catch {
       // 読めなければ空から始める。
+    }
+    try {
+      const logs = coerceLogs(await $.store.get(LOGS_KEY));
+      await update($, logsAtom, () =>
+        Object.fromEntries(
+          Object.entries(logs).map(([k, v]) => [
+            k,
+            { supported: true, cursor: v.cursor, lines: v.lines },
+          ]),
+        ),
+      );
+    } catch {
+      // ログが読めなければ空から積む。
     }
     try {
       const endpoints = coerceEndpoints(await $.store.get(ENDPOINTS_KEY));
@@ -722,7 +908,11 @@ export const register: Register = (on) => {
       if (hit !== null && outcome.deny === undefined && outcome.isError !== true) {
         const started = parseStartResult(outcome.text ?? "");
         if (started !== null) {
-          await track($, hit, started, (e as Record<string, unknown>).title);
+          const input = e as Record<string, unknown>;
+          await track($, hit, started, input.title, {
+            repository: input.repository,
+            model: input.model,
+          });
         }
       }
       const rovoTool = outcome.deny === undefined ? matchRovoTool(String(e.tool)) : null;
@@ -765,6 +955,20 @@ export const register: Register = (on) => {
     }
 
     const elapsedOf = (t: RovoTask): string => formatElapsed((t.terminalAt ?? now) - t.startedAt);
+    // 題名は、ペインの幅から他の列を引いた残りを使う（右端で折り返さないよう 1 桁あける）。
+    const widest = (texts: string[], max: number): number =>
+      Math.min(max, Math.max(0, ...texts.map(displayWidth)));
+    const cols = laneColumns(e.props.bodyColumns - 1, {
+      repo: widest(
+        listed.map((t) => repoName(t.repository)),
+        REPO_MAX,
+      ),
+      model: widest(
+        listed.map((t) => shortModel(t.model ?? "")),
+        MODEL_MAX,
+      ),
+      elapsed: widest(listed.map(elapsedOf), ELAPSED_MAX),
+    });
     const start = startOf(m, await read($, scrollAtom));
     const shown = m.lines.slice(start, start + m.windowRows);
     const frame = await read($, frameAtom);
@@ -792,7 +996,8 @@ export const register: Register = (on) => {
               ? frame - arrival.since < ARRIVE_FRAMES
               : false;
           const right = rightText(t, own?.hasOutput === true ? own.nowText : null, own?.pr);
-          const repo = (t.repository ?? "").split("/").pop() ?? "";
+          const repo = repoName(t.repository);
+          const model = shortModel(t.model ?? "");
           const press = async () => {
             await update($, selectedAtom, () => key);
             await update($, shownAtom, () => key);
@@ -804,10 +1009,10 @@ export const register: Register = (on) => {
               <Button key={`row:${key}:0`} plain onPress={press}>
                 {isSelected ? <Text color="claude">▸</Text> : " "}{" "}
                 <Text weight={isSelected ? "bold" : undefined}>
-                  {padWidth(truncateWidth(t.title, TITLE_W), TITLE_W)}
+                  {padWidth(truncateWidth(t.title, cols.title), cols.title)}
                 </Text>
                 <Text dimColor>
-                  {` ${padWidth(truncateWidth(repo, REPO_W), REPO_W)} ${padWidth(truncateWidth(t.model ?? "", MODEL_W), MODEL_W)} ${elapsedOf(t)}`}
+                  {` ${padWidth(truncateWidth(repo, cols.repo), cols.repo)} ${padWidth(truncateWidth(model, cols.model), cols.model)} ${padWidth(elapsedOf(t), cols.elapsed)}`}
                 </Text>
               </Button>
               <Button key={`row:${key}:1`} plain onPress={press}>
@@ -863,8 +1068,9 @@ export const register: Register = (on) => {
                 borderColor={
                   isTerminal(selected.status) ? statusColor(selected.status) : "suggestion"
                 }
+                height={m.frameRows + m.windowRows}
               >
-                {view.command !== null && (
+                {!m.stacked && view.command !== null && (
                   <Box>
                     <Text mono wrap="truncate-end">{`$ ${view.command}`}</Text>
                     {view.commandWhere !== undefined && (
@@ -872,12 +1078,26 @@ export const register: Register = (on) => {
                     )}
                   </Box>
                 )}
-                {shown.map((line, i) => (
-                  <Text key={`out:${start + i}`} mono wrap="truncate-end">
-                    {line}
-                  </Text>
-                ))}
-                {m.lines.length === 0 && view.command === null && (
+                {shown.map((line, i) => {
+                  const style = logStyle(line.kind);
+                  return (
+                    <Box key={`out:${start + i}`}>
+                      <Text
+                        mono
+                        wrap="truncate-end"
+                        color={style.color}
+                        dimColor={style.dim === true}
+                        weight={style.bold === true ? "bold" : undefined}
+                      >
+                        {line.text}
+                      </Text>
+                      {line.where !== undefined && (
+                        <Text dimColor wrap="truncate-end">{`  ${line.where} で`}</Text>
+                      )}
+                    </Box>
+                  );
+                })}
+                {m.lines.length === 0 && (m.stacked || view.command === null) && (
                   <Text dimColor>まだ出力はありません。</Text>
                 )}
               </Box>

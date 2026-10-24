@@ -518,8 +518,9 @@ test("polls task_console every 4 seconds with the right server and prefix", asyn
   await r.clock.advance(3_999);
   expect(r.calls).toEqual([]);
   await r.clock.advance(1);
+  // the shown worker also asks for its log (log_after), from the start
   expect(r.calls).toEqual([
-    { server: "rovo-direct", tool: "task_console", args: { task_id: "t1" } },
+    { server: "rovo-direct", tool: "task_console", args: { task_id: "t1", log_after: "0" } },
   ]);
   await r.clock.advance(4_000);
   expect(r.calls).toHaveLength(2);
@@ -531,7 +532,7 @@ test("polls task_console every 4 seconds with the right server and prefix", asyn
   expect(r.calls).toContainEqual({
     server: "claude_ai_mcp_hubs_run",
     tool: "my-rovo_task_console",
-    args: { task_id: "t2" },
+    args: { task_id: "t2", log_after: "0" }, // t2 is the newest, so it is the shown one
   });
 });
 
@@ -2041,4 +2042,369 @@ test("listed workers survive a restart through $.store", async ($, on) => {
   await r.clock.settle();
   expect(r.stored().map((t) => t.taskId)).toContain("L1");
   expect(r.stored()[0]).toMatchObject({ kind: "task", listed: true, model: "sonnet" });
+});
+
+// --- the stacking log (task_console log / log_after) ----------------------------
+
+const AT = "2026-01-01T00:00:00Z";
+const cmdEv = (n: number, command: string, tail = "", exit = 0) => ({
+  seq: n,
+  at: AT,
+  type: "command",
+  command: wrap(command),
+  exit_code: exit,
+  ...(tail !== "" ? { output_tail: wrap(tail) } : {}),
+});
+const editEv = (n: number) => ({
+  seq: n,
+  at: AT,
+  type: "edit",
+  path: wrap(`f${n}.ts`),
+  op: "modify",
+  added: 1,
+  removed: 0,
+});
+
+/** log_after を理解するサーバー: events を cursor（先頭からの位置）で 100 件ずつ返す。 */
+const logServer =
+  (events: unknown[], over: (id: string) => Record<string, unknown> = () => ({})) =>
+  (call: McpCall) => {
+    const id = String(call.args.task_id);
+    const body = consoleBody(id, {
+      output: { command: null, tail: null, running: false, redacted: true },
+      ...over(id),
+    });
+    if (call.args.log_after === undefined) return ok(body);
+    const from = Number(call.args.log_after);
+    const page = events.slice(from, from + 100);
+    const next = from + page.length;
+    return ok({
+      ...body,
+      log: { entries: page, next_cursor: String(next), truncated: next < events.length },
+    });
+  };
+
+const startLogRig = async (
+  $: Engine,
+  on: On,
+  events: unknown[],
+  over?: (id: string) => Record<string, unknown>,
+) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler(logServer(events, over));
+  on("ui.scroll", () => ({}));
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Log task", repository: "o/r" });
+  await r.clock.advance(4_000);
+  return r;
+};
+
+const occurrences = (text: string, needle: string) => text.split(needle).length - 1;
+
+type Framed = { props?: { borderStyle?: string; height?: number } };
+const framedBoxes = async (ui: { findAll: (q: { type: string }) => Promise<unknown[]> }) =>
+  ((await ui.findAll({ type: "Box" })) as Framed[]).filter(
+    (b) => b.props?.borderStyle !== undefined,
+  );
+
+test("with a log, earlier commands stay: the console stacks instead of showing only the latest", async ($, on) => {
+  const events: unknown[] = [
+    cmdEv(1, "pnpm install", "added 3 packages"),
+    cmdEv(2, "pnpm test", "all passed"),
+  ];
+  const r = await startLogRig($, on, events);
+  expect(r.calls[0]?.args).toMatchObject({ task_id: "t1", log_after: "0" });
+
+  let ui = await mountPane($);
+  let text = await allText(ui);
+  expect(text).toContain("$ pnpm install");
+  expect(text).toContain("added 3 packages");
+  expect(text).toContain("$ pnpm test");
+  expect(text).toContain("all passed");
+  expect(text).not.toContain("<<<");
+  await ui.unmount();
+
+  events.push(editEv(3), cmdEv(4, "ls -la"));
+  r.calls.length = 0;
+  await r.clock.advance(4_000);
+  expect(r.calls[0]?.args).toMatchObject({ log_after: "2" }); // the cursor moved on
+  ui = await mountPane($);
+  text = await allText(ui);
+  for (const part of ["$ pnpm install", "$ pnpm test", "✎ edit f3.ts (+1 -0)", "$ ls -la"]) {
+    expect(text).toContain(part);
+  }
+  expect(occurrences(text, "$ pnpm test")).toBe(1);
+  await ui.unmount();
+});
+
+test("the running command's live output ends the log, and is not repeated once it lands in the entries", async ($, on) => {
+  const events: unknown[] = [cmdEv(1, "pnpm install")];
+  const live = { running: true };
+  const r = await startLogRig($, on, events, () => ({
+    output: {
+      command: wrap("make"),
+      tail: wrap("compiling a\ncompiling b"),
+      running: live.running,
+      redacted: true,
+    },
+  }));
+  let ui = await mountPane($);
+  let text = await allText(ui);
+  expect(text).toContain("$ pnpm install");
+  expect(text).toContain("compiling b");
+  expect(occurrences(text, "$ make")).toBe(1);
+  expect(text.indexOf("$ pnpm install")).toBeLessThan(text.indexOf("$ make"));
+  await ui.unmount();
+
+  live.running = false;
+  events.push(cmdEv(2, "make", "compiling a\ncompiling b\nbuilt"));
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  text = await allText(ui);
+  expect(occurrences(text, "$ make")).toBe(1);
+  expect(occurrences(text, "compiling b")).toBe(1);
+  expect(text).toContain("built");
+  await ui.unmount();
+});
+
+test("only the shown worker is asked for its log; the others are polled as before", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() => listOf(item(1), item(2)));
+  r.setHandler(logServer([cmdEv(1, "ls")]));
+  await startSession($);
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  const byId = (id: string) => r.calls.filter((c) => c.args.task_id === id);
+  expect(byId("L1").length).toBeGreaterThan(0);
+  for (const c of byId("L1")) expect(c.args.log_after).toBeUndefined();
+  for (const c of byId("L2")) expect(c.args.log_after).toBeDefined();
+  const ui = await mountPane($);
+  const first = (await buttons(ui)).find((b) => b.key === "row:rovo-direct/L1:0");
+  await ui.press({ key: first?.key ?? "missing" });
+  await r.clock.advance(4_000);
+  expect(byId("L1").at(-1)?.args.log_after).toBe("0");
+  expect(await allText(ui)).toContain("$ ls");
+  await ui.unmount();
+});
+
+test("a truncated page is followed with next_cursor in the same poll, and the newest lines are in view", async ($, on) => {
+  const events = Array.from({ length: 250 }, (_, i) => editEv(i + 1));
+  const r = await startLogRig($, on, events);
+  expect(r.calls.map((c) => c.args.log_after)).toEqual(["0", "100", "200"]);
+  const ui = await mountPane($, 20);
+  const text = await allText(ui);
+  expect(text).toContain("✎ edit f250.ts");
+  expect(text).not.toContain("✎ edit f1.ts ");
+  await ui.unmount();
+});
+
+test("a server without log keeps today's behavior: only the latest command, pinned in the frame", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler((call) => ok(consoleBody(String(call.args.task_id)))); // ignores log_after, no log
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Old server", repository: "o/r" });
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(occurrences(text, "$ pnpm test")).toBe(1);
+  expect(text).toContain("line1\nline2");
+  expect(r.calls.every((c) => c.tool === "task_console")).toBe(true);
+  await ui.unmount();
+});
+
+test("a server that stops returning log goes back to the latest command only", async ($, on) => {
+  const events: unknown[] = [cmdEv(1, "old command")];
+  const r = await startLogRig($, on, events);
+  let ui = await mountPane($);
+  expect(await allText(ui)).toContain("$ old command");
+  await ui.unmount();
+
+  r.setHandler((call) => ok(consoleBody(String(call.args.task_id))));
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).not.toContain("old command");
+  expect(text).toContain("$ pnpm test");
+  await ui.unmount();
+});
+
+test("a server that rejects log_after still shows the console: retried without it, then left alone for a minute", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler((call) =>
+    call.args.log_after !== undefined
+      ? err("invalid_input: unexpected argument log_after")
+      : ok(consoleBody(String(call.args.task_id))),
+  );
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Strict", repository: "o/r" });
+  await r.clock.advance(4_000);
+  expect(r.calls.map((c) => [c.tool, c.args.log_after])).toEqual([
+    ["task_console", "0"],
+    ["task_console", undefined],
+  ]);
+  r.calls.length = 0;
+  await r.clock.advance(4_000);
+  expect(r.calls.map((c) => [c.tool, c.args.log_after])).toEqual([["task_console", undefined]]);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).toContain("$ pnpm test");
+  expect(text).not.toContain("このサーバーは出力に対応していません");
+  await ui.unmount();
+  r.calls.length = 0;
+  await r.clock.advance(60_000);
+  expect(r.calls.some((c) => c.args.log_after === "0")).toBe(true);
+});
+
+const logRowsOf = async (ui: Finder) =>
+  ((await ui.findAll({ type: "Text" })) as { text?: string }[])
+    .map((t) => t.text ?? "")
+    .filter((t) => /^✎ edit f\d+\.ts/.test(t));
+
+test("scrolling up stops following the log: the same lines stay when new ones arrive; scrolling to the end follows again", async ($, on) => {
+  const events: unknown[] = Array.from({ length: 60 }, (_, i) => editEv(i + 1));
+  const r = await startLogRig($, on, events);
+  await scrollBy($, -8);
+  let ui = await mountPane($, 12);
+  const shown = await logRowsOf(ui);
+  expect(shown.length).toBeGreaterThan(0);
+  expect(shown).not.toContain("✎ edit f60.ts (+1 -0)");
+  await ui.unmount();
+
+  events.push(editEv(61), editEv(62));
+  await r.clock.advance(4_000);
+  ui = await mountPane($, 12);
+  expect(await logRowsOf(ui)).toEqual(shown);
+  await ui.unmount();
+
+  await scrollBy($, 1000);
+  await r.clock.advance(4_000);
+  ui = await mountPane($, 12);
+  expect(await logRowsOf(ui)).toContain("✎ edit f62.ts (+1 -0)");
+  await ui.unmount();
+});
+
+test("the buffer keeps the last 500 lines per worker, and a held window does not slip when old lines drop", async ($, on) => {
+  const events: unknown[] = Array.from({ length: 600 }, (_, i) => editEv(i + 1));
+  const r = await startLogRig($, on, events);
+  await scrollBy($, -100_000);
+  let ui = await mountPane($, 12);
+  let rows = await logRowsOf(ui);
+  expect(rows[0]).toBe("✎ edit f101.ts (+1 -0)"); // 600 - 500 + 1
+  await ui.unmount();
+
+  // held a few lines below the top: 3 more lines push 3 old ones out, the window follows them
+  await scrollBy($, 5, 12);
+  ui = await mountPane($, 12);
+  const held = await logRowsOf(ui);
+  await ui.unmount();
+  events.push(editEv(601), editEv(602), editEv(603));
+  await r.clock.advance(4_000);
+  ui = await mountPane($, 12);
+  rows = await logRowsOf(ui);
+  expect(rows).toEqual(held);
+  await ui.unmount();
+});
+
+test("the frame fills the rest of the pane, with or without a log, and keeps a minimum when rows are short", async ($, on) => {
+  const events: unknown[] = [cmdEv(1, "ls"), cmdEv(2, "pwd")];
+  await startLogRig($, on, events);
+  // heading + the worker's 3 rows + title + links = 6 rows above the frame
+  let ui = await mountPane($, 20);
+  let boxes = await framedBoxes(ui);
+  expect(boxes).toHaveLength(1);
+  expect(boxes[0]?.props?.height).toBe(20 - 6);
+  await ui.unmount();
+  ui = await mountPane($, 40);
+  boxes = await framedBoxes(ui);
+  expect(boxes[0]?.props?.height).toBe(40 - 6);
+  await ui.unmount();
+  ui = await mountPane($, 3);
+  boxes = await framedBoxes(ui);
+  expect(boxes[0]?.props?.height).toBeGreaterThanOrEqual(3);
+  await ui.unmount();
+});
+
+test("without a log the frame also fills the rest, command row included", async ($, on) => {
+  await startScrollRig($, on, "a\nb");
+  const ui = await mountPane($, 20);
+  const boxes = await framedBoxes(ui);
+  expect(boxes).toHaveLength(1);
+  expect(boxes[0]?.props?.height).toBe(20 - 6);
+  await ui.unmount();
+});
+
+test("the log is kept in $.store in small form: the last 100 lines and the cursor", async ($, on) => {
+  const events: unknown[] = Array.from({ length: 150 }, (_, i) => editEv(i + 1));
+  const r = await startLogRig($, on, events);
+  const saved = r.storeGet("logs") as Record<string, { cursor: string; lines: unknown[] }>;
+  expect(Object.keys(saved)).toEqual(["rovo-direct/t1"]);
+  expect(saved["rovo-direct/t1"]?.cursor).toBe("150");
+  expect(saved["rovo-direct/t1"]?.lines).toHaveLength(100);
+});
+
+test("a restored log is shown after the first poll, which asks from the stored cursor", async ($, on) => {
+  const r = rig(on, {
+    store: {
+      tasks: [task(1)],
+      logs: {
+        "rovo-direct/t1": { cursor: "42", lines: [{ kind: "cmd", text: "$ restored" }] },
+      },
+    },
+  });
+  r.setHandler(logServer([]));
+  await startSession($);
+  await r.clock.advance(4_000);
+  expect(r.calls.some((c) => c.args.log_after === "42")).toBe(true);
+  const ui = await mountPane($);
+  expect(await allText(ui)).toContain("$ restored");
+  await ui.unmount();
+});
+
+// --- columns --------------------------------------------------------------------
+
+test("the title takes the width the other columns leave, and model and repo are short", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  const long = "task_list: 途中で切れない長い題名のワーカー";
+  r.setListHandler(() =>
+    listOf(
+      item(1, { title: long, repository: "youyo/rovo", model: "anthropic/claude-sonnet-5-5" }),
+    ),
+  );
+  await startSession($);
+  await r.clock.settle();
+  const ui = await mountPane($);
+  const [row] = await rowsOf(ui, "L1");
+  expect(row).toContain(long);
+  expect(row).toContain("sonnet-5.5");
+  expect(row).not.toContain("anthropic");
+  expect(row).toContain("rovo");
+  expect(row).not.toContain("youyo/");
+  await ui.unmount();
+
+  const narrow = await $.ui.mount({
+    ...PANE,
+    props: { ...PANE.props, bodyColumns: 44 },
+    surface: "terminal",
+  });
+  const [small1] = await rowsOf(narrow, "L1");
+  expect(small1).toContain("…");
+  expect(small1).toContain("sonnet-5.5");
+  await narrow.unmount();
+});
+
+test("repo and model show on the first row as soon as task_start gave them, before task_list answers", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1", { model: "anthropic/claude-haiku-5-5" }));
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Just started", repository: "youyo/rovo" });
+  const ui = await mountPane($);
+  const [row] = await rowsOf(ui, "t1");
+  expect(row).toContain("rovo");
+  expect(row).toContain("haiku-5.5");
+  expect(row).not.toContain("youyo/");
+  await ui.unmount();
 });

@@ -1,6 +1,6 @@
 import type { ThemeKey } from "claude-code";
 
-import type { RovoTask } from "../types";
+import type { RovoLogLine, RovoTask } from "../types";
 
 export const MAX_TASKS = 10;
 /** task_list から入ったタスクの上限（task_list の limit の最大と同じ）。 */
@@ -31,6 +31,8 @@ export type ParsedConsole = {
   pr?: PrLink;
   /** 予算の延長の承認待ちのときだけ。 */
   awaiting?: Awaiting;
+  /** `log` を返すサーバーのときだけ（task_console の log_after に対する応答）。 */
+  log?: LogPage;
 };
 
 export type Awaiting = "budget_extension";
@@ -95,13 +97,15 @@ export const matchTaskStart = (tool: string): { server: string; prefix: string }
 
 export const parseStartResult = (
   text: string,
-): { taskId: string; status?: string; dashboardUrl?: string } | null => {
+): { taskId: string; status?: string; dashboardUrl?: string; model?: string } | null => {
   const body = asObject(text);
   if (body === null || typeof body.task_id !== "string" || body.task_id === "") return null;
   const dashboardUrl = httpsOnly(body.dashboard_url);
   const status = plain(body.status) ?? undefined;
+  const model = shortText(body.model, MAX_MODEL);
   return {
     taskId: stripFence(body.task_id),
+    ...(model !== undefined ? { model } : {}),
     ...(status !== undefined && status !== "" ? { status } : {}),
     ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
   };
@@ -176,6 +180,7 @@ export const parseConsole = (text: string): ParsedConsole | null => {
   const dashboardUrl = httpsOnly(body.dashboard_url);
   const pr = parsePr(body.pr);
   const awaiting = parseAwaiting(body.status, body.awaiting);
+  const log = parseLog(body.log);
   const now2 = splitNow(plain(now?.text));
   const cmdRaw = plain(output?.command);
   const cmd = cmdRaw === null ? null : splitCommand(cmdRaw);
@@ -192,6 +197,7 @@ export const parseConsole = (text: string): ParsedConsole | null => {
     ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
     ...(pr !== undefined ? { pr } : {}),
     ...(awaiting !== undefined ? { awaiting } : {}),
+    ...(log !== null ? { log } : {}),
   };
 };
 
@@ -214,6 +220,254 @@ export const parseStatus = (
 
 const cut = (line: string): string =>
   line.length > MAX_LINE ? `${line.slice(0, MAX_LINE)}…` : line;
+
+// --- 積み上がるログ（task_console の log） -------------------------------------
+
+/** ワーカーごとに持つ行の上限。古い行から捨てる。 */
+export const MAX_LOG_LINES = 500;
+/** $.store に残す行数（再起動後に続きを見せるぶんだけ）。 */
+export const STORED_LOG_LINES = 100;
+/** 1 回の取得で追いかけるページ数の上限（1 ページは最大 100 件）。 */
+export const MAX_LOG_PAGES = 10;
+const MAX_ENTRIES_PER_PAGE = 200;
+const MAX_CURSOR = 200;
+
+export type LogLine = RovoLogLine;
+export type LogKind = LogLine["kind"];
+
+export type LogPage = { lines: LogLine[]; nextCursor: string; truncated: boolean };
+
+const LOG_KINDS: ReadonlySet<string> = new Set([
+  "cmd",
+  "out",
+  "edit",
+  "commit",
+  "web",
+  "tool",
+  "status",
+  "pr",
+  "error",
+]);
+
+/** 構造化イベントを別に出すツール（dashboard の STRUCTURED_OF と同じ）。tool_start は重複するので出さない。 */
+const STRUCTURED_TOOLS: ReadonlySet<string> = new Set([
+  "bash",
+  "write_file",
+  "edit_file",
+  "git_commit",
+  "web_search",
+  "web_fetch",
+  "web_browse",
+]);
+
+const oneLine = (value: unknown, max: number = MAX_LINE): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const text = stripFence(value).replace(/\s+/g, " ").trim();
+  return text === "" ? undefined : cut(text.slice(0, max * 2));
+};
+
+const count = (value: unknown): number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+
+const EDIT_LABEL: Record<string, string> = { create: "create", modify: "edit", delete: "delete" };
+
+/**
+ * task_console の log.entries の 1 件を、描く行にする（ダッシュボードの流れるコンソールと同じ型）。
+ * ワーカーが書いた文字列は囲みを外して整える。知らない型・形が違うものは空。
+ */
+export const entryLines = (entry: unknown): LogLine[] => {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+  const e = entry as Record<string, unknown>;
+  switch (e.type) {
+    case "command": {
+      const raw = plain(e.command);
+      if (raw === null || raw.trim() === "") return [];
+      const c = splitCommand(raw.replace(/\s+/g, " ").trim());
+      const out: LogLine[] = [
+        {
+          kind: "cmd",
+          text: cut(`$ ${c.command}`),
+          ...(c.where !== undefined ? { where: c.where } : {}),
+        },
+      ];
+      const tail = plain(e.output_tail);
+      if (tail !== null && tail.trim() !== "") {
+        for (const line of tailLines(tail).split("\n")) out.push({ kind: "out", text: line });
+      }
+      if (typeof e.exit_code === "number" && e.exit_code !== 0) {
+        out.push({ kind: "error", text: `✕ exit ${e.exit_code}` });
+      }
+      return out;
+    }
+    case "edit": {
+      const path = oneLine(e.path);
+      if (path === undefined) return [];
+      const label = EDIT_LABEL[String(e.op)] ?? "edit";
+      return [
+        { kind: "edit", text: `✎ ${label} ${path} (+${count(e.added)} -${count(e.removed)})` },
+      ];
+    }
+    case "commit": {
+      const message = oneLine(e.message);
+      return message === undefined ? [] : [{ kind: "commit", text: `⎇ commit ${message}` }];
+    }
+    case "web": {
+      const kind = e.kind === "search" || e.kind === "fetch" || e.kind === "browse" ? e.kind : null;
+      if (kind === null) return [];
+      const host = oneLine(e.host, 253);
+      const icon = kind === "search" ? "🔍" : "🌐";
+      return [{ kind: "web", text: `${icon} ${kind}${host === undefined ? "" : ` ${host}`}` }];
+    }
+    case "status_changed": {
+      const to = oneLine(e.to, 40);
+      if (to === undefined) return [];
+      const from = oneLine(e.from, 40);
+      const text =
+        from === undefined ? statusLabel(to) : `${statusLabel(from)} → ${statusLabel(to)}`;
+      return [{ kind: "status", text: `· ${text}` }];
+    }
+    case "draft_pr_created": {
+      const n = e.pr_number;
+      return typeof n === "number" && Number.isInteger(n) && n >= 1
+        ? [{ kind: "pr", text: `⎇ Draft PR #${n}` }]
+        : [];
+    }
+    case "tool_start": {
+      const name = oneLine(e.name, 100);
+      if (name === undefined || STRUCTURED_TOOLS.has(name)) return [];
+      const summary = oneLine(e.summary);
+      return [{ kind: "tool", text: `· ${name}${summary === undefined ? "" : ` ${summary}`}` }];
+    }
+    case "tool_end": {
+      if (e.is_error !== true) return [];
+      const summary = oneLine(e.summary);
+      return [{ kind: "error", text: `✕ ${summary ?? "失敗"}` }];
+    }
+    default:
+      return [];
+  }
+};
+
+/** task_console の `log`。entries と next_cursor（文字列）が無ければ null（log の無いサーバー）。 */
+export const parseLog = (value: unknown): LogPage | null => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v.entries)) return null;
+  if (
+    typeof v.next_cursor !== "string" ||
+    v.next_cursor === "" ||
+    v.next_cursor.length > MAX_CURSOR
+  )
+    return null;
+  const lines: LogLine[] = [];
+  for (const entry of (v.entries as unknown[]).slice(0, MAX_ENTRIES_PER_PAGE)) {
+    lines.push(...entryLines(entry));
+  }
+  return { lines, nextCursor: v.next_cursor, truncated: v.truncated === true };
+};
+
+/** 行を末尾に足し、上限を超えた古い行を捨てる。dropped は先頭から捨てた行数（窓の位置を直すのに使う）。 */
+export const appendLines = (
+  buffer: readonly LogLine[],
+  add: readonly LogLine[],
+  max: number = MAX_LOG_LINES,
+): { lines: LogLine[]; dropped: number } => {
+  const all = [...buffer, ...add];
+  const dropped = Math.max(0, all.length - max);
+  return { lines: dropped === 0 ? all : all.slice(dropped), dropped };
+};
+
+export type WorkerLog = { cursor: string; lines: LogLine[] };
+
+const coerceLine = (raw: unknown): LogLine | null => {
+  if (typeof raw !== "object" || raw === null) return null;
+  const l = raw as Record<string, unknown>;
+  if (typeof l.kind !== "string" || !LOG_KINDS.has(l.kind) || typeof l.text !== "string")
+    return null;
+  const text = cut(stripFence(l.text));
+  const where = typeof l.where === "string" ? stripFence(l.where).slice(0, MAX_TITLE) : undefined;
+  return {
+    kind: l.kind as LogKind,
+    text,
+    ...(where !== undefined && where !== "" ? { where } : {}),
+  };
+};
+
+/** $.store から読んだログを信用せず、形を確かめて作り直す。 */
+export const coerceLogs = (value: unknown): Record<string, WorkerLog> => {
+  const out: Record<string, WorkerLog> = {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const w = raw as Record<string, unknown> | null;
+    if (typeof w !== "object" || w === null) continue;
+    if (typeof w.cursor !== "string" || w.cursor === "" || w.cursor.length > MAX_CURSOR) continue;
+    const lines: LogLine[] = [];
+    if (Array.isArray(w.lines)) {
+      for (const l of w.lines.slice(-STORED_LOG_LINES)) {
+        const line = coerceLine(l);
+        if (line !== null) lines.push(line);
+      }
+    }
+    out[key] = { cursor: w.cursor, lines };
+  }
+  return out;
+};
+
+/** ログの行の色。undefined は本文の色、dim は薄く。 */
+export const logStyle = (kind: LogKind): { color?: ThemeKey; dim?: boolean; bold?: boolean } => {
+  switch (kind) {
+    case "cmd":
+      return { bold: true };
+    case "edit":
+    case "web":
+    case "pr":
+      return { color: "suggestion" };
+    case "commit":
+      return { color: "success" };
+    case "error":
+      return { color: "error" };
+    case "status":
+    case "tool":
+      return { dim: true };
+    default:
+      return {};
+  }
+};
+
+// --- 列の幅 -------------------------------------------------------------------------
+
+const MARK_W = 2;
+const GAPS_W = 3;
+const MIN_TITLE = 8;
+const MIN_SHRUNK = 6;
+
+/** `anthropic/claude-sonnet-5-5` → `sonnet-5.5`。provider/ と claude- を落とし、末尾の -N-N を -N.N に。 */
+export const shortModel = (model: string): string =>
+  model
+    .replace(/^.*\//, "")
+    .replace(/^claude-/, "")
+    .replace(/-(\d{1,2})-(\d{1,2})$/, "-$1.$2");
+
+/** `owner/name` → `name`。 */
+export const repoName = (repository: string | undefined): string =>
+  (repository ?? "").split("/").pop() ?? "";
+
+/**
+ * 1 行目の列の幅。題名は、全体の幅から選択の印・列の間・他の列を引いた残り。
+ * 題名が狭くなりすぎるときは、リポジトリ、モデルの順に縮める（それぞれ 6 桁まで）。
+ */
+export const laneColumns = (
+  total: number,
+  want: { repo: number; model: number; elapsed: number },
+): { title: number; repo: number; model: number; elapsed: number } => {
+  let { repo, model } = want;
+  const elapsed = want.elapsed;
+  const room = (): number => total - MARK_W - GAPS_W - repo - model - elapsed;
+  if (room() < MIN_TITLE) repo = Math.max(Math.min(repo, MIN_SHRUNK), repo - (MIN_TITLE - room()));
+  if (room() < MIN_TITLE)
+    model = Math.max(Math.min(model, MIN_SHRUNK), model - (MIN_TITLE - room()));
+  return { title: Math.max(1, room()), repo, model, elapsed };
+};
 
 /** 末尾の n 行。長い行は切る。 */
 export const tailLines = (s: string, n: number = TAIL_LINES): string =>
@@ -357,7 +611,7 @@ const asPrLink = (value: unknown): PrLink | undefined => {
     : undefined;
 };
 
-const shortText = (value: unknown, max: number): string | undefined => {
+export const shortText = (value: unknown, max: number): string | undefined => {
   if (typeof value !== "string") return undefined;
   const text = stripFence(value).replace(/\s+/g, " ").trim().slice(0, max);
   return text === "" ? undefined : text;

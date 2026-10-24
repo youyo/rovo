@@ -59,6 +59,13 @@ export type RovoConsole = {
   pr?: { number: number | null; url: string };
 };
 
+/** ログ（task_console の log）の 1 行。kind で色が決まる。where は cmd の場所（/workspace からの相対）。 */
+export type RovoLogLine = {
+  kind: "cmd" | "out" | "edit" | "commit" | "web" | "tool" | "status" | "pr" | "error";
+  text: string;
+  where?: string;
+};
+
 declare module "claude-code" {
   interface PluginState {
     rovo: {
@@ -81,6 +88,13 @@ declare module "claude-code" {
       endpoints: { server: string; prefix: string }[];
       /** task_list の接続先（server と prefix の組）ごとの状態。キーは `${server}/${prefix}`。 */
       lists: Record<string, { supported: boolean; retryAt: number; lastAt: number }>;
+      /**
+       * 積み上がるログ。キーは taskKey。supported は task_console が log を返したワーカー
+       * （false なら最新のコマンドだけの表示）。cursor は次に渡す log_after、lines は最大 500 行。
+       */
+      logs: Record<string, { supported: boolean; cursor: string; lines: RovoLogLine[] }>;
+      /** log_after を受け付けなかった接続先（`${server}/${prefix}`）を、この時刻（ms）まで使わない。 */
+      logOff: Record<string, number>;
     };
   }
 }

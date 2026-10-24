@@ -1,17 +1,25 @@
 import { expect, test } from "claude-code/testing";
 import type { RovoTask } from "../types";
 import {
+  appendLines,
   budgetToastText,
+  coerceLogs,
   coerceTasks,
+  entryLines,
   formatElapsed,
   glyph,
   httpsOnly,
   isTerminal,
+  laneColumns,
+  MAX_LOG_LINES,
   matchTaskStart,
   parseConsole,
+  parseLog,
   parseStartResult,
   parseStatus,
   pruneTasks,
+  repoName,
+  shortModel,
   slideShift,
   splitCommand,
   statusColor,
@@ -324,4 +332,236 @@ test("parseConsole splits the cd prefix of command and now.text", () => {
   );
   expect(plain?.nowText).toBe("editing a.ts");
   expect(plain?.nowWhere).toBeUndefined();
+});
+
+// --- model / repo short names ---------------------------------------------------
+
+test("shortModel drops the provider and claude-, and turns a trailing -N-N into -N.N", () => {
+  expect(shortModel("anthropic/claude-sonnet-5-5")).toBe("sonnet-5.5");
+  expect(shortModel("anthropic/claude-haiku-5-5")).toBe("haiku-5.5");
+  expect(shortModel("openai/gpt-6-sol")).toBe("gpt-6-sol");
+  expect(shortModel("claude-opus-4-7")).toBe("opus-4.7");
+  expect(shortModel("sonnet")).toBe("sonnet");
+  expect(shortModel("workers-ai/@cf/openai/gpt-oss-120b")).toBe("gpt-oss-120b");
+  expect(shortModel("anthropic/claude-sonnet-4-20250514")).toBe("sonnet-4-20250514");
+  expect(shortModel("")).toBe("");
+});
+
+test("repoName keeps only the name after owner/", () => {
+  expect(repoName("youyo/rovo")).toBe("rovo");
+  expect(repoName("rovo")).toBe("rovo");
+  expect(repoName(undefined)).toBe("");
+});
+
+// --- column widths --------------------------------------------------------------
+
+test("laneColumns gives the title what the other columns leave", () => {
+  const w = laneColumns(80, { repo: 7, model: 10, elapsed: 7 });
+  expect(w).toEqual({ title: 80 - 2 - 3 - 24, repo: 7, model: 10, elapsed: 7 });
+  expect(w.title + 2 + 3 + w.repo + w.model + w.elapsed).toBe(80);
+});
+
+test("laneColumns shrinks repo then model when the pane is narrow, keeping a readable title", () => {
+  const w = laneColumns(40, { repo: 16, model: 14, elapsed: 7 });
+  expect(w.title).toBeGreaterThanOrEqual(8);
+  expect(w.title + 2 + 3 + w.repo + w.model + w.elapsed).toBeLessThanOrEqual(40);
+  expect(w.repo).toBeLessThan(16);
+  const tiny = laneColumns(10, { repo: 16, model: 14, elapsed: 7 });
+  expect(tiny.title).toBeGreaterThanOrEqual(1);
+  expect(tiny.repo).toBeGreaterThanOrEqual(0);
+});
+
+test("laneColumns spends nothing on empty repo or model columns", () => {
+  const w = laneColumns(60, { repo: 0, model: 0, elapsed: 5 });
+  expect(w.title).toBe(60 - 2 - 3 - 5);
+});
+
+// --- log entries -> lines -------------------------------------------------------
+
+const at = "2026-01-01T00:00:00Z";
+const fence = (s: string) =>
+  `<<<UNTRUSTED_CHILD_QUESTION id=x>>>\n${s}\n<<<END_UNTRUSTED_CHILD_QUESTION>>>`;
+
+test("a command entry is a $ line, its output tail, and an exit line when it failed", () => {
+  const lines = entryLines({
+    seq: 1,
+    at,
+    type: "command",
+    command: fence("cd /workspace/apps/x && pnpm test"),
+    exit_code: 1,
+    output_tail: fence("ok 1\nnot ok 2"),
+  });
+  expect(lines).toEqual([
+    { kind: "cmd", text: "$ pnpm test", where: "apps/x" },
+    { kind: "out", text: "ok 1" },
+    { kind: "out", text: "not ok 2" },
+    { kind: "error", text: "✕ exit 1" },
+  ]);
+});
+
+test("a successful command with no output is only the $ line", () => {
+  expect(entryLines({ seq: 1, at, type: "command", command: fence("ls"), exit_code: 0 })).toEqual([
+    { kind: "cmd", text: "$ ls" },
+  ]);
+  expect(entryLines({ seq: 1, at, type: "command", command: "ls", exit_code: null })).toEqual([
+    { kind: "cmd", text: "$ ls" },
+  ]);
+});
+
+test("edit, commit, web, status and PR entries are one line each", () => {
+  expect(
+    entryLines({
+      seq: 2,
+      at,
+      type: "edit",
+      path: fence("apps/x.ts"),
+      op: "modify",
+      added: 12,
+      removed: 4,
+    }),
+  ).toEqual([{ kind: "edit", text: "✎ edit apps/x.ts (+12 -4)" }]);
+  expect(
+    entryLines({ seq: 2, at, type: "edit", path: "a.ts", op: "create", added: 3, removed: 0 }),
+  ).toEqual([{ kind: "edit", text: "✎ create a.ts (+3 -0)" }]);
+  expect(
+    entryLines({ seq: 3, at, type: "commit", message: fence("fix: it"), sha: "abc1234", files: 2 }),
+  ).toEqual([{ kind: "commit", text: "⎇ commit fix: it" }]);
+  expect(entryLines({ seq: 4, at, type: "web", kind: "search", host: "example.com" })).toEqual([
+    { kind: "web", text: "🔍 search example.com" },
+  ]);
+  expect(entryLines({ seq: 4, at, type: "web", kind: "fetch", host: "example.com" })).toEqual([
+    { kind: "web", text: "🌐 fetch example.com" },
+  ]);
+  expect(
+    entryLines({ seq: 5, at, type: "status_changed", from: "RUNNING", to: "VERIFYING" }),
+  ).toEqual([{ kind: "status", text: "· 実行中 → 検証中" }]);
+  expect(
+    entryLines({
+      seq: 6,
+      at,
+      type: "draft_pr_created",
+      pr_number: 7,
+      pr_url: "https://github.com/o/r/pull/7",
+    }),
+  ).toEqual([{ kind: "pr", text: "⎇ Draft PR #7" }]);
+});
+
+test("tool_start for tools that have their own entry is skipped; others are dim lines; only failed tool_end shows", () => {
+  expect(
+    entryLines({ seq: 1, at, type: "tool_start", call_id: "c", name: "bash", summary: "ls" }),
+  ).toEqual([]);
+  expect(
+    entryLines({
+      seq: 1,
+      at,
+      type: "tool_start",
+      call_id: "c",
+      name: "edit_file",
+      summary: "a.ts",
+    }),
+  ).toEqual([]);
+  expect(
+    entryLines({
+      seq: 1,
+      at,
+      type: "tool_start",
+      call_id: "c",
+      name: "read_file",
+      summary: fence("a.ts"),
+    }),
+  ).toEqual([{ kind: "tool", text: "· read_file a.ts" }]);
+  expect(
+    entryLines({ seq: 2, at, type: "tool_end", call_id: "c", is_error: false, summary: "ok" }),
+  ).toEqual([]);
+  expect(
+    entryLines({ seq: 2, at, type: "tool_end", call_id: "c", is_error: true, summary: "boom" }),
+  ).toEqual([{ kind: "error", text: "✕ boom" }]);
+});
+
+test("entryLines ignores unknown or malformed entries and strips control characters from worker text", () => {
+  expect(entryLines({ seq: 1, at, type: "usage", cost_usd: 1 })).toEqual([]);
+  expect(entryLines({ seq: 1, at, type: "agent_event", agent_type: "x" })).toEqual([]);
+  expect(entryLines(null)).toEqual([]);
+  expect(entryLines("x")).toEqual([]);
+  expect(entryLines({ type: "edit" })).toEqual([]);
+  expect(entryLines({ type: "commit", message: 5 })).toEqual([]);
+  expect(entryLines({ type: "web", kind: "search" })).toEqual([{ kind: "web", text: "🔍 search" }]);
+  const [line] = entryLines({ type: "commit", message: "a\u001b[31mred\u001b[0m\nb" });
+  expect(line?.text).toBe("⎇ commit ared b");
+});
+
+test("parseLog needs entries and a next_cursor; bad entries are dropped", () => {
+  const page = parseLog({
+    entries: [
+      { seq: 1, at, type: "commit", message: "m", sha: "abc1234", files: 1 },
+      { type: "nope" },
+    ],
+    next_cursor: "5",
+    truncated: true,
+  });
+  expect(page).toEqual({
+    lines: [{ kind: "commit", text: "⎇ commit m" }],
+    nextCursor: "5",
+    truncated: true,
+  });
+  expect(parseLog(undefined)).toBeNull();
+  expect(parseLog({ entries: "x", next_cursor: "1" })).toBeNull();
+  expect(parseLog({ entries: [] })).toBeNull();
+  expect(parseLog({ entries: [], next_cursor: 5 })).toBeNull();
+  expect(parseLog({ entries: [], next_cursor: "9" })).toEqual({
+    lines: [],
+    nextCursor: "9",
+    truncated: false,
+  });
+});
+
+test("parseConsole carries the log page and keeps working without one", () => {
+  const base = { status: "RUNNING" };
+  expect(parseConsole(JSON.stringify(base))?.log).toBeUndefined();
+  const withLog = parseConsole(
+    JSON.stringify({
+      ...base,
+      log: { entries: [{ type: "commit", message: "m" }], next_cursor: "1", truncated: false },
+    }),
+  );
+  expect(withLog?.log?.nextCursor).toBe("1");
+  expect(withLog?.log?.lines).toHaveLength(1);
+  expect(parseConsole(JSON.stringify({ ...base, log: "x" }))?.log).toBeUndefined();
+});
+
+// --- the line buffer ------------------------------------------------------------
+
+test("appendLines adds at the end and drops the oldest lines past the limit", () => {
+  const mk = (n: number) => ({ kind: "out" as const, text: `l${n}` });
+  const a = appendLines([mk(1), mk(2)], [mk(3)]);
+  expect(a).toEqual({ lines: [mk(1), mk(2), mk(3)], dropped: 0 });
+  const big = Array.from({ length: MAX_LOG_LINES }, (_, i) => mk(i));
+  const b = appendLines(big, [mk(1000), mk(1001)]);
+  expect(b.lines).toHaveLength(MAX_LOG_LINES);
+  expect(b.dropped).toBe(2);
+  expect(b.lines[0]).toEqual(mk(2));
+  expect(b.lines.at(-1)).toEqual(mk(1001));
+  expect(appendLines(big, []).dropped).toBe(0);
+  expect(MAX_LOG_LINES).toBe(500);
+});
+
+test("coerceLogs rebuilds only well-formed stored logs", () => {
+  const good = {
+    cursor: "7",
+    lines: [
+      { kind: "cmd", text: "$ ls", where: "a" },
+      { kind: "out", text: "x" },
+    ],
+  };
+  const out = coerceLogs({
+    "s/t1": good,
+    "s/t2": { cursor: 5, lines: [] },
+    "s/t3": { cursor: "1", lines: [{ kind: "weird", text: "x" }, { kind: "out", text: 3 }, null] },
+    "s/t4": "x",
+  });
+  expect(out["s/t1"]).toEqual(good);
+  expect(out["s/t2"]).toBeUndefined();
+  expect(out["s/t3"]).toEqual({ cursor: "1", lines: [] });
+  expect(out["s/t4"]).toBeUndefined();
+  expect(coerceLogs(null)).toEqual({});
 });

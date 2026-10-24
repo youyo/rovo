@@ -6,7 +6,7 @@
 
 Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確認・待機・キャンセルできる。
 
-- 子エージェントはまだ無い。`task_start` で作ったタスクは `CREATING` のまま止まる。
+- ワーカーはまだ無い。`task_start` で作ったタスクは `CREATING` のまま止まる。
 - Draft PR も作られない（`draft_pr_url: null`）。
 - これらはツールの応答と README に明記する。
 
@@ -64,7 +64,7 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - 結果は UserDO に短時間（TTL 5分）キャッシュする。team から外れてから使えなくなるまでの遅れは最大5分。
   - GitHub API の障害時は拒否する（fail-closed）。
   - 401 は `reauth_required`、403 / 404 は `forbidden`、429 / 5xx は `upstream_unavailable` に分けて返す。
-  - team API は子 team への所属も含めて判定するので、子 team のメンバーも許可される（仕様として明記する）。
+  - team API はワーカー team への所属も含めて判定するので、ワーカー team のメンバーも許可される（仕様として明記する）。
 - **同意画面（confused deputy 対策）**
   - DCR が有効なため、悪意あるクライアントが `/authorize` を開始し、GitHub 側が自動承認すると、利用者の MCP アクセストークンが攻撃者の `redirect_uri` に渡りうる。これを防ぐため、`/authorize` は GitHub へ行く前に必ず同意画面を表示する。
   - 流れ（`@cloudflare/workers-oauth-provider` 1.2.3 の `parseAuthRequest` → `describeConsent` → `beginConsent` → `approveConsent` / `denyConsent` → `beginUpstream`）
@@ -279,6 +279,6 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
 
 ## Phase 1 でやらないこと
 
-- 子エージェント、Sandbox、Draft PR 作成、Token Broker、Web Research、予算の本実装、R2
+- ワーカー、Sandbox、Draft PR 作成、Token Broker、Web Research、予算の本実装、R2
 - Portal / Access の設定（IaC のリポジトリの Terraform で管理し、別途登録する）
 - 実 Cloudflare 環境へのデプロイ（ユーザーの指示があるまで行わない）

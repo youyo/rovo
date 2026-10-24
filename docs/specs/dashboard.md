@@ -114,7 +114,7 @@ path:line は 2026-10-21 時点の origin/main（`c1ddb06`）。
 
 - 同時実行数の設定化（`reservation_slot`、`concurrency_limit`）は main に入っている。
 - usage の `sandbox_runtime_ms` / `cache_build_ms` / `deps_cache`（`agent-events.ts:81-110`）、task_result の `duration_ms` / `reason` / `failure_phase`（`task-do.ts:165-232`）は main に入っている。
-- **`sandbox_instance` と、子の出力の整形（囲みの記号の除去・マルチバイトで切らない・ANSI の除去）は作業中で main に無い**。ダッシュボードの設定欄の「Sandbox の大きさ」と出力の枠は、これらが入るまで空/素のままになる。**M7・M8 の着手前に main へ入っているかを確かめる**（依存）。
+- **`sandbox_instance` と、ワーカーの出力の整形（囲みの記号の除去・マルチバイトで切らない・ANSI の除去）は作業中で main に無い**。ダッシュボードの設定欄の「Sandbox の大きさ」と出力の枠は、これらが入るまで空/素のままになる。**M7・M8 の着手前に main へ入っているかを確かめる**（依存）。
 
 ## 範囲と、やらないこと
 
@@ -342,7 +342,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 ### D14. 構造化イベント（agent → gateway → 詳細）
 
-- agent に足す新しいイベントの型（名前は仮。`step` 系にまとめるか個別にするかは M7 の最初に決める）。いずれも**マスク済み**（`maskSecrets`）で、**制御文字・ANSI を除き、マルチバイトで切らない**（作業中の「子の出力の整形」を使う）。
+- agent に足す新しいイベントの型（名前は仮。`step` 系にまとめるか個別にするかは M7 の最初に決める）。いずれも**マスク済み**（`maskSecrets`）で、**制御文字・ANSI を除き、マルチバイトで切らない**（作業中の「ワーカーの出力の整形」を使う）。
   - `command`: `argv` を人間が読める 1 行に整形した文字列（最大 1,000 字。先頭と末尾を残す）、`cwd`（ワークスペースからの相対）、`exit_code`、`duration_ms`、`output_tail`（最大 2,000 字、マスク済み）。
   - `edit`: `path`（ワークスペースからの相対。`..`・絶対パス・制御文字を拒否。最大 300 字）、`op`（`create` / `modify` / `delete`）、`added` / `removed` の行数。**差分の本文は送らない**。
   - `commit`: `message` の 1 行目（最大 200 字）、`sha`（40 桁）、`files`（数）。
@@ -354,7 +354,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 - 表示の安全: React の `{text}` のエスケープに頼らない前提で、(1) 表示前に制御文字（改行・タブ以外の C0/C1、双方向の制御文字 `U+202A-202E`・`U+2066-2069`）を除去 / 可視化する純関数、(2) `dangerouslySetInnerHTML` を使わない（lint で禁止）、(3) Markdown / HTML を解釈しない、(4) `<a>` は GitHub の PR の URL（`https://github.com/<owner>/<repo>/pull/<n>` に厳密に一致するもの）だけに許可し、`rel="noopener noreferrer"`、(5) `<img>` を出さない（外部画像なし）。
 
 **追加（2026-10-22）: 実行中のコマンドの途中の出力（`command_progress`）。**
-- 子の bash ツールが `exec` の完了を待つ間、3〜5 秒ごとに SandboxDO の `peekOutput()`（`exec` の鎖の外の RPC。実行中の TailBuffer の中身を返す）を呼び、前回と違うときだけ `command_progress`（`command` / `cwd` / `startedAt` / `outputTail`）を onEvent の側路で積む。子の LLM に返る tool result には入れない。
+- ワーカーの bash ツールが `exec` の完了を待つ間、3〜5 秒ごとに SandboxDO の `peekOutput()`（`exec` の鎖の外の RPC。実行中の TailBuffer の中身を返す）を呼び、前回と違うときだけ `command_progress`（`command` / `cwd` / `startedAt` / `outputTail`）を onEvent の側路で積む。ワーカーの LLM に返る tool result には入れない。
 - マスクの規則: stdout / stderr それぞれの窓（末尾 64KiB）の全体に `maskSecrets` をかけてから末尾 2,000 字へ切る（切ってからマスクしない）。最後の改行より後（未完の行）と、閉じていない `-----BEGIN` から先は出さない（`packages/audit/src/progress.ts`）。フィールド名は `outputTail` で、AgentDO の `maskEventStrings` と取り込み時の再マスクが効く。
 - 保存は上書き: gateway の TaskDO は `events`（履歴）に積まず、`meta` の 1 行（`command_progress`）に最新の 1 件だけを書く。`dashboardLatest` が読み、`dashboardEvents` / `task_wait` / `task_status` / `task_result` には出ない（`mapAgentEvent` は専用の `progress` 種別に写し、汎用の `agent_event` に落とさない）。
 - 後始末: 最後の `command` イベント、`ended: true` の進捗（`command` を出せずに終わったとき）、タスクの終端、cancel で消す。`dashboardLatest` は終端のタスクでは進捗を返さない。
@@ -388,7 +388,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 - データの作り方: 偽 GitHub のログイン（`/login/oauth/authorize` は偽サーバーが即承認）で実ブラウザのログインを通し、タスクは**実際の MCP 経路**（`task_start`）で作って、偽の agent の台本で終端まで進める（完了・失敗・キャンセル・consult を混ぜる）。時刻依存（「今日」のタイムライン）は、`ENVIRONMENT=test` のときだけ使える時計の差し替え（既存の `/__test/` ルートの流儀）で固定する。
 - 偽の Cloudflare API: `CLOUDFLARE_API_BASE` を偽サーバーに向け、(1) 正常、(2) 一部の項目が 403 / 空、(3) 5xx を切り替える。画面の「取得できない」の表示と、他の項目が生きていることを確かめる。
 - 前提（M4 の最初に確かめる）: `wrangler dev` の `http://localhost` で、Chromium が `Secure` / `__Host-` の Cookie を受け付けること（D3）。
-- **Sandbox の外で動かす**: Playwright のブラウザの取得先（CDN）とフォントの配布元は、rovo の子エージェントの Sandbox の外向き通信の許可（`registry.npmjs.org` / `pypi.org` / `files.pythonhosted.org` と対象リポジトリの `github.com` だけ。`apps/agent/src/outbound-policy.ts:17,48-51`）に入らない。`wrangler dev` が Sandbox で立つかも未確認。したがって Playwright の E2E は**手元で実行・保守する**（委譲の基準の節）。
+- **Sandbox の外で動かす**: Playwright のブラウザの取得先（CDN）とフォントの配布元は、rovo のワーカーの Sandbox の外向き通信の許可（`registry.npmjs.org` / `pypi.org` / `files.pythonhosted.org` と対象リポジトリの `github.com` だけ。`apps/agent/src/outbound-policy.ts:17,48-51`）に入らない。`wrangler dev` が Sandbox で立つかも未確認。したがって Playwright の E2E は**手元で実行・保守する**（委譲の基準の節）。
 - 並列: 偽 GitHub の状態を共有するので `workers: 1`（既存と同じ）。
 - `mise run test` に `test:e2e:dashboard` を**含める**（`test:e2e` の `depends` に足す。wrangler dev の dev registry の取り違えを避けるため、`test:e2e:gateway` 系の後に直列で走らせる）。Docker は要らない。
 
@@ -407,10 +407,10 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 - 入力: `{task_id}`。応答: `{task_id, status, phase, stopped_phase, now, output, pr, dashboard_url?, generated_at}`。
   - `status` は `task_status` と同じ文字列。`phase`（`prepare` / `run` / `verify` / `done`）と `stopped_phase`（`prepare` / `run` / `verify` / `null`）は、詳細 API と同じ関数（`dashboard/detail-now.ts` の `phaseOf` / `stoppedPhaseOf`）で求める。
   - `now` は詳細 API の `now`（`buildNow`）、`output` は同じく `output`（`buildOutput`。実行中の `command_progress` を `running: true` つきで含む）。出す内容が無ければ `null`（`output` は command も末尾も無いとき）。
-  - `pr` は `{number, url}`（Draft PR の作成前は `null`）。`url` は `task_status` の `draft_pr_url` と同じ値（TaskDO が PR 作成時に `number` と同じ transaction で保存した GitHub の PR の URL。子が書いた文字列ではないので非信頼の囲みはしない）。mod がヘッダーに PR のリンクを出すために足した（`task_status` を別に呼ばせない）。
+  - `pr` は `{number, url}`（Draft PR の作成前は `null`）。`url` は `task_status` の `draft_pr_url` と同じ値（TaskDO が PR 作成時に `number` と同じ transaction で保存した GitHub の PR の URL。ワーカーが書いた文字列ではないので非信頼の囲みはしない）。mod がヘッダーに PR のリンクを出すために足した（`task_status` を別に呼ばせない）。
   - `dashboard_url` は `task_status` と同じ規則（`PUBLIC_BASE_URL` が不正・空なら、キー自体を付けない）。
 - 権限は `task_status` と同じ。**自分のタスクだけ**（TaskDO の `getStatus` が所有者を照合し、他人・未知の `task_id` は `not_found`）。ダッシュボードの「閲覧者が GitHub で見られるリポジトリなら全員のタスク」とは違う。照合に通ったあとで、詳細と同じ読み取り専用の RPC（`dashboardDetail` / `dashboardLatest`）で材料を集める。TaskDO は変えない。
-- 非信頼データ: 子が書いた文字列（`now.text`、`output.command`、`output.tail`）は、`task_status` / `task_result` / `task_wait` と同じ `<<<UNTRUSTED_CHILD_QUESTION ...>>>` 〜 `<<<END_UNTRUSTED_CHILD_QUESTION>>>` で囲む（`null` は囲まない）。マスク・整形・長さの制限は、詳細 API と同じ関数を通る。
+- 非信頼データ: ワーカーが書いた文字列（`now.text`、`output.command`、`output.tail`）は、`task_status` / `task_result` / `task_wait` と同じ `<<<UNTRUSTED_CHILD_QUESTION ...>>>` 〜 `<<<END_UNTRUSTED_CHILD_QUESTION>>>` で囲む（`null` は囲まない）。マスク・整形・長さの制限は、詳細 API と同じ関数を通る。
 - 使い方: 画面用。エージェントの作業の流れでは `task_wait` と `task_result` を使い、`task_console` を繰り返し呼ばない（会話が止まり、出力がコンテキストに入る）。`task_wait` の構造化イベントの除外（`STRUCTURED_TYPES_SQL`）、`task_wait` / `task_status` / `task_result` の応答は変えない。
 - テスト: Unit は `apps/gateway/test/unit/task-console.test.ts` と `mcp.test.ts`、E2E は `apps/gateway/test/e2e/tools.e2e.test.ts`（実行中の出力・終端・他人のタスクの拒否）。
 
@@ -430,7 +430,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 - 仕組みは自前で小さく、ライブラリは足さない。`apps/dashboard/src/i18n.ts` に en と ja の辞書（ja は `Record<Key, string>` で en と同じキー集合を型で強制し、片方の欠けは `tsc` で落ちる）と `t(key, params?)`、`src/lang.tsx` に現在の言語を配る Context（`LangProvider` / `useLang` / `useT`）。`t` は `{name}` を値で置き換える（単一パス・文字列のまま。HTML として解釈せず、`dangerouslySetInnerHTML` は使わない）。単複は `one|other`（英語だけ）。表示に使う純関数（`describeEvent`・`phaseBand`・`cloudflareRows`・`formatUsd` など）は `t` を引数に取り、Context に依存しない。
 - 対象は画面に出る文言すべて（ヘッダ・マイタスク/チーム〔英語は My tasks / Team〕・日付の前後送り・レール・タスクの要約・段階とステップの名前・状態の名前と凡例・予算のバー・Cloudflare の欄・空の状態・エラーの文・ログイン画面と `login_error` の 3 種・`aria-label`・`title` 属性・`<title>`）。`<html lang>` は言語に合わせて切り替える（`index.html` の既定は `en`）。
 - 日付・時刻・金額・数の書式は `Intl` に言語のロケール（英語は `en-US`、日本語は `ja-JP`）を渡す。経過時間（`2m 5s` / `2 分 5 秒`）は辞書の文言。月の予算の基準（UTC の月）は D18 のまま。
-- 訳さないもの: 子やユーザーが書いたデータ（タスクの題名・ログ・summary・`output.tail`・login 名・リポジトリ名・モデル名）。API の値（状態の enum など）は表示時に辞書で引く。gateway が固定の書式で添える文（`now.text` の「<相対パス> で 」）は、その書式のまま読んで、画面の文は言語に合わせて組み直す。
+- 訳さないもの: ワーカーやユーザーが書いたデータ（タスクの題名・ログ・summary・`output.tail`・login 名・リポジトリ名・モデル名）。API の値（状態の enum など）は表示時に辞書で引く。gateway が固定の書式で添える文（`now.text` の「<相対パス> で 」）は、その書式のまま読んで、画面の文は言語に合わせて組み直す。
 - 英語の状態の語は GitHub Actions の語彙に寄せる（In progress / Succeeded / Failed / Cancelled / Awaiting review / Merged など）。日本語は従来の文言のまま。書体は IBM Plex Sans JP / JetBrains Mono のまま（新しい書体は足さない）。
 - テスト: Unit は `apps/dashboard/test/i18n.test.ts`（キー集合の一致・差し込み・単複・英語に日本語の文字が無い）・`lang-prefs.test.ts`・`format-locale.test.ts`・`lang-switch.test.tsx`・`en-render.test.tsx`。既存の Unit は日本語で描く（`test/lang.ts` の `inJa` / `tJa`、App は保存された言語を `ja` にする）。E2E は `apps/dashboard/e2e/i18n.spec.ts`（初回は英語・日本語への切り替えと読み直し・`<html lang>`）。既存の E2E は最初に日本語を保存する（`e2e/fixtures.ts` の `lang`）。
 
@@ -438,9 +438,9 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 各 M は、先に失敗するテストを書いてから実装する（TDD。Unit と E2E の両方）。規模の目安は S（半日未満）/ M（1 日前後）/ L（数日）。
 
-### 委譲の基準（rovo の子エージェントに任せてよい範囲）
+### 委譲の基準（rovo のワーカーに任せてよい範囲）
 
-rovo の子エージェントの Sandbox は、外向き通信が `registry.npmjs.org` / `pypi.org` / `files.pythonhosted.org` と対象リポジトリの `github.com` だけに限られる（`apps/agent/src/outbound-policy.ts:17,48-51`）。Playwright のブラウザの CDN やフォントの配布元には届かず、`wrangler dev` が Sandbox で立つかも未確認。そのため基準は次のとおり。
+rovo のワーカーの Sandbox は、外向き通信が `registry.npmjs.org` / `pypi.org` / `files.pythonhosted.org` と対象リポジトリの `github.com` だけに限られる（`apps/agent/src/outbound-policy.ts:17,48-51`）。Playwright のブラウザの CDN やフォントの配布元には届かず、`wrangler dev` が Sandbox で立つかも未確認。そのため基準は次のとおり。
 
 - **rovo に任せてよい**: `vitest`（jsdom）で閉じる、純関数・コンポーネント・契約（DTO）・ビルド成果物の検査（`dist` に外部ホストが無い等）まで。受入条件が観測でき、設計の判断・認可・移行を含まないもの。
 - **手元でやる**: Playwright の E2E、`wrangler dev` を使うもの、実 API への接続、フォントの同梱（ライセンスの確認と取得）、認可・セッション・DO の変更と移行・デプロイの経路・安全に関わるもの。
@@ -487,7 +487,7 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
 | DO の SQLite の容量の上限（Directory の保持） | **M3a**（確認済み: 10 GB） | ドキュメント |
 | 見本の 3 書体のライセンスとサブセット化 | **M6b** | フォントの同梱の前にライセンスを確認。**確認済み（3 書体とも SIL OFL 1.1。@fontsource から woff2 だけ同梱）** |
 | Cloudflare の権限名（Analytics の Read）と各 API の要求権限 | **M9** | Cloudflare のドキュメント。Terraform の `plan` で見つかること |
-| `sandbox_instance`・子の出力の整形が main に入っているか | **M7** | main の状態の確認 |
+| `sandbox_instance`・ワーカーの出力の整形が main に入っているか | **M7** | main の状態の確認 |
 
 ### M1. 配信の土台
 
@@ -566,7 +566,7 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
 
 ### M7. 構造化イベントと詳細の API
 
-**最初の版に入れる。M8 の前（M5b の後）に作る。** 古い agent の履歴では、M8 は既存の `tool_start` / `tool_end` と状態のイベントで縮退して表示する。着手の前に、`sandbox_instance` と子の出力の整形が main に入っているかを確かめる。
+**最初の版に入れる。M8 の前（M5b の後）に作る。** 古い agent の履歴では、M8 は既存の `tool_start` / `tool_end` と状態のイベントで縮退して表示する。着手の前に、`sandbox_instance` とワーカーの出力の整形が main に入っているかを確かめる。
 
 - 作るもの: agent の新しいイベント（D14: `command` / `edit` / `commit` / `web`）と、マスク・整形・長さの制限、gateway の `mapAgentEvent` の許可リスト、取り込み時の再マスク、`task_wait` からの除外、TaskDO の `dashboardEvents(expectedRepositoryId, cursor, limit, direction)`、`GET .../events` の実装。`tool_start` / `tool_end` へのフォールバック。
 - 完了条件: `mise run test` / `lint`。秘密（GitHub のトークン形式・Bearer・URL 内の資格・env の `KEY=value`・既存の `maskSecrets` が対象にするものすべて）を含む command / 出力 / commit メッセージ / パスが、**agent の出力・gateway の保存・API の応答のどの層でも**伏せられる。MCP の `task_wait` の応答が変わらない。
@@ -575,7 +575,7 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
   - Unit（gateway）: 許可リストに無い項目は落ちる。agent が（バグで）マスクし忘れたトークンが、gateway で再マスクされる。上限を超える値が切られる。`task_wait` の応答に新しい型が出ない（既存のスナップショット）。古い agent（新しい型が無い）の `tool_start` / `tool_end` だけの履歴で詳細の DTO が縮退する。
   - E2E: 偽 agent が秘密入りの command を出す台本 → API の応答に平文の秘密が無い（応答全体を grep）、`events` のページング（末尾から / `cursor`）、権限なしは 404。
 - 触るファイル: `apps/agent/src/agent-do.ts`（と新しい整形の関数・`redact.ts`）、`apps/agent/src/tools/*`（edit / commit の検出点）、`apps/gateway/src/agent/agent-events.ts`、`apps/gateway/src/agent/contract.ts`、`apps/gateway/src/tasks/task-do.ts`、`apps/gateway/src/mcp/server.ts`（除外）、`apps/gateway/src/dashboard/api.ts`、`packages/dashboard-contract`。
-- 依存: M2・M5、D14。作業中の「子の出力の整形」と `sandbox_instance` が main に入っていること（入っていなければ、整形の関数をこの M で共通化する範囲を決める。ESCALATE の候補）。
+- 依存: M2・M5、D14。作業中の「ワーカーの出力の整形」と `sandbox_instance` が main に入っていること（入っていなければ、整形の関数をこの M で共通化する範囲を決める。ESCALATE の候補）。
 
 ### M8. 詳細の画面
 
@@ -679,7 +679,7 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
 6. **consult にモデルが残っていない**（D9）。モデル別の費用に consult を入れるには、UserDO 側の変更（`reserveConsult` のシグネチャ、新テーブル、alarm）が要る。承認済みの設計は索引（TaskDO の outbox）だけに触れていたが、UserDO の outbox と alarm が増える。M3 の規模が L になる主因（決定: 最初の版に入れ、M3a / M3b に分ける）。
 7. **Directory の outbox の配送は alarm の周期（10 秒）にまとめる**ので、一覧は最大約 10 秒遅れ、詳細の状態は遅れない。5 秒のポーリングの「更新」が一覧では 2 回に 1 回は変わらない。許容する前提で書いた（改善するなら、状態遷移だけ即時に配送する）。
 8. **`dashboard_url` は、権限の無い人の画面では 404**。作った本人でも、リポジトリの権限が後で外れると見えなくなる。仕様として許容（D7）。
-9. **作業中の 2 つの変更**（`sandbox_instance`、子の出力の整形）が main に入る前に M7・M8 を始めると、設定欄と出力の枠が不完全になる。着手の前に main の状態を確認する（M7 の依存）。
+9. **作業中の 2 つの変更**（`sandbox_instance`、ワーカーの出力の整形）が main に入る前に M7・M8 を始めると、設定欄と出力の枠が不完全になる。着手の前に main の状態を確認する（M7 の依存）。
 10. **`deploy:config` の生成器は `APPS = ["gateway","agent","web"]`**（`deploy-config-lib.mjs:17`）で、ダッシュボードは Worker ではないので追加しない（gateway の assets として同梱）。`deploy.example/gateway.wrangler.jsonc` の `assets.directory` は `main` と同じく設定ファイルからの相対で、`ROVO_DEPLOY_DIR=deploy` のとき `../apps/dashboard/dist`。別の場所に置く下流は直す必要がある（docs に書く）。
 
 ## 前提・注意

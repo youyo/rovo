@@ -468,7 +468,8 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
       "echo evil > evil.txt",
       "git add -A",
       `git ${GIT_ID.join(" ")} commit -q -m evil`,
-      `(git push -q --force origin HEAD:${ref(task)} && echo PUSH-ACCEPTED || echo PUSH-DENIED)`,
+      // git の 403 のエラー文は長く、tool_end の要約（末尾だけ残す）から印を押し出すので捨てる
+      `(git push -q --force origin HEAD:${ref(task)} 2>/dev/null && echo PUSH-ACCEPTED || echo PUSH-DENIED)`,
       `git checkout -q agent/task-${task}`,
     ].join(" && ");
     const agent = agentClient(wrangler.baseUrl, task);

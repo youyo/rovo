@@ -1,6 +1,6 @@
 {
   "name": "rovo",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "rovo のタスクの進み具合とコンソールを会話の横に出す（読み取り専用）",
   "types": "./types/index.d.ts"
 }

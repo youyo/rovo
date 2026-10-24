@@ -9,6 +9,8 @@ export interface PullInfo {
   url: string;
   draft: boolean;
   state: string;
+  /** タイトル（読めなければ空） */
+  title: string;
   body: string;
   headSha: string;
   baseRef: string;
@@ -220,6 +222,7 @@ export class GitHubRepoApi {
       html_url?: unknown;
       draft?: unknown;
       state?: unknown;
+      title?: unknown;
       body?: unknown;
       head?: { sha?: unknown };
       base?: { ref?: unknown };
@@ -238,6 +241,7 @@ export class GitHubRepoApi {
       url: p.html_url,
       draft: p.draft === true,
       state: typeof p.state === "string" ? p.state : "open",
+      title: typeof p.title === "string" ? p.title : "",
       body: typeof p.body === "string" ? p.body : "",
       headSha: p.head.sha,
       baseRef: p.base.ref,
@@ -314,6 +318,86 @@ export class GitHubRepoApi {
   /** PR（issue）にコメントを 1 件付ける。 */
   async commentPull(number: number, body: string): Promise<void> {
     await this.call("comment pull", "POST", this.repoPath(`/issues/${number}/comments`), { body });
+  }
+
+  /**
+   * PR にレビューを 1 件投稿する（task_review。POST /pulls/{n}/reviews）。event は常に COMMENT で、引数では受け取らない
+   * （ボットの承認がブランチ保護の必須レビューを満たさないよう、APPROVE / REQUEST_CHANGES を送る口を作らない）。
+   * commit_id はレビューした head（その後に head が動いても、どの commit へのレビューかが残る）。本文だけで、インラインのコメントは付けない。
+   */
+  async createPullReview(
+    number: number,
+    body: string,
+    commitId: string,
+  ): Promise<{ id: number; url: string }> {
+    const what = "create pull review";
+    const { json } = await this.call(what, "POST", this.repoPath(`/pulls/${number}/reviews`), {
+      body,
+      event: "COMMENT",
+      commit_id: commitId,
+    });
+    const b = json as { id?: unknown; html_url?: unknown } | null;
+    if (typeof b?.id !== "number" || typeof b.html_url !== "string") return this.bad(what);
+    return { id: b.id, url: b.html_url };
+  }
+
+  /**
+   * base...head（3 点。PR の画面と同じ、分岐点からの差分）の unified diff（task_review）。maxBytes を超えたら、
+   * 超えない最後のファイルの区切り（`diff --git`）で切って truncated を立てる（本文を読み切らずに止める）。
+   */
+  async getCompareDiff(
+    base: string,
+    head: string,
+    maxBytes: number,
+  ): Promise<{ diff: string; truncated: boolean }> {
+    const what = "compare diff";
+    let res: Response;
+    try {
+      res = await this.fetchImpl(this.repoPath(`/compare/${enc(base)}...${enc(head)}`), {
+        method: "GET",
+        headers: {
+          accept: "application/vnd.github.diff",
+          authorization: `Bearer ${this.token}`,
+          "x-github-api-version": "2022-11-28",
+          "user-agent": "rovo-gateway",
+        },
+      });
+    } catch {
+      throw new GitHubApiError({ status: 0, what });
+    }
+    if (!res.ok) return throwApiError(res, what);
+    const reader = res.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    let over = false;
+    if (reader) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        size += value.length;
+        if (size > maxBytes) {
+          over = true;
+          await reader.cancel().catch(() => undefined);
+          break;
+        }
+      }
+    }
+    const all = new Uint8Array(size);
+    let at = 0;
+    for (const c of chunks) {
+      all.set(c, at);
+      at += c.length;
+    }
+    if (!over) return { diff: new TextDecoder().decode(all), truncated: false };
+    // 上限の内側で、最後のファイルの区切りまでを残す（区切りが無ければ空）
+    const text = new TextDecoder().decode(all);
+    const bytes = (s: string) => new TextEncoder().encode(s).length;
+    let cut = text.lastIndexOf("\ndiff --git ");
+    while (cut >= 0 && bytes(text.slice(0, cut + 1)) > maxBytes) {
+      cut = cut === 0 ? -1 : text.lastIndexOf("\ndiff --git ", cut - 1);
+    }
+    return { diff: cut >= 0 ? text.slice(0, cut + 1) : "", truncated: true };
   }
 
   /** ブランチの先頭が expectedSha のときだけ消す。消したら true。 */

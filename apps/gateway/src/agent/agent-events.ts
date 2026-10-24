@@ -346,6 +346,19 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
           commit_sha: text(d.commitSha, 64),
         },
       };
+    // task_review のレビューの段（固定の形だけ。差分・本文・出力は載せない）
+    case "review_started":
+      return {
+        kind: "event",
+        type: "review_started",
+        payload: { model: text(d.model, 100), commands: num(d.commands) },
+      };
+    case "review_commands_finished":
+      return {
+        kind: "event",
+        type: "review_commands_finished",
+        payload: { passed: num(d.passed), failed: num(d.failed), timed_out: num(d.timed_out) },
+      };
     case "pushed":
       return {
         kind: "event",

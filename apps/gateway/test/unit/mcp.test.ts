@@ -71,7 +71,7 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("16 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("17 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
@@ -86,6 +86,7 @@ describe("/mcp ツール一覧", () => {
       "task_pr_merge",
       "task_pr_ready",
       "task_result",
+      "task_review",
       "task_start",
       "task_status",
       "task_steer",
@@ -2630,11 +2631,12 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
     task_steer: WRITE(false, false, false),
     task_cancel: WRITE(true, true, false),
     task_pr_ready: WRITE(false, true, true),
+    task_review: WRITE(false, true, true),
     task_pr_merge: WRITE(true, false, true),
     consult: WRITE(false, false, true),
   };
 
-  it("17 ツール（web_browse 有効）すべてに title と annotations があり、分類が決定どおり", async () => {
+  it("18 ツール（web_browse 有効）すべてに title と annotations があり、分類が決定どおり", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props, withBrowse(fakeWeb().port));
     const { tools } = await client.listTools();
@@ -2654,11 +2656,11 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
     await client.close();
   });
 
-  it("web_browse が無効（既定）なら 16 ツールで、それぞれに annotations がある", async () => {
+  it("web_browse が無効（既定）なら 17 ツールで、それぞれに annotations がある", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(16);
+    expect(tools).toHaveLength(17);
     for (const t of tools) {
       expect(t.annotations, t.name).toMatchObject(EXPECTED[t.name] as Hints);
     }

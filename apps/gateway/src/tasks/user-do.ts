@@ -207,6 +207,28 @@ export type StartAuthzResult =
   | { ok: true; repositoryId: number; installationId: number }
   | AuthzFailure;
 
+/** task_review の対象の PR（利用者本人のトークンで読んだ値。head はこの時点で固定する） */
+export type ReviewPull = {
+  number: number;
+  url: string;
+  headSha: string;
+  headRef: string;
+  baseSha: string;
+  baseRef: string;
+  title: string;
+  /** 非信頼データ（PR を書いた人の文） */
+  body: string;
+  draft: boolean;
+};
+/**
+ * task_review の権限の結果。invalid_input は PR の状態による拒否で、message は理由のコードで始まる
+ * （fork_not_supported / pull_request_closed / pull_request_merged）。not_found は見えない・無い PR（存在を教えない）。
+ */
+export type ReviewAuthzResult =
+  | { ok: true; repositoryId: number; installationId: number; pull: ReviewPull }
+  | AuthzFailure
+  | { ok: false; code: "not_found" | "invalid_input"; message: string };
+
 /** PR の操作の対象。TaskDO の記録から作る（呼び出し元の入力からは取らない）。 */
 export type PrTarget = { repository: string; number: number; branch: string };
 /**
@@ -1477,6 +1499,87 @@ export class UserDO extends DurableObject<Env> {
       return { ok: true, repositoryId: r.repositoryId, installationId: r.installationId };
     } catch (e) {
       return this.toFailure(e);
+    }
+  }
+
+  /**
+   * task_review の権限: task_start と同じ確認（team の再検証・App の Installation 経由で push できる）に加え、利用者本人の
+   * トークンでその PR が見えること（App の権限だけで操作を許さない。design.md 6.2）。見えなければ not_found。
+   * fork の PR（head のリポジトリが base と違う）・閉じた PR・マージ済みの PR は断る（draft は受け付ける）。
+   */
+  async authorizeReview(
+    githubUserId: number,
+    repository: string,
+    number: number,
+  ): Promise<ReviewAuthzResult> {
+    const start = await this.authorizeStart(githubUserId, repository);
+    if (!start.ok) return start;
+    try {
+      const { client, credentials } = this.github();
+      const pull = await credentials.withToken((tok) => client.getPull(tok, repository, number));
+      const same = (r: string | null) => r !== null && r.toLowerCase() === repository.toLowerCase();
+      if (pull.number !== number || !same(pull.baseRepo)) {
+        return { ok: false, code: "not_found", message: "pull request not found" };
+      }
+      if (!same(pull.headRepo)) {
+        return {
+          ok: false,
+          code: "invalid_input",
+          message:
+            "fork_not_supported: pull requests from a fork cannot be reviewed yet (running review_commands on a fork's code would execute untrusted code)",
+        };
+      }
+      if (pull.merged) {
+        return {
+          ok: false,
+          code: "invalid_input",
+          message: "pull_request_merged: the pull request is already merged",
+        };
+      }
+      if (pull.state !== "open") {
+        return {
+          ok: false,
+          code: "invalid_input",
+          message: "pull_request_closed: the pull request is closed",
+        };
+      }
+      if (pull.baseSha === null || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(pull.baseSha)) {
+        return {
+          ok: false,
+          code: "upstream_unavailable",
+          message: "could not read the base commit",
+        };
+      }
+      if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(pull.headSha)) {
+        return {
+          ok: false,
+          code: "upstream_unavailable",
+          message: "could not read the head commit",
+        };
+      }
+      return {
+        ok: true,
+        repositoryId: start.repositoryId,
+        installationId: start.installationId,
+        pull: {
+          number: pull.number,
+          url: pull.url,
+          headSha: pull.headSha,
+          headRef: pull.headRef,
+          baseSha: pull.baseSha,
+          baseRef: pull.baseRef,
+          title: pull.title,
+          body: pull.body,
+          draft: pull.draft,
+        },
+      };
+    } catch (e) {
+      const f = this.toFailure(e);
+      // 見えない・無い PR（GitHub の 404 は client が forbidden に写す）は、存在を教えない
+      if (f.code === "forbidden") {
+        return { ok: false, code: "not_found", message: "pull request not found" };
+      }
+      return f;
     }
   }
 

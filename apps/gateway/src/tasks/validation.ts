@@ -195,6 +195,48 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * task_review の入力（docs/specs/worker-review.md「task_review」）。クライアントが作った PR のレビューだけを頼む。
+ * review_model は必須（作業のモデルを黙って使わない）。review_commands は verification_commands と同じ形で、空なら差分だけのレビュー。
+ * strict: 宣言に無いキー（初版では使えない review_fix_rounds など）は invalid_input にする（黙って捨てない）。idempotency_key は含めない。
+ */
+export const reviewInputSchema = z
+  .object({
+    repository: taskInputSchema.shape.repository,
+    pull_number: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    review_model: z.string().min(1).max(MAX_MODEL_LENGTH),
+    review_commands: z.array(verificationCommandSchema).max(MAX_VERIFICATION_COMMANDS).default([]),
+    budget_policy: z.enum(BUDGET_POLICIES).default(DEFAULT_BUDGET_POLICY),
+    sandbox_instance: z.enum(SELECTABLE_SANDBOX_INSTANCES).optional(),
+  })
+  .strict();
+
+export type ReviewInput = z.infer<typeof reviewInputSchema>;
+
+/**
+ * task_review の指紋（SHA-256, hex）。repository（小文字）・PR の番号・**その時点の head の SHA**（小文字）・review_model・
+ * review_commands（argv / cwd / timeout_seconds を順序込み）・budget_policy・sandbox_instance から作る。
+ * 同じ PR の同じ head に同じ条件で頼み直しても同じ値（二重に投稿しない）。head が進めば別の値。
+ * task_start の指紋（computeFingerprint）とは別の接頭辞にして、衝突させない（task_start の指紋は変えない）。
+ */
+export async function computeReviewFingerprint(
+  input: ReviewInput,
+  headSha: string,
+): Promise<string> {
+  const canonical = JSON.stringify([
+    "review-v1",
+    input.repository.toLowerCase(),
+    input.pull_number,
+    headSha.toLowerCase(),
+    input.review_model,
+    input.review_commands.map((c) => [c.argv, c.cwd ?? null, c.timeout_seconds ?? null]),
+    input.budget_policy,
+    input.sandbox_instance ?? null,
+  ]);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** task_answer の answer / task_steer の message の長さの上限（文字数）。 */
 export const MAX_ANSWER_LENGTH = 20_000;
 export const MAX_STEER_LENGTH = 20_000;

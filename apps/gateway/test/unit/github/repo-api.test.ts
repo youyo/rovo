@@ -111,6 +111,8 @@ describe("GitHubRepoApi", () => {
       url: "https://gh.test/acme/widgets/pull/5",
       draft: true,
       state: "open",
+      // 応答に title が無ければ空（task_review が PR のタイトルを読むために足した項目）
+      title: "",
       body: "b",
       headSha: SHA,
       baseRef: "main",

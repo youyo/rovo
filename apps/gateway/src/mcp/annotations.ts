@@ -35,6 +35,12 @@ export const TOOL_ANNOTATIONS = {
     idempotentHint: false,
     openWorldHint: true,
   }),
+  // クライアントの PR にレビューのコメントを 1 件書く（PR の状態は変えない。同じ head・同じ条件の頼み直しは同じタスク）
+  task_review: write("Review pull request", {
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  }),
   task_answer: write("Answer task question", {
     destructiveHint: false,
     idempotentHint: false,

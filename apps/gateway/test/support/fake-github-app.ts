@@ -22,6 +22,16 @@ export interface RepoStore {
   refs: RefStore;
   /** tree の直下の項目（実 git の保存先のとき）。無ければ undefined。seedRootFiles で置いた tree が優先される */
   tree?(sha: string): { path: string; mode: string; type: string; sha: string }[] | undefined;
+  /** base...head の unified diff（実 git の保存先のとき。task_review の compare）。無ければ undefined。seedDiff が優先される */
+  diff?(base: string, head: string): string | undefined;
+}
+
+/** POST /pulls/:n/reviews で付いたレビュー（確認用） */
+export interface FakeReview {
+  id: number;
+  body: string;
+  event: string;
+  commitId: string | null;
 }
 
 export interface FakeAppOptions {
@@ -82,6 +92,12 @@ export interface FakePull {
   headAtMerge?: string;
   /** POST /issues/:n/comments で付いたコメント（確認用） */
   comments?: string[];
+  /** fork の PR の head のリポジトリ（owner/name）。無ければ base と同じリポジトリ */
+  headRepo?: string;
+  /** head の SHA を固定する（fork の PR など、base のリポジトリに head のブランチが無いとき） */
+  headSha?: string;
+  /** POST /pulls/:n/reviews で付いたレビュー */
+  reviews?: FakeReview[];
 }
 
 /** 利用者のトークン（GitHub App のユーザーアクセストークン）で呼んだ人。 */
@@ -102,6 +118,9 @@ interface FakeRepoRec {
   /** tree の SHA -> 直下の項目（blob）。seedRootFiles が置く。置いていない tree は、保存先が読めればそれ、読めなければ空（lockfile なし） */
   trees: Map<string, { path: string; sha: string }[]>;
   readTree?: RepoStore["tree"];
+  readDiff?: RepoStore["diff"];
+  /** "base...head" -> diff（seedDiff が置く） */
+  diffs: Map<string, string>;
   /** ブランチ保護の再現: 設定するとマージを 405 とこのメッセージで拒否する */
   mergeBlock: string | undefined;
   /** このリポジトリで許可していないマージ方法（405） */
@@ -300,6 +319,8 @@ export class FakeGitHubApp {
       missing: new Set(),
       trees: new Map(),
       ...(store?.tree ? { readTree: store.tree.bind(store) } : {}),
+      ...(store?.diff ? { readDiff: store.diff.bind(store) } : {}),
+      diffs: new Map(),
       mergeBlock: undefined,
       disallowedMethods: new Set(),
       checkRuns: new Map(),
@@ -357,13 +378,26 @@ export class FakeGitHubApp {
     return sha;
   }
 
-  /** 別経路で PR を先に作っておく（head のブランチは存在している必要がある）。 */
+  /**
+   * 別経路で PR を先に作っておく（head のブランチは存在している必要がある。fork の PR は headRepo と headSha を渡す）。
+   * GitHub と同じく refs/pull/<n>/head を head の SHA に置く（task_review の Sandbox が取り出す）。
+   */
   seedPull(
     fullName: string,
-    args: { head: string; base: string; title?: string; body?: string; draft?: boolean },
+    args: {
+      head: string;
+      base: string;
+      title?: string;
+      body?: string;
+      draft?: boolean;
+      headRepo?: string;
+      headSha?: string;
+    },
   ): number {
     const repo = this.mustRepo(fullName);
-    if (!repo.refs.has(`refs/heads/${args.head}`)) throw new Error("seedPull: head branch missing");
+    if (args.headRepo === undefined && !repo.refs.has(`refs/heads/${args.head}`)) {
+      throw new Error("seedPull: head branch missing");
+    }
     const p: FakePull = {
       number: repo.pulls.length + 1,
       title: args.title ?? "pre-existing",
@@ -373,9 +407,40 @@ export class FakeGitHubApp {
       head: args.head,
       base: args.base,
       merged: false,
+      ...(args.headRepo !== undefined ? { headRepo: args.headRepo } : {}),
+      ...(args.headSha !== undefined ? { headSha: args.headSha } : {}),
     };
     repo.pulls.push(p);
+    const headSha = args.headSha ?? repo.refs.get(`refs/heads/${args.head}`);
+    if (headSha !== undefined && (args.headRepo === undefined || repo.commits.has(headSha))) {
+      repo.refs.set(`refs/pull/${p.number}/head`, headSha);
+    }
     return p.number;
+  }
+
+  /** PR をマージ済みにする（task_review が断ることの確認用） */
+  markMerged(fullName: string, number: number): void {
+    const p = this.mustRepo(fullName).pulls.find((x) => x.number === number);
+    if (p) {
+      p.merged = true;
+      p.state = "closed";
+    }
+  }
+
+  /** compare（base...head）を diff のメディア型で読んだときに返す差分を置く */
+  seedDiff(fullName: string, base: string, head: string, diff: string): void {
+    this.mustRepo(fullName).diffs.set(`${base}...${head}`, diff);
+  }
+
+  /** PR に付いたレビュー（POST /pulls/:n/reviews） */
+  reviews(fullName: string, number: number): FakeReview[] {
+    const p = this.repos.get(fullName.toLowerCase())?.pulls.find((x) => x.number === number);
+    return (p?.reviews ?? []).map((r) => ({ ...r }));
+  }
+
+  /** 任意の ref の SHA（refs/pull/<n>/head など）。無ければ null */
+  ref(fullName: string, ref: string): string | null {
+    return this.repos.get(fullName.toLowerCase())?.refs.get(ref) ?? null;
   }
 
   /** PR を閉じる。 */
@@ -572,7 +637,8 @@ export class FakeGitHubApp {
         : fail(404, "Not Found");
     }
     if (isJwtRoute) return this.appRoute(req, path, auth, body);
-    if (user) return this.userRoute(req.method, path, url, body, user);
+    const accept = req.headers.get("accept") ?? "";
+    if (user) return this.userRoute(req.method, path, url, body, user, accept);
     const rec = this.tokenFrom(auth);
     if (!rec) return fail(401, "Bad credentials");
     if (req.method === "DELETE" && path === "/installation/token") {
@@ -597,7 +663,7 @@ export class FakeGitHubApp {
     const name = decodeURIComponent(m[2] as string);
     const repo = this.repos.get(`${owner}/${name}`.toLowerCase());
     if (!repo || !rec.repoIds.includes(repo.id)) return fail(404, "Not Found");
-    return this.repoRoute(req.method, m[3] as string, url, rec, repo, body);
+    return this.repoRoute(req.method, m[3] as string, url, rec, repo, body, accept);
   }
 
   private async appRoute(
@@ -665,10 +731,18 @@ export class FakeGitHubApp {
       merged: p.merged,
       head: {
         ref: p.head,
-        sha: repo.refs.get(`refs/heads/${p.head}`) ?? p.headAtMerge ?? null,
+        sha:
+          p.headSha ??
+          (p.headRepo === undefined ? repo.refs.get(`refs/heads/${p.head}`) : undefined) ??
+          p.headAtMerge ??
+          null,
+        repo: { full_name: p.headRepo ?? repo.fullName },
+      },
+      base: {
+        ref: p.base,
+        sha: repo.refs.get(`refs/heads/${p.base}`) ?? null,
         repo: { full_name: repo.fullName },
       },
-      base: { ref: p.base, repo: { full_name: repo.fullName } },
     };
   }
 
@@ -679,6 +753,7 @@ export class FakeGitHubApp {
     url: URL,
     body: unknown,
     user: FakeUser,
+    accept = "",
   ): Promise<Response> {
     if (path === "/graphql") {
       return method === "POST"
@@ -708,7 +783,7 @@ export class FakeGitHubApp {
       expiresAt: Number.POSITIVE_INFINITY,
       revoked: false,
     };
-    return this.repoRoute(method, m[3] as string, url, rec, repo, body);
+    return this.repoRoute(method, m[3] as string, url, rec, repo, body, accept);
   }
 
   /** markPullRequestReadyForReview だけを扱う GraphQL。エラーは GitHub と同じく HTTP 200 の errors で返す。 */
@@ -812,6 +887,7 @@ export class FakeGitHubApp {
     tok: TokenRec,
     repo: FakeRepoRec,
     body: unknown,
+    accept = "",
   ): Promise<Response> {
     const can = (perm: string) => tok.permissions[perm] === "write";
     const b = (body ?? {}) as Record<string, unknown>;
@@ -885,6 +961,13 @@ export class FakeGitHubApp {
     }
 
     const cmpGet = method === "GET" ? match(/^\/compare\/(.+)\.\.\.(.+)$/) : null;
+    if (cmpGet && accept.includes("application/vnd.github.diff")) {
+      // task_review: 差分の本文（seedDiff で置いたもの、実 git の保存先なら git diff base...head、無ければ空）
+      const base = decodeURIComponent(cmpGet[1] as string);
+      const head = decodeURIComponent(cmpGet[2] as string);
+      const diff = repo.diffs.get(`${base}...${head}`) ?? repo.readDiff?.(base, head) ?? "";
+      return new Response(diff, { status: 200, headers: { "content-type": "text/plain" } });
+    }
     if (cmpGet) {
       const base = this.resolve(repo, decodeURIComponent(cmpGet[1] as string));
       const head = this.resolve(repo, decodeURIComponent(cmpGet[2] as string));
@@ -1027,6 +1110,37 @@ export class FakeGitHubApp {
       if (!repo.refs.has(ref)) return fail(422, "Reference does not exist");
       repo.refs.delete(ref);
       return new Response(null, { status: 204 });
+    }
+
+    const reviewPost = method === "POST" ? match(/^\/pulls\/(\d+)\/reviews$/) : null;
+    if (reviewPost) {
+      const p = repo.pulls.find((x) => x.number === Number(reviewPost[1]));
+      if (!p) return fail(404, "Not Found");
+      if (!can("pull_requests")) return fail(403, "Resource not accessible by integration");
+      const event = String(b.event ?? "");
+      if (!["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(event)) {
+        return fail(422, "Validation Failed");
+      }
+      const all = [...repo.pulls.flatMap((x) => x.reviews ?? [])];
+      const review: FakeReview = {
+        id: 1000 + all.length + 1,
+        body: String(b.body ?? ""),
+        event,
+        commitId: typeof b.commit_id === "string" ? b.commit_id : null,
+      };
+      p.reviews = [...(p.reviews ?? []), review];
+      return res(200, {
+        id: review.id,
+        html_url: `https://${this.prHost}/${repo.fullName}/pull/${p.number}#pullrequestreview-${review.id}`,
+        state:
+          event === "COMMENT"
+            ? "COMMENTED"
+            : event === "APPROVE"
+              ? "APPROVED"
+              : "CHANGES_REQUESTED",
+        body: review.body,
+        commit_id: review.commitId,
+      });
     }
 
     const issueComment = method === "POST" ? match(/^\/issues\/(\d+)\/comments$/) : null;

@@ -90,7 +90,7 @@ describe("同意画面（confused deputy 対策）", () => {
 });
 
 describe("ログイン（本物のフロー: DCR -> /authorize -> 偽 GitHub -> /callback -> token(PKCE)）", () => {
-  it("team の active メンバーはログインでき、16 のツールが使える", async () => {
+  it("team の active メンバーはログインでき、17 のツールが使える", async () => {
     const user = newUser();
     await addMember(user);
     const client = await login(user);
@@ -107,6 +107,7 @@ describe("ログイン（本物のフロー: DCR -> /authorize -> 偽 GitHub -> 
         "task_pr_merge",
         "task_pr_ready",
         "task_result",
+        "task_review",
         "task_start",
         "task_status",
         "task_steer",

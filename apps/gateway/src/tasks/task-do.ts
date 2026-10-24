@@ -14,6 +14,7 @@ import type {
   AgentRpc,
   EventsPage,
   ResultDto,
+  ReviewResultDto,
   StartResult,
   TaskSpec,
   UsageDto,
@@ -64,10 +65,11 @@ import {
   type TaskSummary,
 } from "./summary";
 import { isTaskId, ulid } from "./ulid";
-import type { UserDO } from "./user-do";
+import type { ReviewPull, UserDO } from "./user-do";
 import {
   type BudgetPolicy,
   computeFingerprint,
+  computeReviewFingerprint,
   DEFAULT_BUDGET_POLICY,
   DEFAULT_REVIEW_POLICY,
   isValidIdempotencyKey,
@@ -78,6 +80,7 @@ import {
   parseCursor,
   parseTimeoutSeconds,
   type ReviewPolicy,
+  reviewInputSchema,
   taskInputSchema,
   WAIT_RETRY_AFTER_SECONDS,
 } from "./validation";
@@ -160,10 +163,62 @@ export type EnsureCreatedInput = z.input<typeof taskInputSchema> & {
   model_selection?: ModelSelection;
 };
 
+/** task_review の対象の PR（rovo が開いた PR ではない。task_result の pr の代わり） */
+export type TargetPr = { repository: string; number: number; head_sha: string; url: string };
+
+/**
+ * レビューの段の段階（docs/specs/worker-review.md「状態の遷移」）。task_review で使うのは
+ * waiting（AgentDO がまだ段に入っていない）/ commands（review_commands を流している）/ reviewing（モデルを待っている・投稿の前）/
+ * done（レビューが得られた）/ skipped（予算・失敗・取消しで飛ばした）。
+ */
+export type ReviewStage = "waiting" | "commands" | "reviewing" | "done" | "skipped";
+
+/** task_result の review（公開用。snake_case）。commands の output と body は、service が非信頼の囲みで包む */
+export type ReviewResultView = {
+  stage: "done" | "skipped";
+  model: string;
+  /** 投稿したレビューの URL。投稿できなかった・投稿しなかったときは null */
+  comment_url: string | null;
+  must_fix_count: number;
+  suggestion_count: number;
+  /** task_review は修正しない（常に false） */
+  fix_applied: false;
+  commands: {
+    argv: string[];
+    exit_code: number;
+    timed_out: boolean;
+    output: string;
+    duration_ms?: number;
+    skipped?: true;
+  }[];
+  commands_unavailable: boolean;
+  /** 飛ばした理由の固定コード（model_error / model_rejected / timeout / budget / invalid_response） */
+  failure?: string;
+  /** 修正のあとの再実行の結果（task_review は修正しないので常に null） */
+  final: null;
+  /** レビューに使った費用（作業の費用と分けて見せる） */
+  usage: {
+    cost_usd: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    estimated: boolean;
+  };
+  /** 投稿できなかったときだけ: 投稿するはずだった本文（クライアントが読める） */
+  body?: string;
+};
+
 export type TaskView = {
   task_id: string;
   owner_id: number;
   status: TaskStatus;
+  /** task_review のタスクだけ "review"（通常のタスクには付かない） */
+  kind?: "review";
+  /** task_review のタスクだけ: レビューの段の段階とモデル */
+  review?: { stage: ReviewStage; model: string };
+  /** task_review のタスクだけ: 対象の PR */
+  target_pr?: TargetPr;
   repository: string;
   title: string;
   draft_pr_url: string | null;
@@ -227,6 +282,12 @@ export type AbandonResult =
 /** task_result の中身（公開用。snake_case）。 */
 export type ResultView = {
   status: TaskStatus;
+  /** task_review のタスクだけ "review" */
+  kind?: "review";
+  /** task_review のタスクだけ: レビューの結果 */
+  review?: ReviewResultView;
+  /** task_review のタスクだけ: 対象の PR（pr の代わり） */
+  target_pr?: TargetPr;
   reason?: string;
   /**
    * 失敗した段階。"setup" は準備（ブランチ・Draft PR の作成など。runSetup）で FAILED になったこと。
@@ -334,8 +395,52 @@ export type ResultView = {
 /** 結果の組み立て途中の形（review_policy は GitHub 側の情報と一緒に足す）。 */
 type ResultCore = Omit<
   ResultView,
-  "review_policy" | "budget_policy" | "model" | "effort" | "model_selection"
+  "review_policy" | "budget_policy" | "model" | "effort" | "model_selection" | "kind" | "target_pr"
 >;
+
+/** TaskDO.ensureReviewCreated の入力（task_review）。PR は UserDO が利用者本人のトークンで読んだ値 */
+export type EnsureReviewInput = {
+  task_id: string;
+  owner_id: number;
+  owner_login: string;
+  repository_id: number | null;
+  installation_id: number | null;
+  repository: string;
+  pull_number: number;
+  review_model: string;
+  review_commands: { argv: string[]; cwd?: string; timeout_seconds?: number }[];
+  budget_policy: BudgetPolicy;
+  sandbox_instance?: string;
+  pull: ReviewPull;
+};
+
+/** task_review の状態（1 行）。PR・差分・投稿の進み具合 */
+type ReviewRow = {
+  pull_number: number;
+  pull_url: string;
+  head_sha: string;
+  head_ref: string;
+  base_sha: string;
+  pr_title: string;
+  pr_body: string;
+  review_model: string;
+  /** JSON（task_review の review_commands。snake_case） */
+  review_commands: string;
+  /** 準備で取得した差分。NULL は未取得 */
+  diff: string | null;
+  diff_truncated: number;
+  comment_url: string | null;
+  /** 0 = まだ / 1 = 投稿した / 2 = 投稿を諦めた / 3 = 投稿しない（レビューが無い） */
+  posted: number;
+  post_attempts: number;
+  post_retry_at: number;
+};
+
+/** gateway が取得する差分の上限（UTF-8 のバイト数）。レビューのモデルに渡す前に agent がさらに 200 KB に収める */
+const REVIEW_DIFF_FETCH_MAX_BYTES = 1024 * 1024;
+const FULL_SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+/** PR の本文の保存の上限（agent がモデルに渡すのは先頭 4000 文字。行の大きさを抑える） */
+const MAX_REVIEW_PR_BODY = 8_000;
 
 /** task_pr_ready / task_pr_merge の入口で TaskDO が返す、対象と判定の結果。 */
 export type PrContextResult =
@@ -513,6 +618,8 @@ type TaskRow = {
   model_selection: string | null;
   /** 明示した Sandbox の大きさ。NULL は省略（agent の既定） */
   sandbox_instance: string | null;
+  /** タスクの種類。NULL は通常のタスク、"review" は task_review */
+  kind: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -806,6 +913,26 @@ export class TaskDO extends DurableObject<Env> {
     addColumnIfMissing(this.ctx.storage.sql, "task", "model_selection", "TEXT");
     // task_start の sandbox_instance（明示した Sandbox の大きさ。NULL は省略 = agent の既定）
     addColumnIfMissing(this.ctx.storage.sql, "task", "sandbox_instance", "TEXT");
+    // task_review: タスクの種類（NULL = 通常のタスク）と、対象の PR・差分・投稿の進み具合（1 行。review のタスクだけ）
+    addColumnIfMissing(this.ctx.storage.sql, "task", "kind", "TEXT");
+    sql.exec(`CREATE TABLE IF NOT EXISTS review_link (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      pull_number INTEGER NOT NULL,
+      pull_url TEXT NOT NULL,
+      head_sha TEXT NOT NULL,
+      head_ref TEXT NOT NULL,
+      base_sha TEXT NOT NULL,
+      pr_title TEXT NOT NULL,
+      pr_body TEXT NOT NULL,
+      review_model TEXT NOT NULL,
+      review_commands TEXT NOT NULL,
+      diff TEXT,
+      diff_truncated INTEGER NOT NULL DEFAULT 0,
+      comment_url TEXT,
+      posted INTEGER NOT NULL DEFAULT 0,
+      post_attempts INTEGER NOT NULL DEFAULT 0,
+      post_retry_at INTEGER NOT NULL DEFAULT 0
+    )`);
     // Phase 4: ワーカーの質問と回答、クライアントからの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
     sql.exec(`CREATE TABLE IF NOT EXISTS questions (
       question_id TEXT PRIMARY KEY,
@@ -916,11 +1043,63 @@ export class TaskDO extends DurableObject<Env> {
     return row.status;
   }
 
+  private isReview(row: Pick<TaskRow, "kind"> | undefined): boolean {
+    return row?.kind === "review";
+  }
+
+  private getReview(): ReviewRow | undefined {
+    return this.ctx.storage.sql.exec<ReviewRow>("SELECT * FROM review_link").toArray()[0];
+  }
+
+  private targetPr(row: TaskRow, rl: ReviewRow): TargetPr {
+    return {
+      repository: row.repository,
+      number: rl.pull_number,
+      head_sha: rl.head_sha,
+      url: rl.pull_url,
+    };
+  }
+
+  /**
+   * レビューの段の段階。終端では、レビューが得られた（AgentDO の結果を待たずに分かる: COMPLETED）なら done、それ以外は skipped。
+   * 実行中は、取り込んだイベント（review_started / review_commands_finished）から決める。
+   */
+  private reviewStage(row: TaskRow, rl: ReviewRow): ReviewStage {
+    const status = this.statusOf(row);
+    if (isTerminal(status)) return status === "COMPLETED" ? "done" : "skipped";
+    const seen = new Set(
+      this.ctx.storage.sql
+        .exec<{ type: string }>(
+          "SELECT DISTINCT type FROM events WHERE type IN ('review_started', 'review_commands_finished')",
+        )
+        .toArray()
+        .map((r) => r.type),
+    );
+    if (seen.has("review_commands_finished")) return "reviewing";
+    if (seen.has("review_started")) {
+      const commands = JSON.parse(rl.review_commands) as unknown[];
+      return commands.length > 0 ? "commands" : "reviewing";
+    }
+    return "waiting";
+  }
+
+  private reviewViewPart(row: TaskRow): Pick<TaskView, "kind" | "review" | "target_pr"> {
+    if (!this.isReview(row)) return {};
+    const rl = this.getReview();
+    if (!rl) return { kind: "review" };
+    return {
+      kind: "review",
+      review: { stage: this.reviewStage(row, rl), model: rl.review_model },
+      target_pr: this.targetPr(row, rl),
+    };
+  }
+
   private view(row: TaskRow): TaskView {
     return {
       task_id: row.id,
       owner_id: row.owner_id,
       status: this.statusOf(row),
+      ...this.reviewViewPart(row),
       repository: row.repository,
       title: row.title,
       draft_pr_url: row.draft_pr_url,
@@ -1269,6 +1448,141 @@ export class TaskDO extends DurableObject<Env> {
         `agent/task-${input.task_id}`,
       );
       this.appendEvent("created", { status: "CREATING" }, at);
+      this.bumpIndexRevision();
+      const row = this.getRow();
+      if (!row) throw new Error("task row missing after insert");
+      return { ok: true, created: true, task: this.view(row) };
+    });
+    if (result.ok && result.created) this.notifyWaiters();
+    if (result.ok) await this.ensureAlarm();
+    return result;
+  }
+
+  /**
+   * task_review のタスクの冪等な作成（ensureCreated と同じ規則: 同じ入力なら既存を返し、違う入力は conflict、tombstone 済みは expired）。
+   * 作業ブランチ・初期コミット・Draft PR は作らない。github_link は Installation Token の発行と失効のために持つ（branch は空、PR は無い）。
+   * 指紋は task_review の指紋（その時点の head の SHA を含む）。対象の PR は review_link に残す。
+   */
+  async ensureReviewCreated(input: EnsureReviewInput): Promise<EnsureCreatedResult> {
+    const parsed = reviewInputSchema.safeParse({
+      repository: input.repository,
+      pull_number: input.pull_number,
+      review_model: input.review_model,
+      review_commands: input.review_commands,
+      budget_policy: input.budget_policy,
+      ...(input.sandbox_instance !== undefined ? { sandbox_instance: input.sandbox_instance } : {}),
+    });
+    const pull = input.pull;
+    if (
+      !parsed.success ||
+      !isTaskId(input.task_id) ||
+      !Number.isSafeInteger(input.owner_id) ||
+      typeof input.owner_login !== "string" ||
+      !isNullableId(input.repository_id) ||
+      !isNullableId(input.installation_id) ||
+      typeof pull !== "object" ||
+      pull === null ||
+      pull.number !== input.pull_number ||
+      typeof pull.headSha !== "string" ||
+      !FULL_SHA_RE.test(pull.headSha) ||
+      typeof pull.baseSha !== "string" ||
+      !FULL_SHA_RE.test(pull.baseSha) ||
+      typeof pull.url !== "string" ||
+      typeof pull.title !== "string" ||
+      typeof pull.body !== "string" ||
+      typeof pull.baseRef !== "string" ||
+      pull.baseRef === "" ||
+      typeof pull.headRef !== "string"
+    ) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const data = parsed.data;
+    // レビューのモデルは、このデプロイの AGENT_MODELS の中だけ（service でも見るが、TaskDO への直接の呼び出しにも効かせる）
+    if (!agentModelsOf(this.env).includes(data.review_model)) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const fingerprint = await computeReviewFingerprint(data, pull.headSha);
+    const model = data.review_model;
+    const effort = effortOf(this.env, model);
+    const header = `Review pull request ${data.repository}#${data.pull_number} at ${pull.headSha}.`;
+    const result = this.ctx.storage.transactionSync((): EnsureCreatedResult => {
+      const existing = this.getRow();
+      if (existing) {
+        const same =
+          existing.id === input.task_id &&
+          existing.owner_id === input.owner_id &&
+          existing.fingerprint === fingerprint;
+        return same
+          ? { ok: true, created: false, task: this.view(existing) }
+          : { ok: false, code: "conflict" };
+      }
+      if (this.isAbandoned()) return { ok: false, code: "expired" };
+      const at = this.now();
+      const selection: ModelSelection = { mode: "explicit", chosen: model, reason: "explicit" };
+      this.ctx.storage.sql.exec(
+        `INSERT INTO task (singleton, id, owner_id, owner_login, repository, repository_id,
+           installation_id, base_ref, base_sha, title, instructions, acceptance_criteria,
+           constraints, verification_commands, fingerprint, review_policy, budget_policy, model, effort, model_selection, sandbox_instance, kind, status, draft_pr_url, created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, 'review', 'CREATING', NULL, ?, ?)`,
+        input.task_id,
+        input.owner_id,
+        input.owner_login,
+        data.repository,
+        input.repository_id ?? null,
+        input.installation_id ?? null,
+        pull.baseRef,
+        pull.baseSha,
+        clip(`Review #${data.pull_number}: ${pull.title}`, 200),
+        header,
+        fingerprint,
+        DEFAULT_REVIEW_POLICY,
+        data.budget_policy,
+        model,
+        effort,
+        JSON.stringify(selection),
+        data.sandbox_instance ?? null,
+        at,
+        at,
+      );
+      // start の spec（トークン・差分・review は start の直前に足す）。Pi は動かないので instructions は rovo が書いた見出し
+      const spec: BaseSpec = {
+        taskId: input.task_id,
+        userId: String(input.owner_id),
+        repository: data.repository,
+        baseSha: pull.baseSha,
+        instructions: header,
+        acceptanceCriteria: [],
+        constraints: [],
+        model,
+        effort,
+        ...(data.sandbox_instance !== undefined ? { sandboxInstance: data.sandbox_instance } : {}),
+        budgetUsd: taskBudgetUsd(this.env),
+        budgetPolicy: data.budget_policy,
+        deadlineAt: at + AGENT_DEADLINE_MS,
+        kind: "review",
+      };
+      this.ctx.storage.sql.exec(
+        `INSERT INTO agent_link (singleton, spec, operation_id, start_state, cancel_state)
+         VALUES (1, ?, ?, 'pending', 'none')`,
+        JSON.stringify(spec),
+        `run:${input.task_id}`,
+      );
+      // 作業ブランチは持たない（branch は空）。Installation Token の発行・配送・失効は github_link の仕組みを使う
+      this.ctx.storage.sql.exec("INSERT INTO github_link (singleton, branch) VALUES (1, '')");
+      this.ctx.storage.sql.exec(
+        `INSERT INTO review_link (singleton, pull_number, pull_url, head_sha, head_ref, base_sha, pr_title, pr_body, review_model, review_commands)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        data.pull_number,
+        pull.url,
+        pull.headSha,
+        pull.headRef,
+        pull.baseSha,
+        clip(pull.title, 300),
+        clip(pull.body, MAX_REVIEW_PR_BODY),
+        model,
+        JSON.stringify(data.review_commands),
+      );
+      this.appendEvent("created", { status: "CREATING", kind: "review" }, at);
       this.bumpIndexRevision();
       const row = this.getRow();
       if (!row) throw new Error("task row missing after insert");
@@ -1681,6 +1995,8 @@ export class TaskDO extends DurableObject<Env> {
           ? { ok: true, status, steer_id: steerId }
           : { ok: false, code: "conflict" };
       }
+      // task_review にはワーカーの LLM が無い（追加の指示の届け先が無い）
+      if (this.isReview(row)) return { ok: false, code: "conflict" };
       if (!STEERABLE.has(status)) return { ok: false, code: "conflict" };
       const at = this.now();
       this.ctx.storage.sql.exec(
@@ -1810,7 +2126,9 @@ export class TaskDO extends DurableObject<Env> {
    */
   private finalizePending(row: TaskRow): boolean {
     const gl = this.getGithub();
-    if (!gl || gl.pr_number === null || gl.finalize_done === 1) return false;
+    if (!gl || gl.finalize_done === 1) return false;
+    // task_review は PR を持たないが、レビューの投稿が終了処理の中にある
+    if (gl.pr_number === null && !this.isReview(row)) return false;
     return this.now() - row.updated_at < RESULT_FINALIZE_WAIT_MS;
   }
 
@@ -1855,6 +2173,14 @@ export class TaskDO extends DurableObject<Env> {
       return { ok: false, code, message };
     };
     const status = this.statusOf(row);
+    // task_review の対象はクライアントの PR（rovo の PR ではない）。rovo は Ready にもマージにもしない
+    if (this.isReview(row)) {
+      return deny(
+        "conflict",
+        "review_task",
+        "this is a task_review task; it reviews the client's pull request and has no pull request of its own (rovo never marks it ready or merges it)",
+      );
+    }
     if (!isTerminal(status) || !this.isStopped()) {
       return deny("not_ready", "task_not_finished", "the task has not finished yet");
     }
@@ -1956,7 +2282,51 @@ export class TaskDO extends DurableObject<Env> {
     const dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
     const view =
       dto.status === "not_ready" ? this.synthesizeResult(row, status) : shapeResult(status, dto);
-    return this.withGithub(view);
+    const withGh = this.withGithub(view);
+    return this.isReview(row)
+      ? this.withReview(row, withGh, dto.status === "not_ready" ? undefined : dto.review)
+      : withGh;
+  }
+
+  /** task_review の結果: review と target_pr を足す（pr は無い）。投稿できなかったときだけ本文を載せる */
+  private withReview(row: TaskRow, view: ResultView, dto: ReviewResultDto | undefined): ResultView {
+    const rl = this.getReview();
+    if (!rl) return { ...view, kind: "review" };
+    const usage = dto?.usage;
+    const review: ReviewResultView = {
+      stage: dto?.stage === "done" ? "done" : "skipped",
+      model: rl.review_model,
+      comment_url: rl.posted === 1 ? rl.comment_url : null,
+      must_fix_count: count(dto?.mustFixCount),
+      suggestion_count: count(dto?.suggestionCount),
+      fix_applied: false,
+      commands: (dto?.commands ?? []).map((c) => ({
+        argv: c.argv,
+        exit_code: c.exitCode,
+        timed_out: c.timedOut,
+        output: tailUtf8(c.output, MAX_RESULT_OUTPUT),
+        ...(typeof c.durationMs === "number" && Number.isFinite(c.durationMs) && c.durationMs >= 0
+          ? { duration_ms: c.durationMs }
+          : {}),
+        ...(c.skipped === true ? { skipped: true as const } : {}),
+      })),
+      commands_unavailable: dto?.commandsUnavailable === true,
+      ...(typeof dto?.failure === "string" ? { failure: dto.failure.slice(0, 100) } : {}),
+      final: null,
+      usage: {
+        cost_usd:
+          typeof usage?.costUsd === "number" && Number.isFinite(usage.costUsd) && usage.costUsd >= 0
+            ? usage.costUsd
+            : 0,
+        input_tokens: count(usage?.inputTokens),
+        output_tokens: count(usage?.outputTokens),
+        cache_read_tokens: count(usage?.cacheReadTokens),
+        cache_write_tokens: count(usage?.cacheWriteTokens),
+        estimated: usage?.estimated === true,
+      },
+      ...(rl.posted === 2 && typeof dto?.body === "string" ? { body: dto.body } : {}),
+    };
+    return { ...view, kind: "review", review, target_pr: this.targetPr(row, rl) };
   }
 
   /** GitHub 側の情報（Draft PR・終端で読んだ head・警告）を結果に足す。 */
@@ -2106,7 +2476,12 @@ export class TaskDO extends DurableObject<Env> {
     const base = JSON.parse(link.spec) as BaseSpec;
     // 再送のたびに同じ spec（同じトークン）を送る。AgentDO は spec の同一性で冪等を判定する。
     const spec: TaskSpec = gl
-      ? { ...base, ...(await this.githubSpecPart(gl)) }
+      ? {
+          ...base,
+          ...(this.isReview(this.getRow())
+            ? await this.reviewSpecPart(gl)
+            : await this.githubSpecPart(gl)),
+        }
       : (base as TaskSpec);
     const result = await this.agentStub().start(spec);
     this.applyStartResult(result);
@@ -2125,6 +2500,13 @@ export class TaskDO extends DurableObject<Env> {
             "UPDATE github_link SET cred_delivered_id = COALESCE((SELECT MIN(id) FROM git_token WHERE kind = 'start'), 0)",
           );
           if (this.currentStatus() === "CREATING") this.changeStatus("RUNNING");
+          if (this.isReview(this.getRow())) {
+            const rl = this.getReview();
+            this.emitAudit("review_started", {
+              userId: this.getRow()?.owner_id,
+              ...(rl ? { model: rl.review_model } : {}),
+            });
+          }
           break;
         case "rejected":
           // 受理されなかったので何も動いていない。停止確認も済んだものとして扱う。
@@ -2668,7 +3050,8 @@ export class TaskDO extends DurableObject<Env> {
     if (!row || !gl || gl.setup_done === 1 || isTerminal(this.statusOf(row))) return;
     if (this.now() < gl.setup_retry_at) return;
     try {
-      await this.runSetup(row, gl);
+      if (this.isReview(row)) await this.runReviewSetup(row, gl);
+      else await this.runSetup(row, gl);
     } catch (e) {
       this.onGithubError(e, "setup");
     }
@@ -2778,6 +3161,66 @@ export class TaskDO extends DurableObject<Env> {
 
     // 5. 最初のトークンは発行済み（上）。start を送ってよい。
     sql.exec("UPDATE github_link SET setup_done = 1, setup_attempts = 0, setup_retry_at = 0");
+  }
+
+  /**
+   * task_review の準備: 最初の Installation Token、依存関係のキャッシュの指定（head の lockfile。読めなくても null で続ける）、
+   * base...head の差分（上限 1 MiB。超えたらファイルの区切りで切る）。ブランチ・初期コミット・PR は作らない（クライアントの PR に書き込まない）。
+   * 各ステップは冪等で、進んだところは永続化する。
+   */
+  private async runReviewSetup(row: TaskRow, start: GithubRow): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const rl = this.getReview();
+    if (!rl) throw new SetupFailure("review_missing");
+    const existing = this.tokenRows("kind = 'start'")[0];
+    const plain = existing
+      ? await this.decryptToken(existing)
+      : (await this.issueToken(row, "start")).token;
+    const api = this.repoApi(row, plain);
+    if (start.deps === null) {
+      const deps = await detectDeps(api, row.repository_id ?? 0, rl.head_sha);
+      sql.exec("UPDATE github_link SET deps = ?", JSON.stringify(deps));
+    }
+    if (rl.diff === null) {
+      const d = await api.getCompareDiff(rl.base_sha, rl.head_sha, REVIEW_DIFF_FETCH_MAX_BYTES);
+      sql.exec("UPDATE review_link SET diff = ?, diff_truncated = ?", d.diff, d.truncated ? 1 : 0);
+    }
+    sql.exec("UPDATE github_link SET setup_done = 1, setup_attempts = 0, setup_retry_at = 0");
+  }
+
+  /** task_review の start の spec に足す部分（トークン・差分・レビューの指定）。再送でも同じ値になる */
+  private async reviewSpecPart(
+    gl: GithubRow,
+  ): Promise<Pick<TaskSpec, "branch" | "initialSha" | "gitCredential" | "deps" | "review">> {
+    const start = this.tokenRows("kind = 'start'")[0];
+    const rl = this.getReview();
+    if (!start || !rl || rl.diff === null) throw new Error("review setup is incomplete");
+    const commands = JSON.parse(rl.review_commands) as {
+      argv: string[];
+      cwd?: string;
+      timeout_seconds?: number;
+    }[];
+    return {
+      branch: "",
+      initialSha: rl.head_sha,
+      gitCredential: { token: await this.decryptToken(start), expiresAt: start.expires_at },
+      ...(gl.deps !== null ? { deps: JSON.parse(gl.deps) as TaskSpec["deps"] } : {}),
+      review: {
+        pullNumber: rl.pull_number,
+        headSha: rl.head_sha,
+        baseSha: rl.base_sha,
+        model: rl.review_model,
+        commands: commands.map((c) => ({
+          argv: c.argv,
+          ...(c.cwd !== undefined ? { cwd: c.cwd } : {}),
+          ...(c.timeout_seconds !== undefined ? { timeoutSeconds: c.timeout_seconds } : {}),
+        })),
+        title: rl.pr_title,
+        body: rl.pr_body,
+        diff: rl.diff,
+        diffTruncated: rl.diff_truncated === 1,
+      },
+    };
   }
 
   private checkBase(pr: PullInfo, row: TaskRow): PullInfo {
@@ -3029,6 +3472,8 @@ export class TaskDO extends DurableObject<Env> {
         if ((this.getGithub() as GithubRow).body_done === 0) return;
       }
     }
+    // task_review: レビューの投稿（再試行待ちのあいだは、失効しない）
+    if (this.isReview(row) && !(await this.postReview(row, status))) return;
 
     for (const t of this.tokenRows("revoked = 0")) {
       try {
@@ -3096,6 +3541,107 @@ export class TaskDO extends DurableObject<Env> {
       retryAfter !== undefined ? Math.min(Math.max(retryAfter, 0), RETRY_AFTER_MAX_MS) : backoff;
     this.ctx.storage.sql.exec(
       "UPDATE github_link SET revoke_attempts = ?, finalize_retry_at = ?",
+      attempts,
+      this.now() + delay,
+    );
+  }
+
+  /**
+   * task_review の終了処理: AgentDO が返した本文を、PR のレビュー（event は COMMENT に固定。repo-api が決める）として 1 回だけ投稿する。
+   * 投稿するのは COMPLETED で本文があるときだけ（それ以外は何も書かない）。PR の状態・本文・ブランチは変えない。
+   * 一時的な失敗（5xx・429・ネットワーク）は backoff で再試行し、FINALIZE_MAX_ATTEMPTS で諦める。再試行しても直らない失敗はその場で諦め、
+   * warnings に review_comment_failed を足す（本文は task_result の review.body で読める）。
+   * 戻り値: 終わった（投稿した・諦めた・投稿しない）なら true、再試行を待つなら false。
+   */
+  private async postReview(row: TaskRow, status: TaskStatus): Promise<boolean> {
+    const rl = this.getReview();
+    if (!rl || rl.posted !== 0) return true;
+    if (this.now() < rl.post_retry_at) return false;
+    let dto: ResultDto;
+    try {
+      dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
+    } catch {
+      this.schedulePostRetry(rl, true);
+      return false;
+    }
+    const review = dto.status === "not_ready" ? undefined : dto.review;
+    const audit = {
+      userId: row.owner_id,
+      model: rl.review_model,
+      ...(review ? { cost_usd: review.usage.costUsd } : {}),
+    };
+    if (status !== "COMPLETED" || !review?.body) {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("UPDATE review_link SET posted = 3");
+        this.appendEvent("review_finished", { stage: "skipped" }, this.now());
+        this.emitAudit("review_failed", {
+          ...audit,
+          reason: review?.failure ?? status.toLowerCase(),
+        });
+      });
+      this.notifyWaiters();
+      return true;
+    }
+    try {
+      const api = this.repoApi(row, await this.workingToken(row));
+      const posted = await api.createPullReview(rl.pull_number, review.body, rl.head_sha);
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "UPDATE review_link SET posted = 1, comment_url = ?",
+          posted.url.length <= 2_000 ? posted.url : null,
+        );
+        const at = this.now();
+        this.appendEvent(
+          "review_posted",
+          {
+            comment_url: posted.url.length <= 2_000 ? posted.url : null,
+            must_fix_count: review.mustFixCount,
+            suggestion_count: review.suggestionCount,
+          },
+          at,
+        );
+        this.appendEvent("review_finished", { stage: "done" }, at);
+        this.emitAudit("review_posted", {
+          ...audit,
+          must_fix_count: review.mustFixCount,
+          suggestion_count: review.suggestionCount,
+        });
+      });
+      this.notifyWaiters();
+      return true;
+    } catch (e) {
+      const retryable =
+        !(e instanceof GitHubApiError) || e.rateLimited || e.status === 0 || e.status >= 500;
+      console.error("task_do_review_post_error", e instanceof GitHubApiError ? e.status : typeof e);
+      if (retryable && rl.post_attempts + 1 < FINALIZE_MAX_ATTEMPTS) {
+        this.schedulePostRetry(rl, true, e instanceof GitHubApiError ? e.retryAfterMs : undefined);
+        return false;
+      }
+      this.ctx.storage.transactionSync(() => {
+        const gl = this.getGithub();
+        const own = gl ? (JSON.parse(gl.warnings) as string[]) : [];
+        if (!own.includes("review_comment_failed")) own.push("review_comment_failed");
+        this.ctx.storage.sql.exec("UPDATE github_link SET warnings = ?", JSON.stringify(own));
+        this.ctx.storage.sql.exec("UPDATE review_link SET posted = 2");
+        const at = this.now();
+        this.appendEvent("warning", { code: "review_comment_failed" }, at);
+        this.appendEvent("review_finished", { stage: "done" }, at);
+        this.emitAudit("review_failed", { ...audit, reason: "comment_failed" });
+      });
+      this.notifyWaiters();
+      return true;
+    }
+  }
+
+  private schedulePostRetry(rl: ReviewRow, count: boolean, retryAfterMs?: number): void {
+    const attempts = rl.post_attempts + (count ? 1 : 0);
+    const backoff = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1));
+    const delay =
+      retryAfterMs !== undefined
+        ? Math.min(Math.max(retryAfterMs, 0), RETRY_AFTER_MAX_MS)
+        : backoff;
+    this.ctx.storage.sql.exec(
+      "UPDATE review_link SET post_attempts = ?, post_retry_at = ?",
       attempts,
       this.now() + delay,
     );

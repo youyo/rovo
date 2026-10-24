@@ -502,3 +502,46 @@ describe("consult（consult_started / consult_finished。D10）", () => {
     for (const k of ["model", "cost_usd", "consult_id"]) expect(rec).not.toHaveProperty(k);
   });
 });
+
+describe("task_review（review_started / review_posted / review_failed）", () => {
+  it("3 つのイベント名が閉じた一覧にある", () => {
+    for (const e of ["review_started", "review_posted", "review_failed"]) {
+      expect(AUDIT_EVENTS).toContain(e);
+    }
+  });
+
+  it("モデル・費用・件数だけを通す（差分や本文は項目として存在しない）", () => {
+    const rec = run("review_posted", {
+      userId: 5,
+      taskId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+      model: "openai/gpt-6-sol",
+      cost_usd: 0.25,
+      must_fix_count: 2,
+      suggestion_count: 7,
+      body: "the review body",
+      diff: "diff --git",
+    }).record;
+    expect(rec).toMatchObject({
+      event: "review_posted",
+      model: "openai/gpt-6-sol",
+      cost_usd: 0.25,
+      must_fix_count: 2,
+      suggestion_count: 7,
+    });
+    expect(rec).not.toHaveProperty("body");
+    expect(rec).not.toHaveProperty("diff");
+    const failed = run("review_failed", { reason: "model_error", model: "anthropic/x" }).record;
+    expect(failed).toMatchObject({ reason: "model_error", model: "anthropic/x" });
+  });
+
+  it("件数は非負の整数だけ。他のイベントでは件数を通さない", () => {
+    for (const bad of [-1, 1.5, "3", Number.NaN]) {
+      expect(run("review_posted", { must_fix_count: bad }).record).not.toHaveProperty(
+        "must_fix_count",
+      );
+    }
+    expect(run("task_cancelled", { must_fix_count: 1 }).record).not.toHaveProperty(
+      "must_fix_count",
+    );
+  });
+});

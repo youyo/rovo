@@ -150,7 +150,7 @@ describe("git_commit: diff-tree が失敗してもツールは成功し、push �
     const r = await run("git_commit", { message: "m" });
     expect(r.isError).toBe(false);
     expect(events).toEqual([{ type: "commit", data: { message: "m", sha, files: 0 } }]);
-    expect(sandbox.calls.some((c) => c.argv[0] === "git" && c.argv[1] === "push")).toBe(true);
+    expect(sandbox.calls.some((c) => c.argv[0] === "git" && c.argv.includes("push"))).toBe(true);
   });
 });
 

@@ -6,6 +6,7 @@ import {
   normalizeStructuredEvent,
   workspaceRelativePath,
 } from "@rovo/audit";
+import { GIT_ISOLATION_ENV, isolatedGit, pushTarget } from "../git-isolation";
 import { maskSecrets } from "../redact";
 import type { ExecResult, SandboxPort } from "../sandbox-port";
 import {
@@ -484,8 +485,9 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
 
   /** 最後に push が成功した SHA（このツールが見たもの）。ToolContext.lastPushedSha が無いときの代わり */
   let lastPushedLocal: string | undefined;
+  // 検査の git（ls-remote を含む）も、子の gitconfig（url.insteadOf で偽のリモートへ向けるなど）から切り離す
   const scanGit: ScanGit = (argv, timeoutMs, maxOutputBytes) =>
-    port.exec(["git", ...argv], { ...cwdOpts, timeoutMs, maxOutputBytes });
+    port.exec(isolatedGit(argv), { ...cwdOpts, env: GIT_ISOLATION_ENV, timeoutMs, maxOutputBytes });
 
   /** 止めたときに子へ返す文（値は含めない）。commit は残り、push はしていない */
   const blockedText = (v: Exclude<ScanVerdict, { status: "clean" | "aborted" }>): string => {
@@ -511,10 +513,20 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
    */
   const pushCheckpoint = async (sha: string): Promise<string> => {
     if (!context.branch || !context.onPush) return "";
+    // 送る commit が SHA として読めなければ push しない（許可証は 40 桁の SHA だけ）
+    if (!/^[0-9a-f]{40}$/.test(sha)) {
+      try {
+        await context.onPush({ ok: false, sha, error: "could not read HEAD after commit" });
+      } catch {
+        // 記録の失敗で commit を失敗にしない
+      }
+      return "\npush failed (the commit is kept locally; the next git_commit tries again)";
+    }
     const known = context.lastPushedSha?.() ?? lastPushedLocal;
     // 基準が分からないとき（無い・SHA の形でない）は、HEAD から辿れる全部の commit を見る
     const base = known && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(known) ? known : undefined;
-    const verdict = await scanUnpushedForSecrets(scanGit, "HEAD", base, {
+    // 検査するのは、これから送る commit（sha）。HEAD が動いても、検査した commit と送る commit は同じ
+    const verdict = await scanUnpushedForSecrets(scanGit, sha, base, {
       remote: remoteFor(context.repository?.(), context.baseSha?.()),
     });
     if (verdict.status !== "clean" && verdict.status !== "aborted") {
@@ -525,9 +537,13 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
       }
       return blockedText(verdict);
     }
+    // 検査を通した commit（sha）をそのまま送る。許可証（ref と newSha）が一致する push だけを、gateway が通す
+    const ref = `refs/heads/${context.branch}`;
     const r = await port
-      .exec(["git", "push", "origin", `HEAD:refs/heads/${context.branch}`], {
+      .exec(isolatedGit(["push", pushTarget(context.repository?.()), `${sha}:${ref}`]), {
         ...cwdOpts,
+        env: GIT_ISOLATION_ENV,
+        pushPermit: { ref, newSha: sha },
         timeoutMs: 120_000,
         maxOutputBytes: 32 * 1024,
       })
@@ -584,7 +600,13 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
       ]);
       if (commit.exitCode !== 0)
         return fail("git_commit", commit.stderr || commit.stdout || "git commit failed");
-      const head = await git(["rev-parse", "HEAD"]);
+      // push する commit の SHA を確定させる（子の gitconfig から切り離して読む）
+      const head = await port.exec(isolatedGit(["rev-parse", "HEAD"]), {
+        ...cwdOpts,
+        env: GIT_ISOLATION_ENV,
+        timeoutMs: 120_000,
+        maxOutputBytes: 32 * 1024,
+      });
       const sha = head.stdout.trim();
       // 構造化イベント用のファイル数（取れなければ 0）。メッセージは 1 行目だけが出る
       // fail-soft: 取得が失敗（exec の reject を含む）してもツールは成功させ、push は必ず走らせる

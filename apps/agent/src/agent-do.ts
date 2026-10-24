@@ -80,7 +80,14 @@ import {
   type ScriptStep,
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
-import type { ExecResult, PeekedOutput, SandboxPort, WorkspaceSpec } from "./sandbox-port";
+import { GIT_ISOLATION_ENV, isolatedGit, pushTarget } from "./git-isolation";
+import type {
+  ExecResult,
+  PeekedOutput,
+  PushPermit,
+  SandboxPort,
+  WorkspaceSpec,
+} from "./sandbox-port";
 import {
   blockedMessage,
   remoteFor,
@@ -1811,6 +1818,20 @@ export class AgentDO extends DurableObject<Env> {
       const sb = this.lazySandbox();
       const git = (argv: string[], timeoutMs = 60_000, maxOutputBytes = 32 * 1024) =>
         sb.exec(["git", ...argv], { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes });
+      // push とその前後（HEAD の確定・リモートの確認）の git は、子の gitconfig（global・system・フック・credential helper）から切り離す
+      const isolated = (
+        argv: string[],
+        timeoutMs = 60_000,
+        maxOutputBytes = 32 * 1024,
+        pushPermit?: PushPermit,
+      ) =>
+        sb.exec(isolatedGit(argv), {
+          cwd: WORKSPACE_ROOT,
+          env: GIT_ISOLATION_ENV,
+          timeoutMs,
+          maxOutputBytes,
+          ...(pushPermit ? { pushPermit } : {}),
+        });
       const okRun = (r: ExecResult) => r.exitCode === 0 && !r.timedOut;
       const why = (r: ExecResult) =>
         r.timedOut ? "timed out" : `exit ${r.exitCode}: ${(r.stderr || r.stdout).trim()}`;
@@ -1855,15 +1876,15 @@ export class AgentDO extends DurableObject<Env> {
         WIP_COMMIT_MESSAGE,
       ]);
       if (!okRun(commit)) return fail(`git commit ${why(commit)}`);
-      const head = await git(["rev-parse", "HEAD"]);
+      const head = await isolated(["rev-parse", "HEAD"]);
       const sha = head.stdout.trim();
       if (!okRun(head) || !SHA_RE.test(sha)) return fail("could not read HEAD after commit");
       if (interrupted()) return;
       // push の前にも、git_commit と同じ検査をする。commit 前に見たのは staged の差分だけで、HEAD には子が自分で積んだ
       // 未 push の commit（git_commit で止められたものなど）が残っていることがある。それらの秘密も送らない
       const range = await scanUnpushedForSecrets(
-        (argv, timeoutMs, maxOutputBytes) => git(argv, timeoutMs, maxOutputBytes),
-        "HEAD",
+        (argv, timeoutMs, maxOutputBytes) => isolated(argv, timeoutMs, maxOutputBytes),
+        sha,
         this.lastPushedSha(),
         { remote: remoteFor(spec.repository, spec.baseSha) },
       );
@@ -1873,10 +1894,15 @@ export class AgentDO extends DurableObject<Env> {
         record({ outcome: "committed", sha, pushed: false });
         return;
       }
-      // push は git_commit と同じ経路（作業ブランチへ HEAD を push し、pushed / push_failed イベントと branch_sync を更新）
-      const push = await git(["push", "origin", `HEAD:refs/heads/${spec.branch}`]).catch(
-        (e: unknown) => e,
-      );
+      // push は git_commit と同じ経路（作業ブランチへ、検査した commit を push し、pushed / push_failed イベントと branch_sync を更新）。
+      // 許可証（ref と newSha）は、この push の exec の間だけ。gateway は一致する push にだけ認証を付ける
+      const ref = `refs/heads/${spec.branch}`;
+      const push = await isolated(
+        ["push", pushTarget(spec.repository), `${sha}:${ref}`],
+        60_000,
+        32 * 1024,
+        { ref, newSha: sha },
+      ).catch((e: unknown) => e);
       const pushed = !(push instanceof Error) && okRun(push as ExecResult);
       await this.onCheckpointPush(
         pushed
@@ -2489,7 +2515,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "no_push",
-        text: "Every git_commit is pushed to the task branch automatically; do not run git push yourself, do not change git remotes or credentials, and do not create pull requests. Credentials are not available inside the sandbox. The gateway creates the draft pull request for the task branch (you never create it), and the parent reviews and merges it. So do not say in your summary that you did not create a pull request, and do not report the missing pull request as a problem: describe the changes you committed instead.",
+        text: "Every git_commit is pushed to the task branch automatically; do not run git push yourself (a push from a bash command is rejected), do not change git remotes or credentials, and do not create pull requests. Credentials are not available inside the sandbox. Each bash call starts at the workspace root. Do not prefix commands with `cd <dir> &&`; pass the directory as the cwd argument instead. The gateway creates the draft pull request for the task branch (you never create it), and the parent reviews and merges it. So do not say in your summary that you did not create a pull request, and do not report the missing pull request as a problem: describe the changes you committed instead.",
       },
     ];
   }
@@ -3167,8 +3193,17 @@ export class AgentDO extends DurableObject<Env> {
     if (!spec) return;
     const ref = `refs/heads/${spec.branch}`;
     const sb = this.lazySandbox();
-    const exec = (argv: string[], timeoutMs: number) =>
-      sb.exec(argv, { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes: 32 * 1024 });
+    // ls-remote と push は、子の gitconfig から切り離した git で、origin ではなくリポジトリの URL へ直接送る。
+    // 許可証（ref と newSha）は push の exec の間だけ付く
+    const remoteUrl = pushTarget(spec.repository);
+    const exec = (argv: string[], timeoutMs: number, pushPermit?: PushPermit) =>
+      sb.exec(isolatedGit(argv), {
+        cwd: WORKSPACE_ROOT,
+        env: GIT_ISOLATION_ENV,
+        timeoutMs,
+        maxOutputBytes: 32 * 1024,
+        ...(pushPermit ? { pushPermit } : {}),
+      });
     const ok = (r: ExecResult) => r.exitCode === 0 && !r.timedOut;
     const why = (r: ExecResult) =>
       r.timedOut
@@ -3176,7 +3211,7 @@ export class AgentDO extends DurableObject<Env> {
         : `exit ${r.exitCode}: ${tail(maskSecrets((r.stderr || r.stdout).trim()), 300)}`;
     /** ls-remote の出力から ref の先頭を読む。無ければ ""。SHA の形でなければ例外 */
     const readRemote = async (): Promise<string> => {
-      const ls = await exec(["git", "ls-remote", "origin", ref], 60_000);
+      const ls = await exec(["ls-remote", remoteUrl, ref], 60_000);
       if (!ok(ls)) throw new Error(`git ls-remote ${why(ls)}`);
       const line = ls.stdout
         .split("\n")
@@ -3199,7 +3234,12 @@ export class AgentDO extends DurableObject<Env> {
     if (this.stopIntents().length > 0 || isTerminal(this.store.phase())) return;
     const scan = await scanUnpushedForSecrets(
       (argv, timeoutMs, maxOutputBytes) =>
-        sb.exec(["git", ...argv], { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes }),
+        sb.exec(isolatedGit(argv), {
+          cwd: WORKSPACE_ROOT,
+          env: GIT_ISOLATION_ENV,
+          timeoutMs,
+          maxOutputBytes,
+        }),
       sha,
       this.lastPushedSha(),
       { remote: remoteFor(spec.repository, spec.baseSha) },
@@ -3214,8 +3254,9 @@ export class AgentDO extends DurableObject<Env> {
       try {
         const remote = await readRemote();
         const push = await exec(
-          ["git", "push", `--force-with-lease=${ref}:${remote}`, "origin", `${sha}:${ref}`],
+          ["push", `--force-with-lease=${ref}:${remote}`, remoteUrl, `${sha}:${ref}`],
           120_000,
+          { ref, newSha: sha },
         );
         if (!ok(push)) throw new Error(`git push ${why(push)}`);
         const after = await readRemote();

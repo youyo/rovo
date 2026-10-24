@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides, setAgentTestOverrides } from "../../src/agent/deps";
-import { FakeSandbox } from "../support/fake-sandbox";
+import { FakeSandbox, stripGitIsolation } from "../support/fake-sandbox";
 import {
   allEvents,
   call,
@@ -19,7 +19,8 @@ const asFx = (stub: Fixture["stub"]) => ({ stub }) as Fixture;
 // toolsFactory を差し替えず、本番の配線（createSandboxTools）で動かす。時計も実時間。
 describe("AgentDO の本番ツール配線", () => {
   it("createSandboxTools のツール（read_file / bash / git_commit）が SandboxPort 経由で動く", async () => {
-    const sandbox = new FakeSandbox((argv) => {
+    const sandbox = new FakeSandbox((raw) => {
+      const argv = stripGitIsolation(raw);
       if (argv[0] === "git" && argv[1] === "rev-parse") return { stdout: "c0ffee\n" };
       // 完了時の作業ブランチの同期（ls-remote で先頭を確かめる）。リモートは常に c0ffee
       if (argv[0] === "git" && argv[1] === "ls-remote") return { stdout: `c0ffee\t${argv[3]}\n` };

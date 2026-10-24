@@ -44,6 +44,7 @@ import type {
   ExecOptions,
   ExecResult,
   PeekedOutput,
+  PushPermit,
   SandboxPort,
   WorkspaceSpec,
 } from "./sandbox-port";
@@ -82,6 +83,10 @@ const BASE_ENV: Record<string, string> = {
   GIT_CONFIG_VALUE_0: WORKSPACE,
 };
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+/** 自動の push の許可証（storage の kv）のキー。exec の間だけ置き、finally で消す。 */
+const PUSH_PERMIT_KEY = "push_permit";
+/** 許可証の期限は exec の時間切れ + この猶予（消し忘れても、この後は無効になる）。 */
+const PUSH_PERMIT_GRACE_MS = 30_000;
 const DEFAULT_MAX_OUTPUT = 64 * 1024;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 /**
@@ -631,6 +636,19 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /**
+   * OutboundGateway 用。いま自動の push の exec が走っているとき（exec の pushPermit）だけ、その ref と newSha を返す。
+   * 無い・期限切れ・終端は undefined（= receive-pack は 403）。serial を通さない（exec が鎖の中で待っている間に読まれる）。
+   */
+  async readPushPermit(): Promise<PushPermit | undefined> {
+    if (this.terminated()) return undefined;
+    const stored = this.ctx.storage.kv.get<{ ref: string; newSha: string; expiresAt: number }>(
+      PUSH_PERMIT_KEY,
+    );
+    if (!stored || !(stored.expiresAt > Date.now())) return undefined;
+    return { ref: stored.ref, newSha: stored.newSha };
+  }
+
+  /**
    * 実行中の子のコマンドの途中の出力。serial を通さない（exec が鎖の中で待っている間も返る）ので、ストレージにも触れない。
    * origin の無い内部の exec（git など）は見せない。
    */
@@ -661,11 +679,32 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         pending = decided === "recorded";
       }
       const startedAt = Date.now();
-      const result = await this.runExec(argv, { ...options, cwd });
-      if (options.origin !== undefined) {
-        this.finishCommand(argv, result, Date.now() - startedAt, pending);
+      // 許可証は、この exec の間だけ（serial の中なので同時に 1 つ）。期限は exec の時間切れまで。finally で必ず消す
+      const permit = options.pushPermit;
+      if (permit !== undefined) {
+        if (
+          typeof permit.ref !== "string" ||
+          !/^refs\/heads\/[^\s]+$/.test(permit.ref) ||
+          typeof permit.newSha !== "string" ||
+          !/^[0-9a-f]{40}$/.test(permit.newSha)
+        ) {
+          throw new Error("invalid push permit");
+        }
+        this.ctx.storage.kv.put(PUSH_PERMIT_KEY, {
+          ref: permit.ref,
+          newSha: permit.newSha,
+          expiresAt: startedAt + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS) + PUSH_PERMIT_GRACE_MS,
+        });
       }
-      return result;
+      try {
+        const result = await this.runExec(argv, { ...options, cwd });
+        if (options.origin !== undefined) {
+          this.finishCommand(argv, result, Date.now() - startedAt, pending);
+        }
+        return result;
+      } finally {
+        if (permit !== undefined) this.ctx.storage.kv.delete(PUSH_PERMIT_KEY);
+      }
     });
   }
 
@@ -782,6 +821,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     this.audit("sandbox_privileged_op", { op: "terminate" });
     this.ctx.storage.kv.put("terminated", true);
     this.ctx.storage.kv.delete("git_credential");
+    this.ctx.storage.kv.delete(PUSH_PERMIT_KEY);
     this.invalidateBoot();
     await this.ctx.storage.deleteAlarm();
     let error: unknown;
@@ -881,6 +921,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (!spec) return;
     if (this.terminated() || Date.now() >= spec.deadlineAt) {
       this.ctx.storage.kv.delete("git_credential");
+      this.ctx.storage.kv.delete(PUSH_PERMIT_KEY);
       try {
         await this.destroyContainer();
       } catch {

@@ -554,6 +554,7 @@ describe("git_commit の push（チェックポイント）", () => {
     const { sandbox, run } = setup(handler(), {
       branch: "agent/task-t1",
       repository: () => "acme/hello",
+      onPush: async () => {},
     });
     await run("git_commit", { message: "m" });
     await run("bash", { command: "git push origin HEAD" });

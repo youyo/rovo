@@ -7,7 +7,7 @@ import type { ScriptStep } from "../../../src/pi/scripted-provider";
 import type { ExecResult } from "../../../src/sandbox-port";
 import type { SandboxToolsFactory } from "../../../src/tools/types";
 import type { WebPort } from "../../../src/tools/web";
-import { FakeSandbox } from "../../support/fake-sandbox";
+import { FakeSandbox, stripGitIsolation } from "../../support/fake-sandbox";
 
 export const T0 = 1_800_000_000_000;
 
@@ -179,7 +179,9 @@ export function newFixture(
   const lsRemoteResults: Partial<ExecResult>[] = [];
   const pushCalls: string[][] = [];
 
-  const sandbox = new FakeSandbox(async (argv) => {
+  const sandbox = new FakeSandbox(async (raw) => {
+    // 自動の git の、子の gitconfig を切り離す上書きは読み飛ばす
+    const argv = stripGitIsolation(raw);
     // push 前の秘密の検査が読む、リモートの heads・tags 全体（git -C / ls-remote --heads --tags <url>）。公開済みの SHA は無い
     if (argv[0] === "git" && argv.includes("ls-remote") && argv.includes("--heads")) return {};
     // `git --no-replace-objects -c k=v <sub> ...` のオプションを読み飛ばしてサブコマンドを見る
@@ -205,7 +207,7 @@ export function newFixture(
       return { stdout: remote.sha === undefined ? "" : `${remote.sha}\t${ref}\n` };
     }
     if (a0 === "git" && a1 === "push") {
-      pushCalls.push(argv);
+      pushCalls.push(raw);
       const r = pushResults.shift() ?? {};
       if ((r.exitCode ?? 0) === 0 && !r.timedOut) {
         // 最後の引数が `<src>:<ref>`。src が HEAD なら、検証前の HEAD（c0ffee）

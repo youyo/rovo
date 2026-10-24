@@ -285,8 +285,8 @@ describe("git_commit の push 前の秘密の検査", () => {
     t.git.stage(file("src/a.ts", "ok"));
     await t.commit();
     expect(t.git.state.pushes).toHaveLength(1);
-    // 基準が無いので --not を付けず、HEAD から辿れる全部の commit を見る
-    expect(t.diffArgs()[0]).toContain("HEAD");
+    // 基準が無いので --not を付けず、送る commit（HEAD の SHA）から辿れる全部の commit を見る
+    expect(t.diffArgs()[0]).toContain(t.git.head());
     expect(t.notOf(t.diffArgs()[0])).toBeUndefined();
   });
 

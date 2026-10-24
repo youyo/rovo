@@ -106,7 +106,7 @@ export default async function globalSetup() {
     await emit(baseUrl, id("secret"), "command", { command: "SECRET-CMD", exitCode: 0 });
     await emit(baseUrl, id("bob"), "command", { command: "bob-cmd", exitCode: 0 });
 
-    // 子が作業ブランチに commit を積んだ状態で完了させる（変更が無いと rovo が空の Draft PR を閉じる）。
+    // ワーカーが作業ブランチに commit を積んだ状態で完了させる（変更が無いと rovo が空の Draft PR を閉じる）。
     // 完了すると rovo が PR を自動で Ready にする（クライアントのレビュー待ち）
     await waitForStatus(baseUrl, id("review"), "RUNNING");
     const reviewBranch = `agent/task-${id("review")}`;

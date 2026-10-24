@@ -1,7 +1,9 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { CONSULT_TIMEOUT_MS } from "../../src/consult";
 import { consultBudgetUsd, DEFAULT_CONSULT_BUDGET_USD } from "../../src/tasks/budget";
 import { ulid } from "../../src/tasks/ulid";
+import { CONSULT_STALE_AFTER_MS } from "../../src/tasks/user-do";
 import { FP, newUserId, userStub } from "./helpers";
 
 type UserStub = ReturnType<typeof userStub>;
@@ -225,34 +227,87 @@ describe("UserDO.reserveConsult / settleConsult", () => {
     ]);
   });
 
-  it("精算されないまま 30 分たった consult の予約は、次の予約のときに予約額で閉じる", async () => {
+  it("精算されないまま CONSULT_STALE_AFTER_MS たった consult の予約は、次の予約のときに予約額で閉じる", async () => {
     const stub = userStub(newUserId());
     const clock = await setup(stub);
     const stale = newConsultId(Date.UTC(2026, 0, 15, 12));
     await stub.reserveConsult(stale);
-    clock.advance(29 * MIN);
-    await stub.reserveConsult(newConsultId(Date.UTC(2026, 0, 15, 12, 29)));
+    clock.advance(CONSULT_STALE_AFTER_MS - MIN);
+    await stub.reserveConsult(
+      newConsultId(Date.UTC(2026, 0, 15, 12, 0) + CONSULT_STALE_AFTER_MS - MIN),
+    );
     expect(await sql(stub, "SELECT closed FROM task_budget WHERE task_id = ?", stale)).toEqual([
       { closed: 0 },
     ]);
     clock.advance(2 * MIN);
-    await stub.reserveConsult(newConsultId(Date.UTC(2026, 0, 15, 12, 31)));
+    await stub.reserveConsult(
+      newConsultId(Date.UTC(2026, 0, 15, 12, 0) + CONSULT_STALE_AFTER_MS + MIN),
+    );
     expect(
       await sql(stub, "SELECT settled_micro, closed FROM task_budget WHERE task_id = ?", stale),
     ).toEqual([{ settled_micro: 0.5 * MICRO, closed: 1 }]);
   });
 
-  it("タスクの予約（reserve）のときも、30 分たった consult の予約を閉じてから月の枠を判定する", async () => {
+  it("タスクの予約（reserve）のときも、期限を過ぎた consult の予約を閉じてから月の枠を判定する", async () => {
     const stub = userStub(newUserId());
     const clock = await setup(stub, { limitUsd: 10.2 });
     const stale = newConsultId(Date.UTC(2026, 0, 15, 12));
     await stub.reserveConsult(stale);
-    clock.advance(31 * MIN);
+    clock.advance(CONSULT_STALE_AFTER_MS + MIN);
     // consult の予約 0.5 は閉じて実費（予約額）の 0.5 になる。10.2 − 0.5 = 9.7 < 10 なので、タスク（10）は始められない
     expect(await stub.reserve("k1", FP)).toEqual({ ok: false, code: "budget_exceeded" });
     expect(
       await sql(stub, "SELECT settled_micro, closed FROM task_budget WHERE task_id = ?", stale),
     ).toEqual([{ settled_micro: 0.5 * MICRO, closed: 1 }]);
+  });
+});
+
+describe("取り残された consult の予約の期限（クライアントが切れて精算が走らなかった場合）", () => {
+  it("期限は consult の待ち時間（CONSULT_TIMEOUT_MS）より長く、数分で閉じる（30 分も取り残さない）", () => {
+    expect(CONSULT_STALE_AFTER_MS).toBeGreaterThan(CONSULT_TIMEOUT_MS);
+    expect(CONSULT_STALE_AFTER_MS).toBeLessThanOrEqual(10 * MIN);
+  });
+
+  it("budget_status を見た時点で、期限を過ぎた予約は予約額で閉じて spent / estimated に入る（予約のまま残らない）", async () => {
+    const stub = userStub(newUserId());
+    const clock = await setup(stub);
+    const id = newConsultId(Date.UTC(2026, 0, 15, 12));
+    await stub.reserveConsult(id);
+    expect(await stub.budgetStatus()).toMatchObject({ reserved_usd: 0.5, spent_usd: 0 });
+    clock.advance(CONSULT_STALE_AFTER_MS - MIN);
+    expect(await stub.budgetStatus()).toMatchObject({ reserved_usd: 0.5, spent_usd: 0 });
+    clock.advance(2 * MIN);
+    expect(await stub.budgetStatus()).toMatchObject({
+      reserved_usd: 0,
+      spent_usd: 0.5,
+      estimated_usd: 0.5,
+      remaining_usd: 99.5,
+    });
+    // 閉じた後に遅れて届いた精算は何もしない（二重に数えない）
+    expect(await stub.settleConsult(id, 0.1)).toEqual({ ok: true, applied: false });
+    expect(await stub.budgetStatus()).toMatchObject({ spent_usd: 0.5, reserved_usd: 0 });
+  });
+
+  it("ダッシュボードの予算の表示（dashboardBudget）でも閉じる", async () => {
+    const stub = userStub(newUserId());
+    const clock = await setup(stub);
+    await stub.reserveConsult(newConsultId(Date.UTC(2026, 0, 15, 12)));
+    clock.advance(CONSULT_STALE_AFTER_MS + MIN);
+    expect(await stub.dashboardBudget()).toMatchObject({ reserved_usd: 0, spent_usd: 0.5 });
+  });
+
+  it("2 回取り残された予約（本番で起きた形）が、まとめて予約額で閉じる", async () => {
+    const stub = userStub(newUserId());
+    const clock = await setup(stub);
+    await stub.reserveConsult(newConsultId(Date.UTC(2026, 0, 15, 12)));
+    await stub.reserveConsult(newConsultId(Date.UTC(2026, 0, 15, 12) + 1));
+    expect(await stub.budgetStatus()).toMatchObject({ reserved_usd: 1 });
+    clock.advance(CONSULT_STALE_AFTER_MS + MIN);
+    expect(await stub.budgetStatus()).toMatchObject({
+      reserved_usd: 0,
+      spent_usd: 1,
+      estimated_usd: 1,
+    });
   });
 });
 

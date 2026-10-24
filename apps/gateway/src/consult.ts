@@ -16,6 +16,7 @@ import { withTestScripts } from "./test-routes";
  * AgentDO.consult（consult ごとのインスタンス `consult-<ULID>`。AI バインディングと thinking の補正は AgentDO にある）→
  * 実費で精算。AgentDO が失敗を返したときはかかった費用で、例外で終わって実費が分からないときは予約額で精算する
  * （予約より少なく数えない）。rovo は会話を保存しない。
+ * クライアントが先に切れて、この後の精算が走らなかった予約は、UserDO が CONSULT_STALE_AFTER_MS 後に予約額で閉じる。
  */
 
 export type ConsultValue = {

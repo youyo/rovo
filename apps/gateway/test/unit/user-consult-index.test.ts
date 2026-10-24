@@ -132,7 +132,7 @@ describe("UserDO consult_log（reserve / settle）", () => {
     expect((await logRows(stub))[0]).toMatchObject({ cost_micro: 100_000, revision: 1 });
   });
 
-  it("精算されないまま 30 分たった consult は、予約額・estimated で閉じる行も dirty になる", async () => {
+  it("精算されないまま期限を過ぎた consult は、予約額・estimated で閉じる行も dirty になる", async () => {
     const uid = newUserId();
     const stub = userStub(uid);
     const clock = await setup(stub);

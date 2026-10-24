@@ -89,8 +89,12 @@ export type ReserveResult =
   | { ok: true; task_id: string; reused: boolean }
   | { ok: false; code: "conflict" | "concurrency_limit" | "budget_exceeded" };
 
-/** 精算されないまま残った consult の予約を、予約額で閉じるまでの時間。 */
-export const CONSULT_STALE_AFTER_MS = 30 * 60 * 1000;
+/**
+ * 精算されないまま残った consult の予約を、予約額で閉じるまでの時間。
+ * consult の待ち時間の上限（CONSULT_TIMEOUT_MS = 2 分）に余裕を足した値。クライアントが先に切れて Worker の
+ * 精算が走らなかった予約を、数分で閉じる（30 分も budget_status の reserved に残さない）。
+ */
+export const CONSULT_STALE_AFTER_MS = 5 * 60 * 1000;
 
 /** consult の索引（Directory）への配送の周期（ms）。TaskDO の alarm と同じ */
 export const CONSULT_INDEX_ALARM_INTERVAL_MS = 10_000;
@@ -1091,6 +1095,9 @@ export class UserDO extends DurableObject<Env> {
    */
   budgetStatus(): BudgetStatus {
     const at = this.now();
+    // 期限を過ぎた consult の予約は、見せる前に予約額で閉じる（取り残された予約を reserved に出し続けない）
+    this.ctx.storage.transactionSync(() => this.closeStaleConsults(at));
+    this.requestConsultAlarm();
     const month = monthOf(at);
     const { spent, estimated, reserved } = this.spentAndReservedMicro(month);
     const limit = Math.round(this.monthlyLimitUsd() * MICRO);

@@ -26,6 +26,8 @@ export const TOOL_ANNOTATIONS = {
   task_list: read("List tasks", false),
   models_list: read("List models", false),
   budget_status: read("Budget status", false),
+  // consult の答えを受け取る（long polling）。状態を変えず、同じ答えを何度でも取れる（保持は 1 時間）
+  consult_result: read("Consult result", false),
   sandbox_instances_list: read("List sandbox sizes", false),
   web_search: read("Web search", true),
   web_fetch: read("Fetch web page", true),

@@ -196,6 +196,7 @@ describe("consult: 予約と精算", () => {
             return { ok: true as const, reserved_usd: 0.5 };
           },
           startConsult: () => ({ ok: true as const }),
+          discardConsult: () => ({ ok: true as const, discarded: true }),
           waitConsult: () => ({
             ok: true as const,
             status: "done" as const,
@@ -528,7 +529,10 @@ describe("consult: 50 秒を超える（pending）", () => {
     const svc = consultServiceWith(env, agent.factory, { waitMs: 10 });
     const p = principal();
     for (let i = 0; i < 4; i++) {
-      expect(await svc.consult(p, input())).toMatchObject({ ok: true, value: { status: "pending" } });
+      expect(await svc.consult(p, input())).toMatchObject({
+        ok: true,
+        value: { status: "pending" },
+      });
     }
     const fifth = await svc.consult(p, input());
     expect(fifth).toMatchObject({ ok: false, error: { code: "concurrency_limit" } });
@@ -629,5 +633,62 @@ describe("consult_result: 入力と各状態", () => {
       ok: true,
       value: { consult_id: unknownId, status: "pending", retry_after_seconds: 5 },
     });
+  });
+});
+
+describe("consult: 答えを受け取れたときだけ UserDO の本文を消す", () => {
+  const doneValue = {
+    text: "x",
+    model: "anthropic/claude-sonnet-5-5",
+    usage: { input: 1, output: 1, cache_read: 0, cache_write: 0 },
+    cost_usd: 0.001,
+  };
+  const mock = (wait: unknown, discards: unknown[][]) =>
+    ({
+      reserveConsult: () => ({ ok: true as const, reserved_usd: 0.5 }),
+      startConsult: () => ({ ok: true as const }),
+      waitConsult: () => wait,
+      discardConsult: (...a: unknown[]) => {
+        discards.push(a);
+        return { ok: true as const, discarded: true };
+      },
+    }) as never;
+
+  it("done / failed を受け取ったら消す。pending のときは消さない（取りに来られる）", async () => {
+    const p = principal();
+    for (const [wait, expected] of [
+      [{ ok: true, status: "done", value: doneValue }, 1],
+      [
+        {
+          ok: true,
+          status: "failed",
+          error: { code: "model_rejected", message: "m" },
+          cost_usd: 0,
+        },
+        1,
+      ],
+      [{ ok: true, status: "pending" }, 0],
+    ] as const) {
+      const discards: unknown[][] = [];
+      const svc = createConsultService(env, { users: () => mock(wait, discards) });
+      await svc.consult(p, input());
+      expect(discards).toHaveLength(expected);
+      if (expected === 1) expect(discards[0]?.[1]).toBe(p.githubUserId);
+    }
+  });
+
+  it("消すのに失敗しても、受け取った答えは返す", async () => {
+    const svc = createConsultService(env, {
+      users: () =>
+        ({
+          reserveConsult: () => ({ ok: true as const, reserved_usd: 0.5 }),
+          startConsult: () => ({ ok: true as const }),
+          waitConsult: () => ({ ok: true as const, status: "done" as const, value: doneValue }),
+          discardConsult: () => {
+            throw new Error("boom");
+          },
+        }) as never,
+    });
+    expect(await svc.consult(principal(), input())).toEqual({ ok: true, value: doneValue });
   });
 });

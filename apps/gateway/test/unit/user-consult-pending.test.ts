@@ -1,7 +1,6 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ConsultRequest } from "../../src/agent/contract";
-import { MAX_CONCURRENT_WAITERS, WAIT_RETRY_AFTER_SECONDS } from "../../src/tasks/validation";
 import { ulid } from "../../src/tasks/ulid";
 import {
   CONSULT_ANSWER_TTL_MS,
@@ -9,6 +8,7 @@ import {
   CONSULT_STALE_AFTER_MS,
   MAX_PENDING_CONSULTS,
 } from "../../src/tasks/user-do";
+import { MAX_CONCURRENT_WAITERS, WAIT_RETRY_AFTER_SECONDS } from "../../src/tasks/validation";
 import { controllableAgent, okResult, tuneUserDo } from "../support/consult-agent";
 import { FP, newUserId, userStub } from "./helpers";
 
@@ -306,22 +306,26 @@ describe("UserDO.waitConsult", () => {
     expect(await f.stub.budgetStatus()).toMatchObject({ spent_usd: 0.0012 + 0.5 });
   });
 
-  it("consume: 取り出した時点で行を消す（50 秒以内に返した答えを UserDO に残さない）。pending のときは消さない", async () => {
+  it("discardConsult: 受け取れた答えの行を消す（50 秒以内に返した答えを UserDO に残さない）。pending・他人・無い行は消さない。waitConsult は消さない", async () => {
     const f = await fixture();
     const { id } = await f.begin();
-    expect(await f.stub.waitConsult(id, f.uid, 10, { consume: true })).toEqual({
-      ok: true,
-      status: "pending",
-    });
+    expect(await f.stub.discardConsult(id, f.uid)).toEqual({ ok: true, discarded: false });
     expect(await sql(f.stub, "SELECT status FROM consult_answer")).toEqual([{ status: "pending" }]);
     f.agent.release(id, okResult({ text: "SECRET-ANSWER" }));
-    expect(await f.stub.waitConsult(id, f.uid, 5000, { consume: true })).toMatchObject({
+    // 待っただけでは消えない（待っている間に呼び出し側が切れても、答えは取り直せる）
+    expect(await f.stub.waitConsult(id, f.uid, 5000)).toMatchObject({
       ok: true,
       status: "done",
       value: { text: "SECRET-ANSWER" },
     });
+    expect(await sql(f.stub, "SELECT status FROM consult_answer")).toEqual([{ status: "done" }]);
+    // 他人の owner_id では消えない
+    expect(await f.stub.discardConsult(id, f.uid + 1)).toEqual({ ok: true, discarded: false });
+    expect(await sql(f.stub, "SELECT status FROM consult_answer")).toEqual([{ status: "done" }]);
+    expect(await f.stub.discardConsult(id, f.uid)).toEqual({ ok: true, discarded: true });
     expect(await sql(f.stub, "SELECT * FROM consult_answer")).toEqual([]);
     expect(await f.stub.waitConsult(id, f.uid, 0)).toEqual({ ok: false, code: "not_found" });
+    expect(await f.stub.discardConsult("consult-x", f.uid)).toEqual({ ok: true, discarded: false });
     // 精算は済んでいる
     expect(await f.stub.budgetStatus()).toMatchObject({ spent_usd: 0.0012, reserved_usd: 0 });
   });

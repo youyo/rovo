@@ -79,6 +79,8 @@ export type ConsultScriptStep = {
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   /** 失敗を返す（model_rejected = モデルの 4xx、model_error = 5xx など）。費用は 0 */
   fail?: { code: "model_rejected" | "model_error" };
+  /** 応答するまでの遅れ（ms）。遅いモデル（consult の pending）の再現に使う */
+  delayMs?: number;
 };
 
 const STATE_KEY = "fake-agent-state";
@@ -454,6 +456,7 @@ export class FakeAgentDO extends DurableObject {
     this.callCounts.consults.push(req);
     this.save();
     const step = this.consultScripts.get(req.messages[0]?.content ?? "");
+    if (step?.delayMs) await new Promise((r) => setTimeout(r, step.delayMs));
     if (step?.fail) {
       return {
         ok: false,

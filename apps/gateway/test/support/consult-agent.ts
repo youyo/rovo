@@ -19,7 +19,9 @@ type Tunable = {
   env: unknown;
 };
 
-export const okResult = (over: Partial<Extract<ConsultResult, { ok: true }>> = {}): ConsultResult => ({
+export const okResult = (
+  over: Partial<Extract<ConsultResult, { ok: true }>> = {},
+): ConsultResult => ({
   ok: true,
   text: "answer",
   model: "anthropic/claude-sonnet-5-5",
@@ -28,28 +30,36 @@ export const okResult = (over: Partial<Extract<ConsultResult, { ok: true }>> = {
   ...over,
 });
 
-/** 呼び出しごとに「いつ返すか」をテストが決められる偽の AgentDO。 */
+/**
+ * 呼び出しごとに「いつ返すか」をテストが決められる偽の AgentDO。
+ * 返事は、テストが release で置いた値を、UserDO の側（呼び出しの中）が一定間隔で読みに行く形にする。
+ * Promise をテストから直接 resolve すると、別の Durable Object の文脈からの I/O になって workerd に拒否される。
+ */
 export function controllableAgent() {
   const calls: ConsultRequest[] = [];
   const names: string[] = [];
-  const settle = new Map<string, (r: ConsultResult | Error) => void>();
+  const released = new Map<string, ConsultResult | Error>();
   return {
     calls,
     names,
     factory: ((consultId: string) => ({
-      consult: (request: ConsultRequest) => {
+      consult: async (request: ConsultRequest): Promise<ConsultResult> => {
         calls.push(request);
         names.push(consultId);
-        return new Promise<ConsultResult>((resolve, reject) => {
-          settle.set(request.consultId, (r) => (r instanceof Error ? reject(r) : resolve(r)));
-        });
+        for (let i = 0; i < 3_000; i++) {
+          const r = released.get(request.consultId);
+          if (r !== undefined) {
+            if (r instanceof Error) throw r;
+            return r;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error("controllableAgent: never released");
       },
     })) as ConsultAgentFactory,
     /** その consult の AgentDO の呼び出しを、この結果（または例外）で終わらせる */
     release(consultId: string, result: ConsultResult | Error = okResult()) {
-      const s = settle.get(consultId);
-      if (!s) throw new Error(`consult was not started: ${consultId}`);
-      s(result);
+      released.set(consultId, result);
     },
   };
 }
@@ -88,10 +98,13 @@ export function consultServiceWith(
     let ready: Promise<void> | undefined;
     return new Proxy(stub, {
       get(target, prop) {
-        const member = Reflect.get(target, prop) as (...a: unknown[]) => unknown;
         return (...args: unknown[]) => {
           ready ??= tuneUserDo(stub, { agent, envOverride: { ENVIRONMENT: env.ENVIRONMENT } });
-          return ready.then(() => member.apply(target, args));
+          return ready.then(() =>
+            (target as unknown as Record<string, (...a: unknown[]) => unknown>)[String(prop)]?.(
+              ...args,
+            ),
+          );
         };
       },
     });

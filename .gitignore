@@ -26,3 +26,26 @@ playwright-report/
 
 # Claude Code の mod（plugins/rovo）の型。エンジンが自動生成する
 plugins/*/.claude-plugin/types/
+
+# 実際のデプロイ設定（アカウント ID や KV の ID が入る）。公開の upstream には入れない。
+# 下流の private リポジトリでは初回だけ強制的に追加する（docs/deploy.md の 4）。
+/rovo.config.json
+/deploy/
+
+# 環境ごとの値・秘密
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+*.local.toml
+*.pem
+*.key
+
+# テスト・ビルドの成果物
+coverage/
+.nyc_output/
+.vitest/
+*.tsbuildinfo
+.turbo/
+.mf/

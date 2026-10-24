@@ -1,9 +1,11 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ConsultRequest, ConsultResult } from "../../src/agent/contract";
 import { readWorkerAudit } from "../../src/audit-sink";
-import { createConsultService } from "../../src/consult";
+import { CONSULT_WAIT_MS, createConsultService } from "../../src/consult";
 import type { Principal } from "../../src/tasks/service";
+import { consultServiceWith, controllableAgent, okResult } from "../support/consult-agent";
 import { clearWorkerAudit, newUserId, userStub } from "./helpers";
 
 // vitest.config.ts の AGENT_MODELS: sonnet（既定）・haiku・gpt-6-sol。CONSULT_BUDGET_USD は未設定（既定 0.5）
@@ -49,7 +51,7 @@ beforeEach(() => clearWorkerAudit());
 describe("consult: 入力", () => {
   it("messages は 1 件以上で、最初と最後が user。role は user | assistant だけ", async () => {
     const fx = fakeAgent();
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     const p = principal();
     const bad: unknown[] = [
       {},
@@ -82,7 +84,7 @@ describe("consult: 入力", () => {
 
   it("入力が大きすぎれば invalid_input", async () => {
     const fx = fakeAgent();
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     const big = "あ".repeat(60_000);
     const r = await svc.consult(
       principal(),
@@ -101,7 +103,7 @@ describe("consult: 入力", () => {
 
   it("使えないモデルは invalid_input（models_list を案内）。予約もしない", async () => {
     const fx = fakeAgent();
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     const p = principal();
     for (const model of ["anthropic/claude-opus-5-5", "openai/gpt-6-astra", "nope"]) {
       const r = await svc.consult(p, input({ model }));
@@ -124,7 +126,7 @@ describe("consult: 予約と精算", () => {
         costUsd: 0.00555,
       },
     ]);
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     const p = principal();
     const r = await svc.consult(
       p,
@@ -160,7 +162,7 @@ describe("consult: 予約と精算", () => {
 
   it("model を指定すれば AgentDO に渡す（AGENT_MODELS の中だけ）", async () => {
     const fx = fakeAgent();
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     await svc.consult(principal(), input({ model: "openai/gpt-6-sol" }));
     expect(fx.requests[0]?.model).toBe("openai/gpt-6-sol");
   });
@@ -168,20 +170,18 @@ describe("consult: 予約と精算", () => {
   it("実行中は予約が月の枠に載り、同時実行の枠（タスク）は使わない", async () => {
     const p = principal();
     let during: Awaited<ReturnType<ReturnType<typeof userStub>["budgetStatus"]>> | undefined;
-    const svc = createConsultService(env, {
-      agent: () => ({
-        consult: async (req: ConsultRequest): Promise<ConsultResult> => {
-          during = await userStub(p.githubUserId).budgetStatus();
-          return {
-            ok: true,
-            text: "x",
-            model: req.model,
-            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-            costUsd: 0.000002,
-          };
-        },
-      }),
-    });
+    const svc = consultServiceWith(env, () => ({
+      consult: async (req: ConsultRequest): Promise<ConsultResult> => {
+        during = await userStub(p.githubUserId).budgetStatus();
+        return {
+          ok: true,
+          text: "x",
+          model: req.model,
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          costUsd: 0.000002,
+        };
+      },
+    }));
     await svc.consult(p, input());
     expect(during).toMatchObject({ reserved_usd: 0.5, remaining_usd: 99.5 });
   });
@@ -195,15 +195,26 @@ describe("consult: 予約と精算", () => {
             calls.push(a);
             return { ok: true as const, reserved_usd: 0.5 };
           },
+          startConsult: () => ({ ok: true as const }),
+          discardConsult: () => ({ ok: true as const, discarded: true }),
+          waitConsult: () => ({
+            ok: true as const,
+            status: "done" as const,
+            value: {
+              text: "x",
+              model: "anthropic/claude-sonnet-5-5",
+              usage: { input: 1, output: 1, cache_read: 0, cache_write: 0 },
+              cost_usd: 0.001,
+            },
+          }),
           settleConsult: () => ({ ok: true as const, applied: true }),
         }) as never,
-      agent: fakeAgent().agent,
     });
     const p = principal();
     const r = await svc.consult(p, input({ system: "SECRET-SYSTEM" }));
     expect(r.ok).toBe(true);
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.[1]).toBe(r.ok ? r.value.model : "");
+    expect(calls[0]?.[1]).toBe("anthropic/claude-sonnet-5-5");
     expect(calls[0]?.[2]).toEqual({ id: p.githubUserId, login: "alice" });
     expect(JSON.stringify(calls)).not.toContain("SECRET-SYSTEM");
     expect(JSON.stringify(calls)).not.toContain("design the cache");
@@ -211,7 +222,7 @@ describe("consult: 予約と精算", () => {
 
   it("月の枠が足りなければ budget_exceeded で、AgentDO は呼ばない", async () => {
     const fx = fakeAgent();
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     const p = principal();
     await userStub(p.githubUserId).reserveConsult("consult-00000000000000000000000000");
     await userStub(p.githubUserId).settleConsult("consult-00000000000000000000000000", 100);
@@ -224,7 +235,7 @@ describe("consult: 予約と精算", () => {
     const fx = fakeAgent([
       { ok: false, code: "model_error", message: "the model call failed", costUsd: 0.0004 },
     ]);
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     const p = principal();
     const r = await svc.consult(p, input());
     expect(r).toMatchObject({ ok: false, error: { code: "upstream_unavailable" } });
@@ -238,7 +249,7 @@ describe("consult: 予約と精算", () => {
     const fx = fakeAgent([
       { ok: false, code: "model_rejected", message: "the model rejected the request", costUsd: 0 },
     ]);
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     const p = principal();
     const r = await svc.consult(p, input());
     expect(r).toMatchObject({ ok: false, error: { code: "model_rejected" } });
@@ -255,7 +266,7 @@ describe("consult: 予約と精算", () => {
     const fx2 = fakeAgent([
       { ok: false, code: "model_error", message: "the model call failed", costUsd: 0 },
     ]);
-    const r2 = await createConsultService(env, { agent: fx2.agent }).consult(principal(), input());
+    const r2 = await consultServiceWith(env, fx2.agent).consult(principal(), input());
     expect(r2).toMatchObject({
       ok: false,
       error: { code: "upstream_unavailable", retry_after_seconds: 30 },
@@ -265,7 +276,7 @@ describe("consult: 予約と精算", () => {
   it("AgentDO が入力の大きさ・モデルを拒否したら invalid_input。費用は 0 で精算する", async () => {
     for (const code of ["input_too_large", "unknown_model", "invalid_request"] as const) {
       const fx = fakeAgent([{ ok: false, code, message: "m", costUsd: 0 }]);
-      const svc = createConsultService(env, { agent: fx.agent });
+      const svc = consultServiceWith(env, fx.agent);
       const p = principal();
       expect(await svc.consult(p, input()), code).toMatchObject({
         ok: false,
@@ -280,7 +291,7 @@ describe("consult: 予約と精算", () => {
 
   it("AgentDO の呼び出しが例外で終わり実費が分からないときは、予約額で精算する（予約より少なく数えない）", async () => {
     const fx = fakeAgent(["throw"]);
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     const p = principal();
     const r = await svc.consult(p, input());
     expect(r).toMatchObject({ ok: false, error: { code: "upstream_unavailable" } });
@@ -292,13 +303,13 @@ describe("consult: 予約と精算", () => {
 
   it("例外・壊れた応答で予約額で確定した分は estimated_usd に入る。実費が分かった精算は入らない", async () => {
     const p = principal();
-    const bad = createConsultService(env, {
-      agent: () => ({ consult: async () => ({ nonsense: true }) as unknown as ConsultResult }),
-    });
-    await createConsultService(env, { agent: fakeAgent(["throw"]).agent }).consult(p, input());
+    const bad = consultServiceWith(env, () => ({
+      consult: async () => ({ nonsense: true }) as unknown as ConsultResult,
+    }));
+    await consultServiceWith(env, fakeAgent(["throw"]).agent).consult(p, input());
     await bad.consult(p, input());
     // 実費が分かった consult（既定の応答。0.0012）は estimated_usd に入らない
-    await createConsultService(env, { agent: fakeAgent().agent }).consult(p, input());
+    await consultServiceWith(env, fakeAgent().agent).consult(p, input());
     const status = await userStub(p.githubUserId).budgetStatus();
     expect(status.estimated_usd).toBeCloseTo(1.0, 9);
     expect(status.spent_usd).toBeCloseTo(1.0012, 9);
@@ -320,7 +331,7 @@ describe("consult: 予約と精算", () => {
       // 実費が分かる失敗（costEstimated なし）
       { ok: false, code: "model_error", message: "m", costUsd: 0.01 },
     ]);
-    const svc = createConsultService(env, { agent: fx.agent });
+    const svc = consultServiceWith(env, fx.agent);
     await svc.consult(p, input());
     await svc.consult(p, input());
     await svc.consult(p, input());
@@ -330,9 +341,9 @@ describe("consult: 予約と精算", () => {
   });
 
   it("AgentDO の応答が壊れた形でも、予約額で精算して internal を返す", async () => {
-    const svc = createConsultService(env, {
-      agent: () => ({ consult: async () => ({ nonsense: true }) as unknown as ConsultResult }),
-    });
+    const svc = consultServiceWith(env, () => ({
+      consult: async () => ({ nonsense: true }) as unknown as ConsultResult,
+    }));
     const p = principal();
     const r = await svc.consult(p, input());
     expect(r).toMatchObject({ ok: false, error: { code: "internal" } });
@@ -344,7 +355,7 @@ describe("consult: 監査", () => {
   it("consult_started / consult_finished を出す（userId・model・cost_usd。会話の内容は出さない）", async () => {
     const fx = fakeAgent();
     const testEnv = { ...env, ENVIRONMENT: "test" } as unknown as Env;
-    const svc = createConsultService(testEnv, { agent: fx.agent });
+    const svc = consultServiceWith(testEnv, fx.agent);
     const p = principal();
     await svc.consult(p, input({ system: "SECRET-SYSTEM" }));
     const records = (await readWorkerAudit(testEnv)).filter((r) => r.userId === p.githubUserId);
@@ -372,7 +383,7 @@ describe("consult: 監査", () => {
       },
     ]);
     const testEnv = { ...env, ENVIRONMENT: "test" } as unknown as Env;
-    const svc = createConsultService(testEnv, { agent: fx.agent });
+    const svc = consultServiceWith(testEnv, fx.agent);
     const p = principal();
     const r = await svc.consult(p, input());
     expect(r).toMatchObject({ ok: true, value: { cost_usd: 0.4 } });
@@ -382,5 +393,302 @@ describe("consult: 監査", () => {
       cost_usd: 0.4,
       reason: "usage_missing",
     });
+  });
+});
+
+describe("consult: 50 秒以内に終わる（今と同じ応答の形。本文を UserDO に残さない）", () => {
+  it("成功の応答に status・consult_id を足さない。答えの行も残らない", async () => {
+    const fx = fakeAgent();
+    const svc = consultServiceWith(env, fx.agent);
+    const p = principal();
+    const r = await svc.consult(p, input());
+    expect(r).toEqual({
+      ok: true,
+      value: {
+        text: "answer",
+        model: "anthropic/claude-sonnet-5-5",
+        usage: { input: 1000, output: 200, cache_read: 0, cache_write: 0 },
+        cost_usd: 0.0012,
+      },
+    });
+    const rows = await runInDurableObject(userStub(p.githubUserId), (_i, s) =>
+      s.storage.sql.exec("SELECT * FROM consult_answer").toArray(),
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("失敗も今と同じエラー（答えの行は残らない）", async () => {
+    const fx = fakeAgent([{ ok: false, code: "model_error", message: "m", costUsd: 0 }, "throw"]);
+    const svc = consultServiceWith(env, fx.agent);
+    const p = principal();
+    expect(await svc.consult(p, input())).toEqual({
+      ok: false,
+      error: {
+        code: "upstream_unavailable",
+        message: "the model call failed; retry later",
+        retry_after_seconds: 30,
+      },
+    });
+    expect(await svc.consult(p, input())).toEqual({
+      ok: false,
+      error: {
+        code: "upstream_unavailable",
+        message: "the consult is temporarily unavailable; retry later",
+        retry_after_seconds: 30,
+      },
+    });
+    const rows = await runInDurableObject(userStub(p.githubUserId), (_i, s) =>
+      s.storage.sql.exec("SELECT * FROM consult_answer").toArray(),
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("待つ上限は 50 秒（CONSULT_WAIT_MS）", () => {
+    expect(CONSULT_WAIT_MS).toBe(50_000);
+  });
+});
+
+describe("consult: 50 秒を超える（pending）", () => {
+  it("pending を通常の結果で返す。consult_id は予約と同じ。retry_after_seconds は付かない。予約は開いたまま", async () => {
+    const agent = controllableAgent();
+    const svc = consultServiceWith(env, agent.factory, { waitMs: 30 });
+    const p = principal();
+    const r = await svc.consult(p, input());
+    const id = agent.calls[0]?.consultId;
+    expect(id).toMatch(/^consult-[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(r).toEqual({ ok: true, value: { consult_id: id, status: "pending" } });
+    expect(await userStub(p.githubUserId).budgetStatus()).toMatchObject({
+      reserved_usd: 0.5,
+      spent_usd: 0,
+      pending_consults: 1,
+    });
+    // 完了すると、リクエストが終わっていても UserDO が精算し、答えは consult_result で取れる
+    agent.release(id as string, okResult({ text: "slow answer", costUsd: 0.25 }));
+    const got = await svc.consultResult(p, { consult_id: id, timeout_seconds: 5 });
+    expect(got).toEqual({
+      ok: true,
+      value: {
+        consult_id: id,
+        status: "done",
+        text: "slow answer",
+        model: "anthropic/claude-sonnet-5-5",
+        usage: { input: 1000, output: 200, cache_read: 0, cache_write: 0 },
+        cost_usd: 0.25,
+      },
+    });
+    expect(await userStub(p.githubUserId).budgetStatus()).toMatchObject({
+      reserved_usd: 0,
+      spent_usd: 0.25,
+      pending_consults: 0,
+    });
+  });
+
+  it("遅い失敗は consult_result が failed（error は 50 秒以内の失敗と同じ形）で返す", async () => {
+    const agent = controllableAgent();
+    const svc = consultServiceWith(env, agent.factory, { waitMs: 20 });
+    const p = principal();
+    const r = await svc.consult(p, input());
+    const id = agent.calls[0]?.consultId as string;
+    expect(r).toMatchObject({ ok: true, value: { status: "pending" } });
+    agent.release(id, { ok: false, code: "model_rejected", message: "x", costUsd: 0.01 });
+    expect(await svc.consultResult(p, { consult_id: id, timeout_seconds: 5 })).toEqual({
+      ok: true,
+      value: {
+        consult_id: id,
+        status: "failed",
+        error: {
+          code: "model_rejected",
+          message:
+            "the model rejected the request (a 4xx response, e.g. invalid_request_error); retrying the same request will not help. Change the input or the model",
+        },
+        cost_usd: 0.01,
+      },
+    });
+  });
+
+  it("consult の待ち時間の間に UserDO への待機が切れても（例外）、pending を返す（consult_id で取り直せる）", async () => {
+    const calls: string[] = [];
+    const svc = createConsultService(env, {
+      users: () =>
+        ({
+          reserveConsult: () => ({ ok: true as const, reserved_usd: 0.5 }),
+          startConsult: () => ({ ok: true as const }),
+          waitConsult: () => {
+            throw new Error("Durable Object reset");
+          },
+          settleConsult: (...a: unknown[]) => calls.push(String(a[0])),
+        }) as never,
+    });
+    const r = await svc.consult(principal(), input());
+    expect(r).toMatchObject({ ok: true, value: { status: "pending" } });
+    expect(calls).toEqual([]);
+  });
+
+  it("同時 pending は 4 まで。5 件目は concurrency_limit で、AgentDO を呼ばない", async () => {
+    const agent = controllableAgent();
+    const svc = consultServiceWith(env, agent.factory, { waitMs: 10 });
+    const p = principal();
+    for (let i = 0; i < 4; i++) {
+      expect(await svc.consult(p, input())).toMatchObject({
+        ok: true,
+        value: { status: "pending" },
+      });
+    }
+    const fifth = await svc.consult(p, input());
+    expect(fifth).toMatchObject({ ok: false, error: { code: "concurrency_limit" } });
+    expect(agent.calls).toHaveLength(4);
+    expect(await userStub(p.githubUserId).budgetStatus()).toMatchObject({
+      pending_consults: 4,
+      reserved_usd: 2,
+    });
+  });
+});
+
+describe("consult_result: 入力と各状態", () => {
+  const unknownId = "consult-00000000000000000000000000";
+
+  it("consult_id が文字列でない・timeout_seconds が不正（負・小数・文字列）は invalid_input", async () => {
+    const svc = consultServiceWith(env, fakeAgent().agent);
+    const p = principal();
+    for (const bad of [
+      {},
+      { consult_id: 1 },
+      { consult_id: null },
+      { consult_id: unknownId, timeout_seconds: -1 },
+      { consult_id: unknownId, timeout_seconds: 1.5 },
+      { consult_id: unknownId, timeout_seconds: "5" },
+    ]) {
+      expect(await svc.consultResult(p, bad), JSON.stringify(bad)).toMatchObject({
+        ok: false,
+        error: { code: "invalid_input" },
+      });
+    }
+  });
+
+  it("形式が不正・存在しない・他人・期限切れは、同じ not_found（同じ文言）", async () => {
+    const agent = controllableAgent();
+    const svc = consultServiceWith(env, agent.factory, { waitMs: 10 });
+    const alice = principal();
+    const bob = principal();
+    await svc.consult(alice, input());
+    const id = agent.calls[0]?.consultId as string;
+    agent.release(id);
+    expect(await svc.consultResult(alice, { consult_id: id, timeout_seconds: 5 })).toMatchObject({
+      ok: true,
+      value: { status: "done" },
+    });
+    const outcomes = [
+      await svc.consultResult(bob, { consult_id: id }), // 他人
+      await svc.consultResult(alice, { consult_id: unknownId }), // 存在しない
+      await svc.consultResult(alice, { consult_id: "consult-x" }), // 形式が不正
+      await svc.consultResult(alice, { consult_id: "" }),
+      await svc.consultResult(alice, { consult_id: "task-00000000000000000000000000" }),
+    ];
+    for (const o of outcomes) {
+      expect(o).toEqual({
+        ok: false,
+        error: { code: "not_found", message: "consult not found (it may have expired)" },
+      });
+    }
+  });
+
+  it("timeout_seconds: 省略は 30 秒、上限 50 秒にクランプ、0 は待たない（UserDO には ms で渡す）", async () => {
+    const waits: unknown[][] = [];
+    const svc = createConsultService(env, {
+      users: () =>
+        ({
+          waitConsult: (...a: unknown[]) => {
+            waits.push(a);
+            return { ok: true as const, status: "pending" as const };
+          },
+        }) as never,
+    });
+    const p = principal();
+    await svc.consultResult(p, { consult_id: unknownId });
+    await svc.consultResult(p, { consult_id: unknownId, timeout_seconds: 999 });
+    await svc.consultResult(p, { consult_id: unknownId, timeout_seconds: 0 });
+    await svc.consultResult(p, { consult_id: unknownId, timeout_seconds: 7 });
+    expect(waits.map((w) => [w[0], w[1], w[2]])).toEqual([
+      [unknownId, p.githubUserId, 30_000],
+      [unknownId, p.githubUserId, 50_000],
+      [unknownId, p.githubUserId, 0],
+      [unknownId, p.githubUserId, 7_000],
+    ]);
+  });
+
+  it("pending: {consult_id, status: pending}。待機の枠が埋まっていたときだけ retry_after_seconds", async () => {
+    const answers = [
+      { ok: true as const, status: "pending" as const },
+      { ok: true as const, status: "pending" as const, retry_after_seconds: 5 },
+    ];
+    const svc = createConsultService(env, {
+      users: () => ({ waitConsult: () => answers.shift() }) as never,
+    });
+    const p = principal();
+    expect(await svc.consultResult(p, { consult_id: unknownId })).toEqual({
+      ok: true,
+      value: { consult_id: unknownId, status: "pending" },
+    });
+    expect(await svc.consultResult(p, { consult_id: unknownId })).toEqual({
+      ok: true,
+      value: { consult_id: unknownId, status: "pending", retry_after_seconds: 5 },
+    });
+  });
+});
+
+describe("consult: 答えを受け取れたときだけ UserDO の本文を消す", () => {
+  const doneValue = {
+    text: "x",
+    model: "anthropic/claude-sonnet-5-5",
+    usage: { input: 1, output: 1, cache_read: 0, cache_write: 0 },
+    cost_usd: 0.001,
+  };
+  const mock = (wait: unknown, discards: unknown[][]) =>
+    ({
+      reserveConsult: () => ({ ok: true as const, reserved_usd: 0.5 }),
+      startConsult: () => ({ ok: true as const }),
+      waitConsult: () => wait,
+      discardConsult: (...a: unknown[]) => {
+        discards.push(a);
+        return { ok: true as const, discarded: true };
+      },
+    }) as never;
+
+  it("done / failed を受け取ったら消す。pending のときは消さない（取りに来られる）", async () => {
+    const p = principal();
+    for (const [wait, expected] of [
+      [{ ok: true, status: "done", value: doneValue }, 1],
+      [
+        {
+          ok: true,
+          status: "failed",
+          error: { code: "model_rejected", message: "m" },
+          cost_usd: 0,
+        },
+        1,
+      ],
+      [{ ok: true, status: "pending" }, 0],
+    ] as const) {
+      const discards: unknown[][] = [];
+      const svc = createConsultService(env, { users: () => mock(wait, discards) });
+      await svc.consult(p, input());
+      expect(discards).toHaveLength(expected);
+      if (expected === 1) expect(discards[0]?.[1]).toBe(p.githubUserId);
+    }
+  });
+
+  it("消すのに失敗しても、受け取った答えは返す", async () => {
+    const svc = createConsultService(env, {
+      users: () =>
+        ({
+          reserveConsult: () => ({ ok: true as const, reserved_usd: 0.5 }),
+          startConsult: () => ({ ok: true as const }),
+          waitConsult: () => ({ ok: true as const, status: "done" as const, value: doneValue }),
+          discardConsult: () => {
+            throw new Error("boom");
+          },
+        }) as never,
+    });
+    expect(await svc.consult(principal(), input())).toEqual({ ok: true, value: doneValue });
   });
 });

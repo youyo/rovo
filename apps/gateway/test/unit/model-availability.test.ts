@@ -1,9 +1,9 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { ConsultRequest, ConsultResult } from "../../src/agent/contract";
-import { createConsultService } from "../../src/consult";
 import { listModels, resolveModel } from "../../src/models";
 import { createTaskService, type Principal } from "../../src/tasks/service";
+import { consultServiceWith } from "../support/consult-agent";
 import { fakeAgent, newUserId, userStub } from "./helpers";
 
 // D10b: AI Gateway の BYOK のキー（provider_configs）の有無で、使えるモデルが決まる。実 API は呼ばず、fetch は偽物。
@@ -257,7 +257,7 @@ describe("consult", () => {
 
   it("available でないモデルは model_unavailable。予約も AgentDO 呼び出しもしない", async () => {
     const a = agentStub();
-    const svc = createConsultService(setup(), { agent: a.agent }, { fetch: keysFetch([]).fn });
+    const svc = consultServiceWith(setup(), a.agent, {}, { fetch: keysFetch([]).fn });
     const p = principal();
     const r = await svc.consult(p, q({ model: SONNET }));
     expect(r).toMatchObject({ ok: false, error: { code: "model_unavailable" } });
@@ -268,7 +268,7 @@ describe("consult", () => {
 
   it("Workers AI のモデルは、キーが無くても使える。省略時の既定は gpt-oss-120b", async () => {
     const a = agentStub();
-    const svc = createConsultService(setup(), { agent: a.agent }, { fetch: keysFetch([]).fn });
+    const svc = consultServiceWith(setup(), a.agent, {}, { fetch: keysFetch([]).fn });
     const r1 = await svc.consult(principal(), q({ model: OSS20 }));
     expect(r1).toMatchObject({ ok: true, value: { model: OSS20 } });
     const r2 = await svc.consult(principal(), q());

@@ -23,6 +23,33 @@ const DRAFT_FALLBACK_KEY = "test-draft-fallback";
 const HOLD_DELIVERIES_KEY = "test-hold-deliveries";
 const TASK_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+const CONSULT_TIMING_KEY = "test-consult-timing";
+
+/** consult の待ち時間の上書き（E2E が 50 秒・5 分を実時間で待たないための差し替え）。test 環境以外・未設定なら undefined。 */
+export type ConsultTimingOverride = { waitMs?: number; backgroundTimeoutMs?: number };
+
+export async function testConsultTiming(env: {
+  ENVIRONMENT?: string;
+  OAUTH_KV: KVNamespace;
+}): Promise<ConsultTimingOverride | undefined> {
+  if (env.ENVIRONMENT !== "test") return undefined;
+  const raw = await env.OAUTH_KV.get(CONSULT_TIMING_KEY);
+  if (raw === null) return undefined;
+  try {
+    const v = JSON.parse(raw) as { wait_ms?: unknown; background_timeout_ms?: unknown };
+    const num = (x: unknown) =>
+      typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined;
+    const waitMs = num(v.wait_ms);
+    const backgroundTimeoutMs = num(v.background_timeout_ms);
+    return {
+      ...(waitMs !== undefined ? { waitMs } : {}),
+      ...(backgroundTimeoutMs !== undefined ? { backgroundTimeoutMs } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /** 通しの E2E が預けた DRAFT_PR_FALLBACK の上書き値。test 環境以外・未設定なら undefined。 */
 export async function testDraftFallback(env: Env): Promise<string | undefined> {
   if (env.ENVIRONMENT !== "test") return undefined;
@@ -36,6 +63,28 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     const body = (await c.req.json().catch(() => ({}))) as { value?: unknown };
     if (typeof body.value === "string") await c.env.OAUTH_KV.put(DRAFT_FALLBACK_KEY, body.value);
     else await c.env.OAUTH_KV.delete(DRAFT_FALLBACK_KEY);
+    return c.json({ ok: true });
+  });
+
+  // consult の待ち時間を縮める（wait_ms: consult が答えを待つ上限、background_timeout_ms: UserDO が裏の呼び出しを待つ上限。空で既定に戻す）
+  app.post("/__test/consult/timing", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    const body = (await c.req.json().catch(() => ({}))) as {
+      wait_ms?: unknown;
+      background_timeout_ms?: unknown;
+    };
+    if (typeof body.wait_ms === "number" || typeof body.background_timeout_ms === "number") {
+      await c.env.OAUTH_KV.put(
+        CONSULT_TIMING_KEY,
+        JSON.stringify({
+          wait_ms: body.wait_ms,
+          background_timeout_ms: body.background_timeout_ms,
+        }),
+        { expirationTtl: SCRIPT_TTL_SECONDS },
+      );
+    } else {
+      await c.env.OAUTH_KV.delete(CONSULT_TIMING_KEY);
+    }
     return c.json({ ok: true });
   });
 

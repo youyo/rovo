@@ -1,9 +1,8 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { CONSULT_TIMEOUT_MS } from "../../src/consult";
 import { consultBudgetUsd, DEFAULT_CONSULT_BUDGET_USD } from "../../src/tasks/budget";
 import { ulid } from "../../src/tasks/ulid";
-import { CONSULT_STALE_AFTER_MS } from "../../src/tasks/user-do";
+import { CONSULT_BACKGROUND_TIMEOUT_MS, CONSULT_STALE_AFTER_MS } from "../../src/tasks/user-do";
 import { FP, newUserId, userStub } from "./helpers";
 
 type UserStub = ReturnType<typeof userStub>;
@@ -60,6 +59,7 @@ describe("UserDO.budgetStatus（budget_status）", () => {
       consult_budget_usd: 0.5,
       max_concurrent_tasks: 10,
       concurrency_limit: 1, // Unit の vitest.config.ts の MAX_CONCURRENT_TASKS
+      pending_consults: 0,
       period: { start: "2026-01-01T00:00:00.000Z", end: "2026-02-01T00:00:00.000Z" },
     });
   });
@@ -263,8 +263,8 @@ describe("UserDO.reserveConsult / settleConsult", () => {
 });
 
 describe("取り残された consult の予約の期限（クライアントが切れて精算が走らなかった場合）", () => {
-  it("期限は consult の待ち時間（CONSULT_TIMEOUT_MS）より長く、数分で閉じる（30 分も取り残さない）", () => {
-    expect(CONSULT_STALE_AFTER_MS).toBeGreaterThan(CONSULT_TIMEOUT_MS);
+  it("期限は裏の呼び出しの上限（CONSULT_BACKGROUND_TIMEOUT_MS）より長く、10 分で閉じる（30 分も取り残さない）", () => {
+    expect(CONSULT_STALE_AFTER_MS).toBeGreaterThan(CONSULT_BACKGROUND_TIMEOUT_MS);
     expect(CONSULT_STALE_AFTER_MS).toBeLessThanOrEqual(10 * MIN);
   });
 

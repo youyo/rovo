@@ -1,5 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
+import type { AgentRpc, ConsultRequest, ConsultResult } from "../agent/contract";
+import { auditFromWorker } from "../audit-sink";
 import { isUserIdAllowed, loadAllowRules } from "../auth/allowlist";
+import {
+  type ConsultFailure,
+  type ConsultValue,
+  interpretConsult,
+  unavailableFailure,
+} from "../consult-answer";
 import {
   randomToken,
   SESSION_ABSOLUTE_MS,
@@ -30,11 +38,13 @@ import {
   VisibleSetTooLargeError,
 } from "../github";
 import { errorMessageForLog } from "../log-error";
+import { testConsultTiming, withTestScripts } from "../test-routes";
 import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
 import { MAX_BUDGET_EXTENSIONS } from "./budget-question";
 import { addColumnIfMissing } from "./sql-schema";
 import type { TaskDO } from "./task-do";
 import { isConsultId, isTaskId, ulid, ulidTime } from "./ulid";
+import { MAX_CONCURRENT_WAITERS, MAX_WAIT_SECONDS, WAIT_RETRY_AFTER_SECONDS } from "./validation";
 
 /** requests の保存期間。 */
 export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -90,11 +100,22 @@ export type ReserveResult =
   | { ok: false; code: "conflict" | "concurrency_limit" | "budget_exceeded" };
 
 /**
- * 精算されないまま残った consult の予約を、予約額で閉じるまでの時間。
- * consult の待ち時間の上限（CONSULT_TIMEOUT_MS = 2 分）に余裕を足した値。クライアントが先に切れて Worker の
- * 精算が走らなかった予約を、数分で閉じる（30 分も budget_status の reserved に残さない）。
+ * 裏のモデル呼び出し（AgentDO.consult）を UserDO が待つ上限。超えたら実費不明として予約額で精算し、failed（upstream_unavailable）にする。
+ * クライアントの待ち時間（50 秒）とは別で、consult の答えは consult_result で受け取る。
  */
-export const CONSULT_STALE_AFTER_MS = 5 * 60 * 1000;
+export const CONSULT_BACKGROUND_TIMEOUT_MS = 5 * 60 * 1000;
+/**
+ * 精算されないまま残った consult の予約を、予約額で閉じるまでの時間（裏の上限 + 余裕 = 10 分）。
+ * 精算は UserDO の中で完結するので、通常は期限に当たらない。UserDO の作り直しなどで裏の処理が失われたときの最後の網。
+ * 裏の上限より短いと、pending 中に閉じてしまう。
+ */
+export const CONSULT_STALE_AFTER_MS = CONSULT_BACKGROUND_TIMEOUT_MS + 5 * 60 * 1000;
+/** 完了した consult の答え（consult_answer）を持つ期間。過ぎたら本文ごと捨てる（以後 not_found） */
+export const CONSULT_ANSWER_TTL_MS = 60 * 60 * 1000;
+/** 同時に開いておける consult の数（予約から精算まで）。超えたら concurrency_limit。暴走時の UserDO の負荷を抑える */
+export const MAX_PENDING_CONSULTS = 4;
+/** consult_answer の 1 行の上限（バイト。DO の SQLite は 1 行 2MB 未満）。超える答えは切り詰めず failed にする */
+const CONSULT_ANSWER_MAX_BYTES = 1_900_000;
 
 /** consult の索引（Directory）への配送の周期（ms）。TaskDO の alarm と同じ */
 export const CONSULT_INDEX_ALARM_INTERVAL_MS = 10_000;
@@ -110,7 +131,30 @@ export type ConsultOwner = { id: number; login: string };
 
 export type ConsultReserveResult =
   | { ok: true; reserved_usd: number }
-  | { ok: false; code: "budget_exceeded" | "invalid_input" };
+  | { ok: false; code: "budget_exceeded" | "concurrency_limit" | "invalid_input" };
+
+export type ConsultStartResult = { ok: true } | { ok: false; code: "not_found" | "invalid_input" };
+
+/**
+ * consult の答えの取得（waitConsult）の結果。not_found は、不正な ID・存在しない・他人・保持期間切れのすべて（区別しない）。
+ * pending の retry_after_seconds は、待機の枠が埋まっていて待てなかったときだけ付く。
+ */
+export type ConsultWaitResult =
+  | { ok: false; code: "not_found" }
+  | { ok: true; status: "pending"; retry_after_seconds?: number }
+  | { ok: true; status: "done"; value: ConsultValue }
+  | { ok: true; status: "failed"; error: ConsultFailure; cost_usd: number };
+
+/** 裏の AgentDO の呼び出し（UserDO の consultAgent。Unit が差し替える） */
+export type ConsultAgent = { consult(request: ConsultRequest): Promise<ConsultResult> };
+
+type ConsultAnswerRow = {
+  consult_id: string;
+  owner_id: number;
+  status: "pending" | "done" | "failed";
+  result_json: string | null;
+};
+type ConsultWaiter = { consultId: string; wake: () => void; timer?: ReturnType<typeof setTimeout> };
 
 /** budget_status の応答（D10）。金額は USD。 */
 export type BudgetStatus = {
@@ -130,6 +174,8 @@ export type BudgetStatus = {
   max_concurrent_tasks: number;
   /** 利用者ごとに同時に実行できるタスクの上限（設定値 MAX_CONCURRENT_TASKS。既定 2）。実際に同時に実行できる数は、これと max_concurrent_tasks の小さいほう */
   concurrency_limit: number;
+  /** 開いている consult の数（予約から精算まで。pending の consult と、始めたばかりのもの）。同時の上限は MAX_PENDING_CONSULTS（超えたら consult は concurrency_limit） */
+  pending_consults: number;
   /** 今月（UTC）。end は翌月の頭（含まない） */
   period: { start: string; end: string };
 };
@@ -171,6 +217,23 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
+}
+
+/** consult_answer の done / failed の行を応答にする。壊れた行は failed（internal） */
+function parseStoredAnswer(row: ConsultAnswerRow): ConsultWaitResult {
+  try {
+    const v = JSON.parse(row.result_json ?? "null") as unknown;
+    if (row.status === "done") return { ok: true, status: "done", value: v as ConsultValue };
+    const f = v as { error: ConsultFailure; cost_usd: number };
+    return { ok: true, status: "failed", error: f.error, cost_usd: f.cost_usd };
+  } catch {
+    return {
+      ok: true,
+      status: "failed",
+      error: { code: "internal", message: "internal error" },
+      cost_usd: 0,
+    };
+  }
 }
 
 /** 開始時刻の月（UTC, "YYYY-MM"）。月またぎのタスクは開始した月に計上する。 */
@@ -312,6 +375,16 @@ export class UserDO extends DurableObject<Env> {
   protected random: () => number = Math.random;
   /** 索引の配送を始める alarm が要るか（同期区間の中で立て、区間の後に requestConsultAlarm が消す） */
   private consultAlarmWanted = false;
+  /**
+   * 裏のモデル呼び出し（AgentDO.consult）の相手。consult ごとの AgentDO インスタンス（名前は consultId）。
+   * test のときだけ、E2E が預けた台本を渡す（それ以外は元のスタブのまま）。Unit が差し替える。
+   */
+  consultAgent: (consultId: string) => ConsultAgent = (consultId) =>
+    withTestScripts(this.env, this.env.AGENT_DO.getByName(consultId) as unknown as AgentRpc);
+  /** 裏のモデル呼び出しを待つ上限（ms）。Unit が短くする */
+  consultBackgroundTimeoutMs = CONSULT_BACKGROUND_TIMEOUT_MS;
+  /** consult の答えを待っている呼び出し（メモリのみ。UserDO が作り直されたら消える。正本は consult_answer の行） */
+  private consultWaiters = new Set<ConsultWaiter>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -359,6 +432,17 @@ export class UserDO extends DurableObject<Env> {
     sql.exec(
       "CREATE INDEX IF NOT EXISTS consult_log_dirty ON consult_log (index_dirty) WHERE index_dirty = 1",
     );
+    // consult の答え（docs/specs/consult-pending.md）。裏の完了で、精算（task_budget）・索引（consult_log）と同じ同期区間で書く。
+    // pending は裏で続いている間、done / failed は完了から CONSULT_ANSWER_TTL_MS（expires_at）まで本文を持つ。本文はここにしか残さない。
+    sql.exec(`CREATE TABLE IF NOT EXISTS consult_answer (
+      consult_id TEXT PRIMARY KEY,
+      owner_id INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      result_json TEXT,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      expires_at INTEGER
+    )`);
     // 配送の失敗の記録（バックオフ）。1 行だけ
     sql.exec(`CREATE TABLE IF NOT EXISTS consult_outbox (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -1116,6 +1200,7 @@ export class UserDO extends DurableObject<Env> {
       consult_budget_usd: consultBudgetUsd(this.env),
       max_concurrent_tasks: taskMicro > 0 ? Math.floor(remaining / taskMicro) : 0,
       concurrency_limit: this.concurrencyLimit(),
+      pending_consults: this.openConsultCount(),
       period: { start: new Date(start).toISOString(), end: new Date(end).toISOString() },
     };
   }
@@ -1149,6 +1234,10 @@ export class UserDO extends DurableObject<Env> {
         )
         .toArray()[0];
       if (existing) return { ok: true, reserved_usd: existing.reserved_micro / MICRO };
+      // 開いている consult が上限なら断る（期限切れは上で閉じた後の数）。月の枠で抑えられるが、暴走時の負荷を抑える
+      if (this.openConsultCount() >= MAX_PENDING_CONSULTS) {
+        return { ok: false, code: "concurrency_limit" };
+      }
       const month = monthOf(at);
       const reservedMicro = Math.round(reservedUsd * MICRO);
       if (this.committedMicro(month) + reservedMicro > Math.round(this.monthlyLimitUsd() * MICRO)) {
@@ -1178,7 +1267,19 @@ export class UserDO extends DurableObject<Env> {
     return result;
   }
 
-  /** 同期区間内で呼ぶ。古い consult の予約を、予約額（以上）で閉じる。 */
+  /** 開いている consult（予約から精算まで）の数。同期区間の外でも呼べる。 */
+  private openConsultCount(): number {
+    return this.ctx.storage.sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
+      )
+      .one().n;
+  }
+
+  /**
+   * 同期区間内で呼ぶ。古い consult の予約を、予約額（以上）で閉じる。pending の答えがあれば、同じ区間で failed
+   * （upstream_unavailable）にする（pending のまま残さない）。保持期間を過ぎた答えもここで捨てる。
+   */
   private closeStaleConsults(at: number): void {
     const sql = this.ctx.storage.sql;
     const open = sql
@@ -1194,7 +1295,33 @@ export class UserDO extends DurableObject<Env> {
         task_id,
       );
       this.markConsultSettled(task_id);
+      const settled = sql
+        .exec<{ settled_micro: number }>(
+          "SELECT settled_micro FROM task_budget WHERE task_id = ?",
+          task_id,
+        )
+        .one().settled_micro;
+      this.writeConsultFailure(task_id, unavailableFailure(), settled / MICRO, at);
+      this.wakeConsultSoon(task_id);
     }
+    sql.exec("DELETE FROM consult_answer WHERE expires_at IS NOT NULL AND expires_at <= ?", at);
+  }
+
+  /** 同期区間内で呼ぶ。pending の答えを failed にする（pending でなければ何もしない）。 */
+  private writeConsultFailure(
+    consultId: string,
+    error: ConsultFailure,
+    costUsd: number,
+    at: number,
+  ): void {
+    this.ctx.storage.sql.exec(
+      `UPDATE consult_answer SET status = 'failed', result_json = ?, finished_at = ?, expires_at = ?
+       WHERE consult_id = ? AND status = 'pending'`,
+      JSON.stringify({ error, cost_usd: costUsd }),
+      at,
+      at + CONSULT_ANSWER_TTL_MS,
+      consultId,
+    );
   }
 
   /**
@@ -1203,6 +1330,7 @@ export class UserDO extends DurableObject<Env> {
    * 実費が予約を超えて報告されたときは、そのまま実費を記録する（AgentDO が max_output_tokens で予約内に収める）。
    * 予約額で閉じたとき（costUsd が null）と、AgentDO が costUsd を見積もりと申告したとき（estimated）は、
    * 見積もりで確定した印（settled_estimated）を立てる（budget_status の estimated_usd に数える）。
+   * 通常は裏の完了（finishConsult）が呼ぶ。gateway のリクエストは精算しない。
    */
   settleConsult(consultId: string, costUsd: number | null, estimated = false): SettleResult {
     if (!isConsultId(consultId)) return { ok: false };
@@ -1212,29 +1340,315 @@ export class UserDO extends DurableObject<Env> {
         .toArray();
       return known.length > 0 ? { ok: true, applied: false } : { ok: false };
     }
-    const result = this.ctx.storage.transactionSync((): SettleResult => {
+    const result = this.ctx.storage.transactionSync(() =>
+      this.settleConsultInSection(consultId, costUsd, estimated),
+    );
+    this.requestConsultAlarm();
+    if (!result.ok) return { ok: false };
+    return { ok: true, applied: result.applied };
+  }
+
+  /** 同期区間内で呼ぶ。settleConsult の本体（値の検証は呼び出し側）。settled_micro は閉じた後の確定額。 */
+  private settleConsultInSection(
+    consultId: string,
+    costUsd: number | null,
+    estimated: boolean,
+  ): { ok: true; applied: boolean; settled_micro: number } | { ok: false } {
+    const sql = this.ctx.storage.sql;
+    const row = sql
+      .exec<{ reserved_micro: number; settled_micro: number; closed: number }>(
+        "SELECT reserved_micro, settled_micro, closed FROM task_budget WHERE task_id = ?",
+        consultId,
+      )
+      .toArray()[0];
+    if (!row) return { ok: false };
+    if (row.closed === 1) return { ok: true, applied: false, settled_micro: row.settled_micro };
+    const micro = costUsd === null ? row.reserved_micro : Math.round(costUsd * MICRO);
+    sql.exec(
+      "UPDATE task_budget SET settled_micro = ?, settled_estimated = ?, closed = 1 WHERE task_id = ?",
+      micro,
+      costUsd === null || estimated ? 1 : 0,
+      consultId,
+    );
+    // 索引の行を同じ同期区間で確定する（精算と索引が食い違わない）
+    this.markConsultSettled(consultId);
+    return { ok: true, applied: true, settled_micro: micro };
+  }
+
+  // ---- consult の裏の処理と答えの取得（docs/specs/consult-pending.md）----
+
+  /**
+   * consult の開始。consult_answer に pending の行を作り、AgentDO.consult の完了を待つ非同期処理を始めて、すぐ返る。
+   * 処理は完了時に（成功・失敗・例外・時間切れのいずれでも）答えの保存・精算・索引の確定を同じ同期区間で行い、
+   * 待っている呼び出しを起こす。呼び出し側（gateway のリクエスト）の切断に左右されない。
+   * 予約（reserveConsult）が開いていない consult は始めない。同じ consult の再送は、モデルを二重に呼ばない。
+   */
+  async startConsult(request: ConsultRequest): Promise<ConsultStartResult> {
+    const consultId = request?.consultId;
+    if (!isConsultId(consultId)) return { ok: false, code: "invalid_input" };
+    const ownerId = Number(request.userId);
+    if (!Number.isSafeInteger(ownerId)) return { ok: false, code: "invalid_input" };
+    // test のときだけ、E2E が裏の上限を縮める
+    const backgroundMs =
+      (await testConsultTiming(this.env))?.backgroundTimeoutMs ?? this.consultBackgroundTimeoutMs;
+    const state = this.ctx.storage.transactionSync((): "not_found" | "exists" | "started" => {
       const sql = this.ctx.storage.sql;
+      if (
+        sql.exec("SELECT 1 FROM consult_answer WHERE consult_id = ?", consultId).toArray().length >
+        0
+      ) {
+        return "exists";
+      }
+      const budget = sql
+        .exec<{ closed: number }>("SELECT closed FROM task_budget WHERE task_id = ?", consultId)
+        .toArray()[0];
+      if (!budget || budget.closed === 1) return "not_found";
+      sql.exec(
+        `INSERT INTO consult_answer (consult_id, owner_id, status, started_at)
+         VALUES (?, ?, 'pending', ?)`,
+        consultId,
+        ownerId,
+        this.now(),
+      );
+      return "started";
+    });
+    if (state === "not_found") return { ok: false, code: "not_found" };
+    if (state === "started") {
+      // 完了まで待つ。待つ間は未完了の RPC が DO を生かす。waitUntil は念のため（失敗を握りつぶさない処理なので例外は出ない）
+      this.ctx.waitUntil(this.runConsult(request, backgroundMs));
+      this.scheduleConsultDeadlineAlarm();
+    }
+    return { ok: true };
+  }
+
+  /** 裏の処理。AgentDO.consult を上限まで待ち、完了処理に渡す。例外は出さない。 */
+  private async runConsult(request: ConsultRequest, backgroundMs: number): Promise<void> {
+    let result: ConsultResult | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      result = await Promise.race([
+        this.consultAgent(request.consultId).consult(request),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("consult timeout")), backgroundMs);
+        }),
+      ]);
+    } catch (e) {
+      // 例外・時間切れは、実費が分からないので予約額で精算する（完了処理が undefined を実費不明として扱う）
+      console.error("consult_error", e instanceof Error ? e.name : typeof e);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    try {
+      await this.finishConsult(request, result);
+    } catch (e) {
+      // 保存と精算は同じ区間なので、失敗すれば両方とも起きていない（pending のまま。期限が予約額で閉じる）
+      console.error("consult_finish_error", e instanceof Error ? e.name : typeof e);
+    }
+  }
+
+  /**
+   * 完了処理。答えの保存・精算（settleConsult と同じ規則）・consult_log の確定を、同じ同期区間で行う。
+   * 期限で既に閉じられた consult（遅れて届いた完了）は、精算も保存もしない（二重に数えない。答えは捨てる）。
+   */
+  private async finishConsult(
+    request: ConsultRequest,
+    result: ConsultResult | undefined,
+  ): Promise<void> {
+    const consultId = request.consultId;
+    let outcome = interpretConsult(result);
+    if (
+      outcome.status === "done" &&
+      new TextEncoder().encode(JSON.stringify(outcome.value)).length > CONSULT_ANSWER_MAX_BYTES
+    ) {
+      // 1 行に収まらない答えは、切り詰めず failed にする（費用は実費で精算する）
+      outcome = {
+        status: "failed",
+        error: { code: "internal", message: "internal error" },
+        settleUsd: outcome.settleUsd,
+        estimated: outcome.estimated,
+      };
+    }
+    const done = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const at = this.now();
       const row = sql
-        .exec<{ reserved_micro: number; closed: number }>(
-          "SELECT reserved_micro, closed FROM task_budget WHERE task_id = ?",
+        .exec<ConsultAnswerRow>("SELECT status FROM consult_answer WHERE consult_id = ?", consultId)
+        .toArray()[0];
+      if (row?.status !== "pending") return null;
+      const settled = this.settleConsultInSection(consultId, outcome.settleUsd, outcome.estimated);
+      if (!settled.ok) return null;
+      const costUsd = settled.settled_micro / MICRO;
+      if (!settled.applied) {
+        // 予約は別の経路で閉じられた。答えは捨て、pending のまま残さない
+        this.writeConsultFailure(consultId, unavailableFailure(), costUsd, at);
+        return null;
+      }
+      if (outcome.status === "done") {
+        sql.exec(
+          `UPDATE consult_answer SET status = 'done', result_json = ?, finished_at = ?, expires_at = ?
+           WHERE consult_id = ? AND status = 'pending'`,
+          JSON.stringify(outcome.value),
+          at,
+          at + CONSULT_ANSWER_TTL_MS,
+          consultId,
+        );
+      } else {
+        this.writeConsultFailure(consultId, outcome.error, costUsd, at);
+      }
+      return { costUsd };
+    });
+    this.wakeConsult(consultId);
+    this.requestConsultAlarm();
+    this.scheduleConsultDeadlineAlarm();
+    if (done === null) return;
+    await auditFromWorker(this.env, "consult_finished", {
+      userId: Number(request.userId),
+      caller: "parent",
+      model: request.model,
+      consult_id: consultId,
+      cost_usd: done.costUsd,
+      // 成功なのに usage が返らなかった（費用は呼ぶ前の見積りで精算した）
+      ...(outcome.status === "done" && outcome.usageMissing ? { reason: "usage_missing" } : {}),
+    });
+  }
+
+  /**
+   * consult の答えを取る（long polling）。done / failed は保持期間内なら何度でも同じ答え。待つのは最大 50 秒。
+   * 完了した答えがあればすぐ返し、無ければ（pending）完了か待ち時間の終わりまで待つ。待っている間にクライアントが切れても、
+   * 裏の処理にも答えにも影響しない。UserDO が作り直されて待ちが消えても、行（SQLite）が正なので呼び直せば最新を返す。
+   * not_found は、不正な ID・存在しない・他人（ownerId の照合）・保持期間切れのすべて。
+   * 答えは返しても消さない（待っている間に呼び出し側が切れると、答えを受け取る人がいないまま消えてしまうため）。
+   * consult が 50 秒以内に返した答えは、リクエストが答えを受け取れたあとで discardConsult が消す。
+   */
+  async waitConsult(
+    consultId: string,
+    ownerId: number,
+    timeoutMs: number,
+  ): Promise<ConsultWaitResult> {
+    if (!isConsultId(consultId) || !Number.isSafeInteger(ownerId)) {
+      return { ok: false, code: "not_found" };
+    }
+    const timeout =
+      typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? Math.min(timeoutMs, MAX_WAIT_SECONDS * 1000)
+        : 0;
+    let current = this.readConsultAnswer(consultId, ownerId);
+    if (!(current.ok && current.status === "pending") || timeout === 0) return current;
+    if (this.consultWaiters.size >= MAX_CONCURRENT_WAITERS) {
+      return { ok: true, status: "pending", retry_after_seconds: WAIT_RETRY_AFTER_SECONDS };
+    }
+
+    // 待機者を登録してから再読する（登録前の完了を取りこぼさない）
+    const waiter: ConsultWaiter = { consultId, wake: () => {} };
+    this.consultWaiters.add(waiter);
+    const deadline = Date.now() + timeout;
+    try {
+      for (;;) {
+        current = this.readConsultAnswer(consultId, ownerId);
+        if (!(current.ok && current.status === "pending")) break;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise<void>((resolve) => {
+          waiter.wake = resolve;
+          waiter.timer = setTimeout(resolve, remaining);
+        });
+        clearTimeout(waiter.timer);
+      }
+    } finally {
+      clearTimeout(waiter.timer);
+      this.consultWaiters.delete(waiter);
+    }
+    return current;
+  }
+
+  /**
+   * 完了した答え（done / failed）の行を消す。consult が 50 秒以内に答えを受け取れたとき、返す前に呼ぶ（本文を UserDO に残さない）。
+   * pending の行・他人の行・無い行は何もしない。受け取れなかった（待っている間にクライアントが切れた）答えは呼ばれないので、
+   * 保持期間まで残り、consult_result で取れる。
+   */
+  discardConsult(consultId: string, ownerId: number): { ok: true; discarded: boolean } {
+    if (!isConsultId(consultId) || !Number.isSafeInteger(ownerId))
+      return { ok: true, discarded: false };
+    const cursor = this.ctx.storage.sql.exec(
+      "DELETE FROM consult_answer WHERE consult_id = ? AND owner_id = ? AND status != 'pending'",
+      consultId,
+      ownerId,
+    );
+    return { ok: true, discarded: cursor.rowsWritten > 0 };
+  }
+
+  /** consult_answer を読む。期限を過ぎた pending は閉じ、保持期間を過ぎた答えは捨ててから読む。 */
+  private readConsultAnswer(consultId: string, ownerId: number): ConsultWaitResult {
+    const result = this.ctx.storage.transactionSync((): ConsultWaitResult => {
+      const sql = this.ctx.storage.sql;
+      this.closeStaleConsults(this.now());
+      const row = sql
+        .exec<ConsultAnswerRow>(
+          "SELECT consult_id, owner_id, status, result_json FROM consult_answer WHERE consult_id = ?",
           consultId,
         )
         .toArray()[0];
-      if (!row) return { ok: false };
-      if (row.closed === 1) return { ok: true, applied: false };
-      const micro = costUsd === null ? row.reserved_micro : Math.round(costUsd * MICRO);
-      sql.exec(
-        "UPDATE task_budget SET settled_micro = ?, settled_estimated = ?, closed = 1 WHERE task_id = ?",
-        micro,
-        costUsd === null || estimated ? 1 : 0,
-        consultId,
-      );
-      // 索引の行を同じ同期区間で確定する（精算と索引が食い違わない）
-      this.markConsultSettled(consultId);
-      return { ok: true, applied: true };
+      // 所有者の照合も行う（UserDO はユーザーごとなので、他人の ID は通常ここに行が無い）
+      if (!row || row.owner_id !== ownerId) return { ok: false, code: "not_found" };
+      if (row.status === "pending") return { ok: true, status: "pending" };
+      return parseStoredAnswer(row);
     });
     this.requestConsultAlarm();
     return result;
+  }
+
+  /** 待っている呼び出しを起こす（起きた側が行を読み直す） */
+  private wakeConsult(consultId: string): void {
+    for (const w of this.consultWaiters) if (w.consultId === consultId) w.wake();
+  }
+
+  /** 同期区間の中から呼ぶ用。区間が終わってから起こす。 */
+  private wakeConsultSoon(consultId: string): void {
+    queueMicrotask(() => this.wakeConsult(consultId));
+  }
+
+  /**
+   * 次に必要な期限（pending の consult が失われたときの閉じ・保持期間を過ぎた答えの削除）に alarm を置く。
+   * 既にそれより早い alarm があれば動かさない。同期メソッドから呼ぶので待たない（失敗しても consult は止めない）。
+   */
+  private scheduleConsultDeadlineAlarm(): void {
+    const deadline = this.nextConsultDeadline();
+    if (deadline === undefined) return;
+    const target = Date.now() + Math.max(0, deadline - this.now());
+    this.ctx.waitUntil(
+      this.ctx.storage
+        .getAlarm()
+        .then((current) =>
+          current === null || current > target ? this.ctx.storage.setAlarm(target) : undefined,
+        )
+        .catch((e) => {
+          console.error("consult_deadline_alarm_error", e instanceof Error ? e.name : typeof e);
+        }),
+    );
+  }
+
+  /** 開いている consult を閉じる期限と、答えの保持期限のうち、いちばん早いもの（this.now() の時刻系。無ければ undefined） */
+  private nextConsultDeadline(): number | undefined {
+    const sql = this.ctx.storage.sql;
+    let next: number | undefined;
+    const consider = (t: number | undefined) => {
+      if (t !== undefined && (next === undefined || t < next)) next = t;
+    };
+    for (const { task_id } of sql
+      .exec<{ task_id: string }>(
+        "SELECT task_id FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
+      )
+      .toArray()) {
+      const t = ulidTime(task_id.slice("consult-".length));
+      if (t !== undefined) consider(t + CONSULT_STALE_AFTER_MS);
+    }
+    const expiry = sql
+      .exec<{ t: number | null }>(
+        "SELECT MIN(expires_at) AS t FROM consult_answer WHERE expires_at IS NOT NULL",
+      )
+      .one().t;
+    if (expiry !== null) consider(expiry);
+    return next;
   }
 
   // ---- consult の索引（outbox と alarm。D9 / M3b）----
@@ -1257,7 +1671,7 @@ export class UserDO extends DurableObject<Env> {
 
   /**
    * 未配送の consult があるとき、alarm が無ければ設定する（同期メソッドから呼ぶので待たない。失敗しても consult は止めない）。
-   * 既に alarm があれば動かさない（連続した consult で alarm が後ろへ押されない）。
+   * 既に十分早い alarm があれば動かさない（連続した consult で alarm が後ろへ押されない）。
    */
   private requestConsultAlarm(): void {
     if (!this.consultAlarmWanted) return;
@@ -1266,11 +1680,14 @@ export class UserDO extends DurableObject<Env> {
     this.ctx.waitUntil(
       this.ctx.storage
         .getAlarm()
-        .then((current) =>
-          current === null
-            ? this.ctx.storage.setAlarm(Date.now() + CONSULT_INDEX_ALARM_INTERVAL_MS)
-            : undefined,
-        )
+        .then((current) => {
+          // 既に十分早い alarm があれば動かさない（連続した consult で alarm が後ろへ押されない）。
+          // 期限用の遠い alarm（consult の閉じ・答えの保持）があるときは、索引の配送のために手前へ寄せる
+          const target = Date.now() + CONSULT_INDEX_ALARM_INTERVAL_MS;
+          return current === null || current > target
+            ? this.ctx.storage.setAlarm(target)
+            : undefined;
+        })
         .catch((e) => {
           console.error("consult_index_alarm_error", e instanceof Error ? e.name : typeof e);
         }),
@@ -1283,6 +1700,13 @@ export class UserDO extends DurableObject<Env> {
    * 恒久的な拒否（invalid_input）はその行を送信済みとして捨てる。
    */
   override async alarm(): Promise<void> {
+    try {
+      // 期限を過ぎた consult を閉じ、保持期間を過ぎた答えを捨てる（閉じた分の索引は、この後の配送に載る）
+      this.ctx.storage.transactionSync(() => this.closeStaleConsults(this.now()));
+      this.consultAlarmWanted = false;
+    } catch (e) {
+      console.error("consult_sweep_error", e instanceof Error ? e.name : typeof e);
+    }
     try {
       await this.deliverConsultIndex();
     } catch (e) {
@@ -1347,17 +1771,26 @@ export class UserDO extends DurableObject<Env> {
     }
   }
 
-  /** 未配送が残っていれば次の alarm を（バックオフを考えて）設定し、無ければ何もしない（alarm は消費済み） */
+  /**
+   * 次の alarm を設定する（alarm は消費済み）。未配送の索引が残っていれば（バックオフを考えて）その時刻、
+   * 開いている consult の期限・答えの保持期限があればその時刻のうち早いほう。どちらも無ければ何もしない。
+   */
   private async syncConsultAlarm(): Promise<void> {
-    if (this.env.DIRECTORY_DO === undefined) return;
     const sql = this.ctx.storage.sql;
-    const left = sql.exec("SELECT 1 FROM consult_log WHERE index_dirty = 1 LIMIT 1").toArray();
-    if (left.length === 0) return;
-    const { retry_at } = sql
-      .exec<{ retry_at: number }>("SELECT retry_at FROM consult_outbox WHERE singleton = 1")
-      .one();
-    const wait = Math.max(CONSULT_INDEX_ALARM_INTERVAL_MS, retry_at - this.now());
-    await this.ctx.storage.setAlarm(Date.now() + wait);
+    const waits: number[] = [];
+    if (this.env.DIRECTORY_DO !== undefined) {
+      const left = sql.exec("SELECT 1 FROM consult_log WHERE index_dirty = 1 LIMIT 1").toArray();
+      if (left.length > 0) {
+        const { retry_at } = sql
+          .exec<{ retry_at: number }>("SELECT retry_at FROM consult_outbox WHERE singleton = 1")
+          .one();
+        waits.push(Math.max(CONSULT_INDEX_ALARM_INTERVAL_MS, retry_at - this.now()));
+      }
+    }
+    const deadline = this.nextConsultDeadline();
+    if (deadline !== undefined) waits.push(Math.max(1_000, deadline - this.now()));
+    if (waits.length === 0) return;
+    await this.ctx.storage.setAlarm(Date.now() + Math.min(...waits));
   }
 
   // ---- GitHub 連携 ----

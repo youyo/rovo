@@ -71,13 +71,14 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("18 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("19 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "budget_status",
       "consult",
+      "consult_result",
       "models_list",
       "sandbox_instances_list",
       "task_answer",
@@ -1863,6 +1864,89 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
     await client.close();
   });
 
+  it("consult の説明: 待つのは最大 50 秒。pending のとき consult_id で consult_result を呼ぶ。裏の上限・期限・保持の値を書く（120 秒・約 5 分の古い記述は無い）", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tool = (await list(client)).find((t) => t.name === "consult");
+    const d = tool?.description ?? "";
+    for (const word of [
+      "最大 50 秒",
+      "pending",
+      "consult_id",
+      "consult_result",
+      "concurrency_limit",
+      "サブエージェント",
+      "5 分",
+      "10 分",
+      "1 時間",
+    ]) {
+      expect(d, word).toContain(word);
+    }
+    expect(d).not.toContain("上限は 120 秒");
+    expect(d).not.toContain("約 5 分後に予約額で閉じる");
+    await client.close();
+  });
+
+  it("consult_result: 入力 {consult_id, timeout_seconds?}。説明に pending / done / failed / not_found と保持・助言を書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tool = (await list(client)).find((t) => t.name === "consult_result");
+    const props = tool?.inputSchema.properties as Record<string, unknown>;
+    expect(Object.keys(props).sort()).toEqual(["consult_id", "timeout_seconds"]);
+    expect(tool?.inputSchema.required).toEqual(["consult_id"]);
+    for (const word of [
+      "pending",
+      "done",
+      "failed",
+      "not_found",
+      "1 時間",
+      "最大 50 秒",
+      "error",
+      "助言",
+      "事実確認",
+      "retry_after_seconds",
+    ]) {
+      expect(tool?.description, word).toContain(word);
+    }
+    await client.close();
+  });
+
+  it("consult_result: 不正な入力は invalid_input、形式が不正・存在しない ID は同じ not_found", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const missing = await client.callTool({ name: "consult_result", arguments: {} });
+    expect(missing.isError).toBe(true);
+    expect(body(missing)).toMatchObject({ code: "invalid_input" });
+    const badTimeout = await client.callTool({
+      name: "consult_result",
+      arguments: { consult_id: "consult-00000000000000000000000000", timeout_seconds: -1 },
+    });
+    expect(body(badTimeout)).toMatchObject({ code: "invalid_input" });
+    const a = await client.callTool({
+      name: "consult_result",
+      arguments: { consult_id: "nope" },
+    });
+    const b = await client.callTool({
+      name: "consult_result",
+      arguments: { consult_id: "consult-00000000000000000000000000", timeout_seconds: 0 },
+    });
+    expect(a.isError).toBe(true);
+    expect(body(a)).toMatchObject({ code: "not_found" });
+    expect(body(b)).toEqual(body(a));
+    await client.close();
+  });
+
+  it("budget_status に pending_consults（開いている consult の件数）がある。説明にも書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tool = (await list(client)).find((t) => t.name === "budget_status");
+    expect(tool?.description).toContain("pending_consults");
+    expect(body(await client.callTool({ name: "budget_status", arguments: {} }))).toMatchObject({
+      pending_consults: 0,
+    });
+    await client.close();
+  });
+
   it("task_start は model を受け取り、AGENT_MODELS の外は invalid_input。task_status に返る", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
@@ -2029,6 +2113,7 @@ describe("D10: AI への伝え方（instructions と説明）", () => {
       "models_list",
       "budget_status",
       "consult",
+      "consult_result",
       "model",
       "セカンドオピニオン",
       "前置き",
@@ -2784,9 +2869,11 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
     task_review: WRITE(false, true, true),
     task_pr_merge: WRITE(true, false, true),
     consult: WRITE(false, false, true),
+    // 仕様（consult-pending.md）の分類: 読み取り専用。答えを読むだけで、状態を変えない
+    consult_result: READ(false),
   };
 
-  it("18 ツール（web_browse 有効）すべてに title と annotations があり、分類が決定どおり", async () => {
+  it("20 ツール（web_browse 有効）すべてに title と annotations があり、分類が決定どおり", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props, withBrowse(fakeWeb().port));
     const { tools } = await client.listTools();
@@ -2806,11 +2893,11 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
     await client.close();
   });
 
-  it("web_browse が無効（既定）なら 18 ツールで、それぞれに annotations がある", async () => {
+  it("web_browse が無効（既定）なら 19 ツールで、それぞれに annotations がある", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(18);
+    expect(tools).toHaveLength(19);
     for (const t of tools) {
       expect(t.annotations, t.name).toMatchObject(EXPECTED[t.name] as Hints);
     }

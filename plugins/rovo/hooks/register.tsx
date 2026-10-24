@@ -2,35 +2,62 @@ import type { EngineInterface, McpToolResult, Register, Timer } from "claude-cod
 import { atom, read, update } from "claude-code";
 
 import type { RovoConsole, RovoTask } from "../types";
-import type { Awaiting, LaneState, ParsedConsole, PrLink, TaskKind } from "./lib";
+import type {
+  Awaiting,
+  LaneState,
+  LogLine,
+  ParsedConsole,
+  PrLink,
+  TaskKind,
+  WorkerPlan,
+} from "./lib";
 import {
+  agoText,
+  appendLines,
+  bestWorker,
   budgetToastText,
   CONSOLE_RETRY_MS,
   cleanTitle,
+  coerceLogs,
   coerceTasks,
+  columnHeader,
+  detailText,
+  displayWidth,
   formatElapsed,
+  glyph,
   headingText,
   httpsOnly,
   isTerminal,
   isWaiting,
-  labelRow,
   laneCells,
+  logStyle,
+  MAX_LOG_PAGES,
   matchRovoTool,
   matchTaskStart,
   mergeListed,
+  moveTarget,
+  orderTasks,
   padWidth,
+  paneColumns,
   parseConsole,
   parseStartResult,
   parseStatus,
   parseTaskList,
+  planWorkers,
   pruneTasks,
-  rightText,
+  repoName,
+  reviewHeader,
   STATIONS,
+  STORED_LOG_LINES,
+  shortModel,
+  shortText,
   slideShift,
   stageIndex,
   statusColor,
+  TRACK_COL,
   tailLines,
   taskKey,
+  terminalCell,
   toastText,
   truncateWidth,
 } from "./lib";
@@ -40,6 +67,7 @@ type Dollar = EngineInterface;
 const PANE_ID = "rovo";
 const POLL_MS = 4000;
 const STORE_KEY = "tasks";
+const LOGS_KEY = "logs";
 
 // 読み取り専用: 呼ぶ MCP ツールはこの 3 つだけ（task_start は model が呼んだ結果を見るだけ）。
 const TOOL_CONSOLE = "task_console";
@@ -62,10 +90,13 @@ const frameAtom = atom({ plugin: "rovo", key: "frame" } as const, 0);
 const arrivalsAtom = atom({ plugin: "rovo", key: "arrivals" } as const, {});
 const listsAtom = atom({ plugin: "rovo", key: "lists" } as const, {});
 const endpointsAtom = atom({ plugin: "rovo", key: "endpoints" } as const, []);
-const selectedAtom = atom({ plugin: "rovo", key: "selected" } as const, null);
+// 積み上がるログ（ワーカーごと）と、log_after を受け付けなかった接続先。
+const logsAtom = atom({ plugin: "rovo", key: "logs" } as const, {});
+const logOffAtom = atom({ plugin: "rovo", key: "logOff" } as const, {});
 // 出力の窓。follow が true の間は末尾に追従する。offset は追従を止めたときの先頭行（出力の中の行番号）。
 const scrollAtom = atom({ plugin: "rovo", key: "scroll" } as const, { follow: true, offset: 0 });
-// 直近に出していたタスク。ボタン以外（自動の切り替え・一覧から消えた）で変わったら追従に戻す。
+// いま出しているワーカー（taskKey）。描画のたびに選び直さない。動くのは、クリックと、
+// イベント（新しい作業中のタスクを拾った・質問待ちに入った）で出しているものが終端か消えているときだけ。変わったら追従に戻す。
 const shownAtom = atom({ plugin: "rovo", key: "shown" } as const, null);
 // /rovo:create-task が実行された時刻。タスクを拾うまで「タスクを作成中…」を出す。
 const creatingAtom = atom({ plugin: "rovo", key: "creating" } as const, null);
@@ -80,15 +111,7 @@ const baseName = (command: string): string =>
 // 自分のコマンド（名前空間なし・rovo: 付き）。baseName と同じ範囲。
 const OWN_COMMANDS = /^(?:rovo:)?(?:create-task|open-console|close-console)$/;
 
-// 一覧に出すワーカーの最大数（ペインが狭いことがある）。選んでいるワーカーは必ず入れる。
-const LIST_MAX = 4;
-// 一覧以外の行（見出し・「他 n 件」・題名・リンク・枠・コマンド）と、出力の窓の最低の行数。
-const FIXED_ROWS = 7;
-const MIN_WINDOW = 3;
-const LANE_ROWS = 3;
-const TITLE_W = 18;
-const REPO_W = 12;
-const MODEL_W = 10;
+const endpointKey = (e: { server: string; prefix: string }): string => `${e.server}/${e.prefix}`;
 
 const textOf = (result: McpToolResult): string =>
   result.content
@@ -109,26 +132,33 @@ const openPane = async ($: Dollar): Promise<boolean> => {
   }
 };
 
-/** 出すタスク: 選択中 → 最新の実行中 → 最新。 */
-const pickSelected = (
-  tasks: readonly RovoTask[],
-  selectedKey: string | null,
-): RovoTask | undefined =>
-  tasks.find((t) => taskKey(t) === selectedKey) ??
-  [...tasks].reverse().find((t) => !isTerminal(t.status)) ??
-  tasks[tasks.length - 1];
+const HOUR_MS = 60 * 60 * 1000;
 
-/** 出しているタスクが変わっていたら、窓を追従に戻す（ボタンで選んだときは押した側が shown も更新する）。 */
-const syncShown = async ($: Dollar, tasks: readonly RovoTask[]): Promise<void> => {
+const visibleOf = (tasks: readonly RovoTask[], now: number): RovoTask[] =>
+  tasks.filter((t) => t.terminalAt === undefined || now - t.terminalAt < HOUR_MS);
+
+/** 出すタスク: 出しているもの。無い・消えているときは見かけ上 best（保存はイベントのとき）。 */
+const resolveShown = (tasks: readonly RovoTask[], shown: string | null): RovoTask | undefined =>
+  tasks.find((t) => taskKey(t) === shown) ?? bestWorker(tasks);
+
+/** いまペインに出しているタスクの taskKey（無ければ null）。 */
+const shownKeyNow = async ($: Dollar): Promise<string | null> => {
   const now = await $.clock.now();
-  const visible = tasks.filter(
-    (t) => t.terminalAt === undefined || now - t.terminalAt < 60 * 60 * 1000,
-  );
-  const picked = pickSelected(visible, await read($, selectedAtom));
-  const key = picked === undefined ? null : taskKey(picked);
+  const picked = resolveShown(visibleOf(await read($, tasksAtom), now), await read($, shownAtom));
+  return picked === undefined ? null : taskKey(picked);
+};
+
+/** 出すワーカーを替える。替わったら窓を追従に戻す。 */
+const setShown = async ($: Dollar, key: string | null): Promise<void> => {
   if (key === (await read($, shownAtom))) return;
   await update($, shownAtom, () => key);
   await update($, scrollAtom, () => ({ follow: true, offset: 0 }));
+};
+
+/** イベントのとき: 出しているものが終端・消えている・無いときだけ、質問待ち > 最新の実行中 > 最新へ移る。 */
+const considerMove = async ($: Dollar, tasks: readonly RovoTask[]): Promise<void> => {
+  const now = await $.clock.now();
+  await setShown($, moveTarget(visibleOf(tasks, now), await read($, shownAtom)));
 };
 
 const showStatus = (tasks: readonly RovoTask[], $: Dollar): void => {
@@ -148,7 +178,17 @@ const mutate = async ($: Dollar, change: (list: RovoTask[]) => RovoTask[]): Prom
     await $.store.set(STORE_KEY, after);
   }
   showStatus(after, $);
-  await syncShown($, after);
+  // イベント: 新しい作業中のタスクを拾った・質問待ちに入った（まだ何も出していないときも決める）。
+  const was = new Map(before.map((t) => [taskKey(t), t]));
+  const isEvent = after.some((t) => {
+    if (isTerminal(t.status)) return false;
+    const old = was.get(taskKey(t));
+    return old === undefined || (isWaiting(t) && !isWaiting(old));
+  });
+  // 出しているものが一覧から消えた（終端から 1 時間）ときも、同じ規則で移る。
+  const shownNow = await read($, shownAtom);
+  const isGone = shownNow !== null && !visibleOf(after, now).some((t) => taskKey(t) === shownNow);
+  if (isEvent || isGone || shownNow === null) await considerMove($, after);
   return after;
 };
 
@@ -169,21 +209,128 @@ const stopIfIdle = async ($: Dollar): Promise<void> => {
   }
 };
 
+/** task_console 自体が無いサーバーのエラー（引数を変えても直らない）。 */
+const UNKNOWN_TOOL = /unknown tool|no such tool|tool not found|method not found/i;
+
+const callConsole = async (
+  $: Dollar,
+  t: RovoTask,
+  args: Record<string, unknown>,
+): Promise<{ parsed: ParsedConsole | null; toolMissing: boolean }> => {
+  try {
+    const res = await $.mcp.call(t.server, t.prefix + TOOL_CONSOLE, args);
+    if (res.isError) return { parsed: null, toolMissing: UNKNOWN_TOOL.test(textOf(res)) };
+    return { parsed: parseConsole(textOf(res)), toolMissing: false };
+  } catch {
+    return { parsed: null, toolMissing: false };
+  }
+};
+
+/** ログを取り込んだ結果。logSeen はこのサーバーが log を返したこと。 */
+type LogOutcome = { seen: boolean; added: LogLine[]; cursor: string; rejected: boolean };
+
+/** 取り込んだログを buffer に足す。古い行が落ちたぶんだけ、追従を止めている窓も前へ寄せる。 */
+const applyLog = async (
+  $: Dollar,
+  key: string,
+  outcome: LogOutcome | null,
+  parsedOk: boolean,
+): Promise<void> => {
+  const cur = (await read($, logsAtom))[key];
+  if (outcome === null) return;
+  if (!outcome.seen) {
+    // log を返さない（古いサーバー・受け付けなかった・取得に失敗）: 無ければ印だけ作り、あれば触らない。
+    // 取れたのに log が無いときは、前に積んだログがあっても最新のコマンドだけの表示に戻す。
+    if (cur === undefined || (parsedOk && cur.supported)) {
+      await update($, logsAtom, (m) => ({
+        ...m,
+        [key]: { supported: false, cursor: cur?.cursor ?? "0", lines: cur?.lines ?? [] },
+      }));
+    }
+    return;
+  }
+  const { lines, dropped } = appendLines(cur?.lines ?? [], outcome.added);
+  await update($, logsAtom, (m) => ({
+    ...m,
+    [key]: { supported: true, cursor: outcome.cursor, lines },
+  }));
+  if (dropped > 0 && (await shownKeyNow($)) === key) {
+    await update($, scrollAtom, (s) =>
+      s.follow ? s : { ...s, offset: Math.max(0, s.offset - dropped) },
+    );
+  }
+  await persistLogs($);
+};
+
+/** ログを $.store に小さく残す（追跡中のワーカーの、最後の STORED_LOG_LINES 行とカーソル）。 */
+const persistLogs = async ($: Dollar): Promise<void> => {
+  const keys = new Set((await read($, tasksAtom)).map(taskKey));
+  let kept: Record<string, { cursor: string; lines: LogLine[] }> = {};
+  await update($, logsAtom, (m) => {
+    const next: typeof m = {};
+    kept = {};
+    for (const [k, v] of Object.entries(m)) {
+      if (!keys.has(k)) continue;
+      next[k] = v;
+      if (v.supported) kept[k] = { cursor: v.cursor, lines: v.lines.slice(-STORED_LOG_LINES) };
+    }
+    return Object.keys(next).length === Object.keys(m).length ? m : next;
+  });
+  await $.store.set(LOGS_KEY, kept);
+};
+
 const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   let parsed: ParsedConsole | null = null;
   const startedAt = await $.clock.now();
   // task_console が使えないタスクも、60 秒に 1 回は試し直す（同時 1 本は tick の isPolling が守る）。
   const isRetry = t.noConsole === true && startedAt >= (t.consoleRetryAt ?? 0);
   let isConsoleMissing = t.noConsole === true && !isRetry;
+  const key = taskKey(t);
+  const epKey = endpointKey(t);
+  // ログ（log_after）を頼むのは、ペインに出しているワーカーだけ。受け付けなかったサーバーは 1 分あきらめる。
+  const wantLog =
+    !isConsoleMissing &&
+    (await shownKeyNow($)) === key &&
+    startedAt >= ((await read($, logOffAtom))[epKey] ?? 0);
+  let outcome: LogOutcome | null = null;
   if (!isConsoleMissing) {
-    try {
-      const res = await $.mcp.call(t.server, t.prefix + TOOL_CONSOLE, { task_id: t.taskId });
-      parsed = res.isError ? null : parseConsole(textOf(res));
-    } catch {
-      parsed = null;
+    if (!wantLog) {
+      parsed = (await callConsole($, t, { task_id: t.taskId })).parsed;
+    } else {
+      outcome = {
+        seen: false,
+        added: [],
+        cursor: (await read($, logsAtom))[key]?.cursor ?? "0",
+        rejected: false,
+      };
+      for (let page = 0; page < MAX_LOG_PAGES; page++) {
+        const { parsed: p, toolMissing } = await callConsole($, t, {
+          task_id: t.taskId,
+          log_after: outcome.cursor,
+        });
+        if (p === null) {
+          if (page === 0 && !toolMissing) {
+            // log_after を受け付けないサーバーかもしれない: 付けずにもう一度。
+            parsed = (await callConsole($, t, { task_id: t.taskId })).parsed;
+            outcome.rejected = parsed !== null;
+          }
+          break;
+        }
+        parsed = p;
+        if (p.log === undefined) break;
+        outcome.seen = true;
+        outcome.added.push(...p.log.lines);
+        const advanced = p.log.nextCursor !== outcome.cursor;
+        outcome.cursor = p.log.nextCursor;
+        if (!p.log.truncated || !advanced) break;
+      }
+      if (outcome.rejected) {
+        await update($, logOffAtom, (m) => ({ ...m, [epKey]: startedAt + CONSOLE_RETRY_MS }));
+      }
     }
     if (parsed === null) isConsoleMissing = true;
   }
+  await applyLog($, key, outcome, parsed !== null);
 
   let status: string;
   let dashboardUrl: string | undefined;
@@ -237,7 +384,6 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   const becameTerminal = !isTerminal(t.status) && isTerminal(status);
   const shouldToast = becameTerminal && t.notified !== true;
   const shouldToastBudget = awaiting !== undefined && t.awaiting === undefined;
-  const key = taskKey(t);
   await mutate($, (list) =>
     list.map((x) =>
       taskKey(x) !== key
@@ -260,7 +406,7 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   );
   // 追従を止めて読んでいる間は、末尾が前へずれた分だけ窓も前へ寄せ、同じ行を見せ続ける。
   const old = (await read($, consolesAtom))[key];
-  if (old?.tail != null && view.tail !== null) {
+  if (outcome?.seen !== true && old?.tail != null && view.tail !== null) {
     const shift = slideShift(tailLines(old.tail).split("\n"), tailLines(view.tail).split("\n"));
     const stand = await read($, scrollAtom);
     if (shift > 0 && !stand.follow) {
@@ -274,8 +420,6 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   if (shouldToast) $.ui.toast(toastText(t.title, status));
   if (shouldToastBudget) $.ui.toast(budgetToastText(t.title));
 };
-
-const endpointKey = (e: { server: string; prefix: string }): string => `${e.server}/${e.prefix}`;
 
 /**
  * 呼んだ人の全タスク（task_list）を取って追跡リストに混ぜる。task_list が無いサーバー
@@ -333,7 +477,8 @@ const syncLists = async ($: Dollar): Promise<void> => {
 /** 今回 task_console を取るワーカー: 選んでいるものを先頭に、残りは順番に回して上限まで。並びは一覧のまま。 */
 const chooseToPoll = async ($: Dollar, running: RovoTask[]): Promise<RovoTask[]> => {
   if (running.length <= MAX_CONSOLE_POLLS) return running;
-  const selected = pickSelected(running, await read($, selectedAtom));
+  const shownKey = await shownKeyNow($);
+  const selected = running.find((t) => taskKey(t) === shownKey);
   const others = running.filter((t) => t !== selected);
   const room = MAX_CONSOLE_POLLS - (selected === undefined ? 0 : 1);
   const start = pollCursor % others.length;
@@ -377,11 +522,7 @@ const tick = async ($: Dollar): Promise<void> => {
 const fetchMissingNow = async ($: Dollar, only?: string, listedOnly = false): Promise<void> => {
   const tasks = await read($, tasksAtom);
   const now = await $.clock.now();
-  const visible = tasks.filter(
-    (t) => t.terminalAt === undefined || now - t.terminalAt < 60 * 60 * 1000,
-  );
-  const picked = pickSelected(visible, await read($, selectedAtom));
-  const pickedKey = picked === undefined ? null : taskKey(picked);
+  const pickedKey = await shownKeyNow($);
   for (const t of tasks) {
     const key = taskKey(t);
     if (only !== undefined && key !== only) continue;
@@ -390,7 +531,12 @@ const fetchMissingNow = async ($: Dollar, only?: string, listedOnly = false): Pr
     if (listedOnly && t.listed !== true) continue;
     // 実行中のタスクはタイマーが取る。
     if (!isTerminal(t.status)) continue;
-    if ((await read($, consolesAtom))[key] !== undefined) continue;
+    // 中身がある終端のタスクは取り直さない。ただし出しているものは、ログをまだ頼んでいなければ 1 回頼む。
+    const needsLog =
+      key === pickedKey &&
+      (await read($, logsAtom))[key] === undefined &&
+      now >= ((await read($, logOffAtom))[endpointKey(t)] ?? 0);
+    if ((await read($, consolesAtom))[key] !== undefined && !needsLog) continue;
     try {
       await pollOne($, t);
     } catch {
@@ -518,11 +664,15 @@ const rememberEndpoint = async (
 const track = async (
   $: Dollar,
   hit: { server: string; prefix: string },
-  started: { taskId: string; status?: string; dashboardUrl?: string },
+  started: { taskId: string; status?: string; dashboardUrl?: string; model?: string },
   title: unknown,
+  input: { repository?: unknown; model?: unknown } = {},
 ): Promise<void> => {
   const now = await $.clock.now();
   const status = started.status ?? "RUNNING";
+  // task_list が答える前でも、1 行目にリポジトリとモデルを出せるよう、task_start の入力と応答から取る。
+  const repository = shortText(input.repository, 100);
+  const model = started.model ?? shortText(input.model, 60);
   const added: RovoTask = {
     taskId: started.taskId,
     title: cleanTitle(title, started.taskId),
@@ -531,6 +681,8 @@ const track = async (
     startedAt: now,
     status,
     ...(started.dashboardUrl !== undefined ? { dashboardUrl: started.dashboardUrl } : {}),
+    ...(repository !== undefined ? { repository } : {}),
+    ...(model !== undefined ? { model } : {}),
     ...(isTerminal(status) ? { terminalAt: now, notified: true as const } : {}),
   };
   const isNew = !(await read($, tasksAtom)).some((x) => taskKey(x) === taskKey(added));
@@ -549,15 +701,18 @@ type PaneModel = {
   selected: RovoTask | undefined;
   view: RovoConsole | undefined;
   now: number;
-  /** 一覧に出すワーカー（新しい順）と、出さなかった件数。 */
-  listed: RovoTask[];
-  hidden: number;
+  /** 一覧に出すワーカー（並びは orderTasks）と、出さなかった件数・行の数。 */
+  plan: WorkerPlan;
   link: string | undefined;
   prLink: RovoConsole["pr"];
   /** ヘッダーの行数（枠の外）。 */
   headerRows: number;
-  /** 出力の全行（TAIL_LINES まで）と、窓の高さ（枠の行を除く）・先頭行の範囲。 */
-  lines: string[];
+  /** 出力の全行（ログがあればログ + いま流れている出力、無ければ末尾 TAIL_LINES まで）と、窓の高さ（枠の行を除く）・先頭行の範囲。 */
+  lines: LogLine[];
+  /** ログ（積み上がる表示）か。false なら最新のコマンドだけ（`$ コマンド` を枠の先頭に固定）。 */
+  stacked: boolean;
+  /** 枠の行数（上下の辺と、固定する `$ コマンド`）。枠の高さは frameRows + windowRows。 */
+  frameRows: number;
   windowRows: number;
   maxStart: number;
   /** タスクを作成中（10 分以内）。true の間は案内だけを描き、一覧・詳細は出さない。 */
@@ -575,65 +730,83 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
       selected: undefined,
       view: undefined,
       now,
-      listed: [],
-      hidden: 0,
+      plan: { shown: [], hidden: 0, hiddenAllTerminal: false, rows: 0 },
       link: undefined,
       prLink: undefined,
       headerRows: CREATING_ROWS,
       lines: [],
+      stacked: false,
+      frameRows: 0,
       windowRows: Math.max(1, bodyRows - CREATING_ROWS),
       maxStart: 0,
       creating: true,
     };
   }
   const all = await read($, tasksAtom);
-  const tasks = all.filter(
-    (t) => t.terminalAt === undefined || now - t.terminalAt < 60 * 60 * 1000,
-  );
+  const tasks = visibleOf(all, now);
   const consoles = await read($, consolesAtom);
-  const selectedKey = await read($, selectedAtom);
-  const selected = pickSelected(tasks, selectedKey);
+  const selected = resolveShown(tasks, await read($, shownAtom));
   const view = selected === undefined ? undefined : consoles[taskKey(selected)];
   const link = selected === undefined ? undefined : httpsOnly(selected.dashboardUrl);
   const prCandidate = view?.pr ?? selected?.pr;
   const prLink =
     prCandidate !== undefined && httpsOnly(prCandidate.url) !== undefined ? prCandidate : undefined;
 
-  // 行が足りないときは、出すワーカーを減らして出力の窓を残す。
-  const room = Math.floor((bodyRows - FIXED_ROWS - MIN_WINDOW) / LANE_ROWS);
-  const workerMax = Math.max(1, Math.min(LIST_MAX, room));
-  const newest = [...tasks].reverse();
-  let listed = newest.slice(0, workerMax);
-  if (selected !== undefined && !listed.includes(selected)) {
-    listed = [...newest.slice(0, workerMax - 1), selected];
-  }
-  const hidden = newest.length - listed.length;
+  // 行が足りないときは、終端の行 → 作業中の行の順に減らして出力の窓を残す（出しているワーカーは残す）。
+  const plan = planWorkers(
+    orderTasks(tasks),
+    selected === undefined ? null : taskKey(selected),
+    bodyRows,
+  );
 
-  // 数える行: 見出し + ワーカー 3 行ずつ + 「他 n 件」 + 題名 + (取得前・非対応の一言) + リンク
-  let headerRows = 1 + listed.length * LANE_ROWS + (hidden > 0 ? 1 : 0);
+  // 数える行: 見出し + 列見出し + 一覧（plan.rows）+ タイトルとリンクの 1 行 + (取得前・非対応の一言)
+  let headerRows = 2 + plan.rows;
   if (selected !== undefined) {
     headerRows += 1;
     if (view === undefined || !view.hasOutput) headerRows += 1;
-    if (link !== undefined || prLink !== undefined) headerRows += 1;
   }
-  const lines =
+  const worker = selected === undefined ? undefined : (await read($, logsAtom))[taskKey(selected)];
+  const stacked = view !== undefined && view.hasOutput && worker?.supported === true;
+  const tailOf = (): LogLine[] =>
     view !== undefined && view.hasOutput && view.tail !== null
-      ? tailLines(view.tail).split("\n")
+      ? tailLines(view.tail)
+          .split("\n")
+          .map((text) => ({ kind: "out" as const, text }))
       : [];
-  // 出力は枠で囲む: 上下の辺で 2 行、`$ コマンド` は枠の中の 1 行目に固定して 1 行。
-  const frameRows = view !== undefined && view.hasOutput ? 2 + (view.command !== null ? 1 : 0) : 0;
+  let lines: LogLine[];
+  if (stacked && view !== undefined) {
+    // ログの末尾に、いま流れている出力を続ける（終わったコマンドは entries のほうにある）。
+    const live: LogLine[] = [];
+    if (view.isRunning) {
+      if (view.command !== null) {
+        live.push({
+          kind: "cmd",
+          text: `$ ${view.command}`,
+          ...(view.commandWhere !== undefined ? { where: view.commandWhere } : {}),
+        });
+      }
+      live.push(...tailOf());
+    }
+    lines = [...(worker?.lines ?? []), ...live];
+  } else {
+    lines = tailOf();
+  }
+  // 出力は枠で囲む: 上下の辺で 2 行。ログでなければ `$ コマンド` を枠の中の 1 行目に固定して 1 行。
+  const frameRows =
+    view !== undefined && view.hasOutput ? 2 + (!stacked && view.command !== null ? 1 : 0) : 0;
   const windowRows = Math.max(1, bodyRows - headerRows - frameRows);
   return {
     tasks,
     selected,
     view,
     now,
-    listed,
-    hidden,
+    plan,
     link,
     prLink,
     headerRows,
     lines,
+    stacked,
+    frameRows,
     windowRows,
     maxStart: Math.max(0, lines.length - windowRows),
     creating: false,
@@ -650,6 +823,19 @@ export const register: Register = (on) => {
       await mutate($, () => stored);
     } catch {
       // 読めなければ空から始める。
+    }
+    try {
+      const logs = coerceLogs(await $.store.get(LOGS_KEY));
+      await update($, logsAtom, () =>
+        Object.fromEntries(
+          Object.entries(logs).map(([k, v]) => [
+            k,
+            { supported: true, cursor: v.cursor, lines: v.lines },
+          ]),
+        ),
+      );
+    } catch {
+      // ログが読めなければ空から積む。
     }
     try {
       const endpoints = coerceEndpoints(await $.store.get(ENDPOINTS_KEY));
@@ -722,7 +908,11 @@ export const register: Register = (on) => {
       if (hit !== null && outcome.deny === undefined && outcome.isError !== true) {
         const started = parseStartResult(outcome.text ?? "");
         if (started !== null) {
-          await track($, hit, started, (e as Record<string, unknown>).title);
+          const input = e as Record<string, unknown>;
+          await track($, hit, started, input.title, {
+            repository: input.repository,
+            model: input.model,
+          });
         }
       }
       const rovoTool = outcome.deny === undefined ? matchRovoTool(String(e.tool)) : null;
@@ -740,7 +930,7 @@ export const register: Register = (on) => {
   on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e) => {
     const { Box, Text, Button, Link } = $.ui.resolve(e);
     const m = await buildModel($, e.props.scroll.bodyRows);
-    const { selected, view, listed, link, prLink, now } = m;
+    const { selected, view, link, prLink, now } = m;
 
     // 作成中は案内だけ。前のタスクの一覧・詳細・出力は描かない（2 行なので bodyRows に収まる）。
     if (m.creating) {
@@ -764,14 +954,107 @@ export const register: Register = (on) => {
       );
     }
 
-    const elapsedOf = (t: RovoTask): string => formatElapsed((t.terminalAt ?? now) - t.startedAt);
+    const W = e.props.bodyColumns - 1; // 右端で折り返さないよう 1 桁あける
+    const cols = paneColumns(W);
     const start = startOf(m, await read($, scrollAtom));
     const shown = m.lines.slice(start, start + m.windowRows);
     const frame = await read($, frameAtom);
     const arrivals = await read($, arrivalsAtom);
     const consoles = await read($, consolesAtom);
+    const padLeft = (text: string, width: number): string =>
+      " ".repeat(Math.max(0, width - displayWidth(text))) + text;
 
-    // 上から: 見出し・ワーカーの列（3 行ずつ）・選んだワーカーの題名とリンク（ヘッダー、出力の量に関わらず常に出す）、
+    // 1 ワーカーぶんの行。作業中・質問待ちは 2 行（タイトル+線路+モデル+経過 / リポジトリ+いまの動き）、終端は 1 行。
+    const workerRows = (t: RovoTask) => {
+      const key = taskKey(t);
+      const isShown = selected !== undefined && taskKey(selected) === key;
+      const own = consoles[key];
+      const lane = laneOf(t, own);
+      const bar = isShown ? <Text color="claude">▎</Text> : " ";
+      const track = laneCells({ ...lane, frame, arrived: false });
+      const press = async () => {
+        await setShown($, key);
+        await update($, scrollAtom, () => ({ follow: true, offset: 0 }));
+        void fetchMissing($, key).catch(() => undefined);
+      };
+      const trackCells = (cells: typeof track) =>
+        cells.map((c, i) => (
+          <Text key={`cell:${i}`} color={c.color} weight={c.bold ? "bold" : undefined}>
+            {c.text}
+          </Text>
+        ));
+      const trackPad = (cells: typeof track): string =>
+        " ".repeat(Math.max(0, TRACK_COL - cells.reduce((n, c) => n + displayWidth(c.text), 0)));
+      if (isTerminal(t.status)) {
+        const cell = terminalCell(t, own?.pr);
+        const g = glyph(t.status);
+        const dim = t.status === "COMPLETED" || t.status === "CANCELLED";
+        const titleW = Math.max(1, cols.title - 2);
+        const ago = agoText(now - (t.terminalAt ?? now));
+        const cellPad = " ".repeat(
+          Math.max(0, cols.model - displayWidth(truncateWidth(cell.text, cols.model))) + 1,
+        );
+        return (
+          <Button key={`row:${key}:0`} plain onPress={press}>
+            {bar} <Text color={statusColor(t.status)}>{g}</Text>{" "}
+            <Text dimColor={dim} weight={isShown ? "bold" : undefined}>
+              {padWidth(truncateWidth(t.title, titleW), titleW)}
+            </Text>{" "}
+            {trackCells(track)}
+            {trackPad(track)}
+            {cols.model > 0 && (
+              <Text color={cell.color}>{truncateWidth(cell.text, cols.model)}</Text>
+            )}
+            {cols.model > 0 && cellPad}
+            <Text dimColor>{padLeft(ago, cols.elapsed)}</Text>
+          </Button>
+        );
+      }
+      const arrival = arrivals[key];
+      const arrived =
+        arrival !== undefined && lane.at !== null && arrival.at === lane.at
+          ? frame - arrival.since < ARRIVE_FRAMES
+          : false;
+      const live = laneCells({ ...lane, frame, arrived });
+      const detail = detailText(t, own?.hasOutput === true ? own.nowText : null);
+      const repo = repoName(t.repository);
+      const detailW = Math.max(1, W - 4 - (repo === "" ? 0 : displayWidth(repo) + 2));
+      return (
+        <Box key={`worker:${key}`} flexDirection="column">
+          <Button key={`row:${key}:0`} plain onPress={press}>
+            {bar}{" "}
+            <Text weight={isShown ? "bold" : undefined}>
+              {padWidth(truncateWidth(t.title, cols.title), cols.title)}
+            </Text>{" "}
+            {trackCells(live)}
+            {trackPad(live)}
+            {cols.model > 0 && (
+              <Text>{`${padWidth(truncateWidth(shortModel(t.model ?? ""), cols.model), cols.model)} `}</Text>
+            )}
+            <Text dimColor>{padLeft(formatElapsed(now - t.startedAt), cols.elapsed)}</Text>
+          </Button>
+          <Button key={`row:${key}:1`} plain onPress={press}>
+            {bar}
+            {"   "}
+            {repo !== "" && <Text dimColor>{`${repo}  `}</Text>}
+            {detail.text !== "" && (
+              <Text color={detail.color}>{truncateWidth(detail.text, detailW)}</Text>
+            )}
+          </Button>
+        </Box>
+      );
+    };
+
+    const taskKind = m.plan.shown.filter((t) => t.kind !== "review");
+    const reviewKind = m.plan.shown.filter((t) => t.kind === "review");
+    const hiddenNote =
+      m.plan.hidden > 0
+        ? m.plan.hiddenAllTerminal
+          ? `他 ${m.plan.hidden} 件（完了。終わって 1 時間で消えます）`
+          : `他 ${m.plan.hidden} 件`
+        : "";
+
+    // 上から: 見出し・列見出し・ワーカーの行・選んだワーカーのタイトル行（右端にリンク。出力の量に関わらず常に出す）、
     // 残りの行が出力の窓。ツリー全体を bodyRows に収めるので、エンジンはスクロールしない。
     return (
       <Box flexDirection="column">
@@ -781,80 +1064,47 @@ export const register: Register = (on) => {
           </Text>
           <Text dimColor>{`  ${headingText(m.tasks)}`}</Text>
         </Box>
-        {listed.map((t) => {
-          const key = taskKey(t);
-          const isSelected = selected !== undefined && taskKey(selected) === key;
-          const own = consoles[key];
-          const lane = laneOf(t, own);
-          const arrival = arrivals[key];
-          const arrived =
-            arrival !== undefined && lane.at !== null && arrival.at === lane.at
-              ? frame - arrival.since < ARRIVE_FRAMES
-              : false;
-          const right = rightText(t, own?.hasOutput === true ? own.nowText : null, own?.pr);
-          const repo = (t.repository ?? "").split("/").pop() ?? "";
-          const press = async () => {
-            await update($, selectedAtom, () => key);
-            await update($, shownAtom, () => key);
-            await update($, scrollAtom, () => ({ follow: true, offset: 0 }));
-            void fetchMissing($, key).catch(() => undefined);
-          };
-          return (
-            <Box key={`worker:${key}`} flexDirection="column">
-              <Button key={`row:${key}:0`} plain onPress={press}>
-                {isSelected ? <Text color="claude">▸</Text> : " "}{" "}
-                <Text weight={isSelected ? "bold" : undefined}>
-                  {padWidth(truncateWidth(t.title, TITLE_W), TITLE_W)}
-                </Text>
-                <Text dimColor>
-                  {` ${padWidth(truncateWidth(repo, REPO_W), REPO_W)} ${padWidth(truncateWidth(t.model ?? "", MODEL_W), MODEL_W)} ${elapsedOf(t)}`}
-                </Text>
-              </Button>
-              <Button key={`row:${key}:1`} plain onPress={press}>
-                {"  "}
-                {laneCells({ ...lane, frame, arrived }).map((c, i) => (
-                  <Text key={`cell:${i}`} color={c.color} weight={c.bold ? "bold" : undefined}>
-                    {c.text}
-                  </Text>
-                ))}
-                {"   "}
-                {right.text !== "" && <Text color={right.color}>{right.text}</Text>}
-              </Button>
-              <Button key={`row:${key}:2`} plain onPress={press}>
-                {"  "}
-                <Text dimColor>{labelRow(lane.kind)}</Text>
-              </Button>
-            </Box>
-          );
-        })}
-        {m.hidden > 0 && <Text dimColor>{`他 ${m.hidden} 件`}</Text>}
+        <Text dimColor wrap="truncate-end">
+          {columnHeader(cols, taskKind.length === 0 && reviewKind.length > 0 ? "review" : "task")}
+        </Text>
+        {taskKind.map(workerRows)}
+        {taskKind.length > 0 && reviewKind.length > 0 && (
+          <Text dimColor wrap="truncate-end">
+            {reviewHeader(cols)}
+          </Text>
+        )}
+        {reviewKind.map(workerRows)}
+        {hiddenNote !== "" && <Text dimColor>{hiddenNote}</Text>}
         {selected !== undefined && (
           <Box flexDirection="column">
-            <Text wrap="truncate-end">
-              <Text dimColor>{"─ "}</Text>
-              <Text weight="bold">{selected.title}</Text>
-            </Text>
-            {view === undefined && <Text dimColor>まだ取得していません。</Text>}
-            {view !== undefined && !view.hasOutput && (
-              <Text dimColor>このサーバーは出力に対応していません。</Text>
-            )}
-            {(link !== undefined || prLink !== undefined) && (
-              <Box>
-                {link !== undefined && (
-                  <Link href={link}>
-                    <Text color="suggestion">ダッシュボードを開く</Text>
-                  </Link>
-                )}
-                {prLink !== undefined && (
-                  <Box marginLeft={link !== undefined ? 2 : 0}>
+            <Box key="titlebar" justifyContent="space-between">
+              <Box flexShrink={1}>
+                <Text wrap="truncate-end">
+                  <Text dimColor>{"─ "}</Text>
+                  <Text weight="bold">{selected.title}</Text>
+                </Text>
+              </Box>
+              {(link !== undefined || prLink !== undefined) && (
+                <Box flexShrink={0} marginLeft={2}>
+                  {prLink !== undefined && (
                     <Link href={prLink.url}>
                       <Text color="suggestion">
                         {prLink.number === null ? "PR" : `PR #${prLink.number}`}
                       </Text>
                     </Link>
-                  </Box>
-                )}
-              </Box>
+                  )}
+                  {prLink !== undefined && link !== undefined && <Text dimColor>{" · "}</Text>}
+                  {link !== undefined && (
+                    <Link href={link}>
+                      <Text color="suggestion">ダッシュボード</Text>
+                    </Link>
+                  )}
+                </Box>
+              )}
+            </Box>
+            {view === undefined && <Text dimColor>まだ取得していません。</Text>}
+            {view !== undefined && !view.hasOutput && (
+              <Text dimColor>このサーバーは出力に対応していません。</Text>
             )}
             {view !== undefined && view.hasOutput && (
               <Box
@@ -863,8 +1113,9 @@ export const register: Register = (on) => {
                 borderColor={
                   isTerminal(selected.status) ? statusColor(selected.status) : "suggestion"
                 }
+                height={m.frameRows + m.windowRows}
               >
-                {view.command !== null && (
+                {!m.stacked && view.command !== null && (
                   <Box>
                     <Text mono wrap="truncate-end">{`$ ${view.command}`}</Text>
                     {view.commandWhere !== undefined && (
@@ -872,12 +1123,26 @@ export const register: Register = (on) => {
                     )}
                   </Box>
                 )}
-                {shown.map((line, i) => (
-                  <Text key={`out:${start + i}`} mono wrap="truncate-end">
-                    {line}
-                  </Text>
-                ))}
-                {m.lines.length === 0 && view.command === null && (
+                {shown.map((line, i) => {
+                  const style = logStyle(line.kind);
+                  return (
+                    <Box key={`out:${start + i}`}>
+                      <Text
+                        mono
+                        wrap="truncate-end"
+                        color={style.color}
+                        dimColor={style.dim === true}
+                        weight={style.bold === true ? "bold" : undefined}
+                      >
+                        {line.text}
+                      </Text>
+                      {line.where !== undefined && (
+                        <Text dimColor wrap="truncate-end">{`  ${line.where} で`}</Text>
+                      )}
+                    </Box>
+                  );
+                })}
+                {m.lines.length === 0 && (m.stacked || view.command === null) && (
                   <Text dimColor>まだ出力はありません。</Text>
                 )}
               </Box>

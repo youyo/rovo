@@ -59,17 +59,22 @@ export type RovoConsole = {
   pr?: { number: number | null; url: string };
 };
 
+/** ログ（task_console の log）の 1 行。kind で色が決まる。where は cmd の場所（/workspace からの相対）。 */
+export type RovoLogLine = {
+  kind: "cmd" | "out" | "edit" | "commit" | "web" | "tool" | "status" | "pr" | "error";
+  text: string;
+  where?: string;
+};
+
 declare module "claude-code" {
   interface PluginState {
     rovo: {
       tasks: RovoTask[];
       /** キーは taskKey(task) = `${server}/${taskId}`。 */
       consoles: Record<string, RovoConsole>;
-      /** 選択中のタスクの taskKey。null は既定（最新の実行中、無ければ最新）。 */
-      selected: string | null;
       /** 出力の窓。follow は末尾に追従中。offset は追従を止めたときの先頭行（出力の中の行番号）。 */
       scroll: { follow: boolean; offset: number };
-      /** 直近にペインへ出していたタスクの taskKey。自動の切り替えを見つけて追従に戻すために持つ。 */
+      /** いまペインに出しているワーカーの taskKey。描くたびには選び直さず、クリックとイベント（新しい作業中のタスク・質問待ち）のときだけ替わる。替わったら窓を追従に戻す。 */
       shown: string | null;
       /** /rovo-create-task が実行された時刻（ms）。タスクを拾うと null に戻る。10 分たつと表示しない。 */
       creating: number | null;
@@ -81,6 +86,13 @@ declare module "claude-code" {
       endpoints: { server: string; prefix: string }[];
       /** task_list の接続先（server と prefix の組）ごとの状態。キーは `${server}/${prefix}`。 */
       lists: Record<string, { supported: boolean; retryAt: number; lastAt: number }>;
+      /**
+       * 積み上がるログ。キーは taskKey。supported は task_console が log を返したワーカー
+       * （false なら最新のコマンドだけの表示）。cursor は次に渡す log_after、lines は最大 500 行。
+       */
+      logs: Record<string, { supported: boolean; cursor: string; lines: RovoLogLine[] }>;
+      /** log_after を受け付けなかった接続先（`${server}/${prefix}`）を、この時刻（ms）まで使わない。 */
+      logOff: Record<string, number>;
     };
   }
 }

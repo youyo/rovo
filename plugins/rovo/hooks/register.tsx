@@ -179,6 +179,8 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
       stoppedPhase: parsed.stoppedPhase,
       nowText: parsed.nowText,
       command: parsed.command,
+      ...(parsed.nowWhere !== undefined ? { nowWhere: parsed.nowWhere } : {}),
+      ...(parsed.commandWhere !== undefined ? { commandWhere: parsed.commandWhere } : {}),
       tail: parsed.tail,
       isRunning: parsed.isRunning,
       hasOutput: true,
@@ -610,9 +612,14 @@ export const register: Register = (on) => {
                 {view.stoppedPhase !== null && (
                   <Text wrap="truncate-end">{`停止した段階: ${stoppedLabel(view.stoppedPhase)}`}</Text>
                 )}
-                <Text wrap="truncate-end">
-                  {view.nowText !== null ? `いま: ${view.nowText}` : "いま: （なし）"}
-                </Text>
+                <Box>
+                  <Text wrap="truncate-end">
+                    {view.nowText !== null ? `いま: ${view.nowText}` : "いま: （なし）"}
+                  </Text>
+                  {view.nowWhere !== undefined && (
+                    <Text dimColor wrap="truncate-end">{`  ${view.nowWhere} で`}</Text>
+                  )}
+                </Box>
               </Box>
             )}
             {view !== undefined && !view.hasOutput && (
@@ -645,7 +652,12 @@ export const register: Register = (on) => {
                 }
               >
                 {view.command !== null && (
-                  <Text mono wrap="truncate-end">{`$ ${view.command}`}</Text>
+                  <Box>
+                    <Text mono wrap="truncate-end">{`$ ${view.command}`}</Text>
+                    {view.commandWhere !== undefined && (
+                      <Text dimColor wrap="truncate-end">{`  ${view.commandWhere} で`}</Text>
+                    )}
+                  </Box>
                 )}
                 {shown.map((line, i) => (
                   <Text key={`out:${start + i}`} mono wrap="truncate-end">

@@ -13,6 +13,7 @@ import {
   parseStatus,
   pruneTasks,
   slideShift,
+  splitCommand,
   statusColor,
   statusLabel,
   stripFence,
@@ -281,4 +282,46 @@ test("statusColor maps each state to a theme key", () => {
   expect(statusColor("CANCELLED")).toBe("inactive");
   expect(statusColor("BUDGET_EXCEEDED")).toBe("inactive");
   expect(statusColor("SOMETHING")).toBeUndefined();
+});
+
+test("splitCommand removes a leading cd and returns where", () => {
+  const cases: [string, { command: string; where?: string }][] = [
+    [
+      "cd /workspace/apps/agent && npx vitest run",
+      { command: "npx vitest run", where: "apps/agent" },
+    ],
+    ["cd apps/gateway && pnpm test", { command: "pnpm test", where: "apps/gateway" }],
+    ["cd ./apps/gateway && pnpm test", { command: "pnpm test", where: "apps/gateway" }],
+    ["cd /workspace && ls", { command: "ls" }],
+    ["cd . && ls", { command: "ls" }],
+    ["cd ../x && ls", { command: "cd ../x && ls" }],
+    ["cd /workspace/../x && ls", { command: "cd /workspace/../x && ls" }],
+    ["cd /tmp && ls", { command: "cd /tmp && ls" }],
+    ["cd ~ && ls", { command: "cd ~ && ls" }],
+    ['cd "$HOME" && ls', { command: 'cd "$HOME" && ls' }],
+    ["cd $HOME && ls", { command: "cd $HOME && ls" }],
+    ["cd - && ls", { command: "cd - && ls" }],
+    ['cd "apps/agent" && ls', { command: 'cd "apps/agent" && ls' }],
+    ["ls", { command: "ls" }],
+  ];
+  for (const [input, want] of cases) expect(splitCommand(input)).toEqual(want);
+});
+
+test("parseConsole splits the cd prefix of command and now.text", () => {
+  const parsed = parseConsole(
+    JSON.stringify({
+      status: "RUNNING",
+      now: { text: "$ cd apps/agent && pnpm test" },
+      output: { command: "cd /workspace/apps/gateway && ls", tail: "", running: true },
+    }),
+  );
+  expect(parsed?.command).toBe("ls");
+  expect(parsed?.commandWhere).toBe("apps/gateway");
+  expect(parsed?.nowText).toBe("$ pnpm test");
+  expect(parsed?.nowWhere).toBe("apps/agent");
+  const plain = parseConsole(
+    JSON.stringify({ status: "RUNNING", now: { text: "editing a.ts" }, output: null }),
+  );
+  expect(plain?.nowText).toBe("editing a.ts");
+  expect(plain?.nowWhere).toBeUndefined();
 });

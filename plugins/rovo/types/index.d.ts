@@ -29,7 +29,11 @@ export type RovoConsole = {
   phase: string | null;
   stoppedPhase: string | null;
   nowText: string | null;
+  /** nowText のコマンドの場所（/workspace からの相対）。 */
+  nowWhere?: string;
   command: string | null;
+  /** command の場所（/workspace からの相対）。 */
+  commandWhere?: string;
   tail: string | null;
   isRunning: boolean;
   /** 出力に対応していないサーバー（task_status だけ）。 */

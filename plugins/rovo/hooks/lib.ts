@@ -118,6 +118,45 @@ const prFromUrl = (value: unknown): PrLink | undefined => {
   return { number: Number.isSafeInteger(n) && n > 0 ? n : null, url };
 };
 
+const DIR_SEGMENT = /^[\p{L}\p{N}_.@+-]+$/u;
+const CD_PREFIX = /^cd\s+(\S+)\s+&&\s+(\S.*)$/;
+const WORKSPACE = "/workspace";
+
+/** cd の行き先を /workspace からの相対にする。素直なパスでなければ undefined、/workspace 自身と . は ""。 */
+const relativeDir = (path: string): string | undefined => {
+  let rest: string;
+  if (path === WORKSPACE || path.startsWith(`${WORKSPACE}/`))
+    rest = path.slice(WORKSPACE.length + 1);
+  else if (/^[/~$-]/.test(path)) return undefined;
+  else if (path === ".") return "";
+  else rest = path.startsWith("./") ? path.slice(2) : path;
+  if (rest === "") return "";
+  const parts = rest.split("/");
+  if (parts.at(-1) === "") parts.pop();
+  for (const p of parts) if (p === "." || p === ".." || !DIR_SEGMENT.test(p)) return undefined;
+  return parts.join("/");
+};
+
+/**
+ * 表示用に、コマンドの先頭の `cd <相対パス> && ` を外して場所に分ける（dashboard の splitCommand と同じ規則）。
+ * `cd /workspace && ` と `cd . && ` は前置きだけ外す。.. を含む・/workspace の外・~ や $HOME や -・引用符つきは触らない。
+ */
+export const splitCommand = (text: string): { command: string; where?: string } => {
+  const m = CD_PREFIX.exec(text);
+  if (m === null) return { command: text };
+  const dir = relativeDir(m[1] as string);
+  if (dir === undefined) return { command: text };
+  const command = m[2] as string;
+  return dir === "" ? { command } : { command, where: dir };
+};
+
+/** now.text は `$ ` で始まる形があるので、その後ろに splitCommand を当てる。 */
+const splitNow = (text: string | null): { text: string | null; where?: string } => {
+  if (text === null || !text.startsWith("$ ")) return { text };
+  const c = splitCommand(text.slice(2));
+  return { text: `$ ${c.command}`, ...(c.where === undefined ? {} : { where: c.where }) };
+};
+
 export const parseConsole = (text: string): ParsedConsole | null => {
   const body = asObject(text);
   if (body === null || typeof body.status !== "string") return null;
@@ -129,12 +168,17 @@ export const parseConsole = (text: string): ParsedConsole | null => {
   const dashboardUrl = httpsOnly(body.dashboard_url);
   const pr = parsePr(body.pr);
   const awaiting = parseAwaiting(body.status, body.awaiting);
+  const now2 = splitNow(plain(now?.text));
+  const cmdRaw = plain(output?.command);
+  const cmd = cmdRaw === null ? null : splitCommand(cmdRaw);
   return {
     status: stripFence(body.status),
     phase: plain(body.phase),
     stoppedPhase: plain(body.stopped_phase),
-    nowText: plain(now?.text),
-    command: plain(output?.command),
+    nowText: now2.text,
+    ...(now2.where !== undefined ? { nowWhere: now2.where } : {}),
+    command: cmd === null ? null : cmd.command,
+    ...(cmd?.where !== undefined ? { commandWhere: cmd.where } : {}),
     tail: plain(output?.tail),
     isRunning: output?.running === true,
     ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),

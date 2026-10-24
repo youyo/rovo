@@ -125,6 +125,27 @@ describe("MCP: task_review", () => {
     await client.close();
   });
 
+  it("説明と応答の note は、レビューのモデルが読み取りの道具（read_file・list_files・search）で調べる形で書く（「ツールなし」「1 回読ませ」ではない）", async () => {
+    const { client, number } = await setup();
+    const { tools } = await client.listTools();
+    const description = tools.find((x) => x.name === "task_review")?.description ?? "";
+    const instructions = client.getInstructions() ?? "";
+    const started = body(await client.callTool({ name: "task_review", arguments: args(number) }));
+    for (const text of [description, started.note as string]) {
+      expect(text).toContain("read_file");
+      expect(text).toContain("list_files");
+      expect(text).toContain("search");
+      expect(text).not.toContain("ツールなし");
+      expect(text).not.toContain("1 回読ませ");
+    }
+    // review_commands が空でも PR の head を取り出して、道具で調べられる
+    expect(description).toMatch(/review_commands.*(空|なくても|無くても)/);
+    expect(instructions).not.toContain("ツールなし");
+    expect(instructions).not.toContain("差分だけ");
+    expect(description).toContain("tool_rounds_exceeded");
+    await client.close();
+  });
+
   it("PR の head を固定してタスクを作り、レビューを COMMENT で投稿する。task_result はレビューの形（summary・patch・pr は無い）", async () => {
     const { client, head, number } = await setup();
     const started = body(

@@ -10,7 +10,6 @@ import {
   type ModelCallResult,
   REVIEW_MAX_TOOL_ROUNDS,
   REVIEW_TOOL_RESULT_TOTAL_MAX_BYTES,
-  type ReviewMessage,
   reviewWarnings,
   runReviewCommands,
   runReviewModel,

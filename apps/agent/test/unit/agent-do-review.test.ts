@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides } from "../../src/agent/deps";
 import type { TaskSpec } from "../../src/agent/types";
+import type { ScriptStep } from "../../src/pi/scripted-provider";
 import { REVIEW_JSON_ONLY_RETRY, REVIEW_SYSTEM_PROMPT } from "../../src/review/input";
 import { REVIEW_MAX_TOOL_ROUNDS } from "../../src/review/stage";
 import {
@@ -13,7 +14,6 @@ import {
   waitForTerminal,
   waitUntil,
 } from "./support/agent-fixture";
-import type { ScriptStep } from "../../src/pi/scripted-provider";
 
 afterEach(() => clearAgentTestOverrides());
 
@@ -299,7 +299,10 @@ describe("task_review: レビューのモデルの読み取りの道具", () => 
     expect(await waitForTerminal(fx)).toBe("completed");
     // 取り出しは review_commands が空でも走る（依存の導入は省く）
     expect(fx.sandbox.readySpecs).toHaveLength(1);
-    expect(fx.sandbox.readySpecs[0]).toMatchObject({ checkout: { pullNumber: 7, sha: HEAD }, deps: null });
+    expect(fx.sandbox.readySpecs[0]).toMatchObject({
+      checkout: { pullNumber: 7, sha: HEAD },
+      deps: null,
+    });
     // 道具の結果は非信頼データの囲みに入って、2 回目のモデル呼び出しに届く
     expect(fx.modelCalls.toolResults[0]).toEqual([]);
     const seen = fx.modelCalls.toolResults[1]?.join("\n") ?? "";
@@ -440,6 +443,8 @@ describe("task_review: レビューのモデルの読み取りの道具", () => 
     await fx.stub.start(reviewSpec("rv-tools-unavail"));
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.modelCalls.toolNames[0]).toEqual([]);
-    expect(fx.modelCalls.userTexts[0]?.join("\n")).toMatch(/tools.*unavailable|unavailable.*tools/i);
+    expect(fx.modelCalls.userTexts[0]?.join("\n")).toMatch(
+      /tools.*unavailable|unavailable.*tools/i,
+    );
   });
 });

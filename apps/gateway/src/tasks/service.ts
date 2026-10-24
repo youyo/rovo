@@ -202,7 +202,7 @@ export type ReviewStartValue = {
 } & WithDashboardUrl;
 
 export const REVIEW_NOTE =
-  "task_review: クライアントの PR のレビューだけを rovo に頼んだ（ワーカーの LLM は動かさない）。review_commands があれば Sandbox で PR の head を取り出して全部流し（失敗しても止めない）、review_model に差分と結果を 1 回読ませて、PR に COMMENT のレビューとして投稿する。PR の状態・本文・ブランチは変えない（Ready にもマージにもしない。承認・変更の要求も送らない）。進み具合は task_wait / task_status の review.stage（waiting → commands → reviewing → done / skipped）、結果は終端のあと task_result の review（comment_url・must_fix_count・suggestion_count・commands・usage）と target_pr。同じ PR の同じ head に同じ条件で頼み直すと、同じタスクが返る（二重に投稿しない）。";
+  "task_review: クライアントの PR のレビューだけを rovo に頼んだ（ワーカーの LLM は動かさない）。Sandbox に PR の head を常に取り出し（review_commands があれば全部流す。失敗しても止めない）、review_model に差分と結果を渡す。モデルは読み取り専用の道具 read_file・list_files・search（往復は 20 回まで）で差分の外を調べてから答え、rovo がそれを検査して PR に COMMENT のレビューとして投稿する。PR の状態・本文・ブランチは変えない（Ready にもマージにもしない。承認・変更の要求も送らない）。進み具合は task_wait / task_status の review.stage（waiting → commands → reviewing → done / skipped）、結果は終端のあと task_result の review（comment_url・must_fix_count・suggestion_count・commands・usage）と target_pr。同じ PR の同じ head に同じ条件で頼み直すと、同じタスクが返る（二重に投稿しない）。";
 export type PrReadyValue = {
   task_id: string;
   pr_number: number;

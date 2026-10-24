@@ -120,13 +120,18 @@ export function createReviewToolRunner(tools: readonly ToolLike[]): ReviewToolRu
     run: async (call) => {
       const tool = allowed.get(call.name);
       if (!tool) {
-        return fail("tool", `unknown tool: ${call.name.slice(0, 64)}. Available tools: ${REVIEW_TOOL_NAMES.join(", ")}.`);
+        return fail(
+          "tool",
+          `unknown tool: ${call.name.slice(0, 64)}. Available tools: ${REVIEW_TOOL_NAMES.join(", ")}.`,
+        );
       }
       const problem = checkArguments(tool.parameters, call.arguments);
       if (problem) return fail(tool.name, `invalid arguments: ${problem}`);
       try {
         const res = await tool.execute(call.arguments as never, {} as never, {} as never);
-        const text = (res.output ?? []).map((c) => (c.type === "text" ? (c.text ?? "") : "")).join("");
+        const text = (res.output ?? [])
+          .map((c) => (c.type === "text" ? (c.text ?? "") : ""))
+          .join("");
         return { text: shield(tool.name, text), isError: res.isError === true };
       } catch (e) {
         return fail(tool.name, e instanceof Error ? e.message : String(e));

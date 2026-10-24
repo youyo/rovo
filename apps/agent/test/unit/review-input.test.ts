@@ -248,3 +248,31 @@ describe("buildReviewInput", () => {
     expect(Object.keys(base)).not.toContain("summary");
   });
 });
+
+describe("レビューの固定の指示（道具）", () => {
+  it("system に、道具（read_file・list_files・search）で差分の外を確かめてから指摘すること・確かめられないことは推測として書くことを含む", () => {
+    expect(REVIEW_SYSTEM_PROMPT).toMatch(/read_file/);
+    expect(REVIEW_SYSTEM_PROMPT).toMatch(/list_files/);
+    expect(REVIEW_SYSTEM_PROMPT).toMatch(/search/);
+    expect(REVIEW_SYSTEM_PROMPT).toMatch(/re-export/);
+    expect(REVIEW_SYSTEM_PROMPT).toMatch(/looks like/);
+    // 道具の結果も非信頼データ
+    expect(REVIEW_SYSTEM_PROMPT).toMatch(/results of the tools/);
+  });
+
+  it("道具が使えないとき（toolsAvailable: false）は、その旨を入力に書く", () => {
+    const base = {
+      header: "h",
+      title: "t",
+      body: "",
+      diff: "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n",
+      diffTruncatedUpstream: false,
+      commands: [],
+      commandsUnavailable: false,
+    };
+    expect(buildReviewInput({ ...base, toolsAvailable: false }).blocks.join("\n")).toMatch(
+      /tools are unavailable/,
+    );
+    expect(buildReviewInput(base).blocks.join("\n")).not.toMatch(/tools are unavailable/);
+  });
+});

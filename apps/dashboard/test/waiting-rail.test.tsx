@@ -67,9 +67,9 @@ const tabs = (c: HTMLElement) =>
 const rows = (c: HTMLElement) => [...c.querySelectorAll("a.rail-row")] as HTMLAnchorElement[];
 
 describe("レールの「この日 / 待ち」の切り替え", () => {
-  it("上に 2 択のタブ（全員 / 自分と同じ seg の見た目）。待ちの件数をタブに添える。選択中は aria-pressed", () => {
+  it("上に 2 択のタブ（全員 / 自分と同じ見た目）。待ちの件数をタブに添える。選択中は aria-pressed", () => {
     const c = mount({ waiting: ready(waitingFixture), railTab: "day", onRailTabChange: () => {} });
-    const fs = c.querySelector("fieldset.seg.rail-tabs");
+    const fs = c.querySelector("fieldset.rail-tabs");
     expect(fs).not.toBeNull();
     expect(fs?.getAttribute("aria-label")).toBe("レールの表示（この日 / 待ち）");
     expect(tabs(c).map((b) => b.textContent)).toEqual([

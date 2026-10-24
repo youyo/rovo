@@ -211,13 +211,15 @@ fieldset {
 .grow {
   flex: 1 1 auto;
 }
-.seg {
+.seg,
+.rail-tabs {
   display: flex;
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
 }
 .seg button,
+.rail-tabs button,
 .user button {
   min-height: 28px;
   padding: 0;
@@ -226,12 +228,14 @@ fieldset {
   font: inherit;
   cursor: pointer;
 }
-.seg button {
+.seg button,
+.rail-tabs button {
   padding: 3px 12px;
   font-size: var(--fs-small);
   color: var(--dim);
 }
-.seg button[aria-pressed="true"] {
+.seg button[aria-pressed="true"],
+.rail-tabs button[aria-pressed="true"] {
   background: var(--fg);
   color: var(--panel);
 }
@@ -301,6 +305,7 @@ fieldset {
 }
 @media (pointer: coarse) {
   .seg button,
+  .rail-tabs button,
   .user button {
     min-height: 44px;
   }

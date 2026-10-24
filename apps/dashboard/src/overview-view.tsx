@@ -152,7 +152,7 @@ export function OverviewView(props: {
     }
     railNode = (
       <div className="rail-col">
-        <fieldset className="seg rail-tabs" aria-label={t("rail.tabsLabel")}>
+        <fieldset className="rail-tabs" aria-label={t("rail.tabsLabel")}>
           {tabs.map((x) => (
             <button
               key={x.value}

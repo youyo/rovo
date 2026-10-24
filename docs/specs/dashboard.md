@@ -700,3 +700,10 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
 5. **D13**: 案 B。既存の Terraform 管理の読み取りトークンに Analytics の Read を足す。名前は変えない。取れない項目は「取得できない」。
 6. **月**: UTC のまま「UTC の月」と明記。「今日」はブラウザのローカル日（D18）。
 7. **Access / Portal**: docs/deploy.md には OSS 利用者向けの内容（Access を前に置く場合の `/dashboard` と `/callback` の扱いなど）を書く（M11）。ユーザー自身の環境への設定は、インフラを管理する別のリポジトリで行う**別作業**で、この計画の範囲外（記載だけ）。
+
+## 追記: 日をまたいだ「待ち」と月のペース（2026-10-24）
+
+PR の流れの変更（完了で自動の Ready、マージはクライアント）で、前日以前の「Ready のまま未マージの PR」「入力待ち」が溜まりうる。画面は 1 日分（overview は最大 36 時間）しか見せないので、次の 2 つを足した。どちらも読み取り専用で、新しい画面・ルートは作らない。
+
+- **待ち**: 左のレールの上の「この日 / 待ち」の切り替え。`GET /dashboard/api/waiting?scope=all|me`。期間を切らず、INPUT_REQUIRED と、COMPLETED で PR があり Draft でなく rovo の記録で未マージのものを新しい順に返す（上限 100 件。超えたら `truncated`）。データは索引（task_index の `status` / `pr_draft` / `pr_merged`）。認可は overview と同じ（見える repository id の集合で絞る）。権限の無い待ちは個別の行を作らず `hidden_count` だけ（D7）。人が GitHub 上でマージ・クローズした PR は索引に反映されないので、見える行だけ GitHub の PR の状態を取って（overview と同じ fail-soft の仕組み）、merged / closed のものを外す。取れなかった（unknown）ものは残す。
+- **月のペース**: 予算の欄に 1 行。`month.period` と `generated_at` と `budget.spent_usd`・`monthly_budget_usd` から画面側だけで計算する（`apps/dashboard/src/pace.ts`。契約・API は変えない）。月は UTC。経過が 1 日未満は「まだ見込みを出せません」。上限を超える見込みなら文言で示す。

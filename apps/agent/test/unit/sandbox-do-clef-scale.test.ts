@@ -285,6 +285,30 @@ describe("SandboxDO: 判断ごとの記録と集計（usage の振り返り用�
     });
   });
 
+  it("明らかに軽いコマンドは Clef を呼ばず、skippedLight を数える（判断の記録は増やさない）。重いコマンド・迷う形は今までどおり呼ぶ", async () => {
+    await runInDO(sandboxStub("clef-skip-light"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      await inst.exec(["bash", "-c", "git status && ls"], AGENT);
+      await inst.exec(["bash", "-c", "cat a | head -3"], { origin: "verification" });
+      expect(fake.clef.calls.length).toBe(0);
+      let m = await inst.metrics();
+      expect(m.scaleStats).toEqual({
+        decisions: 0,
+        raised: 0,
+        clefFailures: 0,
+        slowNotRaised: 0,
+        skippedLight: 2,
+      });
+      expect(m.scaleDecisions).toBeUndefined();
+      await inst.exec(["bash", "-c", "ls && pnpm build"], AGENT); // 迷う形 → 聞く
+      await inst.exec(HEAVY, AGENT);
+      expect(fake.clef.calls.length).toBe(2);
+      m = await inst.metrics();
+      expect(m.scaleStats).toMatchObject({ decisions: 2, skippedLight: 2 });
+    });
+  });
+
   it("記録は直近 50 件まで（古い方から捨てる）。集計は捨てずに数え続ける。記録の大きさは小さいまま", async () => {
     await runInDO(sandboxStub("clef-cap"), async (inst) => {
       setup(inst);

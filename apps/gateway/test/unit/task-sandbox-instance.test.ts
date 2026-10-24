@@ -441,6 +441,23 @@ describe("task_result の usage: Clef による昇格の判断の集計と記録
     expect(JSON.stringify(bad)).not.toContain("free text");
   });
 
+  it("skipped_light は sandbox_scale_skipped_light に写る（decisions が 0 でも。欄が無い古い記録は 0）", async () => {
+    const only = await usageWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      scaleStats: { decisions: 0, raised: 0, clefFailures: 0, slowNotRaised: 0, skippedLight: 7 },
+    });
+    expect(only).toMatchObject({ sandbox_scale_skipped_light: 7, sandbox_scale_decisions: 0 });
+    const old = await usageWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      scaleStats: { decisions: 3, raised: 0, clefFailures: 0, slowNotRaised: 0 },
+    });
+    expect(old).toMatchObject({ sandbox_scale_skipped_light: 0 });
+  });
+
   it("Clef を呼ばなかったタスク（報告が無い・空）には付かない", async () => {
     const none = await usageWith({ runtimeMs: 1, restarts: 0, bootRetries: 0 });
     for (const k of [

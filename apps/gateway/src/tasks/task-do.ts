@@ -325,6 +325,7 @@ export type ResultView = {
     sandbox_scale_clef_failures?: number;
     /** 上げなかったのに長くかかった（60 秒超）コマンドの数。Clef の見落としの候補 */
     sandbox_scale_slow_not_raised?: number;
+    sandbox_scale_skipped_light?: number;
     /** Clef の判断ごとの記録（古い順、直近 50 件まで）。from は判断したときの大きさ、to は上げた先（上げなかった・昇格に失敗した・Clef が失敗したときは null）、heavy / fast4 / choice は確率、model は答えを使ったモデル（flash / clef）、clef_ms は Clef の所要、cmd_ms / exit_code はそのコマンドの実行時間と終了コード、cmd は argv[0] の basename だけ（argv の全体は残らない）。Clef の精度の振り返り用 */
     sandbox_scale_log?: PublicScaleDecision[];
   };
@@ -3304,13 +3305,14 @@ export class TaskDO extends DurableObject<Env> {
               ...(up.sandbox_promotion_failures !== undefined
                 ? { promotionFailures: up.sandbox_promotion_failures }
                 : {}),
-              ...(up.sandbox_scale_decisions !== undefined && up.sandbox_scale_decisions > 0
+              ...((up.sandbox_scale_decisions ?? 0) > 0 || (up.sandbox_scale_skipped_light ?? 0) > 0
                 ? {
                     scaleStats: {
-                      decisions: up.sandbox_scale_decisions,
+                      decisions: up.sandbox_scale_decisions ?? 0,
                       raised: up.sandbox_scale_raised ?? 0,
                       clefFailures: up.sandbox_scale_clef_failures ?? 0,
                       slowNotRaised: up.sandbox_scale_slow_not_raised ?? 0,
+                      skippedLight: up.sandbox_scale_skipped_light ?? 0,
                     },
                   }
                 : {}),
@@ -3809,6 +3811,7 @@ function sandboxScaleUsage(sb: UsageDto["sandbox"]): {
   sandbox_scale_raised?: number;
   sandbox_scale_clef_failures?: number;
   sandbox_scale_slow_not_raised?: number;
+  sandbox_scale_skipped_light?: number;
   sandbox_scale_log?: PublicScaleDecision[];
 } {
   const stats = sanitizeScaleStats(sb?.scaleStats);
@@ -3820,6 +3823,7 @@ function sandboxScaleUsage(sb: UsageDto["sandbox"]): {
           sandbox_scale_raised: stats.raised,
           sandbox_scale_clef_failures: stats.clef_failures,
           sandbox_scale_slow_not_raised: stats.slow_not_raised,
+          sandbox_scale_skipped_light: stats.skipped_light,
         }
       : {}),
     ...(log.length > 0 ? { sandbox_scale_log: log } : {}),

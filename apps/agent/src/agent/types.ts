@@ -249,6 +249,8 @@ export interface SandboxScaleStats {
   clefFailures: number;
   /** 上げなかったのに長くかかった（60 秒超）コマンドの数。Clef の見落としの候補 */
   slowNotRaised: number;
+  /** 明らかに軽いコマンドで Clef を呼ばずに今の大きさのまま実行した回数 */
+  skippedLight: number;
 }
 
 /**

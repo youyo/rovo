@@ -295,12 +295,14 @@ function sanitizeScaleStats(v: unknown): SandboxScaleStats | undefined {
   if (typeof v !== "object" || v === null) return undefined;
   const r = v as Record<string, unknown>;
   const decisions = finiteCount(r.decisions);
-  if (decisions <= 0) return undefined;
+  const skippedLight = finiteCount(r.skippedLight);
+  if (decisions <= 0 && skippedLight <= 0) return undefined;
   return {
     decisions,
     raised: finiteCount(r.raised),
     clefFailures: finiteCount(r.clefFailures),
     slowNotRaised: finiteCount(r.slowNotRaised),
+    skippedLight,
   };
 }
 

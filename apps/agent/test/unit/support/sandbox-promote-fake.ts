@@ -8,7 +8,8 @@ export const CA_CERT = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 export const IMAGE = `registry.cloudflare.com/acct/rovo-agent-sandboxdo-workspace@sha256:${"b".repeat(64)}`;
 export const HEAVY = ["pnpm", "test"];
 export const BUILD = ["pnpm", "build"];
-export const LIGHT = ["ls", "-la"];
+// Clef が軽いと判断するが、isLightCommand の表には無い（Clef を呼ぶ）コマンド
+export const LIGHT = ["node", "--version"];
 /** 子（bash ツール）が実行したコマンド。Clef の判断の対象になる（Sandbox 自身の内部の exec には付けない） */
 export const AGENT = { origin: "agent_command" } as const;
 

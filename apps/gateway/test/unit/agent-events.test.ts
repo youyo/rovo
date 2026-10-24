@@ -493,6 +493,17 @@ describe("usage の Clef による昇格の判断の集計（sandbox_scale_*）"
   const usage = (sandbox: Record<string, unknown>) =>
     payloadOf(mapAgentEvent(ev("usage", { costUsd: 1, sandbox: { runtimeMs: 100, ...sandbox } })));
 
+  it("skippedLight は sandbox_scale_skipped_light に写る（欄が無ければ 0）", () => {
+    expect(
+      usage({
+        scaleStats: { decisions: 0, raised: 0, clefFailures: 0, slowNotRaised: 0, skippedLight: 5 },
+      }),
+    ).toMatchObject({ sandbox_scale_skipped_light: 5 });
+    expect(
+      usage({ scaleStats: { decisions: 1, raised: 0, clefFailures: 0, slowNotRaised: 0 } }),
+    ).toMatchObject({ sandbox_scale_skipped_light: 0 });
+  });
+
   it("集計は数値だけを sandbox_scale_* に写す（整数に切り捨て）。判断ごとの記録は usage イベントに載せない（イベントを大きくしない）", () => {
     const p = usage({
       scaleStats: { decisions: 12.9, raised: 2, clefFailures: 1, slowNotRaised: 0 },

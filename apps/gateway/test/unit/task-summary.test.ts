@@ -583,6 +583,7 @@ describe("Clef による昇格の判断の集計（sandbox_scale_*）を summary
       raised: 2,
       clef_failures: 1,
       slow_not_raised: 3,
+      skipped_light: 0,
     });
     expect(buildTaskSummary(base).sandbox).not.toHaveProperty("scale");
     const zero = buildTaskSummary({
@@ -598,6 +599,25 @@ describe("Clef による昇格の判断の集計（sandbox_scale_*）を summary
       } as SummaryInput["usage"],
     });
     expect(zero.sandbox).not.toHaveProperty("scale");
+  });
+
+  it("skipped_light だけが 0 より大きいときも scale に出る。古い記録（欄なし）は 0", () => {
+    const base = input();
+    const mk = (scaleStats: Record<string, number>) =>
+      buildTaskSummary({
+        ...base,
+        usage: {
+          ...base.usage,
+          sandbox: { runtimeMs: 1, restarts: 0, bootRetries: 0, scaleStats },
+        } as SummaryInput["usage"],
+      });
+    expect(
+      mk({ decisions: 0, raised: 0, clefFailures: 0, slowNotRaised: 0, skippedLight: 4 }).sandbox
+        .scale,
+    ).toEqual({ decisions: 0, raised: 0, clef_failures: 0, slow_not_raised: 0, skipped_light: 4 });
+    expect(
+      mk({ decisions: 2, raised: 0, clefFailures: 0, slowNotRaised: 0 }).sandbox.scale,
+    ).toMatchObject({ skipped_light: 0 });
   });
 
   it("usage_public: 数値の集計は増えるだけ（小さい値で巻き戻さない）。parse で読み戻せる", () => {

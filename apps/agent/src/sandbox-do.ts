@@ -53,7 +53,7 @@ import {
   type RecentCommand,
   resolveClefThresholds,
 } from "./sandbox-scale-decision";
-import { scaleCmd } from "./scale-cmd";
+import { isLightCommand, scaleCmd } from "./scale-cmd";
 import { TailBuffer } from "./tail-buffer";
 import {
   isInsideWorkspace,
@@ -470,7 +470,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       // 成功した昇格の履歴（trigger つき）
       ...(promotions !== undefined && promotions.length > 0 ? { promotions } : {}),
       // Clef の判断の集計と、判断ごとの記録（直近 50 件）。Clef を呼んだタスクだけ
-      ...(scaleStats !== undefined && scaleStats.decisions > 0 ? { scaleStats } : {}),
+      ...(scaleStats !== undefined && (scaleStats.decisions > 0 || scaleStats.skippedLight > 0)
+        ? { scaleStats }
+        : {}),
       ...(scaleLog !== undefined && scaleLog.length > 0 ? { scaleDecisions: scaleLog } : {}),
       // 見送り・失敗の内訳（昇格の試みごとに 1 件。promotionReason は最後の理由だけ）
       ...(failures !== undefined && failures.length > 0 ? { promotionFailures: failures } : {}),
@@ -1326,6 +1328,18 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const current = this.currentInstance();
     // 今の大きさがすでに上限なら、聞いても上げられないので呼ばない
     if (SANDBOX_INSTANCES[current].vcpu >= SANDBOX_INSTANCES[max.instance].vcpu) return "none";
+    // 明らかに軽いコマンドは Clef を呼ばずに今の大きさのまま実行する（判断の記録は増やさず、省いた回数だけ数える）
+    if (isLightCommand(argv)) {
+      const prev = kv.get<SandboxScaleStats>("scale_stats");
+      kv.put("scale_stats", {
+        decisions: prev?.decisions ?? 0,
+        raised: prev?.raised ?? 0,
+        clefFailures: prev?.clefFailures ?? 0,
+        slowNotRaised: prev?.slowNotRaised ?? 0,
+        skippedLight: (prev?.skippedLight ?? 0) + 1,
+      });
+      return "none";
+    }
     const gatewayId = (this.env as unknown as { AI_GATEWAY_ID?: string }).AI_GATEWAY_ID ?? "";
     const ai = this.scaleAi(gatewayId);
     if (ai === undefined) {
@@ -1474,6 +1488,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       raised: (prev?.raised ?? 0) + (d.to !== null ? 1 : 0),
       clefFailures: (prev?.clefFailures ?? 0) + (d.failed === true ? 1 : 0),
       slowNotRaised: prev?.slowNotRaised ?? 0,
+      skippedLight: prev?.skippedLight ?? 0,
     });
   }
 

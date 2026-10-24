@@ -208,9 +208,9 @@ describe("SandboxDO: 判断ごとの記録と集計（usage の振り返り用�
   it("判断ごとに、大きさ・確率・モデル・Clef の所要・コマンドの実行時間と終了コード・argv[0] だけを残す。argv の全体は残さない", async () => {
     await runInDO(sandboxStub("clef-log"), async (inst) => {
       const fake = setup(inst);
-      fake.handler = (argv) => (argv[0]?.endsWith("false") ? { code: 3 } : undefined);
+      fake.handler = (argv) => (argv[0]?.endsWith("failing") ? { code: 3 } : undefined);
       await inst.ensureReady(spec());
-      await inst.exec(["/usr/bin/false", "--token=SECRET-ARGV-VALUE", "other"], AGENT);
+      await inst.exec(["/usr/bin/failing", "--token=SECRET-ARGV-VALUE", "other"], AGENT);
       await inst.exec(HEAVY, AGENT);
       const m = await inst.metrics();
       const [a, b] = m.scaleDecisions ?? [];
@@ -221,7 +221,7 @@ describe("SandboxDO: 判断ごとの記録と集計（usage の振り返り用�
         fast4: 0.02,
         choice: [0.2, 0.5, 0.3],
         model: "flash",
-        cmd: "false",
+        cmd: "failing",
         exitCode: 3,
       });
       expect(typeof a.at).toBe("number");
@@ -236,7 +236,13 @@ describe("SandboxDO: 判断ごとの記録と集計（usage の振り返り用�
         exitCode: 0,
       });
       expect(JSON.stringify(m)).not.toContain("SECRET-ARGV-VALUE");
-      expect(m.scaleStats).toEqual({ decisions: 2, raised: 1, clefFailures: 0, slowNotRaised: 0 });
+      expect(m.scaleStats).toEqual({
+        decisions: 2,
+        raised: 1,
+        clefFailures: 0,
+        slowNotRaised: 0,
+        skippedLight: 0,
+      });
     });
   });
 
@@ -285,11 +291,34 @@ describe("SandboxDO: 判断ごとの記録と集計（usage の振り返り用�
     });
   });
 
+  it("明らかに軽いコマンドは Clef を呼ばず、skippedLight を数える（判断の記録は増やさない）。重いコマンド・迷う形は今までどおり呼ぶ", async () => {
+    await runInDO(sandboxStub("clef-skip-light"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      await inst.exec(["bash", "-c", "git status && ls"], AGENT);
+      await inst.exec(["bash", "-c", "cat a | head -3"], { origin: "verification" });
+      expect(fake.clef.calls.length).toBe(0);
+      let m = await inst.metrics();
+      expect(m.scaleStats).toEqual({
+        decisions: 0,
+        raised: 0,
+        clefFailures: 0,
+        slowNotRaised: 0,
+        skippedLight: 2,
+      });
+      expect(m.scaleDecisions).toBeUndefined();
+      await inst.exec(["bash", "-c", "ls && pnpm build"], AGENT); // 迷う形 → 聞く
+      expect(fake.clef.calls.length).toBe(1);
+      m = await inst.metrics();
+      expect(m.scaleStats).toMatchObject({ decisions: 1, skippedLight: 2 });
+    });
+  });
+
   it("記録は直近 50 件まで（古い方から捨てる）。集計は捨てずに数え続ける。記録の大きさは小さいまま", async () => {
     await runInDO(sandboxStub("clef-cap"), async (inst) => {
       setup(inst);
       await inst.ensureReady(spec());
-      for (let i = 0; i < 55; i++) await inst.exec(["ls", String(i)], AGENT);
+      for (let i = 0; i < 55; i++) await inst.exec(["node", String(i)], AGENT);
       const m = await inst.metrics();
       expect(m.scaleDecisions).toHaveLength(50);
       expect(m.scaleStats?.decisions).toBe(55);
@@ -365,19 +394,19 @@ describe("SandboxDO: Clef に渡す state（リポジトリの事実と直近の
   it("直近 3 件のコマンド（コマンド・所要秒・終了コード）を state に入れる。古いものは入れない", async () => {
     await runInDO(sandboxStub("clef-recent"), async (inst) => {
       const fake = setup(inst);
-      fake.handler = (argv) => (argv[0] === "false" ? { code: 1 } : undefined);
+      fake.handler = (argv) => (argv[0] === "failing" ? { code: 1 } : undefined);
       await inst.ensureReady(spec());
-      await inst.exec(["echo", "one"], AGENT);
-      await inst.exec(["echo", "two"], AGENT);
-      await inst.exec(["false"], AGENT);
-      await inst.exec(["echo", "four"], AGENT);
-      await inst.exec(["echo", "five"], AGENT);
+      await inst.exec(["node", "one"], AGENT);
+      await inst.exec(["node", "two"], AGENT);
+      await inst.exec(["failing"], AGENT);
+      await inst.exec(["node", "four"], AGENT);
+      await inst.exec(["node", "five"], AGENT);
       const recent = fake.clef.calls[4]?.state.recent_commands as {
         command: string;
         seconds: number;
         exit_code: number;
       }[];
-      expect(recent.map((r) => r.command)).toEqual(["echo two", "false", "echo four"]);
+      expect(recent.map((r) => r.command)).toEqual(["node two", "failing", "node four"]);
       expect(recent.map((r) => r.exit_code)).toEqual([0, 1, 0]);
       expect(recent.every((r) => typeof r.seconds === "number")).toBe(true);
       expect(fake.clef.calls[0]?.state.recent_commands).toEqual([]);

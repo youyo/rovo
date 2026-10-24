@@ -2155,6 +2155,7 @@ describe("sandbox_instances_list / task_start の sandbox_instance", () => {
       "sandbox_scale_raised",
       "sandbox_scale_clef_failures",
       "sandbox_scale_slow_not_raised",
+      "sandbox_scale_skipped_light",
       "sandbox_scale_log",
       "sandbox_promotion_failures",
     ]) {

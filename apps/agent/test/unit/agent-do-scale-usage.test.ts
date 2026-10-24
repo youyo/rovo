@@ -185,7 +185,7 @@ describe("AgentDO: usage の Clef の判断の集計と記録", () => {
       restarts: 0,
       bootRetries: 0,
       instance: "standard-2",
-      scaleStats: { decisions: 3, raised: 1, clefFailures: 1, slowNotRaised: 0 },
+      scaleStats: { decisions: 3, raised: 1, clefFailures: 1, slowNotRaised: 0, skippedLight: 0 },
       scaleDecisions: [
         decision(),
         { at: 2, from: "standard-3", to: null, failed: true, clefMs: 15_000, cmd: "ls" },
@@ -195,7 +195,13 @@ describe("AgentDO: usage の Clef の判断の集計と記録", () => {
     };
     expect(await start(fx, "clef-scale-usage")).toBe("completed");
     const sb = done(await fx.stub.getResult()).usage.sandbox;
-    expect(sb?.scaleStats).toEqual({ decisions: 3, raised: 1, clefFailures: 1, slowNotRaised: 0 });
+    expect(sb?.scaleStats).toEqual({
+      decisions: 3,
+      raised: 1,
+      clefFailures: 1,
+      slowNotRaised: 0,
+      skippedLight: 0,
+    });
     expect(sb?.scaleDecisions).toHaveLength(3);
     expect(sb?.scaleDecisions?.[0]).toMatchObject({
       from: "standard-2",
@@ -216,7 +222,7 @@ describe("AgentDO: usage の Clef の判断の集計と記録", () => {
       runtimeMs: 10,
       restarts: 0,
       bootRetries: 0,
-      scaleStats: { decisions: 0, raised: 0, clefFailures: 0, slowNotRaised: 0 },
+      scaleStats: { decisions: 0, raised: 0, clefFailures: 0, slowNotRaised: 0, skippedLight: 0 },
       scaleDecisions: [],
     };
     expect(await start(fx, "clef-scale-zero")).toBe("completed");
@@ -234,12 +240,22 @@ describe("sameUsage: Clef の判断の集計の違いも別の usage として�
     }) as never;
 
   it("集計や記録の件数が違うと同じではない。同じなら同じ", () => {
-    const a = { scaleStats: { decisions: 1, raised: 0, clefFailures: 0, slowNotRaised: 0 } };
+    const a = {
+      scaleStats: { decisions: 1, raised: 0, clefFailures: 0, slowNotRaised: 0, skippedLight: 0 },
+    };
     expect(sameUsage(u(a), u(a))).toBe(true);
     expect(
       sameUsage(
         u(a),
-        u({ scaleStats: { decisions: 2, raised: 0, clefFailures: 0, slowNotRaised: 0 } }),
+        u({
+          scaleStats: {
+            decisions: 2,
+            raised: 0,
+            clefFailures: 0,
+            slowNotRaised: 0,
+            skippedLight: 0,
+          },
+        }),
       ),
     ).toBe(false);
     expect(sameUsage(u({}), u({ scaleDecisions: [{}] }))).toBe(false);

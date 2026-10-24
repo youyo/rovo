@@ -224,3 +224,72 @@ export function scaleCmd(argv: readonly string[]): string {
   }
   return clean(argv[0] ?? "");
 }
+
+/** 明らかに軽いコマンドの先頭の語。「上げる」を決める表ではなく、「聞かなくてよい」の判定だけに使う */
+const LIGHT_WORDS = new Set(
+  (
+    "ls cat head tail wc pwd echo printf true false which type stat file basename dirname " +
+    "realpath readlink date grep rg sed awk sort uniq cut tr diff cmp mkdir touch cd test"
+  ).split(" "),
+);
+const LIGHT_GIT = new Set([
+  "status",
+  "log",
+  "diff",
+  "show",
+  "rev-parse",
+  "branch",
+  "remote",
+  "ls-files",
+]);
+
+/** 先頭の語（と git の 2 語目）が表にあるか */
+function lightHead(first: string, second: string | undefined): boolean {
+  if (first === "git") return second !== undefined && LIGHT_GIT.has(second);
+  return LIGHT_WORDS.has(first);
+}
+
+/**
+ * Clef に聞かなくてよいほど明らかに軽いコマンドか。迷う形はすべて false（今までどおり Clef に聞く）。
+ * true は、次をすべて満たすときだけ: `bash -c <script>` の形で、script が tokenize できて `$(`・バッククォート・here-doc・プロセス置換（`<(` `>(`）を含まず、2000 文字（SCAN_CHARS）以内で、
+ * 区切り（`&&` `||` `;` `|` `&` 改行）で分けた各単純コマンドの先頭の語がすべて表にある（git は 2 語目が読み取り系のときだけ）。
+ * shell を通さない直の argv は、argv[0] の basename が表にあれば true。
+ */
+export function isLightCommand(argv: readonly string[]): boolean {
+  const script = shellScript(argv);
+  if (script === null) {
+    const [first, second] = argv;
+    if (first === undefined || SHELLS.has(basename(first))) return false;
+    return lightHead(basename(first), second);
+  }
+  // tokenize は先頭の SCAN_CHARS しか読まない。それより長いと後ろに重いコマンドが隠れうる
+  if (script.length > SCAN_CHARS) return false;
+  if (
+    script.includes("$(") ||
+    script.includes("`") ||
+    script.includes("<<") ||
+    script.includes("<(") ||
+    script.includes(">(")
+  )
+    return false;
+  // `2>&1`・`&>file` の `&` を区切りと読まないよう、先に fd の複製を取り除く
+  const t = tokenize(script.replace(/\d*[<>]&(?:\d+|-)/g, "").replace(/&>>?/g, ">"));
+  if (t === null) return false;
+  let commands = 0;
+  let cmd: string[] = [];
+  const check = (): boolean => {
+    if (cmd.length === 0) return true;
+    commands += 1;
+    const ok = lightHead(cmd[0] ?? "", cmd[1]);
+    cmd = [];
+    return ok;
+  };
+  for (const w of t) {
+    if (SEPARATORS.has(w)) {
+      if (!check()) return false;
+    } else {
+      cmd.push(w);
+    }
+  }
+  return check() && commands > 0;
+}

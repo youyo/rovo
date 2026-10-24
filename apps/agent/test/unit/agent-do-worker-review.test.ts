@@ -42,6 +42,8 @@ const MUST_FIX = {
   severity: "high",
 };
 const SUGGESTION = { path: "src/sum.ts", line: null, reason: "s", change: "", severity: "low" };
+/** ワーカーの report_completion。予算（$0.03）のうち $0.02 を使う（残りではレビューの最大額が収まらない） */
+const piSpend = (): ScriptStep => ({ ...report(), usage: { input: 20_000 } });
 const readFile = (path: string): ScriptStep => ({
   toolCall: { name: "read_file", arguments: { path } },
 });
@@ -62,8 +64,18 @@ async function resultOf(fx: Fixture) {
   return { result: d, review: d.review };
 }
 
-function fixture(name: string, script: ScriptStep[], sha = "c".repeat(40)): Fixture {
-  const fx = newFixture(name, script);
+/**
+ * 台本は最初の user メッセージの本文をキーに引く。ワーカー（Pi）の台本はその指示文（makeSpec の instructions）をキーにして保存し、
+ * 既定の台本はレビューのモデルが使う（レビューの会話は、ワーカーの会話とは別の台本の先頭から始まる）。
+ */
+async function fixture(
+  name: string,
+  review: ScriptStep[],
+  worker: ScriptStep[] = [report()],
+  sha = "c".repeat(40),
+): Promise<Fixture> {
+  const fx = newFixture(name, review);
+  await fx.stub.setScript(`taskId=${name} を実装して`, worker);
   fx.reviewDiff.value = DIFF;
   // git rev-parse HEAD の応答（検証の前後と固定の確認で何度も読む）。尽きたあとの既定値だと固定の確認が合わない
   fx.revParse.push(...Array.from({ length: 12 }, () => sha));
@@ -72,10 +84,11 @@ function fixture(name: string, script: ScriptStep[], sha = "c".repeat(40)): Fixt
 
 describe("worker_review: レビューの段（verification のあと、完了にする前）", () => {
   it("verification_commands が通ったあと、同じ SHA で review_commands を流し、モデルを呼び、本文を結果に残して completed にする", async () => {
-    const fx = fixture("wr-flow", [
-      report(WORKER_CLAIM),
-      { text: verdict({ must_fix: [MUST_FIX] }), usage: { input: 1000, output: 500 } },
-    ]);
+    const fx = await fixture(
+      "wr-flow",
+      [{ text: verdict({ must_fix: [MUST_FIX] }), usage: { input: 1000, output: 500 } }],
+      [report(WORKER_CLAIM)],
+    );
     const r = await fx.stub.start(
       workerSpec("wr-flow", {}, [{ argv: ["pnpm", "test"] }, { argv: ["pnpm", "lint"] }]),
     );
@@ -83,7 +96,11 @@ describe("worker_review: レビューの段（verification のあと、完了に
     expect(await waitForTerminal(fx)).toBe("completed");
 
     // verification_commands（npm test）→ review_commands（pnpm test・pnpm lint）の順。どちらも origin: verification
-    expect(fx.verifyCalls).toEqual([["npm", "test"], ["pnpm", "test"], ["pnpm", "lint"]]);
+    expect(fx.verifyCalls).toEqual([
+      ["npm", "test"],
+      ["pnpm", "test"],
+      ["pnpm", "lint"],
+    ]);
     const origins = fx.sandbox.calls
       .filter((c) => c.argv[0] === "pnpm" || c.argv[0] === "npm")
       .map((c) => c.options.origin);
@@ -91,7 +108,7 @@ describe("worker_review: レビューの段（verification のあと、完了に
 
     // 差分は Sandbox の固定した SHA から読む（base_sha..固定 SHA）
     expect(fx.reviewDiffCalls).toHaveLength(1);
-    expect(fx.reviewDiffCalls[0]).toContain("base000...cccccccccccccccccccccccccccccccccccccccc");
+    expect(fx.reviewDiffCalls[0]).toContain("base000..cccccccccccccccccccccccccccccccccccccccc");
 
     expect(fx.modelCalls.count).toBe(2);
     const { result, review } = await resultOf(fx);
@@ -120,26 +137,28 @@ describe("worker_review: レビューの段（verification のあと、完了に
   });
 
   it("レビューのモデルへの入力: 差分・目的・受け入れ条件・review_commands の結果を渡し、ワーカーの summary は渡さない。道具は読み取りの 3 つだけ", async () => {
-    const fx = fixture("wr-input", [report(WORKER_CLAIM), { text: verdict() }]);
+    const fx = await fixture("wr-input", [{ text: verdict() }], [report(WORKER_CLAIM)]);
     fx.verifyResults.push({}, { exitCode: 1, stdout: "1 failed: sum.test.ts" });
     await fx.stub.start(workerSpec("wr-input", {}, [{ argv: ["pnpm", "test"] }]));
     expect(await waitForTerminal(fx)).toBe("completed");
-    expect(fx.modelCalls.systemTexts[1]).toBe(REVIEW_SYSTEM_PROMPT);
-    const seen = fx.modelCalls.userTexts[1]?.join("\n") ?? "";
+    const reviewCall = fx.modelCalls.systemTexts.indexOf(REVIEW_SYSTEM_PROMPT);
+    expect(reviewCall).toBeGreaterThan(0);
+    const seen = fx.modelCalls.userTexts[reviewCall]?.join("\n") ?? "";
     expect(seen).toContain("taskId=wr-input を実装して");
     expect(seen).toContain("テストが通る");
     expect(seen).toContain("a + b");
     expect(seen).toContain("1 failed: sum.test.ts");
     expect(seen).not.toContain(WORKER_CLAIM);
-    expect(fx.modelCalls.toolNames[1]).toEqual(["read_file", "list_files", "search"]);
+    expect(fx.modelCalls.toolNames[reviewCall]).toEqual(["read_file", "list_files", "search"]);
+    // ワーカー自身のモデルの呼び出しには、ワーカーの道具（書き込み・bash など）が付く
+    expect(fx.modelCalls.toolNames[0]).toContain("report_completion");
     // review_commands の失敗はタスクを止めない（レビューの入力になる）
     const { review } = await resultOf(fx);
     expect(review?.commands[0]).toMatchObject({ exitCode: 1 });
   });
 
   it("読み取りの道具の往復: read_file の結果がモデルに渡り、本文に反映される。Sandbox はレビューが終わるまで止めない", async () => {
-    const fx = fixture("wr-tools", [
-      report(),
+    const fx = await fixture("wr-tools", [
       readFile("src/index.ts"),
       {
         text: verdict({
@@ -165,7 +184,11 @@ describe("worker_review: レビューの段（verification のあと、完了に
   });
 
   it("verification_commands が通らないあいだはレビューしない。通った回の SHA でだけレビューする", async () => {
-    const fx = fixture("wr-retry", [report("first"), report("second"), { text: verdict() }]);
+    const fx = await fixture(
+      "wr-retry",
+      [{ text: verdict() }],
+      [report("first"), report("second")],
+    );
     fx.verifyResults.push({ exitCode: 1, stdout: "fail" });
     fx.revParse.length = 0;
     fx.revParse.push(...Array.from({ length: 3 }, () => "a".repeat(40)));
@@ -173,14 +196,23 @@ describe("worker_review: レビューの段（verification のあと、完了に
     await fx.stub.start(workerSpec("wr-retry", {}, [{ argv: ["pnpm", "test"] }]));
     expect(await waitForTerminal(fx)).toBe("completed");
     // 1 回目の検証の失敗では review_commands もモデルも呼ばない
-    expect(fx.verifyCalls).toEqual([["npm", "test"], ["npm", "test"], ["pnpm", "test"]]);
+    expect(fx.verifyCalls).toEqual([
+      ["npm", "test"],
+      ["npm", "test"],
+      ["pnpm", "test"],
+    ]);
+    // ワーカーの 2 回 + レビューの 1 回
     expect(fx.modelCalls.count).toBe(3);
     const { review } = await resultOf(fx);
     expect(review?.headSha).toBe("b".repeat(40));
   });
 
   it("検証を使い切って failed になったときは、レビューしない（review は skipped）", async () => {
-    const fx = fixture("wr-verify-fail", [report("1"), report("2"), report("3"), report("4")]);
+    const fx = await fixture(
+      "wr-verify-fail",
+      [{ text: verdict() }],
+      [report("1"), report("2"), report("3"), report("4")],
+    );
     for (let i = 0; i < 4; i++) fx.verifyResults.push({ exitCode: 1, stdout: "fail" });
     await fx.stub.start(workerSpec("wr-verify-fail", {}, [{ argv: ["pnpm", "test"] }]));
     expect(await waitForTerminal(fx)).toBe("failed");
@@ -192,7 +224,7 @@ describe("worker_review: レビューの段（verification のあと、完了に
   });
 
   it("verification_commands が無く Sandbox も使っていなくても、レビューのために Sandbox を用意して流す", async () => {
-    const fx = fixture("wr-no-verify", [report(), { text: verdict() }]);
+    const fx = await fixture("wr-no-verify", [{ text: verdict() }]);
     await fx.stub.start(workerSpec("wr-no-verify", { verificationCommands: [] }));
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.sandbox.readySpecs).toHaveLength(1);
@@ -204,7 +236,7 @@ describe("worker_review: レビューの段（verification のあと、完了に
 
 describe("worker_review: 結果の分類（review_fix_rounds: 0）", () => {
   it("must_fix が 0 件・suggestions なし: warnings に review_* は無い", async () => {
-    const fx = fixture("wr-clean", [report(), { text: verdict() }]);
+    const fx = await fixture("wr-clean", [{ text: verdict() }]);
     await fx.stub.start(workerSpec("wr-clean"));
     expect(await waitForTerminal(fx)).toBe("completed");
     const { result, review } = await resultOf(fx);
@@ -213,8 +245,7 @@ describe("worker_review: 結果の分類（review_fix_rounds: 0）", () => {
   });
 
   it("must_fix が 0 件で suggestions がある: review_suggestions: <件数>", async () => {
-    const fx = fixture("wr-suggest", [
-      report(),
+    const fx = await fixture("wr-suggest", [
       { text: verdict({ suggestions: [SUGGESTION, SUGGESTION] }) },
     ]);
     await fx.stub.start(workerSpec("wr-suggest"));
@@ -225,9 +256,13 @@ describe("worker_review: 結果の分類（review_fix_rounds: 0）", () => {
   });
 
   it("must_fix がある: review_must_fix_unaddressed: <件数>。completed のまま（直さない）", async () => {
-    const fx = fixture("wr-mustfix", [
-      report(),
-      { text: verdict({ must_fix: [MUST_FIX, { ...MUST_FIX, line: 2 }], suggestions: [SUGGESTION] }) },
+    const fx = await fixture("wr-mustfix", [
+      {
+        text: verdict({
+          must_fix: [MUST_FIX, { ...MUST_FIX, line: 2 }],
+          suggestions: [SUGGESTION],
+        }),
+      },
     ]);
     await fx.stub.start(workerSpec("wr-mustfix"));
     expect(await waitForTerminal(fx)).toBe("completed");
@@ -240,8 +275,7 @@ describe("worker_review: 結果の分類（review_fix_rounds: 0）", () => {
   });
 
   it("レビューのモデルが失敗: completed のまま、review は skipped、warnings に review_failed: <理由>。かかった費用は数える", async () => {
-    const fx = fixture("wr-model-fail", [
-      report(),
+    const fx = await fixture("wr-model-fail", [
       { error: "upstream 500", status: 500, usage: { input: 10 } },
       { error: "upstream 500", status: 500, usage: { input: 10 } },
     ]);
@@ -255,8 +289,30 @@ describe("worker_review: 結果の分類（review_fix_rounds: 0）", () => {
     expect(result.verification.verified).toBe(true);
   });
 
+  it("差分を Sandbox の git から読めなければ、モデルを呼ばずにレビューを飛ばし、completed のまま review_failed: diff_unavailable", async () => {
+    const fx = await fixture("wr-no-diff", [{ text: verdict() }]);
+    const exec = fx.sandbox.exec.bind(fx.sandbox);
+    fx.sandbox.exec = async (argv, options) =>
+      argv.includes("--no-ext-diff")
+        ? {
+            exitCode: 128,
+            stdout: "",
+            stderr: "fatal: bad revision",
+            timedOut: false,
+            truncated: false,
+          }
+        : exec(argv, options);
+    await fx.stub.start(workerSpec("wr-no-diff"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.modelCalls.count).toBe(1);
+    const { result, review } = await resultOf(fx);
+    expect(review).toMatchObject({ stage: "skipped", failure: "diff_unavailable" });
+    expect(result.warnings).toContain("review_failed: diff_unavailable");
+    expect(result.verification.verified).toBe(true);
+  });
+
   it("JSON でない答えは「JSON だけ」と 1 回だけ再要求し、それでもだめなら review_failed: invalid_response", async () => {
-    const fx = fixture("wr-invalid", [report(), { text: "LGTM" }, { text: "still not json" }]);
+    const fx = await fixture("wr-invalid", [{ text: "LGTM" }, { text: "still not json" }]);
     await fx.stub.start(workerSpec("wr-invalid"));
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.modelCalls.count).toBe(3);
@@ -265,10 +321,11 @@ describe("worker_review: 結果の分類（review_fix_rounds: 0）", () => {
   });
 
   it("差分の秘密は伏せ字にしてモデルに渡し、warnings に review_redacted", async () => {
-    const fx = fixture("wr-redact", [report(), { text: verdict() }]);
+    const fx = await fixture("wr-redact", [{ text: verdict() }]);
     fx.reviewDiff.value = `${DIFF}+const token = "ghp_${"a1B2c3D4e5".repeat(4)}";\n`;
     await fx.stub.start(workerSpec("wr-redact"));
     expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.modelCalls.userTexts[1]?.join("\n")).toContain("const token");
     expect(fx.modelCalls.userTexts[1]?.join("\n")).not.toContain("ghp_a1B2c3D4e5");
     const { result } = await resultOf(fx);
     expect(result.warnings).toContain("review_redacted");
@@ -277,8 +334,8 @@ describe("worker_review: 結果の分類（review_fix_rounds: 0）", () => {
 
 describe("worker_review: 予算（同じタスクの枠の中）", () => {
   it("budget_policy が stop で足りなければ、モデルを呼ばずにレビューを飛ばし、completed のまま review_skipped_budget", async () => {
-    const fx = fixture("wr-budget-stop", [report(), { text: verdict() }]);
-    await fx.stub.start(workerSpec("wr-budget-stop", { budgetUsd: 0.007, budgetPolicy: "stop" }));
+    const fx = await fixture("wr-budget-stop", [{ text: verdict() }], [piSpend()]);
+    await fx.stub.start(workerSpec("wr-budget-stop", { budgetUsd: 0.03, budgetPolicy: "stop" }));
     expect(await waitForTerminal(fx)).toBe("completed");
     // ワーカーの 1 回だけ。レビューのモデルは呼ばない
     expect(fx.modelCalls.count).toBe(1);
@@ -289,8 +346,12 @@ describe("worker_review: 予算（同じタスクの枠の中）", () => {
   });
 
   it("budget_policy が ask で足りなければ、budget_extension の質問を出し、Sandbox を中断して待つ。承認されたらレビューを続けて completed にする", async () => {
-    const fx = fixture("wr-budget-ask", [report(), { text: verdict({ must_fix: [MUST_FIX] }) }]);
-    await fx.stub.start(workerSpec("wr-budget-ask", { budgetUsd: 0.007, budgetPolicy: "ask" }));
+    const fx = await fixture(
+      "wr-budget-ask",
+      [{ text: verdict({ must_fix: [MUST_FIX] }) }],
+      [piSpend()],
+    );
+    await fx.stub.start(workerSpec("wr-budget-ask", { budgetUsd: 0.03, budgetPolicy: "ask" }));
     await waitForPhase(fx, "input_required");
     const q = (await allEvents(fx)).find((e) => e.type === "question");
     expect(q?.data).toMatchObject({ question_id: "q-1", kind: "budget_extension" });
@@ -309,8 +370,8 @@ describe("worker_review: 予算（同じタスクの枠の中）", () => {
   });
 
   it("延長を断られたら BUDGET_EXCEEDED（従来どおり）", async () => {
-    const fx = fixture("wr-budget-no", [report(), { text: verdict() }]);
-    await fx.stub.start(workerSpec("wr-budget-no", { budgetUsd: 0.007, budgetPolicy: "ask" }));
+    const fx = await fixture("wr-budget-no", [{ text: verdict() }], [piSpend()]);
+    await fx.stub.start(workerSpec("wr-budget-no", { budgetUsd: 0.03, budgetPolicy: "ask" }));
     await waitForPhase(fx, "input_required");
     await fx.stub.answer("q-1", "stop");
     expect(await waitForTerminal(fx)).toBe("budget_exceeded");
@@ -318,9 +379,11 @@ describe("worker_review: 予算（同じタスクの枠の中）", () => {
   });
 
   it("往復の途中で足りなくなり stop なら、そこで打ち切って completed（review_skipped_budget）", async () => {
-    const fx = fixture("wr-budget-mid", [
-      report(),
-      { toolCall: { name: "read_file", arguments: { path: "src/a.ts" } }, usage: { input: 20_000 } },
+    const fx = await fixture("wr-budget-mid", [
+      {
+        toolCall: { name: "read_file", arguments: { path: "src/a.ts" } },
+        usage: { input: 20_000 },
+      },
       { text: verdict() },
     ]);
     fx.sandbox.files.set("/workspace/src/a.ts", "export const a = 1;\n");
@@ -334,7 +397,7 @@ describe("worker_review: 予算（同じタスクの枠の中）", () => {
 
 describe("worker_review: 取消し・spec の検査・client_review との違い", () => {
   it("レビューのコマンドの実行中に取り消されたら CANCELLED。レビューのモデルは呼ばない", async () => {
-    const fx = fixture("wr-cancel", [report(), { text: verdict() }]);
+    const fx = await fixture("wr-cancel", [{ text: verdict() }]);
     const gate = { held: false, entered: false };
     const exec = fx.sandbox.exec.bind(fx.sandbox);
     fx.sandbox.exec = async (argv, options) => {
@@ -343,6 +406,12 @@ describe("worker_review: 取消し・spec の検査・client_review との違い
         while (gate.held) await new Promise((r) => setTimeout(r, 10));
       }
       return exec(argv, options);
+    };
+    // Sandbox を止めると実行中のコマンドは終わる（本物の Sandbox と同じ）
+    const terminate = fx.sandbox.terminate.bind(fx.sandbox);
+    fx.sandbox.terminate = async () => {
+      gate.held = false;
+      return terminate();
     };
     gate.held = true;
     await fx.stub.start(workerSpec("wr-cancel", {}, [{ argv: ["pnpm", "test"] }]));
@@ -354,11 +423,11 @@ describe("worker_review: 取消し・spec の検査・client_review との違い
     expect(fx.modelCalls.count).toBe(1);
   });
 
-  it("workerReview の形が違えば受け付けない（未知のモデル・修正の回 1・コマンドの形・kind: review との併用）", async () => {
-    const fx = newFixture("wr-invalid", []);
+  it("workerReview の形が違えば受け付けない（未知のモデル・修正の回 1・コマンドの形・task_review の spec との併用）", async () => {
+    const fx = newFixture("wr-badspec", []);
     const bad = (workerReview: unknown, over: Partial<TaskSpec> = {}) =>
       fx.stub.start(
-        makeSpec("wr-invalid", { workerReview: workerReview as TaskSpec["workerReview"], ...over }),
+        makeSpec("wr-badspec", { workerReview: workerReview as TaskSpec["workerReview"], ...over }),
       );
     expect(await bad({ model: "nope/none", commands: [], fixRounds: 0 })).toMatchObject({
       status: "rejected",
@@ -373,6 +442,27 @@ describe("worker_review: 取消し・spec の検査・client_review との違い
       status: "rejected",
     });
     expect(await bad({ model: MODEL, commands: [] })).toMatchObject({ status: "rejected" });
+    // task_review（kind: review）の spec とは併用しない
+    const both = await bad(
+      { model: MODEL, commands: [], fixRounds: 0 },
+      {
+        kind: "review",
+        branch: "",
+        initialSha: "a".repeat(40),
+        review: {
+          pullNumber: 7,
+          headSha: "a".repeat(40),
+          baseSha: "b".repeat(40),
+          model: MODEL,
+          commands: [],
+          title: "t",
+          body: "",
+          diff: "",
+          diffTruncated: false,
+        },
+      },
+    );
+    expect(both).toMatchObject({ status: "rejected", reason: "invalid_spec: workerReview" });
   });
 
   it("workerReview が無ければ今までどおり（レビューの段は動かず、review は付かない）", async () => {

@@ -525,8 +525,7 @@ describe("worker_review（段階 3: review_fix_rounds: 0）", () => {
       const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(v)));
       return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
     };
-    const fp = (input: Record<string, unknown>) =>
-      computeFingerprint(taskInputSchema.parse(input));
+    const fp = (input: Record<string, unknown>) => computeFingerprint(taskInputSchema.parse(input));
     // client_review の指紋は変わらない（v1）
     expect(await fp(base)).toBe(
       await hash(["v1", "owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]]),
@@ -552,9 +551,9 @@ describe("worker_review（段階 3: review_fix_rounds: 0）", () => {
     expect(await fp({ ...worker, review_model: "openai/gpt-6-sol" })).not.toBe(a);
     const withCmd = await fp({ ...worker, review_commands: [{ argv: ["pnpm", "test"] }] });
     expect(withCmd).not.toBe(a);
-    expect(await fp({ ...worker, review_commands: [{ argv: ["pnpm", "test"], cwd: "x" }] })).not.toBe(
-      withCmd,
-    );
+    expect(
+      await fp({ ...worker, review_commands: [{ argv: ["pnpm", "test"], cwd: "x" }] }),
+    ).not.toBe(withCmd);
     // client_review とは別のタスク。verification_commands・model・予算の方針・effort とも組み合わさる
     expect(a).not.toBe(await fp(base));
     expect(await fp({ ...worker, model: "anthropic/claude-haiku-5-5" })).not.toBe(a);

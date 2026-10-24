@@ -2617,14 +2617,21 @@ export class TaskDO extends DurableObject<Env> {
    * 初回に GitHub から引いて保存し、以後は同じ値を返す。引けなかった（障害・権限・App 未設定）ときは
    * GitHub のアカウントに結び付かない代わりの作者（rovo@noreply.invalid）にして、それも保存する（タスクを止めない）。
    */
-  private async botIdentity(): Promise<BotAuthor> {
+  private async botIdentity(installationToken?: string): Promise<BotAuthor> {
     const stored = await this.storedBotIdentity();
     if (stored) return stored;
     let who = FALLBACK_COMMIT_IDENTITY;
     try {
-      who = await this.appClient().getBotIdentity();
-    } catch {
-      // 代わりの作者のまま続ける（コミットの作者のために、タスクを失敗させない）
+      who = await this.appClient().getBotIdentity(installationToken);
+    } catch (e) {
+      // 代わりの作者のまま続ける（コミットの作者のために、タスクを失敗させない）。理由だけ残す（トークンや本文は出さない）
+      const what =
+        e instanceof GitHubApiError
+          ? `${e.message} status=${e.status} detail=${e.detail.slice(0, 200)}`
+          : e instanceof SetupFailure
+            ? `setup_failure`
+            : "unexpected error";
+      console.warn(`[bot-identity] fallback: ${what}`);
     }
     await this.ctx.storage.put(BOT_IDENTITY_KEY, who);
     return who;
@@ -2703,7 +2710,7 @@ export class TaskDO extends DurableObject<Env> {
         throw e;
       }
       const date = new Date(row.created_at).toISOString().replace(/\.\d{3}Z$/, "Z");
-      const who = await this.botIdentity();
+      const who = await this.botIdentity(plain);
       const sha = await api.createCommit({
         message: `rovo: start task ${row.id}`,
         treeSha: base.treeSha,

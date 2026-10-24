@@ -1,6 +1,6 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ResultDto } from "../../src/agent/contract";
 import { MANAGED_BEGIN, MANAGED_END } from "../../src/github/pr-body";
 import { createTaskService } from "../../src/tasks/service";
@@ -139,6 +139,34 @@ describe("CREATING: 初期コミット・ブランチ・Draft PR", () => {
     expect(c).toMatchObject({ author: who, committer: who });
     const { specs } = await agent.calls();
     expect(specs[0]?.commitAuthor).toEqual(who);
+  });
+
+  it("bot の id の取得は認証付き（Installation Token）で行う", async () => {
+    const { stub } = await createTask();
+    await stub.advance();
+    const reqs = app()
+      .requests()
+      .filter((r) => r.method === "GET" && r.path.startsWith("/users/"));
+    expect(reqs.length).toBeGreaterThan(0);
+    for (const r of reqs) expect(r.auth).toBe("token");
+  });
+
+  it("予備の作者にしたときは理由（what / status）を warn に出す。トークンは出さない", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      app().setFault({ pattern: "^GET /users/", status: 403 });
+      const { stub } = await createTask();
+      await stub.advance();
+      const line = warn.mock.calls
+        .map((c) => c.join(" "))
+        .find((l) => l.includes("[bot-identity]"));
+      expect(line).toContain("fallback");
+      expect(line).toContain("status=403");
+      expect(line).not.toMatch(/ghs_/);
+    } finally {
+      warn.mockRestore();
+      app().setFault({ pattern: "^GET /users/", status: null });
+    }
   });
 
   it("bot の id が引けない（障害）と、GitHub のアカウントに結び付かない rovo@noreply.invalid にする。タスクは止めない", async () => {

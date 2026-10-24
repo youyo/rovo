@@ -634,3 +634,16 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
 
   return [read_file, list_files, search, write_file, edit_file, bash, git_commit];
 }
+
+/** 読み取り専用の道具の名前。レビューのモデル（task_review）に渡すのはこの 3 つだけ */
+export const READ_ONLY_TOOL_NAMES = ["read_file", "list_files", "search"] as const;
+
+/**
+ * 読み取り専用の部分集合（read_file / list_files / search）だけを返す。ワーカーの道具と同じ定義・同じ上限で、
+ * 新しい読み取りの道具は書かない。write_file / edit_file / bash / git_commit は含めない。
+ */
+export function createReadOnlySandboxToolsImpl(port: SandboxPort, context: ToolContext) {
+  return createSandboxToolsImpl(port, context).filter((t) =>
+    (READ_ONLY_TOOL_NAMES as readonly string[]).includes(t.name),
+  );
+}

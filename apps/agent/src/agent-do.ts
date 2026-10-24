@@ -93,11 +93,14 @@ import {
   REVIEW_MODEL_TIMEOUT_MS,
   REVIEW_STAGE_LIMIT_MS,
   type ReviewCommandsOutcome,
+  type ReviewMessage,
   type ReviewModelOutcome,
+  type ReviewTranscript,
   reviewWarnings,
   runReviewCommands,
   runReviewModel,
 } from "./review/stage";
+import { createReviewToolRunner, type ReviewToolDef, type ReviewToolRunner } from "./review/tools";
 import type {
   ExecResult,
   PeekedOutput,
@@ -112,7 +115,7 @@ import {
   scanUnpushedForSecrets,
 } from "./secret-scan";
 import { headChars, stripAnsi, tailChars } from "./text-util";
-import { createSandboxTools } from "./tools";
+import { createReadOnlySandboxTools, createSandboxTools } from "./tools";
 import { commitAuthorOf, createToolContext } from "./tools/context";
 import type { PushResult, SandboxToolsFactory } from "./tools/types";
 import { stripUntrustedMarkers, wrapUntrusted } from "./tools/untrusted";
@@ -834,14 +837,16 @@ export class AgentDO extends DurableObject<Env> {
   private workspaceSpec(spec: StoredSpec): WorkspaceSpec {
     const rv = spec.kind === "review" ? spec.review : undefined;
     if (rv) {
-      // task_review: 作業ブランチは持たない。base リポジトリの refs/pull/<n>/head を取り出し、固定した head を checkout する
+      // task_review: 作業ブランチは持たない。base リポジトリの refs/pull/<n>/head を、review_commands の有無によらず常に取り出し、
+      // 固定した head を checkout する（レビューのモデルの読み取りの道具が調べる場所。レビューが終わるまで止めない）
       return {
         repository: spec.repository,
         baseSha: rv.headSha,
         branch: `pull/${rv.pullNumber}/head`,
         initialSha: rv.headSha,
         deadlineAt: this.deadlineAt(),
-        deps: spec.deps ?? null,
+        // review_commands が空なら依存の導入は要らない（読み取りの道具に依存は要らない）。取り出しだけにする
+        deps: rv.commands.length > 0 ? (spec.deps ?? null) : null,
         ...(spec.sandboxInstance !== undefined ? { instance: spec.sandboxInstance } : {}),
         checkout: { pullNumber: rv.pullNumber, sha: rv.headSha },
       };

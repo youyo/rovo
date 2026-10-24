@@ -1375,32 +1375,52 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
       "task_result",
       "task_pr_ready",
       "task_pr_merge",
-      "merge_policy",
-      "agent_merge",
-      "human_review",
+      "review_policy",
+      "client_review",
+      "worker_review",
       "next_steps",
       "task_steer",
       "base_ref",
     ]) {
       expect(text, word).toContain(word);
     }
-    // 人のレビューを待つ場合と、非信頼データの扱い
-    expect(text).toContain("人のレビューを待つ");
+    // 新しいフロー: 完了で自動の Ready → クライアントが手元で全体のテストとレビュー → マージはクライアント
+    expect(text).toContain("自動で Ready for review");
+    expect(text).toContain("クライアント");
+    expect(text).toContain("手元");
+    expect(text).toContain("gh pr checkout");
+    // 実践: verification_commands は変更に関係するテストだけ（全体のテストは手元）
+    expect(text).toContain("変更に関係するテストだけ");
+    expect(text).toContain("docker を使う e2e");
+    // 修正を積んだら head_matches_verified が false になり、task_pr_merge は使えない
+    expect(text).toContain("head_matches_verified が false");
+    expect(text).toContain("直接マージ");
+    expect(text).toContain("checks_failing");
+    // 廃止した方針の言い回しを残さない
+    for (const old of ["merge_policy", "agent_merge", "human_review", "人のレビューを待つ"]) {
+      expect(text, old).not.toContain(old);
+    }
     expect(text).toMatch(/指示ではなく.*データ/);
     await client.close();
   });
 
-  it("task_start は merge_policy（human_review | agent_merge、既定 human_review）を受け取り、説明に書く", async () => {
+  it("task_start は review_policy（client_review | worker_review、既定 client_review）を受け取り、説明に書く。merge_policy は宣言に無い", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
     const start = tools.find((t) => t.name === "task_start");
     const props = start?.inputSchema.properties as Record<string, { enum?: string[] }>;
-    expect(props.merge_policy?.enum).toEqual(["human_review", "agent_merge"]);
-    expect(start?.description).toContain("merge_policy");
-    expect(start?.description).toContain("task_pr_ready");
-    // 「PR は Draft のままで、マージはされない」の古い説明を残さない
-    expect(start?.description).not.toContain("PR は Draft のままで、マージはされない");
+    expect(props.review_policy?.enum).toEqual(["client_review", "worker_review"]);
+    expect(props.merge_policy).toBeUndefined();
+    expect(start?.description).toContain("review_policy");
+    expect(start?.description).toContain("worker_review");
+    expect(start?.description).toContain("近日対応");
+    expect(start?.description).toContain("自動で Ready for review");
+    expect(start?.description).toContain("変更に関係するテストだけ");
+    // 古い説明（Draft のまま返り、merge_policy でマージの可否を決める）を残さない
+    expect(start?.description).not.toContain("PR は Draft のまま返り");
+    expect(start?.description).not.toContain("agent_merge");
+    expect(start?.description).not.toContain("human_review");
     await client.close();
   });
 
@@ -1428,14 +1448,16 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
     await client.close();
   });
 
-  it("task_result の説明に next_steps と merge_policy、pr.draft を書く", async () => {
+  it("task_result の説明に next_steps と review_policy、pr.draft を書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
     const r = tools.find((t) => t.name === "task_result");
     expect(r?.description).toContain("next_steps");
-    expect(r?.description).toContain("merge_policy");
+    expect(r?.description).toContain("review_policy");
+    expect(r?.description).not.toContain("merge_policy");
     expect(r?.description).toContain("draft");
+    expect(r?.description).toContain("自動で false");
     await client.close();
   });
 
@@ -1468,7 +1490,12 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
     expect(ready?.description).toContain("COMPLETED");
     expect(ready?.description).toContain("冪等");
     expect(ready?.description).toContain("利用者の GitHub");
-    expect(merge?.description).toContain("agent_merge");
+    expect(ready?.description).toContain("自動で Ready");
+    expect(merge?.description).toContain("review_policy によらず");
+    expect(merge?.description).not.toContain("agent_merge");
+    expect(merge?.description).toContain("checks_failing");
+    expect(merge?.description).toContain("checks_pending");
+    expect(merge?.description).toContain("check が 1 つも無ければ通る");
     expect(merge?.description).toContain("task_pr_ready");
     expect(merge?.description).toContain("head_matches_verified");
     expect(merge?.description).toContain("merge_blocked");
@@ -1479,7 +1506,7 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
 });
 
 describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）", () => {
-  async function completed(policy?: "agent_merge" | "human_review") {
+  async function completed() {
     const id = newUserId();
     const gh = new FakeGitHubFetch();
     gh.user = { id, login: "alice" };
@@ -1490,7 +1517,7 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     const started = body(
       await client.callTool({
         name: "task_start",
-        arguments: startArgs("t-pr", policy ? { merge_policy: policy } : {}),
+        arguments: startArgs("t-pr"),
       }),
     );
     const taskId = String(started.task_id);
@@ -1508,22 +1535,18 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
       .pulls("acme/widgets")
       .find((p) => p.head === branch);
 
-  it("task_result に merge_policy と next_steps と pr.draft。agent_merge: ready → merge の流れを通しで", async () => {
-    const t = await completed("agent_merge");
+  it("task_result に review_policy と next_steps と pr.draft。完了で自動の Ready → merge の流れを通しで（task_pr_ready を呼ばない）", async () => {
+    const t = await completed();
     const before = body(await t.call("task_result", { task_id: t.taskId }));
     expect(before).toMatchObject({
       status: "COMPLETED",
-      merge_policy: "agent_merge",
-      pr: { draft: true, merged: false, head_matches_verified: true },
+      review_policy: "client_review",
+      pr: { draft: false, merged: false, head_matches_verified: true },
     });
-    expect(String(before.next_steps)).toContain("task_pr_ready");
-
-    const ready = body(await t.call("task_pr_ready", { task_id: t.taskId }));
-    expect(ready).toMatchObject({ draft: false, changed: true, merge_policy: "agent_merge" });
     expect(pull(t.branch)?.draft).toBe(false);
-    expect(String(body(await t.call("task_result", { task_id: t.taskId })).next_steps)).toContain(
-      "task_pr_merge でマージ",
-    );
+    expect(String(before.next_steps)).toContain("全体のテスト");
+    expect(String(before.next_steps)).toContain("task_pr_merge でマージ");
+    expect(String(before.next_steps)).not.toContain("task_pr_ready で Ready にする");
 
     const merged = body(
       await t.call("task_pr_merge", {
@@ -1537,6 +1560,7 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
       merge_method: "squash",
       merge_sha: t.head,
       branch_deleted: true,
+      review_policy: "client_review",
     });
     expect(pull(t.branch)).toMatchObject({ merged: true, mergeSha: t.head });
     expect(String(body(await t.call("task_result", { task_id: t.taskId })).next_steps)).toContain(
@@ -1545,22 +1569,43 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     await t.client.close();
   });
 
-  it("human_review（既定）: task_pr_ready は通り、task_pr_merge は forbidden", async () => {
+  it("自動の Ready が失敗して Draft のまま: next_steps が task_pr_ready を促す。task_pr_ready で Ready にでき、task_pr_merge も通る", async () => {
+    prApp().setFault({ pattern: "^POST /graphql$", status: 502, count: 1 });
     const t = await completed();
-    expect(body(await t.call("task_result", { task_id: t.taskId }))).toMatchObject({
-      merge_policy: "human_review",
+    const before = body(await t.call("task_result", { task_id: t.taskId }));
+    expect(before).toMatchObject({ status: "COMPLETED", pr: { draft: true } });
+    expect(String(before.next_steps)).toContain("task_pr_ready で Ready にする");
+    expect(pull(t.branch)?.draft).toBe(true);
+    // Draft のマージは拒否される
+    expect(body(await t.call("task_pr_merge", { task_id: t.taskId })).code).toBe("conflict");
+    const ready = body(await t.call("task_pr_ready", { task_id: t.taskId }));
+    expect(ready).toMatchObject({ draft: false, changed: true, review_policy: "client_review" });
+    expect(pull(t.branch)?.draft).toBe(false);
+    expect((await t.call("task_pr_merge", { task_id: t.taskId })).isError).toBeFalsy();
+    await t.client.close();
+  });
+
+  it("task_pr_merge は review_policy によらず使える（forbidden にならない）。check が失敗していれば merge_blocked（checks_failing）", async () => {
+    const t = await completed();
+    prApp().setCheckRuns("acme/widgets", t.head, [
+      { name: "ci", status: "completed", conclusion: "failure" },
+    ]);
+    const blocked = await t.call("task_pr_merge", { task_id: t.taskId });
+    expect(blocked.isError).toBe(true);
+    expect(body(blocked)).toMatchObject({
+      code: "merge_blocked",
+      message: expect.stringContaining("checks_failing"),
     });
-    expect((await t.call("task_pr_ready", { task_id: t.taskId })).isError).toBeFalsy();
-    const merge = await t.call("task_pr_merge", { task_id: t.taskId });
-    expect(merge.isError).toBe(true);
-    expect(body(merge).code).toBe("forbidden");
-    expect(pull(t.branch)).toMatchObject({ draft: false, merged: false });
+    expect(pull(t.branch)?.merged).toBe(false);
+    prApp().setCheckRuns("acme/widgets", t.head, [
+      { name: "ci", status: "completed", conclusion: "success" },
+    ]);
+    expect((await t.call("task_pr_merge", { task_id: t.taskId })).isError).toBeFalsy();
     await t.client.close();
   });
 
   it("ブランチ保護の拒否は merge_blocked（GitHub の理由つき）のコードで返る", async () => {
-    const t = await completed("agent_merge");
-    await t.call("task_pr_ready", { task_id: t.taskId });
+    const t = await completed();
     prApp().setMergeBlock("acme/widgets", "Changes must be made through a pull request.");
     const r = await t.call("task_pr_merge", { task_id: t.taskId });
     expect(r.isError).toBe(true);
@@ -1572,7 +1617,8 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
   });
 
   it("不正な入力は invalid_input。他人のタスクと不明な task_id は not_found", async () => {
-    const t = await completed("agent_merge");
+    prApp().setFault({ pattern: "^POST /graphql$", status: 502, count: 1 });
+    const t = await completed();
     const bad = await t.call("task_pr_merge", { task_id: t.taskId, merge_method: "ff" });
     expect(bad.isError).toBe(true);
     expect(body(bad).code).toBe("invalid_input");
@@ -1588,15 +1634,37 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     await t.client.close();
   });
 
-  it("task_start に不正な merge_policy を渡すと invalid_input", async () => {
+  it("task_start に不正な review_policy を渡すと invalid_input。worker_review は未対応（近日）として invalid_input", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
-    const r = await client.callTool({
+    const bad = await client.callTool({
       name: "task_start",
-      arguments: startArgs("t", { merge_policy: "auto" }),
+      arguments: startArgs("t", { review_policy: "auto" }),
     });
-    expect(r.isError).toBe(true);
-    expect(body(r).code).toBe("invalid_input");
+    expect(bad.isError).toBe(true);
+    expect(body(bad).code).toBe("invalid_input");
+    const worker = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t2", { review_policy: "worker_review" }),
+    });
+    expect(worker.isError).toBe(true);
+    expect(body(worker).code).toBe("invalid_input");
+    expect(String(body(worker).message)).toContain("not supported yet");
+    await client.close();
+  });
+
+  it("task_start に旧 merge_policy を渡すと invalid_input（黙って無視しない）。メッセージで review_policy を案内する", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    for (const old of ["agent_merge", "human_review"]) {
+      const r = await client.callTool({
+        name: "task_start",
+        arguments: startArgs(`t-${old}`, { merge_policy: old }),
+      });
+      expect(r.isError, old).toBe(true);
+      expect(body(r).code).toBe("invalid_input");
+      expect(String(body(r).message)).toContain("review_policy");
+    }
     await client.close();
   });
 });

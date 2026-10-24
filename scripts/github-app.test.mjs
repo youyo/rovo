@@ -49,7 +49,13 @@ describe("manifest", () => {
       request_oauth_on_install: false,
       public: false,
       hook_attributes: { url: "https://rovo.example.com", active: false },
-      default_permissions: { contents: "write", pull_requests: "write", metadata: "read" },
+      default_permissions: {
+        contents: "write",
+        pull_requests: "write",
+        metadata: "read",
+        checks: "read",
+        statuses: "read",
+      },
       default_events: [],
       setup_on_update: false,
     });

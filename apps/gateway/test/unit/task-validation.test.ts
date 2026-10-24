@@ -297,34 +297,39 @@ describe("task_answer / task_steer の入力", () => {
   });
 });
 
-describe("merge_policy（D9）", () => {
-  it("省略は human_review。human_review / agent_merge だけを受け付け、他は拒否する", () => {
-    expect(taskInputSchema.parse(base).merge_policy).toBe("human_review");
-    expect(taskInputSchema.parse({ ...base, merge_policy: "agent_merge" }).merge_policy).toBe(
-      "agent_merge",
+describe("review_policy（全体のテストとレビューの方針）", () => {
+  it("省略は client_review。worker_review は受け付けるだけで、未対応（近日）として拒否する。他の値も拒否する", () => {
+    expect(taskInputSchema.parse(base).review_policy).toBe("client_review");
+    expect(taskInputSchema.parse({ ...base, review_policy: "client_review" }).review_policy).toBe(
+      "client_review",
     );
-    for (const bad of ["auto", "AGENT_MERGE", "", 1, null]) {
-      expect(taskInputSchema.safeParse({ ...base, merge_policy: bad }).success).toBe(false);
+    const worker = taskInputSchema.safeParse({ ...base, review_policy: "worker_review" });
+    expect(worker.success).toBe(false);
+    expect(JSON.stringify(worker.error?.issues)).toContain("not supported yet");
+    for (const bad of ["auto", "CLIENT_REVIEW", "", 1, null]) {
+      expect(taskInputSchema.safeParse({ ...base, review_policy: bad }).success).toBe(false);
     }
   });
 
-  it("fingerprint: 既定（human_review）は従来の値のまま。agent_merge は別のタスク", async () => {
+  it("旧 merge_policy は渡すと拒否する（review_policy に置き換えたことを message で伝える）", () => {
+    for (const old of ["human_review", "agent_merge", "auto", 1, null]) {
+      const r = taskInputSchema.safeParse({ ...base, merge_policy: old });
+      expect(r.success, String(old)).toBe(false);
+      expect(JSON.stringify(r.error?.issues)).toContain("review_policy");
+    }
+    // 省略なら問題ない
+    expect(taskInputSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("fingerprint: 既定は従来の値のまま（v1 形式）。検証コマンドの有無は別のタスク", async () => {
     const implicit = await computeFingerprint(taskInputSchema.parse(base));
     const explicit = await computeFingerprint(
-      taskInputSchema.parse({ ...base, merge_policy: "human_review" }),
-    );
-    const merge = await computeFingerprint(
-      taskInputSchema.parse({ ...base, merge_policy: "agent_merge" }),
+      taskInputSchema.parse({ ...base, review_policy: "client_review" }),
     );
     expect(explicit).toBe(implicit);
-    expect(merge).not.toBe(implicit);
-    // 検証コマンドがあっても、policy の違いは別のタスクにする
     const cmd = { verification_commands: [{ argv: ["npm", "test"] }] };
     const withCmd = await computeFingerprint(taskInputSchema.parse({ ...base, ...cmd }));
-    const withCmdMerge = await computeFingerprint(
-      taskInputSchema.parse({ ...base, ...cmd, merge_policy: "agent_merge" }),
-    );
-    expect(withCmdMerge).not.toBe(withCmd);
+    expect(withCmd).not.toBe(implicit);
     // 従来の fingerprint（v1 形式）が変わらない: 保存済みのタスクの再試行（同じ idempotency_key）が conflict にならない
     const v1 = JSON.stringify(["v1", "owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]]);
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v1));
@@ -344,7 +349,7 @@ describe("model（D10）", () => {
     }
   });
 
-  it("fingerprint: 未指定は従来の値のまま（v1 / v2 / v3）。指定すれば別のタスク（v4）", async () => {
+  it("fingerprint: 未指定は従来の値のまま（v1 / v2）。指定すれば別のタスク（v4）", async () => {
     const implicit = await computeFingerprint(taskInputSchema.parse(base));
     const haiku = await computeFingerprint(
       taskInputSchema.parse({ ...base, model: "anthropic/claude-haiku-5-5" }),
@@ -354,7 +359,7 @@ describe("model（D10）", () => {
     );
     expect(haiku).not.toBe(implicit);
     expect(sol).not.toBe(haiku);
-    // 既存の値が変わらない: v1 / v3 を直接計算して一致を確かめる
+    // 既存の値が変わらない: v1 を直接計算して一致を確かめる
     const sha = async (v: unknown) => {
       const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(v)));
       return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -362,12 +367,13 @@ describe("model（D10）", () => {
     expect(implicit).toBe(
       await sha(["v1", "owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]]),
     );
-    const merge = await computeFingerprint(
-      taskInputSchema.parse({ ...base, merge_policy: "agent_merge" }),
+    // model と review_policy の組み合わせ（v4）。sol・haiku とは別のタスク
+    const both = await computeFingerprint(
+      taskInputSchema.parse({ ...base, review_policy: "client_review", model: "openai/gpt-6-sol" }),
     );
-    expect(merge).toBe(
+    expect(both).toBe(
       await sha([
-        "v3",
+        "v4",
         "owner/repo",
         "main",
         base.base_sha,
@@ -376,15 +382,13 @@ describe("model（D10）", () => {
         ["a"],
         ["c"],
         [],
-        "agent_merge",
+        "client_review",
+        "openai/gpt-6-sol",
       ]),
     );
-    // model と merge_policy の組み合わせも別のタスク
-    const both = await computeFingerprint(
-      taskInputSchema.parse({ ...base, merge_policy: "agent_merge", model: "openai/gpt-6-sol" }),
-    );
-    expect(both).not.toBe(merge);
-    expect(both).not.toBe(sol);
+    expect(both).not.toBe(implicit);
+    // review_policy は client_review だけが使えるので、明示しても省略と同じタスク
+    expect(both).toBe(sol);
   });
 });
 
@@ -402,7 +406,7 @@ describe("sandbox_instance（Sandbox の大きさ）", () => {
     }
   });
 
-  it("fingerprint: 省略した入力の値は変わらない（v1 / v3 / v4 のまま）。指定すれば別のタスク（v5）", async () => {
+  it("fingerprint: 省略した入力の値は変わらない（v1 / v4 のまま）。指定すれば別のタスク（v5）", async () => {
     const hash = async (v: unknown) => {
       const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(v)));
       return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -412,11 +416,8 @@ describe("sandbox_instance（Sandbox の大きさ）", () => {
       computeFingerprint(taskInputSchema.parse({ ...base, ...extra }));
     // 省略: 従来の形式のまま
     expect(await fp()).toBe(await hash(["v1", ...head]));
-    expect(await fp({ merge_policy: "agent_merge" })).toBe(
-      await hash(["v3", ...head, [], "agent_merge"]),
-    );
     expect(await fp({ model: "anthropic/claude-haiku-5-5" })).toBe(
-      await hash(["v4", ...head, [], "human_review", "anthropic/claude-haiku-5-5"]),
+      await hash(["v4", ...head, [], "client_review", "anthropic/claude-haiku-5-5"]),
     );
     // 指定: 別の値。大きさが違えば別のタスク、model との組み合わせも区別する
     const s2 = await fp({ sandbox_instance: "standard-2" });

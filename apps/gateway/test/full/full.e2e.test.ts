@@ -629,14 +629,14 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 3）", () => {
     // main には触っていない
     expect(upstream.refSha("calc", "refs/heads/main")).toBe(upstream.calcSha);
 
-    // task_result の pr（head は検証済みの SHA と一致）。PR は Draft のまま
+    // task_result の pr（head は検証済みの SHA と一致）。完了で rovo が自動で Ready にする（client_review）
     const pr = pullOf(taskId);
-    expect(pr).toMatchObject({ draft: true, state: "open", base: "main" });
+    expect(pr).toMatchObject({ draft: false, state: "open", base: "main" });
     expect(r.pr).toEqual({
       number: pr?.number,
       url: `https://github.test/${REPO.fullName}/pull/${pr?.number}`,
-      // 作成直後の Draft PR（task_pr_ready / task_pr_merge で変わる。D9）
-      draft: true,
+      // 完了で rovo が自動で Ready にした
+      draft: false,
       merged: false,
       head_sha: v.commit_sha,
       head_matches_verified: true,
@@ -993,7 +993,7 @@ describe("Gateway → Agent → 実コンテナ の通し（Phase 4: 親子間�
     expect(v.verified).toBe(true);
     expect(events.some((e) => e.type === "pushed")).toBe(true);
     expect(upstream.refSha("calc", refOf(taskId))).toBe(v.commit_sha);
-    expect(pullOf(taskId)).toMatchObject({ draft: true, state: "open" });
+    expect(pullOf(taskId)).toMatchObject({ draft: false, state: "open" });
     expect(r.pr).toMatchObject({ head_sha: v.commit_sha, head_matches_verified: true });
     const after = await call(client, "task_status", { task_id: taskId });
     expect(after.body.pending_question).toBeNull();

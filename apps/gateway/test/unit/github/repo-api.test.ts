@@ -107,6 +107,7 @@ describe("GitHubRepoApi", () => {
     });
     expect(await a.findOpenPull("agent/task-A")).toEqual({
       number: 5,
+      nodeId: null,
       url: "https://gh.test/acme/widgets/pull/5",
       draft: true,
       state: "open",
@@ -153,6 +154,59 @@ describe("GitHubRepoApi", () => {
     expect((await a.getPull(9)).headSha).toBe(SHA);
     await a.updatePullBody(9, "new");
     expect(await calls[2]?.json()).toEqual({ body: "new" });
+  });
+
+  it("getPull: node_id を nodeId として返す（Ready 化に使う）", async () => {
+    const { a } = api({
+      "GET /repos/acme/widgets/pulls/9": () =>
+        json({
+          number: 9,
+          node_id: "PR_node_9",
+          html_url: "https://gh.test/p/9",
+          draft: true,
+          state: "open",
+          body: "x",
+          head: { sha: SHA },
+          base: { ref: "main" },
+        }),
+    });
+    expect((await a.getPull(9)).nodeId).toBe("PR_node_9");
+  });
+
+  describe("markReadyForReview（GraphQL。Installation Token）", () => {
+    const ok = {
+      data: { markPullRequestReadyForReview: { pullRequest: { id: "N", isDraft: false } } },
+    };
+
+    it("POST /graphql に node ID を変数で渡し、token で認証する", async () => {
+      const { a, calls } = api({ "POST /graphql": () => json(ok) });
+      await a.markReadyForReview("PR_node_9");
+      const body = (await calls[0]?.json()) as { query: string; variables: { id: string } };
+      expect(body.variables).toEqual({ id: "PR_node_9" });
+      expect(body.query).toContain("markPullRequestReadyForReview");
+      expect(body.query).not.toContain("PR_node_9");
+      expect(calls[0]?.headers.get("authorization")).toBe("Bearer ghs_tok");
+    });
+
+    it("HTTP 200 の errors（権限不足・見つからない）も失敗にする", async () => {
+      const { a } = api({
+        "POST /graphql": () =>
+          json({ data: null, errors: [{ type: "FORBIDDEN", message: "Resource not accessible" }] }),
+      });
+      await expect(a.markReadyForReview("N")).rejects.toMatchObject({
+        detail: expect.stringContaining("FORBIDDEN"),
+      });
+    });
+
+    it("isDraft が false にならなければ失敗にする。HTTP の失敗は status を保つ", async () => {
+      const still = api({
+        "POST /graphql": () =>
+          json({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: true } } } }),
+      });
+      await expect(still.a.markReadyForReview("N")).rejects.toBeInstanceOf(GitHubApiError);
+      const down = api({ "POST /graphql": () => json({ message: "bad" }, { status: 502 }) });
+      await expect(down.a.markReadyForReview("N")).rejects.toMatchObject({ status: 502 });
+    });
   });
 
   it("応答が壊れていれば GitHubApiError", async () => {

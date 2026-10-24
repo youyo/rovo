@@ -24,9 +24,9 @@ import {
   exceedsInputLimit,
   isValidIdempotencyKey,
   type MergeMethod,
-  type MergePolicy,
   prMergeInputSchema,
   prReadyInputSchema,
+  type ReviewPolicy,
   type SteerInput,
   steerInputSchema,
   type TaskInput,
@@ -92,7 +92,7 @@ export type StartValue = {
 } & WithDashboardUrl;
 
 export const START_NOTE =
-  "Phase 3: 作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントが Sandbox で編集・テスト・commit・push します。draft_pr_url は作成前なので null です。PR の URL は task_status・task_result・イベント draft_pr_created で返ります。成果は終端になってから task_result で取得できます（rovo は PR を Ready にもマージにもしません。PR は Draft のまま返り、あなたが差分をレビューして問題が無ければ task_pr_ready で Ready にします。merge_policy が agent_merge なら task_pr_merge でマージもできます。次の一手は task_result の next_steps に書かれます）。応答の dashboard_url は、このタスクの詳細をブラウザで見られる URL です（task_status・task_result にも付きます。閲覧権限が無い人が開いても 404 になるだけで、URL 自体は秘密ではありません。デプロイの設定によっては付きません）。";
+  "Phase 3: 作業ブランチ agent/task-<id> と Draft PR を作り、子エージェントが Sandbox で編集・テスト・commit・push します。draft_pr_url は作成前なので null です。PR の URL は task_status・task_result・イベント draft_pr_created で返ります。成果は終端になってから task_result で取得できます（タスクが COMPLETED になると、rovo が PR を自動で Ready for review にします。FAILED / BUDGET_EXCEEDED / CANCELLED は Draft のままです。rovo は PR をマージしません。全体のテストとレビューはあなた（クライアント）が手元で行い、問題が無ければ task_pr_merge か gh などで直接マージします。次の一手は task_result の next_steps に書かれます）。応答の dashboard_url は、このタスクの詳細をブラウザで見られる URL です（task_status・task_result にも付きます。閲覧権限が無い人が開いても 404 になるだけで、URL 自体は秘密ではありません。デプロイの設定によっては付きません）。";
 
 /** クライアントに返すイベントの値。TaskDO の保存形はプリミティブだけ（RPC・保存のため）だが、usage の履歴だけは配列で返す */
 export type PublicEventValue =
@@ -158,7 +158,7 @@ export type PrReadyValue = {
   draft: false;
   /** false は、すでに Ready だった（冪等な再実行） */
   changed: boolean;
-  merge_policy: MergePolicy;
+  review_policy: ReviewPolicy;
   next_steps: string;
 };
 export type PrMergeValue = {
@@ -173,7 +173,7 @@ export type PrMergeValue = {
   /** delete_branch を求めなかったときは null。消せなかったときは false（マージは成功。warnings に理由） */
   branch_deleted: boolean | null;
   warnings: string[];
-  merge_policy: MergePolicy;
+  review_policy: ReviewPolicy;
   next_steps: string;
 };
 
@@ -692,7 +692,7 @@ export function createTaskService(
               ...(r.result.failure_phase !== undefined
                 ? { failure_phase: r.result.failure_phase }
                 : {}),
-              merge_policy: r.result.merge_policy,
+              review_policy: r.result.review_policy,
               verification: r.result.verification,
               pr: r.result.pr,
             }),
@@ -739,15 +739,15 @@ export function createTaskService(
           pr_url: ctx.pr_url,
           draft: false,
           changed: !r.already_ready,
-          merge_policy: ctx.merge_policy,
-          next_steps: nextStepsAfterReady(ctx.merge_policy),
+          review_policy: ctx.review_policy,
+          next_steps: nextStepsAfterReady(ctx.review_policy),
         },
       };
     },
 
     /**
-     * PR をマージする（task_pr_merge）。条件（所有者・COMPLETED・merge_policy が agent_merge・head が検証済み）は TaskDO、
-     * Ready であることの確認とマージは UserDO（利用者のユーザートークン）。検証済みの head の sha を GitHub に渡す。
+     * PR をマージする（task_pr_merge）。条件（所有者・COMPLETED・head が検証済み）は TaskDO、
+     * Ready であること・head の GitHub の check が成功していること（無ければ通す）の確認とマージは UserDO（利用者のユーザートークン）。検証済みの head の sha を GitHub に渡す。
      */
     async prMerge(principal: Principal, rawInput: unknown): Promise<ServiceResult<PrMergeValue>> {
       const parsed = prMergeInputSchema.safeParse(rawInput);
@@ -784,7 +784,7 @@ export function createTaskService(
           merge_sha: r.merge_sha,
           branch_deleted: r.branch_deleted,
           warnings: r.warnings,
-          merge_policy: ctx.merge_policy,
+          review_policy: ctx.review_policy,
           next_steps: nextStepsAfterMerge({ branch_deleted: r.branch_deleted }),
         },
       };

@@ -1503,12 +1503,14 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * PR をマージする。Ready であること・head が検証済みの sha であることを確かめ、sha 付きで GitHub に渡す
+   * PR をマージする。Ready であること・head が検証済みの sha であること・head に付いた GitHub の check がすべて成功している
+   * （check が無ければ通す）ことを確かめ、sha 付きで GitHub に渡す
    * （確かめた後にブランチが動けば GitHub が 409 で拒否する）。ブランチ保護に拒否されたら merge_blocked。
    */
   async prMerge(target: PrTarget, opts: PrMergeOptions): Promise<PrMergeResult> {
     const { client, credentials } = this.github();
     let outcome: { already: boolean; sha: string | null };
+    let checksUnreadable = false;
     try {
       const merged = await credentials.withToken(
         async (tok): Promise<PrFailure | { already: boolean; sha: string | null }> => {
@@ -1529,6 +1531,34 @@ export class UserDO extends DurableObject<Env> {
             };
           }
           if (pull.headSha !== opts.expectedSha) return this.headMoved(pull.headSha);
+          // head の commit に GitHub の check（check run / commit status）が付いていれば、すべて成功していること。
+          // 1 つも無ければ通す（厳しくしたいときは GitHub のブランチ保護を使う）。
+          // 読めないとき（権限不足の 403 / 404・5xx・ネットワークの失敗）は止めずに通し、warnings に checks_unreadable を残す
+          // （止めるかどうかは GitHub のブランチルールの責務）。読めて failing / pending なら止める
+          checksUnreadable = false;
+          let checks: Awaited<ReturnType<typeof client.getCheckState>> = "none";
+          try {
+            checks = await client.getCheckState(tok, target.repository, opts.expectedSha);
+          } catch (e) {
+            if (
+              !(e instanceof GitHubError) ||
+              !["forbidden", "upstream_unavailable"].includes(e.code)
+            ) {
+              throw e;
+            }
+            checksUnreadable = true;
+          }
+          if (checks === "failing" || checks === "pending") {
+            return {
+              ok: false,
+              code: "merge_blocked",
+              reason: checks === "failing" ? "checks_failing" : "checks_pending",
+              message:
+                checks === "failing"
+                  ? "checks_failing: a GitHub check on the pull request head has failed; fix it and wait for the checks to pass, or merge by hand"
+                  : "checks_pending: GitHub checks on the pull request head are still running or pending; wait for them to finish and retry",
+            };
+          }
           const r = await client.mergePull(tok, target.repository, target.number, {
             sha: opts.expectedSha,
             method: opts.method,
@@ -1545,6 +1575,11 @@ export class UserDO extends DurableObject<Env> {
     // マージは取り消せない。ブランチの削除に失敗しても成功として返し、warnings に残す。
     let branchDeleted: boolean | null = null;
     const warnings: string[] = [];
+    if (checksUnreadable) {
+      warnings.push(
+        "checks_unreadable: the GitHub checks (CI results) of the pull request head could not be read, so the pull request was merged without checking them; add the Checks: Read-only and Commit statuses: Read-only permissions to the GitHub App to have them checked (see docs/deploy.md)",
+      );
+    }
     if (opts.deleteBranch) {
       try {
         await credentials.withToken((tok) =>

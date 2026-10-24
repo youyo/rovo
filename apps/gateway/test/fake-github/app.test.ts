@@ -257,3 +257,93 @@ describe("偽 GitHub: 偽 git 向けのトークン検証と beforeHandle", () =
     expect(seen.some((k) => k.startsWith("GET /repos/acme/widgets/pulls"))).toBe(true);
   });
 });
+
+describe("偽 GitHub: Installation Token での Ready 化と、コミットの check / status", () => {
+  async function seeded() {
+    const t = await appClient().createInstallationToken(77, 4242);
+    const a = repoApi(t.token);
+    const base = await a.getCommit("0123456789abcdef");
+    await a.createBranch("agent/task-R", base.sha);
+    const pr = await a.createPull({
+      title: "T",
+      head: "agent/task-R",
+      base: "main",
+      body: "",
+      draft: true,
+    });
+    return { t, a, pr, sha: base.sha };
+  }
+  const rest = async (token: string, path: string) => {
+    const res = await fetch(`${gh.url}${path}`, { headers: { authorization: `Bearer ${token}` } });
+    return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  };
+
+  it("POST /graphql の markPullRequestReadyForReview を Installation Token で呼べる（GitHubRepoApi.markReadyForReview）", async () => {
+    const { a, pr } = await seeded();
+    expect(pr.nodeId).toMatch(/^PR_/);
+    await a.markReadyForReview(pr.nodeId as string);
+    expect((await a.getPull(pr.number)).draft).toBe(false);
+    // もう Draft ではない: GitHub と同じくエラー
+    await expect(a.markReadyForReview(pr.nodeId as string)).rejects.toBeInstanceOf(GitHubApiError);
+  });
+
+  it("存在しない node ID は NOT_FOUND（Draft のまま）", async () => {
+    const { a, pr } = await seeded();
+    await expect(a.markReadyForReview("PR_nope")).rejects.toMatchObject({
+      detail: expect.stringContaining("NOT_FOUND"),
+    });
+    expect((await a.getPull(pr.number)).draft).toBe(true);
+  });
+
+  it("GET /commits/:sha/check-runs は seed した check run を返す。無ければ空", async () => {
+    const { t, sha } = await seeded();
+    const empty = await rest(t.token, `/repos/acme/widgets/commits/${sha}/check-runs`);
+    expect(empty).toMatchObject({ status: 200, json: { total_count: 0, check_runs: [] } });
+    gh.app?.setCheckRuns("acme/widgets", sha, [
+      { name: "ci", status: "completed", conclusion: "failure" },
+      { name: "lint", status: "in_progress" },
+    ]);
+    const r = await rest(t.token, `/repos/acme/widgets/commits/${sha}/check-runs`);
+    expect(r.json).toMatchObject({
+      total_count: 2,
+      check_runs: [
+        { name: "ci", status: "completed", conclusion: "failure" },
+        { name: "lint", status: "in_progress", conclusion: null },
+      ],
+    });
+  });
+
+  it("GET /commits/:sha/status: 0 件は pending、failure があれば failure、pending があれば pending、全部 success なら success", async () => {
+    const { t, sha } = await seeded();
+    const state = async () =>
+      (await rest(t.token, `/repos/acme/widgets/commits/${sha}/status`)).json;
+    expect(await state()).toMatchObject({ state: "pending", total_count: 0, statuses: [] });
+    gh.app?.setCommitStatuses("acme/widgets", sha, [{ context: "a", state: "success" }]);
+    expect(await state()).toMatchObject({ state: "success", total_count: 1 });
+    gh.app?.setCommitStatuses("acme/widgets", sha, [
+      { context: "a", state: "success" },
+      { context: "b", state: "pending" },
+    ]);
+    expect(await state()).toMatchObject({ state: "pending" });
+    gh.app?.setCommitStatuses("acme/widgets", sha, [
+      { context: "a", state: "pending" },
+      { context: "b", state: "error" },
+    ]);
+    expect(await state()).toMatchObject({ state: "failure" });
+  });
+
+  it("HTTP の管理 API（/__admin/app）から check run を seed できる", async () => {
+    const { t, sha } = await seeded();
+    const r = await fetch(`${gh.url}/__admin/app`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        method: "setCheckRuns",
+        args: ["acme/widgets", sha, [{ name: "ci", status: "queued" }]],
+      }),
+    });
+    expect(r.status).toBe(200);
+    const runs = await rest(t.token, `/repos/acme/widgets/commits/${sha}/check-runs`);
+    expect(runs.json).toMatchObject({ total_count: 1 });
+  });
+});

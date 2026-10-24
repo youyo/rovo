@@ -320,6 +320,24 @@ test("the bare names create-task / open-console / close-console are caught too",
   expect(c.text).not.toBe("engine");
 });
 
+test("other mods' commands never reach the rovo hook", async ($, on) => {
+  const r = rig(on);
+  on("command.run", () => ({ text: "engine" }));
+  await startSession($);
+  for (const command of [
+    "other:open-console",
+    "other:create-task",
+    "compact",
+    "rovo:other",
+    "open-console2",
+  ]) {
+    const out = await $.command.run({ command, args: "" } as never);
+    expect(out.text).toBe("engine");
+  }
+  expect(r.opened).toEqual([]);
+  expect(r.closed).toEqual([]);
+});
+
 test("the old names do nothing: the engine answers", async ($, on) => {
   const r = rig(on);
   on("command.run", () => ({ text: "engine" }));

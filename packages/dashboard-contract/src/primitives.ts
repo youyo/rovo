@@ -61,7 +61,7 @@ export const modelIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,9
 export const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const effortSchema = z.enum(EFFORTS);
 
-export const MERGE_POLICIES = ["human_review", "agent_merge"] as const;
+export const REVIEW_POLICIES = ["client_review", "worker_review"] as const;
 
 /**
  * タスクの状態。gateway の TASK_STATUSES（apps/gateway/src/tasks/state.ts）と同じ 9 つ。

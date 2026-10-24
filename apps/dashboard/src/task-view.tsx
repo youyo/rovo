@@ -505,7 +505,7 @@ export function TaskView(props: {
                 />
               )}
               <Fact k={t("fact.effort")} v={task.effort} />
-              <Fact k={t("fact.mergePolicy")} v={t(`mergePolicy.${settings.merge_policy}`)} />
+              <Fact k={t("fact.reviewPolicy")} v={t(`reviewPolicy.${settings.review_policy}`)} />
               {settings.deps_cache === undefined ? null : (
                 <Fact
                   k={t("fact.depsCache")}

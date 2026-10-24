@@ -455,14 +455,14 @@ describe("tasks/:id", () => {
       repository_id: repo,
       title: "DETAIL-TITLE",
       instructions: "SECRET-INSTRUCTIONS-BODY",
-      merge_policy: "agent_merge",
+      review_policy: "client_review",
     });
     const r = await api(v, `/tasks/${t.id}?fresh=1`);
     expect(r.status).toBe(200);
     const dto = TaskDetailDtoSchema.parse(r.json());
     expect(dto.task).toMatchObject({ task_id: t.id, title: "DETAIL-TITLE", status: "CREATING" });
     expect(dto.phase).toBe("prepare");
-    expect(dto.settings.merge_policy).toBe("agent_merge");
+    expect(dto.settings.review_policy).toBe("client_review");
     expect(dto.output).toEqual({ tail: null, redacted: true });
     expect(r.text).not.toContain("SECRET-INSTRUCTIONS-BODY");
     expect(r.text).not.toMatch(/instructions|git_token|ghs_|ghu_|"enc"/);
@@ -1351,14 +1351,14 @@ describe("TaskDO.dashboardDetail", () => {
     const nul = await createTask({ repository_id: null }, 4_002);
     expect(await nul.stub.dashboardDetail()).toEqual({ ok: false, code: "not_found" });
     const t = await createTask(
-      { repository_id: 4242, instructions: "SECRET-BODY", merge_policy: "agent_merge" },
+      { repository_id: 4242, instructions: "SECRET-BODY", review_policy: "client_review" },
       4_002,
     );
     const r = await t.stub.dashboardDetail();
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.view.task_id).toBe(t.id);
-    expect(r.merge_policy).toBe("agent_merge");
+    expect(r.review_policy).toBe("client_review");
     expect(JSON.stringify(r)).not.toContain("SECRET-BODY");
   });
 });

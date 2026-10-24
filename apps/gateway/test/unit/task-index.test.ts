@@ -9,6 +9,7 @@ import {
   createTask,
   REPO,
   runToCompleted,
+  runToCompletedDraft,
   type TaskStub,
 } from "./pr-helpers";
 
@@ -106,7 +107,7 @@ describe("outbox: 各更新点で revision が上がる", () => {
   });
 
   it("recordPrAction（Ready / マージ）で上がる。終端後で alarm が消えていても、再設定されて配送される", async () => {
-    const t = await runToCompleted({ merge_policy: "agent_merge" }, OWNER);
+    const t = await runToCompletedDraft({}, OWNER);
     const dir = new FakeDirectory();
     await useDirectory(t.stub, dir);
     // 束縛していなかった間の更新が未配送で残っている。advance が alarm を戻し、alarm が配送する
@@ -129,6 +130,18 @@ describe("outbox: 各更新点で revision が上がる", () => {
     expect(dir.calls.at(-1)?.snapshot.pr_merged).toBe(true);
     expect(dir.calls.at(-1)?.revision).toBe(before + 2);
     expect(await sent(t.stub)).toBe(before + 2);
+  });
+
+  it("完了時の自動の Ready でも上がり、Directory には pr_draft: false が届く", async () => {
+    const t = await runToCompleted({}, OWNER);
+    const dir = new FakeDirectory();
+    await useDirectory(t.stub, dir);
+    await t.stub.advance();
+    for (let i = 0; i < 4 && (await alarmOf(t.stub)) !== null; i++) {
+      await runDurableObjectAlarm(t.stub);
+    }
+    expect(dir.calls.at(-1)?.snapshot.pr_draft).toBe(false);
+    expect(await sent(t.stub)).toBe(await revision(t.stub));
   });
 
   it("行の更新と revision の上昇は同じトランザクション（途中で例外なら、どちらも反映されない）", async () => {

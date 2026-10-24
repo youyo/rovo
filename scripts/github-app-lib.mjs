@@ -22,7 +22,15 @@ export function defaultAppName(namePrefix) {
  * @param {{name: string, publicBaseUrl: string, redirectUrl: string, team: boolean}} o
  */
 export function buildManifest({ name, publicBaseUrl, redirectUrl, team }) {
-  const permissions = { contents: "write", pull_requests: "write", metadata: "read" };
+  // checks / statuses の read は任意: あると task_pr_merge が PR の head の check（check run と commit status）の結果を確かめる。
+  // 無くてもマージは止まらず、応答の warnings に checks_unreadable が入る
+  const permissions = {
+    contents: "write",
+    pull_requests: "write",
+    metadata: "read",
+    checks: "read",
+    statuses: "read",
+  };
   // org の Members: read は allowed.team で所属を確かめるときだけ
   if (team) permissions.members = "read";
   return {

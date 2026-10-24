@@ -316,9 +316,11 @@ web に secret は無い（GitHub のトークンも Anthropic のキーも持�
 - **Callback URL**: `<PUBLIC_BASE_URL>/callback`（ローカル開発用に `http://localhost:8787/callback` も追加できる）
 - **Request user authorization (OAuth) during installation**: 不要。**Webhook**: 無効でよい
 - **Expire user authorization tokens**: 有効にする（既定）。manifest では指定できない（docs に記載が無い）ので、自動作成のあと App の設定画面（Optional features）で確かめる。トークンは 8 時間で切れ、refresh token（約 6 か月）で自動更新される。無効にした場合も動く
-- **Repository permissions**: Metadata: Read-only / Contents: Read and write / Pull requests: Read and write
-  - `task_pr_ready` / `task_pr_merge`（D9）は、**この権限のままで足りる**（追加は要らない）。これらは Installation Token ではなく、**利用者の GitHub のユーザートークン**で行うので、有効な権限は「App の権限」と「利用者本人の権限」の共通部分になる。Draft → Ready（GraphQL の `markPullRequestReadyForReview`）とマージ（`PUT .../pulls/{n}/merge`）には **Pull requests: write** と **Contents: write** が、`delete_branch`（`DELETE .../git/refs/heads/{branch}`）には **Contents: write** が要る。App の権限が read になっていると `forbidden` になる。利用者にそのリポジトリへの書き込み権限が無い場合も同じ。権限の表は GitHub の記述に基づくので、実機の受入（[acceptance.md](specs/acceptance.md) の 21 節）で確かめる
-  - ブランチ保護（必須レビュー・必須チェック・ruleset）は GitHub が利用者のトークンに対して適用する。`merge_policy` が `agent_merge` でも、保護に拒否されたら `merge_blocked` になり、マージされない（組織としての強制は GitHub に任せる）
+- **Repository permissions**: Metadata: Read-only / Contents: Read and write / Pull requests: Read and write / Checks: Read-only（任意） / Commit statuses: Read-only（任意）
+  - 完了時の自動の Ready（`review_policy` が `client_review`。タスクが `COMPLETED` になったとき、rovo が PR を Ready for review にする）は、**GitHub App の Installation Token**で GraphQL の `markPullRequestReadyForReview` を呼ぶ。**Pull requests: write** が要る。失敗してもタスクは `COMPLETED` のままで、PR は Draft のまま残り（warning イベント `auto_ready_failed`）、`next_steps` が `task_pr_ready` を案内する
+  - `task_pr_merge` は、マージの前に PR の head の commit に付いた GitHub の check を読む（`GET .../commits/{sha}/check-runs` と `GET .../commits/{sha}/status`）。これに **Checks: Read-only** と **Commit statuses: Read-only** が要る（manifest で自動で付く。すでに作った App は、App の設定で権限を足して、Install した org / アカウントで承認する）。この 2 つの権限は**任意**: 無い・読めない（403・5xx・ネットワークの失敗）ときは、マージを止めずに通し、応答の `warnings` に `checks_unreadable` を入れる（止めるかどうかは GitHub のブランチルールの責務）。足すと CI の結果を確かめられる。失敗している check があれば `merge_blocked`（`checks_failing`）、実行中・保留なら `merge_blocked`（`checks_pending`）。**check が 1 つも無ければ通る**（厳しくしたいときは GitHub のブランチ保護を使う）
+  - `task_pr_ready` / `task_pr_merge`（D9）は、**Installation Token ではなく、利用者の GitHub のユーザートークン**で行うので、有効な権限は「App の権限」と「利用者本人の権限」の共通部分になる。Draft → Ready（GraphQL の `markPullRequestReadyForReview`）とマージ（`PUT .../pulls/{n}/merge`）には **Pull requests: write** と **Contents: write** が、`delete_branch`（`DELETE .../git/refs/heads/{branch}`）には **Contents: write** が要る。App の権限が read になっていると `forbidden` になる。利用者にそのリポジトリへの書き込み権限が無い場合も同じ。権限の表は GitHub の記述に基づくので、実機の受入（[acceptance.md](specs/acceptance.md) の 21 節）で確かめる
+  - ブランチ保護（必須レビュー・必須チェック・ruleset）は GitHub が利用者のトークンに対して適用する。`review_policy` によらず、保護に拒否されたら `merge_blocked` になり、マージされない（組織としての強制は GitHub に任せる）
 - **Organization permissions**: Members: Read-only（team 所属の確認に使う。`ALLOWED_USER_IDS` だけで認可する個人利用では使わない）
 - App を対象の org / リポジトリに **Install** する。個人アカウントのリポジトリでも、`task_start` の Installation と push 権限の確認はそのまま動く（`ALLOWED_USER_IDS` で認可した利用者は、org の Members 権限を使わない）。`task_start` は、利用者のトークンで見える Installation に対象リポジトリが含まれ、利用者に push 権限があるときだけ成功する（公開リポジトリでも App が未導入なら `forbidden`）
 
@@ -487,7 +489,9 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 | `task_start` が `github_app_not_configured` で FAILED | `GITHUB_APP_ID` または `GITHUB_APP_PRIVATE_KEY` が未設定 |
 | `task_start` が `ai_gateway_not_configured` で拒否される | agent の `AI_GATEWAY_ID` が空 |
 | `task_start` が `forbidden` | App が対象リポジトリに未導入、または push 権限が無い |
-| `task_pr_ready` / `task_pr_merge` が `forbidden` | `task_pr_merge` は `merge_policy` が `human_review` のタスク。または App の権限が Pull requests / Contents の write でない、利用者に書き込み権限が無い（メッセージに GitHub の理由が入る） |
+| `task_pr_ready` / `task_pr_merge` が `forbidden` | App の権限が Pull requests / Contents の write でない、利用者に書き込み権限が無い（メッセージに GitHub の理由が入る） |
+| `task_pr_merge` の応答の `warnings` に `checks_unreadable` | CI の結果を読めずに確かめないままマージした。App に Checks / Commit statuses の read 権限を足すと確かめられる（任意） |
+| タスクが `COMPLETED` なのに PR が Draft のまま | 完了時の自動の Ready が失敗した（warning イベント `auto_ready_failed`。App の Pull requests: write が無い、GitHub の障害など）。`task_pr_ready` で Ready にできる |
 | `task_pr_merge` が `merge_blocked` | ブランチ保護（必須レビュー・必須チェック・ruleset）に拒否された。メッセージの GitHub の理由を満たしてから再実行する |
 | `task_start` が `draft_pr_unsupported` で FAILED | Draft PR を作れないリポジトリ。`DRAFT_PR_FALLBACK=ready` にするか、リポジトリを変える |
 | `web_search` が `internal`（`web research is misconfigured on the operator side; retrying will not help ...`。再試行の目安〔`retry_after_seconds`〕は付かない） | web の AI Gateway が byok_only（`web_search_byok_not_configured`）、または Web Search の認証・クレジットの不足。`terraform apply` で `ai_web_gateway_id` を作り、`deploy:config` → `deploy:web` で web の `AI_GATEWAY_ID` をそれに向ける（web の Worker のログに上流のコードが出る） |

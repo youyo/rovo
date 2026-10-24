@@ -759,7 +759,7 @@ describe("TaskDO.result", () => {
           commit_sha: "a".repeat(40),
         },
         warnings: ["w", expect.stringMatching(/^head_moved_after_verification/)],
-        merge_policy: "human_review",
+        review_policy: "client_review",
         budget_policy: "ask",
         effort: "high",
         // D10: 子のモデル（task_start で省略 = 既定）
@@ -767,8 +767,8 @@ describe("TaskDO.result", () => {
         pr: {
           number: expect.any(Number),
           url: expect.stringMatching(/\/pull\/\d+$/),
-          // 作成直後の Draft PR（task_pr_ready / task_pr_merge で変わる。D9）
-          draft: true,
+          // 完了で rovo が自動で Ready にした（client_review）
+          draft: false,
           merged: false,
           // 終端の PR 更新（head の読み取り）が済んでいる。commit_sha（pushedSha と同じ）は PR の head と一致しない。
           head_sha: expect.stringMatching(/^[0-9a-f]{40}$/),

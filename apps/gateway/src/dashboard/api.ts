@@ -443,7 +443,7 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
   const fresh = new URL(request.url).searchParams.get("fresh") === "1";
   const read = await readAuthorizedTask(env, auth.session, taskId, { fresh });
   if (!read.ok) return read.response;
-  const { view, merge_policy, sandbox_instance, model_selection, reached } = read.detail;
+  const { view, review_policy, sandbox_instance, model_selection, reached } = read.detail;
 
   // 「いまの手順」と出力の末尾の材料（直近の数十件と最新の command だけ）。照合に使った repository_id を渡し、TaskDO が突き合わせる
   const repositoryId = view.repository_id;
@@ -467,7 +467,7 @@ async function handleTaskDetail(request: Request, env: Env, taskId: string): Pro
     // 実行中の一言。最新の command / edit / web などから作る（古い agent は tool_start に縮退。終端は null）
     now: buildNow(latest.recent, view.status, phase, read.detail.awaiting_budget),
     settings: {
-      merge_policy,
+      review_policy,
       ...(deps === "hit" || deps === "miss" || deps === "built" || deps === "disabled"
         ? { deps_cache: deps }
         : {}),

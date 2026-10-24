@@ -102,14 +102,13 @@ const shownAtom = atom({ plugin: "rovo", key: "shown" } as const, null);
 const creatingAtom = atom({ plugin: "rovo", key: "creating" } as const, null);
 const CREATING_MS = 10 * 60 * 1000;
 const CREATE_COMMAND = "create-task";
-const OPEN_COMMAND = "open-console";
-const CLOSE_COMMAND = "close-console";
+const CONSOLE_COMMAND = "rovo-console";
 // 名前空間なし（create-task）と rovo: 付き（rovo:create-task）だけを同じ名前として扱う。旧名は拾わない。
 const baseName = (command: string): string =>
   command.startsWith("rovo:") ? command.slice(5) : command;
 
 // 自分のコマンド（名前空間なし・rovo: 付き）。baseName と同じ範囲。
-const OWN_COMMANDS = /^(?:rovo:)?(?:create-task|open-console|close-console)$/;
+const OWN_COMMANDS = /^(?:(?:rovo:)?create-task|rovo-console)$/;
 
 const endpointKey = (e: { server: string; prefix: string }): string => `${e.server}/${e.prefix}`;
 
@@ -691,7 +690,7 @@ const track = async (
   if (isNew) {
     // 新しいタスクを拾うたびに開く。狭い端末では待ちになるので、トーストで知らせる。
     const isPlaced = await openPane($);
-    if (!isPlaced) $.ui.toast("rovo のタスクを始めました。/rovo:open-console で開けます");
+    if (!isPlaced) $.ui.toast("rovo のタスクを始めました。/rovo-console で開けます");
   }
 };
 
@@ -818,6 +817,17 @@ const startOf = (m: PaneModel, s: { follow: boolean; offset: number }): number =
 
 export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
+    // 開け閉めするだけなので、作業中のターンを待たせずその場で動かす（immediate）。
+    // run はターンの状態に依存しない。スキルだと作業中に打ったとき終わりを待つため mod のコマンドにする。
+    try {
+      await $.command.register({
+        name: CONSOLE_COMMAND,
+        description: "rovo のペインを開く・閉じる",
+        immediate: true,
+      });
+    } catch {
+      // 登録できなくてもほかの機能は動かす。
+    }
     try {
       const stored = coerceTasks(await $.store.get(STORE_KEY));
       await mutate($, () => stored);
@@ -850,26 +860,33 @@ export const register: Register = (on) => {
     return next(e);
   });
 
-  // open-console / close-console は skill（中身なし）の実行を拾い、next を呼ばずに自分で答える。
+  // rovo-console は mod 自身が登録した immediate のコマンド（開閉の切り替え）で、next を呼ばずに自分で答える。
   // create-task は next で本来の処理（モデルへ手順を渡す）に続ける。mod は task_start を呼ばない。
   // matcher で自分のコマンドだけに絞る（他の mod のコマンドの結果に rovo が混ざらないように）。
   on("command.run", { command: OWN_COMMANDS }, async ($, e, next) => {
     const name = baseName(e.command);
-    if (name === CLOSE_COMMAND) {
+    if (name === CONSOLE_COMMAND) {
+      // 開いて見えているときは閉じる。閉じている・他のタブの裏にあるときは開く（前に出す）。
+      let isShown = false;
       try {
-        await $.ui.close({ id: PANE_ID });
+        isShown = (await $.ui.panes()).some((p) => p.id === PANE_ID && p.isShown);
       } catch {
-        // 閉じられなくても続ける。
+        // 分からなければ開く側に倒す。
       }
-      try {
-        await update($, creatingAtom, () => null);
-      } catch {
-        // 作成中の表示が消せなくても続ける。
-      }
+      if (isShown) {
+        try {
+          await $.ui.close({ id: PANE_ID });
+        } catch {
+          // 閉じられなくても続ける。
+        }
+        try {
+          await update($, creatingAtom, () => null);
+        } catch {
+          // 作成中の表示が消せなくても続ける。
+        }
 
-      return { text: "コンソールのペインを閉じました。" };
-    }
-    if (name === OPEN_COMMAND) {
+        return { text: "コンソールのペインを閉じました。" };
+      }
       try {
         // 作成中の逃げ道: 作成中の表示を消して、通常の表示（前のタスク）に戻す。
         await update($, creatingAtom, () => null);
@@ -987,25 +1004,24 @@ export const register: Register = (on) => {
         " ".repeat(Math.max(0, TRACK_COL - cells.reduce((n, c) => n + displayWidth(c.text), 0)));
       if (isTerminal(t.status)) {
         const cell = terminalCell(t, own?.pr);
-        const g = glyph(t.status);
+        // 結果は線路の位置に文字で出す（✓ PR #n / ✕ 失敗 など）。タイトルの前は選択の帯の位置だけ。
+        const result = truncateWidth(`${glyph(t.status)} ${cell.text}`, TRACK_COL - 2);
         const dim = t.status === "COMPLETED" || t.status === "CANCELLED";
-        const titleW = Math.max(1, cols.title - 2);
         const ago = agoText(now - (t.terminalAt ?? now));
-        const cellPad = " ".repeat(
-          Math.max(0, cols.model - displayWidth(truncateWidth(cell.text, cols.model))) + 1,
-        );
+        const model = shortModel(t.model ?? "");
         return (
           <Button key={`row:${key}:0`} plain onPress={press}>
-            {bar} <Text color={statusColor(t.status)}>{g}</Text>{" "}
+            {bar}{" "}
             <Text dimColor={dim} weight={isShown ? "bold" : undefined}>
-              {padWidth(truncateWidth(t.title, titleW), titleW)}
+              {padWidth(truncateWidth(t.title, cols.title), cols.title)}
             </Text>{" "}
-            {trackCells(track)}
-            {trackPad(track)}
+            <Text color={cell.color}>{result}</Text>
+            {" ".repeat(Math.max(0, TRACK_COL - displayWidth(result)))}
             {cols.model > 0 && (
-              <Text color={cell.color}>{truncateWidth(cell.text, cols.model)}</Text>
+              <Text dimColor={dim}>
+                {`${padWidth(truncateWidth(model, cols.model), cols.model)} `}
+              </Text>
             )}
-            {cols.model > 0 && cellPad}
             <Text dimColor>{padLeft(ago, cols.elapsed)}</Text>
           </Button>
         );

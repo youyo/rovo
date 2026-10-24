@@ -198,7 +198,7 @@ The gateway serves a read-only dashboard (`/dashboard`) where you can see the st
 
 ## Claude Code mod
 
-A read-only mod that shows the progress of tasks in a pane beside Claude Code is bundled ([plugins/rovo/README.md](plugins/rovo/README.md)). It also adds `/rovo:create-task`, `/rovo:consult`, `/rovo:open-console` and `/rovo:close-console`. To install it, see step 5 of the [Quick start](#quick-start) (`/plugin marketplace add youyo/rovo` and `/plugin install rovo@rovo`). From a shell: `claude plugin install rovo --marketplace youyo/rovo`.
+A read-only mod that shows the progress of tasks in a pane beside Claude Code is bundled ([plugins/rovo/README.md](plugins/rovo/README.md)). It also adds `/rovo:create-task`, `/rovo:consult`, `/rovo-console`. To install it, see step 5 of the [Quick start](#quick-start) (`/plugin marketplace add youyo/rovo` and `/plugin install rovo@rovo`). From a shell: `claude plugin install rovo --marketplace youyo/rovo`.
 
 ## Components
 

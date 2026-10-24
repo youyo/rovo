@@ -607,7 +607,7 @@ test("agoText counts whole minutes since the end", () => {
 
 test("paneColumns gives the title the rest, and drops the model column when narrow", () => {
   const w = paneColumns(74);
-  expect(w).toEqual({ title: 33, model: 10, elapsed: 9 });
+  expect(w).toEqual({ title: 32, model: 10, elapsed: 9 });
   expect(2 + w.title + 1 + TRACK_COL + w.model + 1 + w.elapsed).toBe(74);
   const n = paneColumns(44);
   expect(n.model).toBe(0);
@@ -621,6 +621,7 @@ test("columnHeader puts the station names once, over the track, and uses タイ�
   expect(h).toContain("タイトル");
   expect(h).toContain("準備 実行 検証 PR");
   expect(h).toContain("モデル");
+  expect(h).toMatch(/PR {2,}モデル/); // at least 2 columns between the last station and モデル
   expect(h.endsWith("経過")).toBe(true);
   expect(h).not.toContain("題名");
   expect(displayWidth(h.slice(0, h.indexOf("準備")))).toBe(2 + w.title + 1);

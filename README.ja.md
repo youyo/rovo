@@ -198,7 +198,7 @@ gateway は、タスクの状況をブラウザで見られる読み取り専用
 
 ## Claude Code の mod
 
-タスクの進み具合を Claude Code の横のペインに出す読み取り専用の mod を同梱している（[plugins/rovo/README.md](plugins/rovo/README.md)）。`/rovo:create-task`・`/rovo:consult`・`/rovo:open-console`・`/rovo:close-console` も追加される。導入は[クイックスタート](#クイックスタート)の 5（`/plugin marketplace add youyo/rovo` と `/plugin install rovo@rovo`）。シェルからは `claude plugin install rovo --marketplace youyo/rovo`。
+タスクの進み具合を Claude Code の横のペインに出す読み取り専用の mod を同梱している（[plugins/rovo/README.md](plugins/rovo/README.md)）。`/rovo:create-task`・`/rovo:consult`・`/rovo-console` も追加される。導入は[クイックスタート](#クイックスタート)の 5（`/plugin marketplace add youyo/rovo` と `/plugin install rovo@rovo`）。シェルからは `claude plugin install rovo --marketplace youyo/rovo`。
 
 ## 構成
 

@@ -48,11 +48,19 @@ describe("stageOf（task の段階）", () => {
 describe("stageOf（review の段階）", () => {
   it("COMPLETED 以外の終端は止まった段を返す（review_stage × 終端）", () => {
     const stages = ["waiting", "commands", "reviewing", "posting", "done", null] as const;
-    const want = { waiting: "fetch", commands: "fetch", reviewing: "investigate", posting: "post", done: "post" } as const;
+    const want = {
+      waiting: "fetch",
+      commands: "fetch",
+      reviewing: "investigate",
+      posting: "post",
+      done: "post",
+    } as const;
     for (const status of ["FAILED", "BUDGET_EXCEEDED", "CANCELLED"]) {
       for (const rs of stages) {
         const expected = rs === null ? "fetch" : want[rs];
-        expect(stage({ kind: "review", status, review_stage: rs }), `${status}/${rs}`).toBe(expected);
+        expect(stage({ kind: "review", status, review_stage: rs }), `${status}/${rs}`).toBe(
+          expected,
+        );
       }
     }
   });

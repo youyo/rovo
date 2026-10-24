@@ -2,7 +2,7 @@
 
 rovo を upstream として取り込み、自分の Cloudflare アカウントにデプロイするための手順。**急ぐ人は 4 のクイックスタート（`mise run setup`）だけでよい。** 以降は詳細の参照（値の一覧、GitHub App、AI Gateway、R2、監査ログなど）。環境固有の値はすべてプレースホルダ（`<YOUR_...>`）で書く。
 
-**印について**: コードを読んで確かめられないこと（Cloudflare の画面操作、料金、実機での挙動）には「**【実機で確認して追記】**」と印を付けてある。実機での受入（[acceptance.md](specs/acceptance.md)）で確かめるまでは、この印の箇所を事実として扱わない。
+**印について**: Cloudflare の公式文書で確かめられたことは、出典の URL を添えて事実として書いた（確認日 2026-10-24。文書は変わるので、迷ったら出典を見直す）。公式文書では確かめられないこと（画面操作の細部、実アカウントでの挙動）には「**【実機で確認して追記】**」と印を付けてある。実機での受入（[acceptance.md](specs/acceptance.md)）で確かめるまでは、この印の箇所を事実として扱わない。
 
 ## 1. この文書の位置づけ
 
@@ -26,10 +26,11 @@ rovo を upstream として取り込み、自分の Cloudflare アカウント�
 | Workers AI | web の `AI`（Web Search API、HTML の Markdown 変換、Clef-flash）、agent の `AI`（AI Gateway 経由で Claude を呼ぶ。Sandbox の昇格の判断に Clef）、gateway の `AI`（task_start で model を省略したとき、Clef がモデルを選ぶ。新しい secret は無い） | gateway に `ai` バインディングが増えた。既存のデプロイは `mise run deploy:config` で設定を作り直してから deploy する（`deploy:config:check` で確かめる） |
 | AI Gateway | Claude、Web Search API、Clef-flash の呼び出し | Anthropic の API キーは AI Gateway に保管する。Worker には置かない |
 | R2 | gateway の `LOGS`（任意。9） | |
-| Browser Run | web の `BROWSER`（宣言は常にある。コードが使うのは `WEB_BROWSE_ENABLED` が `"true"` のときだけ。12） | upstream の `wrangler.jsonc` も `deploy.example/` も `browser` を常に宣言している。`apps/web/src/service.ts` は `env.BROWSER` を `WEB_BROWSE_ENABLED` の確認より後でしか触らない（無効なら使われない）。Browser Run の無いアカウントで宣言だけでデプロイが通るか: **【実機で確認して追記】** |
+| Browser Run | web の `BROWSER`（宣言は常にある。コードが使うのは `WEB_BROWSE_ENABLED` が `"true"` のときだけ。12） | upstream の `wrangler.jsonc` も `deploy.example/` も `browser` を常に宣言している。`apps/web/src/service.ts` は `env.BROWSER` を `WEB_BROWSE_ENABLED` の確認より後でしか触らない（無効なら使われない）。Browser Run は Workers Free でも使える（1 日 10 分まで）ので、プランの面では宣言だけでデプロイが止まる理由は文書に無い（出典: [Browser Run の制限](https://developers.cloudflare.com/browser-run/limits/)）。ただし宣言だけのデプロイを実アカウントで通したことはない: **【実機で確認して追記】** |
 
-- 必要なプラン、Containers や Web Search API の提供状況: **【実機で確認して追記】**
-- 課金されるもの: Workers / Durable Objects / Containers / KV / R2 の利用料、Workers AI（Web Search API、Clef-flash）、AI Gateway 経由の Claude の利用料、Browser Run（有効にした場合）。単価と見積もりは **【実機で確認して追記】**（推定の単価の上書きは 11）。
+- **必要なプラン**: **Workers Paid プラン（月 5 USD〜）が要る。** Containers の利用料は Workers Paid の枠（メモリ・CPU・ディスクの月ごとの含み量）に付いていて、Workers Free の欄は N/A（使えない）。出典: [Containers の料金](https://developers.cloudflare.com/containers/platform/pricing/)、[Workers の料金](https://developers.cloudflare.com/workers/platform/pricing/)。監査ログの Logpush（Workers Trace Events）も Workers Paid が要る（出典: [Logpush](https://developers.cloudflare.com/logs/logpush/)）。
+- **Web Search API**: 2026-10-02 にベータとして提供開始。AI Gateway を通り、AI Gateway のクレジットか、Gateway に保管したプロバイダーのキーで払う（出典: [Web Search API](https://developers.cloudflare.com/web-search/how-to-use/)）。rovo の web は `env.AI.websearch()` を使う（7）。ベータなので仕様や提供状況は変わりうる。
+- **課金されるもの**: Workers / Durable Objects / Containers / KV / R2 の利用料、Workers AI（Web Search API、Clef-flash）、AI Gateway 経由の Claude の利用料、Browser Run（有効にした場合）。文書にある単価（2026-10-24 の確認。変わりうるので出典を見る）: Containers は 10ms 単位で、含み量を超えるとメモリ 0.0000025 USD / GiB-秒・CPU 0.000020 USD / vCPU-秒・ディスク 0.00000007 USD / GB-秒（[出典](https://developers.cloudflare.com/containers/platform/pricing/)）。Workers AI は 1,000 Neuron あたり 0.011 USD、無料枠は 1 日 1 万 Neuron（[出典](https://developers.cloudflare.com/workers-ai/platform/pricing/)）。Browser Run は Workers Paid で月 10 時間を含み、超過は 1 ブラウザ時間あたり 0.09 USD（Workers バインディングは同時ブラウザ数の分が別途。[出典](https://developers.cloudflare.com/changelog/post/2025-07-28-br-pricing/)）。R2 は保存 0.015 USD / GB-月など（[出典](https://developers.cloudflare.com/workers/platform/pricing/)）。rovo が使う分の見積もりは、タスクの内容と Sandbox の大きさで大きく変わるので書かない（推定の単価の上書きは 11）。
 - ローカルに必要なもの: mise（`mise install` で node・pnpm・terraform が入る）、Docker、`wrangler login` 済みのアカウント、Terraform 用の Cloudflare API トークン（env の `CLOUDFLARE_API_TOKEN`。権限は `infra/README.md`）。
 
 ## 3. 構成とデプロイの順序
@@ -151,11 +152,11 @@ AI Gateway の ID・KV の id・アーカイブのバケット名は Terraform �
 
 | 実行 | 内容 |
 |---|---|
-| `mise run deploy:config` | `terraform -chdir=infra output -raw <名前>` で非秘密の出力 3 つだけを読み、`deploy/infra.json` に保存して生成する。Terraform の資格情報が要る |
+| `mise run deploy:config` | `terraform -chdir=infra output -raw <名前>` で非秘密の出力 4 つ（`kv_namespace_id` / `archive_bucket_name` / `ai_gateway_id` / `ai_web_gateway_id`）だけを読み、`deploy/infra.json` に保存して生成する。Terraform の資格情報が要る |
 | `mise run deploy:config -- --no-terraform` | 保存済みの `deploy/infra.json` から作り直す（`rovo.config.json` を直したとき） |
 | `mise run deploy:config:check`（`deploy:config -- --check`） | Terraform を読まず、`rovo.config.json` + `infra.json` + 雛形から作り直した結果と、コミット済みの生成物を比べる。差分があれば 1。ファイルは書かない |
 
-下流の CI では `mise run deploy:config:check` を流し、`rovo.config.json` を直したのに生成し直していない、生成物を手で書き換えた、upstream の雛形が変わったのに取り込んでいない、を検出する。`-json` は sensitive の値も出すので使わず、`kv_namespace_id` などを名前指定の `-raw` で読む。生成物のどこにも秘密は入らない。生成物には `deploy.sh` の検査（`<...>` の残り・upstream の設定への symlink）がそのままかかる。
+下流の CI では `mise run deploy:config:check` を流し、`rovo.config.json` を直したのに生成し直していない、生成物を手で書き換えた、upstream の雛形が変わったのに取り込んでいない、を検出する。`-json` は sensitive の値も出すので使わず、名前指定の `-raw` で読む。生成物のどこにも秘密は入らない。生成物には `deploy.sh` の検査（`<...>` の残り・upstream の設定への symlink）がそのままかかる。
 
 `main` などのパスは設定ファイルからの相対パスで、`deploy/` がリポジトリ直下にある前提（`../apps/...`）。出力先を変えるときは `ROVO_DEPLOY_DIR` を指定する（`setup` の既定は `deploy`）。
 
@@ -182,6 +183,8 @@ AI Gateway の ID・KV の id・アーカイブのバケット名は Terraform �
 | `rovo.config.json` | 上の設定。コミットする（秘密は無い。account id は秘密ではないが公開しないほうがよいので、公開リポジトリには置かない） |
 | `deploy/*.wrangler.jsonc`、`deploy/infra.json` | `deploy:config` の生成物。コミットする |
 | `infra/backend.tf` | Terraform の state の置き場所（任意。upstream は `backend` を持たない。`infra/README.md`） |
+
+upstream の `.gitignore` は、公開リポジトリに実際の設定が入らないよう、`rovo.config.json` と `deploy/` を除外している。**下流では、初回だけ `git add -f rovo.config.json deploy/` で追加する**（追加したあとは通常どおり追跡される）。または下流の `.gitignore` の末尾に `!/rovo.config.json` と `!/deploy/` を足す。
 
 > rovo の `apps/*/wrangler.jsonc` に本番の値を書かないこと。特に `r2_buckets` は下流の設定にだけ置く。
 
@@ -285,7 +288,7 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 
 | 名前 | Worker | 必須 | 入れ方 / 説明 |
 |---|---|---|---|
-| `GITHUB_APP_CLIENT_SECRET` | gateway | 必須 | GitHub App の Client secret。**人が入力する**（隠した入力） |
+| `GITHUB_APP_CLIENT_SECRET` | gateway | 必須 | GitHub App の Client secret。`mise run setup` / `github-app` で App を作ったときは、manifest フローが標準入力で直接入れる（人は入力しない）。App を手で作ったときだけ、`deploy:secrets` が隠した入力で聞く |
 | `GITHUB_APP_PRIVATE_KEY` | gateway | 必須 | GitHub App の秘密鍵（**PKCS#8** の PEM）。`--pem` の `.pem`（GitHub がダウンロードさせる PKCS#1）をスクリプトが変換して渡す。変換は 6 |
 | `TOKEN_ENC_KEY` | gateway | 必須 | GitHub のトークンと Installation Token を暗号化して保存する鍵。base64 の 32 バイト。**自動生成**。変えると保存済みの資格は復号できず、全員が再ログインになる（だから既定は上書きしない） |
 | `TOKEN_ENC_KEY` | agent | 必須 | Installation Token を SandboxDO に暗号化して保存する鍵。形式は同じで、**gateway とは別の値を自動生成**する。未設定だと `start` は拒否される（fail closed） |
@@ -342,7 +345,11 @@ openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem | wrangler secret put GITH
   - agent: `AI` バインディングが AI Gateway 経由で Claude（と、登録していれば OpenAI の Responses API）を呼ぶ（子エージェントのモデル呼び出しは AI Gateway 経由だけ）。
   - web: `env.AI.websearch()`（Web Search API）と、安全性の評価（`env.AI.run` による Clef-flash）。どちらも AI Gateway を通る。
 - Clef の呼び出しには、metadata として `userId` / `taskId` / `caller` が付く（誰がいくら使ったかの集計用）。子エージェントの呼び出しは `userId` / `taskId`、`consult` の呼び出しは `userId` / `consultId` / `caller: "consult"`。
-- AI Gateway の画面での設定項目（認証、レート制限、クレジット〔Unified Billing〕など）: **【実機で確認して追記】**
+- AI Gateway の設定項目（文書で確かめたもの）。画面は **AI > AI Gateway > 対象の Gateway > Settings**（プロバイダーキーは同じ Gateway の **Provider Keys**）:
+  - 認証（Authenticated Gateway）: Settings で認証トークンを作り（`Run` の権限。値は一度しか表示されない）、認証を有効にする。BYOK は Gateway の認証が前提（[出典](https://developers.cloudflare.com/ai-gateway/configuration/authentication/)）。**AI Gateway のトークンの権限（Read / Run / Edit）は Gateway 単位に絞れず、アカウント全体に効く**。`Run` を持つトークンは、BYOK のキーを持つ Gateway も含めてアカウントのすべての Gateway で使える。Gateway どうしを分けたいならアカウントを分けるか、Worker の AI バインディングを使う。
+  - レート制限: Settings の Rate-limiting で、回数・期間・方式を決める（既定はその Gateway の全リクエストに効く。[出典](https://developers.cloudflare.com/ai-gateway/features/rate-limiting/)）。rovo の Terraform は付けない。
+  - クレジット（Unified Billing）: Cloudflare のアカウントにクレジットを入れ、プロバイダーのキーがリクエストにも BYOK にも無いときに、Cloudflare 管理の資格情報で処理して残高から引く。優先順位は「リクエストのキー、BYOK のキー、Unified Billing」。Workers AI を Unified Billing で払うかは Settings の **Workers AI Billing** で選ぶ（既定は通常の請求。[出典](https://developers.cloudflare.com/ai-gateway/features/unified-billing/)、[出典](https://developers.cloudflare.com/ai-gateway/configuration/manage-gateway/)）。
+  - BYOK: Provider Keys の **Add API Key** でプロバイダーを選んでキーを入れる。API で作るときは先に Secrets Store に `{gateway_id}_{provider_slug}_{alias}` の名前でシークレットを作る必要がある（[出典](https://developers.cloudflare.com/ai-gateway/configuration/bring-your-own-keys/)）。`mise run byok` が Secrets Store の権限を要するかは **【実機で確認して追記】**（4）。
 
 ## 8. Portal / Access への登録に必要な情報
 
@@ -372,7 +379,7 @@ openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem | wrangler secret put GITH
 - 秘密のマスク（`apps/agent/src/redact.ts`）は正規表現による best effort で、取りこぼしうる。バケットを非公開に保ち、バインディングを gateway だけにし、ライフサイクルで期限を切ることで備える。
 - `result.json` には、子に渡した検証コマンド（`verification.commands`）が入る。**検証コマンドの引数に秘密を入れない**。
 
-R2 の画面操作、ライフサイクルの設定画面: **【実機で確認して追記】**
+ライフサイクルの手動の設定: Wrangler の `wrangler r2 bucket lifecycle add <バケット> [名前] [接頭辞] --expire-days <日数>` で、期限切れの削除ルールを足せる（[出典: wrangler r2 のコマンド](https://developers.cloudflare.com/workers/wrangler/commands/r2/)、[出典: Object lifecycles](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)）。バケットロックのルールがあるオブジェクトは、ライフサイクルでも消えない。ダッシュボードのライフサイクルの画面の操作: **【実機で確認して追記】**
 
 ## 10. 監査ログの設定
 
@@ -385,7 +392,7 @@ R2 の画面操作、ライフサイクルの設定画面: **【実機で確認�
 
 Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換の鍵）が平文で残る。state は非公開の場所に置く（`infra/README.md`）。
 
-確かめ方: 設定後にタスクを 1 件実行し、Logpush の送り先に監査行（`"audit":true`）が欠けずに届くことを、タスクの `TaskDO` の events（`credential_issued` / `credential_revoked` など）の件数と突き合わせる。具体的な手順は [acceptance.md](specs/acceptance.md) の 16 節。Logpush の画面操作: **【実機で確認して追記】**
+確かめ方: 設定後にタスクを 1 件実行し、Logpush の送り先に監査行（`"audit":true`）が欠けずに届くことを、タスクの `TaskDO` の events（`credential_issued` / `credential_revoked` など）の件数と突き合わせる。具体的な手順は [acceptance.md](specs/acceptance.md) の 16 節。手動で作る場合の画面操作（文書による）: ダッシュボードの **Logpush** ページ（アカウントのレベル）> **Create a Logpush job** > 送り先（R2）> データセットに **Workers trace events** を選ぶ > フィールドを選ぶ > 画面の指示に従って送り先の所有を確かめて完了（[出典](https://developers.cloudflare.com/workers/observability/logs/logpush/)、R2 の送り先は[出典](https://developers.cloudflare.com/logs/logpush/logpush-job/enable-destinations/r2/)）。Workers Trace Events の Logpush は Workers Paid が要る。通常は Terraform が作るので、この画面操作は要らない。
 
 ## 11. 単価（推定費用）の上書き
 
@@ -438,7 +445,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 
 - 有効にする前に、[acceptance.md](specs/acceptance.md) の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを運用者が判断して記録する。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。実機のゲート（付録 A）は任意で、このリポジトリの作者は行わずに有効にしている。
 - 有効にするには、3 つの Worker の `WEB_BROWSE_ENABLED` を `"true"` にする。順序は web → agent → gateway（4 の順序と同じ）。無効のままなら、親の `tools/list` にも子のツールにも出ない。
-- web の `BROWSER` バインディングは、下流の設定で `remote` を指定する（ローカルの `BROWSER` は実際のブラウザを持たない）。設定の方法、wrangler の版と `compatibility_date`: **【実機で確認して追記】**
+- web の `BROWSER` バインディングの `remote` は、**ローカル開発（`wrangler dev`）で本物のヘッドレスブラウザに繋ぐための設定**（`"browser": { "binding": "BROWSER", "remote": true }`）。ローカルには Browser Run の模擬が無い（出典: [Local development](https://developers.cloudflare.com/workers/local-development/)、[Browser Run の Wrangler](https://developers.cloudflare.com/browser-run/reference/wrangler/)）。デプロイした Worker は `remote` が無くても Browser Run を使う。`deploy.example/` の `browser` には `remote` を入れていない。`quickAction()` を使うなら `compatibility_date` は `2026-03-24` 以降（雛形は `2026-10-12`）。Puppeteer を使うコードなら `nodejs_compat` が要る（`compatibility_date` が `2026-08-04` 以降なら既定で有効）。rovo の web がどちらの API を使うかと、実際に `web_browse` が動くか: **【実機で確認して追記】**
 - 有効化後は、`tools/list` に `web_browse` が現れることを確かめる。
 
 ## 13. 初回デプロイの確認
@@ -450,16 +457,16 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 3. Portal 経由で Claude Code から接続し、同意画面 → GitHub のログイン → ツールの一覧（`task_start` / `task_status` / `task_wait` / `task_result` / `task_cancel` / `task_answer` / `task_steer` / `task_pr_ready` / `task_pr_merge` / `web_search` / `web_fetch`。`web_browse` は有効にした場合だけ）が出る。
 4. 許可した team のメンバーで `task_start` → Draft PR ができ、`task_result` が返る。
 
-詳しい受入は [acceptance.md](specs/acceptance.md)。実機での確認の結果: **【実機で確認して追記】**
+詳しい受入は [acceptance.md](specs/acceptance.md)。
 
 ## 14. 更新手順とロールバック
 
 - 更新: upstream を取り込み（4）、`mise run test`（または自分の CI）で確認する。`deploy.example/` が変わったら `mise run deploy:config -- --no-terraform` で `deploy/` を作り直してコミットし（`deploy:config:check` が差分を検出する）、`infra/` が変わったら `terraform apply`（または `mise run setup`）してから、web → agent → gateway の順に再デプロイする（`ROVO_DEPLOY_DIR=deploy mise run deploy:all`）。
-- 新しい Durable Object クラス `DepsCacheDO`（agent。依存関係のキャッシュ。17）: agent の設定は `exports`（`SandboxDO` / `AgentDO` と同じ書き方）でクラスを宣言していて、`migrations` の項目は無い。`deploy.example/` の雛形（`deploy:config` の生成物）には `durable_objects.bindings` の `DEPS_CACHE_DO` と `exports` の `DepsCacheDO` が入っているので、**再生成して（`deploy:config:check` が差分を示す）コミットし、agent を再デプロイする**。クラスの作成は初回のデプロイで 1 回だけ行われるはずだが、`exports` だけでの新しいクラスの追加が本番で通るかは**【実機で確認して追記】**。状態は鍵ごとのスナップショットの参照だけ（失っても、次のタスクが作り直すだけ）。
+- 新しい Durable Object クラス `DepsCacheDO`（agent。依存関係のキャッシュ。17）: agent の設定は `exports`（`SandboxDO` / `AgentDO` と同じ書き方）でクラスを宣言していて、`migrations` の項目は無い。`deploy.example/` の雛形（`deploy:config` の生成物）には `durable_objects.bindings` の `DEPS_CACHE_DO` と `exports` の `DepsCacheDO` が入っているので、**再生成して（`deploy:config:check` が差分を示す）コミットし、agent を再デプロイする**。`exports` は新しいクラスの作成を宣言できる（Wrangler がデプロイ時に作成・更新・削除を報告する）。**クラスの作成・削除・名前変更を含む変更は、バージョンのアップロードや段階的デプロイでは適用できず、`wrangler deploy`（rovo では `deploy:*`）で行う**（出典: [Durable Object class exports](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/)）。既存の Worker を `exports` に切り替えても、作成済みの namespace とデータはそのまま残る。また、1 つの Worker で `exports` の Durable Object と `migrations` は併用できない（rovo は agent が `exports`、gateway が `migrations`）。状態は鍵ごとのスナップショットの参照だけ（失っても、次のタスクが作り直すだけ）。
 - Durable Object のマイグレーション: gateway の `migrations`（`TaskDO` / `UserDO`）は upstream の `wrangler.jsonc` にある。下流の設定にも**同じ `migrations` を引き継ぐ**（`deploy.example/` の雛形に入っているので、`deploy:config` の生成物に入る）。クラス名の変更・削除は、保存済みのデータを失うので、upstream の更新で入った場合は内容を確認してから適用する。
 - 公開 API を変える更新（ツールの入出力）は、接続中のクライアントに影響する。upstream の変更を確認する。
-- ロールバック: Cloudflare の Worker のバージョン機能で前のバージョンに戻せるが、DO のマイグレーションと保存済みのデータは戻らない。**【実機で確認して追記】**（コンテナを含む agent のロールバック）
-- 実行中のタスクがある間の再デプロイ（特に agent）の影響: **【実機で確認して追記】**
+- ロールバック: `wrangler rollback`（または ダッシュボードの Worker > Deployments > バージョンの「Rollback」）で、直近 100 件の公開済みバージョンのどれかに戻せる。戻すと、そのバージョンで新しいデプロイができ、全ルートに即座に効く。**Durable Object のクラスの作成・削除・名前変更（`exports` または `migrations` による）をはさんだバージョンへは戻せない**（拒否される）。KV・R2・キューなどのリソースが消えている・変わっているときも戻せない。つまり DO のクラスを変えた更新は、戻る道が無い前提で行う。Rollbacks は Worker のコードと設定のバージョンを切り替える機能で、Durable Object の保存済みのデータを書き戻すものではない（出典: [Rollbacks](https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/)、[段階的デプロイと Durable Objects](https://developers.cloudflare.com/workers/versions-and-deployments/gradual-deployments/with-durable-objects/)）。コンテナを含む agent のロールバック（イメージの扱い）: **【実機で確認して追記】**
+- 再デプロイとコンテナ: `wrangler deploy` は先に Worker のコードを有効にし、そのあとでイメージの公開とコンテナの入れ替え（rollout）を始める。既定は段階的で、入れ替え対象のインスタンスには `SIGTERM` が送られ、最長 15 分で終了しなければ `SIGKILL` になる。ただし rollout が入れ替えるのは既定のスケジューリングポリシーのコンテナで、Sandbox SDK の文書は「Worker のデプロイは実行中のインスタンスを止めない（ファイルとプロセスは残る。新しいイメージは新しく起動するインスタンスにだけ効く）」と書いている（出典: [Rollouts](https://developers.cloudflare.com/containers/configuration/rollouts/)、[Sandbox の寿命](https://developers.cloudflare.com/sandbox/concepts/lifetime/)）。rovo の agent の SandboxDO で、実行中のタスクがこのどちらの動きになるか、タスクが途中で切れるか: **【実機で確認して追記】**
 
 ## 15. 運用の注意
 

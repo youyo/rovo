@@ -175,7 +175,7 @@ Phase 1 のコードが揃った後に、利用者と一緒に実施して結果
 - [ ] ワーカーが `git_commit` するたびに、作業ブランチが進む（GitHub 上のコミット一覧で確認）
 - [ ] 完了時、PR の head が `task_result` の `verification.commit_sha` と一致し、`pr.head_matches_verified` が `true`
 - [ ] PR 本文の rovo の管理範囲（目印の間）が、状態・検証結果・未解決事項に更新される。目印の外側に手で書いた文章は残る
-- [ ] PR は Draft のまま。rovo 自身はマージも Ready for review もしない（クライアント が行う Ready 化とマージは 21 節）
+- [ ] PR は Draft のまま。rovo 自身はマージも Ready for review もしない（クライアントが行う Ready 化とマージは 21 節）
 - [ ] 実行中に `task_cancel` すると、本文が `CANCELLED` で更新される。ワーカーの commit があれば PR は閉じずに残り、ワーカーの commit が無ければ（作業ブランチの先頭が initial_sha のまま）rovo が空の Draft PR を閉じて作業ブランチを消す（`pr.closed_empty`）
 - [ ] 終端の後、Installation Token が失効している。トークンの値はログにも出ないので、通常は確認できない。確認が必要なら、検証用に一時的にログへ出す改造をして、終端の後にそのトークンで GitHub API を呼び 401 になることを見る（省略可）
 - [ ] 完了の後に作業ブランチへ別のコミットを手で push してから終端の処理を行わせると、`head_moved_after_verification` の警告が出る（再現が難しければ省略可）
@@ -518,7 +518,7 @@ M6（点検）と M11（公開）の結果の記録。履歴の処理・push・�
 
 ## 22. モデルの選択・予算・consult（D10）
 
-クライアント がモデルと単価を見て選び、残りの予算を確かめ、`consult` でセカンドオピニオンを得られることの確認（design 15.8 の D10）。自動テスト（`test:unit` の `models` / `audit` / `user-consult-budget` / `consult` / `task-model` / `mcp` / agent の `pricing` / `consult-cache` / `agent-do-consult`、`test:e2e:gateway` の `models.e2e.test.ts`）は偽の AgentDO（台本）で済んでいる。ここでは実機（実 Anthropic・AI Gateway）で、単価とキャッシュの効きを確かめる。
+クライアントがモデルと単価を見て選び、残りの予算を確かめ、`consult` でセカンドオピニオンを得られることの確認（design 15.8 の D10）。自動テスト（`test:unit` の `models` / `audit` / `user-consult-budget` / `consult` / `task-model` / `mcp` / agent の `pricing` / `consult-cache` / `agent-do-consult`、`test:e2e:gateway` の `models.e2e.test.ts`）は偽の AgentDO（台本）で済んでいる。ここでは実機（実 Anthropic・AI Gateway）で、単価とキャッシュの効きを確かめる。
 
 前提: AI Gateway に Anthropic の BYOK 登録済み（`docs/deploy.md` の 7）。gateway と agent の `AGENT_MODELS` に `anthropic/claude-haiku-5-5` と `anthropic/claude-sonnet-5-5` を入れ、同じ値にしてある。確認ごとに課金される（小。consult は 1 回 $0.5 まで）。
 

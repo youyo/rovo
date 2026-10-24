@@ -26,7 +26,7 @@ import { generateAppKeyPair } from "../support/app-keys";
 import { type CollectTiming, collectUntil } from "../support/collect";
 import { gitRepoStore } from "../support/git-store";
 
-// Phase 3 / Phase 4 / Phase 5 のゴールの通し検証: MCP クライアント → Gateway（OAuth・TaskDO・UserDO・GitHub App）→ AgentDO → SandboxDO（実コンテナ）。
+// Phase 3 / Phase 4 / Phase 5 のゴールの通し検証: MCP クライアント→ Gateway（OAuth・TaskDO・UserDO・GitHub App）→ AgentDO → SandboxDO（実コンテナ）。
 // Phase 5 では 3 つ目の Worker として apps/web（Web Research Service）も同時に起動し、
 // gateway（クライアントの MCP の web_search / web_fetch）と agent（ワーカーの Pi ツール）から service binding で通しで呼ぶ。
 // 偽なのは GitHub（OAuth・API）、git / npm の上流（acme/calc）、モデル（台本付き）、

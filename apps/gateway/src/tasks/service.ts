@@ -147,7 +147,7 @@ export type AnswerValue = {
 };
 export type SteerValue = { task_id: string; steer_id: string; status: TaskStatus };
 export type CancelValue = { task_id: string; status: TaskStatus };
-/** task_result の応答。next_steps はクライアント への案内（状態から決まる文）。 */
+/** task_result の応答。next_steps はクライアントへの案内（状態から決まる文）。 */
 export type ResultValue = { task_id: string } & ResultView & {
     next_steps: string;
   } & WithDashboardUrl;

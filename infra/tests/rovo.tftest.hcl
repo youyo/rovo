@@ -24,7 +24,7 @@ run "logpush_filter_has_three_script_names" {
   }
   assert {
     condition     = jsondecode(cloudflare_logpush_job.audit.filter).where.operator == "in"
-    error_message = "filter の演算ワーカーが in ではない"
+    error_message = "filter の演算子が in ではない"
   }
   assert {
     condition     = jsondecode(cloudflare_logpush_job.audit.filter).where.value == ["rovo-gateway", "rovo-agent", "rovo-web"]

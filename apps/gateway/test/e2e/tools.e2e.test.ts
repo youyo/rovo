@@ -548,16 +548,28 @@ describe("task_console（mod 用の読み取り専用ツール。本物のログ
     }
   }, 180_000);
 
-  it("log_after: コマンドを 2 本流したタスクで、\"0\" から 2 本とも返り、next_cursor で次を取ると空", async () => {
+  it('log_after: コマンドを 2 本流したタスクで、"0" から 2 本とも返り、next_cursor で次を取ると空', async () => {
     const { client } = await memberClient("console-log");
     try {
       const started = bodyOf(
         await client.callTool({ name: "task_start", arguments: startArgs("console-log-1") }),
       );
       const taskId = started.task_id as string;
-      await emitAgentEvent(taskId, "command", { command: "echo first", exitCode: 0, outputTail: "first" });
-      await emitAgentEvent(taskId, "command", { command: "echo second", exitCode: 0, outputTail: "second" });
-      type Log = { entries: { type: string; command?: string }[]; next_cursor: string; truncated: boolean };
+      await emitAgentEvent(taskId, "command", {
+        command: "echo first",
+        exitCode: 0,
+        outputTail: "first",
+      });
+      await emitAgentEvent(taskId, "command", {
+        command: "echo second",
+        exitCode: 0,
+        outputTail: "second",
+      });
+      type Log = {
+        entries: { type: string; command?: string }[];
+        next_cursor: string;
+        truncated: boolean;
+      };
       let log: Log = { entries: [], next_cursor: "0", truncated: false };
       const deadline = Date.now() + 90_000;
       while (Date.now() < deadline) {

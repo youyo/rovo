@@ -2613,7 +2613,9 @@ describe("task_console の log_after（積み上がるログ。差分で返す�
     const s = body(await client.callTool({ name: "task_start", arguments: startArgs("t1") }));
     const taskId = String(s.task_id);
     const consoleOf = async (args: Record<string, unknown> = {}) =>
-      body(await client.callTool({ name: "task_console", arguments: { task_id: taskId, ...args } }));
+      body(
+        await client.callTool({ name: "task_console", arguments: { task_id: taskId, ...args } }),
+      );
     const emit = async (type: string, data: unknown) => {
       await fakeAgent(taskId).emit(type, data);
     };
@@ -2626,9 +2628,7 @@ describe("task_console の log_after（積み上がるログ。差分で返す�
     await taskStub(t.taskId).advance();
     const res = await t.consoleOf();
     expect(res).not.toHaveProperty("log");
-    expect(Object.keys(res).sort()).toEqual(
-      Object.keys(await t.consoleOf()).sort(),
-    );
+    expect(Object.keys(res).sort()).toEqual(Object.keys(await t.consoleOf()).sort());
     const withLog = await t.consoleOf({ log_after: "0" });
     const { log: _log, generated_at: _g, ...rest } = withLog;
     const { generated_at: _g2, ...base } = res;
@@ -2700,7 +2700,8 @@ describe("task_console の log_after（積み上がるログ。差分で返す�
     const types = new Set(log.entries.map((e) => e.type));
     expect(types.has("usage")).toBe(false);
     expect(types.has("agent_event")).toBe(false);
-    for (const type of ["command", "edit", "commit", "tool_start"]) expect(types.has(type)).toBe(true);
+    for (const type of ["command", "edit", "commit", "tool_start"])
+      expect(types.has(type)).toBe(true);
     const cmd = log.entries.find((e) => e.type === "command") as LogEntry;
     for (const f of ["command", "output_tail"]) {
       expect(String(cmd[f])).toContain("<<<UNTRUSTED_CHILD_QUESTION");

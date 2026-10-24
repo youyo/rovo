@@ -2602,6 +2602,153 @@ describe("task_console（mod が画面に進み具合を出すための読み取
   });
 });
 
+describe("task_console の log_after（積み上がるログ。差分で返す）", () => {
+  const GHP = `ghp_${"a1B2".repeat(9)}`;
+  type LogEntry = Record<string, unknown> & { seq: number; type: string };
+  type Log = { entries: LogEntry[]; next_cursor: string; truncated: boolean };
+
+  async function setup() {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const s = body(await client.callTool({ name: "task_start", arguments: startArgs("t1") }));
+    const taskId = String(s.task_id);
+    const consoleOf = async (args: Record<string, unknown> = {}) =>
+      body(await client.callTool({ name: "task_console", arguments: { task_id: taskId, ...args } }));
+    const emit = async (type: string, data: unknown) => {
+      await fakeAgent(taskId).emit(type, data);
+    };
+    return { client, taskId, consoleOf, emit };
+  }
+
+  it("log_after を省略すると応答に log は付かない（今の応答のまま）", async () => {
+    const t = await setup();
+    await t.emit("command", { command: "pnpm test", exitCode: 0 });
+    await taskStub(t.taskId).advance();
+    const res = await t.consoleOf();
+    expect(res).not.toHaveProperty("log");
+    expect(Object.keys(res).sort()).toEqual(
+      Object.keys(await t.consoleOf()).sort(),
+    );
+    const withLog = await t.consoleOf({ log_after: "0" });
+    const { log: _log, generated_at: _g, ...rest } = withLog;
+    const { generated_at: _g2, ...base } = res;
+    expect(rest).toEqual(base);
+    await t.client.close();
+  });
+
+  it("カーソルより後だけを返す。続きが無ければ空で、next_cursor は変わらない", async () => {
+    const t = await setup();
+    await t.emit("command", { command: "echo one", exitCode: 0, outputTail: "one" });
+    await t.emit("command", { command: "echo two", exitCode: 1, outputTail: "two" });
+    await taskStub(t.taskId).advance();
+    const first = (await t.consoleOf({ log_after: "0" })).log as Log;
+    const cmds = first.entries.filter((e) => e.type === "command");
+    expect(cmds).toHaveLength(2);
+    expect(String(cmds[0]?.command)).toContain("echo one");
+    expect(String(cmds[1]?.command)).toContain("echo two");
+    expect(first.truncated).toBe(false);
+    const second = (await t.consoleOf({ log_after: first.next_cursor })).log as Log;
+    expect(second.entries).toEqual([]);
+    expect(second.truncated).toBe(false);
+    expect(second.next_cursor).toBe(first.next_cursor);
+    await t.emit("command", { command: "echo three", exitCode: 0 });
+    await taskStub(t.taskId).advance();
+    const third = (await t.consoleOf({ log_after: first.next_cursor })).log as Log;
+    expect(third.entries).toHaveLength(1);
+    expect(String(third.entries[0]?.command)).toContain("echo three");
+    await t.client.close();
+  });
+
+  it("100 件を超えると truncated: true。next_cursor で続きが取れ、取りこぼし・重複がない", async () => {
+    const t = await setup();
+    for (let i = 0; i < 105; i++) await t.emit("command", { command: `cmd-${i}`, exitCode: 0 });
+    await taskStub(t.taskId).advance();
+    const a = (await t.consoleOf({ log_after: "0" })).log as Log;
+    expect(a.entries).toHaveLength(100);
+    expect(a.truncated).toBe(true);
+    const b = (await t.consoleOf({ log_after: a.next_cursor })).log as Log;
+    expect(b.truncated).toBe(false);
+    const all = [...a.entries, ...b.entries].filter((e) => e.type === "command");
+    expect(all).toHaveLength(105);
+    expect(new Set(all.map((e) => e.seq)).size).toBe(105);
+    await t.client.close();
+  });
+
+  it("ワーカーの文字列は秘密を伏せて非信頼の囲みに入れる。usage と agent_event は入らない", async () => {
+    const t = await setup();
+    await t.emit("command", {
+      command: `curl -H "Authorization: ${GHP}"`,
+      exitCode: 0,
+      outputTail: "ok\nAPI_KEY=plainvalue789\n",
+    });
+    await t.emit("edit", { path: "src/a.ts", op: "modify", added: 1, removed: 0 });
+    await t.emit("commit", { message: `feat: x ${GHP}`, sha: "a".repeat(40), files: 1 });
+    await t.emit("tool_start", { callId: "c1", name: "bash", summary: "ls" });
+    await t.emit("usage", {
+      costUsd: 0.1,
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    await t.emit("agent_event", { agentType: "x" });
+    await taskStub(t.taskId).advance();
+    const log = (await t.consoleOf({ log_after: "0" })).log as Log;
+    const text = JSON.stringify(log);
+    expect(text).not.toContain(GHP);
+    expect(text).not.toContain("plainvalue789");
+    const types = new Set(log.entries.map((e) => e.type));
+    expect(types.has("usage")).toBe(false);
+    expect(types.has("agent_event")).toBe(false);
+    for (const type of ["command", "edit", "commit", "tool_start"]) expect(types.has(type)).toBe(true);
+    const cmd = log.entries.find((e) => e.type === "command") as LogEntry;
+    for (const f of ["command", "output_tail"]) {
+      expect(String(cmd[f])).toContain("<<<UNTRUSTED_CHILD_QUESTION");
+      expect(String(cmd[f])).toContain("<<<END_UNTRUSTED_CHILD_QUESTION>>>");
+    }
+    const edit = log.entries.find((e) => e.type === "edit") as LogEntry;
+    expect(String(edit.path)).toContain("<<<UNTRUSTED_CHILD_QUESTION");
+    expect(edit.added).toBe(1);
+    const commit = log.entries.find((e) => e.type === "commit") as LogEntry;
+    expect(String(commit.message)).toContain("<<<UNTRUSTED_CHILD_QUESTION");
+    await t.client.close();
+  });
+
+  it("他人のタスクは log_after を付けても not_found。不正なカーソルは invalid_cursor", async () => {
+    const alice = await user("alice");
+    const bob = await user("bob");
+    const ca = await connect(createApiApp(), alice.props);
+    const cb = await connect(createApiApp(), bob.props);
+    const s = body(await ca.callTool({ name: "task_start", arguments: startArgs("t1") }));
+    const taskId = String(s.task_id);
+    const other = await cb.callTool({
+      name: "task_console",
+      arguments: { task_id: taskId, log_after: "0" },
+    });
+    expect(other.isError).toBe(true);
+    expect(body(other).code).toBe("not_found");
+    const bad = await ca.callTool({
+      name: "task_console",
+      arguments: { task_id: taskId, log_after: "abc" },
+    });
+    expect(bad.isError).toBe(true);
+    expect(body(bad).code).toBe("invalid_cursor");
+    await Promise.all([ca.close(), cb.close()]);
+  });
+
+  it("説明に log_after と log を書き、画面用の注意を残す", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const t = tools.find((x) => x.name === "task_console");
+    expect(t?.description).toContain("log_after");
+    expect(t?.description).toContain("next_cursor");
+    expect(t?.description).toMatch(/繰り返し呼ばない/);
+    expect(t?.inputSchema.required).toEqual(["task_id"]);
+    await client.close();
+  });
+});
+
 describe("tools/list の annotations（読み取り専用 / 書き込みの分類）", () => {
   type Hints = {
     readOnlyHint: boolean;

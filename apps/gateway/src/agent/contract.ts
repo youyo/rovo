@@ -177,6 +177,8 @@ export interface SandboxUsageDto {
     raised: number;
     clefFailures: number;
     slowNotRaised: number;
+    /** 明らかに軽いコマンドで Clef を呼ばなかった回数 */
+    skippedLight: number;
   };
   /** Clef の判断ごとの記録（古い順、直近 50 件まで）。agent は終端の確定のときだけ付ける。コマンドは argv[0] の basename だけ */
   scaleDecisions?: {

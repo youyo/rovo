@@ -583,6 +583,7 @@ describe("Clef による昇格の判断の集計（sandbox_scale_*）を summary
       raised: 2,
       clef_failures: 1,
       slow_not_raised: 3,
+      skipped_light: 0,
     });
     expect(buildTaskSummary(base).sandbox).not.toHaveProperty("scale");
     const zero = buildTaskSummary({

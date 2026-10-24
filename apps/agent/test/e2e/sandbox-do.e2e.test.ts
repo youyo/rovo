@@ -67,7 +67,13 @@ describe("Sandbox の昇格（コマンドの前に Clef が上げると判断�
     runtimeMsBeforePromotion?: number;
     promotionReason?: string;
     promotions?: { to: string; at: number; trigger: string; runtimeMsBefore: number }[];
-    scaleStats?: { decisions: number; raised: number; clefFailures: number; slowNotRaised: number };
+    scaleStats?: {
+      decisions: number;
+      raised: number;
+      clefFailures: number;
+      slowNotRaised: number;
+      skippedLight?: number;
+    };
     scaleDecisions?: { from: string; to: string | null; cmd: string; exitCode?: number }[];
     restarts: number;
     runtimeMs: number;

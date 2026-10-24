@@ -117,6 +117,7 @@ export type SummaryInput = {
         raised: number;
         clefFailures: number;
         slowNotRaised: number;
+        skippedLight: number;
       };
       /** 昇格の試みの見送り・失敗の内訳（固定の trigger と理由コード） */
       promotionFailures?: PublicPromotionFailure[];
@@ -397,6 +398,7 @@ export const USAGE_PUBLIC_KEYS = [
   "sandbox_scale_raised",
   "sandbox_scale_clef_failures",
   "sandbox_scale_slow_not_raised",
+  "sandbox_scale_skipped_light",
 ] as const;
 
 export type UsagePublic = Partial<Record<(typeof USAGE_PUBLIC_KEYS)[number], number>> & {

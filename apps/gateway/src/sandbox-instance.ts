@@ -138,6 +138,7 @@ export type PublicScaleStats = {
   raised: number;
   clef_failures: number;
   slow_not_raised: number;
+  skipped_light: number;
 };
 
 const unit01 = (v: unknown): number | undefined =>
@@ -195,11 +196,13 @@ export function sanitizeScaleStats(v: unknown): PublicScaleStats | undefined {
   if (typeof v !== "object" || v === null) return undefined;
   const r = v as Record<string, unknown>;
   const decisions = count0(r.decisions);
-  if (decisions <= 0) return undefined;
+  const skipped_light = count0(r.skippedLight);
+  if (decisions <= 0 && skipped_light <= 0) return undefined;
   return {
     decisions,
     raised: count0(r.raised),
     clef_failures: count0(r.clefFailures),
     slow_not_raised: count0(r.slowNotRaised),
+    skipped_light,
   };
 }

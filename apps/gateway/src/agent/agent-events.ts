@@ -148,6 +148,7 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
           sandbox_scale_raised: scale.raised,
           sandbox_scale_clef_failures: scale.clef_failures,
           sandbox_scale_slow_not_raised: scale.slow_not_raised,
+          sandbox_scale_skipped_light: scale.skipped_light,
         }
       : {}),
   };

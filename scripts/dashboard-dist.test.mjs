@@ -57,8 +57,12 @@ test("dist のどのファイルにも外部ホストへの参照が無い", () 
     const urls = [...text.matchAll(/https?:\/\/[^\s"'`)\\]+/g)]
       .map((m) => m[0])
       .filter((u) => !/^https?:\/\/(react\.dev|reactjs\.org|www\.w3\.org)\//.test(u))
-      // Cloudflare の枠の「開く」リンク（href のトップだけ。アカウント ID を含まない固定の URL）
-      .filter((u) => u !== "https://dash.cloudflare.com/");
+      // Cloudflare の枠の「開く」リンク（トップと、アカウントを書かない公式の深いリンクの接頭辞だけ。アカウント ID を含まない固定の URL）
+      .filter(
+        (u) =>
+          u !== "https://dash.cloudflare.com/" &&
+          u !== "https://dash.cloudflare.com/?to=/:account/",
+      );
     assert.deepEqual(urls, [], `${relative(dist, f)} に外部 URL: ${urls.join(", ")}`);
   }
 });

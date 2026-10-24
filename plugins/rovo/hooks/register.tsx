@@ -1,28 +1,38 @@
-import type { EngineInterface, McpToolResult, Register, ThemeKey, Timer } from "claude-code";
+import type { EngineInterface, McpToolResult, Register, Timer } from "claude-code";
 import { atom, read, update } from "claude-code";
 
 import type { RovoConsole, RovoTask } from "../types";
-import type { Awaiting, ParsedConsole, PrLink } from "./lib";
+import type { Awaiting, LaneState, ParsedConsole, PrLink, TaskKind } from "./lib";
 import {
   budgetToastText,
   CONSOLE_RETRY_MS,
   cleanTitle,
   coerceTasks,
   formatElapsed,
-  glyph,
+  headingText,
   httpsOnly,
   isTerminal,
+  isWaiting,
+  labelRow,
+  laneCells,
+  matchRovoTool,
   matchTaskStart,
+  mergeListed,
+  padWidth,
   parseConsole,
   parseStartResult,
   parseStatus,
+  parseTaskList,
   pruneTasks,
+  rightText,
+  STATIONS,
   slideShift,
+  stageIndex,
   statusColor,
-  statusLabel,
   tailLines,
   taskKey,
   toastText,
+  truncateWidth,
 } from "./lib";
 
 type Dollar = EngineInterface;
@@ -31,12 +41,27 @@ const PANE_ID = "rovo";
 const POLL_MS = 4000;
 const STORE_KEY = "tasks";
 
-// 読み取り専用: 呼ぶ MCP ツールはこの 2 つだけ（task_start は model が呼んだ結果を見るだけ）。
+// 読み取り専用: 呼ぶ MCP ツールはこの 3 つだけ（task_start は model が呼んだ結果を見るだけ）。
 const TOOL_CONSOLE = "task_console";
 const TOOL_STATUS = "task_status";
+const TOOL_LIST = "task_list";
+const ENDPOINTS_KEY = "endpoints";
+const MAX_ENDPOINTS = 4;
+// 流れ（▶・スピナー・点滅）の描き直し。動いているワーカーがいる間だけ回す。
+const ANIM_MS = 700;
+// 着いた直後の ◉ を出しておくフレーム数。
+const ARRIVE_FRAMES = 3;
+// task_list を取り直す間隔。動いているワーカーがいなければゆっくり。
+const LIST_IDLE_MS = 20_000;
+// 1 回の tick で task_console を取るワーカーの上限（選んでいるものを先頭に、残りは順番に回す）。
+const MAX_CONSOLE_POLLS = 6;
 
 const tasksAtom = atom({ plugin: "rovo", key: "tasks" } as const, []);
 const consolesAtom = atom({ plugin: "rovo", key: "consoles" } as const, {});
+const frameAtom = atom({ plugin: "rovo", key: "frame" } as const, 0);
+const arrivalsAtom = atom({ plugin: "rovo", key: "arrivals" } as const, {});
+const listsAtom = atom({ plugin: "rovo", key: "lists" } as const, {});
+const endpointsAtom = atom({ plugin: "rovo", key: "endpoints" } as const, []);
 const selectedAtom = atom({ plugin: "rovo", key: "selected" } as const, null);
 // 出力の窓。follow が true の間は末尾に追従する。offset は追従を止めたときの先頭行（出力の中の行番号）。
 const scrollAtom = atom({ plugin: "rovo", key: "scroll" } as const, { follow: true, offset: 0 });
@@ -55,41 +80,25 @@ const baseName = (command: string): string =>
 // 自分のコマンド（名前空間なし・rovo: 付き）。baseName と同じ範囲。
 const OWN_COMMANDS = /^(?:rovo:)?(?:create-task|open-console|close-console)$/;
 
-// ヘッダーに出すタスク一覧の最大行数（ペインが狭いことがある）。選んでいるタスクは必ず入れる。
+// 一覧に出すワーカーの最大数（ペインが狭いことがある）。選んでいるワーカーは必ず入れる。
 const LIST_MAX = 4;
-
-const PHASES = [
-  ["prepare", "準備"],
-  ["run", "実行"],
-  ["verify", "検証"],
-  ["done", "完了"],
-] as const;
-
-const stoppedLabel = (phase: string): string =>
-  PHASES.find(([name]) => name === phase && name !== "done")?.[1] ?? "不明";
+// 一覧以外の行（見出し・「他 n 件」・題名・リンク・枠・コマンド）と、出力の窓の最低の行数。
+const FIXED_ROWS = 7;
+const MIN_WINDOW = 3;
+const LANE_ROWS = 3;
+const TITLE_W = 18;
+const REPO_W = 12;
+const MODEL_W = 10;
 
 const textOf = (result: McpToolResult): string =>
   result.content
     .map((block) => (block.type === "text" && typeof block.text === "string" ? block.text : ""))
     .join("");
 
-/** 段階の各ステップ。ワーカーの文字列は入らない（サーバーが決めた段階名だけを見る）。 */
-const phaseSteps = (
-  phase: string | null,
-): { mark: string; label: string; color: ThemeKey }[] | null => {
-  const at = PHASES.findIndex(([name]) => name === phase);
-  if (at < 0) return null;
-  return PHASES.map(([, label], i) => {
-    if (i < at || (i === at && phase === "done"))
-      return { mark: "✓", label, color: "success" as const };
-    return i === at
-      ? { mark: "●", label, color: "suggestion" as const }
-      : { mark: "○", label, color: "subtle" as const };
-  });
-};
-
 let timer: Timer | null = null;
+let animTimer: Timer | null = null;
 let isPolling = false;
+let pollCursor = 0;
 
 /** ペインを開く。描かれたか（isPlaced）を返す。開けなくても追跡は続ける。 */
 const openPane = async ($: Dollar): Promise<boolean> => {
@@ -143,11 +152,20 @@ const mutate = async ($: Dollar, change: (list: RovoTask[]) => RovoTask[]): Prom
   return after;
 };
 
+/** task_list を取り直す必要があるか: 取れている接続先が 1 つでもある。 */
+const hasListSupport = async ($: Dollar): Promise<boolean> =>
+  Object.values(await read($, listsAtom)).some((l) => l.supported);
+
 const stopIfIdle = async ($: Dollar): Promise<void> => {
   const list = await read($, tasksAtom);
-  if (timer !== null && !list.some((t) => !isTerminal(t.status))) {
+  const active = list.some((t) => !isTerminal(t.status));
+  if (timer !== null && !active && !(await hasListSupport($))) {
     timer.cancel();
     timer = null;
+  }
+  if (animTimer !== null && !active) {
+    animTimer.cancel();
+    animTimer = null;
   }
 };
 
@@ -257,15 +275,88 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   if (shouldToastBudget) $.ui.toast(budgetToastText(t.title));
 };
 
+const endpointKey = (e: { server: string; prefix: string }): string => `${e.server}/${e.prefix}`;
+
+/**
+ * 呼んだ人の全タスク（task_list）を取って追跡リストに混ぜる。task_list が無いサーバー
+ * （エラー・形が違う）は 1 分間あきらめ、その間は task_start で拾ったものだけで動く。
+ * 呼び出し側が isPolling を握っていること。
+ */
+const syncLists = async ($: Dollar): Promise<void> => {
+  const endpoints = await read($, endpointsAtom);
+  for (const ep of endpoints) {
+    const key = endpointKey(ep);
+    const now = await $.clock.now();
+    const state = (await read($, listsAtom))[key];
+    if (state !== undefined) {
+      if (!state.supported && now < state.retryAt) continue;
+      const active = (await read($, tasksAtom)).some((t) => !isTerminal(t.status));
+      if (state.supported && now - state.lastAt < (active ? POLL_MS - 500 : LIST_IDLE_MS)) continue;
+    }
+    let parsed: ReturnType<typeof parseTaskList> = null;
+    try {
+      const res = await $.mcp.call(ep.server, ep.prefix + TOOL_LIST, {
+        scope: "recent",
+        limit: 50,
+      });
+      parsed = res.isError ? null : parseTaskList(textOf(res));
+    } catch {
+      parsed = null;
+    }
+    const at = await $.clock.now();
+    if (parsed === null) {
+      await update($, listsAtom, (m) => ({
+        ...m,
+        [key]: { supported: false, retryAt: at + CONSOLE_RETRY_MS, lastAt: at },
+      }));
+      continue;
+    }
+    await update($, listsAtom, (m) => ({
+      ...m,
+      [key]: { supported: true, retryAt: 0, lastAt: at },
+    }));
+    const listed = parsed.tasks;
+    const merged = await mutate($, (list) => mergeListed(list, listed, ep, at));
+    await ensureTimer($);
+    // 終端に変わったワーカーを知らせる（初めから終わっていたものは notified 済みで、ここに来ない）。
+    const toAnnounce = merged.filter((t) => isTerminal(t.status) && t.notified !== true);
+    if (toAnnounce.length > 0) {
+      const keys = new Set(toAnnounce.map(taskKey));
+      await mutate($, (list) =>
+        list.map((x) => (keys.has(taskKey(x)) ? { ...x, notified: true as const } : x)),
+      );
+      for (const t of toAnnounce) $.ui.toast(toastText(t.title, t.status));
+    }
+  }
+};
+
+/** 今回 task_console を取るワーカー: 選んでいるものを先頭に、残りは順番に回して上限まで。並びは一覧のまま。 */
+const chooseToPoll = async ($: Dollar, running: RovoTask[]): Promise<RovoTask[]> => {
+  if (running.length <= MAX_CONSOLE_POLLS) return running;
+  const selected = pickSelected(running, await read($, selectedAtom));
+  const others = running.filter((t) => t !== selected);
+  const room = MAX_CONSOLE_POLLS - (selected === undefined ? 0 : 1);
+  const start = pollCursor % others.length;
+  pollCursor += room;
+  const rotated = [...others.slice(start), ...others.slice(0, start)].slice(0, room);
+  const chosen = new Set<RovoTask>(selected === undefined ? rotated : [selected, ...rotated]);
+  return running.filter((t) => chosen.has(t));
+};
+
 /** 前の呼び出しが終わるまで次を出さない。1 回の中でも 1 本ずつ。 */
 const tick = async ($: Dollar): Promise<void> => {
   if (isPolling) return;
   isPolling = true;
   try {
-    await mutate($, (list) => list);
-    for (const t of await read($, tasksAtom)) {
-      if (!isTerminal(t.status)) await pollOne($, t);
+    try {
+      await syncLists($);
+    } catch {
+      // task_list がだめでも、task_console は取る。
     }
+    await mutate($, (list) => list);
+    const running = (await read($, tasksAtom)).filter((t) => !isTerminal(t.status));
+    for (const t of await chooseToPoll($, running)) await pollOne($, t);
+    await fetchMissingNow($, undefined, true);
   } catch {
     // 次の周期でやり直す。
   } finally {
@@ -279,24 +370,40 @@ const tick = async ($: Dollar): Promise<void> => {
 };
 
 /**
- * consolesAtom に中身が無いタスクを 1 回ずつ取る（終端でも取る。取れたら二度と取らない）。
- * tick と同じ isPolling で同時 1 本を守り、pollOne をそのまま使う。失敗しても他の表示には触れない。
+ * consolesAtom に中身が無い終端のタスクを 1 回ずつ取る（取れたら二度と取らない）。
+ * pollOne をそのまま使う。task_list から入ったものは数が多いので、いま出しているもの
+ * （か only で指したもの）だけ。失敗しても他の表示には触れない。呼び出し側が isPolling を握っていること。
  */
+const fetchMissingNow = async ($: Dollar, only?: string, listedOnly = false): Promise<void> => {
+  const tasks = await read($, tasksAtom);
+  const now = await $.clock.now();
+  const visible = tasks.filter(
+    (t) => t.terminalAt === undefined || now - t.terminalAt < 60 * 60 * 1000,
+  );
+  const picked = pickSelected(visible, await read($, selectedAtom));
+  const pickedKey = picked === undefined ? null : taskKey(picked);
+  for (const t of tasks) {
+    const key = taskKey(t);
+    if (only !== undefined && key !== only) continue;
+    if (only === undefined && t.listed === true && key !== pickedKey) continue;
+    // タイマーの周期では、task_start で拾った終端のタスクは取り直さない（開いたときだけ）。
+    if (listedOnly && t.listed !== true) continue;
+    // 実行中のタスクはタイマーが取る。
+    if (!isTerminal(t.status)) continue;
+    if ((await read($, consolesAtom))[key] !== undefined) continue;
+    try {
+      await pollOne($, t);
+    } catch {
+      // このタスクは今回あきらめる。次の機会にやり直す。
+    }
+  }
+};
+
 const fetchMissing = async ($: Dollar, only?: string): Promise<void> => {
   if (isPolling) return;
   isPolling = true;
   try {
-    for (const t of await read($, tasksAtom)) {
-      if (only !== undefined && taskKey(t) !== only) continue;
-      // 実行中のタスクはタイマーが取る。
-      if (!isTerminal(t.status)) continue;
-      if ((await read($, consolesAtom))[taskKey(t)] !== undefined) continue;
-      try {
-        await pollOne($, t);
-      } catch {
-        // このタスクは今回あきらめる。次の機会にやり直す。
-      }
-    }
+    await fetchMissingNow($, only);
   } catch {
     // 読めなければ何もしない。
   } finally {
@@ -309,13 +416,103 @@ const fetchMissing = async ($: Dollar, only?: string): Promise<void> => {
   }
 };
 
-const ensureTimer = async ($: Dollar): Promise<void> => {
-  if (timer !== null) return;
-  const list = await read($, tasksAtom);
-  if (timer !== null || !list.some((t) => !isTerminal(t.status))) return;
-  timer = $.clock.every(POLL_MS, () => {
-    void tick($);
+/** task_list を取り直し、中身の無い終端のワーカーを 1 回取る。開いたとき・始まったときに使う。 */
+const refresh = async ($: Dollar): Promise<void> => {
+  if (isPolling) return;
+  isPolling = true;
+  try {
+    await syncLists($);
+    await fetchMissingNow($);
+  } catch {
+    // 次の機会にやり直す。
+  } finally {
+    isPolling = false;
+  }
+  try {
+    await stopIfIdle($);
+  } catch {
+    // タイマーが残るだけ。
+  }
+};
+
+/** いまの駅の番号と状態。list の stage を先に、無ければ task_console の phase を読む。 */
+const laneOf = (
+  t: RovoTask,
+  view: RovoConsole | undefined,
+): { kind: TaskKind; at: number | null; state: LaneState } => {
+  const kind = t.kind ?? "task";
+  const n = STATIONS[kind].length;
+  const own = stageIndex(kind, t.stage);
+  const seen = view?.hasOutput === true ? stageIndex(kind, view.phase) : null;
+  const stopped = view?.hasOutput === true ? stageIndex(kind, view.stoppedPhase) : null;
+  if (t.status === "COMPLETED") return { kind, at: n, state: "done" };
+  if (isTerminal(t.status)) return { kind, at: stopped ?? own ?? seen, state: "failed" };
+  return { kind, at: own ?? seen, state: isWaiting(t) ? "waiting" : "active" };
+};
+
+/** 描き直しを 1 つ進める。駅が変わったワーカーを覚え（着いた直後の ◉ のため）、動くものがなければ止める。 */
+const advanceFrame = async ($: Dollar): Promise<void> => {
+  const frame = await update($, frameAtom, (n) => n + 1);
+  const tasks = await read($, tasksAtom);
+  const consoles = await read($, consolesAtom);
+  await update($, arrivalsAtom, (old) => {
+    const next: Record<string, { at: number; since: number }> = {};
+    for (const t of tasks) {
+      if (isTerminal(t.status)) continue;
+      const key = taskKey(t);
+      const at = laneOf(t, consoles[key]).at ?? -1;
+      const prev = old[key];
+      next[key] =
+        prev === undefined ? { at, since: -99 } : prev.at === at ? prev : { at, since: frame };
+    }
+    return JSON.stringify(next) === JSON.stringify(old) ? old : next;
   });
+  if (!tasks.some((t) => !isTerminal(t.status))) {
+    animTimer?.cancel();
+    animTimer = null;
+  }
+};
+
+const ensureTimer = async ($: Dollar): Promise<void> => {
+  const list = await read($, tasksAtom);
+  const active = list.some((t) => !isTerminal(t.status));
+  if (timer === null && (active || (await hasListSupport($)))) {
+    timer = $.clock.every(POLL_MS, () => {
+      void tick($);
+    });
+  }
+  if (animTimer === null && active) {
+    animTimer = $.clock.every(ANIM_MS, () => {
+      void advanceFrame($).catch(() => undefined);
+    });
+  }
+};
+
+/** $.store から読んだ接続先を、形を確かめて作り直す。 */
+const coerceEndpoints = (value: unknown): { server: string; prefix: string }[] => {
+  if (!Array.isArray(value)) return [];
+  const out: { server: string; prefix: string }[] = [];
+  for (const raw of value) {
+    const e = raw as Record<string, unknown> | null;
+    if (typeof e !== "object" || e === null) continue;
+    if (typeof e.server !== "string" || e.server === "" || typeof e.prefix !== "string") continue;
+    if (!/^(?:[A-Za-z0-9-]+_)*$/.test(e.prefix)) continue;
+    out.push({ server: e.server, prefix: e.prefix });
+  }
+  return out.slice(0, MAX_ENDPOINTS);
+};
+
+/** rovo のツールを呼んだ接続先を覚える（task_list を呼ぶ先）。新しい接続先なら true。 */
+const rememberEndpoint = async (
+  $: Dollar,
+  ep: { server: string; prefix: string },
+): Promise<boolean> => {
+  const known = await read($, endpointsAtom);
+  if (known.some((k) => endpointKey(k) === endpointKey(ep))) return false;
+  const next = [...known, ep].slice(-MAX_ENDPOINTS);
+  await update($, endpointsAtom, () => next);
+  await $.store.set(ENDPOINTS_KEY, next);
+  return true;
 };
 
 const track = async (
@@ -352,7 +549,7 @@ type PaneModel = {
   selected: RovoTask | undefined;
   view: RovoConsole | undefined;
   now: number;
-  /** 一覧に出すタスク（新しい順）と、出さなかった件数。 */
+  /** 一覧に出すワーカー（新しい順）と、出さなかった件数。 */
   listed: RovoTask[];
   hidden: number;
   link: string | undefined;
@@ -398,25 +595,25 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
   const selected = pickSelected(tasks, selectedKey);
   const view = selected === undefined ? undefined : consoles[taskKey(selected)];
   const link = selected === undefined ? undefined : httpsOnly(selected.dashboardUrl);
+  const prCandidate = view?.pr ?? selected?.pr;
   const prLink =
-    view?.pr !== undefined && httpsOnly(view.pr.url) !== undefined ? view.pr : undefined;
+    prCandidate !== undefined && httpsOnly(prCandidate.url) !== undefined ? prCandidate : undefined;
 
+  // 行が足りないときは、出すワーカーを減らして出力の窓を残す。
+  const room = Math.floor((bodyRows - FIXED_ROWS - MIN_WINDOW) / LANE_ROWS);
+  const workerMax = Math.max(1, Math.min(LIST_MAX, room));
   const newest = [...tasks].reverse();
-  let listed = newest.slice(0, LIST_MAX);
+  let listed = newest.slice(0, workerMax);
   if (selected !== undefined && !listed.includes(selected)) {
-    listed = [...newest.slice(0, LIST_MAX - 1), selected];
+    listed = [...newest.slice(0, workerMax - 1), selected];
   }
   const hidden = newest.length - listed.length;
 
-  // 数える行: 一覧 + 「他 n 件」 + タイトル + 状態 + 段階など + リンク
-  let headerRows = listed.length + (hidden > 0 ? 1 : 0);
+  // 数える行: 見出し + ワーカー 3 行ずつ + 「他 n 件」 + 題名 + (取得前・非対応の一言) + リンク
+  let headerRows = 1 + listed.length * LANE_ROWS + (hidden > 0 ? 1 : 0);
   if (selected !== undefined) {
-    headerRows += 2;
+    headerRows += 1;
     if (view === undefined || !view.hasOutput) headerRows += 1;
-    else {
-      headerRows += 2; // 段階・いま
-      if (view.stoppedPhase !== null) headerRows += 1;
-    }
     if (link !== undefined || prLink !== undefined) headerRows += 1;
   }
   const lines =
@@ -451,12 +648,18 @@ export const register: Register = (on) => {
     try {
       const stored = coerceTasks(await $.store.get(STORE_KEY));
       await mutate($, () => stored);
-      await ensureTimer($);
     } catch {
       // 読めなければ空から始める。
     }
-    // 起動を待たせない。終端だけのときタイマーは動かないので、ここで 1 回取る。
-    void fetchMissing($).catch(() => undefined);
+    try {
+      const endpoints = coerceEndpoints(await $.store.get(ENDPOINTS_KEY));
+      await update($, endpointsAtom, () => endpoints);
+      await ensureTimer($);
+    } catch {
+      // 接続先が読めなければ task_start で拾ったものだけで動く。
+    }
+    // 起動を待たせない。task_list を取り、終端だけのときはタイマーが動かないので中身も 1 回取る。
+    void refresh($).catch(() => undefined);
 
     return next(e);
   });
@@ -493,7 +696,7 @@ export const register: Register = (on) => {
       } catch {
         // ペインは開いた。
       }
-      void fetchMissing($).catch(() => undefined);
+      void refresh($).catch(() => undefined);
 
       return { text: "コンソールのペインを開きました（読み取り専用）。" };
     }
@@ -521,6 +724,10 @@ export const register: Register = (on) => {
         if (started !== null) {
           await track($, hit, started, (e as Record<string, unknown>).title);
         }
+      }
+      const rovoTool = outcome.deny === undefined ? matchRovoTool(String(e.tool)) : null;
+      if (rovoTool !== null && (await rememberEndpoint($, rovoTool))) {
+        void refresh($).catch(() => undefined);
       }
       await ensureTimer($);
     } catch {
@@ -558,74 +765,76 @@ export const register: Register = (on) => {
     }
 
     const elapsedOf = (t: RovoTask): string => formatElapsed((t.terminalAt ?? now) - t.startedAt);
-    const steps = view !== undefined && view.hasOutput ? phaseSteps(view.phase) : null;
     const start = startOf(m, await read($, scrollAtom));
     const shown = m.lines.slice(start, start + m.windowRows);
+    const frame = await read($, frameAtom);
+    const arrivals = await read($, arrivalsAtom);
+    const consoles = await read($, consolesAtom);
 
-    // 上から: 一覧・タイトル・状態・段階・いま・コマンド・リンク（ヘッダー、出力の量に関わらず常に出す）、
+    // 上から: 見出し・ワーカーの列（3 行ずつ）・選んだワーカーの題名とリンク（ヘッダー、出力の量に関わらず常に出す）、
     // 残りの行が出力の窓。ツリー全体を bodyRows に収めるので、エンジンはスクロールしない。
     return (
       <Box flexDirection="column">
+        <Box>
+          <Text color="claude" weight="bold">
+            rovo
+          </Text>
+          <Text dimColor>{`  ${headingText(m.tasks)}`}</Text>
+        </Box>
         {listed.map((t) => {
           const key = taskKey(t);
-          const mark = selected !== undefined && taskKey(selected) === key ? "▶" : " ";
+          const isSelected = selected !== undefined && taskKey(selected) === key;
+          const own = consoles[key];
+          const lane = laneOf(t, own);
+          const arrival = arrivals[key];
+          const arrived =
+            arrival !== undefined && lane.at !== null && arrival.at === lane.at
+              ? frame - arrival.since < ARRIVE_FRAMES
+              : false;
+          const right = rightText(t, own?.hasOutput === true ? own.nowText : null, own?.pr);
+          const repo = (t.repository ?? "").split("/").pop() ?? "";
+          const press = async () => {
+            await update($, selectedAtom, () => key);
+            await update($, shownAtom, () => key);
+            await update($, scrollAtom, () => ({ follow: true, offset: 0 }));
+            void fetchMissing($, key).catch(() => undefined);
+          };
           return (
-            <Button
-              key={`task:${key}`}
-              plain
-              onPress={async () => {
-                await update($, selectedAtom, () => key);
-                await update($, shownAtom, () => key);
-                await update($, scrollAtom, () => ({ follow: true, offset: 0 }));
-                void fetchMissing($, key).catch(() => undefined);
-              }}
-            >
-              {mark === "▶" ? <Text color="claude">▶</Text> : " "}{" "}
-              <Text color={statusColor(t.status)}>{glyph(t.status)}</Text>
-              {` ${t.title} `}
-              <Text dimColor>{elapsedOf(t)}</Text>
-            </Button>
+            <Box key={`worker:${key}`} flexDirection="column">
+              <Button key={`row:${key}:0`} plain onPress={press}>
+                {isSelected ? <Text color="claude">▸</Text> : " "}{" "}
+                <Text weight={isSelected ? "bold" : undefined}>
+                  {padWidth(truncateWidth(t.title, TITLE_W), TITLE_W)}
+                </Text>
+                <Text dimColor>
+                  {` ${padWidth(truncateWidth(repo, REPO_W), REPO_W)} ${padWidth(truncateWidth(t.model ?? "", MODEL_W), MODEL_W)} ${elapsedOf(t)}`}
+                </Text>
+              </Button>
+              <Button key={`row:${key}:1`} plain onPress={press}>
+                {"  "}
+                {laneCells({ ...lane, frame, arrived }).map((c, i) => (
+                  <Text key={`cell:${i}`} color={c.color} weight={c.bold ? "bold" : undefined}>
+                    {c.text}
+                  </Text>
+                ))}
+                {"   "}
+                {right.text !== "" && <Text color={right.color}>{right.text}</Text>}
+              </Button>
+              <Button key={`row:${key}:2`} plain onPress={press}>
+                {"  "}
+                <Text dimColor>{labelRow(lane.kind)}</Text>
+              </Button>
+            </Box>
           );
         })}
         {m.hidden > 0 && <Text dimColor>{`他 ${m.hidden} 件`}</Text>}
         {selected !== undefined && (
           <Box flexDirection="column">
-            <Text weight="bold" wrap="truncate-end">
-              {selected.title}
-            </Text>
-            <Text dimColor wrap="truncate-end">
-              {`${statusLabel(selected.status, selected.awaiting)} / 経過 ${elapsedOf(selected)}`}
+            <Text wrap="truncate-end">
+              <Text dimColor>{"─ "}</Text>
+              <Text weight="bold">{selected.title}</Text>
             </Text>
             {view === undefined && <Text dimColor>まだ取得していません。</Text>}
-            {view !== undefined && view.hasOutput && (
-              <Box flexDirection="column">
-                {steps === null ? (
-                  <Text wrap="truncate-end">段階: 不明</Text>
-                ) : (
-                  <Text wrap="truncate-end">
-                    {"段階: "}
-                    {steps.flatMap((step, i) => [
-                      i > 0 ? " → " : "",
-                      <Text key={`phase:${i}`} color={step.color}>
-                        {step.mark}
-                      </Text>,
-                      step.label,
-                    ])}
-                  </Text>
-                )}
-                {view.stoppedPhase !== null && (
-                  <Text wrap="truncate-end">{`停止した段階: ${stoppedLabel(view.stoppedPhase)}`}</Text>
-                )}
-                <Box>
-                  <Text wrap="truncate-end">
-                    {view.nowText !== null ? `いま: ${view.nowText}` : "いま: （なし）"}
-                  </Text>
-                  {view.nowWhere !== undefined && (
-                    <Text dimColor wrap="truncate-end">{`  ${view.nowWhere} で`}</Text>
-                  )}
-                </Box>
-              </Box>
-            )}
             {view !== undefined && !view.hasOutput && (
               <Text dimColor>このサーバーは出力に対応していません。</Text>
             )}

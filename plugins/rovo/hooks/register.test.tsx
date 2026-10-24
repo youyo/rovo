@@ -55,6 +55,8 @@ type McpHandler = (call: McpCall) => unknown | Promise<unknown>;
 type Rig = {
   clock: ReturnType<typeof mock.clock>;
   calls: McpCall[];
+  /** task_list の呼び出し（calls には入れない: 古いサーバーでは失敗するだけの呼び出し）。 */
+  listCalls: McpCall[];
   toasts: string[];
   statuses: (string | undefined)[];
   opened: string[];
@@ -64,7 +66,9 @@ type Rig = {
   seen: unknown[];
   answers: Map<string, unknown>;
   setHandler: (h: McpHandler) => void;
+  setListHandler: (h: McpHandler) => void;
   stored: () => RovoTask[];
+  storeGet: (key: string) => unknown;
 };
 
 const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } = {}): Rig => {
@@ -81,6 +85,7 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
   });
 
   const calls: McpCall[] = [];
+  const listCalls: McpCall[] = [];
   const toasts: string[] = [];
   const statuses: (string | undefined)[] = [];
   const opened: string[] = [];
@@ -90,6 +95,8 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
   const seen: unknown[] = [];
   const answers = new Map<string, unknown>();
   let handler: McpHandler = (call) => ok(consoleBody(String(call.args.task_id)));
+  // 既定は task_list の無いサーバー（今の本番）。
+  let listHandler: McpHandler = () => err("unknown tool: task_list");
 
   on("session.start", (_, e) => ({ cwd: e.cwd }));
   on("ui.open", (_, e) => {
@@ -116,6 +123,10 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
   });
   on("mcp.call", async (_, e) => {
     const call = { server: e.server, tool: e.tool, args: e.args };
+    if (/(^|_)task_list$/.test(e.tool)) {
+      listCalls.push(call);
+      return { value: (await listHandler(call)) as never };
+    }
     calls.push(call);
     return { value: (await handler(call)) as never };
   });
@@ -132,6 +143,7 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
   return {
     clock,
     calls,
+    listCalls,
     toasts,
     statuses,
     opened,
@@ -143,7 +155,11 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
     setHandler: (h) => {
       handler = h;
     },
+    setListHandler: (h) => {
+      listHandler = h;
+    },
     stored: () => (store.get("tasks") ?? []) as RovoTask[],
+    storeGet: (key) => store.get(key),
   };
 };
 
@@ -855,6 +871,12 @@ test("the pane shows the list, the selected task, phases, command and tail on ev
         status: id === "t1" ? "COMPLETED" : "RUNNING",
         phase: id === "t1" ? "done" : "verify",
         now: { text: wrap(`now-${id}`), at: "x" },
+        output: {
+          command: wrap("pnpm test"),
+          tail: wrap(`line1\nline2\ntail-${id}`),
+          running: true,
+          redacted: true,
+        },
       }),
     );
   });
@@ -868,27 +890,31 @@ test("the pane shows the list, the selected task, phases, command and tail on ev
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface });
 
+    // 3 rows per worker (name / lane / station names), all of them buttons
     const rows = await ui.findAll({ type: "Button" });
-    expect(rows.length).toBeGreaterThanOrEqual(2);
+    expect(rows).toHaveLength(6);
     const first = await ui.find({ type: "Button", text: /First/ });
     const second = await ui.find({ type: "Button", text: /Second/ });
-    expect(first?.text).toContain("✓");
-    expect(second?.text).toContain("●");
+    expect((await rowsOf(ui, "t1"))[1]).toContain("✓ 完了");
+    const lane2 = (await rowsOf(ui, "t2"))[1] ?? "";
+    expect(lane2).toMatch(/^ *●━━━━●━━━━[◐◓◑◒◉]/);
+    expect(lane2).toContain("now-t2");
 
     // default: the latest running one (t2)
     let text = await allText(ui);
-    expect(text).toContain("now-t2");
     expect(text).not.toContain("now-t1");
+    expect(text).toContain("tail-t2");
+    expect(text).not.toContain("tail-t1");
     expect(text).toContain("pnpm test");
     expect(text).toContain("line1\nline2");
     expect(text).not.toContain("<<<");
-    expect(text).toContain("段階: ✓準備 → ✓実行 → ●検証 → ○完了");
+    expect((await rowsOf(ui, "t2"))[2]).toContain("準備 実行 検証 PR");
 
     // pick the first one
     await ui.press({ key: first?.key ?? "missing" });
     text = await allText(ui);
-    expect(text).toContain("now-t1");
-    expect(text).not.toContain("now-t2");
+    expect(text).toContain("tail-t1");
+    expect(text).not.toContain("tail-t2");
 
     await ui.press({ key: second?.key ?? "missing" }); // back to the default for the next surface
     await ui.unmount();
@@ -1001,7 +1027,7 @@ test("the pane hides a terminal task one hour after it ended, even with no event
   await ui.unmount();
 });
 
-test("an unknown phase reads as unknown; stopped_phase is shown by its Japanese name", async ($, on) => {
+test("an unknown phase draws no current station; stopped_phase marks the station it stopped at with ✕", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
   r.setHandler(() =>
@@ -1012,9 +1038,10 @@ test("an unknown phase reads as unknown; stopped_phase is shown by its Japanese 
   await r.clock.advance(4_000);
 
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
-  const text = await allText(ui);
-  expect(text).toContain("段階: 不明");
-  expect(text).toContain("停止した段階: 検証");
+  const [, lane, labels] = await rowsOf(ui, "t1");
+  expect(lane).toMatch(/^ *●━━━━●━━━━✕┈┈┈┈○/);
+  expect(lane).toContain("✕ 失敗");
+  expect(labels).toContain("準備 実行 検証 PR");
   await ui.unmount();
 });
 
@@ -1111,29 +1138,26 @@ const startScrollRig = async ($: Engine, on: On, tail: string) => {
   return r;
 };
 
-test("the header (title, status, phase, now, link) is drawn whatever the output, and the pane fits its rows", async ($, on) => {
+test("the header (heading, worker rows, title, link) is drawn whatever the output, and the pane fits its rows", async ($, on) => {
   await startScrollRig($, on, manyRows(0, 99).slice(0, 4000));
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...small(12), surface });
     const text = await allText(ui);
     expect(text).toContain("Header task");
-    expect(text).toContain("段階:");
+    expect(text).toContain("作業中 1 · 質問待ち 0 · 完了 0");
+    expect(text).toContain("準備 実行 検証 PR");
     expect(text).toContain("editing src/a.ts");
     expect(await ui.findAll({ type: "Link" })).toHaveLength(1);
     const outputRows = (await ui.findAll({ type: "Text" })).filter((t) =>
       /^row\d+$/.test(t.text ?? ""),
     );
     expect(outputRows.length).toBeGreaterThan(0);
-    // colored Texts are inline marks inside a row, not rows of their own
-    const total =
-      (await ui.findAll({ type: "Text" })).filter(
-        (t) => (t as { props?: { color?: string } }).props?.color === undefined,
-      ).length +
-      (await ui.findAll({ type: "Button" })).length +
-      (await ui.findAll({ type: "Link" })).length;
-    // a Button's elapsed time is a Text on its own row
-    expect(total - (await ui.findAll({ type: "Button" })).length).toBeLessThanOrEqual(12);
+    // heading + the worker's 3 buttons + title + link + frame (2) + command + the output window
+    const buttonCount = (await ui.findAll({ type: "Button" })).length;
+    expect(buttonCount).toBe(3);
+    const rowsDrawn = 1 + buttonCount + 1 + 1 + 2 + 1 + outputRows.length;
+    expect(rowsDrawn).toBeLessThanOrEqual(12);
     await ui.unmount();
   }
 });
@@ -1403,7 +1427,7 @@ test("when the selected task disappears the window follows again", async ($, on)
   await r.clock.advance(4_000);
 
   // pick the first (finished) task, scroll up in it
-  let ui = await $.ui.mount({ ...small(12), surface: "terminal" });
+  let ui = await $.ui.mount({ ...small(30), surface: "terminal" });
   const first = await ui.find({ type: "Button", text: /First/ });
   await ui.press({ key: first?.key ?? "missing" });
   await ui.unmount();
@@ -1431,7 +1455,7 @@ const colorOf = async (
 
 test("the glyph of each state has its own theme color", async ($, on) => {
   const r = rig(on);
-  const states = ["COMPLETED", "FAILED", "INPUT_REQUIRED", "CANCELLED", "BUDGET_EXCEEDED"];
+  const states = ["COMPLETED", "FAILED", "INPUT_REQUIRED", "CANCELLED"]; // the pane lists 4 workers
   r.setHandler((call) => {
     const n = Number(String(call.args.task_id).slice(1));
     return ok(consoleBody(`t${n}`, { status: states[n] ?? "RUNNING" }));
@@ -1448,14 +1472,15 @@ test("the glyph of each state has its own theme color", async ($, on) => {
   const pairs = (await ui.findAll({ type: "Text" })).map(
     (n) => `${(n as { text?: string }).text}|${(n as { props?: { color?: string } }).props?.color}`,
   );
-  expect(pairs).toContain("✓|success");
-  expect(pairs).toContain("✕|error");
-  expect(pairs).toContain("?|warning");
-  expect(pairs).toContain("–|inactive");
+  // the result at the right of each lane carries the state color
+  expect(pairs).toContain("✓ 完了|success");
+  expect(pairs).toContain("✕ 失敗|error");
+  expect(pairs).toContain("入力待ち|warning");
+  expect(pairs).toContain("– 取り消し|inactive");
   await ui.unmount();
 });
 
-test("a running task glyph is colored suggestion", async ($, on) => {
+test("a running worker's spinner is colored suggestion", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
   await startSession($);
@@ -1465,11 +1490,11 @@ test("a running task glyph is colored suggestion", async ($, on) => {
   const pairs = (await ui.findAll({ type: "Text" })).map(
     (n) => `${(n as { text?: string }).text}|${(n as { props?: { color?: string } }).props?.color}`,
   );
-  expect(pairs).toContain("●|suggestion");
+  expect(pairs.some((p) => /^[◐◓◑◒]\|suggestion$/.test(p))).toBe(true);
   await ui.unmount();
 });
 
-test("the selected row mark, phase marks, links and frame are colored; body text is not", async ($, on) => {
+test("the selected row mark, lane marks, links and frame are colored; body text is not", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
@@ -1485,14 +1510,14 @@ test("the selected row mark, phase marks, links and frame are colored; body text
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
 
-  expect(await colorOf(ui, /^▶$/)).toBe("claude");
-  expect(await colorOf(ui, /^✓$/)).toBe("success");
-  expect(await colorOf(ui, /^●$/)).toBe("suggestion");
+  expect(await colorOf(ui, /^▸$/)).toBe("claude");
+  expect(await colorOf(ui, /^●$/)).toBe("success");
+  expect(await colorOf(ui, /^[◐◓◑◒]$/)).toBe("suggestion");
   expect(await colorOf(ui, /^○$/)).toBe("subtle");
   expect(await colorOf(ui, /ダッシュボードを開く/)).toBe("suggestion");
   expect(await colorOf(ui, /^line1/)).toBeUndefined();
   expect(await colorOf(ui, /^\$ pnpm test$/)).toBeUndefined();
-  expect(await colorOf(ui, /^いま: /)).toBeUndefined();
+  expect(await colorOf(ui, /^editing src/)).toBeUndefined();
   const framed = (await ui.findAll({ type: "Box" })).filter(
     (b) => (b as { props?: { borderStyle?: string } }).props?.borderStyle !== undefined,
   );
@@ -1543,7 +1568,9 @@ test("only terminal tasks stored: session.start then open fetches the console on
   await r.clock.advance(0);
   expect(r.calls.map((c) => c.tool)).toEqual(["task_console"]);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
-  expect(await allText(ui)).toContain("editing src/a.ts");
+  // a finished worker shows its result on the lane; the console below holds the fetched output
+  expect(await allText(ui)).toContain("line1");
+  expect((await rowsOf(ui, "t1"))[1]).toContain("✓ 完了");
   expect(await allText(ui)).not.toContain("まだ取得していません。");
   await ui.unmount();
 });
@@ -1614,4 +1641,404 @@ test("a running task is still polled every 4 seconds alongside the one-off fetch
   const ids = r.calls.map((c) => c.args.task_id);
   expect(ids.filter((i) => i === "t2")).toHaveLength(1);
   expect(ids.filter((i) => i === "t1").length).toBeGreaterThanOrEqual(2);
+});
+
+// --- lanes: the pipeline pane ------------------------------------------------
+
+const T0 = Date.parse("2026-01-01T00:10:00Z");
+const ENDPOINT = { endpoints: [{ server: "rovo-direct", prefix: "" }] };
+
+const item = (n: number, over: Record<string, unknown> = {}) => ({
+  task_id: `L${n}`,
+  kind: "task",
+  title: `Listed ${n}`,
+  repository: "o/repo",
+  status: "RUNNING",
+  stage: "work",
+  waiting_for_answer: false,
+  model: "sonnet",
+  created_at: `2026-01-01T00:0${n}:00Z`,
+  updated_at: "2026-01-01T00:09:30Z",
+  ...over,
+});
+
+const listOf = (...items: unknown[]) => ok({ tasks: items, truncated: false });
+
+type Finder = { findAll: (q: { type: string }) => Promise<unknown[]> };
+
+const buttons = async (ui: Finder) =>
+  (await ui.findAll({ type: "Button" })) as { key?: string; text?: string }[];
+
+/** 1 ワーカーの 3 行（Button）のテキスト。 */
+const rowsOf = async (ui: Finder, taskId: string) => {
+  const all = await buttons(ui);
+  return [0, 1, 2].map(
+    (i) => all.find((b) => b.key === `row:rovo-direct/${taskId}:${i}`)?.text ?? "",
+  );
+};
+
+const mountPane = ($: Engine, bodyRows = 30) =>
+  $.ui.mount({
+    ...PANE,
+    props: { ...PANE.props, scroll: { offset: 0, bodyRows } },
+    surface: "terminal",
+  });
+
+test("with task_list, workers from other sessions are listed: 3 rows each, counts in the heading", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() =>
+    listOf(
+      item(1),
+      item(2, {
+        kind: "review",
+        stage: "investigate",
+        status: "INPUT_REQUIRED",
+        waiting_for_answer: true,
+        model: "opus",
+      }),
+      item(3, {
+        status: "COMPLETED",
+        stage: "done",
+        ended_at: "2026-01-01T00:09:00Z",
+        pr: { number: 5, url: "https://github.com/o/r/pull/5" },
+      }),
+    ),
+  );
+  await startSession($);
+  await r.clock.settle();
+
+  expect(r.listCalls[0]).toEqual({
+    server: "rovo-direct",
+    tool: "task_list",
+    args: { scope: "recent", limit: 50 },
+  });
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).toContain("rovo");
+  expect(text).toContain("作業中 1 · 質問待ち 1 · 完了 1");
+  expect(text).not.toMatch(/USD|費用|\$\d/);
+
+  const [a1, a2, a3] = await rowsOf(ui, "L1");
+  expect(a1).toContain("Listed 1");
+  expect(a1).toContain("repo");
+  expect(a1).toContain("sonnet");
+  expect(a2).toContain("●");
+  expect(a3).toContain("準備 実行 検証 PR");
+
+  const [b1, b2, b3] = await rowsOf(ui, "L2");
+  expect(b1).toContain("opus");
+  expect(b2).toContain("入力待ち");
+  expect(b3).toContain("取出 調査 投稿");
+  expect(b3).not.toContain("PR");
+
+  const [c1, c2] = await rowsOf(ui, "L3");
+  expect(c1).toContain("Listed 3");
+  expect(c2).toContain("✓ PR #5");
+  expect(c2).not.toContain("┈");
+  await ui.unmount();
+});
+
+test("the task_list endpoint is remembered from any rovo tool call and stored", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  r.setListHandler(() => listOf(item(1)));
+  await startSession($);
+  await $.tool.call({ tool: "mcp__claude_ai_mcp_hubs_run__my-rovo_task_wait", task_id: "x" });
+  await r.clock.settle();
+  expect(r.listCalls[0]?.server).toBe("claude_ai_mcp_hubs_run");
+  expect(r.listCalls[0]?.tool).toBe("my-rovo_task_list");
+  const ui = await mountPane($);
+  expect(await ui.find({ type: "Button", text: /Listed 1/ })).toBeDefined();
+  await ui.unmount();
+  // 再起動後も呼べるよう、$.store に残す
+  expect(r.storeGet("endpoints")).toEqual([
+    { server: "claude_ai_mcp_hubs_run", prefix: "my-rovo_" },
+  ]);
+});
+
+test("without task_list (today's server) it falls back: only tasks picked up from task_start, and task_list is retried once a minute", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Mine", repository: "o/r" });
+  await r.clock.settle();
+  expect(r.listCalls).toHaveLength(1);
+
+  for (let i = 0; i < 14; i++) await r.clock.advance(4_000); // 56 秒
+  expect(r.listCalls).toHaveLength(1);
+  await r.clock.advance(12_000); // 68 秒
+  expect(r.listCalls).toHaveLength(2);
+
+  const ui = await mountPane($);
+  const all = await buttons(ui);
+  expect(all.filter((b) => (b.key ?? "").startsWith("row:"))).toHaveLength(3);
+  const [row1, row2, row3] = await rowsOf(ui, "t1");
+  expect(row1).toContain("Mine");
+  expect(row2).toContain("●");
+  expect(row3).toContain("準備 実行 検証 PR");
+  expect(r.calls.every((c) => c.tool === "task_console")).toBe(true);
+  await ui.unmount();
+});
+
+test("when task_list starts working later, the listed workers appear", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  await startSession($);
+  await r.clock.settle();
+  expect(r.listCalls).toHaveLength(1);
+  const ui0 = await mountPane($);
+  expect(await ui0.find({ type: "Text", text: /追跡中のタスクはありません/ })).toBeDefined();
+  await ui0.unmount();
+
+  r.setListHandler(() => listOf(item(1)));
+  await r.clock.advance(61_000);
+  await $.command.run({ command: "rovo:open-console", args: "" } as never); // retries task_list
+  await r.clock.settle();
+  const ui = await mountPane($);
+  expect(await ui.find({ type: "Button", text: /Listed 1/ })).toBeDefined();
+  await ui.unmount();
+});
+
+test("pressing a worker's row switches the console below to that worker", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() => listOf(item(1), item(2)));
+  r.setHandler((call) => {
+    const id = String(call.args.task_id);
+    return ok(
+      consoleBody(id, {
+        output: { command: wrap(`cmd-${id}`), tail: wrap(`tail-${id}`), running: true },
+      }),
+    );
+  });
+  await startSession($);
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+
+  const ui = await mountPane($);
+  let text = await allText(ui);
+  expect(text).toContain("tail-L2"); // 最新の実行中が既定
+  expect(text).not.toContain("tail-L1");
+
+  const first = (await buttons(ui)).find((b) => b.key === "row:rovo-direct/L1:0");
+  await ui.press({ key: first?.key ?? "missing" });
+  text = await allText(ui);
+  expect(text).toContain("tail-L1");
+  expect(text).toContain("cmd-L1");
+  expect(text).not.toContain("tail-L2");
+  // 3 行のどれを押しても選べる
+  const second = (await buttons(ui)).find((b) => b.key === "row:rovo-direct/L2:2");
+  await ui.press({ key: second?.key ?? "missing" });
+  expect(await allText(ui)).toContain("tail-L2");
+  await ui.unmount();
+});
+
+test("the light flows on a running worker and stops on one waiting for an answer, which blinks ?", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() =>
+    listOf(item(1), item(2, { status: "INPUT_REQUIRED", waiting_for_answer: true })),
+  );
+  await startSession($);
+  await r.clock.settle();
+
+  const runLanes: string[] = [];
+  const waitLanes: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    await r.clock.advance(700);
+    const ui = await mountPane($);
+    runLanes.push((await rowsOf(ui, "L1"))[1] ?? "");
+    waitLanes.push((await rowsOf(ui, "L2"))[1] ?? "");
+    await ui.unmount();
+  }
+  expect(runLanes.some((t) => t.includes("▶"))).toBe(true);
+  expect(new Set(runLanes).size).toBeGreaterThan(2);
+  for (const t of waitLanes) expect(t).not.toContain("▶");
+  expect(waitLanes.some((t) => t.includes("?"))).toBe(true);
+  expect(waitLanes.some((t) => !t.includes("?") && t.includes("入力待ち"))).toBe(true);
+});
+
+test("a worker that just reached a station shows a bright ◉ for a moment", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  let stage = "work";
+  r.setListHandler(() => listOf(item(1, { stage })));
+  await startSession($);
+  await r.clock.advance(700);
+  await r.clock.advance(700);
+  stage = "verify";
+  await r.clock.advance(4_000); // list を取り直す
+  await r.clock.advance(700);
+  let ui = await mountPane($);
+  const arrived = (await rowsOf(ui, "L1"))[1] ?? "";
+  expect(arrived).toContain("◉");
+  await ui.unmount();
+
+  await r.clock.advance(700 * 4);
+  ui = await mountPane($);
+  expect((await rowsOf(ui, "L1"))[1]).not.toContain("◉");
+  await ui.unmount();
+});
+
+test("the redraw timer stops when every worker is terminal and starts again for a new running one", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  let phase: "run" | "done" | "again" = "run";
+  r.setListHandler(() => {
+    if (phase === "run") return listOf(item(1));
+    if (phase === "done") {
+      return listOf(
+        item(1, { status: "COMPLETED", stage: "done", ended_at: "2026-01-01T00:09:30Z" }),
+      );
+    }
+    return listOf(
+      item(1, { status: "COMPLETED", stage: "done", ended_at: "2026-01-01T00:09:30Z" }),
+      item(2),
+    );
+  });
+  r.setHandler((call) =>
+    ok(
+      consoleBody(String(call.args.task_id), {
+        status: phase !== "run" && call.args.task_id === "L1" ? "COMPLETED" : "RUNNING",
+        phase: phase !== "run" && call.args.task_id === "L1" ? "done" : "run",
+      }),
+    ),
+  );
+  const laneFrames = async (id: string, n: number) => {
+    const out: string[] = [];
+    for (let i = 0; i < n; i++) {
+      await r.clock.advance(700);
+      const ui = await mountPane($);
+      out.push((await rowsOf(ui, id))[1] ?? "");
+      await ui.unmount();
+    }
+    return out;
+  };
+  await startSession($);
+  expect(new Set(await laneFrames("L1", 6)).size).toBeGreaterThan(2);
+
+  phase = "done";
+  await r.clock.advance(8_000);
+  const finished = await laneFrames("L1", 4);
+  expect(new Set(finished).size).toBe(1);
+  expect(finished[0]).toContain("✓ 完了");
+
+  phase = "again";
+  await r.clock.advance(21_000); // an idle list is read less often
+  expect(new Set(await laneFrames("L2", 6)).size).toBeGreaterThan(2);
+});
+
+test("a listed worker turning terminal toasts once; one already terminal when first seen never does", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  let status = "RUNNING";
+  r.setListHandler(() =>
+    listOf(item(1, { status }), item(2, { status: "FAILED", ended_at: "2026-01-01T00:09:00Z" })),
+  );
+  await startSession($);
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual([]);
+  status = "FAILED";
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual(["Listed 1 が失敗"]);
+});
+
+test("a listed worker that ended more than an hour ago is not shown", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() =>
+    listOf(
+      item(1, { status: "COMPLETED", stage: "done", ended_at: "2026-01-01T00:00:00Z" }),
+      item(2, { status: "COMPLETED", stage: "done", ended_at: "2025-12-31T20:00:00Z" }),
+    ),
+  );
+  await startSession($);
+  await r.clock.settle();
+  const ui = await mountPane($);
+  expect(await ui.find({ type: "Button", text: /Listed 1/ })).toBeDefined();
+  expect(await ui.find({ type: "Button", text: /Listed 2/ })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("a failed worker marks the station it stopped at with ✕", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() =>
+    listOf(item(1, { status: "FAILED", stage: "verify", ended_at: "2026-01-01T00:09:00Z" })),
+  );
+  r.setHandler((call) =>
+    ok(consoleBody(String(call.args.task_id), { status: "FAILED", phase: "verify" })),
+  );
+  await startSession($);
+  await r.clock.settle();
+  const ui = await mountPane($);
+  const row2 = (await rowsOf(ui, "L1"))[1] ?? "";
+  expect(row2).toContain("✕");
+  expect(row2).not.toContain("▶");
+  await ui.unmount();
+});
+
+test("the list and console fit bodyRows; with little room fewer workers are listed and the selected one stays", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() => listOf(item(1), item(2), item(3), item(4), item(5), item(6)));
+  await startSession($);
+  await r.clock.advance(4_000);
+  await r.clock.advance(4_000);
+  for (const rows of [30, 16, 10]) {
+    const ui = await mountPane($, rows);
+    const all = await buttons(ui);
+    const workers = new Set(all.map((b) => (b.key ?? "").split(":")[1]));
+    expect(workers.size).toBeGreaterThanOrEqual(1);
+    expect(workers.size).toBeLessThanOrEqual(4);
+    expect(all.length).toBe(workers.size * 3);
+    expect(await ui.find({ type: "Text", text: /他 \d+ 件/ })).toBeDefined();
+    await ui.unmount();
+  }
+});
+
+test("task_list is read-only and bounded: scope recent, limit 50, no write tools, and console polls are capped per tick", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() =>
+    listOf(
+      ...Array.from({ length: 12 }, (_, i) =>
+        item(i + 1, { created_at: `2026-01-01T00:0${Math.min(i, 9)}:00Z` }),
+      ),
+    ),
+  );
+  await startSession($);
+  await r.clock.settle();
+  r.calls.length = 0;
+  await r.clock.advance(4_000);
+  const polled = r.calls.filter((c) => c.tool === "task_console");
+  expect(polled.length).toBeGreaterThan(0);
+  expect(polled.length).toBeLessThanOrEqual(6);
+  for (const c of [...r.calls, ...r.listCalls]) expect(c.tool).not.toMatch(WRITE_TOOLS);
+  expect(r.listCalls.every((c) => c.args.scope === "recent" && c.args.limit === 50)).toBe(true);
+  expect(r.forbidden).toEqual([]);
+});
+
+test("without task_list a worker waiting for an answer (INPUT_REQUIRED) also stops the flow and blinks ?", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler((call) =>
+    ok(consoleBody(String(call.args.task_id), { status: "INPUT_REQUIRED", phase: "run" })),
+  );
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Asks", repository: "o/r" });
+  await r.clock.advance(4_000);
+  const lanes: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    await r.clock.advance(700);
+    const ui = await mountPane($);
+    lanes.push((await rowsOf(ui, "t1"))[1] ?? "");
+    await ui.unmount();
+  }
+  for (const l of lanes) {
+    expect(l).not.toContain("▶");
+    expect(l).toContain("入力待ち");
+  }
+  expect(lanes.some((l) => l.includes("?"))).toBe(true);
+  expect(lanes.some((l) => !l.includes("?"))).toBe(true);
+});
+
+test("listed workers survive a restart through $.store", async ($, on) => {
+  const r = rig(on, { now: T0, store: ENDPOINT });
+  r.setListHandler(() => listOf(item(1)));
+  await startSession($);
+  await r.clock.settle();
+  expect(r.stored().map((t) => t.taskId)).toContain("L1");
+  expect(r.stored()[0]).toMatchObject({ kind: "task", listed: true, model: "sonnet" });
 });

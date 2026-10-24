@@ -71,7 +71,7 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("17 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("18 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
@@ -83,6 +83,7 @@ describe("/mcp ツール一覧", () => {
       "task_answer",
       "task_cancel",
       "task_console",
+      "task_list",
       "task_pr_merge",
       "task_pr_ready",
       "task_result",
@@ -2616,6 +2617,7 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
   ): Hints => ({ readOnlyHint: false, destructiveHint, idempotentHint, openWorldHint });
   // 利用者の決定した分類。ここに無いツールが登録されたらテストが落ちる
   const EXPECTED: Record<string, Hints> = {
+    task_list: READ(false),
     task_status: READ(false),
     task_wait: READ(false),
     task_result: READ(false),
@@ -2656,11 +2658,11 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
     await client.close();
   });
 
-  it("web_browse が無効（既定）なら 17 ツールで、それぞれに annotations がある", async () => {
+  it("web_browse が無効（既定）なら 18 ツールで、それぞれに annotations がある", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(17);
+    expect(tools).toHaveLength(18);
     for (const t of tools) {
       expect(t.annotations, t.name).toMatchObject(EXPECTED[t.name] as Hints);
     }

@@ -4,7 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { describe, expect, it } from "vitest";
 import { createApiApp } from "../../src/app";
 import { DIRECTORY_NAME, type TaskIndexSnapshot } from "../../src/directory/types";
-import { TASK_LIST_RECENT_MS, stageOf } from "../../src/tasks/task-list";
+import { stageOf, TASK_LIST_RECENT_MS } from "../../src/tasks/task-list";
 import { FakeGitHubFetch, installFakeGitHub } from "./fake-github-fetch";
 import { newUserId } from "./helpers";
 
@@ -107,7 +107,8 @@ async function seed(rows: TaskIndexSnapshot[]) {
 }
 
 let idSeq = 0;
-const tid = () => `01TASKLIST${String(Date.now()).padStart(10, "0")}${String(idSeq++).padStart(6, "0")}`;
+const tid = () =>
+  `01TASKLIST${String(Date.now()).padStart(10, "0")}${String(idSeq++).padStart(6, "0")}`;
 
 async function connectAs(userId: number) {
   const gh = new FakeGitHubFetch();

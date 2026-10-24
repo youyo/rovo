@@ -23,6 +23,7 @@ export const TOOL_ANNOTATIONS = {
   task_wait: read("Wait for task events", false),
   task_result: read("Task result", false),
   task_console: read("Task console", false),
+  task_list: read("List tasks", false),
   models_list: read("List models", false),
   budget_status: read("Budget status", false),
   sandbox_instances_list: read("List sandbox sizes", false),

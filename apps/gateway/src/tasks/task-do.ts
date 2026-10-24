@@ -523,6 +523,13 @@ export type SteerResult =
   | { ok: false; code: "not_found" | "conflict" | "invalid_input" };
 
 /** steer を受け付ける状態（4.6）。 */
+/** 索引の review_stage / verify_attempt を変えるイベント（取り込んだら索引の revision を上げる） */
+const INDEX_STAGE_EVENTS: ReadonlySet<string> = new Set([
+  "verification",
+  "review_started",
+  "review_commands_finished",
+]);
+
 const STEERABLE: ReadonlySet<TaskStatus> = new Set(["RUNNING", "VERIFYING", "INPUT_REQUIRED"]);
 
 export type WaitResult =
@@ -2755,6 +2762,8 @@ export class TaskDO extends DurableObject<Env> {
           if (open && m.progress !== undefined) this.applyProgress(m.progress, e.ts);
         } else if (open) {
           this.appendAgentEvent(m.type, m.payload, e.ts, link.operation_id, e.seq);
+          // 索引の stage / verify_attempt に効くイベント（一覧の段階を古いままにしない）
+          if (INDEX_STAGE_EVENTS.has(m.type)) this.bumpIndexRevision();
           // 終わったコマンドの記録が来たら、そのコマンドの途中経過は要らない
           if (m.type === "command") this.clearProgress();
         }
@@ -3579,6 +3588,7 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec("UPDATE review_link SET posted = 3");
         this.appendEvent("review_finished", { stage: "skipped" }, this.now());
+        this.bumpIndexRevision();
         this.emitAudit("review_failed", {
           ...audit,
           reason: review?.failure ?? status.toLowerCase(),
@@ -3606,6 +3616,7 @@ export class TaskDO extends DurableObject<Env> {
           at,
         );
         this.appendEvent("review_finished", { stage: "done" }, at);
+        this.bumpIndexRevision();
         this.emitAudit("review_posted", {
           ...audit,
           must_fix_count: review.mustFixCount,
@@ -3638,6 +3649,7 @@ export class TaskDO extends DurableObject<Env> {
       const at = this.now();
       this.appendEvent("warning", { code: "review_comment_failed" }, at);
       this.appendEvent("review_finished", { stage: "done" }, at);
+      this.bumpIndexRevision();
       this.emitAudit("review_failed", {
         userId: row.owner_id,
         model: rl.review_model,
@@ -4213,10 +4225,72 @@ export class TaskDO extends DurableObject<Env> {
       reason: typeof last?.p.reason === "string" ? clip(last.p.reason, INDEX_LIMITS.reason) : null,
       failure_phase:
         status === "FAILED" && gl !== undefined && gl.setup_done === 0 ? "setup" : null,
+      ...this.indexStageFields(row, status),
       // deps_cache は終端の結果（AgentDO の getResult）にしか無く、TaskDO が同期で持つ値ではない。詳細は TaskDO から読む（M7）
       deps_cache: null,
       sandbox_runtime_ms:
         up.sandbox_runtime_ms !== undefined ? Math.floor(up.sandbox_runtime_ms) : null,
+    };
+  }
+
+  /**
+   * task_list の stage に要る値（kind・review の段・検証に入ったか・検証の試行回数・review の対象 PR）。
+   * review の段は、終端でも途中の段を残す（失敗したレビューの止まった段が分かる）。COMPLETED は投稿が済んだか（posting / done）。
+   */
+  private indexStageFields(
+    row: TaskRow,
+    status: TaskStatus,
+  ): Pick<
+    TaskIndexSnapshot,
+    | "kind"
+    | "review_stage"
+    | "reached_verifying"
+    | "verify_attempt"
+    | "target_pr_number"
+    | "target_pr_url"
+  > {
+    const sql = this.ctx.storage.sql;
+    const reachedVerifying = this.reachedStatuses().verifying;
+    if (this.isReview(row)) {
+      const rl = this.getReview();
+      const seen = new Set(
+        sql
+          .exec<{ type: string }>(
+            "SELECT DISTINCT type FROM events WHERE type IN ('review_started', 'review_commands_finished', 'review_finished')",
+          )
+          .toArray()
+          .map((r) => r.type),
+      );
+      let reviewStage: "waiting" | "commands" | "reviewing" | "posting" | "done" = "waiting";
+      if (status === "COMPLETED") reviewStage = seen.has("review_finished") ? "done" : "posting";
+      else if (seen.has("review_commands_finished")) reviewStage = "reviewing";
+      else if (seen.has("review_started")) {
+        const commands = rl ? (JSON.parse(rl.review_commands) as unknown[]) : [];
+        reviewStage = commands.length > 0 ? "commands" : "reviewing";
+      }
+      return {
+        kind: "review",
+        review_stage: reviewStage,
+        reached_verifying: reachedVerifying,
+        verify_attempt: null,
+        target_pr_number: rl?.pull_number ?? null,
+        // URL は切り詰めると壊れるので、上限を超えたら入れない
+        target_pr_url:
+          rl?.pull_url != null && rl.pull_url.length <= INDEX_LIMITS.url ? rl.pull_url : null,
+      };
+    }
+    const last = sql
+      .exec<{ a: number | null }>(
+        "SELECT MAX(json_extract(payload, '$.attempt')) AS a FROM events WHERE type = 'verification'",
+      )
+      .toArray()[0]?.a;
+    return {
+      kind: "task",
+      review_stage: null,
+      reached_verifying: reachedVerifying,
+      verify_attempt: typeof last === "number" && Number.isInteger(last) && last > 0 ? last : null,
+      target_pr_number: null,
+      target_pr_url: null,
     };
   }
 

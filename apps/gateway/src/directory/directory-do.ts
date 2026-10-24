@@ -5,6 +5,8 @@ import {
   ConsultIndexSnapshotSchema,
   type ListConsultsQuery,
   type ListConsultsResult,
+  type ListOwnTasksQuery,
+  type ListOwnTasksResult,
   type ListTasksQuery,
   type ListTasksResult,
   type ListWaitingQuery,
@@ -26,9 +28,10 @@ import {
 type ConsultDbRow = Omit<ConsultIndexRow, "estimated"> & { estimated: number };
 
 /** TaskIndexRow の列（task_index の列と同じ名前。pr_draft / pr_merged は 0/1 で持つ） */
-type DbRow = Omit<TaskIndexSnapshot, "pr_draft" | "pr_merged"> & {
+type DbRow = Omit<TaskIndexSnapshot, "pr_draft" | "pr_merged" | "reached_verifying"> & {
   pr_draft: number | null;
   pr_merged: number;
+  reached_verifying: number | null;
   revision: number;
 };
 
@@ -59,6 +62,22 @@ const COLUMNS = [
   "failure_phase",
   "deps_cache",
   "sandbox_runtime_ms",
+  "kind",
+  "review_stage",
+  "reached_verifying",
+  "verify_attempt",
+  "target_pr_number",
+  "target_pr_url",
+] as const;
+
+/** 後から足した列（既存の索引には ALTER TABLE で足す。値の無い行は NULL） */
+const ADDED_COLUMNS = [
+  ["kind", "TEXT"],
+  ["review_stage", "TEXT"],
+  ["reached_verifying", "INTEGER"],
+  ["verify_attempt", "INTEGER"],
+  ["target_pr_number", "INTEGER"],
+  ["target_pr_url", "TEXT"],
 ] as const;
 
 /**
@@ -110,6 +129,15 @@ export class DirectoryDO extends DurableObject<Env> {
       sandbox_runtime_ms INTEGER,
       revision INTEGER NOT NULL
     )`);
+    const have = new Set(
+      sql
+        .exec<{ name: string }>("SELECT name FROM pragma_table_info('task_index')")
+        .toArray()
+        .map((c) => c.name),
+    );
+    for (const [name, type] of ADDED_COLUMNS) {
+      if (!have.has(name)) sql.exec(`ALTER TABLE task_index ADD COLUMN ${name} ${type}`);
+    }
     sql.exec(
       "CREATE INDEX IF NOT EXISTS task_index_created ON task_index (created_at DESC, task_id)",
     );
@@ -283,6 +311,12 @@ export class DirectoryDO extends DurableObject<Env> {
         s.failure_phase,
         s.deps_cache,
         s.sandbox_runtime_ms,
+        s.kind ?? null,
+        s.review_stage ?? null,
+        s.reached_verifying === undefined ? null : s.reached_verifying ? 1 : 0,
+        s.verify_attempt ?? null,
+        s.target_pr_number ?? null,
+        s.target_pr_url ?? null,
       ];
       sql.exec(
         `INSERT OR REPLACE INTO task_index (${COLUMNS.join(", ")}, revision)
@@ -334,6 +368,38 @@ export class DirectoryDO extends DurableObject<Env> {
       .toArray()
       .map(toRow);
     return { ok: true, total, rows };
+  }
+
+  /**
+   * ある所有者のタスク（task_list）。リポジトリでは絞らない（所有者本人の一覧で、task_status と同じ「自分のタスクだけ」）。
+   * 終端でない（ended_at が無い）タスクと、scope が recent なら endedSince 以降に終端になったタスクを、新しい順に最大 limit 件。
+   * 1 件多く読んで、続きがあるか（truncated）を返す。
+   */
+  listOwnTasks(query: ListOwnTasksQuery): ListOwnTasksResult {
+    if (
+      !Number.isSafeInteger(query?.ownerId) ||
+      !Number.isSafeInteger(query.endedSince) ||
+      !Number.isSafeInteger(query.limit) ||
+      query.limit < 1 ||
+      (query.scope !== "active" && query.scope !== "recent")
+    ) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const limit = Math.min(query.limit, MAX_LIST_LIMIT);
+    const since = query.scope === "recent" ? query.endedSince : null;
+    const rows = this.ctx.storage.sql
+      .exec<DbRow>(
+        `SELECT * FROM task_index WHERE owner_id = ?
+           AND (ended_at IS NULL OR (? IS NOT NULL AND ended_at >= ?))
+         ORDER BY created_at DESC, task_id LIMIT ?`,
+        query.ownerId,
+        since,
+        since,
+        limit + 1,
+      )
+      .toArray()
+      .map(toRow);
+    return { ok: true, rows: rows.slice(0, limit), truncated: rows.length > limit };
   }
 
   /**
@@ -482,10 +548,23 @@ export class DirectoryDO extends DurableObject<Env> {
 }
 
 function toRow(r: DbRow): TaskIndexRow {
-  return {
-    ...r,
+  const { reached_verifying, ...rest } = r;
+  const row: TaskIndexRow = {
+    ...rest,
     pr_draft: r.pr_draft === null ? null : r.pr_draft === 1,
     pr_merged: r.pr_merged === 1,
     failure_phase: r.failure_phase === "setup" ? "setup" : null,
   };
+  // task_list 用の列は、値の無い行（古い snapshot）では項目ごと省く
+  if (reached_verifying !== null) row.reached_verifying = reached_verifying === 1;
+  for (const k of [
+    "kind",
+    "review_stage",
+    "verify_attempt",
+    "target_pr_number",
+    "target_pr_url",
+  ] as const) {
+    if (row[k] === null) delete row[k];
+  }
+  return row;
 }

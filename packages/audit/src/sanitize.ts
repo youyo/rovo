@@ -1,7 +1,7 @@
 import { stripAnsi } from "./text";
 
 /**
- * 子エージェント由来の文字列を、ダッシュボードに出す前に整える共通の関数（docs/specs/dashboard.md D14）。
+ * ワーカー由来の文字列を、ダッシュボードに出す前に整える共通の関数（docs/specs/dashboard.md D14）。
  * agent（出力時）と gateway（取り込み時）が同じ関数を使い、どちらかが壊れていても漏らさない二重の防御にする。
  * workerd でも Node でも動くよう、Node 固有の API は使わない。
  */

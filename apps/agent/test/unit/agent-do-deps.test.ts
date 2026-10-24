@@ -13,7 +13,7 @@ import {
   waitForTerminal,
 } from "./support/agent-fixture";
 
-// D14（依存関係のキャッシュ）の AgentDO 側: deps を SandboxDO へ渡す・結果を usage に載せる・子のシステムプロンプトに書く
+// D14（依存関係のキャッシュ）の AgentDO 側: deps を SandboxDO へ渡す・結果を usage に載せる・ワーカーのシステムプロンプトに書く
 
 afterEach(() => clearAgentTestOverrides());
 
@@ -135,7 +135,7 @@ describe("usage の sandbox に depsCache / cacheBuildMs を載せる", () => {
   });
 });
 
-describe("子のシステムプロンプト", () => {
+describe("ワーカーのシステムプロンプト", () => {
   it("hit / built: 依存関係は導入済みで、npm ci は不要。lockfile を変えたときだけ入れ直すと書く", async () => {
     for (const status of ["hit", "built"] as const) {
       const fx = newFixture(`deps-prompt-${status}`, [boot(), call("gate")]);

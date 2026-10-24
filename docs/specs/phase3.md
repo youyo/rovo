@@ -7,9 +7,9 @@ GitHub App のユーザー認可（ログイン）は Phase 1 で済んでいる
 ## ゴール
 
 - `task_start` で、作業ブランチ `agent/task-<id>` と Draft PR が作られる（6.5）。`task_status`・`task_result`・イベントで、Draft PR の URL を返す。
-- 子エージェントの commit が作業ブランチに push され、Draft PR に反映される。
+- ワーカーの commit が作業ブランチに push され、Draft PR に反映される。
 - タスクの終端で、PR 本文が状態・検証結果・未解決事項で更新される。
-- PR は Draft のまま。マージはしない（design 1.3）。（D9 で変更: rovo 自身は Ready にもマージにもしないが、呼び出し元の AI が `task_pr_ready` / `task_pr_merge` で行える。design 15.8）
+- PR は Draft のまま。マージはしない（design 1.3）。（D9 で変更: rovo 自身は Ready にもマージにもしないが、クライアントが `task_pr_ready` / `task_pr_merge` で行える。design 15.8）
 
 ## 保証の範囲（正確に書く）
 
@@ -21,7 +21,7 @@ GitHub App のユーザー認可（ログイン）は Phase 1 で済んでいる
 - モデルの `git push` の扱い
   - **モデルが bash から `git push` しても通らない。** receive-pack は、SandboxDO が自動の push の exec の間だけ預かる許可証（ref と newSha）が、本文のコマンドと一致するときだけ認証を付けて転送する。許可証が無い・違うときは 403（`push_not_permitted`）。
   - 許可証を渡すのは自動の push（`git_commit`・WIP・完了時の同期）だけで、どれも push の前に秘密の検査を通している。bash ツールと検証コマンドには渡さない。
-  - 自動の push は、子の gitconfig（global・system・`core.hooksPath`・`credential.helper`・`origin` の URL）の影響を受けないよう切り離す。
+  - 自動の push は、ワーカーの gitconfig（global・system・`core.hooksPath`・`credential.helper`・`origin` の URL）の影響を受けないよう切り離す。
 - そのため、真偽は信頼できる側で確かめる。
   - 完了時に、AgentDO が検証済みの SHA をブランチの先頭に揃え、`ls-remote` で確かめる。
   - 終端で、TaskDO が GitHub 上の PR の head SHA を読み、検証済みの SHA と比べる。違えば警告する。
@@ -117,7 +117,7 @@ TaskDO の CREATING で、AgentDO.start の前に行う。各ステップは冪�
   - 本文は 65,536 文字を上限とする。
   - モデルの要約、検証の出力、警告は信用しないデータなので、コードフェンスで囲み、長さを切る。
   - 費用は既定では本文に載せない（公開リポジトリでは誰でも見られるため）。env `PR_SHOW_COST=true` のときだけ載せる。
-- PR は Draft のままにし、Ready for review にもしない。キャンセルされたタスクの PR は、閉じずに残す（design 4.7）。ただし、どの終端でも子の commit が 1 つも無い（作業ブランチの先頭が initial_sha のまま）ときは、空の Draft PR を閉じて作業ブランチを消す（2026-10-24 追加。`pr.closed_empty`）。
+- PR は Draft のままにし、Ready for review にもしない。キャンセルされたタスクの PR は、閉じずに残す（design 4.7）。ただし、どの終端でもワーカーの commit が 1 つも無い（作業ブランチの先頭が initial_sha のまま）ときは、空の Draft PR を閉じて作業ブランチを消す（2026-10-24 追加。`pr.closed_empty`）。
 - 更新は冪等にし、失敗したら alarm で再試行する。
 
 ## MCP の変更
@@ -164,4 +164,4 @@ TaskDO の CREATING で、AgentDO.start の前に行う。各ステップは冪�
 ## Phase 3 でやらないこと
 
 - PR のマージ、Ready for review への変更
-- 親への質問と追加指示（Phase 4）
+- クライアントへの質問と追加指示（Phase 4）

@@ -417,7 +417,7 @@ describe("Draft PR（偽 GitHub の App API 経由）", () => {
       }
       expect((await tokens()).every((x) => x.revoked)).toBe(true);
       const after = (await pullsOf()).find((p) => p.head === branch);
-      // 子の commit が無いままキャンセルされたので、本文を更新したあと空の Draft PR は閉じられる
+      // ワーカーの commit が無いままキャンセルされたので、本文を更新したあと空の Draft PR は閉じられる
       expect(after).toMatchObject({ draft: true, state: "closed" });
       expect(after?.body).toContain("CANCELLED");
 

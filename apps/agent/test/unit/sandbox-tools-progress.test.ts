@@ -3,7 +3,7 @@ import { createSandboxTools } from "../../src/tools";
 import type { ToolContext } from "../../src/tools/types";
 import { FakeSandbox } from "../support/fake-sandbox";
 
-// bash の実行中に流す途中の出力（command_progress）。子の LLM に返る tool result には入らず、onEvent の側路だけで流れる。
+// bash の実行中に流す途中の出力（command_progress）。ワーカーの LLM に返る tool result には入らず、onEvent の側路だけで流れる。
 const GHP = `ghp_${"a1B2".repeat(9)}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -63,7 +63,7 @@ describe("bash の command_progress（実行中の途中の出力）", () => {
     expect(events).toHaveLength(n);
   });
 
-  it("子の LLM に返る tool result には、進捗の中身が入らない（onEvent の側路だけ）", async () => {
+  it("ワーカーの LLM に返る tool result には、進捗の中身が入らない（onEvent の側路だけ）", async () => {
     const { sandbox, events, bash } = setup();
     sandbox.setHandler(async () => {
       sandbox.live.stdout = "only-in-progress\n";

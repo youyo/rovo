@@ -379,7 +379,7 @@ describe("task_start の追加入力と task_result", () => {
     expect(body(done)).toMatchObject({
       task_id: taskId,
       status: "COMPLETED",
-      // 子が書いた summary は非信頼データとして囲んで返す（意図した仕様変更）
+      // ワーカーが書いた summary は非信頼データとして囲んで返す（意図した仕様変更）
       summary: expect.stringMatching(
         /^<<<UNTRUSTED_CHILD_QUESTION[^\n]*\nfake summary\n<<<END_UNTRUSTED_CHILD_QUESTION>>>$/,
       ),
@@ -1203,7 +1203,7 @@ describe("web_browse（Phase 5 M2）", () => {
     await anon.close();
   });
 
-  it("web の RPC のエラーを固定の文言に写す。上流の文字列は親に渡さない", async () => {
+  it("web の RPC のエラーを固定の文言に写す。上流の文字列はクライアントに渡さない", async () => {
     const u = await user("alice");
     const SECRET = "UPSTREAM-SECRET";
     const cases: [string, string, string][] = [
@@ -2102,7 +2102,7 @@ describe("D10: AI への伝え方（instructions と説明）", () => {
     await client.close();
   });
 
-  it("子の自由文（質問に限らない）が囲まれて返ることを、task_result・task_wait・task_status の説明に書く", async () => {
+  it("ワーカーの自由文（質問に限らない）が囲まれて返ることを、task_result・task_wait・task_status の説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
@@ -2316,7 +2316,7 @@ describe("sandbox_instances_list / task_start の sandbox_instance", () => {
 });
 
 describe("AI への伝え方: Web の優先・タスクの分割と並列・モデルと Sandbox の選び方", () => {
-  it("instructions に、Web は rovo のツールを優先する理由と使い分け、並列化と積み方、モデルの役割分担、子への指示の書き方を書く", async () => {
+  it("instructions に、Web は rovo のツールを優先する理由と使い分け、並列化と積み方、モデルの役割分担、ワーカーへの指示の書き方を書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const text = client.getInstructions() ?? "";
@@ -2498,7 +2498,7 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
 });
 
 describe("task_console（mod が画面に進み具合を出すための読み取り専用ツール）", () => {
-  it("説明: 読み取り専用・画面用であること、エージェントの流れは task_wait と task_result で繰り返し呼ばないこと、子の文字列は非信頼の囲み（データ）であることを書く", async () => {
+  it("説明: 読み取り専用・画面用であること、エージェントの流れは task_wait と task_result で繰り返し呼ばないこと、ワーカーの文字列は非信頼の囲み（データ）であることを書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();

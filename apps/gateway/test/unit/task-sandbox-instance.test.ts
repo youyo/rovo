@@ -176,7 +176,7 @@ describe("task_result の usage.sandbox_promoted_*（昇格）", () => {
   });
 });
 
-describe("task_result の usage.sandbox_promotions（昇格の履歴）と子が上げたあとの重いコマンドの本数", () => {
+describe("task_result の usage.sandbox_promotions（昇格の履歴）とワーカーが上げたあとの重いコマンドの本数", () => {
   it("agent が報告した履歴を、公開用の形（snake_case・固定の値だけ）で返す。sandbox_promoted_to は最終の大きさ", async () => {
     const usage = await usageWith({
       runtimeMs: 90_000,

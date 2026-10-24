@@ -37,7 +37,7 @@ export function isSelectableSandboxInstance(v: unknown): v is SelectableSandboxI
   return (SELECTABLE_SANDBOX_INSTANCES as readonly unknown[]).includes(v);
 }
 
-/** 選べる大きさのうち、max（含む）までの名前を小さい順に返す。上限より大きい名前は含めない（子に見せる説明の組み立て用） */
+/** 選べる大きさのうち、max（含む）までの名前を小さい順に返す。上限より大きい名前は含めない（ワーカーに見せる説明の組み立て用） */
 export function selectableSandboxInstancesUpTo(max: SandboxInstance): SelectableSandboxInstance[] {
   return SELECTABLE_SANDBOX_INSTANCES.filter(
     (name) => SANDBOX_INSTANCES[name].vcpu <= SANDBOX_INSTANCES[max].vcpu,
@@ -75,7 +75,7 @@ export function resolveMaxSandboxInstance(raw: string | undefined): {
 /**
  * 昇格の引き金（usage.sandbox_promotions[].trigger。固定の値）。
  * - clef: コマンドの前に Clef（Workers AI の決定モデル）が上げると判断した
- * - agent / rule / verification: 古いタスクの記録を読むために残す（子の sandbox_scale_up・重いコマンドの規則・検証コマンドの heavy。今は使わない。
+ * - agent / rule / verification: 古いタスクの記録を読むために残す（ワーカーの sandbox_scale_up・重いコマンドの規則・検証コマンドの heavy。今は使わない。
  *   rule のときの一致した表の名前（rule_match）も、古い記録としてだけ gateway が読む）
  */
 export const SANDBOX_PROMOTION_TRIGGERS = ["agent", "rule", "verification", "clef"] as const;

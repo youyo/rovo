@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { runInDO, sandboxStub, setup, spec } from "./support/sandbox-promote-fake";
 
 // 自動の push の許可証（ExecOptions.pushPermit）: exec の間だけ SandboxDO に預かられ、終わったら（失敗・時間切れでも）必ず消える。
-// OutboundGateway は readPushPermit で読む。子の bash（pushPermit 無し）の exec の間は、許可証は無い。
+// OutboundGateway は readPushPermit で読む。ワーカーの bash（pushPermit 無し）の exec の間は、許可証は無い。
 
 const SHA = "d".repeat(40);
 const REF = "refs/heads/agent/task-x";
@@ -38,7 +38,7 @@ describe("SandboxDO: push の許可証", () => {
     });
   });
 
-  it("pushPermit の無い exec（子の bash・検証コマンド）の間は、許可証が無い", async () => {
+  it("pushPermit の無い exec（ワーカーの bash・検証コマンド）の間は、許可証が無い", async () => {
     await runInDO(sandboxStub("permit-none"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());

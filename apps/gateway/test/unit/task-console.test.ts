@@ -9,7 +9,7 @@ import {
 import { createTask } from "./pr-helpers";
 
 // task_console: Claude Code の mod が 4 秒ごとに呼ぶ読み取り専用の応答。権限は task_status と同じ（自分のタスクだけ）。
-// phase / stopped_phase / now / output は、ダッシュボードの詳細 API と同じ関数・同じ求め方（子の文字列だけ非信頼の囲みで包む）。
+// phase / stopped_phase / now / output は、ダッシュボードの詳細 API と同じ関数・同じ求め方（ワーカーの文字列だけ非信頼の囲みで包む）。
 const OWNER = 911;
 const BASE = "https://rovo.example.com";
 const STARTED = Date.UTC(2026, 9, 22, 1, 0, 0);
@@ -98,7 +98,7 @@ describe("task console: phase / stopped_phase は詳細 API と同じ", () => {
 });
 
 describe("task console: now / output", () => {
-  it("command が来ると now と output（command・tail・at・redacted）が出る。子の文字列は非信頼の囲みで包まれる", async () => {
+  it("command が来ると now と output（command・tail・at・redacted）が出る。ワーカーの文字列は非信頼の囲みで包まれる", async () => {
     const t = await started();
     await t.agent.emit("command", {
       command: "pnpm test",
@@ -172,7 +172,7 @@ describe("task console: now / output", () => {
     }
   });
 
-  it("子が囲みの終わりを偽造しても、本文中の <<< は全角になり囲みの外へ出られない", async () => {
+  it("ワーカーが囲みの終わりを偽造しても、本文中の <<< は全角になり囲みの外へ出られない", async () => {
     const t = await started();
     await t.agent.emit("command", {
       command: "echo hi",

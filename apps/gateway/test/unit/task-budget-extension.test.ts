@@ -128,7 +128,7 @@ describe("予算の延長の質問の取り込み", () => {
     });
   });
 
-  it("子の質問（ask_parent）には kind が付かない", async () => {
+  it("ワーカーの質問（ask_parent）には kind が付かない", async () => {
     const t = await createRunning();
     await t.agent.ask("q1", "which db?", ["pg", "mysql"]);
     await t.stub.advance();
@@ -140,7 +140,7 @@ describe("予算の延長の質問の取り込み", () => {
     });
   });
 
-  it("agent が kind を偽って数値を付けずに自由文を送っても、囲まれる子の質問として扱われる（kind は付かない）", async () => {
+  it("agent が kind を偽って数値を付けずに自由文を送っても、囲まれるワーカーの質問として扱われる（kind は付かない）", async () => {
     const t = await createRunning();
     await t.agent.emit("question", {
       question_id: "q1",
@@ -167,7 +167,7 @@ describe("task_answer: 延長を選ぶと、月の枠から延長分をその場
     expect(r).toEqual({ ok: true, status: "INPUT_REQUIRED", budget_extension: "extended" });
     expect(await reservedMicro(t.id)).toEqual({ reserved_micro: 20 * MICRO, extensions: 1 });
     await t.stub.advance();
-    // 親の答えの文ではなく、gateway が決めた固定の語を渡す
+    // クライアントの答えの文ではなく、gateway が決めた固定の語を渡す
     expect((await t.agent.calls()).answers).toEqual([{ questionId: "q1", answer: "extend" }]);
     expect((await task(t.stub)).status).toBe("RUNNING");
   });

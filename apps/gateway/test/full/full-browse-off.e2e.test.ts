@@ -20,8 +20,8 @@ import { gitRepoStore } from "../support/git-store";
 
 // Phase 7 M3: web_browse が無効（本番の既定）のときの通し。full.e2e.test.ts は 3 つの Worker すべてで
 // WEB_BROWSE_ENABLED="true" にしているので、ここでは var を一切渡さず、各 wrangler.jsonc の既定値（"false"）のまま 3 つを起動する。
-// 確かめるのは、ユーザーから見えるところ: 親の tools/list に web_browse が出ない・呼んでも拒否される、
-// 子（Pi）のツールにも無く、台本が呼んでもツールのエラーになる。どちらの経路でも Browser Run（偽の BROWSER）は呼ばれない。
+// 確かめるのは、ユーザーから見えるところ: クライアントの tools/list に web_browse が出ない・呼んでも拒否される、
+// ワーカー（Pi）のツールにも無く、台本が呼んでもツールのエラーになる。どちらの経路でも Browser Run（偽の BROWSER）は呼ばれない。
 // 他の web ツール（web_search / web_fetch）は影響を受けず動く。
 // （apps/web の browse が disabled を返すことは Unit: apps/web/test/unit/service-browse.test.ts）
 let github: FakeGitHub;
@@ -151,7 +151,7 @@ const FIX = tool("edit_file", { path: "calc.js", old_string: "a - b", new_string
 const browserCalls = () => fakeWeb.requests.filter((r) => r.path.startsWith("/browser/")).length;
 
 describe("web_browse が無効（既定）の通し", () => {
-  it("x. 親: tools/list に web_browse が出ない（web_search / web_fetch は出る）。呼んでも拒否され、Browser Run は呼ばれない", async () => {
+  it("x. クライアント: tools/list に web_browse が出ない（web_search / web_fetch は出る）。呼んでも拒否され、Browser Run は呼ばれない", async () => {
     const client = await newClient("xena");
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).not.toContain("web_browse");
@@ -174,7 +174,7 @@ describe("web_browse が無効（既定）の通し", () => {
     expect(fetched.isError, fetched.text).toBe(false);
   });
 
-  it("y. 子: 台本が web_browse を呼んでも「ツールが無い」エラーになり、Browser Run は呼ばれない。web_fetch は使えて、タスクは完了する。usage の browse は 0", async () => {
+  it("y. ワーカー: 台本が web_browse を呼んでも「ツールが無い」エラーになり、Browser Run は呼ばれない。web_fetch は使えて、タスクは完了する。usage の browse は 0", async () => {
     const client = await newClient("yuri");
     const instructions = "scenario:browse-off";
     const script = [

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { maskSecrets } from "../src";
 
-// maskSecrets は子の出力（最大数百 KB）にそのままかかる。入力長の 2 乗になる正規表現を許さない。
+// maskSecrets はワーカーの出力（最大数百 KB）にそのままかかる。入力長の 2 乗になる正規表現を許さない。
 // 2 乗なら 100KB で数秒かかる大きさ。上限は CI の揺れを考えて緩め（線形なら数十 ms）。
 const SIZE = 100_000;
 const LIMIT_MS = 500;

@@ -193,7 +193,7 @@ const GATEWAY_CASES: Record<string, Case> = {
     dest: "github",
   },
   push_not_permitted: {
-    // コマンドは作業ブランチ向きで正しいが、SandboxDO に push の許可証が無い（子の bash の直接の git push）
+    // コマンドは作業ブランチ向きで正しいが、SandboxDO に push の許可証が無い（ワーカーの bash の直接の git push）
     request: () => recv(streamOf(cmd())),
     deps: { readPushPermit: async () => undefined },
     status: 403,

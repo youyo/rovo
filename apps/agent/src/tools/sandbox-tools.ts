@@ -96,7 +96,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
   };
 
   /**
-   * 実行中のコマンドの途中の出力を、一定間隔で command_progress として流す（onEvent の側路だけ。子の LLM に返る tool result には入れない）。
+   * 実行中のコマンドの途中の出力を、一定間隔で command_progress として流す（onEvent の側路だけ。ワーカーの LLM に返る tool result には入れない）。
    * 前回と同じ内容なら積まない。peek の失敗・未対応は黙って捨てる（コマンド本体に影響させない）。
    * stop() で止める。止めたあとに返ってきた peek は捨てる。emitted は 1 件でも流したか（失敗時に消す合図を出すため）。
    */
@@ -447,7 +447,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
             cwd,
             timeoutMs: Math.min(seconds * 1000, remaining),
             maxOutputBytes: BASH_MAX_OUTPUT_BYTES,
-            // 子のコマンド: 実行の前に Clef が、今の Sandbox の大きさで足りるかを判断する（sandbox-scale-decision.ts）
+            // ワーカーのコマンド: 実行の前に Clef が、今の Sandbox の大きさで足りるかを判断する（sandbox-scale-decision.ts）
             origin: "agent_command",
           });
         } catch (e) {
@@ -485,11 +485,11 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
 
   /** 最後に push が成功した SHA（このツールが見たもの）。ToolContext.lastPushedSha が無いときの代わり */
   let lastPushedLocal: string | undefined;
-  // 検査の git（ls-remote を含む）も、子の gitconfig（url.insteadOf で偽のリモートへ向けるなど）から切り離す
+  // 検査の git（ls-remote を含む）も、ワーカーの gitconfig（url.insteadOf で偽のリモートへ向けるなど）から切り離す
   const scanGit: ScanGit = (argv, timeoutMs, maxOutputBytes) =>
     port.exec(isolatedGit(argv), { ...cwdOpts, env: GIT_ISOLATION_ENV, timeoutMs, maxOutputBytes });
 
-  /** 止めたときに子へ返す文（値は含めない）。commit は残り、push はしていない */
+  /** 止めたときにワーカーへ返す文（値は含めない）。commit は残り、push はしていない */
   const blockedText = (v: Exclude<ScanVerdict, { status: "clean" | "aborted" }>): string => {
     const head = `\npush skipped: the commit is kept locally but was NOT pushed (${blockedMessage(v)}).`;
     if (v.status === "unscannable")
@@ -600,7 +600,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
       ]);
       if (commit.exitCode !== 0)
         return fail("git_commit", commit.stderr || commit.stdout || "git commit failed");
-      // push する commit の SHA を確定させる（子の gitconfig から切り離して読む）
+      // push する commit の SHA を確定させる（ワーカーの gitconfig から切り離して読む）
       const head = await port.exec(isolatedGit(["rev-parse", "HEAD"]), {
         ...cwdOpts,
         env: GIT_ISOLATION_ENV,

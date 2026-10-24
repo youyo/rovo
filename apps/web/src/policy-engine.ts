@@ -286,7 +286,7 @@ export function decide(
   const categories = CATEGORIES.filter((c) => flagged.has(c));
 
   // reason は固定の理由コードとルール名だけから作る（取得先由来の文字列は入れない）。
-  // 親と子のモデルまで届くので、failure などの自由文は載せない。
+  // クライアントとワーカーのモデルまで届くので、failure などの自由文は載せない。
   const parts: string[] = [];
   for (const rule of new Set(findings.map((f) => f.rule))) parts.push(`injection_rule:${rule}`);
   if (scores) {

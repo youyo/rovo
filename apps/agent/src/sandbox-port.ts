@@ -10,14 +10,14 @@ export interface ExecOptions {
   maxOutputBytes?: number;
   /**
    * このコマンドの出自。あれば、実行の前に Clef が「今の Sandbox の大きさで足りるか」を判断し、足りなければ大きい Sandbox へ昇格する
-   * （sandbox-scale-decision.ts。fail-soft）。子が実行するコマンド（bash ツール）は agent_command、検証コマンドは verification。
+   * （sandbox-scale-decision.ts。fail-soft）。ワーカーが実行するコマンド（bash ツール）は agent_command、検証コマンドは verification。
    * 無ければ Sandbox 自身の内部の exec（git・ファイルの確認など）として、判断しない。コマンドの重さの規則ではなく、誰のコマンドかの区別。
    */
   origin?: "agent_command" | "verification";
   /**
    * 自動の push（git_commit・WIP・完了時の同期）の exec にだけ付ける許可証。SandboxDO は exec の間だけ（終わったら必ず）これを
    * 預かり、OutboundGateway は receive-pack の ref と newSha がこれと一致するときだけ認証を付けて転送する。
-   * 子の bash（agent_command）と検証コマンド（verification）には渡さない（渡せる経路を作らない）。
+   * ワーカーの bash（agent_command）と検証コマンド（verification）には渡さない（渡せる経路を作らない）。
    */
   pushPermit?: PushPermit;
 }
@@ -91,7 +91,7 @@ export interface SandboxPort {
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<void>;
   /**
-   * 実行中の子のコマンド（origin 付きの exec）の途中の出力。exec の完了を待たずに返る（exec の鎖の外）。
+   * 実行中のワーカーのコマンド（origin 付きの exec）の途中の出力。exec の完了を待たずに返る（exec の鎖の外）。
    * 実行中でなければ running: false。マスクはしない（呼び出し側が窓全体にかけてから切る）。無い実装では進捗を流さない。
    */
   peekOutput?(): Promise<PeekedOutput>;

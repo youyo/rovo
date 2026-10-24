@@ -106,7 +106,7 @@ describe("監査イベント（/__test/audit。stdout は走査しない）", ()
       });
       await waitForAudit((r) => r.event === "credential_revoked", { taskId });
 
-      // events（task_wait で親にも見える）の audit は、固定コードだけ
+      // events（task_wait でクライアントにも見える）の audit は、固定コードだけ
       const waited = bodyOf(
         await ca.callTool({
           name: "task_wait",

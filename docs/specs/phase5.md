@@ -4,12 +4,12 @@
 
 ## ゴール
 
-- 親（Claude Code / Cowork）と子（AgentDO）が、共通の Web Research Service を使える。
-  - 親は Remote MCP のツールとして使う。
-  - 子は Pi のツールとして使う。
+- クライアント（Claude Code / Cowork）とワーカー（AgentDO）が、共通の Web Research Service を使える。
+  - クライアントは Remote MCP のツールとして使う。
+  - ワーカーは Pi のツールとして使う。
 - 機能は `web_search`（検索）、`web_fetch`（ページ取得）、`web_browse`（JS を描画するページ取得）の3つ。
 - 取得した本文には安全性の評価（verdict）を付ける。`block` と `unknown` のときは本文を返さない（8.6）。
-- 子のコンテナ（Coding Sandbox）からは、引き続き Web に出られない。子が Web を使うのは、このサービスを経由するときだけ。
+- ワーカーのコンテナ（Coding Sandbox）からは、引き続き Web に出られない。ワーカーが Web を使うのは、このサービスを経由するときだけ。
 
 ## 調査で分かったこと（設計の前提）
 
@@ -110,19 +110,19 @@ apps/agent    ──service binding──▶     search / fetch / browse
 ## 上限と費用
 
 - タスクごと: search 50回、fetch 100回、browse 20回。超えたら `quota_exceeded` を返す。
-- ユーザーごと（親が MCP から使う分）: 1日あたり search 200回、fetch 500回、browse 50回。
+- ユーザーごと（クライアントが MCP から使う分）: 1日あたり search 200回、fetch 500回、browse 50回。
 - 回数は、呼び出し元（Gateway の TaskDO / UserDO、または AgentDO）が数える。web は状態を持たない。
-  - 子の分: AgentDO が数え、usage イベントに `web: {search, fetch, browse}` として載せる（設計 11.1 の記録項目）。
-  - 親の分: Gateway の UserDO が数える。
+  - ワーカーの分: AgentDO が数え、usage イベントに `web: {search, fetch, browse}` として載せる（設計 11.1 の記録項目）。
+  - クライアントの分: Gateway の UserDO が数える。
 - 金額は小さい（Linkup は 1,000回で $5.00、Clef-flash も入力 100 万トークンで $0.038）ので、タスクの予算（$10）には含めない。回数の上限で抑える。
 
 ## 公開
 
-- 親向け（Gateway の MCP）
+- クライアント向け（Gateway の MCP）
   - `web_search`、`web_fetch`、`web_browse` のツールを足す。
   - 認証と team の確認は、他のツールと同じにする。
   - ツールの説明に「本文は信用しないデータ」と書く。
-- 子向け（AgentDO の Pi のツール）
+- ワーカー向け（AgentDO の Pi のツール）
   - 同じ3つのツールを足す。replay は safe にしない（課金と取得の副作用を二重にしないため）。
   - システムプロンプトに、外部のコンテンツを信用しないことと、verdict の意味を書く。
 
@@ -137,7 +137,7 @@ apps/agent    ──service binding──▶     search / fetch / browse
   - search の description の評価と block の扱い、上限。
   - `WebSearchSource` / fetch / `BROWSER` / `AI.run` はすべて fake にする（本物は呼ばない）。
 - Unit（gateway / agent）: ツールの公開、回数の上限、usage への記録、テスト環境での fake の差し込み。
-- E2E: 3つの Worker を同時に起動し、偽の Web サーバー（Node）と fake の AI / BROWSER で、親の MCP と子の台本から search / fetch / browse を通しで動かす。
+- E2E: 3つの Worker を同時に起動し、偽の Web サーバー（Node）と fake の AI / BROWSER で、クライアントの MCP とワーカーの台本から search / fetch / browse を通しで動かす。
   - redirect で private に飛ばされる場合や、注入を含むページの verdict も確かめる。
 - 手動の受入試験（acceptance.md に追加）
   - 本物の Web Search API、Kitesurf、Clef-flash で動くこと。
@@ -215,7 +215,7 @@ apps/agent    ──service binding──▶     search / fetch / browse
 
 - **呼び出し元の種別は `ctx.props` で決める。** service binding の props で固定する。
   - gateway は `{caller: "parent"}`、agent は `{caller: "child"}`。
-  - web は RPC の引数ではなく `ctx.props` から取るので、子が親を名乗ることはできない。
+  - web は RPC の引数ではなく `ctx.props` から取るので、ワーカーがクライアントを名乗ることはできない。
   - props が無いか不正なら、呼び出しを拒否する。
 - **web 側には回数の上限の backstop を持たない。** 保険はコードではなく次のものに頼る。
   - AI Gateway のレート制限
@@ -297,7 +297,7 @@ wrangler 4.124.0、remote binding（`{"browser": {"binding": "BROWSER", "remote"
   - gateway: 無効なら MCP の `web_browse` を**登録しない**（tools/list に出ない）。
   - agent: 無効なら Pi の `web_browse` を**登録しない**。システムプロンプトの `web` セクションも `web_browse` に触れない。
   - web: 無効なら `browse()` は固定エラー `disabled` を投げる（取得も評価もしない）。設定のずれに対する backstop で、service binding の呼び出し元は信頼境界の内側にある。
-- 「ツールを出さない」と「固定エラー disabled を返す」のどちらを選ぶかは、**ツールを出さない**を主とする。理由: 無効なのにモデルへ見せると、試行して回数を消費し、失敗の扱いを考えさせる。tools/list から外せば、親も子もそのツールの存在を前提にしない。web 側の `disabled` はずれた構成に対する二重の防御として残す。
+- 「ツールを出さない」と「固定エラー disabled を返す」のどちらを選ぶかは、**ツールを出さない**を主とする。理由: 無効なのにモデルへ見せると、試行して回数を消費し、失敗の扱いを考えさせる。tools/list から外せば、クライアントもワーカーもそのツールの存在を前提にしない。web 側の `disabled` はずれた構成に対する二重の防御として残す。
 - 有効にする順: web → agent → gateway（呼び出される側から）。無効にする順は逆。
 
 #### fail-closed の分岐表
@@ -372,7 +372,7 @@ wrangler 4.124.0、remote binding（`{"browser": {"binding": "BROWSER", "remote"
    })
    ```
    `res.ok` と `success` の両方を見る。`errors` は固定コードに写し、生のメッセージは返さない（分岐表の 6〜9）。
-   - 写像: `invalid_input`（親が入力した URL をブラウザが開けない）/ `navigation_timeout`（ナビゲーションの期限切れ）/ `upstream_error`（それ以外の Browser Run の失敗・矛盾）/ `timeout`（全体の期限）/ `too_large` / `disabled`。gateway と agent は、`invalid_input` は固定文、`navigation_timeout` と `upstream_error` と `timeout` は「一時的に使えない」、`disabled` は「使えない」（internal）にする。いずれも上流の文字列を親・子のモデルに渡さない。
+   - 写像: `invalid_input`（クライアントが入力した URL をブラウザが開けない）/ `navigation_timeout`（ナビゲーションの期限切れ）/ `upstream_error`（それ以外の Browser Run の失敗・矛盾）/ `timeout`（全体の期限）/ `too_large` / `disabled`。gateway と agent は、`invalid_input` は固定文、`navigation_timeout` と `upstream_error` と `timeout` は「一時的に使えない」、`disabled` は「使えない」（internal）にする。いずれも上流の文字列をクライアント・ワーカーのモデルに渡さない。
    - `userAgent` は指定しない。robots.txt は `rovo-web` のトークンで照合するが、Kitesurf が名乗る UA は未検証で、`webfetch` と揃っていない。これは未解決の事項として acceptance に回す（未検証のオプションを実機で試さずに足さない）。
 6. **DoH の事前検査**は補助として残す。`cloudflare-dns.com/dns-query`（Cloudflare の 1.1.1.1 の DoH）に A と AAAA を問い合わせ、answer の IP が url-policy の禁止範囲なら `blocked`（`private_address`）。**どちらかの問い合わせが失敗したら `unknown`（fail-closed。`dns_check_failed`）で、quickAction は呼ばない。** 理由: 補助とはいえ、検査できなかったものを通すと「検査した」という誤った安心を作る。可用性は下がるが、web_browse は既定で無効の opt-in であり、DoH の失敗で返せないのは受け入れる。IP リテラルの URL は checkUrl が判定済みなので DoH を使わない。DNS rebinding は残存リスクのまま。
 7. **環境の確認**（M2 の最初のタスクとして実施。値は変えない）。結果:
@@ -380,7 +380,7 @@ wrangler 4.124.0、remote binding（`{"browser": {"binding": "BROWSER", "remote"
    - 追加した `"browser": {"binding": "BROWSER"}`（`remote` なし）を、4.151.1 の `wrangler dev` は「Browser Run / local」として受け付け、起動できる。Unit の vitest-plugin（`remoteBindings: false`）も通る。**ただし local の Browser Run は実際のブラウザを持たないので、取得には使えない**。実機の確認は `remote: true` を下流で設定した構成で行う（acceptance）。
    - `mise.toml` には wrangler の固定が無く、版は `apps/web/package.json` と lockfile で決まる（これを変える場合は `^4.151.1` の範囲に収める）。
 8. **未確認事項は M2 の E2E では fake で扱い、実機の確認は acceptance（Phase 7）と有効化前のゲートに回す。** E2E は `ENVIRONMENT=test` のときだけ `env.BROWSER` を偽サーバーへ向ける（`TEST_FAKE_BASE`。AI / fetch の fake と同じ方式）。実 BROWSER を使う E2E は書かない。
-9. **回数の上限**: タスクごと 20 回（子。`WEB_BROWSE_LIMIT_PER_TASK`）、ユーザーごと 1 日 50 回（親。`WEB_BROWSE_DAILY_LIMIT`）。超えたら `quota_exceeded`（子は上限に達した旨の固定文）。gateway は回数を消費する前に URL の検査（url-policy の共有）を行い、違反では消費しない。子の usage は `web.browse` に数える。
+9. **回数の上限**: タスクごと 20 回（ワーカー。`WEB_BROWSE_LIMIT_PER_TASK`）、ユーザーごと 1 日 50 回（クライアント。`WEB_BROWSE_DAILY_LIMIT`）。超えたら `quota_exceeded`（ワーカーは上限に達した旨の固定文）。gateway は回数を消費する前に URL の検査（url-policy の共有）を行い、違反では消費しない。ワーカーの usage は `web.browse` に数える。
 10. **`content`（HTML）→ `env.AI.toMarkdown()` のフォールバックは採用しない。** quickAction の `markdown` が動くことをスパイクで確認済みで、`content` は finalUrl の扱いが同じでも経路が増えるだけのため。
 11. **返す形**（`BrowseResult`）: `FetchResult` と同じ（`source.via` は `rendered`）で、`status` は `ok` / `blocked` / `http_error` / `unknown`。
     - `blocked`: `blocked_reason`（`bot_challenge` / `robots_disallowed` / `robots_unreachable` / `redirect_policy` / `private_address`）。`safety.verdict` は `block`、`policy` は `block`。
@@ -420,7 +420,7 @@ Unit（apps/web）。`BROWSER.quickAction` を fake にし、エンベロープ�
 22. 正規化とダウングレード: 同一 host の異なる path / query は別の URL（finalUrl を checkUrl する）、末尾 slash・percent encoding の違いも別の URL、既定 port（`:443`）と fragment の違いは同一。https→http の遷移（ホップ・finalUrl）は `blocked`。
 23. `WEB_BROWSE_ENABLED` が `"true"` 以外（未設定・`"false"`・`"TRUE "` は有効、`"yes"` は無効）→ `disabled` で quickAction を呼ばない。
 
-E2E（apps/web を含む3 Worker 同時起動、`ENVIRONMENT=test` の fake BROWSER、3 つの Worker すべてに `WEB_BROWSE_ENABLED=true`）: 上の 1・3・5（許可内の meta refresh）・7・9・10 と、21（DoH で private に解決される名前）、回数の上限を、親の MCP から通しで確かめる。子の台本からは 3・1・10 と上限を確かめる。無効（既定）のときに tools/list と子のツールに `web_browse` が出ないことは、gateway と agent の Unit で確かめる。
+E2E（apps/web を含む3 Worker 同時起動、`ENVIRONMENT=test` の fake BROWSER、3 つの Worker すべてに `WEB_BROWSE_ENABLED=true`）: 上の 1・3・5（許可内の meta refresh）・7・9・10 と、21（DoH で private に解決される名前）、回数の上限を、クライアントの MCP から通しで確かめる。ワーカーの台本からは 3・1・10 と上限を確かめる。無効（既定）のときに tools/list とワーカーのツールに `web_browse` が出ないことは、gateway と agent の Unit で確かめる。
 
 ### acceptance.md への追記案（このタスクでは編集しない）
 

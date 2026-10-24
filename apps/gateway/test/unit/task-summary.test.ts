@@ -457,7 +457,7 @@ describe("Sandbox の複数回の昇格（trigger つきの履歴）と費用の
     expect(over.sandbox_usd_estimate).toBeCloseTo(sandboxUsdPerHour("standard-2"), 9);
   });
 
-  it("表に無い大きさ・引き金・規則名の要素は捨てる。子の自由文や argv に当たる項目は summary に出ない", () => {
+  it("表に無い大きさ・引き金・規則名の要素は捨てる。ワーカーの自由文や argv に当たる項目は summary に出ない", () => {
     const s = buildTaskSummary(
       twice({
         promotions: [

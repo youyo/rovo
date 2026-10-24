@@ -8,7 +8,7 @@
 
 > Atlassian の「Rovo」とは無関係。このプロジェクトは、Atlassian の AI 製品「Rovo」とは関係がない。
 
-Rovo は、Claude Code / Cowork から Remote MCP 経由でコーディングタスクを子エージェントに任せる仕組み。タスクは自分の Cloudflare アカウント上の隔離された Sandbox で実行され、成果は Draft PR として返り、進み具合はダッシュボードで見られる。
+Rovo は、Claude Code / Cowork から Remote MCP 経由でコーディングタスクをワーカーに任せる仕組み。タスクは自分の Cloudflare アカウント上の隔離された Sandbox で実行され、成果は Draft PR として返り、進み具合はダッシュボードで見られる。
 
 <p align="center">
   <picture>
@@ -91,8 +91,8 @@ claude mcp add --transport http rovo https://<your-host>/mcp
 
 ## できること
 
-- **MCP でコーディングタスクを任せる**: `task_start` が作業ブランチと Draft PR を作り、子エージェントが隔離された Sandbox で作業する。タスクが完了すると、rovo が PR を Ready for review にする。
-- **レビューとマージは自分で決める**: クライアント（呼び出し元の AI や自分）が PR のブランチを手元で全体のテストとレビューにかけてから、マージする（`task_pr_merge`、または `gh` などで直接）。全体のテストとレビューをどこで行うかは `review_policy`（既定 `client_review`）で選び、GitHub のブランチ保護は常に効く。
+- **MCP でコーディングタスクを任せる**: `task_start` が作業ブランチと Draft PR を作り、ワーカーが隔離された Sandbox で作業する。タスクが完了すると、rovo が PR を Ready for review にする。
+- **レビューとマージは自分で決める**: クライアント（AI や自分）が PR のブランチを手元で全体のテストとレビューにかけてから、マージする（`task_pr_merge`、または `gh` などで直接）。全体のテストとレビューをどこで行うかは `review_policy`（既定 `client_review`）で選び、GitHub のブランチ保護は常に効く。
 - **モデルと思考レベルをタスクごとに選ぶ**: Claude、OpenAI（BYOK）、無料の Workers AI のモデル。単価は `models_list` で見られ、選ばなければ自動で選ぶ。
 - **予算を守る**: 月の枠、延長の前に聞くタスクごとの予算、同時に実行できるタスク数の上限。
 - **セカンドオピニオン**: `consult` が別のモデルに 1 回質問する（プロンプトキャッシュつき）。
@@ -115,7 +115,7 @@ packages/audit  (監査ログの共通ライブラリ。3 つの Worker が使�
 | ディレクトリ | 役割 |
 |---|---|
 | `apps/gateway` | MCP サーバー、OAuth、タスクの状態（`TaskDO`）、利用者の資格と予算（`UserDO`） |
-| `apps/agent` | 子エージェント（`AgentDO`）、Sandbox（`SandboxDO`）、外向き通信の制御（`OutboundGateway`） |
+| `apps/agent` | ワーカー（`AgentDO`）、Sandbox（`SandboxDO`）、外向き通信の制御（`OutboundGateway`） |
 | `apps/web` | Web Research Service（状態を持たない別 Worker） |
 | `packages/audit` | 監査イベントを 1 行の構造化 JSON で出す `audit()` |
 | `packages/models` | 使えるモデルの許可リストと、pi-ai のカタログから取る単価・費用計算（gateway と agent が共有） |
@@ -138,18 +138,18 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 
 | ツール | 種別 | 内容 |
 |---|---|---|
-| `task_start` | 書き込み | タスクを作り（`budget_policy`: `ask`〔既定。予算に近づいたら親に延長を聞く〕/ `stop`）、子エージェント（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, model, model_selection?, note, dashboard_url?}`。`model` を省略すると rovo がタスクの内容から選ぶ（Workers AI の Clef。候補は `AUTO_MODEL_CANDIDATES`。選べなければ既定のモデル）。指定すればそのモデル。選んだモデルと理由は応答の `model_selection`（`task_status`・`task_result` にも付く）に返る。`dashboard_url`（`<PUBLIC_BASE_URL>/dashboard/tasks/<task_id>`）は、そのタスクの詳細をブラウザで見られる URL で、`task_status`・`task_result` にも付く（閲覧権限が無い人が開いても 404 になるだけで、URL 自体は秘密ではない。`PUBLIC_BASE_URL` が空・不正なら付かない）。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される。`review_policy`（任意。`client_review`（既定）| `worker_review`）で、全体のテストとレビューをどこで行うかを選ぶ。`client_review` はワーカーが変更に関係するテスト（`verification_commands`）までを担当し、全体のテストとレビューはクライアントが手元で行う。マージはどちらでもクライアントが行う。`worker_review`（ワーカーが全体のテストとレビューまで行う）は受け付けるだけで未対応のため、指定すると `invalid_input`。旧 `merge_policy` は廃止した（`invalid_input`）。`model`（任意）で子のモデルを選ぶ（`models_list` の id。省略は既定）。`task_status`・`task_result` に `model` が返る。`sandbox_instance`（任意。`standard-1`〜`standard-4`。`sandbox_instances_list` で確かめる。省略は既定の大きさで小さく始まり、重いコマンド（テスト・型検査・ビルドなど）の初回に自動で昇格する。指定したらその大きさで固定され、昇格しない）で子の Sandbox の大きさを選ぶ。`task_status` に指定した値（省略は `null`）、`task_result` の `usage.sandbox_instance` に最初に起動した大きさ、昇格したタスクには `usage.sandbox_promoted_to` などが返る |
+| `task_start` | 書き込み | タスクを作り（`budget_policy`: `ask`〔既定。予算に近づいたらクライアントに延長を聞く〕/ `stop`）、ワーカー（`apps/agent` の AgentDO）を起動する。`{task_id, status, draft_pr_url, model, model_selection?, note, dashboard_url?}`。`model` を省略すると rovo がタスクの内容から選ぶ（Workers AI の Clef。候補は `AUTO_MODEL_CANDIDATES`。選べなければ既定のモデル）。指定すればそのモデル。選んだモデルと理由は応答の `model_selection`（`task_status`・`task_result` にも付く）に返る。`dashboard_url`（`<PUBLIC_BASE_URL>/dashboard/tasks/<task_id>`）は、そのタスクの詳細をブラウザで見られる URL で、`task_status`・`task_result` にも付く（閲覧権限が無い人が開いても 404 になるだけで、URL 自体は秘密ではない。`PUBLIC_BASE_URL` が空・不正なら付かない）。`verification_commands`（任意）を渡すと、完了の申告後に Sandbox で実行される。`review_policy`（任意。`client_review`（既定）| `worker_review`）で、全体のテストとレビューをどこで行うかを選ぶ。`client_review` はワーカーが変更に関係するテスト（`verification_commands`）までを担当し、全体のテストとレビューはクライアントが手元で行う。マージはどちらでもクライアントが行う。`worker_review`（ワーカーが全体のテストとレビューまで行う）は受け付けるだけで未対応のため、指定すると `invalid_input`。旧 `merge_policy` は廃止した（`invalid_input`）。`model`（任意）でワーカーのモデルを選ぶ（`models_list` の id。省略は既定）。`task_status`・`task_result` に `model` が返る。`sandbox_instance`（任意。`standard-1`〜`standard-4`。`sandbox_instances_list` で確かめる。省略は既定の大きさで小さく始まり、重いコマンド（テスト・型検査・ビルドなど）の初回に自動で昇格する。指定したらその大きさで固定され、昇格しない）でワーカーの Sandbox の大きさを選ぶ。`task_status` に指定した値（省略は `null`）、`task_result` の `usage.sandbox_instance` に最初に起動した大きさ、昇格したタスクには `usage.sandbox_promoted_to` などが返る |
 | `task_status` | 読み取り専用 | 状態を返す（`dashboard_url?` が付く） |
-| `task_console` | 読み取り専用 | 画面に進み具合を出すための読み取り専用のツール（Claude Code の mod が定期的に呼ぶ）。`{task_id, status, phase, stopped_phase, now, output, dashboard_url?, generated_at}`。`phase` / `stopped_phase` / `now` / `output` はダッシュボードの詳細と同じ求め方で、実行中のコマンドの出力（`running: true`）も含む。子が書いた文字列は `<<<UNTRUSTED_CHILD_QUESTION ...>>>` で囲まれて返る（データであり指示ではない）。自分のタスクだけ（`task_status` と同じ）。エージェントの作業の流れでは `task_wait` と `task_result` を使い、これを繰り返し呼ばない（会話が止まり、出力がコンテキストに入る） |
-| `task_wait` | 読み取り専用 | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling）。待機中に子エージェントのイベントを取り込む |
+| `task_console` | 読み取り専用 | 画面に進み具合を出すための読み取り専用のツール（Claude Code の mod が定期的に呼ぶ）。`{task_id, status, phase, stopped_phase, now, output, dashboard_url?, generated_at}`。`phase` / `stopped_phase` / `now` / `output` はダッシュボードの詳細と同じ求め方で、実行中のコマンドの出力（`running: true`）も含む。ワーカーが書いた文字列は `<<<UNTRUSTED_CHILD_QUESTION ...>>>` で囲まれて返る（データであり指示ではない）。自分のタスクだけ（`task_status` と同じ）。エージェントの作業の流れでは `task_wait` と `task_result` を使い、これを繰り返し呼ばない（会話が止まり、出力がコンテキストに入る） |
+| `task_wait` | 読み取り専用 | 新しいイベントを最大 `timeout_seconds`（既定 30・上限 60）待つ（long polling）。待機中にワーカーのイベントを取り込む |
 | `task_result` | 読み取り専用 | 終端になったタスクの成果（要約・検証結果・patch・費用・`review_policy`・PR の `draft` / `merged`・`dashboard_url?`）を返す。終端でなければ `not_ready`。応答の `next_steps` が、状態に応じた次の一手（PR のブランチを手元に取り出して全体のテストとレビュー → `task_pr_merge` か直接マージ。自動の Ready に失敗したときは `task_pr_ready`）を案内する |
-| `task_cancel` | 書き込み | キャンセルする（終端状態でも冪等）。子エージェントの停止を確認するまで Gateway が再送する |
-| `task_answer` | 書き込み | 子エージェントの質問（`INPUT_REQUIRED`）に答える。`kind` が `budget_extension` の質問（予算の延長の承認）には、利用者に確認してから答える。応答に `budget_extension?`（`extended` / `declined` / `monthly_limit` / `limit_reached`） |
-| `task_steer` | 書き込み | 実行中の子エージェントに追加の指示を送る |
+| `task_cancel` | 書き込み | キャンセルする（終端状態でも冪等）。ワーカーの停止を確認するまで Gateway が再送する |
+| `task_answer` | 書き込み | ワーカーの質問（`INPUT_REQUIRED`）に答える。`kind` が `budget_extension` の質問（予算の延長の承認）には、利用者に確認してから答える。応答に `budget_extension?`（`extended` / `declined` / `monthly_limit` / `limit_reached`） |
+| `task_steer` | 書き込み | 実行中のワーカーに追加の指示を送る |
 | `task_pr_ready` | 書き込み | COMPLETED のタスクの Draft PR を Ready for review にする（冪等）。タスクの完了時に rovo が自動で Ready にするので、自動の Ready が失敗したとき（`pr.draft` が `true` のまま）や、この動作より前のタスクにだけ使う。`{task_id}` だけを受け、対象の PR はタスクの記録から決まる。利用者本人の GitHub トークンで行う |
 | `task_pr_merge` | 書き込み | PR をマージする。`{task_id, merge_method?: squash \| merge \| rebase, delete_branch?}`。`review_policy` によらず使え、`head_matches_verified` が true、PR が Ready、PR の head の commit に付いた GitHub の check（check run と commit status）がすべて成功のときだけ（check が 1 つも無ければ通る。厳しくしたいときは GitHub のブランチ保護を使う。そうでなければ `merge_blocked` の `checks_failing` / `checks_pending`）。PR のブランチに修正を積むと `head_matches_verified` が false になり使えなくなるので、`gh` などで直接マージする。検証済みの head の sha を GitHub に渡し、ブランチ保護に拒否されたら `merge_blocked`（GitHub の理由つき）。利用者本人の GitHub トークンで行う |
 | `models_list` | 読み取り専用 | 使えるモデルの一覧と単価を返す（入力なし）。`{models: [{id, provider, api, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, tiers, context_window, default, effort, available, unavailable_reason?}]}`。単価は USD / 100 万トークン。`task_start` の `model` と `consult` の `model` に使える。`available` は AI Gateway にそのプロバイダーのキー（BYOK）が登録されているか（キーが無い Anthropic / OpenAI のモデルは `false`・`no_provider_key`。Workers AI は常に `true`） |
-| `sandbox_instances_list` | 読み取り専用 | 子の Sandbox の大きさの一覧と単価を返す（入力なし）。`{instances: [{name, vcpu, memory_gib, disk_gb, usd_per_hour, default, selectable, auto_scale_max}]}`。`task_start` の `sandbox_instance` に使えるのは `selectable: true`（`lite` は `false`）。`auto_scale_max: true` が、Clef（Workers AI の決定モデル）が Sandbox を自動で上げる上限（無効にしているデプロイではどれも `false`）。Sandbox は小さく始まり、子のコマンドの前に Clef が「今の大きさで足りるか」を判断して、足りなければ 2 → 3 → 4 と上がる（上げるだけ）。子が最初に使うときに起動する（web 検索だけのタスクでは起動しない） |
+| `sandbox_instances_list` | 読み取り専用 | ワーカーの Sandbox の大きさの一覧と単価を返す（入力なし）。`{instances: [{name, vcpu, memory_gib, disk_gb, usd_per_hour, default, selectable, auto_scale_max}]}`。`task_start` の `sandbox_instance` に使えるのは `selectable: true`（`lite` は `false`）。`auto_scale_max: true` が、Clef（Workers AI の決定モデル）が Sandbox を自動で上げる上限（無効にしているデプロイではどれも `false`）。Sandbox は小さく始まり、ワーカーのコマンドの前に Clef が「今の大きさで足りるか」を判断して、足りなければ 2 → 3 → 4 と上がる（上げるだけ）。ワーカーが最初に使うときに起動する（web 検索だけのタスクでは起動しない） |
 | `budget_status` | 読み取り専用 | 自分の予算の状況を返す（入力なし）。`{monthly_budget_usd, spent_usd, reserved_usd, remaining_usd, task_budget_usd, consult_budget_usd, max_concurrent_tasks, concurrency_limit, period}`。`concurrency_limit` は利用者ごとに同時に実行できるタスクの上限（設定値）で、実際に同時に実行できる数は `concurrency_limit` と `max_concurrent_tasks`（残りの予算 ÷ タスクの予約額）の小さいほう。rovo の月の枠だけで、Anthropic / OpenAI の残高は取得できない（各プロバイダの画面で上限を管理する） |
 | `consult` | 書き込み | セカンドオピニオン（設計の相談役）。`{model?, system?, messages: [{role: user \| assistant, content}], max_output_tokens?}` を 1 回で完結して答える（会話は保存しない。コードは書かせず、Sandbox も使わない）。応答は `{text, model, usage: {input, output, cache_read, cache_write}, cost_usd}`。Anthropic のモデルでは system と最後の user より前にプロンプトキャッシュを付けるので、同じ前置きを送ると 2 回目以降は安くなる。呼ぶ前に `CONSULT_BUDGET_USD`（既定 $0.5）を月の枠から予約し、実費で精算する |
 | `web_search` | 読み取り専用 | Web Search API の結果（url・title・description）を返す。詳細は下の「Web Research Service」 |
@@ -165,25 +165,25 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 - `idempotency_key` を省略すると、再試行の重複排除は保証されない。
 - 利用者ごとに同時に実行できるタスクの数には上限がある（設定値 `MAX_CONCURRENT_TASKS`。値は `budget_status` の `concurrency_limit` で見る）。上限に達していると `task_start` は `concurrency_limit` で断られる。タスクの停止を確認できるまで、そのタスクの枠は空かない。
 - タスクの予算はソフトリミット（`task_start` の `budget_policy`。既定 `ask`）: 予算に近づくと、止めずに `INPUT_REQUIRED` にして「あと `TASK_BUDGET_USD` 使って続けますか」を聞く（`kind: budget_extension` の質問。rovo が数値だけで書く固定文。利用者に確認してから `task_answer` で答える）。続けると月の枠からその場で延長分を予約する（1 タスク 2 回まで。月の枠はハードリミットで、足りなければ `BUDGET_EXCEEDED`）。待つ間は Sandbox を止めて費用を止める。`budget_policy: stop` は今までどおり聞かずに止まる（無人で回す用途）。
-- 1 タスクにつき既定で $10（env `TASK_BUDGET_USD`。0 以下・不正な値は 10）を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。子エージェントの予算の上限（`budgetUsd`）にも同じ値を渡す。足りなければ `budget_exceeded`。月額の枠を 10 未満にするときは `TASK_BUDGET_USD` も下げる（受入試験で数ドルに抑えたいとき）。
+- 1 タスクにつき既定で $10（env `TASK_BUDGET_USD`。0 以下・不正な値は 10）を月額の枠（env `MONTHLY_BUDGET_USD`、既定 100）から予約する。ワーカーの予算の上限（`budgetUsd`）にも同じ値を渡す。足りなければ `budget_exceeded`。月額の枠を 10 未満にするときは `TASK_BUDGET_USD` も下げる（受入試験で数ドルに抑えたいとき）。
 
 ### Web Research Service（`web_search` / `web_fetch` / `web_browse`）
 
-親（MCP）の `web_search` / `web_fetch` の説明。子（`apps/agent` の Pi）にも同名のツールがある。どちらも `apps/web` を service binding で呼ぶ。
+MCP の `web_search` / `web_fetch` の説明。ワーカー（`apps/agent` の Pi）にも同名のツールがある。どちらも `apps/web` を service binding で呼ぶ。
 
 | ツール | 内容 |
 |---|---|
 | `web_search` | `{query, limit?}`。Web Search API の結果（url・title・description）を返す。private なアドレスなどを指す URL は結果から落とす |
 | `web_fetch` | `{url}`。公開ページを取得して Markdown で返す（JS は実行しない）。`status: "blocked"` は取得できなかった（bot チャレンジ・robots.txt の Disallow・redirect で private に飛ぶ） |
 
-- 本文（`content`）・`title`・検索の description は、Web 上の第三者が書いた**非信頼データ**。親には `<<<UNTRUSTED_WEB_CONTENT ...>>>` と `<<<END_UNTRUSTED_WEB_CONTENT>>>` で囲んで返し（本文中の `<<<` は全角に置き換える）、子には既存の `<<<BEGIN_UNTRUSTED_OUTPUT>>>` で囲んで渡す。
+- 本文（`content`）・`title`・検索の description は、Web 上の第三者が書いた**非信頼データ**。クライアントには `<<<UNTRUSTED_WEB_CONTENT ...>>>` と `<<<END_UNTRUSTED_WEB_CONTENT>>>` で囲んで返し（本文中の `<<<` は全角に置き換える）、ワーカーには既存の `<<<BEGIN_UNTRUSTED_OUTPUT>>>` で囲んで渡す。
 - `safety.verdict`: `allow`（問題なし）/ `caution`（不審な表現があるので慎重に）/ `block`（注入などを検出。本文は `null`）/ `unknown`（評価できなかった。本文は `null`）。検索は結果全体で 1 つの判定で、`block` / `unknown` のときは description を落とし、title も `(title withheld)` にして URL だけを返す。
 - 回数の上限
-  - 親: ユーザーごとに UTC の 1 日あたり search 200 回・fetch 500 回（`UserDO` が数える）。超えると `quota_exceeded`（`retry_after_seconds` は翌日 0 時 UTC まで）。env `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` で変える。
-  - web_browse は別枠: 親は 1 日 50 回（`WEB_BROWSE_DAILY_LIMIT`）、子はタスクごとに 20 回（`WEB_BROWSE_LIMIT_PER_TASK`）。
-  - 子: タスクごとに search 50 回・fetch 100 回（`AgentDO` が数える）。超えるとツールのエラー。`apps/agent` の env `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` で変える。回数は `usage` イベント（`web_search` / `web_fetch` / `web_browse`）と `task_result` の `usage.web` に出る。
+  - クライアント向け（Gateway の MCP）: ユーザーごとに UTC の 1 日あたり search 200 回・fetch 500 回（`UserDO` が数える）。超えると `quota_exceeded`（`retry_after_seconds` は翌日 0 時 UTC まで）。env `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` で変える。
+  - web_browse は別枠: クライアントは 1 日 50 回（`WEB_BROWSE_DAILY_LIMIT`）、ワーカーはタスクごとに 20 回（`WEB_BROWSE_LIMIT_PER_TASK`）。
+  - ワーカー向け（`apps/agent` の Pi のツール）: タスクごとに search 50 回・fetch 100 回（`AgentDO` が数える）。超えるとツールのエラー。`apps/agent` の env `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` で変える。回数は `usage` イベント（`web_search` / `web_fetch` / `web_browse`）と `task_result` の `usage.web` に出る。
   - 回数は呼び出しの前に数える（失敗しても戻さない）。web 自体には回数の上限を持たない（AI Gateway のレート制限とアカウントの上限に頼る）。
-- `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効なら親の tools/list にも子の Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、`docs/specs/acceptance.md` の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを判断してほしい。** 実機のゲートは任意で、作者は行わずに有効にしている。
+- `web_browse`（JS を描画した後のページを Markdown で取得。Browser Run の Kitesurf）は**既定で無効**。`apps/web`・`apps/agent`・`apps/gateway` の env `WEB_BROWSE_ENABLED` を `"true"` にした Worker だけが有効になる（無効ならクライアントの tools/list にもワーカーの Pi のツールにも出ない）。`{url}` だけを受け、`status` は `ok` / `blocked`（bot チャレンジ・robots・redirect や遷移先が private・許可外・https→http・private に解決される名前）/ `http_error`（4xx・5xx。本文なし）/ `unknown`（判定できなかった。本文なし）。保証するのは「禁止先・判定不能の取得結果を返さない」ことまでで、禁止先への通信の発生は防げない。**有効にする前に、`docs/specs/acceptance.md` の 11 節「web_browse（有効化前のゲート）」の残存リスクを読み、受け入れるかを判断してほしい。** 実機のゲートは任意で、作者は行わずに有効にしている。
 
 ## ダッシュボード
 
@@ -206,7 +206,7 @@ gateway は、タスクの状況をブラウザで見られる読み取り専用
   - `/authorize`（同意画面）→ GitHub App のユーザー認可 → `/callback`: defaultHandler。state（1 回限り・10 分）と、開始したブラウザへの Cookie 紐付けは OAuthProvider の `beginUpstream` / `finishUpstream` を使う
   - `UserDO`（ユーザーごと）: GitHub 資格（AES-GCM で暗号化）、team 所属のキャッシュ（TTL 5 分）、同時実行の枠（タスクごとに 1 行。上限は `MAX_CONCURRENT_TASKS`）、月額予算（タスクごとの予約・usage の冪等な精算・終了時の返却）。GitHub のトークンは DO の外へ返さない
   - `TaskDO`（タスクごと）: 状態とイベント。AgentDO への start / cancel の配送、イベントの取り込み、usage の精算を alarm で収束させる
-- `apps/agent`: 子エージェントの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
+- `apps/agent`: ワーカーの別 Worker。`SandboxDO`（`ctx.container` を `enableInternet:false` で起動し、外向き通信を `OutboundGateway` に傍受させる）、`OutboundGateway`（許可判定は `src/outbound-policy.ts` の純粋関数）、`AgentDO`（`PiHarness` と台本付き fake モデルでの最小実装）。Gateway からは `script_name` 付きの DO バインディング `AGENT_DO` で呼ぶ
   - 依存関係のキャッシュ: ルート直下の lockfile（`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`）が同じなら、導入済みの `node_modules` を Containers のスナップショット（public beta）から復元して起動する。`DepsCacheDO`（鍵ごとに作成を 1 回にまとめる）と、SandboxDO の別インスタンス（作成）が行う。使えなくてもタスクは失敗せず今までどおり動く。結果は `task_result` の `usage.deps_cache`（`hit` / `miss` / `built` / `disabled`）と、作ったタスクの `cache_build_ms`。`rovo.config.json` の `depsCache.enabled` で無効にできる（docs/deploy.md の 17）
 
 ## 同意画面（confused deputy 対策）
@@ -241,7 +241,7 @@ mise run lint         # Biome + 型検査
 | `mise run test:e2e` | `test:e2e:gateway` + `test:e2e:docker` |
 | `mise run test:e2e:gateway` | `wrangler dev` で実 Worker と偽 GitHub を起動し、MCP SDK の Client から DCR → `/authorize` → 偽 GitHub → `/callback` → token(PKCE) → 4 つのツールまで通す |
 | `mise run test:e2e:docker` | **Docker 必須**。`wrangler dev` で実コンテナを起動し、ローカルの偽サーバー（偽 GitHub の git smart HTTP と偽 npm レジストリ）を許可先にして、外向き通信の許可・拒否（非許可ホスト、push、内部 IP、非 80/443 ポート、IPv6、CONNECT、WebSocket、リダイレクト、ヘッダ除去、再起動後の傍受）と `npm install` / `git clone`、Gateway → Agent の DO RPC（`-c gateway -c agent` の同時起動）を検証する |
-| `mise run test:e2e:full` | **Docker 必須**。gateway・agent・**web の 3 つの Worker を同時に** `wrangler dev` で起動し、MCP SDK の Client から Gateway → AgentDO → 実コンテナ、`web_search` / `web_fetch`（親の MCP と子の台本）まで通しで検証する。偽なのは GitHub・git / npm の上流・モデル（台本）と、web の外側（Web Search API・Clef・toMarkdown・公開ページ。`apps/web/test/support/fake-web.ts`）だけ。web には `ENVIRONMENT=test` と `TEST_FAKE_BASE`（偽サーバーの URL）を `.dev.vars` で渡す |
+| `mise run test:e2e:full` | **Docker 必須**。gateway・agent・**web の 3 つの Worker を同時に** `wrangler dev` で起動し、MCP SDK の Client から Gateway → AgentDO → 実コンテナ、`web_search` / `web_fetch`（クライアントの MCP とワーカーの台本）まで通しで検証する。偽なのは GitHub・git / npm の上流・モデル（台本）と、web の外側（Web Search API・Clef・toMarkdown・公開ページ。`apps/web/test/support/fake-web.ts`）だけ。web には `ENVIRONMENT=test` と `TEST_FAKE_BASE`（偽サーバーの URL）を `.dev.vars` で渡す |
 | `mise run test:e2e:net` | **Docker 必須・実ネットワーク**。上の E2E の実ネットワーク版。実 registry.npmjs.org への GET / `npm install` が通ること、許可外のホストに出られないこと、github.com への通信はトークンが無ければ 401 で落ちる（認証なしの clone が通らない）ことだけを確かめる。git の clone / push の検証は偽 git の E2E が担う。CI で不安定になりうるため `test` には含めない。認証付きアクセスや push はしない |
 | `mise run lint` / `mise run fmt` | Biome の lint / 整形、`tsc` の型検査 |
 | `mise run typegen` | `wrangler.jsonc` を変えたら実行して両アプリの `worker-configuration.d.ts` を更新する |
@@ -273,7 +273,7 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `ENVIRONMENT` | `production`（既定）。`test` のときだけ `GITHUB_OAUTH_BASE` / `GITHUB_API_BASE` の上書きを許す。**本番で `test` にしないこと**（本番で上書きを指定すると起動時に拒否される） |
 | `PUBLIC_BASE_URL` | 公開 URL。OAuth の issuer と `/mcp` の resource、GitHub のコールバック URL（`<PUBLIC_BASE_URL>/callback`）になる。本番は `https`、ローカルのみ loopback の `http` が許される |
 | `GITHUB_APP_CLIENT_ID` | GitHub App の Client ID（秘密ではない） |
-| `ALLOWED_ORG` / `ALLOWED_TEAM` | ログインと全ツール呼び出しを許す org と team の slug。子 team のメンバーも許可される。対で設定する（片方だけだとログインできない）。`ALLOWED_USER_IDS` のどちらかが必須 |
+| `ALLOWED_ORG` / `ALLOWED_TEAM` | ログインと全ツール呼び出しを許す org と team の slug。ワーカー team のメンバーも許可される。対で設定する（片方だけだとログインできない）。`ALLOWED_USER_IDS` のどちらかが必須 |
 | `ALLOWED_USER_IDS` | ログインと全ツール呼び出しを許す GitHub の数値の user ID（カンマ区切り。`gh api user --jq .id` で分かる）。team の無い個人アカウントで使うときはこちらを使う。org/team と両方を設定した場合は、どちらかを満たせば許可する。不正な要素が 1 つでもあれば全体が不正になり、ログインできない（fail closed） |
 | `GITHUB_APP_ID` | GitHub App の App ID（秘密ではない）。Installation Access Token の発行（JWT の `iss`）に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる（fail closed） |
 | `DRAFT_PR_FALLBACK` | Draft PR を作れないリポジトリ（Free プランの private リポジトリなど）での扱い。`fail`（既定。タスクを `draft_pr_unsupported` で FAILED にする）/ `ready`（`[WIP]` を付けた通常の PR を作り、本文冒頭に注記し、警告 `draft_pr_unavailable` を付ける）。**不正な値は `fail` として扱う**。判定は Draft に関する 422 のときだけ |
@@ -303,8 +303,8 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `MODEL_EFFORTS`（変数） | モデルごとの思考レベルの上書き（空なら既定）。gateway の同名の変数と同じ値にする。実際に Pi へ渡すのはこの値 |
 | `ENVIRONMENT`（変数） | `production`（既定）。E2E だけ `test` |
 
-| `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` / `WEB_BROWSE_LIMIT_PER_TASK`（変数） | 子の `web_search` / `web_fetch` / `web_browse` のタスクごとの回数の上限（既定 50 / 100 / 20）。0 以上の整数のみ。不正な値は既定に戻る |
-| `WEB_BROWSE_ENABLED`（変数） | 子に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
+| `WEB_SEARCH_LIMIT_PER_TASK` / `WEB_FETCH_LIMIT_PER_TASK` / `WEB_BROWSE_LIMIT_PER_TASK`（変数） | ワーカーの `web_search` / `web_fetch` / `web_browse` のタスクごとの回数の上限（既定 50 / 100 / 20）。0 以上の整数のみ。不正な値は既定に戻る |
+| `WEB_BROWSE_ENABLED`（変数） | ワーカーに `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
 | `WEB`（service binding） | `apps/web` の `WebResearch`（`props: {caller: "child"}`）。デプロイは web → agent → gateway の順 |
 
 ローカルは `apps/agent/.dev.vars.example` を `apps/agent/.dev.vars` にコピーして埋める（`mise run dev:all`）。
@@ -325,8 +325,8 @@ secret は無い（GitHub のトークンも Anthropic のキーも持たせな�
 | 名前 | 内容 |
 |---|---|
 | `WEB`（service binding） | `apps/web` の `WebResearch`（`props: {caller: "parent"}`） |
-| `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` / `WEB_BROWSE_DAILY_LIMIT`（変数） | 親の `web_search` / `web_fetch` / `web_browse` の、ユーザーごと・UTC の 1 日あたりの上限（既定 200 / 500 / 50） |
-| `WEB_BROWSE_ENABLED`（変数） | 親の MCP に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
+| `WEB_SEARCH_DAILY_LIMIT` / `WEB_FETCH_DAILY_LIMIT` / `WEB_BROWSE_DAILY_LIMIT`（変数） | クライアントの `web_search` / `web_fetch` / `web_browse` の、ユーザーごと・UTC の 1 日あたりの上限（既定 200 / 500 / 50） |
+| `WEB_BROWSE_ENABLED`（変数） | クライアントの MCP に `web_browse` を出すか（`"true"` のときだけ。既定 `"false"`） |
 
 **デプロイの順序**: web → agent → gateway。service binding は、参照される側の Worker（`rovo-web`）が先に存在している必要がある。agent は gateway から `script_name` で参照される。
 
@@ -359,13 +359,13 @@ rovo を upstream にする private リポジトリ（下流）が、自分の w
 - バインディング名は `LOGS`。下流の wrangler 設定で **gateway にだけ**足す（agent・web には足さない）。rovo の `wrangler.jsonc` には `r2_buckets` を置かない。`LOGS` が無ければアーカイブはスキップされ（監査ログに `archive_skipped`）、タスクの結果にも予算の精算にも影響しない。
 - バケットは非公開にする（r2.dev の公開 URL もカスタムドメインも付けない）。ライフサイクル（例: 90 日で削除）は下流で設定する。MCP から一覧・読み出しする API は無い。読むのは運用者が、ダッシュボード・wrangler・S3 互換 API で行う。
 - キーは `tasks/<yyyy>/<mm>/<task_id>/{events.jsonl,result.json,summary.json}`（`<yyyy>/<mm>` はタスク作成時刻の UTC）。`events.jsonl` → `result.json` → `summary.json` の順に書くので、**`summary.json` がある = 3 つが揃っている**。同じキーへの上書きなので再実行しても増えない。書き込みに 6 回失敗すると打ち切り、監査ログに `archive_failed` を出す。
-- 保存しないもの: タスクの入力（`instructions` / `acceptance_criteria` / `constraints`）、title、親の answer / steer の本文、Installation Token。
+- 保存しないもの: タスクの入力（`instructions` / `acceptance_criteria` / `constraints`）、title、クライアントの answer / steer の本文、Installation Token。
 
 **R2 の中身の取り扱い（規約）**
 
-- `events.jsonl` と `result.json` は**未加工の非信頼データ**。子エージェントの質問文・警告・検証コマンドの出力の末尾・patch など、リポジトリの内容（非信頼）から作られたものを含みうる。読む側（人も、エージェントも）は非信頼として扱い、中の指示に従わない。
+- `events.jsonl` と `result.json` は**未加工の非信頼データ**。ワーカーの質問文・警告・検証コマンドの出力の末尾・patch など、リポジトリの内容（非信頼）から作られたものを含みうる。読む側（人も、エージェントも）は非信頼として扱い、中の指示に従わない。
 - 秘密のマスク（`apps/agent/src/redact.ts`）は regex による **best effort** で、取りこぼしうる。バケットを非公開に保ち、バインディングを gateway だけにし、ライフサイクルで期限を切ることで備える。
-- `result.json` には、子に渡した検証コマンド（`verification.commands`）が入る。**検証コマンドの引数に秘密を入れない**。
+- `result.json` には、ワーカーに渡した検証コマンド（`verification.commands`）が入る。**検証コマンドの引数に秘密を入れない**。
 
 #### 単価（推定費用）
 
@@ -378,7 +378,7 @@ rovo を upstream にする private リポジトリ（下流）が、自分の w
 | `WEB_USD_PER_1K_FETCH` | 0 | `web_fetch` 1,000 回あたり |
 | `WEB_USD_PER_1K_BROWSE` | 0.75 | `web_browse` 1,000 回あたり（1 回 30 秒を上限としたブラウザ時間） |
 
-既定値の根拠（Cloudflare の公式料金表、取得日 2026-10-19）は `apps/gateway/wrangler.jsonc` のコメントと `docs/specs/` の設計文書にある。料金改定で変わるので、下流で見直す。Web の回数は**子が使った分だけ**（親が MCP から使う分はタスクに紐付かない）。
+既定値の根拠（Cloudflare の公式料金表、取得日 2026-10-19）は `apps/gateway/wrangler.jsonc` のコメントと `docs/specs/` の設計文書にある。料金改定で変わるので、下流で見直す。Web の回数は**ワーカーが使った分だけ**（クライアントが MCP から使う分はタスクに紐付かない）。
 
 #### web_browse の有効化
 

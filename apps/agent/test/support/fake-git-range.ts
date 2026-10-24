@@ -6,7 +6,7 @@ import type { ExecHandler } from "./fake-sandbox";
  * git_commit の push 前の検査（scanUnpushedForSecrets）を試すための台本。
  * - git add -A / commit: pending のファイルを 1 つの commit にする
  * - git push: pushOk なら base を HEAD に進める
- * 子が bash で作った commit は commitDirect、git reset --soft は resetSoft で再現する。
+ * ワーカーが bash で作った commit は commitDirect、git reset --soft は resetSoft で再現する。
  * 本物の git と同じく、後の commit で消したファイル（deleted）は、木の差分には出ないが、足した commit の log には出る。
  */
 export interface FakeFile {
@@ -150,7 +150,7 @@ export function fakeGitRange(opts: { base?: string } = {}) {
     stage: (...files: FakeFile[]) => {
       state.pending.push(...files);
     },
-    /** 子が bash で自分で作った commit（git_commit を通らない） */
+    /** ワーカーが bash で自分で作った commit（git_commit を通らない） */
     commitDirect: (...files: FakeFile[]) => commitFiles(files),
     /** git reset --soft の再現（HEAD を steps 個戻し、戻した分の変更は pending に戻る） */
     resetSoft: (steps = 1) => {

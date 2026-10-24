@@ -26,7 +26,7 @@ export type PublicPayload = Record<string, string | number | boolean | null>;
 /** 公開する文字列の上限。AgentDO の data をそのままは流さず、既知の項目だけをここで切って渡す。 */
 export const MAX_PUBLIC_TEXT = 500;
 export const MAX_PUBLIC_SUMMARY = 2_000;
-/** 子の質問の本文の上限（文字数）。options は 10 個まで・各 500 文字（ask_parent の上限と同じ）。 */
+/** ワーカーの質問の本文の上限（文字数）。options は 10 個まで・各 500 文字（ask_parent の上限と同じ）。 */
 export const MAX_QUESTION_LENGTH = 4_000;
 export const MAX_QUESTION_OPTIONS = 10;
 export const MAX_QUESTION_OPTION_LENGTH = 500;
@@ -34,7 +34,7 @@ export const MAX_QUESTION_OPTION_LENGTH = 500;
 export type MappedAgentEvent =
   | { kind: "phase"; status: TaskStatus | null; reason?: string }
   | { kind: "usage"; costMicroUsd: number; payload: PublicPayload }
-  /** 子の質問。TaskDO は questions テーブルにも保存する。options は JSON 配列の文字列 */
+  /** ワーカーの質問。TaskDO は questions テーブルにも保存する。options は JSON 配列の文字列 */
   | { kind: "question"; payload: PublicPayload }
   | { kind: "event"; type: string; payload: PublicPayload }
   /**
@@ -131,11 +131,11 @@ function sandboxCounts(sb: unknown): Record<string, string | number> {
       : {}),
     ...(reason !== undefined ? { sandbox_promotion_reason: reason } : {}),
     ...(promotions.length > 0 ? { sandbox_promotions: JSON.stringify(promotions) } : {}),
-    // 古い agent の記録（子が上げたあとに規則で重いと判定されたコマンドの本数。今の agent は報告しない）
+    // 古い agent の記録（ワーカーが上げたあとに規則で重いと判定されたコマンドの本数。今の agent は報告しない）
     ...(typeof s.heavyCommandsAfterAgentScaleUp === "number"
       ? { sandbox_heavy_commands_after_agent_scale_up: n(s.heavyCommandsAfterAgentScaleUp) }
       : {}),
-    // そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（子の見立ての的中）
+    // そのうち、ワーカーが規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（ワーカーの見立ての的中）
     ...(typeof s.heavyCommandsCoveredByAgent === "number"
       ? { sandbox_heavy_commands_covered_by_agent: n(s.heavyCommandsCoveredByAgent) }
       : {}),
@@ -205,7 +205,7 @@ function depsCacheFields(
   };
 }
 
-/** agent の audit イベントのうち、親にも見せてよい固定コード（Phase 6 M3。phase6.md「M3 で決めたこと」） */
+/** agent の audit イベントのうち、クライアントにも見せてよい固定コード（Phase 6 M3。phase6.md「M3 で決めたこと」） */
 const PUBLIC_AGENT_AUDIT_CODES: ReadonlySet<string> = new Set([
   "agent_cancelled",
   "sandbox_privileged_op",
@@ -263,8 +263,8 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
       };
     }
     case "question": {
-      // 予算の延長の質問は、数値だけを受け取り、文と選択肢は gateway が固定文で作る（子の自由文を通さない）。
-      // kind が違う・数値が不正なら、子の質問として扱う（囲まれる）
+      // 予算の延長の質問は、数値だけを受け取り、文と選択肢は gateway が固定文で作る（ワーカーの自由文を通さない）。
+      // kind が違う・数値が不正なら、ワーカーの質問として扱う（囲まれる）
       const budget = d.kind === BUDGET_EXTENSION_KIND ? parseBudgetNumbers(d) : undefined;
       if (budget !== undefined) {
         const text = budgetQuestionText(budget);

@@ -80,16 +80,16 @@
 - `tasks/<yyyy>/<mm>/<task_id>/summary.json`: 11.1 の要約レコード（観測性の節）。**title は入れない**。
 - **保存しないもの**
   - タスクの入力（`instructions` / `acceptance_criteria` / `constraints`）。利用者の自由記述で、秘密を含みうる。title も同じ理由で入れない。
-  - 親の answer と steer の本文。公開イベントには ID（`question_id`、`steer_id`）だけが入っているので、events.jsonl にも本文は入らない。TaskDO の `questions` / `steers` テーブルは保存の対象外。
+  - クライアントの answer と steer の本文。公開イベントには ID（`question_id`、`steer_id`）だけが入っているので、events.jsonl にも本文は入らない。TaskDO の `questions` / `steers` テーブルは保存の対象外。
   - Installation Token（`git_token`）と、その暗号文。
-  - ただし result.json には、`verification.commands`（子に渡した検証コマンド）が入る。コマンドの引数に秘密を入れない運用を README に書く。
+  - ただし result.json には、`verification.commands`（ワーカーに渡した検証コマンド）が入る。コマンドの引数に秘密を入れない運用を README に書く。
 
 ### 取り扱い: R2 の中身は非信頼データ
 
 - **events.jsonl は未加工**で保存する。アーカイブの時にマーカーで wrap しない。
-  - 本文（patch、検証の出力、warnings、質問文、ツールの summary）は、子がリポジトリの内容（非信頼）から作ったものを含む。**読む側が、非信頼データとして扱う**。
+  - 本文（patch、検証の出力、warnings、質問文、ツールの summary）は、ワーカーがリポジトリの内容（非信頼）から作ったものを含む。**読む側が、非信頼データとして扱う**。
   - この旨を README と、利用者向けの規約（docs/deploy.md の運用の節）に書く。
-- 秘密のマスクは、子の側（`apps/agent/src/redact.ts`）で出る前にかけているものを引き続き使う。regex のマスクは **best effort** で、取りこぼしうる。
+- 秘密のマスクは、ワーカーの側（`apps/agent/src/redact.ts`）で出る前にかけているものを引き続き使う。regex のマスクは **best effort** で、取りこぼしうる。
   - **アーカイブの境界で、新たに生のデータを足さない**（TaskDO が既に持っている公開イベントと結果だけを書く）。
   - 取りこぼしへの備えが、バケットの非公開、バインディングを gateway だけに持たせること、MCP から読み出さないこと、ライフサイクルである。
 - 受入試験で、アーカイブの中をトークン形式（`ghs_` など）で grep する（acceptance.md 15）。
@@ -125,7 +125,7 @@
   - events は R2 の events.jsonl に残るので、ログ基盤の取りこぼしがあっても、タスクごとの監査の記録が残る。
   - 既存のイベントで足りるものは流用する（cancel は `cancelled`、期限・予算・回答待ちの上限は `status_changed` の reason、失効の失敗は `warning`: `token_revoke_failed`）。足りないものは、`type: "audit"`、payload は固定コードだけ（`{code, ...}`）のイベントを新設する。
   - agent 側の事象（特権操作など）は、AgentDO のイベントとして出し、gateway の `agent-events.ts` が `audit` として写す。
-  - これらのイベントは `task_wait` で親にも見える。固定コードと ID だけなので、親に見えてよい。
+  - これらのイベントは `task_wait` でクライアントにも見える。固定コードと ID だけなので、クライアントに見えてよい。
 - 二重化しないもの（監査ログだけ）: タスクに紐付かないもの（認証の失敗）、頻度が高く攻撃者が起こせるもの（外向き通信の違反、Web の block）、アーカイブの後に起きるもの（`archive_*`）、agent 内部の防御（起動世代、tombstone、start の衝突）。
   - agent 内部の防御は、ログが欠けても防御そのものは働くので、監査ログだけにする。
 
@@ -195,7 +195,7 @@
   - Task ID、User ID、repository、PR URL、状態遷移（時刻つき）、実行時間
   - Claude の使用量と推定費用
   - Sandbox の実行時間と、起動世代の回数
-  - Web の回数（search / fetch / browse）、安全性の判定の件数（verdict ごと）。**子が使った分だけ**。親が MCP から使う分は UserDO の日次のカウンタで、タスクに紐付かない
+  - Web の回数（search / fetch / browse）、安全性の判定の件数（verdict ごと）。**ワーカーが使った分だけ**。クライアントが MCP から使う分は UserDO の日次のカウンタで、タスクに紐付かない
   - 質問の回数、復旧の回数（コンテナの作り直し、起動のやり直し）
   - 検証の結果、エラーの内容（固定のコード）
   - **title は入れない**
@@ -296,7 +296,7 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 - `restarts` / `bootRetries` は agent に今は無く、`this.gen`（メモリ上の値）から**永続化したカウンタ**として作ることにした。
 - `RECOVERING` に agent は入らないので、復旧の回数は SandboxDO のカウンタからしか取れない。5.3 の対応表に書いた。
 - Sandbox と Web の単価は gateway の `vars` に既定値を置き、下流が上書きできる形にした（design 16）。金額は「推定」と明記した。
-- 親の Web 利用はタスクに紐付かないので、要約の Web の件数は子の分だけとした。
+- クライアントの Web 利用はタスクに紐付かないので、要約の Web の件数はワーカーの分だけとした。
 
 ### テスト
 
@@ -417,14 +417,14 @@ phase5.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 ### agent の `audit` イベントの扱い
 
 - **公開する。ただし固定コードだけ**: `{code:"agent_cancelled"}` と `{code:"sandbox_privileged_op", op}`（`op` は terminate / set_deadline / extend_deadline のどれか）を、gateway 自身の `audit` と同じ形（type `audit`、payload は固定コード）で events に積む。それ以外の code、op の値が固定でないもの、形の合わないものは、中身を出さず従来どおり `agent_event {agent_type:"audit"}` に落とす（`data` の他の項目は一切通さない）。
-- 理由: 二重化の目的は、ログ基盤が欠落しても、タスクごとの記録が events（R2 の events.jsonl）に残ること。親に見せない選択にすると、agent 側の特権操作と cancel が events から消え、二重化が成り立たない。固定コードと固定の op だけなので、親（task_wait）に見えて害はない。
+- 理由: 二重化の目的は、ログ基盤が欠落しても、タスクごとの記録が events（R2 の events.jsonl）に残ること。クライアントに見せない選択にすると、agent 側の特権操作と cancel が events から消え、二重化が成り立たない。固定コードと固定の op だけなので、クライアント（task_wait）に見えて害はない。
 - **gateway の監査ログには出し直さない**。agent の SandboxDO が実行した側として既に出している。gateway が出すと、同じ事象が 2 つの Worker から二重に出る（M2 で保留していた判断を確定）。
-- 制約: 終端に確定した後に取り込んだ agent のイベントは、既存の規則（終端の後は公開イベントを増やさない）により events に積まれない。cancel では TaskDO が先に終端になるので、`agent_cancelled` は events に載らないことが多い（親の cancel は TaskDO の `cancelled` + `audit` で記録済み）。agent の監査ログには出ている。この規則は変えない。
+- 制約: 終端に確定した後に取り込んだ agent のイベントは、既存の規則（終端の後は公開イベントを増やさない）により events に積まれない。cancel では TaskDO が先に終端になるので、`agent_cancelled` は events に載らないことが多い（クライアントの cancel は TaskDO の `cancelled` + `audit` で記録済み）。agent の監査ログには出ている。この規則は変えない。
 
 ### 要約レコード（`src/tasks/summary.ts`。純関数）
 
 - `buildTaskSummary(input)` が `TaskSummary` を作る。数値と固定コードだけ。**title・タスクの入力・answer / steer の本文・イベントの本文（agent_error の message など）は入れない**。`reason` は `^[a-z0-9_]{1,64}$` の形のときだけ入れ、それ以外は null。
-- 項目: `version`、`task_id`、`user_id`、`repository`、`pr_url`、`status`、`reason`、`created_at`、`ended_at`、`duration_ms`、`transitions`（`CREATING` を作成時刻で補い、以降は `status_changed` の時刻）、`usage`（Claude の金額と tokens）、`sandbox`（`observed`、`runtime_ms`、`restarts`、`boot_retries`）、`sandbox_usd_estimate`、`web`（子の分だけ）、`web_usd_estimate`、`unit_prices`（使った単価）、`questions`、`recoveries`（`container_restarts`、`boot_retries`）、`verification`（`attempts`、`passed`。events の `verification` から導く。無ければ 0 / null）、`errors.agent_errors`（件数だけ）。
+- 項目: `version`、`task_id`、`user_id`、`repository`、`pr_url`、`status`、`reason`、`created_at`、`ended_at`、`duration_ms`、`transitions`（`CREATING` を作成時刻で補い、以降は `status_changed` の時刻）、`usage`（Claude の金額と tokens）、`sandbox`（`observed`、`runtime_ms`、`restarts`、`boot_retries`）、`sandbox_usd_estimate`、`web`（ワーカーの分だけ）、`web_usd_estimate`、`unit_prices`（使った単価）、`questions`、`recoveries`（`container_restarts`、`boot_retries`）、`verification`（`attempts`、`passed`。events の `verification` から導く。無ければ 0 / null）、`errors.agent_errors`（件数だけ）。
 - 金額は `sandbox_usd_estimate` / `web_usd_estimate`。**推定**で、Claude の金額（`usage.cost_usd`）とは別。タスクの予算には含めない。
 - `summaryMetrics(summary)` が、監査ログ用の数値だけの平らな項目にする。
 

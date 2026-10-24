@@ -40,7 +40,7 @@ async function startAsk(name: string, script: ReturnType<typeof spend>[] | unkno
   return fx;
 }
 
-describe("budget_policy: ask は予算に近づいたら止めずに親へ聞く", () => {
+describe("budget_policy: ask は予算に近づいたら止めずにクライアントへ聞く", () => {
   it("未 commit の変更を WIP として commit・push してから Sandbox を中断し、INPUT_REQUIRED（kind: budget_extension）にする。質問は数値だけの固定文", async () => {
     const fx = newFixture("bx-ask", [spend(), report()]);
     fx.statusResults.push({ stdout: " M src/a.ts\n" });
@@ -69,7 +69,7 @@ describe("budget_policy: ask は予算に近づいたら止めずに親へ聞く
     });
     const options = JSON.parse(String(q?.data.options)) as string[];
     expect(options).toEqual(["あと $1.00 使って続ける", "ここで止める"]);
-    // 固定文: 数値だけで、子の自由文は入らない
+    // 固定文: 数値だけで、ワーカーの自由文は入らない
     expect(String(q?.data.message)).toBe(
       `タスクの予算 $1.00 のうち $${Number(q?.data.budget_spent_usd).toFixed(2)} を使いました。あと $1.00 使って続けますか。延長できる残り回数: 2 回。`,
     );

@@ -180,7 +180,7 @@ export function newFixture(
   const pushCalls: string[][] = [];
 
   const sandbox = new FakeSandbox(async (raw) => {
-    // 自動の git の、子の gitconfig を切り離す上書きは読み飛ばす
+    // 自動の git の、ワーカーの gitconfig を切り離す上書きは読み飛ばす
     const argv = stripGitIsolation(raw);
     // push 前の秘密の検査が読む、リモートの heads・tags 全体（git -C / ls-remote --heads --tags <url>）。公開済みの SHA は無い
     if (argv[0] === "git" && argv.includes("ls-remote") && argv.includes("--heads")) return {};

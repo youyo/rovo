@@ -412,7 +412,7 @@ describe("TaskDO: イベントの取り込み", () => {
     const { stub, agent } = await createTask();
     await stub.advance();
     await stub.cancel(OWNER);
-    // 終端処理（トークンの失効の audit など）を済ませてから、子の遅れて届くイベントが公開されないことを確かめる
+    // 終端処理（トークンの失効の audit など）を済ませてから、ワーカーの遅れて届くイベントが公開されないことを確かめる
     await stub.advance();
     const before = await eventTypes(stub);
     await agent.emit("tool_end", { callId: "c", name: "n", isError: false, summary: "late" });
@@ -762,7 +762,7 @@ describe("TaskDO.result", () => {
         review_policy: "client_review",
         budget_policy: "ask",
         effort: "high",
-        // D10: 子のモデル（task_start で省略 = 既定）
+        // D10: ワーカーのモデル（task_start で省略 = 既定）
         model: "anthropic/claude-sonnet-5-5",
         pr: {
           number: expect.any(Number),

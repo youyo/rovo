@@ -366,7 +366,7 @@ describe("bash", () => {
     expect(r.text).toMatch(/exit code: 0/i);
   });
 
-  it("子のコマンドには origin: agent_command を付ける（Sandbox が、実行の前に Clef で今の大きさで足りるかを判断する）。ほかのツールの exec には付けない", async () => {
+  it("ワーカーのコマンドには origin: agent_command を付ける（Sandbox が、実行の前に Clef で今の大きさで足りるかを判断する）。ほかのツールの exec には付けない", async () => {
     const { sandbox, run } = setup(() => ({ stdout: "x\n" }));
     await run("bash", { command: "make ci" });
     expect(sandbox.calls[0]?.options.origin).toBe("agent_command");
@@ -519,7 +519,7 @@ describe("git_commit の push（チェックポイント）", () => {
     const r = await run("git_commit", { message: "m" });
     expect(r.isError).toBe(false);
     expect(r.text).toContain(SHA);
-    // push は子の gitconfig（フック・credential helper）の影響を受けない形で、リポジトリの URL へ直接送る
+    // push はワーカーの gitconfig（フック・credential helper）の影響を受けない形で、リポジトリの URL へ直接送る
     expect(pushes(sandbox).map((c) => c.argv)).toEqual([
       [
         "git",

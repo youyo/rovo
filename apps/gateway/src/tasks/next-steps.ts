@@ -3,7 +3,7 @@ import type { ResultView } from "./task-do";
 import type { ReviewPolicy } from "./validation";
 
 /**
- * task_result などの応答に添える next_steps（D9）。呼び出し元の AI が次にすべきことを、状態から決めて文にする。
+ * task_result などの応答に添える next_steps（D9）。クライアントが次にすべきことを、状態から決めて文にする。
  * 案内であって強制ではない: task_pr_ready / task_pr_merge の条件はサーバー側（TaskDO・UserDO と GitHub）が必ず検査する。
  */
 

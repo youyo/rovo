@@ -4,42 +4,42 @@
 
 ### 1.1 目的
 
-ローカルの Claude Code または Claude Cowork を親エージェント（司令塔）とし、Cloudflare 上の Pi Durable を子エージェントとして利用する。
+ローカルの Claude Code または Claude Cowork をクライアント（司令塔）とし、Cloudflare 上の Pi Durable をワーカーとして利用する。
 
-親エージェントはユーザーとの対話、要件定義、実装計画、タスク委譲、レビューを担当する。
+クライアントはユーザーとの対話、要件定義、実装計画、タスク委譲、レビューを担当する。
 
-子エージェントは委譲された実装タスクを自律的に遂行し、GitHub Draft PR を作成・更新する。
+ワーカーは委譲された実装タスクを自律的に遂行し、GitHub Draft PR を作成・更新する。
 
-子エージェントの実行環境には Cloudflare Sandbox を利用する。
+ワーカーの実行環境には Cloudflare Sandbox を利用する。
 
 Web 検索・Web ページ取得は Coding Sandbox から分離した専用環境で実行し、取得結果を Jev で安全性評価する。
 
 ### 1.2 基本方針
 
-- 親エージェントは Claude Code / Claude Cowork。
-- 子エージェントは Pi Durable + Anthropic Claude API。
-- 子エージェントは原則1タスクにつき1つ。
+- クライアントは Claude Code / Claude Cowork。
+- ワーカーは Pi Durable + Anthropic Claude API。
+- ワーカーは原則1タスクにつき1つ。
 - 独立した Factory Controller や別の司令塔は作らない。
-- 親子間通信は Remote MCP を使用する。
+- クライアントとワーカーの間の通信は Remote MCP を使用する。
 - Claude Code と Cowork に同一の MCP インターフェースを提供する。
-- 子エージェントは非同期で実行する。
-- 親は子の実行中もユーザーとの会話や調査を継続できる構成を目指す。
-- 子は必要な場合のみ親へ質問する。
-- GitHub Draft PR はタスク開始時に作成する。タスクが `COMPLETED` になると、rovo が GitHub App の Installation Token で PR を Ready for review にする（`FAILED` / `BUDGET_EXCEEDED` / `CANCELLED` は Draft のまま。失敗してもタスクは `COMPLETED` のまま、`task_pr_ready` で Ready にできる）。rovo はマージしない。全体のテストとレビューをどこで行うかは `review_policy`（`task_start` の入力。`client_review`（既定）| `worker_review`）で選ぶ。`client_review` はクライアント（呼び出し元の AI や人）が PR のブランチを手元に取り出して全体のテストとレビューを行い、`task_pr_merge` か `gh` などで直接マージする。`worker_review`（ワーカーが全体のテストとレビューまで行う）は受け付けるだけで、今は未対応（近日）として `invalid_input`（15.8 の D9）。
+- ワーカーは非同期で実行する。
+- クライアントはワーカーの実行中もユーザーとの会話や調査を継続できる構成を目指す。
+- ワーカーは必要な場合のみクライアントへ質問する。
+- GitHub Draft PR はタスク開始時に作成する。タスクが `COMPLETED` になると、rovo が GitHub App の Installation Token で PR を Ready for review にする（`FAILED` / `BUDGET_EXCEEDED` / `CANCELLED` は Draft のまま。失敗してもタスクは `COMPLETED` のまま、`task_pr_ready` で Ready にできる）。rovo はマージしない。全体のテストとレビューをどこで行うかは `review_policy`（`task_start` の入力。`client_review`（既定）| `worker_review`）で選ぶ。`client_review` はクライアント（AI や人）が PR のブランチを手元に取り出して全体のテストとレビューを行い、`task_pr_merge` か `gh` などで直接マージする。`worker_review`（ワーカーが全体のテストとレビューまで行う）は受け付けるだけで、今は未対応（近日）として `invalid_input`（15.8 の D9）。
 - 障害発生時は可能な範囲で途中状態から自動復旧する。
-- 親のセッションが終了してもクラウド側の処理は継続する。
+- クライアントのセッションが終了してもクラウド側の処理は継続する。
 - Web 調査は独立した Web Research Service に集約する。
 - Coding Sandbox の外向き通信は用途別に制限する。
 - GitHub 認証には GitHub App を使用する。
-- ローカル端末の GitHub 認証情報を子エージェントに渡さない。
+- ローカル端末の GitHub 認証情報をワーカーに渡さない。
 
 ### 1.3 非目標
 
-- 複数子エージェントの並列オーケストレーション
+- 複数ワーカーの並列オーケストレーション
 - 独立したソフトウェアファクトリーの構築
-- 子エージェントによる自動マージ
-- 親エージェントを介さない高レベルの仕様変更
-- 子エージェントによる無制限の外部ネットワークアクセス
+- ワーカーによる自動マージ
+- クライアントを介さない高レベルの仕様変更
+- ワーカーによる無制限の外部ネットワークアクセス
 - Web 検索結果を信頼済み命令として扱うこと
 - ローカルの未コミット変更を自動的にクラウドへ同期すること
 
@@ -128,12 +128,12 @@ Web 検索・Web ページ取得は Coding Sandbox から分離した専用環�
 
 | コンポーネント | 役割 |
 |---|---|
-| Claude Code / Cowork | 親エージェント |
+| Claude Code / Cowork | クライアント |
 | Remote MCP | 共通の操作インターフェース |
 | Coding Task Gateway | 認証、認可、タスク操作 |
 | Durable Objects | タスク状態とイベント管理 |
-| Pi Durable | 子エージェントの実行・継続 |
-| Anthropic Claude API | 子エージェントの推論 |
+| Pi Durable | ワーカーの実行・継続 |
+| Anthropic Claude API | ワーカーの推論 |
 | Coding Sandbox | コード編集、ビルド、テスト |
 | GitHub Token Broker | GitHub App認証と短命トークン発行 |
 | Web Research Service | 隔離されたWeb調査 |
@@ -143,27 +143,27 @@ Web 検索・Web ページ取得は Coding Sandbox から分離した専用環�
 
 ---
 
-## 3. 親子エージェントの責務
+## 3. クライアントの責務
 
-### 3.1 親エージェント
+### 3.1 クライアント
 
-親エージェントが担当する。
+クライアントが担当する。
 
 - ユーザーとの対話
 - 要件の整理
 - タスクの定義
 - 受け入れ条件の定義
 - 実装タスクの委譲
-- 子エージェントからの質問への回答
+- ワーカーからの質問への回答
 - 追加指示
 - 実装結果のレビュー
 - PRの承認・マージ判断
 
-親エージェントはクラウド側の内部実装を直接制御せず、Remote MCP 経由でタスクを操作する。
+クライアントはクラウド側の内部実装を直接制御せず、Remote MCP 経由でタスクを操作する。
 
-### 3.2 子エージェント
+### 3.2 ワーカー
 
-子エージェントが担当する。
+ワーカーが担当する。
 
 - リポジトリの調査
 - 実装計画の具体化
@@ -175,9 +175,9 @@ Web 検索・Web ページ取得は Coding Sandbox から分離した専用環�
 - Draft PRの更新
 - 実装結果の報告
 
-子は、指定された受け入れ条件を満たすための局所的な判断を自律的に行える。
+ワーカーは、指定された受け入れ条件を満たすための局所的な判断を自律的に行える。
 
-次の場合は親に質問する。
+次の場合はクライアントに質問する。
 
 - 仕様が矛盾している
 - 受け入れ条件が不明確
@@ -206,7 +206,7 @@ Claude Code と Cowork に同じ Remote MCP Server を提供する。
 | `task_wait` | イベント待機 |
 | `task_status` | 状態取得 |
 | `task_console` | 画面（Claude Code の mod）に進み具合を出すための読み取り専用ツール。状態・段階・いまの手順・コンソールの出力を返す。ダッシュボードの設計 D19 |
-| `task_answer` | 子の質問への回答 |
+| `task_answer` | ワーカーの質問への回答 |
 | `task_steer` | 追加指示 |
 | `task_cancel` | キャンセル |
 | `task_result` | 最終結果取得（`next_steps` で次の一手を案内する） |
@@ -286,7 +286,7 @@ GitHubの初期化が完了すると、Draft PR URLを後続イベントまた�
 
 MCP接続自体を無期限に保持しない。
 
-親はバックグラウンドで待機し、イベント発生時に処理を再開する。
+クライアントはバックグラウンドで待機し、イベント発生時に処理を再開する。
 
 Claude Code と Cowork におけるバックグラウンドMCP呼び出しの挙動は結合テストで確認する。
 
@@ -304,7 +304,7 @@ Claude Code と Cowork におけるバックグラウンドMCP呼び出しの挙
 
 同一質問への重複回答で処理を二重再開しない。
 
-**予算の延長の質問（`kind: "budget_extension"`）**: タスクが予算に近づくと、`budget_policy: "ask"`（既定）のタスクは止まらずに `INPUT_REQUIRED` になり、rovo（システム）が書く質問が出る。`question` イベントと `task_status` の `pending_question` に optional の `kind: "budget_extension"` が付き（子の質問 `ask_parent` には付かない。古いクライアントは `kind` を知らなくても、ふつうの質問として扱える）、`message` と `options` は数値（使った額・タスクの予算・延長する額・延長の残り回数）だけから gateway が固定文で作る（AgentDO が送る文は使わない）。子の自由文は入らないので `<<<UNTRUSTED_CHILD_QUESTION>>>` で囲まない（子の質問は今までどおり囲む）。`options` は `[あと $X 使って続ける, ここで止める]` の 2 つで、`answer` にはそのどちらかをそのまま渡す（それ以外は `invalid_input`）。**利用者に確認してから答える**（MCP の instructions・`task_start`・`task_answer` の説明と `create-task` スキルに書く）。詳細は 5.2 の「予算のソフトリミット」。
+**予算の延長の質問（`kind: "budget_extension"`）**: タスクが予算に近づくと、`budget_policy: "ask"`（既定）のタスクは止まらずに `INPUT_REQUIRED` になり、rovo（システム）が書く質問が出る。`question` イベントと `task_status` の `pending_question` に optional の `kind: "budget_extension"` が付き（ワーカーの質問 `ask_parent` には付かない。古いクライアントは `kind` を知らなくても、ふつうの質問として扱える）、`message` と `options` は数値（使った額・タスクの予算・延長する額・延長の残り回数）だけから gateway が固定文で作る（AgentDO が送る文は使わない）。ワーカーの自由文は入らないので `<<<UNTRUSTED_CHILD_QUESTION>>>` で囲まない（ワーカーの質問は今までどおり囲む）。`options` は `[あと $X 使って続ける, ここで止める]` の 2 つで、`answer` にはそのどちらかをそのまま渡す（それ以外は `invalid_input`）。**利用者に確認してから答える**（MCP の instructions・`task_start`・`task_answer` の説明と `create-task` スキルに書く）。詳細は 5.2 の「予算のソフトリミット」。
 
 ### 4.6 task_steer
 
@@ -316,7 +316,7 @@ Claude Code と Cowork におけるバックグラウンドMCP呼び出しの挙
 - テストケースを追加する
 - 実装方針を修正する
 
-追加指示はイベントとして永続化し、子エージェントの安全な処理境界で適用する。
+追加指示はイベントとして永続化し、ワーカーの安全な処理境界で適用する。
 
 ### 4.7 task_cancel
 
@@ -336,7 +336,7 @@ Draft PRは自動削除しない。
 |---|---|
 | `CREATING` | タスク・Git環境初期化 |
 | `RUNNING` | 実装中 |
-| `INPUT_REQUIRED` | 親の回答待ち |
+| `INPUT_REQUIRED` | クライアントの回答待ち |
 | `VERIFYING` | ビルド・テスト・検証 |
 | `RECOVERING` | 障害復旧中 |
 | `COMPLETED` | 正常終了 |
@@ -375,9 +375,9 @@ Durable Objectsで以下を保持する。
   2. SandboxDO の期限を回答待ちの上限まで延ばし（`ask_parent` と同じ）、Sandbox を**中断**する（下記）。
   3. 質問（`kind: budget_extension`。数値は `budget_spent_usd`・`budget_total_usd`・`budget_extension_usd`・`budget_extensions_left`）を記録して `INPUT_REQUIRED` にする。`input_timeout` の job を差し替える（回答待ちの累計は 24 時間まで）。
   聞けない（extend の上限に達した・停止中・中断前の失敗）ときは、聞かずに今までどおり `budget_exceeded` で止まる。
-- **回答**: TaskDO は答えが「続ける」（`options[0]`）のとき、受け付ける**前に** `UserDO.extendTaskBudget(taskId, n)` で月の枠から延長分（`TASK_BUDGET_USD` と同額）をその場で予約する。`task_budget.reserved_micro` に足し、`extensions` に n を記録する（n 回目の再送は冪等。2 回まで。月の枠に足りなければ `budget_exceeded` で予約しない = **月の枠はハードリミットのまま**）。予約できたときだけ `questions.decision = 'extend'` とし、それ以外（「止める」・月の枠が足りない・延長の上限・精算済み）は `stop`。AgentDO へ配送するのは親の答えの文ではなく**固定の語 `extend` | `stop`** だけ。`extend` なら AgentDO は予算を `budgetUsd` ぶん増やして（`budget_extensions` を数える。最大 2 回、1 タスク最大 `budgetUsd` x 3）、rovo が書いた固定文を user メッセージとして Pi に渡して続ける。`stop`（と、それ以外の語）は `budget_exceeded` で止まる。`task_answer` の応答に `budget_extension`（`extended` | `declined` | `monthly_limit` | `limit_reached`）が付く。UserDO を呼べなかったとき（予約できたか分からない）は答えを記録せず `upstream_unavailable` を返す（再送できる）。
+- **回答**: TaskDO は答えが「続ける」（`options[0]`）のとき、受け付ける**前に** `UserDO.extendTaskBudget(taskId, n)` で月の枠から延長分（`TASK_BUDGET_USD` と同額）をその場で予約する。`task_budget.reserved_micro` に足し、`extensions` に n を記録する（n 回目の再送は冪等。2 回まで。月の枠に足りなければ `budget_exceeded` で予約しない = **月の枠はハードリミットのまま**）。予約できたときだけ `questions.decision = 'extend'` とし、それ以外（「止める」・月の枠が足りない・延長の上限・精算済み）は `stop`。AgentDO へ配送するのはクライアントの答えの文ではなく**固定の語 `extend` | `stop`** だけ。`extend` なら AgentDO は予算を `budgetUsd` ぶん増やして（`budget_extensions` を数える。最大 2 回、1 タスク最大 `budgetUsd` x 3）、rovo が書いた固定文を user メッセージとして Pi に渡して続ける。`stop`（と、それ以外の語）は `budget_exceeded` で止まる。`task_answer` の応答に `budget_extension`（`extended` | `declined` | `monthly_limit` | `limit_reached`）が付く。UserDO を呼べなかったとき（予約できたか分からない）は答えを記録せず `upstream_unavailable` を返す（再送できる）。
 - **待つ間の Sandbox**: snapshot は「push 済みで clean な作業ツリーを、速く戻すためのもの」としてだけ使う。AgentDO は、WIP の後に作業ツリーが clean で HEAD が push 済み（作業ブランチ、または最初の commit）と確かめられたときだけ `SandboxDO.suspend`（`SandboxPort.suspend?`）を呼ぶ。そうでない（WIP が push まで成功していない・見送り〔秘密・バイナリ・失敗・時間切れ〕・dirty のまま）ときは、作業が snapshot の中にしか無く、戻せなかったとき（期限切れなど）に image から再 clone されて黙って失われるので、**中断せず、コンテナを止めずに待つ**（fail-soft。費用は止まらない代わりに、作業を失わない）。このとき `task_result` の `warnings` に固定文「途中の作業を push できなかったため、承認を待つ間も Sandbox を止めなかった」が 1 行出る。中断は、作業ツリーのスナップショットを取ってからコンテナを止める（昇格と同じ `snapshotContainer`）。次の操作（exec など）の `boot` が、同じスナップショットから（image ではなく）起動し直し、CA 証明書・作業ツリーの状態（HEAD・差分）が中断前と同じことを確かめてから続ける。「再起動した」例外は出さず、`restarts` にも数えない。戻せなければスナップショットを捨てて image から起動し、再 clone する（中断するのは push 済みで clean のときだけなので、作業は失われない）。スナップショットが取れないときも、push 済みで clean なので止めてよい（`allowReclone`。戻すときは再 clone するだけ）。回答待ちは最長 24 時間で、Sandbox の無操作の停止（2 時間）は走るので、その場合は戻すときに再 clone になる。
-- **返事が無いとき**: 回答待ちの上限（累計 24 時間。子の質問と同じ）で、`StopIntent` の `budget_extension_timeout` を記録し、終端は `BUDGET_EXCEEDED`、reason は `budget_extension_timeout`（`decideTerminal` の優先順位は cancel > deadline > input_timeout > **budget_extension_timeout** > budget_exceeded > failed > completed。子の質問の無応答は従来どおり `FAILED(input_timeout)`）。Sandbox は破棄せず（`budget_exceeded` と同じく patch を取って止める）、中断中なら patch の取得のために戻す。TaskDO の 24 時間 + 猶予 10 分のバックストップも、最後の質問が予算の延長なら `BUDGET_EXCEEDED(budget_extension_timeout)` にする。
+- **返事が無いとき**: 回答待ちの上限（累計 24 時間。ワーカーの質問と同じ）で、`StopIntent` の `budget_extension_timeout` を記録し、終端は `BUDGET_EXCEEDED`、reason は `budget_extension_timeout`（`decideTerminal` の優先順位は cancel > deadline > input_timeout > **budget_extension_timeout** > budget_exceeded > failed > completed。ワーカーの質問の無応答は従来どおり `FAILED(input_timeout)`）。Sandbox は破棄せず（`budget_exceeded` と同じく patch を取って止める）、中断中なら patch の取得のために戻す。TaskDO の 24 時間 + 猶予 10 分のバックストップも、最後の質問が予算の延長なら `BUDGET_EXCEEDED(budget_extension_timeout)` にする。
 - **止めるとき**: 「止める」の回答でも無応答でも、中断前に WIP は済んでいるので、止めるためだけに Sandbox を起こして WIP を繰り返さない（`budget_suspended`）。結果の `warnings` には WIP の結果が出る。
 - **見え方**: ダッシュボードと `task_console`（Claude Code の mod が使う）は、入力待ちの一種として「予算の承認待ち」と出す（`now.text` が `waiting for budget approval`。`task_console` には optional の `awaiting: "budget_extension"`）。mod は読み取り専用のままで、`task_answer` は呼ばない。
 
@@ -509,7 +509,7 @@ Draft PRはタスク開始時に作成する。
 
 GitHubのPR作成にはベースブランチとの差分が必要なため、初期コミットには空コミット等を利用する。
 
-commit の作者（author / committer）は、この GitHub App の bot にする: name `<slug>[bot]`、email `<bot_user_id>+<slug>[bot]@users.noreply.github.com`（GitHub が App の bot として扱い、App のアイコンが出る）。slug と bot の id はデプロイごとに違うので、TaskDO が初回に App の JWT で `GET /app`（slug）→ `GET /users/<slug>[bot]`（id）を引き、タスクの DO に保存する（設定や secret は増えない）。初期コミットと、子（AgentDO）の commit（git_commit・予算超過の WIP commit）は同じ作者で、子へは start の spec の `commitAuthor` で渡す。引けなかったとき（障害・権限）は `rovo <rovo@noreply.invalid>`（`.invalid` は RFC 2606 の予約で、GitHub のどのアカウントにも結び付かない）にして、タスクは止めない。`<名前>@users.noreply.github.com` で bot の id が付かない形は、その名前の他人のアカウントの commit とみなされるので使わない（`scripts/commit-author.test.mjs` が全ソースで検査する）。
+commit の作者（author / committer）は、この GitHub App の bot にする: name `<slug>[bot]`、email `<bot_user_id>+<slug>[bot]@users.noreply.github.com`（GitHub が App の bot として扱い、App のアイコンが出る）。slug と bot の id はデプロイごとに違うので、TaskDO が初回に App の JWT で `GET /app`（slug）→ `GET /users/<slug>[bot]`（id）を引き、タスクの DO に保存する（設定や secret は増えない）。初期コミットと、ワーカー（AgentDO）の commit（git_commit・予算超過の WIP commit）は同じ作者で、ワーカーへは start の spec の `commitAuthor` で渡す。引けなかったとき（障害・権限）は `rovo <rovo@noreply.invalid>`（`.invalid` は RFC 2606 の予約で、GitHub のどのアカウントにも結び付かない）にして、タスクは止めない。`<名前>@users.noreply.github.com` で bot の id が付かない形は、その名前の他人のアカウントの commit とみなされるので使わない（`scripts/commit-author.test.mjs` が全ソースで検査する）。
 
 PRタイトルにはタスク名を使用する。
 
@@ -522,7 +522,7 @@ PR本文には以下を含める。
 - テスト結果
 - 未解決事項
 
-PRは子エージェントによってマージしない。マージするのはクライアント（呼び出し元の AI や人）だけで、`task_pr_merge` か `gh` などで行う（D9）。
+PRはワーカーによってマージしない。マージするのはクライアント（AI や人）だけで、`task_pr_merge` か `gh` などで行う（D9）。
 
 ### 6.6 作業ブランチ
 
@@ -626,9 +626,9 @@ Claude Code、Claude Cowork、Pi Durableが共通のWeb Research Serviceを利�
 - `web_fetch`
 - `web_browse`
 
-親エージェントにはRemote MCPとして公開する。
+クライアントにはRemote MCPとして公開する。
 
-子エージェントには内部APIまたは同等のツールインターフェースとして公開する。
+ワーカーには内部APIまたは同等のツールインターフェースとして公開する。
 
 ### 8.3 処理フロー
 
@@ -734,7 +734,7 @@ Jev固有のスコアが取得できる場合は、モデルのスコアとPolic
 
 Jevへ渡す情報は取得コンテンツと評価に必要な最小限のメタデータに限定する。
 
-親エージェントの会話履歴、認証情報、内部シークレットは渡さない。
+クライアントの会話履歴、認証情報、内部シークレットは渡さない。
 
 ---
 
@@ -768,7 +768,7 @@ Sandboxが停止しても、タスク自体は直ちに失われない。
 
 完全なプロセス状態の復元は保証しない。
 
-必要に応じて子エージェントが作業状態を再確認してから再開する。
+必要に応じてワーカーが作業状態を再確認してから再開する。
 
 ### 9.4 冪等性
 
@@ -784,11 +784,11 @@ Sandboxが停止しても、タスク自体は直ちに失われない。
 
 同一タスクの復旧によってPRが重複作成されないようにする。
 
-### 9.5 親セッション終了
+### 9.5 クライアントのセッション終了
 
-親のセッションが終了しても、子は実行を継続する。
+クライアントのセッションが終了しても、ワーカーは実行を継続する。
 
-親が再接続した場合は `task_status` と `task_wait` により状態を取得する。
+クライアントが再接続した場合は `task_status` と `task_wait` により状態を取得する。
 
 質問待ちの場合は `INPUT_REQUIRED` を維持する。
 
@@ -905,7 +905,7 @@ Claude CodeとCoworkの両方からタスクの作成と状態確認ができる
 
 完了条件：
 
-子エージェントが単独の実装タスクを実行できる。
+ワーカーが単独の実装タスクを実行できる。
 
 ### Phase 3: GitHub App
 
@@ -921,17 +921,17 @@ Claude CodeとCoworkの両方からタスクの作成と状態確認ができる
 
 タスク開始時にDraft PRが作成され、実装結果が反映される。
 
-### Phase 4: 親子間対話
+### Phase 4: クライアントとワーカーの対話
 
 - `INPUT_REQUIRED`
 - `task_answer`
 - `task_steer`
 - イベントカーソル
-- 親側バックグラウンド待機
+- クライアント側バックグラウンド待機
 
 完了条件：
 
-子が必要な場合に質問し、親の回答後に再開できる。
+ワーカーが必要な場合に質問し、クライアントの回答後に再開できる。
 
 ### Phase 5: Web Research Service
 
@@ -946,7 +946,7 @@ Claude CodeとCoworkの両方からタスクの作成と状態確認ができる
 
 完了条件：
 
-親と子が共通のWeb検索サービスを利用でき、取得結果に安全性評価が付与される。
+クライアントとワーカーが共通のWeb検索サービスを利用でき、取得結果に安全性評価が付与される。
 
 ### Phase 6: Security / Recovery
 
@@ -970,16 +970,16 @@ Claude CodeとCoworkの両方からタスクの作成と状態確認ができる
 1. Claude Codeから実装を委譲
 2. Draft PRが作成される
 3. Pi Durableが実装開始
-4. 親が別の会話・調査を継続
-5. 子が必要な場合だけ質問
-6. 親が回答
-7. 子が実装再開
+4. クライアントが別の会話・調査を継続
+5. ワーカーが必要な場合だけ質問
+6. クライアントが回答
+7. ワーカーが実装再開
 8. Web検索は隔離環境で実行
 9. Jev判定がレスポンスに含まれる
 10. GitHubへ変更をPush
 11. テスト結果をPRへ反映
-12. 親がPRをレビュー
-13. 親セッションを終了しても子が継続
+12. クライアントがPRをレビュー
+13. クライアントのセッションを終了してもワーカーが継続
 14. 再接続後に状態・結果を取得
 15. Sandbox障害から自動復旧
 
@@ -1010,13 +1010,13 @@ Claude CodeとCoworkの両方からタスクの作成と状態確認ができる
 
 ## 14. 最終的な完成条件
 
-Claude CodeまたはClaude Coworkから実装タスクを委譲すると、Cloudflare上に子エージェントが起動し、GitHub Draft PRが作成される。
+Claude CodeまたはClaude Coworkから実装タスクを委譲すると、Cloudflare上にワーカーが起動し、GitHub Draft PRが作成される。
 
-子エージェントはCoding Sandboxで実装・テストを実施する。
+ワーカーはCoding Sandboxで実装・テストを実施する。
 
-親エージェントは子の実行中もユーザーとの会話や調査を継続できる。
+クライアントはワーカーの実行中もユーザーとの会話や調査を継続できる。
 
-子エージェントは重要な判断が必要な場合のみ親に質問し、回答を受けて再開する。
+ワーカーは重要な判断が必要な場合のみクライアントに質問し、回答を受けて再開する。
 
 Web調査は独立したWeb Research Serviceで実行し、Jevによる安全性評価を結果に含める。
 
@@ -1024,11 +1024,11 @@ Coding Sandboxの外向き通信は、GitHubやパッケージレジストリな
 
 GitHub認証にはGitHub Appを使用し、ローカルのGitHub認証情報をクラウドへ渡さない。
 
-親セッションが終了しても子は継続し、再接続後にタスクの状態と結果を取得できる。
+クライアントのセッションが終了してもワーカーは継続し、再接続後にタスクの状態と結果を取得できる。
 
 Sandbox障害が発生した場合は、保存されたチェックポイントから可能な範囲で自動復旧する。
 
-実装完了後は、rovo が PR を自動で Ready for review にし、検証結果とともに親（クライアント）に返す。`review_policy` が `client_review`（既定）なら、クライアントが PR のブランチを手元に取り出して全体のテストとレビューを行い、問題が無ければ `task_pr_merge` か `gh` などで直接マージする。`verification_commands` は変更に関係するテストだけにする（全体のテストを Sandbox で回すと時間と費用がかかる）。組織としての強制は GitHub のブランチ保護に任せる（D9）。
+実装完了後は、rovo が PR を自動で Ready for review にし、検証結果とともにクライアント（クライアント）に返す。`review_policy` が `client_review`（既定）なら、クライアントが PR のブランチを手元に取り出して全体のテストとレビューを行い、問題が無ければ `task_pr_merge` か `gh` などで直接マージする。`verification_commands` は変更に関係するテストだけにする（全体のテストを Sandbox で回すと時間と費用がかかる）。組織としての強制は GitHub のブランチ保護に任せる（D9）。
 
 ---
 
@@ -1036,11 +1036,11 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 
 実装着手前の確認で決定した事項。本文と食い違う場合はこの章を優先する。
 
-### 15.1 子エージェント（Pi Durable）
+### 15.1 ワーカー（Pi Durable）
 
 - Earendil 製の Pi Durable（`@earendil-works/pi-durable`、`@earendil-works/pi-ai`）を、Cloudflare Agents SDK の `PiHarness` 経由で Durable Object 上に載せる。
   - 参考: https://developers.cloudflare.com/agents/harnesses/pi/ 、https://earendil.com/posts/pi-durable/
-- 両者とも beta で API が変わり得るため、Pi への依存は子エージェントのアダプタ層に閉じ込める。
+- 両者とも beta で API が変わり得るため、Pi への依存はワーカーのアダプタ層に閉じ込める。
 - Pi のイベントストリームにはカーソルがない。そのため `task_wait` が使うイベントログとカーソルは、Gateway 側のタスク DO が自前で連番を振って保持する。
 - Pi の復旧は best effort で、ツール実行中にクラッシュした場合は副作用の成否が分からない。
   - Draft PR 作成や `git push` など外部副作用を持つツールは `replay: "safe"` にしない。
@@ -1072,7 +1072,7 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 
 - タスク単位の上限（初期値 $10 / Task）に加え、ユーザー単位の月額上限を設ける。タスク単位の上限は**ソフトリミット**（`budget_policy`。下の「予算のソフトリミット」）、月額上限は**ハードリミット**（延長の予約も超えられない）。
 - 同時に実行できるタスクの数には、ユーザーごとの上限を設ける（`MAX_CONCURRENT_TASKS`、`rovo.config.json` の `concurrency.maxTasks`。OSS の既定は 2）。UserDO の `reservation_slot` にタスクごとに 1 行の枠を持ち、件数が上限に達していれば `concurrency_limit` で断る。旧スキーマの `reservation`（1 行だけ）は、UserDO の起動時に `reservation_slot` へ移して消す（実行中の予約を失わない）。照合による回収（一度も作られなかった予約だけ）と `finishTask` による解放は、タスクごとに行う。予算（`task_budget`）の予約は別の仕組みで、両方を満たすときだけ始められる。
-- **子のモデル呼び出し前の判定**（`AgentDO.preModelCall`）: 入力は、直前の呼び出しでプロバイダーが返した実測（input + cacheRead + cacheWrite）に、前回以降に context へ足された分をバイト数（トークン数の上限）で足す。実測が無い初回は context 全体のバイト数。単価は入力・出力とも最大値のまま（少なく数えない）。ただし、前回の実測で `cacheRead` があった分（`last_call_basis.cacheReadTokens`。前回の入力の合計を上限とする）だけは、cacheRead の単価（base と全 tier の最大値）で見積もる（`maxOutputTokensWithin` / `estimateCallCostUsd` の `cachedTokens`）。前回の通常の入力・cacheWrite の分、増分（context の増加と枠の余裕 1,024）は、入力と cacheWrite の高い方の単価のまま（Anthropic では境界より後ろの新しい入力が input にも cacheWrite〔1.25 倍〕にもなるため、どちらでも下回らない）。割り引くのは、basis が同じモデルで context が縮んでおらず、`at`（前回の応答の時刻）が 4 分以内（Anthropic のキャッシュの TTL 5 分より短く）のときだけ。basis が無い・モデルが違う・context が縮んだ・古い形（`cacheReadTokens` / `at` が無い）・TTL 超過は、従来どおり全量を通常の単価で見積もる。前回の呼び出しで cache hit した分が次の呼び出しで外れた場合に限り、1 回分の見積もりが実際を下回りうる（利用者と合意した許容範囲）。`inflight` の `estimateUsd`（呼び出しの途中で確定するときや usage が返らないときに費用へ積む額）は割り引かない最悪の値のまま。出力は即 block せず、残額に収まる `maxTokens`（`maxOutputTokensWithin`）まで絞って呼ぶ。収まる出力が 1,024 トークンを割るときだけ `budget_exceeded` で止める。
+- **ワーカーのモデル呼び出し前の判定**（`AgentDO.preModelCall`）: 入力は、直前の呼び出しでプロバイダーが返した実測（input + cacheRead + cacheWrite）に、前回以降に context へ足された分をバイト数（トークン数の上限）で足す。実測が無い初回は context 全体のバイト数。単価は入力・出力とも最大値のまま（少なく数えない）。ただし、前回の実測で `cacheRead` があった分（`last_call_basis.cacheReadTokens`。前回の入力の合計を上限とする）だけは、cacheRead の単価（base と全 tier の最大値）で見積もる（`maxOutputTokensWithin` / `estimateCallCostUsd` の `cachedTokens`）。前回の通常の入力・cacheWrite の分、増分（context の増加と枠の余裕 1,024）は、入力と cacheWrite の高い方の単価のまま（Anthropic では境界より後ろの新しい入力が input にも cacheWrite〔1.25 倍〕にもなるため、どちらでも下回らない）。割り引くのは、basis が同じモデルで context が縮んでおらず、`at`（前回の応答の時刻）が 4 分以内（Anthropic のキャッシュの TTL 5 分より短く）のときだけ。basis が無い・モデルが違う・context が縮んだ・古い形（`cacheReadTokens` / `at` が無い）・TTL 超過は、従来どおり全量を通常の単価で見積もる。前回の呼び出しで cache hit した分が次の呼び出しで外れた場合に限り、1 回分の見積もりが実際を下回りうる（利用者と合意した許容範囲）。`inflight` の `estimateUsd`（呼び出しの途中で確定するときや usage が返らないときに費用へ積む額）は割り引かない最悪の値のまま。出力は即 block せず、残額に収まる `maxTokens`（`maxOutputTokensWithin`）まで絞って呼ぶ。収まる出力が 1,024 トークンを割るときだけ `budget_exceeded` で止める。
 - **予算超過で止まるときの WIP commit**（`AgentDO.commitWipOnBudgetStop`）: `requestStop("budget_exceeded")` は、モデルを呼ばずに、作業ツリーに未 commit の変更があれば `git add -A` → 取り込む差分を `maskSecrets` で確かめる（秘密らしき文字列があれば `git reset` して commit しない。バイナリの変更〔`diff --cached --numstat` が `-\t-`〕は中身を検査できないので、見つけたら commit せず `git reset` する。4MiB を超えて確かめ切れないときも同様。warnings は固定文で、git の出力は載せない）→ 固定メッセージ `wip: budget exceeded（rovo が自動で commit）` で commit → 作業ブランチへ push（`git_commit` と同じ経路。`pushed` / `push_failed` イベントと `branch_sync`）を行ってから、確定（patch の取得）に進む。全体で 90 秒が上限で、時間切れの後は後段の git（diff・commit・push）を実行せず結果も書き換えない。Sandbox を起動していない・git の失敗・時間切れは諦めて今までどおり止まる（fail-soft）。結果は `task_result` の `warnings` に 1 行で出る（commit した / push できなかった / 秘密のため見送った / 失敗）。`budget_policy: ask` のときは、止める前の質問のとき（`askBudgetExtension`）にも同じ処理を行い、その後に Sandbox を中断する（5.2 の「予算のソフトリミット」。止めると答えたとき・無応答のときは、中断前に済んだ WIP を繰り返さない）。期限切れ（deadline）・回答待ちの期限（input_timeout）・cancel では行わない: これらは停止の時点で Sandbox を破棄する設計で（期限は時間の上限を守るため、cancel は利用者の明示の停止のため）、破棄後の Sandbox から commit を取らない。
 - **予算超過で止まったときの結果**: 作業ブランチへ push 済みの SHA（チェックポイントの push を含む）を `pushedSha` に、patch・diffstat を（Sandbox を破棄する前に取れれば）結果に残す。summary が空なら停止理由と最後に push した commit を固定文で入れる。PR の `head_sha` は記録するが、検証した commit が無いので `head_matches_verified` は false。cancel・期限・回答待ちの期限は Sandbox を直ちに破棄するので、patch は残さない（`pushedSha` と summary は同じ）。
 
@@ -1140,7 +1140,7 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - `apps/gateway/wrangler.jsonc` には `r2_buckets` を置かない（バケット名は環境固有で、下流が `LOGS` として束ねる。16）。ローカルの E2E は、E2E が生成する一時の wrangler 設定にだけ `LOGS` を足す。
   - キーは `tasks/<yyyy>/<mm>/<task_id>/{events.jsonl,result.json,summary.json}`（`<yyyy>/<mm>` はタスク作成時刻の UTC）。`summary.json` を最後に書き、これが完了の印。ライフサイクルの設定（例: 90 日）は下流で行う。
   - コンテナのスナップショット（beta）は、復旧のためには使わない。復旧は push 済みのチェックポイントで成立している。起動を速くするための依存関係のキャッシュには D14 で使う（15.8）。
-  - 保存するのは公開イベントの全件・結果・要約。タスクの入力（instructions / acceptance_criteria / constraints）、title、親の answer / steer の本文、トークンは保存しない。
+  - 保存するのは公開イベントの全件・結果・要約。タスクの入力（instructions / acceptance_criteria / constraints）、title、クライアントの answer / steer の本文、トークンは保存しない。
   - events.jsonl は未加工で、読む側が非信頼データとして扱う。バケットは非公開、バインディングは gateway だけ、MCP からの一覧・読み出しは作らない。
 - **監査ログ（11.2）** は、1行の構造化 JSON で出す。
   - Workers Logs の `console.log` だけでは best-effort（head sampling と短い保持で欠落しうる）。監査として成立する条件は、sampling 100% と Logpush で保持を自分で決められる宛先に流すこと。これは下流の設定で、rovo は環境固有の値を持たない。
@@ -1159,24 +1159,24 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - 鍵らしい拡張子（`.pem`・`.key`・`.p12` など）のバイナリは、中身が検査できないので止める。
 - 検査できないときも止める: 差分が 4MiB を超えたとき、git が失敗・時間切れになったとき。
 - 止めたときは push せず、既存の `push_failed` を固定の文（`blocked: possible secret (<category>) in <path>:<line> (commit <sha7>)` など）で出す。一致した値は出さない。パスも `maskSecrets` を通す。
-- 子が git の状態を書き換えても判定が変わらないように、次の処理をする。
+- ワーカーが git の状態を書き換えても判定が変わらないように、次の処理をする。
   - `--text` を付けて、`-diff` 属性や NUL があっても中身を行として読む。
   - `--no-replace-objects` を付けて、`git replace` で秘密の commit を差し替えさせない。
   - 出力の形に効く設定（`core.quotepath` など）を `-c` で固定する。
   - `origin` を使わず、リポジトリの URL を直接指定して `ls-remote` する。`-C /` でリポジトリの外から呼ぶ。
   - `baseSha` は、`ls-remote` で得た SHA の祖先のときだけ除外に使う。
-- 子が bash で直接 `git push` する経路は、push の許可証で塞ぐ。
+- ワーカーが bash で直接 `git push` する経路は、push の許可証で塞ぐ。
   - 自動の push（`git_commit`・WIP・完了時の同期の 3 か所）は、秘密の検査を通した commit の SHA を確定してから、`<sha>:refs/heads/<branch>` の形で送る。このとき `ExecOptions.pushPermit`（`{ ref, newSha }`）を渡す。
   - SandboxDO は、その exec の間だけ（serial の中で実行の直前に置き、`finally` で必ず消す）許可証を storage に預かる。期限は exec の時間切れ + 猶予。terminate でも消える。
   - OutboundGateway は、receive-pack のコマンド部を検証した後・認証を付ける前に、`readPushPermit`（SandboxDO の RPC）で許可証を読み、無い・ref が違う・コマンドの `newSha` が違うときは 403（`push_not_permitted`）で拒否し、違反として記録する。fetch 系（upload-pack）と receive-pack の advert（`info/refs`）は今までどおり通す（本文を送れず害が無い）。
-  - 許可証を渡せるのは自動の push の exec だけ。子の bash ツール（`origin: "agent_command"`）と検証コマンド（`origin: "verification"`）には渡さない。
-- 自動の git を子の設定から切り離す。子は root で、`/root/.gitconfig`・`/etc/gitconfig`・`/workspace/.git/config` を書き換えられるため。
+  - 許可証を渡せるのは自動の push の exec だけ。ワーカーの bash ツール（`origin: "agent_command"`）と検証コマンド（`origin: "verification"`）には渡さない。
+- 自動の git をワーカーの設定から切り離す。ワーカーは root で、`/root/.gitconfig`・`/etc/gitconfig`・`/workspace/.git/config` を書き換えられるため。
   - 対象は、自動の push と、その前後の `ls-remote`・`rev-parse`、push 前の検査の git（`ls-remote` を含む）。
   - env で `GIT_CONFIG_GLOBAL=/dev/null`・`GIT_CONFIG_NOSYSTEM=1` を渡し、global と system の設定を読ませない（`safe.directory` は `BASE_ENV` の `GIT_CONFIG_COUNT` 側に残る）。
-  - `git` の直後に `-c core.hooksPath=/dev/null -c credential.helper=` を付け、子が置いた pre-push フックと credential helper を使わない（`-c` は `.git/config` より優先する）。
+  - `git` の直後に `-c core.hooksPath=/dev/null -c credential.helper=` を付け、ワーカーが置いた pre-push フックと credential helper を使わない（`-c` は `.git/config` より優先する）。
   - `push` と `ls-remote` は `origin` ではなくリポジトリの URL（`https://github.com/<owner>/<name>.git`）を直接指定する。`remote.origin.url`・`remote.origin.pushurl` に左右されない。`url.<base>.insteadOf` は打ち消せない（同じ長さなら先に書かれた設定が勝つ）ので上書きしない。書き換えられても、行き先は gateway の判定と許可証が止めるので、push が失敗するだけで、秘密の検査を通らない push にはならない。
 - 既知の課題（今回の対象外）:
-  - 子が `/` などに作った `.git` や、`PATH` の差し替えで、子のコマンドの中の git の振る舞いを変えることは止めない（自動の git はこの影響を受けない）。
+  - ワーカーが `/` などに作った `.git` や、`PATH` の差し替えで、ワーカーのコマンドの中の git の振る舞いを変えることは止めない（自動の git はこの影響を受けない）。
   - 本物の git を使うテストは `apps/agent/vitest.node.config.ts`（`mise run test:unit:agent-git`）で流れる。秘密の検査を変えるときは、rovo の検証コマンドに `pnpm exec vitest run --config vitest.node.config.ts`（`apps/agent` で実行）も入れる。
 
 ### 15.8 Phase 7: End-to-End Test と公開の準備（2026-10-19 決定）
@@ -1186,7 +1186,7 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
 - **読み替え**: 8・12・13・14 章の Jev は Clef に読み替える（実装は 15.5 の Clef-flash）。本文は直さない。
 - **TaskDO のデータ（D1）**: R2 は引き続きコピーで、正は TaskDO のまま。`git_token` の暗号文（`enc` 列）だけを、`finalize_done = 1`（トークンの失効の後）に空にする。行と id は残す（`cred_delivered_id` の参照と、`credential_*` の件数の突き合わせを保つため）。`events` / `questions` / `steers` は消さない。本文の保持期限が要件になった時に、別の Phase で決める。
 - **個人での利用の認可（D8、2026-10-20 決定。phase7.md の D7 は Jev の読み替え）**: GitHub の個人アカウントには team が無いので、数値の user ID の許可リスト `ALLOWED_USER_IDS` でも認可できるようにする。login は改名でき、空いた名前を他人が取れるので使わない。org/team のルールと ID のルールは OR（どちらかを満たせば許可）。少なくとも 1 つが完全に設定されている必要がある。`ALLOWED_ORG` と `ALLOWED_TEAM` は対で、片方だけの設定は不正（ID のルールに切り替えない。fail closed）。`ALLOWED_USER_IDS` は 1 つでも不正な要素（数字以外・0・重複・空要素）があれば全体が不正で、読み飛ばさない。ID の判定は `GET /user` で取得した `id` で行い、トークンの持ち主の確認（不一致は拒否）は省略しない。ID で通らず、org/team の対が設定されているときだけ team を確認する。拒否の応答と監査（`authz_denied` / `not_team_member`）は team に無い場合と同じ。キャッシュ（TTL 5 分）の振る舞いは変えない。解析と判定は `apps/gateway/src/auth/allowlist.ts` に置く。
-- **呼び出し元の AI による PR の Ready 化とマージ（D9、2026-10-20 決定）**: 従来は「rovo は PR を Draft のまま返し、レビューとマージは親とユーザーが行う」だった。これを「呼び出し元の AI（親）が差分をレビューし、問題が無ければ Ready にする。人のレビューが要るかは組織のポリシー次第なので、要らなければマージまでできる」に変える。
+- **クライアントによる PR の Ready 化とマージ（D9、2026-10-20 決定）**: 従来は「rovo は PR を Draft のまま返し、レビューとマージはクライアントとユーザーが行う」だった。これを「クライアントが差分をレビューし、問題が無ければ Ready にする。人のレビューが要るかは組織のポリシー次第なので、要らなければマージまでできる」に変える。
   - **2026-10-24 の変更（`merge_policy` を `review_policy` に置き換え。非互換）**: 軸を「全体のテストとレビューをどこで行うか」に変えた。`merge_policy`（`human_review` | `agent_merge`）は消し、`task_start` に渡すと `invalid_input`。`review_policy` は `client_review`（既定）| `worker_review`。マージはどちらでもクライアントが行う。**完了（`COMPLETED`）で rovo が PR を自動で Ready にする**（`client_review` のとき）: 終端の処理（`updatePullBody`）の中で、停止確認・最終の push・PR 本文の更新・空の PR の片付けのあとに、`pushedSha` がある Draft の open な PR にだけ、**Installation Token**（終端の処理が他の操作に使うものと同じ）で GraphQL の `markPullRequestReadyForReview` を呼ぶ（node_id は `GET .../pulls/{n}` から読む）。fail-soft: 失敗してもタスクは `COMPLETED` のまま、warn と warning イベント（`auto_ready_failed`）を残し、結果の `warnings` には足さない（`task_pr_merge` を `warnings_present` で止めないため）。`next_steps` が `task_pr_ready` を案内する。冪等で、すでに Ready・閉じている PR には呼ばない。監査は `pr_ready`（`caller: system`、`reason: auto_ready`）。`worker_review` は受け付けるだけで、`task_start` では未対応（近日）として `invalid_input`（実装は次の作業）。`task_pr_merge` は `review_policy` によらず使え、PR が Ready・`head_matches_verified` が true・`warnings` が空に加えて、**PR の head の SHA に付いた GitHub の check がすべて成功**していること（check run は `conclusion` が success / skipped / neutral、`status` が completed。commit status は combined の `state` が success。statuses が 0 件の pending は「無い」とみなす）。失敗は `merge_blocked`（`checks_failing`）、実行中・保留は `merge_blocked`（`checks_pending`）。**check が 1 つも無ければ通す**（厳しくしたい人は GitHub のブランチ保護を使う）。check を読めない（App に Checks / Commit statuses の read 権限が無い〔任意の権限〕、GitHub の障害）ときは、止めずに通し、応答の `warnings` に `checks_unreadable` を入れる（止めるかどうかは GitHub のブランチルールの責務。2026-10-24 の利用者の決定）。以下の D9 の記述のうち `merge_policy`・「Draft のまま返す」・「自動で Ready にするのを退けた」は、この変更で置き換わっている。
   - （2026-10-24 に `review_policy` へ置き換え済み。上を参照）**ポリシーは `task_start` の入力 `merge_policy`（`"human_review"` | `"agent_merge"`、既定 `human_review`）で、TaskDO に保存する**（`task_status`・`task_result` にも返す）。デプロイ全体の env（`PR_MERGE_POLICY` など）にはしない: 組織で使うときは各個人が選べるようにする。fingerprint は既定なら従来の値のまま（保存済みの冪等キーを壊さない）、`agent_merge` のときだけ別のタスクになる。
   - （`merge_policy` の条件は置き換え済み。上を参照）**MCP ツールは 2 つ。入力はどちらも `task_id` が中心で、リポジトリ・PR 番号・sha は呼び出し元から受け取らない**（任意の PR を操作する道具にしない。対象は TaskDO の記録: `github_link` の `pr_number` とブランチから取る）。`task_pr_ready {task_id}`: Draft PR を Ready for review にする。条件は、タスクの所有者であること・status が COMPLETED であること。冪等（すでに Ready なら成功）。`merge_policy` が `human_review` でも使える。`task_pr_merge {task_id, merge_method?: squash|merge|rebase（既定 squash）, delete_branch?: boolean（既定 false）}`: 上の条件に加えて、`merge_policy` が `agent_merge`（`human_review` は `forbidden`）、`task_result` の `head_matches_verified` が true、PR が Ready（Draft のままなら `conflict` で `task_pr_ready` を先に呼ぶよう返す）。GitHub のマージ API に、検証済みの head の sha（`github_link.head_sha`）を `sha` として渡し、検証後にブランチが動いていればマージしない（`head_moved`）。冪等（マージ済みなら成功）。`delete_branch` の削除に失敗してもマージは成功として返し、`warnings` に残す。
@@ -1194,10 +1194,10 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - **GitHub の API**: Draft → Ready は REST に無く、GraphQL の `markPullRequestReadyForReview(input:{pullRequestId})`。node_id は保存せず、その場で `GET /repos/{o}/{r}/pulls/{n}` から読む（このとき PR が TaskDO の記録のブランチ・リポジトリと一致することも確かめる）。マージは `PUT /repos/{o}/{r}/pulls/{n}/merge`（`sha`、`merge_method`）。ブランチの削除は `DELETE /repos/{o}/{r}/git/refs/heads/{branch}`（記録の作業ブランチだけ）。
   - **エラーコードの追加**: `merge_blocked`（GitHub が 405 / 422 でマージを拒否: ブランチ保護など）、`head_moved`（409、または検証済みの sha と PR の head が違う）、`github_rejected`（その他の GitHub の拒否）。権限の不足は `forbidden`、トークンの失効は `reauth_required`、一時的な障害は `upstream_unavailable`。
   - **監査**: `pr_ready` / `pr_merged` / `pr_denied`（`taskId`・`userId`・`review_policy`、`pr_denied` は `kind`（ready | merge）と固定の `reason`）。冪等な再実行（すでに Ready・マージ済み）では出さない。
-  - （流れは 2026-10-24 に置き換え済み。上を参照）**AI への伝え方**: MCP の initialize の応答の `instructions` に、使い方の全体の流れ（task_start → task_wait / task_status → task_result → 差分のレビュー → task_pr_ready → `agent_merge` なら task_pr_merge、`human_review` なら人のレビューを待つ）を書く。`task_result` の応答に `next_steps`（status・`merge_policy`・PR の draft 状態・`head_matches_verified` から決まる案内文）と `merge_policy`、`pr.draft`・`pr.merged` を足す。レビューで問題が見つかったときは、`task_steer`（実行中専用）ではなく新しいタスクで頼む: `base_ref` に PR のブランチ `agent/task-<id>`、`base_sha` に `pr.head_sha` を指定すると、その PR に積む形で続けられる。ポリシーを説明文だけに頼らない: 条件の検査は TaskDO と GitHub がサーバー側で行う。子エージェントの system prompt の `<no_push>` 節には「Draft PR は gateway が作る（子は作らない）」と書き、子の summary が「PR を作っていない」と誤解させないようにする。
+  - （流れは 2026-10-24 に置き換え済み。上を参照）**AI への伝え方**: MCP の initialize の応答の `instructions` に、使い方の全体の流れ（task_start → task_wait / task_status → task_result → 差分のレビュー → task_pr_ready → `agent_merge` なら task_pr_merge、`human_review` なら人のレビューを待つ）を書く。`task_result` の応答に `next_steps`（status・`merge_policy`・PR の draft 状態・`head_matches_verified` から決まる案内文）と `merge_policy`、`pr.draft`・`pr.merged` を足す。レビューで問題が見つかったときは、`task_steer`（実行中専用）ではなく新しいタスクで頼む: `base_ref` に PR のブランチ `agent/task-<id>`、`base_sha` に `pr.head_sha` を指定すると、その PR に積む形で続けられる。ポリシーを説明文だけに頼らない: 条件の検査は TaskDO と GitHub がサーバー側で行う。ワーカーの system prompt の `<no_push>` 節には「Draft PR は gateway が作る（ワーカーは作らない）」と書き、ワーカーの summary が「PR を作っていない」と誤解させないようにする。
   - **退けた案**: 呼び出し元の `gh` を使わせる（`gh` の無い環境で使えず、ポリシーを強制できないため）。デプロイ全体の `PR_MERGE_POLICY`（組織の中でも個人が選べるようにしたいため）。（「rovo が完了時に自動で Ready にする」は退けていたが、2026-10-24 に採用した。上を参照）
   - GitHub App の権限は変えない（Pull requests: Read and write、Contents: Read and write のまま足りる。`docs/deploy.md`）。受入は `acceptance.md` の 21 節。
-- **モデルの選択・予算の確認・consult（D10、2026-10-20 決定）**: 呼び出し元の AI が、タスクの難しさに合わせて子のモデルを選び、残りの予算を確かめ、設計の相談やレビューのセカンドオピニオンを 1 回で得られるようにする。
+- **モデルの選択・予算の確認・consult（D10、2026-10-20 決定）**: クライアントが、タスクの難しさに合わせてワーカーのモデルを選び、残りの予算を確かめ、設計の相談やレビューのセカンドオピニオンを 1 回で得られるようにする。
   - **単価はカタログから取る**。手書きの単価表（`apps/agent/src/agent/pricing.ts` の `MODEL_PRICES`）をやめ、pi-ai の Cloudflare AI Gateway カタログ（`providers/data/cloudflare-ai-gateway.json`。api 名の下にモデルがあり、各モデルに `cost{input,output,cacheRead,cacheWrite,tiers[]}`・`contextWindow` がある）から、明示の許可リストの id だけを取り出す。許可リストと「rovo の id → カタログの id」の対応は 1 か所（`packages/models` の `MODEL_CATALOG_IDS`。gateway と agent が共有する workspace package）。初期値は `anthropic/claude-haiku-5-5`・`sonnet-5-5`・`opus-5-5`・`fable-5-1`、`openai/gpt-6-luna`・`gpt-6-sol`・`gpt-6-astra`。rovo の id は `<プロバイダー>/<カタログの id>`（AI Gateway の specifier と同じ形）。カタログに無い・cost が無い・読めない tier があるモデルは「単価が分からない」ので使えない（fail closed）。
   - **JSON は直接 import できない**（pi-ai の `exports` は `./providers/*` → `dist/providers/*.js` だけで、`.json` は解決しない）。同じ内容を平坦化した `@earendil-works/pi-ai/providers/cloudflare-ai-gateway.models`（`agents/models/pi-ai` が使うのと同じ経路。バンドル・型検査が通る）の `CLOUDFLARE_AI_GATEWAY_MODELS` を読み、`packages/models` が実行時に形を検証して許可リストの id だけを取り出す。平坦化は id をキーにするので、api をまたいで同じ id があれば後勝ちになる。unit テストで api が期待どおり（claude は `anthropic-messages`、gpt-6 は `openai-responses`）であることも固定する。
   - **tier はキャッシュの単価まで持つ**（`inputTokensAbove` を超える呼び出しの `input`・`output`・`cacheRead`・`cacheWrite`）。以前の手書きの haiku は tier の `cacheRead` / `cacheWrite` が抜けていて、入力の見積り（`estimateCallCostUsd`: input と cacheWrite の高い方の最大値）が 100k 超で $0.5/M と過少だった（正しくは cacheWrite の $0.625/M）。これを直した。費用の計算 `computeCostUsd` は pi-ai の `calculateCost` と同じ規則（入力側の合計 = input + cacheRead + cacheWrite が `inputTokensAbove` を超えたら、いちばん高いしきい値の tier を全体に使う）。`ENVIRONMENT=test` の scripted モデルの単価 `TEST_MODEL_PRICES` は残す（cacheRead $0.1・cacheWrite $1.25 を足した。台本の usage にキャッシュが無ければ費用に影響しない）。
@@ -1263,30 +1263,30 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - **BYOK を CLI で登録する**（`mise run byok -- <anthropic|openai>`）: Cloudflare API の `POST /accounts/{accountId}/ai-gateway/gateways/{ai_gateway_id}/provider_configs`（body `{ provider_slug, alias: "default", default_config: true, secret }`）。`accountId` は `rovo.config.json`、ゲートウェイの id は `deploy/infra.json`、認証は env の `CLOUDFLARE_API_TOKEN`（Terraform 用）。キーは隠した入力（TTY の echo を切る）で受け取り、引数・env・ログ・ファイルに出さない。既に `default` があれば list で確かめて上書き（`PUT .../provider_configs/{id}`）するかを聞く。403 のときは必要な権限（AI Gateway Edit、Secrets Store の可能性）を案内して止まる。`setup` は案内だけで自動では実行しない（キーの入力が要る）。
   - **退けた案**: client secret / pem を一時ファイルに書いて既存の `--pem` に渡す（ディスクに残る）。secret を env で渡す（プロセスの環境に残る）。キーを引数で渡す（プロセス一覧に見える）。BYOK を `setup` の中で自動実行する（キーの入力が要る）。
   - **未確認（実機）**: GitHub が manifest を受理するか（`redirect_url` が loopback の http で通るか）、User-to-server token expiration の既定、BYOK の API が body の `secret` を直接受けるか（docs には Secrets Store に `{gateway_id}_{provider_slug}_{alias}` の名前で先に secret を作る手順もある）、Terraform 用トークンの権限で足りるか（Secrets Store）、上書きが `PUT .../provider_configs/{id}` でよいか。
-- **Sandbox コンテナの大きさを指定できるようにする（D13、2026-10-20 決定）**: 本番の利用者から、子の Sandbox で `npm test` がローカルの約 80 倍遅く（2.2 秒 → 171 秒）、`npm ci` も 190 秒かかり、途中で「Network connection lost」でコンテナが再起動して（`sandbox_restarts: 1`）`node_modules` が消えた、と報告があった。原因は、`scheduling_policy: durable_object` のとき wrangler の `instance_type` が効かず、SandboxDO の `ctx.container.start()` が `instance` を指定していないため、既定の `lite`（1/16 vCPU、256 MiB、2 GB）で動いていたこと。再起動はメモリ不足の可能性が高い（推測。下の「再起動の理由」）。
+- **Sandbox コンテナの大きさを指定できるようにする（D13、2026-10-20 決定）**: 本番の利用者から、ワーカーの Sandbox で `npm test` がローカルの約 80 倍遅く（2.2 秒 → 171 秒）、`npm ci` も 190 秒かかり、途中で「Network connection lost」でコンテナが再起動して（`sandbox_restarts: 1`）`node_modules` が消えた、と報告があった。原因は、`scheduling_policy: durable_object` のとき wrangler の `instance_type` が効かず、SandboxDO の `ctx.container.start()` が `instance` を指定していないため、既定の `lite`（1/16 vCPU、256 MiB、2 GB）で動いていたこと。再起動はメモリ不足の可能性が高い（推測。下の「再起動の理由」）。
   - **agent の var `SANDBOX_INSTANCE`** を `start()` の `instance` に渡す。受け付けるのは名前付きの 5 種類（`lite` / `standard-1` / `standard-2` / `standard-3` / `standard-4`）だけ。**既定は `standard-2`**（1 vCPU、6 GiB、12 GB。ユーザーの決定）。不正な値・空は `standard-2` に戻し、警告のログだけ出す（起動はエラーにしない。`MODEL_EFFORTS` と同じ流儀）。一方、デプロイ設定の生成器（`deploy:config`）は、`rovo.config.json` の `sandbox.instance` が 5 種類以外ならエラーにする（デプロイ前に気づけるため）。カスタムの `{vcpu, memoryMib, diskMb}` は扱わない。
   - **単価は大きさから決める**: 表（大きさごとの vCPU・メモリ・ディスクと、Containers の単価）は `packages/models/src/sandbox.ts` の 1 か所。`sandboxUsdPerHour(instance)` が CPU 100% 稼働の上限側で 1 時間あたりを計算し、小数 4 桁に**切り上げる**（少なく数えない）。`standard-2` は `1*3600*0.00002 + 6*3600*0.0000025 + 12*3600*0.00000007 = $0.129024` → `0.1291`。この単価を使うのは gateway（要約の `sandbox_usd_estimate`）だけで、agent は使わない。gateway の `SANDBOX_USD_PER_HOUR` の既定は `standard-2` の値で、明示の値があればそれを優先する（上書きできる）。`deploy:config` は `sandbox.instance` から agent の `SANDBOX_INSTANCE` と gateway の `SANDBOX_USD_PER_HOUR` の両方を決める（`vars.gateway.SANDBOX_USD_PER_HOUR` を書けばそれを優先）。gateway と agent は別 Worker で、gateway は agent の `SANDBOX_INSTANCE` を読めないので、デプロイ設定で揃える。
   - **再起動の理由（調査）**: Workers の `Container` API は終了コードも OOM かどうかも返さない（`monitor()` は `Promise<void>`、`inspect()` は labels と image だけ）。SandboxDO が分かるのは「動いているはずのコンテナが止まっていて、`start` し直した」ことだけ（`restarts` に数えている）。メモリ不足（exit 137）と他の停止（Network connection lost など）を区別して記録することはできないので、新しいイベントは足さない。大きさを上げて再発するかで切り分ける。
   - **退けた案**: wrangler の `instance_type`（`durable_object` では効かない）。大きさをタスクごとに選ばせる（この時点では退けた。次の「Sandbox の大きさの使い分け」で改めて入れた）。単価を agent も持つ（agent は使わない）。
 - **Sandbox の大きさの使い分けと、必要になるまで起動しない（D13 の続き、2026-10-20 決定）**: 実測で、`standard-2`（1 vCPU）では gateway の unit が 4〜5 分かかる（18 コアの手元では 13 秒）。一方、編集だけ・web 検索だけのタスクに大きな Sandbox は要らない。動いているコンテナの大きさは変えられないので、大きさは起動のときに決める。第一段階として次を入れた（後段の「小さく起動し、重いコマンドの初回でスナップショットを取って大きい Sandbox で起動し直す（昇格）」は、まだ入れていない）。
-  - **必要になるまで Sandbox を起動しない（lazy boot）**: 以前は `start` の直後（`AgentDO.doLaunch`）に `SandboxDO.ensureReady` を呼んでから子を走らせていた。今は `doLaunch` は子を走らせるだけで、**子が最初に Sandbox を使うツール（ファイルの読み書き・コマンドの実行・git など = `SandboxPort` の `exec` / `readFile` / `writeFile`）を呼んだとき**に `AgentDO.ensureSandboxReady` が `ensureReady` を呼ぶ（同時の呼び出しは 1 つを共有。起動済みの印は `sandbox_booted`）。依存キャッシュ（D14）の待ち・復元、ブランチの clone、傍受の登録は、従来どおり `ensureReady`（起動）の中でまとめて行う（順序は変えない）。起動の失敗は、**rovo の側で**最大 3 回まで再試行し（`setup_attempts` を永続化。間隔は 5 秒。呼んだツールはその間待つ）、3 回とも失敗したら、モデルを介さずに `sandbox_setup_failed` で終える（以前は tick job が再試行していた。モデルに失敗を見せて判断させない）。起動を試みて失敗したタスクは、下の「起動せずに完了」の近道の対象にしない。`sandbox_runtime_ms` は SandboxDO がコンテナを動かした時間を数えるので、起動しなければ 0。`web_search` / `web_fetch` だけで進むタスクは Sandbox を起動しない。
+  - **必要になるまで Sandbox を起動しない（lazy boot）**: 以前は `start` の直後（`AgentDO.doLaunch`）に `SandboxDO.ensureReady` を呼んでからワーカーを走らせていた。今は `doLaunch` はワーカーを走らせるだけで、**ワーカーが最初に Sandbox を使うツール（ファイルの読み書き・コマンドの実行・git など = `SandboxPort` の `exec` / `readFile` / `writeFile`）を呼んだとき**に `AgentDO.ensureSandboxReady` が `ensureReady` を呼ぶ（同時の呼び出しは 1 つを共有。起動済みの印は `sandbox_booted`）。依存キャッシュ（D14）の待ち・復元、ブランチの clone、傍受の登録は、従来どおり `ensureReady`（起動）の中でまとめて行う（順序は変えない）。起動の失敗は、**rovo の側で**最大 3 回まで再試行し（`setup_attempts` を永続化。間隔は 5 秒。呼んだツールはその間待つ）、3 回とも失敗したら、モデルを介さずに `sandbox_setup_failed` で終える（以前は tick job が再試行していた。モデルに失敗を見せて判断させない）。起動を試みて失敗したタスクは、下の「起動せずに完了」の近道の対象にしない。`sandbox_runtime_ms` は SandboxDO がコンテナを動かした時間を数えるので、起動しなければ 0。`web_search` / `web_fetch` だけで進むタスクは Sandbox を起動しない。
   - **起動していない間の扱い**: 質問（`ask_parent`）は、未 commit の確認と期限の延長・設定をしない（守るコンテナもトークンも無い。起動するときの期限は、そのときの `deadlineAt()` から作る）。完了の申告（`report_completion`）は、**検証コマンドが無く、Sandbox を一度も起動しておらず、起動に失敗した試みも無ければ**、確かめるものが無いので起動せずに完了とする（作業ブランチは出発点 `initialSha` のままで、リモートも同じ。push も同期もしない）。検証コマンドがあれば、検証のために起動する。終端の patch の取得も、起動していなければ空の patch として扱い、起動しない。cancel・期限・予算の終端は従来どおり `terminate` を呼ぶ（起動していない Sandbox も終端にして、あとから起動されないようにする）。lazy boot の前に始まったタスク（`lazy_boot` の印が無く、投入済み）は、起動済みとして扱う（デプロイをまたぐ実行中のタスクの patch を失わないため）。
   - **`task_start` の `sandbox_instance`（任意）**: `standard-1` / `standard-2` / `standard-3` / `standard-4` だけ（**`lite` は選べない**。メモリ不足で落ちた実績がある。選べる集合は `packages/models` の `SELECTABLE_SANDBOX_INSTANCES` が出どころで、gateway の入力の検証と `sandbox_instances_list` の `selectable` が同じ集合から導く）。lite・未知の値は `invalid_input`。省略時は従来どおり agent の env の `SANDBOX_INSTANCE`。指定したら、そのタスクの間はずっとその大きさ（TaskSpec に `sandboxInstance` がある = 利用者が明示した。後段の自動の昇格もしない）。fingerprint は指定したときだけ足す（`model` の v4 と同じ流儀。省略した入力の fingerprint は変わらない。指定があれば v5 として `model`（無ければ null）の後ろに足す）。経路は `TaskSpec.sandboxInstance` → `WorkspaceSpec.instance` → `SandboxDO.boot` の `start({instance})`（`spec.instance` が env の既定より優先）。AgentDO と SandboxDO も `standard-1〜4` 以外を拒否する（fail-closed）。**依存キャッシュを作るコンテナ（`deps-<key>`）の大きさは既定のまま**（キャッシュはタスクの大きさに依らず共有されるので、変えない）。
   - **実際の大きさと費用**: SandboxDO は `start()` に渡した大きさを `instance` に覚え、`SandboxMetrics.instance` → `usage.sandbox.instance` → 公開の usage イベントの `sandbox_instance`（packages/models の表にある名前だけ通す）として gateway へ届く。`task_result` の `usage.sandbox_instance` に、**実際にコンテナを起動した大きさ**を返す（Sandbox を起動しなかったタスクには付かない）。`task_status` の `sandbox_instance` は、`task_start` で明示した値（省略したタスクは `null` = 既定）。要約（`task_summary`）の `sandbox_usd_estimate` は、報告された大きさの単価（`sandboxUsdPerHour`）で計算する（`summary.sandbox.instance` と、使った単価 `unit_prices.sandbox_usd_per_hour` も残す）。大きさが報告されなかったタスク（起動しなかった・古い agent）は、従来どおり `SANDBOX_USD_PER_HOUR`（既定は `standard-2`）。gateway にも var `SANDBOX_INSTANCE`（agent と同じ値。`deploy:config` が `sandbox.instance` から両方に入れる）を足した。`sandbox_instances_list` の `default` を決めるためで、単価の計算には使わない。
   - **`sandbox_instances_list`（MCP ツール）**: 入力なし。`{instances: [{name, vcpu, memory_gib, disk_gb, usd_per_hour, default, selectable}]}`。値は `packages/models` の表と `sandboxUsdPerHour` から作り、数値を二重に持たない（`task_start` の説明に数値は書かず、このツールを案内する）。`default: true` は gateway の `SANDBOX_INSTANCE`（不正な値・未設定は `standard-2`）。`lite` は `selectable: false`。
-  - **子のシステムプロンプト**: `dependencies` の節が `SECTION_KEYS`（`pi/extension.ts`）に無く、実際のプロンプトに出ていなかったので足した（Pi の section は生成のたびに再評価され、内容が変わると後ろに足される）。起動前（`deps_cache` が未確定）は「最初のコマンドの前に導入される（キャッシュが使えれば速い）」と書き、`hit` / `built` が分かったら従来の「導入済み」の文になる。`testing` の節も足した。TDD の途中は、変更したファイルに関係するテストだけを流し（例 `vitest run <file>`）、全体のテストは完了報告の前に 1 回だけ流す。ファイルの末尾の改行を保つ。
+  - **ワーカーのシステムプロンプト**: `dependencies` の節が `SECTION_KEYS`（`pi/extension.ts`）に無く、実際のプロンプトに出ていなかったので足した（Pi の section は生成のたびに再評価され、内容が変わると後ろに足される）。起動前（`deps_cache` が未確定）は「最初のコマンドの前に導入される（キャッシュが使えれば速い）」と書き、`hit` / `built` が分かったら従来の「導入済み」の文になる。`testing` の節も足した。TDD の途中は、変更したファイルに関係するテストだけを流し（例 `vitest run <file>`）、全体のテストは完了報告の前に 1 回だけ流す。ファイルの末尾の改行を保つ。
   - **後段の昇格に向けて**: 昇格は「明示されていないタスク（`TaskSpec.sandboxInstance` が無い）だけ」が対象になる前提。lazy boot で、最初の Sandbox 使用が起動の唯一の入口（`ensureSandboxReady`）になったので、昇格の判断（コマンドの前に Clef が判断する）もこの入口の近くに置ける。
-  - **昇格（2026-10-21 に規則で入れ、2026-10-22 に Clef に一本化。小さく始めて、コマンドの前に Clef が「足りない」と判断したら大きい Sandbox へ）**: 動いているコンテナの大きさは変えられない。実験で、`standard-2` で作ったスナップショットを `standard-3` で `start({ containerSnapshot, instance })` で戻せることを確かめた（スナップショットはイメージの版に結び付き、大きさには結び付かない。`node_modules` のネイティブのバイナリも動いた）。起動の既定は `standard-2` のまま。**判断は Workers AI の決定モデル Clef（`@cf/cloudflare/clef-flash`。曖昧なときだけ `@cf/cloudflare/clef`）だけが行う（ユーザー承認）**。コマンドの種類を表で判定する規則（旧 `heavy-command.ts`）・子が呼ぶツール `sandbox_scale_up`・検証コマンドの `heavy: true` による強制昇格は削除した。昇格の手順（下の「手順」）は旧来のまま。
-    - **なぜ Clef に一本化したか**: 規則（argv のパターン）は表に無い重い処理（`make ci`、独自スクリプト）を見逃し、軽い `npm test` を誤検知する。子に判断させる `sandbox_scale_up` は、判断が子の自己申告に依り、ツールが増え、規則との二重管理（保険の的中の数え方など）が複雑だった。コマンドと「並列の手がかり」を見て判断する決定モデルなら、`vitest` の `maxWorkers` や `make -j` の指定まで読んで、2 vCPU で足りるか 4 vCPU が効くかを選び分けられる。
+  - **昇格（2026-10-21 に規則で入れ、2026-10-22 に Clef に一本化。小さく始めて、コマンドの前に Clef が「足りない」と判断したら大きい Sandbox へ）**: 動いているコンテナの大きさは変えられない。実験で、`standard-2` で作ったスナップショットを `standard-3` で `start({ containerSnapshot, instance })` で戻せることを確かめた（スナップショットはイメージの版に結び付き、大きさには結び付かない。`node_modules` のネイティブのバイナリも動いた）。起動の既定は `standard-2` のまま。**判断は Workers AI の決定モデル Clef（`@cf/cloudflare/clef-flash`。曖昧なときだけ `@cf/cloudflare/clef`）だけが行う（ユーザー承認）**。コマンドの種類を表で判定する規則（旧 `heavy-command.ts`）・ワーカーが呼ぶツール `sandbox_scale_up`・検証コマンドの `heavy: true` による強制昇格は削除した。昇格の手順（下の「手順」）は旧来のまま。
+    - **なぜ Clef に一本化したか**: 規則（argv のパターン）は表に無い重い処理（`make ci`、独自スクリプト）を見逃し、軽い `npm test` を誤検知する。ワーカーに判断させる `sandbox_scale_up` は、判断がワーカーの自己申告に依り、ツールが増え、規則との二重管理（保険の的中の数え方など）が複雑だった。コマンドと「並列の手がかり」を見て判断する決定モデルなら、`vitest` の `maxWorkers` や `make -j` の指定まで読んで、2 vCPU で足りるか 4 vCPU が効くかを選び分けられる。
     - **実験の根拠（2026-10-22。生データはリポジトリに入れない）**: 質問は英語で、`criteria.true` / `criteria.false` を必須にする。3 問（重さ: `score` 0〜3 の P(2)+P(3) / 大きさ: `choice` の `standard-2` / `3` / `4` / 4 vCPU で 2 vCPU より明らかに速いか: `noul`）を **1 リクエストにまとめる**（出力は無料なので、まとめても費用は増えない）。state は JSON（コマンド・argv・cwd・今の大きさ・各大きさの vCPU とメモリ・リポジトリの文脈・直近 3 件のコマンド・並列の手がかり）。直近 8 件の履歴は逆効果だったので 3 件。手がかりありの flash で、大きさの一致は 85〜92%、3 と 4 の選び分けは 52 件中 46〜49 件。手がかりなしでは 3 と 4 を選び分けられない。flash の往復は中央値 約 350 ms・p95 約 1 秒。実装した質問と state の形で実際の Clef-flash を 20 回ほど呼んで、応答の形（`answers.weight.probabilities` の `"0"`〜`"3"`、`answers.size.probabilities`、`answers.beyond2.noul`、`usage.input_tokens`。入力は 830〜900 tokens）と、軽いコマンド（`ls`・`git status`）の重い確率が 0.06〜0.20、`make -j4` が 0.54〜0.58、`cargo build --release` が 0.83 になることを確かめた。一方、`pnpm test`（`maxWorkers: 4`）は 0.29〜0.43 と曖昧な帯に入り、clef での聞き直しになる（閾値 0.5 では上げ損ねやすい傾向がある。下の「残る課題」の閾値の見直しを参照）。`weight`（score）の質問文には、実験の文（`How CPU-heavy is the shell command in the state when run on a single CPU core?`）に `Take its parallelism settings into account.` を足した（同じ 10 件で、重い確率が 0.1 ほど高く出たため）。本番の実測（大きさを固定したベンチマーク）: CPU だけの並列処理は `standard-3` で 2.0 倍、`standard-4` で 3.5〜3.9 倍。gateway の vitest（1 つの workerd を共有する）は `standard-3` で 1.42 倍、`standard-4` でも 1.48 倍で頭打ち。**以前の「4 vCPU にしても速くならない」は vitest 固有の結果で、一般には当てはまらない**（並列に動く処理は `standard-4` で速くなる）。そのため `standard-4` は「速くならない」ではなく「並列の手がかりがあるときに選ぶ」大きさとして扱う。
-    - **誰のコマンドを判断するか（出自）**: `ExecOptions.origin`（`agent_command` = 子の `bash` ツール、`verification` = 検証コマンド）が付いた `exec` だけが対象。Sandbox 自身の内部の `exec`（AgentDO の git・ファイルの確認・依存キャッシュの作成など）は `origin` が無く、聞かない（毎回 0.4〜1 秒の往復と serial の占有を避ける）。**これは「誰が実行するコマンドか」の区別で、「何が重いか」の規則ではない**（重さの判断は一切しない）。聞かない場合: `task_start` で `sandbox_instance` を明示したタスク（`fixed_instance` を 1 回だけ残す）、`SANDBOX_MAX_INSTANCE` が空・`off`、今の大きさがすでに上限、`AI_GATEWAY_ID` が空または `ai` バインディングが無い（警告のログ。今の大きさのまま実行する）。
+    - **誰のコマンドを判断するか（出自）**: `ExecOptions.origin`（`agent_command` = ワーカーの `bash` ツール、`verification` = 検証コマンド）が付いた `exec` だけが対象。Sandbox 自身の内部の `exec`（AgentDO の git・ファイルの確認・依存キャッシュの作成など）は `origin` が無く、聞かない（毎回 0.4〜1 秒の往復と serial の占有を避ける）。**これは「誰が実行するコマンドか」の区別で、「何が重いか」の規則ではない**（重さの判断は一切しない）。聞かない場合: `task_start` で `sandbox_instance` を明示したタスク（`fixed_instance` を 1 回だけ残す）、`SANDBOX_MAX_INSTANCE` が空・`off`、今の大きさがすでに上限、`AI_GATEWAY_ID` が空または `ai` バインディングが無い（警告のログ。今の大きさのまま実行する）。
     - **判断の流れ**（`apps/agent/src/sandbox-scale-decision.ts`。純粋関数と、AI.run を引数で受け取る判定）: (1) flash に 3 問を聞く。(2) **重い確率（P(2)+P(3)）< 0.5 なら上げない**。重いなら、4 vCPU で速い確率（`noul`）>= 0.4 で `standard-4`、そうでなければ `standard-3`。いずれも上限の範囲で、今の大きさより大きいときだけ（上げるだけ。下げない）。(3) flash の確率が**曖昧な帯**（重い確率が 0.2〜0.7、または、重いと判断して `standard-4` に届きうるときの 4 vCPU の確率が 0.2〜0.5）のときだけ、clef で聞き直し、**flash と clef の重い確率の大きいほうが 0.5 以上なら上げる**（clef が失敗したら flash だけ。0.7 を超えれば flash だけで上げる。4 vCPU の確率は clef の答え）。clef が失敗したら flash の答えを使い、3 と 4 で迷うときは `standard-3` に倒す（4 に上げ損ねても損は小さい。CPU は使った分だけ課金）。上記の閾値は実験で調整した値で、同じデータで調整したので、env `SANDBOX_CLEF_THRESHOLDS`（`heavy=0.5,four=0.4,heavy_band=0.3-0.7,four_band=0.2-0.5` の形。書いたキーだけ上書き。不正な値は既定に戻して警告）で変えられるようにしてある。何回でも上げられる（2 → 3 → 4）。上限は env `SANDBOX_MAX_INSTANCE`（`rovo.config.json` の `sandbox.maxInstance`。既定 `standard-4`。空・`off` で Clef による昇格を無効）。旧 `SANDBOX_HEAVY_INSTANCE` と `SANDBOX_AGENT_MAX_INSTANCE`（`sandbox.heavyInstance` / `sandbox.agentMaxInstance`）はこの 1 つにまとめた。
     - **Clef の呼び出し**: agent の既存の `ai` バインディングと `AI_GATEWAY_ID` を使う（Workers AI は BYOK 専用の AI Gateway でも通る）。**新しいバインディングも secret も足さない**（デプロイを簡単に保つ）。AI Gateway の metadata は web の `safety/clef.ts` にならい `caller: "sandbox_scale"` と `taskId`（`SandboxDO` は `userId` を持たないので入れない。`WorkspaceSpec` を増やさない）。失敗（例外・時間切れ・想定外の応答）は 1 回 5 秒・最大 3 回・合計 20 秒まで再試行し、それでも駄目なら今の大きさのまま実行する（fail-soft）。数秒の遅延は許容する。`@cf/cloudflare/clef-flash` の窓（24,576 tokens）を超える state は AI.run が例外にするので、state は各部分を切り詰めて数千 tokens に収める。
     - **並列の手がかり（事実の収集。規則ではない）**: コマンドの cwd と、その上の git のルートから、決まったファイル（`package.json` の `packageManager` / `workspaces` / `scripts`、vitest / jest / playwright / mocha の設定、`pyproject.toml` / `pytest.ini` / `setup.cfg`、`Cargo.toml` / `.cargo/config.toml`、`Makefile`、`gradle.properties`、`.bazelrc`、`turbo.json`、`nx.json` など）と、ロックファイルなどの有無を、**コンテナ内の node のスクリプト（`SCALE_FACTS_SCRIPT`）が生のテキストのまま**読む（実験では、生のテキストが JSON に整形したものと同等以上だった）。1 ファイル 1,500 文字・全体 6,000 文字まで。通常のファイルだけ（シンボリックリンクは辿らない）。**ファイルの一覧は「何を読むか」で、「何が重いか」の規則ではない。どのファイルが大事か・並列がいくつかの判断は Clef に任せる**（ユーザーは静的な判断を消すことを求めた）。タスクの中で一度集めて SandboxDO の storage に覚える（cwd ごとに最大 3 つ、10 分。集められなければ空で、覚えずに次回また試す）。**リポジトリの中身は非信頼のデータ**で、質問の側には混ぜず state にだけ入れる。悪意のある設定が Clef の答えを歪めても、影響は**大きさの選択だけ**で、上限（既定 `standard-4`）が費用を抑える（コマンドの実行・秘密・権限には及ばない）ので許容する。秘密らしい値は、コマンド・リポジトリの事実・直近のコマンドのすべてから伏せる（`maskSecrets`）。**既知の形式（`ghp_` や `sk-` など）だけで、`NPM_TOKEN=xxx` のような汎用の値は伏せられず、同じアカウントの Workers AI（AI Gateway 経由）に渡る**（既知の限界）。
     - **手順**: (a) 作業ツリーの指紋（HEAD・追跡ファイルの差分・追跡されていないファイルのハッシュ。`PROMOTE_STATE_SCRIPT`）を取る → (b) `snapshotContainer({name: promote-<task>-<回数>})`（2 分で打ち切り。名前は回数ごとに別で、重複の扱いに頼らない）→ (c) コンテナを破棄 → (d) `start({containerSnapshot, instance: 昇格先})` → (e) 傍受の登録・exec の応答・CA 証明書・指紋の一致を確かめ、基準プロセスを記録し直す → 元のコマンド。コンテナの作り直し（`restarts`）には数えない。以降の作り直しは最終の大きさで起動する（`boot` の大きさの解決は spec.instance → 昇格先 → env の既定）。昇格の失敗時は、最初の大きさではなく**今の大きさ**で起動し直す。実行中のコマンドとは `exec` と同じ直列（`serial`）で競合しない。
     - **fail-soft と理由コード**（`packages/models` の `SANDBOX_PROMOTION_REASONS`）: スナップショットが使えない・失敗 → 破棄せず小さいまま（`snapshot_unsupported` / `snapshot_failed` / `state_unreadable`）。昇格先の起動・確認に失敗 → 同じスナップショットで元の大きさに起動し直す（`start_failed` / `cert_missing` / `workspace_mismatch`）。それも失敗 → image からの起動に乗せて「再起動した」例外（`fallback_failed`）。昇格の途中の terminate は、起動したコンテナを残さず terminated の結果を返す。Clef の失敗は上記のとおり今の大きさのまま実行し、`promotion_failures` には混ぜず別に数える（`sandbox_scale_clef_failures`）。`already_large` は、上限に達していれば Clef を呼ばなくなったので付かない（古いタスクの記録としてだけ残る）。
     - **結果と費用**: `SandboxMetrics` に `promotedTo` / `promotedAt` / `runtimeMsBeforePromotion` / `promotionReason` / `promotions` / `promotionFailures`（既存の意味は変えない）→ 公開の usage イベントと `task_result` の `usage.sandbox_promoted_to` / `sandbox_promoted_at` / `sandbox_runtime_ms_before_promotion` / `sandbox_promotion_reason` / `sandbox_promotions`（`trigger` は `clef`）/ `sandbox_promotion_failures`。`usage.sandbox_instance` は最初の大きさのまま。`task_summary` の `sandbox_usd_estimate` は、大きさごとの区間（`sandbox_segments`）の時間 × その大きさの単価の合計。`sandbox_instances_list` の `auto_scale_max` が上限（旧 `promotion_target` と `agent_max` は 1 つにまとめた）。Sandbox の費用を予算に含めない扱いは変えない。依存キャッシュを作るコンテナ（`deps-<key>`）は昇格しない。
-    - **振り返りの記録（usage。ユーザーは Clef の精度を後で振り返りたい。規則との比較の代わりに、判断ごとに残す）**: SandboxDO が判断のたびに記録を足す（直近 50 件。古い方から捨てる。storage の kv `scale_log`）: 判断した時刻・その時の大きさ（`from`）・判断の結果の大きさ（`to`。変えなければ `null`）・確率（`heavy` / `fast4` / `choice`）・使ったモデル（`flash` / `clef`）・Clef の所要（`clef_ms`）・そのコマンドの実行時間（`cmd_ms`。昇格の時間は含まない）と終了コード（`exit_code`）・コマンドの先頭の語（`cmd`。`argv[0]` の basename を 24 文字まで。子の bash ツールと検証コマンドは `bash -c "<コマンド>"` / `sh -c`（`-lc` なども）の形で exec されて `argv[0]` が常に `bash` になるので、この形のときはコマンド文字列の先頭の語を使う。環境変数の代入（`FOO=1`）・`cd <dir> &&`・前置き（`env` / `timeout` / `time` / `nice` など）は単純な規則で読み飛ばし、読めなければ（引用符・`$(` が閉じない、代入だけで区切りの後ろ、前置きの引数が想定外、コマンド名らしくない・秘密らしい語など）迷わず `argv[0]`（`bash`）に戻す。**先頭の語だけで、argv の全体・コマンド文字列は残さない**）。Clef が失敗した判断は `failed: true` で、確率とモデルが無い。集計（`scaleStats`。捨てずに数え続ける）: 判断の回数・上げた回数・Clef の失敗回数・上げなかったのに 60 秒を超えたコマンドの数。**TaskDO の storage の大きさに配慮**し、記録の一覧は終端の確定のときだけ AgentDO の usage に載せ（`runtimeMs` と同じ扱い。途中で usage イベントを増やさない）、gateway は**公開の usage イベントには集計の数値だけ**（`sandbox_scale_decisions` / `sandbox_scale_raised` / `sandbox_scale_clef_failures` / `sandbox_scale_slow_not_raised` / `sandbox_scale_skipped_light`（明らかに軽いコマンドで Clef を呼ばなかった回数。`isLightCommand`（apps/agent/src/scale-cmd.ts）が、表にある読み取り系の語だけの `bash -c` を true にする。表は「聞かない」の判定だけで、上げる規則ではない。迷う形は false にして Clef に聞く。判断の記録 `sandbox_scale_log` は増やさない）。`usage_public` に覚える数値）を載せ、一覧は `task_result` の `usage.sandbox_scale_log` にだけ出す（`getResult` の usage から。最大 50 件で約 7 KB）。`task_summary` の `sandbox.scale` も集計だけ。 **`task_wait` の usage イベントでも、`sandbox_promotions` / `sandbox_promotion_failures` は `task_result` の usage と同じく配列で返す**（TaskDO の保存形は payload がプリミティブだけなので JSON 文字列のままで、gateway の service 層が返すときに配列へ戻す）。`sandbox_segments` は `task_summary`（`summary.json`）だけの項目で、usage には出さない（区間は `sandbox_promotions` と `sandbox_runtime_ms` から導ける）。既存の `sandbox_promotions` の `trigger` に `clef` を足し、`sandbox_segments`・`sandbox_promotion_failures` は維持する。**古いタスクの記録（`trigger` の `agent` / `rule` / `verification`、`rule_match`、`sandbox_heavy_commands_*`）は、gateway の sanitize・`summary.ts` で読めるまま残す**（`rule_match` は表を削除したので、小文字で始まる短い名前だけを通す）。
+    - **振り返りの記録（usage。ユーザーは Clef の精度を後で振り返りたい。規則との比較の代わりに、判断ごとに残す）**: SandboxDO が判断のたびに記録を足す（直近 50 件。古い方から捨てる。storage の kv `scale_log`）: 判断した時刻・その時の大きさ（`from`）・判断の結果の大きさ（`to`。変えなければ `null`）・確率（`heavy` / `fast4` / `choice`）・使ったモデル（`flash` / `clef`）・Clef の所要（`clef_ms`）・そのコマンドの実行時間（`cmd_ms`。昇格の時間は含まない）と終了コード（`exit_code`）・コマンドの先頭の語（`cmd`。`argv[0]` の basename を 24 文字まで。ワーカーの bash ツールと検証コマンドは `bash -c "<コマンド>"` / `sh -c`（`-lc` なども）の形で exec されて `argv[0]` が常に `bash` になるので、この形のときはコマンド文字列の先頭の語を使う。環境変数の代入（`FOO=1`）・`cd <dir> &&`・前置き（`env` / `timeout` / `time` / `nice` など）は単純な規則で読み飛ばし、読めなければ（引用符・`$(` が閉じない、代入だけで区切りの後ろ、前置きの引数が想定外、コマンド名らしくない・秘密らしい語など）迷わず `argv[0]`（`bash`）に戻す。**先頭の語だけで、argv の全体・コマンド文字列は残さない**）。Clef が失敗した判断は `failed: true` で、確率とモデルが無い。集計（`scaleStats`。捨てずに数え続ける）: 判断の回数・上げた回数・Clef の失敗回数・上げなかったのに 60 秒を超えたコマンドの数。**TaskDO の storage の大きさに配慮**し、記録の一覧は終端の確定のときだけ AgentDO の usage に載せ（`runtimeMs` と同じ扱い。途中で usage イベントを増やさない）、gateway は**公開の usage イベントには集計の数値だけ**（`sandbox_scale_decisions` / `sandbox_scale_raised` / `sandbox_scale_clef_failures` / `sandbox_scale_slow_not_raised` / `sandbox_scale_skipped_light`（明らかに軽いコマンドで Clef を呼ばなかった回数。`isLightCommand`（apps/agent/src/scale-cmd.ts）が、表にある読み取り系の語だけの `bash -c` を true にする。表は「聞かない」の判定だけで、上げる規則ではない。迷う形は false にして Clef に聞く。判断の記録 `sandbox_scale_log` は増やさない）。`usage_public` に覚える数値）を載せ、一覧は `task_result` の `usage.sandbox_scale_log` にだけ出す（`getResult` の usage から。最大 50 件で約 7 KB）。`task_summary` の `sandbox.scale` も集計だけ。 **`task_wait` の usage イベントでも、`sandbox_promotions` / `sandbox_promotion_failures` は `task_result` の usage と同じく配列で返す**（TaskDO の保存形は payload がプリミティブだけなので JSON 文字列のままで、gateway の service 層が返すときに配列へ戻す）。`sandbox_segments` は `task_summary`（`summary.json`）だけの項目で、usage には出さない（区間は `sandbox_promotions` と `sandbox_runtime_ms` から導ける）。既存の `sandbox_promotions` の `trigger` に `clef` を足し、`sandbox_segments`・`sandbox_promotion_failures` は維持する。**古いタスクの記録（`trigger` の `agent` / `rule` / `verification`、`rule_match`、`sandbox_heavy_commands_*`）は、gateway の sanitize・`summary.ts` で読めるまま残す**（`rule_match` は表を削除したので、小文字で始まる短い名前だけを通す）。
     - **振り返りの読み方**（タスクの集合 = 振り返りたい期間の、Sandbox を使った `task_result`）:
 
       | 知りたいこと | 見る項目 | 読み方 |
@@ -1298,7 +1298,7 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
       | 聞き直しの割合 | `sandbox_scale_log` の `model: "clef"` | 高ければ flash が曖昧な判断が多い。往復の時間（`clef_ms`）と費用（Clef の費用は AI Gateway の usage）に響く |
       | Clef の遅延 | `sandbox_scale_log` の `clef_ms` | 通常は 1 秒前後。数秒を超えれば再試行が起きている |
       | 昇格の失敗の内訳 | `sandbox_promotion_failures` | `reason` ごとに数える。`fallback_failed` は、その直前の昇格先の失敗（`start_failed` など）と対で 2 件出る（1 回の試みで 2 件） |
-    - **退けた案**: 規則（argv の表）と Clef の併用（二重管理になり、「静的な判断を消す」要望に反する）。判断を子に任せる `sandbox_scale_up`（子の自己申告に依り、ツールが増える）。全 `exec` を Clef に聞く案（内部の git などまで 0.4〜1 秒の往復が乗る）。負荷（CPU・OOM）を見て後追いで上げる案（今回はやらない）。下げる機能。Sandbox が未起動のときに、起動の大きさだけを変えて最初から大きく起動する最適化（lazy boot の入口が増える。子は読み取りの後に呼ぶのが普通なので、起動してから上げる）。コストの予測しやすさは重視しない（ユーザー）。
+    - **退けた案**: 規則（argv の表）と Clef の併用（二重管理になり、「静的な判断を消す」要望に反する）。判断をワーカーに任せる `sandbox_scale_up`（ワーカーの自己申告に依り、ツールが増える）。全 `exec` を Clef に聞く案（内部の git などまで 0.4〜1 秒の往復が乗る）。負荷（CPU・OOM）を見て後追いで上げる案（今回はやらない）。下げる機能。Sandbox が未起動のときに、起動の大きさだけを変えて最初から大きく起動する最適化（lazy boot の入口が増える。ワーカーは読み取りの後に呼ぶのが普通なので、起動してから上げる）。コストの予測しやすさは重視しない（ユーザー）。
     - **閾値の決定（2026-10-22。Opus の判断）**: 本番のベンチマークで gateway の vitest（`maxWorkers=2`）は `standard-3` で 1.42 倍速くなったので、この種のコマンドは必ず上げる側に入る必要がある。損は非対称（上げすぎはメモリ代と数秒、上げ損ねは時間）なので、聞き直しの帯の下端を 0.3 から 0.2 に下げ（重い確率 0.2 以上 0.7 未満で clef に聞き直す。上端は排他）、帯の中は max(flash の重い確率, clef の重い確率) >= 0.5 で決める（clef が失敗したら flash だけ。0.7 以上は flash だけで上げる）ことにした。既定値は env `SANDBOX_CLEF_THRESHOLDS` で変えられる。実 Clef で測った 10 コマンドの確率（下の表。flash の重い確率 score / noul、clef の score）は Unit のフィクスチャ（`sandbox-scale-decision.test.ts`）に入れて、`ls` / `git status` / `cat package.json` は上げない、`pnpm test`（`maxWorkers` 4 / 2 / `singleWorker`）・`pytest -n auto`・`cargo build --release`・`make -j4`・`pnpm build` は上げる、を固定した。実測: `ls -la` 0.08 / 0.08 / 0.02、`git status` 0.07 / 0.08 / 0.03、`cat package.json` 0.20 / 0.57 / 0.02、`pnpm test`（4）0.42 / 0.61 / 0.76、同（2）0.28 / 0.50 / 0.64、同（singleWorker）0.34 / 0.53 / 0.53、`make -j4` 0.58 / 0.75 / 0.15、`pytest -n auto` 0.57 / 0.68 / 0.76、`pnpm build` 0.53 / 0.78 / 0.29、`cargo build --release` 0.82 / 0.93 / 0.85。質問の型（score か noul か）は変えていない。`cat package.json` は flash の noul で誤検知する（0.57）ので、score を使い続ける。実タスクの `sandbox_scale_log`（確率・`cmd_ms`・`slow_not_raised`）で、上げすぎ・上げ損ねを見て再調整する。
     - **`fixed_instance` の扱い**: `task_start` で大きさを明示したタスクは Clef を呼ばないが、`sandbox_promotion_reason` と `sandbox_promotion_failures` には `trigger: clef`・`reason: fixed_instance` が 1 件だけ入る（旧実装の rule / verification と同じ扱い。「Clef による昇格を見送った理由」の意味）。
     - **その他の残る課題**: 昇格のスナップショットの一覧・削除の API が無い。ローカルの `wrangler dev`（workerd + Docker）は `snapshotContainer` と `containerSnapshot` での起動に対応しているので、`test:e2e:docker` が実コンテナで昇格（作業ツリーの未 commit の変更・傍受の CA・作り直しが昇格先で起動すること・コンテナ内でのリポジトリの設定の収集）まで通しで確かめる。Clef は E2E では呼ばず、応答を仕込む（`ENVIRONMENT=test` の `setClefForTest`）。判断の確率 → 大きさは `sandbox-scale-decision.ts` の Unit、見送り・起動の失敗・元の大きさでの起動し直し・Clef の失敗などの fail-soft の経路は SandboxDO の Unit（container の API と AI.run を差し替える）で確かめ、実際の Clef での精度と本番での確認は acceptance.md。
@@ -1307,14 +1307,14 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - **キャッシュ専用のコンテナで作る（タスクのコンテナを保存しない）**: タスクのコンテナを保存すると、作業ツリー（他のタスクの内容）が混ざる。そこで、キャッシュの鍵ごとに `DepsCacheDO`（agent の Worker。名前 = 鍵）を置き、`ensure()` が作成を 1 回だけ行わせる。作るのは **SandboxDO の別インスタンス（名前 `deps-<鍵>`）の `buildDepsSnapshot()`**。image で起動 → 傍受を登録（タスクと同じ許可リスト。外向きは遮断）→ `git init` + `fetch --depth 1 origin <base_sha>` + checkout → 導入 → すべての `node_modules` を `/opt/deps-cache/nm/<相対パス>` へ `mv`（ルートと、ワークスペースの各パッケージの `node_modules`。相対パスの一覧を `manifest` に書く）→ `/workspace` を空にする → `snapshotContainer({name: "deps-<鍵の先頭16桁>"})` → 破棄。スナップショットには node_modules とパッケージマネージャのキャッシュ（`~/.npm` など）だけが入り、リポジトリの作業状態は入らない。10 分で時間切れ。
     - **DepsCacheDO にコンテナを持たせなかった理由（当初の案からの変更）**: コンテナはクラスごとの `containers` の項目で宣言し、イメージもクラスごとに別の参照（`rovo-agent-<クラス名>-workspace@sha256:...`）で登録される。スナップショットは作ったイメージの版に結び付き、「別のクラス・別のアプリケーションのイメージで復元できるか」はドキュメントに無い。DepsCacheDO にコンテナを持たせると、タスク側（SandboxDO）のイメージと別の参照になり、復元できる保証がない。そこで、コンテナはこれまでどおり SandboxDO だけが持ち、DepsCacheDO は状態の管理（`building` / `ready` / `failed`、同時の `ensure` を 1 回にまとめる、クールダウン）だけをする。`containers` の項目を増やさないので、デプロイで増えるイメージも無い。
     - **DepsCacheDO の状態**: `building`（作成中）→ 成功で `ready {snapshotId, size, createdAt}`、失敗・時間切れで `failed {failedAt, cooldownMs}`。`ready` ならすぐ返す。`building` の間の `ensure` は同じ作成を待つ（待っただけの呼び出しは `built: false`）。`failed` は 60 秒のクールダウンの後に作り直す。復元に失敗したスナップショット（期限切れ・イメージとの不整合）は SandboxDO が `invalidate()` で知らせ、10 分のクールダウンの後に作り直す（壊れ続けるときに毎回作り直さない）。`building` のまま DO が再起動したら、待ち手が消えているので作り直す。
-  - **lockfile の検出**: ルート直下だけ（v1）。`pnpm-lock.yaml` → `pnpm install --frozen-lockfile`、`package-lock.json` → `npm ci`、`yarn.lock` → `yarn install --frozen-lockfile`（この優先順位）。どれも無ければキャッシュしない。pnpm / yarn は、Dockerfile で `corepack enable` した shim（`/usr/local/bin/pnpm` など。子も素の `pnpm` を呼べる）を、corepack 経由（`corepack pnpm ...`。Node 24 のイメージに入っている）で呼ぶ。本体は package.json の `packageManager` に従って corepack が初回に取る（取得先は `registry.npmjs.org` で、外向きの許可に既にある。`COREPACK_ENABLE_DOWNLOAD_PROMPT=0` で確認の入力待ちにならない）。同じ Dockerfile に python3（apt。pip は無し）も入れた（イメージは圧縮前で約 50 MB 増）。導入のコマンドは表の固定の argv で、gateway から来た文字列を実行しない（agent は表にある組だけを受け付け、それ以外は `invalid_deps`）。
+  - **lockfile の検出**: ルート直下だけ（v1）。`pnpm-lock.yaml` → `pnpm install --frozen-lockfile`、`package-lock.json` → `npm ci`、`yarn.lock` → `yarn install --frozen-lockfile`（この優先順位）。どれも無ければキャッシュしない。pnpm / yarn は、Dockerfile で `corepack enable` した shim（`/usr/local/bin/pnpm` など。ワーカーも素の `pnpm` を呼べる）を、corepack 経由（`corepack pnpm ...`。Node 24 のイメージに入っている）で呼ぶ。本体は package.json の `packageManager` に従って corepack が初回に取る（取得先は `registry.npmjs.org` で、外向きの許可に既にある。`COREPACK_ENABLE_DOWNLOAD_PROMPT=0` で確認の入力待ちにならない）。同じ Dockerfile に python3（apt。pip は無し）も入れた（イメージは圧縮前で約 50 MB 増）。導入のコマンドは表の固定の argv で、gateway から来た文字列を実行しない（agent は表にある組だけを受け付け、それ以外は `invalid_deps`）。
   - **gateway が lockfile と package.json の blob SHA を読む**: `GET /git/commits/{base_sha}` → `GET /git/trees/{tree}?recursive=1` を Installation Token で呼び、ルート直下の lockfile・`package.json`・`pnpm-workspace.yaml` の blob SHA と、入れ子の `package.json`（workspace の各パッケージ。`node_modules` の中は除く）の「パスと blob SHA の一覧」の sha256 を、`TaskSpec.deps: {repositoryId, lockfilePath, blobSha, installCommand, packageJsonSha, workspaceSha, manifestsSha} | null` に載せる（`workspaceSha` / `manifestsSha` は無ければ null）。ルートの `package.json` が無い、または tree が切り詰められた（`truncated`。大きなリポジトリ）ときは `deps: null`（一部の `package.json` を読めていない鍵は作らない）。`packageManager` や `pnpm.patchedDependencies` などは package.json にあるので鍵に入っている。鍵から漏れるのは、`.npmrc`・`.yarnrc.yml`・`.pnpmfile.cjs`、install スクリプトが読むファイルの中身、patch ファイルそのものの中身（パスが同じで中身だけ変わる場合）。漏れたときの影響は、同じリポジトリの別ブランチに古い依存が混ざる正確性の問題までで、鍵に `repository_id` が入るのでリポジトリをまたぐことは無い。再帰 tree の取得は 10 秒で打ち切り、超えたら `deps: null`（キャッシュなし）で続ける。TaskDO の `runSetup` で取得して `github_link.deps` に保存し、`start` の再送でも同じ値を送る（agent は spec の同一性で冪等を判定する）。API の失敗は `deps: null`（キャッシュなし）で続け、タスクを失敗させない。通常のファイル（100644 / 100755）の blob だけを lockfile とみなす。
   - **キャッシュの鍵**: `sha256(["rovo-deps-cache-v2", repository_id, lockfile のパス, lockfile の blob SHA, 導入のコマンド, ルートの package.json の blob SHA, pnpm-workspace.yaml の blob SHA（無ければ null）, 入れ子の package.json の一覧の sha256（無ければ null）, イメージの参照])`（JSON の配列にして境界を曖昧にしない）。イメージの参照は SandboxDO が `container.images.workspace`（本番では digest 付き）から足す。イメージが変わると別の鍵になる。別のリポジトリとは共有しない（`repository_id` が鍵に入る）。  同じ lockfile でも `package.json` の scripts（`postinstall` など）が違えば別の鍵になる（v1 は lockfile だけで、scripts を差し替えたブランチの `node_modules` を同じリポジトリの後続のタスクが使えてしまった）。v1 のキャッシュは使われなくなる（スナップショットは 30 日で期限切れ）。
   - **タスクの起動**: SandboxDO の `boot()` は、`deps` があれば `DepsCacheDO(鍵).ensure()` を**同期で**呼ぶ（最初のタスクは作るのを待つ。今の `npm ci` と同じくらいの時間）。ready なら `start({containerSnapshot: {id}, ...})`（`image` は外す）→ 起動後に CA 証明書（`/etc/cloudflare/certs/cloudflare-containers-ca.crt`）が読めることを確かめる（無ければ破棄して image から起動し直す）→ `prepareWorkspace`（空の `/workspace` に clone。GitHub の資格は従来どおりコンテナに入らない）→ manifest どおりに `node_modules` を `/workspace` の同じ相対位置へ `mv`（作業ツリーに同名が既にあれば戻さない）。コンテナを作り直す（`restarts`）ときも同じ流れで戻る。
   - **fail-soft（キャッシュのせいでタスクを失敗させない）**: `ensure` の失敗・時間切れ、`snapshotContainer` の例外、復元の例外、復元したコンテナが ready にならない、証明書の欠落、`mv` の失敗は、すべて image からの普通の起動に戻して続ける。理由は固定コードで `deps_cache_miss: <reason>` とログに出す（`ensure_failed` / `ensure_timeout` / `build_failed` / `build_timeout` / `cooldown` / `snapshot_unsupported` / `snapshot_failed` / `restore_failed` / `cert_missing` / `move_failed` / `invalid_deps`。入力や例外の文面は出さない）。復元に失敗した試行は、通常の起動の試行の上限（3 回）を消費しないよう、上限を 1 回分増やして試す（止まった試行は、従来どおり `bootRetries` に数える）。
   - **pnpm / yarn の本体の用意とハッシュ固定**: 実行時に Node の fetch で大きな本体を取ると外向き通信の中継越しに undici が落ちるため（`assert(!this.paused)`）、イメージのビルド時に pnpm と yarn classic を焼き、違う版は `apps/agent/container/pm-prepare.mjs` が clone の後（と作成コンテナの導入の前）に npm の経路で用意する。`packageManager` の `+sha512.<hex>` は捨てず、完全な spec を `corepack install -g --cache-only` に渡して corepack に検証させる（不一致ならキャッシュに置かず失敗。fail-soft）。待ちはタスクの期限と 3 分の短い方で、残り 10 秒未満なら諦める。異常終了で残った古い一時ディレクトリは次の実行の開始時に掃除する。
   - **見える化と費用**: `task_result` の `usage` に `deps_cache`（`hit` / `miss` / `built` / `disabled`）を出し、キャッシュを作ったタスクには `cache_build_ms` を足す。`deps_cache` が `miss` のときは、使えなかった理由の固定コード（ログの `deps_cache_miss: <reason>` と同じ。`build_failed` / `cooldown` など）を `deps_cache_miss_reason` に出す（miss 以外には付けない）。同じ値が `usage` の公開イベントの `deps_cache` / `cache_build_ms` にも出る。作った時間は、そのタスクの Sandbox の実行時間（`sandbox_runtime_ms`）に**足す**（作ったコンテナは別のインスタンスだが、少なく数えない。`sandbox_usd_estimate` に反映される）。`built` のタスクは、コンテナの作り直しで `hit` になっても `built` のまま。`task_status` には出さない。
-  - **子への指示**: `hit` / `built` のときだけ、システムプロンプトに「依存関係は導入済み（`npm ci` / `pnpm install` / `yarn install` は不要。lockfile や package.json の依存を変えたときだけ入れ直す。ビルドの成果物は入っていない）」と書く。
+  - **ワーカーへの指示**: `hit` / `built` のときだけ、システムプロンプトに「依存関係は導入済み（`npm ci` / `pnpm install` / `yarn install` は不要。lockfile や package.json の依存を変えたときだけ入れ直す。ビルドの成果物は入っていない）」と書く。
   - **セキュリティ**: GitHub のトークンはスナップショットにも作成用のコンテナにも入らない（外向きの転送時に OutboundGateway が、依頼したタスクの資格で付ける）。作成用のコンテナが実行するのは base_sha のコミット済みのコードだけで、タスクの変更は入らない。スナップショットは `repository_id` ごとに別で、他のリポジトリとは共有しない。作成用のコンテナの外向き通信はタスクと同じ許可リスト（github.com は対象リポジトリの git だけ、レジストリは GET だけ）。
   - **無効にする**: agent の var `DEPS_CACHE_ENABLED`（`false` / `0` / `off` で無効。既定は有効）。`rovo.config.json` の `depsCache.enabled` で設定する。public beta の機能なので、止められるようにしておく。無効のとき `deps_cache` は `disabled`。
   - **新しい DO クラス**: `DepsCacheDO`（SQLite、コンテナなし）を agent の `durable_objects` と `exports` に足す。`containers` の項目は増えない。

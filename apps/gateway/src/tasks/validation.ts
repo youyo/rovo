@@ -82,7 +82,7 @@ export const DEFAULT_REVIEW_POLICY: ReviewPolicy = "client_review";
 const WORKER_REVIEW_UNSUPPORTED = "review_policy worker_review is not supported yet (coming soon)";
 
 /**
- * 予算に近づいたときの扱い。ask（既定）は止めずに親へ「あと task_budget_usd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
+ * 予算に近づいたときの扱い。ask（既定）は止めずにクライアントへ「あと task_budget_usd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
  * 月の枠はハードリミットのまま、延長の都度その場で予約する）。stop は今までどおり BUDGET_EXCEEDED で止まる（無人で回す用途）。
  */
 export const BUDGET_POLICIES = ["ask", "stop"] as const;
@@ -118,15 +118,15 @@ export const taskInputSchema = z.object({
     .never({ error: "merge_policy was removed; use review_policy (client_review | worker_review)" })
     .optional(),
   budget_policy: z.enum(BUDGET_POLICIES).default(DEFAULT_BUDGET_POLICY),
-  /** 子のモデル（D10）。省略は env の AGENT_MODEL。env の AGENT_MODELS の中だけ（照合は service と TaskDO が env で行う） */
+  /** ワーカーのモデル（D10）。省略は env の AGENT_MODEL。env の AGENT_MODELS の中だけ（照合は service と TaskDO が env で行う） */
   model: z.string().min(1).max(MAX_MODEL_LENGTH).optional(),
   /**
-   * 子の Sandbox の大きさ。standard-1〜4 だけ（lite は選べない。packages/models の SELECTABLE_SANDBOX_INSTANCES が出どころ）。
+   * ワーカーの Sandbox の大きさ。standard-1〜4 だけ（lite は選べない。packages/models の SELECTABLE_SANDBOX_INSTANCES が出どころ）。
    * 省略は agent の env の既定（SANDBOX_INSTANCE）。指定したらそのタスクの間はずっとその大きさ。
    */
   sandbox_instance: z.enum(SELECTABLE_SANDBOX_INSTANCES).optional(),
   /**
-   * 子のモデルの思考レベル（そのタスクだけの上書き）。値は packages/models の EFFORT_LEVELS（Effort の型）が出どころ。
+   * ワーカーのモデルの思考レベル（そのタスクだけの上書き）。値は packages/models の EFFORT_LEVELS（Effort の型）が出どころ。
    * 省略は、モデルごとの既定（env の MODEL_EFFORTS で上書きした値。models_list の effort）。
    * そのモデルが受け付けるか（supportedEfforts）は、最終のモデルが決まってから service と TaskDO が確かめる（invalid_input）。
    */
@@ -200,7 +200,7 @@ export const MAX_ANSWER_LENGTH = 20_000;
 export const MAX_STEER_LENGTH = 20_000;
 const MAX_ID_LENGTH = 128;
 
-/** task_answer の入力。回答は認証された親からの指示なので内容は縛らず、長さだけ制限する。 */
+/** task_answer の入力。回答は認証されたクライアントからの指示なので内容は縛らず、長さだけ制限する。 */
 export const answerInputSchema = z.object({
   task_id: z.string(),
   question_id: z.string().min(1).max(MAX_ID_LENGTH),

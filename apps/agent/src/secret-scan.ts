@@ -152,7 +152,7 @@ function addedLines(diff: string): AddedLine[] {
 }
 
 /**
- * 検査の git の呼び出しの共通の前置き。子が .git/config・replace の ref・属性で、出力の形や中身を変えられないようにする。
+ * 検査の git の呼び出しの共通の前置き。ワーカーが .git/config・replace の ref・属性で、出力の形や中身を変えられないようにする。
  * - --no-replace-objects: `git replace` で秘密の commit を無害な commit に見せかけられない（replace の ref は push されない）
  * - core.quotepath / diff.noprefix / diff.mnemonicPrefix / diff.relative / color.ui: パースが前提にする形に固定する
  */
@@ -305,11 +305,11 @@ const FULL_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /**
  * リモートに実在する commit の SHA（検査から外してよい、すでに公開済みのもの）を返す。
- * `git ls-remote --heads --tags <url>` の答え（GitHub のもので、子は偽造できない）のうち、ローカルに commit として存在するもの。
+ * `git ls-remote --heads --tags <url>` の答え（GitHub のもので、ワーカーは偽造できない）のうち、ローカルに commit として存在するもの。
  * url は rovo が知っているリポジトリの URL（clone と同じ https://github.com/<owner>/<name>.git）で、設定の origin は使わない
- * （子が remote.origin.url・url.<base>.insteadOf を書き換えて、偽のリモートの答えを返させられるため）。
+ * （ワーカーが remote.origin.url・url.<base>.insteadOf を書き換えて、偽のリモートの答えを返させられるため）。
  * `-C /` でリポジトリの外から呼び、リポジトリの .git/config（insteadOf など）を読まない。認証は clone・push と同じ（外向き通信の傍受）。
- * ローカルのリモート追跡の参照（refs/remotes/*）も、子が update-ref で偽造できるので使わない。
+ * ローカルのリモート追跡の参照（refs/remotes/*）も、ワーカーが update-ref で偽造できるので使わない。
  * baseSha は、その ls-remote の SHA のどれかから辿れる（祖先）ときだけ足す。
  * ls-remote が失敗・時間切れ・出力が上限超えなら、空（= last_pushed だけで判定。誤検知は増えても素通りはしない）。
  */

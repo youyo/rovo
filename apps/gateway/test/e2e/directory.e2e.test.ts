@@ -43,7 +43,7 @@ async function start(prefix: string, title: string) {
   const { task_id: taskId } = bodyOf(
     await client.callTool({ name: "task_start", arguments: startArgs(title) }),
   ) as { task_id: string };
-  // 子エージェントが start を受理して RUNNING になるまで待つ
+  // ワーカーが start を受理して RUNNING になるまで待つ
   const deadline = Date.now() + 30_000;
   for (;;) {
     const st = bodyOf(
@@ -93,7 +93,7 @@ describe("索引（DirectoryDO）への配送（実 DO）", () => {
   it("完了したタスクは最終の状態の行になる。task_status / task_result は索引と無関係に通常どおり動く", async () => {
     const { client, taskId } = await start("idx-done", "INDEX-DONE");
     try {
-      // 偽の子エージェントは、待たせずにすぐ終端にする（長く待つと状態が失われる）
+      // 偽のワーカーは、待たせずにすぐ終端にする（長く待つと状態が失われる）
       const head = await admin.app<string | null>("branch", "acme/widgets", `agent/task-${taskId}`);
       if (!head) throw new Error("作業ブランチがありません");
       await finishAgent(taskId, "completed", completedResult(head));

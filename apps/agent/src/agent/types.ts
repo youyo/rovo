@@ -12,7 +12,7 @@ export type Phase =
   | "starting"
   | "running"
   | "verifying"
-  /** ask_parent で質問し、親の回答を待っている */
+  /** ask_parent で質問し、クライアントの回答を待っている */
   | "input_required"
   | "completed"
   | "failed"
@@ -69,26 +69,26 @@ export interface TaskSpec {
   verificationCommands?: VerificationCommand[];
   constraints?: string[];
   /**
-   * 子のモデル（"anthropic/claude-haiku-5-5" など。D10）。省略は env の AGENT_MODEL（既定 anthropic/claude-sonnet-5-5）。
+   * ワーカーのモデル（"anthropic/claude-haiku-5-5" など。D10）。省略は env の AGENT_MODEL（既定 anthropic/claude-sonnet-5-5）。
    * env の AGENT_MODELS に無いモデルは start を拒否する（unknown_model）。
    */
   model?: string;
   /**
-   * 子のモデルの思考レベル（task_start の effort。そのモデルが受け付けるレベルだけを TaskDO が通している）。**ある = 利用者がこのタスクで指定した**
+   * ワーカーのモデルの思考レベル（task_start の effort。そのモデルが受け付けるレベルだけを TaskDO が通している）。**ある = 利用者がこのタスクで指定した**
    * ので、モデルごとの既定（AgentDO の env の MODEL_EFFORTS）より優先する。off なら AgentDO は reasoning を渡さない。
    * 省略したときはこの項目自体を付けない（AgentDO が従来どおり MODEL_EFFORTS から決める。spec の同一性も変えない）。
    * 既知のレベル（packages/models の EFFORT_LEVELS）でない値は start を拒否する（invalid_spec: effort）。
    */
   effort?: Effort;
   /**
-   * 子の Sandbox の大きさ（task_start の sandbox_instance。standard-1〜4）。**ある = 利用者が明示した**ので、このタスクの間はずっと
+   * ワーカーの Sandbox の大きさ（task_start の sandbox_instance。standard-1〜4）。**ある = 利用者が明示した**ので、このタスクの間はずっと
    * この大きさで起動する（後段の自動の昇格もしない）。省略は env の SANDBOX_INSTANCE の既定。standard-1〜4 以外は start を拒否する。
    */
   sandboxInstance?: string;
   /** このタスクに使える上限（USD） */
   budgetUsd: number;
   /**
-   * 予算に近づいたときの扱い。ask: 止めずに親へ「あと budgetUsd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
+   * 予算に近づいたときの扱い。ask: 止めずにクライアントへ「あと budgetUsd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
    * 承認の予約は gateway が月の枠から行う）/ stop: 今までどおり budget_exceeded で止まる。無い（古い gateway）は stop。
    */
   budgetPolicy?: "ask" | "stop";
@@ -100,7 +100,7 @@ export interface TaskSpec {
    */
   deps?: DepsSpec | null;
   /**
-   * 子の commit の作者（GitHub App の bot: name `<slug>[bot]`、email `<id>+<slug>[bot]@users.noreply.github.com`）。
+   * ワーカーの commit の作者（GitHub App の bot: name `<slug>[bot]`、email `<id>+<slug>[bot]@users.noreply.github.com`）。
    * gateway が決めて渡す（初期コミットと同じ作者にする）。無い・使えない形なら `rovo <rovo@noreply.invalid>`。
    */
   commitAuthor?: { name: string; email: string };
@@ -188,7 +188,7 @@ export interface UsageDto {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  /** 子が使った web の回数（タスクごとの累計）。web 自体の費用は costUsd に含めない */
+  /** ワーカーが使った web の回数（タスクごとの累計）。web 自体の費用は costUsd に含めない */
   web: WebUsage;
   /** SandboxDO のカウンタ。読めなかったとき・読めない実装（fake）では無い。gateway が公開用の形に写す（M3） */
   sandbox?: SandboxMetrics;
@@ -255,7 +255,7 @@ export interface SandboxScaleStats {
 
 /**
  * Clef の判断 1 件の記録。値はすべて固定の値か数値で、コマンドは argv[0] の basename を短く切ったものだけ
- * （argv の全体・リポジトリの内容・子の自由文は入らない）。
+ * （argv の全体・リポジトリの内容・ワーカーの自由文は入らない）。
  */
 export interface SandboxScaleDecision {
   /** 判断した時刻（epoch ms） */
@@ -284,7 +284,7 @@ export interface SandboxScaleDecision {
   cmd: string;
 }
 
-/** 成功した昇格 1 回分。値はすべて固定の値か数値（子の自由文・argv の文字列は入らない） */
+/** 成功した昇格 1 回分。値はすべて固定の値か数値（ワーカーの自由文・argv の文字列は入らない） */
 export interface SandboxPromotionRecord {
   /** 昇格した先の大きさ */
   to: SandboxInstance;

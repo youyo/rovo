@@ -135,7 +135,7 @@ const CACHE_READ_TRUST_MS = 4 * 60_000;
 /** 予算の質問で、途中の作業を push できなかったために Sandbox を止めずに待ったときの warnings（固定文） */
 const BUDGET_KEPT_RUNNING_WARNING =
   "途中の作業を push できなかったため、承認を待つ間も Sandbox を止めなかった";
-/** 予算超過の停止時に、システムが作る WIP commit のメッセージ（固定文。子の自由文は入れない） */
+/** 予算超過の停止時に、システムが作る WIP commit のメッセージ（固定文。ワーカーの自由文は入れない） */
 const WIP_COMMIT_MESSAGE = "wip: budget exceeded（rovo が自動で commit）";
 /** WIP の commit・push 全体の上限（ms）。超えたら諦めて今までどおり止まる */
 const WIP_COMMIT_WAIT_MS = 90_000;
@@ -162,7 +162,7 @@ const BUDGET_ANSWER_EXTEND = "extend";
 const QUESTION_MAX_CHARS = 4000;
 const QUESTION_MAX_OPTIONS = 10;
 const QUESTION_OPTION_MAX_CHARS = 500;
-/** 子の web_search / web_fetch の回数の既定の上限（タスクごと）。env の WEB_SEARCH_LIMIT_PER_TASK / WEB_FETCH_LIMIT_PER_TASK で変える */
+/** ワーカーの web_search / web_fetch の回数の既定の上限（タスクごと）。env の WEB_SEARCH_LIMIT_PER_TASK / WEB_FETCH_LIMIT_PER_TASK で変える */
 const DEFAULT_WEB_SEARCH_LIMIT = 50;
 const DEFAULT_WEB_FETCH_LIMIT = 100;
 export const DEFAULT_WEB_BROWSE_LIMIT = 20;
@@ -175,7 +175,7 @@ function parseLimit(raw: string | undefined, fallback: number): number {
 }
 
 interface StoredQuestion {
-  /** 予算の延長の質問（rovo が数値だけで書く固定文）。無いものは子の質問（ask_parent） */
+  /** 予算の延長の質問（rovo が数値だけで書く固定文）。無いものはワーカーの質問（ask_parent） */
   kind?: "budget_extension";
   message: string;
   options: string[];
@@ -259,7 +259,7 @@ const BG: any = Object.freeze({
   toString: () => "[Context rovo agent background]",
 });
 
-/** 末尾 n 文字（書記素単位。サロゲートペアや結合文字の途中で切らない）。親に返す文字列なので ANSI も除く。 */
+/** 末尾 n 文字（書記素単位。サロゲートペアや結合文字の途中で切らない）。クライアントに返す文字列なので ANSI も除く。 */
 function tail(text: string, n = OUTPUT_TAIL): string {
   return tailChars(stripAnsi(text), n);
 }
@@ -369,7 +369,7 @@ function summarizeArgs(args: unknown): string {
 }
 
 /**
- * イベントの「トップレベルの」文字列項目（子が書いた文や例外文）の秘密をマスクする。最後の砦で、切り詰める側は先に
+ * イベントの「トップレベルの」文字列項目（ワーカーが書いた文や例外文）の秘密をマスクする。最後の砦で、切り詰める側は先に
  * マスクしておく。入れ子のオブジェクト・配列の中は見ない（イベントは平らな形にする）。emit() を通らない経路
  * （question・phase の reason）は積む側でマスクする。
  */
@@ -856,7 +856,7 @@ export class AgentDO extends DurableObject<Env> {
       // 再送された start のトークンが新しければ預け直す（古い・同じものは何もしない）
       await this.deliverCredential(gitCredential);
     }
-    // 子の起動（Pi への投入）は待たない。MCP の呼び出し時間に近づくため。失敗の再試行は tick job が受け持つ。
+    // ワーカーの起動（Pi への投入）は待たない。MCP の呼び出し時間に近づくため。失敗の再試行は tick job が受け持つ。
     // Sandbox はここでは起動しない（最初に Sandbox を使うツールが呼ばれたとき ensureSandboxReady が起動する）
     if (!isTerminal(this.store.phase())) void this.launch().catch(() => undefined);
     return {
@@ -1292,7 +1292,7 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /**
-   * Sandbox の準備が済んだ時点の、依存関係のキャッシュの結果（hit / built など）を覚える。子のシステムプロンプトに
+   * Sandbox の準備が済んだ時点の、依存関係のキャッシュの結果（hit / built など）を覚える。ワーカーのシステムプロンプトに
    * 「依存関係は導入済み」と書くかの判断に使う。読めない・失敗のときは覚えない（書かない側に倒す）。
    */
   private async noteDepsCache(): Promise<void> {
@@ -1352,7 +1352,7 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   private steerText(s: SteerRow): string {
-    return `Additional instruction from the parent (steer ${s.steerId}):\n${s.message}`;
+    return `Additional instruction from the client (steer ${s.steerId}):\n${s.message}`;
   }
 
   /** 次の submit に添える保留中の steer。添えるものを operationId ごとに永続化し、再試行でも同じ内容にする。 */
@@ -1567,7 +1567,7 @@ export class AgentDO extends DurableObject<Env> {
       const text =
         this.questions()[questionId]?.kind === "budget_extension"
           ? this.budgetResumeText()
-          : `The parent answered your question (${questionId}):\n${answer}`;
+          : `The client answered your question (${questionId}):\n${answer}`;
       await this.harness.submit(this.userInput(text, carried), { operationId });
       await this.overrides().afterAnswerSubmit?.();
       if (this.store.meta<string | null>("pending_resume") === questionId) {
@@ -1747,7 +1747,7 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /** 期限・予算の超過を記録し、すぐに停止を始めて確定まで進める（待たない。Pi のタスクの中からも呼ばれる）。 */
-  /** 回答待ちの上限に達した。予算の延長の質問なら budget_exceeded（reason: budget_extension_timeout）、子の質問なら failed(input_timeout) */
+  /** 回答待ちの上限に達した。予算の延長の質問なら budget_exceeded（reason: budget_extension_timeout）、ワーカーの質問なら failed(input_timeout) */
   private requestInputTimeout(): void {
     const open = this.openQuestionId();
     const kind = open ? this.questions()[open]?.kind : undefined;
@@ -1818,7 +1818,7 @@ export class AgentDO extends DurableObject<Env> {
       const sb = this.lazySandbox();
       const git = (argv: string[], timeoutMs = 60_000, maxOutputBytes = 32 * 1024) =>
         sb.exec(["git", ...argv], { cwd: WORKSPACE_ROOT, timeoutMs, maxOutputBytes });
-      // push とその前後（HEAD の確定・リモートの確認）の git は、子の gitconfig（global・system・フック・credential helper）から切り離す
+      // push とその前後（HEAD の確定・リモートの確認）の git は、ワーカーの gitconfig（global・system・フック・credential helper）から切り離す
       const isolated = (
         argv: string[],
         timeoutMs = 60_000,
@@ -1880,7 +1880,7 @@ export class AgentDO extends DurableObject<Env> {
       const sha = head.stdout.trim();
       if (!okRun(head) || !SHA_RE.test(sha)) return fail("could not read HEAD after commit");
       if (interrupted()) return;
-      // push の前にも、git_commit と同じ検査をする。commit 前に見たのは staged の差分だけで、HEAD には子が自分で積んだ
+      // push の前にも、git_commit と同じ検査をする。commit 前に見たのは staged の差分だけで、HEAD にはワーカーが自分で積んだ
       // 未 push の commit（git_commit で止められたものなど）が残っていることがある。それらの秘密も送らない
       const range = await scanUnpushedForSecrets(
         (argv, timeoutMs, maxOutputBytes) => isolated(argv, timeoutMs, maxOutputBytes),
@@ -2314,7 +2314,7 @@ export class AgentDO extends DurableObject<Env> {
       return { block: "task is stopping" };
     }
     // 回答待ちの間は、質問と同じラウンドで続けて呼ばれたモデルも止める（回答なしに動き出させない）
-    if (this.store.phase() === "input_required") return { block: "waiting for parent" };
+    if (this.store.phase() === "input_required") return { block: "waiting for the client" };
     if (this.deadlineExceeded()) {
       this.requestStop("deadline");
       return { block: "deadline" };
@@ -2356,9 +2356,9 @@ export class AgentDO extends DurableObject<Env> {
     );
     const allowed = Math.min(maxTokens, fits);
     if (allowed < Math.min(maxTokens, MIN_OUTPUT_TOKENS)) {
-      // ask: 止めずに親へ聞く（WIP を commit・push し、Sandbox を中断して INPUT_REQUIRED）。聞けない・聞かないなら止める
+      // ask: 止めずにクライアントへ聞く（WIP を commit・push し、Sandbox を中断して INPUT_REQUIRED）。聞けない・聞かないなら止める
       if (await this.askBudgetExtension(spec, spent.costUsd))
-        return { block: "waiting for parent" };
+        return { block: "waiting for the client" };
       this.requestStop("budget_exceeded");
       return { block: "budget_exceeded" };
     }
@@ -2390,7 +2390,7 @@ export class AgentDO extends DurableObject<Env> {
         }
         // 回答待ちの間は、質問と同じラウンドの後続のツールを止める（ask_parent の重複だけは同じ「待ち」の結果を返す）
         if (this.store.phase() === "input_required" && call.name !== "ask_parent") {
-          return "waiting for the parent's answer";
+          return "waiting for the client's answer";
         }
         if (this.spec() && this.deadlineExceeded()) {
           this.requestStop("deadline");
@@ -2408,7 +2408,7 @@ export class AgentDO extends DurableObject<Env> {
           callId: call.id,
           name: call.name,
           isError: result.isError,
-          // web の結果は第三者が書いた本文。親の task_wait にはマーカーなしで流れるので、本文を載せない
+          // web の結果は第三者が書いた本文。クライアントの task_wait にはマーカーなしで流れるので、本文を載せない
           summary: call.name.startsWith("web_")
             ? result.isError
               ? "web tool error"
@@ -2482,7 +2482,7 @@ export class AgentDO extends DurableObject<Env> {
       {
         key: "verification",
         text: spec.verificationCommands?.length
-          ? `After report_completion the parent runs these commands against your committed HEAD:\n${spec.verificationCommands.map((c) => `- ${c.argv.join(" ")}`).join("\n")}`
+          ? `After report_completion the client runs these commands against your committed HEAD:\n${spec.verificationCommands.map((c) => `- ${c.argv.join(" ")}`).join("\n")}`
           : undefined,
       },
       {
@@ -2503,7 +2503,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "ask_parent",
-        text: `You may ask the parent a question with ask_parent, but only when you cannot decide yourself and a wrong guess would be costly: the specification contradicts itself; the acceptance criteria are unclear; the task needs a design change beyond its stated scope; a change is destructive or irreversible; a decision has a serious security impact; or a budget or permission limit blocks the work. Do not ask about trivial implementation choices: decide, and mention the decision in your summary. Commit your work with git_commit (a WIP commit is fine) before asking; ask_parent refuses while there are uncommitted changes. Ask one question at a time. The question and context together must be at most ${QUESTION_MAX_CHARS} characters, with at most ${QUESTION_MAX_OPTIONS} options of at most ${QUESTION_OPTION_MAX_CHARS} characters each. After you ask, stop: the task resumes with the parent's answer as a new user message (an authenticated instruction from the parent, not file content).`,
+        text: `You may ask the client a question with ask_parent, but only when you cannot decide yourself and a wrong guess would be costly: the specification contradicts itself; the acceptance criteria are unclear; the task needs a design change beyond its stated scope; a change is destructive or irreversible; a decision has a serious security impact; or a budget or permission limit blocks the work. Do not ask about trivial implementation choices: decide, and mention the decision in your summary. Commit your work with git_commit (a WIP commit is fine) before asking; ask_parent refuses while there are uncommitted changes. Ask one question at a time. The question and context together must be at most ${QUESTION_MAX_CHARS} characters, with at most ${QUESTION_MAX_OPTIONS} options of at most ${QUESTION_OPTION_MAX_CHARS} characters each. After you ask, stop: the task resumes with the client's answer as a new user message (an authenticated instruction from the client, not file content).`,
       },
       {
         key: "dependencies",
@@ -2515,7 +2515,7 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "no_push",
-        text: "Every git_commit is pushed to the task branch automatically; do not run git push yourself (a push from a bash command is rejected), do not change git remotes or credentials, and do not create pull requests. Credentials are not available inside the sandbox. Each bash call starts at the workspace root. Do not prefix commands with `cd <dir> &&`; pass the directory as the cwd argument instead. The gateway creates the draft pull request for the task branch (you never create it), and the parent reviews and merges it. So do not say in your summary that you did not create a pull request, and do not report the missing pull request as a problem: describe the changes you committed instead.",
+        text: "Every git_commit is pushed to the task branch automatically; do not run git push yourself (a push from a bash command is rejected), do not change git remotes or credentials, and do not create pull requests. Credentials are not available inside the sandbox. Each bash call starts at the workspace root. Do not prefix commands with `cd <dir> &&`; pass the directory as the cwd argument instead. The gateway creates the draft pull request for the task branch (you never create it), and the client reviews and merges it. So do not say in your summary that you did not create a pull request, and do not report the missing pull request as a problem: describe the changes you committed instead.",
       },
     ];
   }
@@ -2531,7 +2531,7 @@ export class AgentDO extends DurableObject<Env> {
   /** web_browse を有効にするか。WEB_BROWSE_ENABLED が "true" のときだけ（既定は無効）。 */
   /**
    * testing の節の、Sandbox の大きさの説明。Sandbox は小さく始まり、コマンドの前に Clef が必要と判断すると自動で大きくなる
-   * （子は何もしなくてよい。ツールは無い）。数十秒かかる・コンテナが再起動する・背景のプロセスは止まる・中断しない、を伝える。
+   * （ワーカーは何もしなくてよい。ツールは無い）。数十秒かかる・コンテナが再起動する・背景のプロセスは止まる・中断しない、を伝える。
    * 無効（SANDBOX_MAX_INSTANCE が空・off）・task_start で大きさを明示したタスクは、何も書かない。
    */
   private scalingPrompt(): string {
@@ -2626,7 +2626,7 @@ export class AgentDO extends DurableObject<Env> {
 
   // ---- 予算のソフトリミット（budget_policy: ask）----
   //
-  // 予算に近づいた（モデル呼び出しの前の判定）とき、stop 以外のポリシーでは止めずに親へ聞く:
+  // 予算に近づいた（モデル呼び出しの前の判定）とき、stop 以外のポリシーでは止めずにクライアントへ聞く:
   //  1. 未 commit の変更を WIP として commit・push する（止めるときと同じ処理）
   //  2. Sandbox を中断する（スナップショット + コンテナ停止で費用を止める）。失敗したらコンテナは動かしたまま待つ
   //  3. 質問（kind: budget_extension。rovo が数値だけで書く固定文）を記録して INPUT_REQUIRED にする
@@ -2645,7 +2645,7 @@ export class AgentDO extends DurableObject<Env> {
   private budgetResumeText(): string {
     const spec = this.spec();
     const ext = spec?.budgetUsd ?? 0;
-    return `The parent extended the task budget by ${usd(ext)} (the budget is now ${usd(spec ? this.budgetLimitUsd(spec) : 0)}). Continue the task. Commit your work with git_commit as you go, and call report_completion when you are done.`;
+    return `The client extended the task budget by ${usd(ext)} (the budget is now ${usd(spec ? this.budgetLimitUsd(spec) : 0)}). Continue the task. Commit your work with git_commit as you go, and call report_completion when you are done.`;
   }
 
   /**
@@ -2710,7 +2710,7 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /**
-   * 予算に近づいたとき、止めずに親へ聞く。聞いたら true（phase は input_required。呼び出し側はモデルを呼ばせない）。
+   * 予算に近づいたとき、止めずにクライアントへ聞く。聞いたら true（phase は input_required。呼び出し側はモデルを呼ばせない）。
    * 聞かない（ポリシーが ask でない・延長の上限・停止中）、または聞けなかったときは false（呼び出し側が budget_exceeded で止める）。
    */
   private async askBudgetExtension(spec: StoredSpec, spentUsd: number): Promise<boolean> {
@@ -2784,7 +2784,7 @@ export class AgentDO extends DurableObject<Env> {
     }
   }
 
-  /** 親への質問。記録して phase を input_required にし、run を終える（terminate）。 */
+  /** クライアントへの質問。記録して phase を input_required にし、run を終える（terminate）。 */
   private async askParent(args: {
     question: string;
     options?: string[];
@@ -2793,7 +2793,7 @@ export class AgentDO extends DurableObject<Env> {
     const ended = { text: "The task has already ended.", isError: true, terminate: true };
     const reject = (text: string) => ({ text, isError: true, terminate: false });
     const waiting = (id: string) => ({
-      text: `Your question (${id}) has been sent to the parent. Stop now and wait: you will be resumed with the parent's answer. Do not call any other tool.`,
+      text: `Your question (${id}) has been sent to the client. Stop now and wait: you will be resumed with the client's answer. Do not call any other tool.`,
       isError: false,
       terminate: true,
     });
@@ -2876,7 +2876,7 @@ export class AgentDO extends DurableObject<Env> {
       return reject(
         wrapUntrusted(
           "ask_parent",
-          `Could not prepare the sandbox to wait for the parent: ${tail(String(e), 300)}\nCall ask_parent again.`,
+          `Could not prepare the sandbox to wait for the client: ${tail(String(e), 300)}\nCall ask_parent again.`,
         ),
       );
     }
@@ -2892,7 +2892,7 @@ export class AgentDO extends DurableObject<Env> {
 
     const seq = (this.store.meta<number>("question_seq") ?? 0) + 1;
     const questionId = `q-${seq}`;
-    // 質問は親に流れる子の自由文。emit() を通らないので、積む前にここでマスクする（meta とイベントの両方）
+    // 質問はクライアントに流れるワーカーの自由文。emit() を通らないので、積む前にここでマスクする（meta とイベントの両方）
     const safeMessage = maskSecrets(message);
     const safeOptions = options.map((o) => maskSecrets(o));
     this.store.tx(() => {
@@ -3193,7 +3193,7 @@ export class AgentDO extends DurableObject<Env> {
     if (!spec) return;
     const ref = `refs/heads/${spec.branch}`;
     const sb = this.lazySandbox();
-    // ls-remote と push は、子の gitconfig から切り離した git で、origin ではなくリポジトリの URL へ直接送る。
+    // ls-remote と push は、ワーカーの gitconfig から切り離した git で、origin ではなくリポジトリの URL へ直接送る。
     // 許可証（ref と newSha）は push の exec の間だけ付く
     const remoteUrl = pushTarget(spec.repository);
     const exec = (argv: string[], timeoutMs: number, pushPermit?: PushPermit) =>

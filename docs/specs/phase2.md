@@ -8,10 +8,10 @@
 |---|---|
 | 6.4 Credential Helper | **廃止**。Sandbox DO の外向き傍受（Git Gateway entrypoint）が GitHub への認証ヘッダを注入する。トークンはコンテナに入れない。Phase 2 は `git-upload-pack`（fetch/clone）だけを許可し、push は Phase 3 で入れる |
 | 7.2 外向き通信 | `enableInternet:false` と `interceptOutboundHttps` / `interceptOutboundHttp` による allowlist で強制する（後述） |
-| 7.4 argv 規則 | Gateway 側（利用者の入力からコマンドを組み立てる箇所）には argv 実行を適用する。子エージェントの bash ツールはモデルが書くシェル文字列なので、`["bash","-lc",cmd]` で実行することを許す。理由: コンテナそのものが信頼境界で、資格情報を持たず、外向き通信は境界で制限されているため |
+| 7.4 argv 規則 | Gateway 側（利用者の入力からコマンドを組み立てる箇所）には argv 実行を適用する。ワーカーの bash ツールはモデルが書くシェル文字列なので、`["bash","-lc",cmd]` で実行することを許す。理由: コンテナそのものが信頼境界で、資格情報を持たず、外向き通信は境界で制限されているため |
 | 15.1 Sandbox | `@cloudflare/sandbox` 1.0.1 は 0.x と別物で、`getSandbox` / `exec` を持たない。`SandboxDO` を自作する（`ctx.container` + `Files`）。ツールは Pi の `defineTool` で自作し、`CodingTools` は使わない |
 | 15.2 Claude | `createAI({binding: env.AI, id: <gateway id>, metadata: {userId, taskId}})`。モデル ID はハイフン形式（例: `anthropic/claude-sonnet-5-5`。実機で確認済み） |
-| 構成 | 子エージェントは別 Worker `apps/agent` に置く。Gateway からは `script_name` 付きの DO バインディングで呼ぶ |
+| 構成 | ワーカーは別 Worker `apps/agent` に置く。Gateway からは `script_name` 付きの DO バインディングで呼ぶ |
 | Phase 3 の範囲 | GitHub App 認証は Phase 1 で済んだ。Phase 3 は Installation Token Broker、Git Gateway の push 許可（`agent/task-*` ブランチのみ）、Draft PR の作成・更新とする |
 
 ## ゴール
@@ -19,7 +19,7 @@
 `task_start` → `RUNNING` → Sandbox で編集・テスト・ローカル commit → `VERIFYING` → `COMPLETED` / `FAILED`、の流れが動く。完了したタスクの成果（要約、検証結果、patch）は `task_result` で取得できる。
 
 - push と Draft PR は作らない（Phase 3）。
-- 親への質問（`INPUT_REQUIRED`）は作らない（Phase 4）。
+- クライアントへの質問（`INPUT_REQUIRED`）は作らない（Phase 4）。
 
 ## codex レビュー（2026-10-18）で追加した原則
 
@@ -27,7 +27,7 @@
 2. **配送の収束**: Gateway → Agent の指示（start / cancel）は、意図を永続化してから送る。成功を確かめるまで alarm で再送する。受け手は冪等にし、tombstone で遅れて届いた指示を拒否する。
 3. **期限は各層が持つ**: 下位の層から上位の層へ通知はしない（一方向 RPC）。Gateway は deadline を渡し、各層は自分で期限を確かめて止まる。上位は poll で状態を知る。
 4. **費用は呼び出し前に止める**: 次のモデル呼び出しの最大費用を見積もり、残りの予算で払えなければ呼ばない（事後の usage で止めるだけでは上限を保証できない）。
-5. **検証の入力はモデルの手の外に置く**: 検証コマンドは親が渡し、AgentDO の storage に保存する。対象の commit SHA を固定する。
+5. **検証の入力はモデルの手の外に置く**: 検証コマンドはクライアントが渡し、AgentDO の storage に保存する。対象の commit SHA を固定する。
 
 ## 構成
 
@@ -55,7 +55,7 @@ apps/gateway (既存 Worker)
 - `@cloudflare/sandbox@1.0.1` と、Docker イメージ `cloudflare/sandbox:1.0.1`（タグをそろえる）
 - Pi への依存は `apps/agent/src/pi/` のアダプタ層に閉じ込める（15.1）。
 
-## AgentDO（子エージェント）
+## AgentDO（ワーカー）
 
 - `Lifecycle.install(this).use(piHarness)`。復旧は PiHarness の heartbeat（30秒）と checkpoint に任せる。
 - モデル
@@ -107,7 +107,7 @@ apps/gateway (既存 Worker)
   - 全部が成功（終了コード 0）なら `completed`。失敗なら、結果をモデルに返して修正させる。
     - 試行は「最初の1回 + 修正3回」の計4回まで。4回目も失敗なら `failed`。
   - verification_commands が無い場合は、モデルの申告だけで `completed` にし、結果に「未検証」と記す。
-  - 限界: モデルはテストの設定（例: package.json の test スクリプト）を書き換えられるので、この検証は門番であって保証ではない。テスト関連のファイル（package.json の scripts、テストの設定ファイル、テストファイルの削除）が変わっていれば、結果に警告として記し、親のレビューに委ねる。
+  - 限界: モデルはテストの設定（例: package.json の test スクリプト）を書き換えられるので、この検証は門番であって保証ではない。テスト関連のファイル（package.json の scripts、テストの設定ファイル、テストファイルの削除）が変わっていれば、結果に警告として記し、クライアントのレビューに委ねる。
 - 成果の保存
   - `completed` / `failed` になったら、base_sha からの patch（`git format-patch`）と、検証結果・要約を AgentDO の storage に保存する。
   - patch は 1MiB までとし、DO の行サイズの制限を避けるため分割して保存する。超える場合は「大きすぎる」と記し、diffstat だけを保存する。
@@ -238,7 +238,7 @@ apps/gateway (既存 Worker)
 ## Phase 2 でやらないこと
 
 - push と Draft PR（Phase 3）
-- 親への質問と追加指示（Phase 4）
+- クライアントへの質問と追加指示（Phase 4）
 - Web 調査（Phase 5）
 - snapshot による高速な復旧、R2（Phase 6）
 - 実環境へのデプロイ（ユーザーの指示があるまで行わない）

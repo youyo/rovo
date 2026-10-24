@@ -1,6 +1,6 @@
 /**
  * ANSI のエスケープコード（色・カーソル操作・OSC のハイパーリンクやタイトル）。
- * 端末向けの装飾で、親にもモデルにも意味がなく、トークンを食うだけなので取り除く。
+ * 端末向けの装飾で、クライアントにもモデルにも意味がなく、トークンを食うだけなので取り除く。
  */
 const ANSI_RE =
   // biome-ignore lint/suspicious/noControlCharactersInRegex: ESC / BEL を扱うのが目的

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { getFakeApp, type UnitGitHubEnv } from "../support/unit-github";
 import { fakeAgent, newTaskId, sampleInput, taskStub } from "./helpers";
 
-// Phase 4 M2: 親子間の対話（question / task_answer / task_steer）の TaskDO 側。
+// Phase 4 M2: クライアントとワーカーの対話（question / task_answer / task_steer）の TaskDO 側。
 const OWNER = 801;
 const app = () => getFakeApp(env as unknown as UnitGitHubEnv);
 
@@ -34,7 +34,7 @@ async function createRunning() {
   return t;
 }
 
-/** 子が質問し、TaskDO が取り込んで INPUT_REQUIRED になるまで進める。 */
+/** ワーカーが質問し、TaskDO が取り込んで INPUT_REQUIRED になるまで進める。 */
 async function createAsked(qid = "q1", message = "which db?", options: string[] = ["pg", "mysql"]) {
   const t = await createRunning();
   await t.agent.ask(qid, message, options);

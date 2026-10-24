@@ -135,7 +135,7 @@ design 16 は「下流の本番用 wrangler 設定を `-c` で指定してデプ
 - 案 2: 検証用の環境（`ENVIRONMENT` を本番と同じにしたまま、Sandbox のイメージにだけ「起動時に一度だけ失敗する」ような仕掛けを足したもの）。コードに検証用の分岐が入る。
 - **推奨: 案 1**。コードに検証用の分岐を入れない（本番の経路と同じ経路を確かめる）。コンテナを止める具体的な手段は M7 で調べて手順に書く。調べる項目は次の 3 つ。
   1. Cloudflare のダッシュボード・API でコンテナのインスタンスを停止する方法。
-  2. Sandbox の中から通常のコマンドでコンテナのメインプロセスを落とす方法（コードの変更は要らないが、子が実行するコマンドとして行うため、外向き通信の制限や権限の範囲内でできるかを確かめる）。
+  2. Sandbox の中から通常のコマンドでコンテナのメインプロセスを落とす方法（コードの変更は要らないが、ワーカーが実行するコマンドとして行うため、外向き通信の制限や権限の範囲内でできるかを確かめる）。
   3. agent を再デプロイして、実行中のインスタンスを置き換える方法（デプロイ時のコンテナの入れ替わりで、実行中のタスクが復旧するかを見る）。
   - 調べても手段が無ければ、実機での確認は諦めて、実コンテナの E2E 〔`sandbox-do.e2e.test.ts`〕で確認済みとして記録し、その限界を残す）。
 
@@ -159,7 +159,7 @@ GitHub の個人アカウントには team が無いので、org/team に加え�
 
 調べた事実:
 
-- Phase 2（子エージェントと Sandbox）の受入の節が無い。節の番号は 1〜4（Phase 1）、5〜7（Phase 3）、8〜10（Phase 4）、11〜13（Phase 5）、14〜17（Phase 6）。Phase 2 の実機の確認が欠けている。
+- Phase 2（ワーカーと Sandbox）の受入の節が無い。節の番号は 1〜4（Phase 1）、5〜7（Phase 3）、8〜10（Phase 4）、11〜13（Phase 5）、14〜17（Phase 6）。Phase 2 の実機の確認が欠けている。
 - design 12 の Phase 7 の 15 項目と、acceptance の節の対応が書かれていない。
 - 「起動のやり直しが実機で効くか」に当たる項目が無い。
 - design 13 の未検証事項の表（Claude Code、Cowork、Pi Durable、Sandbox の外向き通信制限、Git Credential Helper、GitHub App、Jev、Web Sandbox）と、その表に載っていない R2 と Cost Control（design.md 976〜977 行付近の記述）を、受入の節に対応させる。表と、受入の節の対応が無い。
@@ -177,14 +177,14 @@ GitHub の個人アカウントには team が無いので、org/team に加え�
 | 1 | Claude Code から実装を委譲 | 台本付き MCP クライアントで済（full E2E） | 2 |
 | 2 | Draft PR の作成 | full E2E（偽 GitHub） | 5 |
 | 3 | Pi Durable が実装を開始 | full E2E（実コンテナ、台本のモデル） | 19（実 Claude で） |
-| 4 | 親が別の会話・調査を継続 | 自動では確かめられない（クライアントの挙動） | 3、8 |
+| 4 | クライアントが別の会話・調査を継続 | 自動では確かめられない（クライアントの挙動） | 3、8 |
 | 5〜7 | 質問、回答、再開 | full E2E h など（台本） | 9（実モデルが質問する振る舞い） |
 | 8 | Web 検索は隔離環境で実行 | web の E2E（偽） | 11（web_browse は既定で無効なので、web_search / web_fetch が対象） |
 | 9 | 安全性判定（Jev→Clef）がレスポンスに含まれる | 同上 | 11、12、13 |
 | 10 | GitHub へ Push | full E2E | 5 |
 | 11 | テスト結果を PR へ反映 | full E2E | 5 |
-| 12 | 親が PR をレビュー | 対象外（人間の作業） | 19（ユーザーが実際にレビューして記録） |
-| 13 | 親セッションを終了しても子が継続 | cursor での再接続は自動で済 | 3（クライアントを閉じて開き直す） |
+| 12 | クライアントが PR をレビュー | 対象外（人間の作業） | 19（ユーザーが実際にレビューして記録） |
+| 13 | クライアントのセッションを終了してもワーカーが継続 | cursor での再接続は自動で済 | 3（クライアントを閉じて開き直す） |
 | 14 | 再接続後に状態・結果を取得 | 同上 | 3 |
 | 15 | Sandbox 障害から自動復旧 | agent の実コンテナ E2E | 18（D6） |
 
@@ -279,7 +279,7 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 **目的**: Phase 6 から残った穴を、テストで埋める。実装の変更は、テストが落ちた場合に限る。
 
-1. **web_browse が無効のときの full E2E**: `WEB_BROWSE_ENABLED` を `"false"`（既定）で 3 つの Worker を起動した通しで、親の `tools/list` に `web_browse` が出ず、子のツールにも出ず、呼んでも `disabled` で BROWSER を使わない。現在の full E2E は 3 つの Worker すべてで `true` にしてある（phase5.md）。既存の構成を保ったまま、無効の構成を追加する方法（wrangler dev を 2 つ起動するのは重いので、Worker の設定だけを切り替えた別の full 構成、または E2E の中で `vars` を切り替える方法）は、M3 の最初に決める。**決められないときは ESCALATE**。
+1. **web_browse が無効のときの full E2E**: `WEB_BROWSE_ENABLED` を `"false"`（既定）で 3 つの Worker を起動した通しで、クライアントの `tools/list` に `web_browse` が出ず、ワーカーのツールにも出ず、呼んでも `disabled` で BROWSER を使わない。現在の full E2E は 3 つの Worker すべてで `true` にしてある（phase5.md）。既存の構成を保ったまま、無効の構成を追加する方法（wrangler dev を 2 つ起動するのは重いので、Worker の設定だけを切り替えた別の full 構成、または E2E の中で `vars` を切り替える方法）は、M3 の最初に決める。**決められないときは ESCALATE**。
 2. **`LOGS` を外した構成の E2E**: 今は Unit（`task-archive.test.ts`）だけで確認している。E2E で、`LOGS` なしで起動した gateway が、タスクを普通に完了させ、`archive_skipped`（`reason: no_binding`）が `/__test/audit` に出ることを確かめる。構成の作り方は M3-1 と同じ問題（wrangler dev の起動数）。gateway の E2E（Docker 不要）は `r2_buckets` を生成した設定で起動しているので、そこに `LOGS` 無しの起動を足せるかを調べる。
 3. **`result_unavailable` で打ち切る場合の Unit**: アーカイブが `result_unavailable`（結果を作れない）で再試行の上限に達し、`archive_failed`（`reason: result_unavailable`）を出して `archive_done = 1` にすることの Unit。タスクの結果と予算の精算は変わらない。
 4. **outbound-handler の reason ごとのテストの網羅**: `outbound_denied` の `reason`（既存の違反コードの全部）ごとに、`dest` の分類と JSON の形が出ることを確かめる Unit。違反コードの一覧（`outbound-policy.ts`）から表を作り、一覧にあって、テストに無い reason が無いことを確かめるテスト（一覧を増やしたときにテストの追加を促す）にする。
@@ -416,7 +416,7 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 **範囲**
 
-- 11 節: 実 Web Search API と Clef-flash、非信頼データの囲み、子からの利用、robots / bot チャレンジ / private への redirect、**回数の上限**、**`127.0.0.1.nip.io` と `169.254.169.254.nip.io` を `web_fetch` に渡しても内部に到達しないこと**（到達できたら Phase 5 の完了としない。ESCALATE）。
+- 11 節: 実 Web Search API と Clef-flash、非信頼データの囲み、ワーカーからの利用、robots / bot チャレンジ / private への redirect、**回数の上限**、**`127.0.0.1.nip.io` と `169.254.169.254.nip.io` を `web_fetch` に渡しても内部に到達しないこと**（到達できたら Phase 5 の完了としない。ESCALATE）。
 - 12 節: Clef の応答の形、`usage.input_tokens`、sentinel の効き方、AI Gateway の metadata。
 - 13 節: 注入サンプルでの検出率・誤検知率、閾値（`SAFETY_BLOCK_THRESHOLD` 0.8 / `SAFETY_CAUTION_THRESHOLD` 0.4）の調整。
 - **web_browse**（11 節）: 有効化前のゲートは行わない（D5 の 2026-10-20 の更新）。web → agent → gateway の順に `WEB_BROWSE_ENABLED` を `"true"` にし、`tools/list` に現れることを確かめる。11 節の「そのほかの確認」（bot チャレンジ、注入サンプル、所要時間と上限、UA と `rovo-web` の食い違い、BROWSER の wrangler の版と compatibility_date）は、運用しながら確かめて記録する。
@@ -434,7 +434,7 @@ phase6.md の M の分け方に合わせる。各 M は、先に失敗するテ�
 
 - 14〜17 節（アーカイブ、秘密の混入、監査ログ、ライフサイクル）。
 - 18 節（Sandbox・復旧）: 実機ではコンテナを止めない（D6 の 2026-10-20 の更新）。復旧の項目は、実コンテナの E2E で確認済みとして記録し、実機で確かめていない限界を備考に残す。
-- 19 節: design 12 の Phase 7 の 15 項目を、実 Claude Code / Cowork から通しで実施する。親の別会話の継続、親セッションを終了しても子が継続、再接続後の取得、PR をユーザーがレビューする、まで。
+- 19 節: design 12 の Phase 7 の 15 項目を、実 Claude Code / Cowork から通しで実施する。クライアントの別会話の継続、クライアントのセッションを終了してもワーカーが継続、再接続後の取得、PR をユーザーがレビューする、まで。
 - 検証用に一時的に足した設定（短いライフサイクル、sampling を下げた構成）は、確かめた後に元に戻したことを記録する。
 
 **完了条件**: 14〜19 節の項目に結果が記録されている。15 項目それぞれに、確かめた日付と結果がある。未達の項目は、原因と対応が書かれている。design 14 章の「最終的な完成条件」の各文について、満たしたことを示す節への参照を、15.8 に書く。

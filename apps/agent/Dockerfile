@@ -7,7 +7,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 # npm は audit の POST が外向き制御で 403 になるので既定で無効にする
 RUN npm config set audit false --global && npm config set fund false --global
-# pnpm / yarn は corepack の shim を有効にしておく（子が /tmp/bin に自分で入れたり PATH を足したりしなくてよい）。
+# pnpm / yarn は corepack の shim を有効にしておく（ワーカーが /tmp/bin に自分で入れたり PATH を足したりしなくてよい）。
 # 本体はビルド時に corepack のキャッシュ（COREPACK_HOME）へ入れておき、実行時に取りに行かせない。
 # 理由: pnpm 11 以降の wrapper は native バイナリ（約 44MB）を初回の実行時に Node の fetch（undici）で取る。
 # 外向き通信の中継越しにこれを受けると、Node 24 の undici が assert(!this.paused) で落ちる（本番の不具合）。

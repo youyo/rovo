@@ -257,7 +257,7 @@ describe("SandboxDO: 判断ごとの記録と集計（usage の振り返り用�
     });
   });
 
-  it("bash -c の形（子の bash ツール・検証コマンド）は、コマンド文字列の先頭の語を cmd に残す（文字列の全体は残さない）", async () => {
+  it("bash -c の形（ワーカーの bash ツール・検証コマンド）は、コマンド文字列の先頭の語を cmd に残す（文字列の全体は残さない）", async () => {
     await runInDO(sandboxStub("clef-cmd-bash"), async (inst) => {
       setup(inst);
       await inst.ensureReady(spec());

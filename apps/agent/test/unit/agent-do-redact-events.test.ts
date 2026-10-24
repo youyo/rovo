@@ -28,7 +28,7 @@ const GH = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 // 秘密の検出がダミーに反応しないよう組み立てる
 const AWS = `${"AKIA"}ABCDEFGHIJKLMNOP`;
 
-describe("親に流れるイベントの文字列は、積む前に秘密をマスクする", () => {
+describe("クライアントに流れるイベントの文字列は、積む前に秘密をマスクする", () => {
   it("tool_start の summary（引数の要約）に含まれる秘密はマスクされる", async () => {
     const fx = newFixture("redact-start", [
       round(
@@ -138,7 +138,7 @@ describe("親に流れるイベントの文字列は、積む前に秘密をマ�
   });
 });
 
-describe("親に流れるイベントの文字列の体裁", () => {
+describe("クライアントに流れるイベントの文字列の体裁", () => {
   const wrapped = (text: string) => wrapUntrusted("bash", text);
 
   it("囲み済みの長い結果でも、tool_end の summary に BEGIN・END・前置きは入らない", async () => {

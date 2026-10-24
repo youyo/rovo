@@ -74,7 +74,7 @@ describe("E2E 用テストルート /__test/agent/set-script", () => {
   });
 });
 
-describe("E2E 用テストルート /__test/agent/emit（偽の子エージェントにイベントを積ませる）", () => {
+describe("E2E 用テストルート /__test/agent/emit（偽のワーカーにイベントを積ませる）", () => {
   it("ENVIRONMENT が test 以外なら 404（Worker 全体でも、本物の AgentDO は呼ばれない）", async () => {
     const res = await SELF.fetch(
       `${env.PUBLIC_BASE_URL}/__test/agent/emit`,
@@ -107,7 +107,7 @@ describe("E2E 用テストルート /__test/agent/emit（偽の子エージェ�
   });
 });
 
-describe("withTestScripts（TaskDO が子エージェントを呼ぶ前に台本を渡す）", () => {
+describe("withTestScripts（TaskDO がワーカーを呼ぶ前に台本を渡す）", () => {
   const spec = { taskId: "T", instructions: "scenario:wt" } as TaskSpec;
 
   function fakeAgent() {
@@ -196,7 +196,7 @@ describe("E2E 用テストルート（Phase 4: 配送の保留・モデルへの
     }
   });
 
-  it("test の finish は、偽の子エージェントを終端にする（phase と結果）。不正な phase は 400", async () => {
+  it("test の finish は、偽のワーカーを終端にする（phase と結果）。不正な phase は 400", async () => {
     const app = createDefaultApp();
     const bad = await app.request(
       "/__test/agent/finish",

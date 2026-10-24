@@ -54,7 +54,7 @@
     "ALLOWED_ORG": "",
     "ALLOWED_TEAM": "",
     "ALLOWED_USER_IDS": "",
-    // 親（MCP の web_search / web_fetch / web_browse）の回数の上限。ユーザーごとに UTC の1日あたり
+    // クライアント（MCP の web_search / web_fetch / web_browse）の回数の上限。ユーザーごとに UTC の1日あたり
     "WEB_SEARCH_DAILY_LIMIT": "200",
     "WEB_FETCH_DAILY_LIMIT": "500",
     "WEB_BROWSE_DAILY_LIMIT": "50",
@@ -71,11 +71,11 @@
     // Sandbox: Containers の standard-2（既定の SANDBOX_INSTANCE。1 vCPU・6 GiB・12 GB）を CPU 100% 稼働で 1 時間（月の無料枠は差し引かない上限側の推定）。
     // 未設定・不正なら packages/models が決める standard-2 の値。agent の SANDBOX_INSTANCE を変えたら、packages/models の sandboxUsdPerHour と同じ値にする
     "SANDBOX_USD_PER_HOUR": "0.1291",
-    // Web（子が使った分）: 1,000 回あたり。search は Web Search API の linkup（既定のプロバイダ）、browse は Browser Run 30 秒/回の上限側の推定
+    // Web（ワーカーが使った分）: 1,000 回あたり。search は Web Search API の linkup（既定のプロバイダ）、browse は Browser Run 30 秒/回の上限側の推定
     "WEB_USD_PER_1K_SEARCH": "5.00",
     "WEB_USD_PER_1K_FETCH": "0",
     "WEB_USD_PER_1K_BROWSE": "0.75",
-    // タスク 1 件に予約する予算（USD）。月額の枠（MONTHLY_BUDGET_USD、既定 100）からこの額を予約し、子エージェントの上限（budgetUsd）にも同じ値を渡す。
+    // タスク 1 件に予約する予算（USD）。月額の枠（MONTHLY_BUDGET_USD、既定 100）からこの額を予約し、ワーカーの上限（budgetUsd）にも同じ値を渡す。
     // 不正な値・0 以下は 10。月額の枠を 10 未満にするときは、これも下げる（枠より大きいとタスクを始められない）。
     "TASK_BUDGET_USD": "10",
     // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する）。不正な値・0 以下は 0.5。

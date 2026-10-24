@@ -9,8 +9,8 @@ import { resetProviderKeysCache } from "./provider-keys";
 /**
  * 通しの E2E 専用の仕組み（ENVIRONMENT=test のときだけ有効。それ以外は 404 / 何もしない）。
  *
- * 子エージェントの fake モデルの台本は、AgentDO.setScript(key, script) で AgentDO（1 task = 1 インスタンス、
- * 名前は task_id）に置く。しかし task_id は task_start の応答で初めて決まり、その時点で子エージェントは
+ * ワーカーの fake モデルの台本は、AgentDO.setScript(key, script) で AgentDO（1 task = 1 インスタンス、
+ * 名前は task_id）に置く。しかし task_id は task_start の応答で初めて決まり、その時点でワーカーは
  * もう動き出している（Sandbox が速いと最初のモデル呼び出しに間に合わない）。そこで次の 2 段にする。
  *   1. POST /__test/agent/set-script {key, script}: 台本を KV（key = task_start の instructions）に預ける
  *   2. TaskDO が AgentDO.start を呼ぶ直前に withTestScripts が、預かった台本を setScript で渡す
@@ -96,7 +96,7 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json(await agent.testDiagnostics());
   });
 
-  // 子エージェント（E2E の偽 AgentDO）を終端にする。phase は completed / failed、result は getResult の戻り値（ResultDto）。
+  // ワーカー（E2E の偽 AgentDO）を終端にする。phase は completed / failed、result は getResult の戻り値（ResultDto）。
   // PR の Ready 化・マージ（D9）の通しの E2E が、COMPLETED / FAILED のタスクを作るために使う
   app.post("/__test/agent/finish", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();
@@ -121,7 +121,7 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ ok: true });
   });
 
-  // 偽の子エージェント（E2E の偽 AgentDO）にイベントを 1 つ積ませる。構造化イベント（command など）の台本に使う。
+  // 偽のワーカー（E2E の偽 AgentDO）にイベントを 1 つ積ませる。構造化イベント（command など）の台本に使う。
   // 本物の AgentDO には emit が無いので、gateway 単体の E2E（偽の agent Worker）だけで使う
   app.post("/__test/agent/emit", async (c) => {
     if (c.env.ENVIRONMENT !== "test") return c.notFound();

@@ -13,7 +13,7 @@
   "logpush": true,
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "ai": { "binding": "AI" },
-  // Browser Run（web_browse が使う）。remote の設定は docs/deploy.md の 12 を見て、web_browse を有効にするときに足す。
+  // Browser Run（web_browse が使う）。remote: true はローカル開発（wrangler dev）で本物のブラウザに繋ぐための設定で、デプロイには要らない（docs/deploy.md の 12）。
   "browser": { "binding": "BROWSER" },
   "vars": {
     "ENVIRONMENT": "production",

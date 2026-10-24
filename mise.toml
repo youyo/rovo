@@ -357,7 +357,7 @@ description = "AI Gateway にプロバイダーのキー（BYOK、alias は defa
 run = "node scripts/byok.mjs"
 
 [tasks."deploy:config"]
-description = "rovo.config.json（秘密でない値）と terraform の非秘密の出力（kv_namespace_id / archive_bucket_name / ai_gateway_id）から、deploy/ の wrangler 設定を生成する（生成物はコミットする）。terraform の資格情報が要る。オプション: --no-terraform（保存済みの deploy/infra.json から作り直す）/ --check（作り直した結果と既存を比べる。terraform 不要。下流の CI 用）"
+description = "rovo.config.json（秘密でない値）と terraform の非秘密の出力（kv_namespace_id / archive_bucket_name / ai_gateway_id / ai_web_gateway_id）から、deploy/ の wrangler 設定を生成する（生成物はコミットする）。terraform の資格情報が要る。オプション: --no-terraform（保存済みの deploy/infra.json から作り直す）/ --check（作り直した結果と既存を比べる。terraform 不要。下流の CI 用）"
 run = "node scripts/deploy-config.mjs generate"
 
 [tasks."deploy:config:check"]

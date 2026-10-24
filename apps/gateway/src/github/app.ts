@@ -228,8 +228,9 @@ export class GitHubAppClient {
   /**
    * この App の bot の作者。GET /app（App の JWT）で slug を、GET /users/<slug>[bot] で bot ユーザーの id を引く。
    * 引けない・形が不正なら例外（呼び出し側が FALLBACK_COMMIT_IDENTITY にする）。
+   * installationToken を渡すと /users はそれで認証して引く（Workers の外向き IP は共有で、認証なしの上限に当たりやすい）。
    */
-  async getBotIdentity(): Promise<BotAuthor> {
+  async getBotIdentity(installationToken?: string): Promise<BotAuthor> {
     this.key ??= parsePrivateKey(this.privateKey);
     const jwt = await createAppJwt({
       appId: this.appId,
@@ -264,7 +265,10 @@ export class GitHubAppClient {
     const userWhat = "get bot user";
     const user = await readJson(
       await this.send(userWhat, `${this.apiBase}/users/${encodeURIComponent(`${slug}[bot]`)}`, {
-        headers,
+        headers:
+          installationToken === undefined
+            ? headers
+            : { ...headers, authorization: `Bearer ${installationToken}` },
       }),
       userWhat,
     );

@@ -17,8 +17,7 @@ export interface OutboundGatewayProps {
   taskId: string;
 }
 
-export type { GitCredential };
-export type { PushPermit };
+export type { GitCredential, PushPermit };
 
 /**
  * このファイルが自分で出す違反コードの全部（policy の判定と receive-pack の解析のコードは別に持つ）。

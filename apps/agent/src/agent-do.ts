@@ -64,6 +64,7 @@ import {
   type WebUsage,
 } from "./agent/types";
 import { emitAudit, readTestAudit } from "./audit-adapter";
+import { GIT_ISOLATION_ENV, isolatedGit, pushTarget } from "./git-isolation";
 import { applyConsultCacheControl } from "./pi/consult-cache";
 import { type AgentPiHooks, createAgentExtension } from "./pi/extension";
 import {
@@ -80,7 +81,6 @@ import {
   type ScriptStep,
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
-import { GIT_ISOLATION_ENV, isolatedGit, pushTarget } from "./git-isolation";
 import type {
   ExecResult,
   PeekedOutput,

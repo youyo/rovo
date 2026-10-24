@@ -197,7 +197,9 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     expect(await waitForTerminal(fx)).toBe("completed");
     const calls = fx.sandbox.calls.filter((c) => {
       const a = stripGitIsolation(c.argv);
-      return a[0] === "git" && (a[1] === "push" || (a[1] === "ls-remote" && !a.includes("--heads")));
+      return (
+        a[0] === "git" && (a[1] === "push" || (a[1] === "ls-remote" && !a.includes("--heads")))
+      );
     });
     // ls-remote も push も、子の gitconfig から切り離し（-c と env）、origin ではなくリポジトリの URL へ直接送る
     const isolation = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper="];
@@ -386,7 +388,9 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     await fx.stub.cancel();
     fx.gate.release();
     await waitForPhase(fx, "cancelled");
-    expect(fx.sandbox.calls.some((c) => stripGitIsolation(c.argv)[1] === "format-patch")).toBe(false);
+    expect(fx.sandbox.calls.some((c) => stripGitIsolation(c.argv)[1] === "format-patch")).toBe(
+      false,
+    );
     const r = done(await fx.stub.getResult());
     expect(r.patch).toBeUndefined();
     expect(r.diffstat).toBeUndefined();

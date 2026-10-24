@@ -45,6 +45,39 @@ const GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@e"];
 const bash = (c: ReturnType<typeof sandboxClient>, script: string) =>
   c.exec(["bash", "-c", script], { timeoutMs: 120_000 });
 
+/** 自動の push と同じ形（子の gitconfig から切り離し、URL へ直接、<sha>:<ref> を送る）。許可証は渡さなければ付かない */
+const ISOLATION = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper="];
+const ISOLATION_ENV = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+const HELLO_URL = "https://github.com/acme/hello.git";
+async function headSha(c: ReturnType<typeof sandboxClient>) {
+  return (await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim();
+}
+/** SandboxDO の自動の push の exec（pushPermit 付き）。task の作業ブランチへ sha を送る */
+function autoPush(
+  c: ReturnType<typeof sandboxClient>,
+  task: string,
+  sha: string,
+  opts: { permit?: { ref: string; newSha: string } | null; force?: boolean } = {},
+) {
+  const permit = opts.permit === undefined ? { ref: ref(task), newSha: sha } : opts.permit;
+  return c.exec(
+    [
+      "git",
+      ...ISOLATION,
+      "push",
+      ...(opts.force ? ["--force"] : []),
+      HELLO_URL,
+      `${sha}:${ref(task)}`,
+    ],
+    {
+      cwd: "/workspace",
+      env: ISOLATION_ENV,
+      timeoutMs: 120_000,
+      ...(permit ? { pushPermit: permit } : {}),
+    },
+  );
+}
+
 // ---- Sandbox 単体（bash から見える git の振る舞い。proxy の保証の範囲）----
 
 /** 偽 GitHub に作業ブランチを用意し、トークン付きで ensureReady したコンテナを返す。 */
@@ -64,18 +97,20 @@ async function sandboxTask(task: string) {
 }
 
 describe("作業ブランチへの push（proxy の許可と拒否）", () => {
-  it("作業ブランチの先頭から clone され、bash からの git push が通り、トークン付きで上流に届く", async () => {
+  it("作業ブランチの先頭から clone され、自動の push（許可証付き）が通り、トークン付きで上流に届く", async () => {
     const { c } = await sandboxTask("pg");
     const head = (await c.exec(["git", "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
     expect(head).toBe("agent/task-pg");
     upstream.requests.length = 0;
     await c.writeFile("/workspace/a.txt", "a\n");
-    const r = await bash(
+    const made = await bash(
       c,
-      `cd /workspace && git add -A && git ${GIT_ID.join(" ")} commit -q -m a && git push origin HEAD:${ref("pg")}`,
+      `cd /workspace && git add -A && git ${GIT_ID.join(" ")} commit -q -m a`,
     );
+    expect(made.exitCode, made.stderr).toBe(0);
+    const local = await headSha(c);
+    const r = await autoPush(c, "pg", local);
     expect(r.exitCode, r.stderr).toBe(0);
-    const local = (await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim();
     expect(upstream.refSha("hello", ref("pg"))).toBe(local);
     // 上流に届いた receive-pack の通信は、すべて Worker が付けたトークンを持つ
     const expected = `Basic ${Buffer.from(`x-access-token:${TEST_GIT_TOKEN}`).toString("base64")}`;
@@ -86,6 +121,76 @@ describe("作業ブランチへの push（proxy の許可と拒否）", () => {
     // gzip と protocol v2 のヘッダは receive-pack では転送されない
     expect(rp.every((q) => q.headers["git-protocol"] === undefined)).toBe(true);
     expect(rp.every((q) => q.headers["content-encoding"] === undefined)).toBe(true);
+  });
+
+  it("子の bash からの git push は、作業ブランチ向きでも拒否される（許可証が無い）。秘密の検査を通らずに送れない", async () => {
+    const { c } = await sandboxTask("bash-push");
+    await c.writeFile("/workspace/a.txt", "a\n");
+    await bash(c, `cd /workspace && git add -A && git ${GIT_ID.join(" ")} commit -q -m a`);
+    const before = receivePackPosts().length;
+    const mine = upstream.refSha("hello", ref("bash-push"));
+    for (const cmd of [
+      `git push origin HEAD:${ref("bash-push")}`,
+      `git push --force origin HEAD:${ref("bash-push")}`,
+      `git push ${HELLO_URL} HEAD:${ref("bash-push")}`,
+    ]) {
+      const r = await bash(c, `cd /workspace && ${cmd}`);
+      expect(r.exitCode, `${cmd}: ${r.stderr}`).not.toBe(0);
+    }
+    // 子が自分で設定を直しても（フック・credential helper）、許可証が無いので通らない
+    const r = await bash(
+      c,
+      `cd /workspace && git -c credential.helper= -c core.hooksPath=/dev/null push origin HEAD:${ref("bash-push")}`,
+    );
+    expect(r.exitCode, r.stderr).not.toBe(0);
+    // 上流には receive-pack の本文が 1 つも届いていない。ref は動いていない
+    expect(receivePackPosts().length).toBe(before);
+    expect(upstream.refSha("hello", ref("bash-push"))).toBe(mine);
+  });
+
+  it("許可証の ref・newSha が push と違えば拒否される（許可証付きの exec でも、別の commit は送れない）", async () => {
+    const { c } = await sandboxTask("permit-mismatch");
+    await c.writeFile("/workspace/a.txt", "a\n");
+    await bash(c, `cd /workspace && git add -A && git ${GIT_ID.join(" ")} commit -q -m a`);
+    const local = await headSha(c);
+    const before = receivePackPosts().length;
+    const mine = upstream.refSha("hello", ref("permit-mismatch"));
+    const wrong = [
+      { ref: ref("permit-mismatch"), newSha: `${"0".repeat(39)}1` },
+      { ref: ref("someone-else"), newSha: local },
+    ];
+    for (const permit of wrong) {
+      const r = await autoPush(c, "permit-mismatch", local, { permit });
+      expect(r.exitCode, JSON.stringify(permit)).not.toBe(0);
+    }
+    expect(receivePackPosts().length).toBe(before);
+    expect(upstream.refSha("hello", ref("permit-mismatch"))).toBe(mine);
+    // exec が終わると許可証は消える: 同じ push を許可証なしで送っても通らない
+    const r = await autoPush(c, "permit-mismatch", local, { permit: null });
+    expect(r.exitCode).not.toBe(0);
+    expect(upstream.refSha("hello", ref("permit-mismatch"))).toBe(mine);
+  });
+
+  it("自動の push は、子が /root/.gitconfig・.git/config に書いたフック・credential helper・pushurl の影響を受けない", async () => {
+    const { c } = await sandboxTask("iso");
+    await c.writeFile("/workspace/a.txt", "a\n");
+    await bash(
+      c,
+      [
+        "cd /workspace",
+        `git add -A && git ${GIT_ID.join(" ")} commit -q -m a`,
+        "mkdir -p /tmp/hooks && printf '#!/bin/sh\\necho hook-ran > /tmp/hook-ran\\nexit 1\\n' > /tmp/hooks/pre-push && chmod +x /tmp/hooks/pre-push",
+        "git config --global core.hooksPath /tmp/hooks",
+        "git config --global credential.helper '!echo username=evil; echo password=evil; true'",
+        "git config --global url.http://127.0.0.1:1/.insteadOf https://github.com/",
+        "git config remote.origin.pushurl http://127.0.0.1:1/x.git",
+      ].join(" && "),
+    );
+    const local = await headSha(c);
+    const r = await autoPush(c, "iso", local);
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(upstream.refSha("hello", ref("iso"))).toBe(local);
+    expect((await c.exec(["test", "-e", "/tmp/hook-ran"])).exitCode).not.toBe(0);
   });
 
   it("トークンはコンテナに入らない（環境変数・設定ファイル・作業ツリーのどこにも無い）", async () => {
@@ -141,21 +246,23 @@ describe("作業ブランチへの push（proxy の許可と拒否）", () => {
     expect(upstream.refSha("calc", ref("deny"))).toBeUndefined();
   });
 
-  it("【保証の範囲外】履歴を書き換えた force push は proxy では止められない（完了時に信頼できる側が正す）", async () => {
+  it("履歴を書き換えた force push は、子の bash からは拒否される。自動の push（許可証付き）だけが送れる", async () => {
     const { c } = await sandboxTask("force");
     const git = (s: string) => bash(c, `cd /workspace && ${s}`);
     await c.writeFile("/workspace/one.txt", "1\n");
-    await git(
-      `git add -A && git ${GIT_ID.join(" ")} commit -q -m one && git push origin HEAD:${ref("force")}`,
-    );
+    await git(`git add -A && git ${GIT_ID.join(" ")} commit -q -m one`);
+    const first = await autoPush(c, "force", await headSha(c));
+    expect(first.exitCode, first.stderr).toBe(0);
     const one = upstream.refSha("hello", ref("force"));
     await git("git reset -q --hard HEAD~1");
     await c.writeFile("/workspace/two.txt", "2\n");
-    const r = await git(
-      `git add -A && git ${GIT_ID.join(" ")} commit -q -m two && git push --force origin HEAD:${ref("force")}`,
-    );
+    await git(`git add -A && git ${GIT_ID.join(" ")} commit -q -m two`);
+    const two = await headSha(c);
+    const denied = await git(`git push --force origin HEAD:${ref("force")}`);
+    expect(denied.exitCode, denied.stderr).not.toBe(0);
+    expect(upstream.refSha("hello", ref("force"))).toBe(one);
+    const r = await autoPush(c, "force", two, { force: true });
     expect(r.exitCode, r.stderr).toBe(0);
-    const two = (await c.exec(["git", "rev-parse", "HEAD"])).stdout.trim();
     expect(upstream.refSha("hello", ref("force"))).toBe(two);
     expect(two).not.toBe(one);
   });
@@ -164,9 +271,9 @@ describe("作業ブランチへの push（proxy の許可と拒否）", () => {
     const { c } = await sandboxTask("resume");
     const git = (s: string) => bash(c, `cd /workspace && ${s}`);
     await c.writeFile("/workspace/pushed.txt", "p\n");
-    await git(
-      `git add -A && git ${GIT_ID.join(" ")} commit -q -m pushed && git push origin HEAD:${ref("resume")}`,
-    );
+    await git(`git add -A && git ${GIT_ID.join(" ")} commit -q -m pushed`);
+    const pushResult = await autoPush(c, "resume", await headSha(c));
+    expect(pushResult.exitCode, pushResult.stderr).toBe(0);
     const pushed = upstream.refSha("hello", ref("resume")) ?? "";
     expect(pushed).toMatch(/^[0-9a-f]{40}$/);
     await c.writeFile("/workspace/local.txt", "l\n");
@@ -353,7 +460,7 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
     });
   });
 
-  it("bash で履歴を差し替えて force push しても、完了時に検証済みの SHA へ揃う", async () => {
+  it("子が bash で履歴を差し替えて force push しようとしても拒否され、完了時は検証済みの SHA になる", async () => {
     const task = "force-fix";
     const s0 = spec(task);
     const evil = [
@@ -361,7 +468,7 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
       "echo evil > evil.txt",
       "git add -A",
       `git ${GIT_ID.join(" ")} commit -q -m evil`,
-      `git push -q --force origin HEAD:${ref(task)}`,
+      `(git push -q --force origin HEAD:${ref(task)} && echo PUSH-ACCEPTED || echo PUSH-DENIED)`,
       `git checkout -q agent/task-${task}`,
     ].join(" && ");
     const agent = agentClient(wrangler.baseUrl, task);
@@ -378,11 +485,13 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
     const r = await agent.getResult();
     if (r.status !== "completed") throw new Error(`unexpected ${r.status}`);
     const sha = r.verification.commitSha;
-    // 途中でリモートは別の履歴（evil）になったが、完了時に検証済みの SHA へ戻っている
+    // 子の push は許可証が無いので拒否され、リモートは検証済みの commit のまま（自動の push と完了時の同期は通る）
     const bashEnd = (await agent.allEvents()).find(
       (e) => e.type === "tool_end" && e.data.name === "bash",
     );
     expect(bashEnd?.data.isError, JSON.stringify(bashEnd)).toBe(false);
+    expect(JSON.stringify(bashEnd)).toContain("PUSH-DENIED");
+    expect(JSON.stringify(bashEnd)).not.toContain("PUSH-ACCEPTED");
     expect(upstream.refSha("calc", ref(task))).toBe(sha);
     expect(r.pushedSha).toBe(sha);
   });

@@ -191,6 +191,8 @@ export async function setConsultScript(
     usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
     /** 失敗を返す（model_rejected = モデルの 4xx、model_error = 5xx など）。費用は 0 */
     fail?: { code: "model_rejected" | "model_error" };
+    /** 応答するまでの遅れ（ms）。遅いモデル（consult の pending）の再現に使う */
+    delayMs?: number;
   },
 ): Promise<void> {
   const res = await fetch(`${baseUrl}/__test/agent/set-script`, {
@@ -276,4 +278,20 @@ export async function resetDashboardCloudflareCache(): Promise<void> {
 /** 偽の Cloudflare API（provider_configs）への呼び出し回数 */
 export async function providerConfigsCalls(): Promise<number> {
   return (await admin.requests()).filter((r) => r.path.endsWith("/provider_configs")).length;
+}
+
+/**
+ * consult の待ち時間の短縮（ENVIRONMENT=test のときだけある /__test/consult/timing）。実時間で 50 秒・5 分を待たないための差し替え。
+ * wait_ms は consult が答えを待つ上限（本番 50 秒）、background_timeout_ms は UserDO が裏のモデル呼び出しを待つ上限（本番 5 分）。
+ * null で既定に戻す。全ファイルで共有する gateway の設定なので、使ったファイルは afterAll で戻す。
+ */
+export async function setConsultTiming(
+  timing: { wait_ms?: number; background_timeout_ms?: number } | null,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/__test/consult/timing`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(timing ?? {}),
+  });
+  if (!res.ok) throw new Error(`/__test/consult/timing failed: ${res.status}`);
 }

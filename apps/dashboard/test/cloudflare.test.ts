@@ -91,13 +91,23 @@ describe("cloudflareRows", () => {
     expect(rowOf(old, "workers").text).toBe("取得できない（一時的）");
     expect(rowOf(old, "workers_ai").text).toBe("取得できない（一時的）");
   });
-  it("リンクは Cloudflare のトップだけ（open_url やアカウント ID は使わない）", () => {
+  it("リンクは行ごとの ?to=/:account/ 形（open_url やアカウント ID は使わない）", () => {
     const withAccount: CloudflareSummaryDto = {
       ...summary,
       open_url: `https://dash.cloudflare.com/${"0123456789abcdef".repeat(2)}/workers`,
     };
-    for (const r of cloudflareRows(withAccount, tJa)) {
-      expect(r.href).toBe(CLOUDFLARE_DASH_URL);
+    const expected: Record<string, string> = {
+      workers: "https://dash.cloudflare.com/?to=/:account/workers-and-pages",
+      containers: "https://dash.cloudflare.com/?to=/:account/workers/containers",
+      ai_gateway: "https://dash.cloudflare.com/?to=/:account/ai/ai-gateway",
+      workers_ai: "https://dash.cloudflare.com/?to=/:account/ai/workers-ai",
+      credit_balance: "https://dash.cloudflare.com/?to=/:account/ai/ai-gateway",
+    };
+    const rows = cloudflareRows(withAccount, tJa);
+    expect(rows.map((r) => r.key).sort()).toEqual(Object.keys(expected).sort());
+    for (const r of rows) {
+      expect(r.href).toBe(expected[r.key]);
+      expect(isAllowedCloudflareUrl(r.href)).toBe(true);
       expect(r.href).not.toMatch(/[0-9a-f]{32}/);
       expect(r.ariaLabel).toMatch(/を Cloudflare で開く$/);
     }
@@ -105,9 +115,27 @@ describe("cloudflareRows", () => {
 });
 
 describe("isAllowedCloudflareUrl", () => {
-  it("https://dash.cloudflare.com/ だけを許す", () => {
+  it("トップと ?to=/:account/<パス> の形だけを許す", () => {
     expect(isAllowedCloudflareUrl(CLOUDFLARE_DASH_URL)).toBe(true);
+    for (const ok of [
+      "https://dash.cloudflare.com/?to=/:account/workers-and-pages",
+      "https://dash.cloudflare.com/?to=/:account/workers/containers",
+      "https://dash.cloudflare.com/?to=/:account/ai/ai-gateway",
+    ]) {
+      expect(isAllowedCloudflareUrl(ok), ok).toBe(true);
+    }
     for (const bad of [
+      `https://dash.cloudflare.com/?to=/${"0123456789abcdef".repeat(2)}/workers`,
+      `https://dash.cloudflare.com/?to=/:account/${"0123456789abcdef".repeat(2)}`,
+      "https://dash.cloudflare.com/?to=/:account/",
+      "https://dash.cloudflare.com/?to=/:account/a/../b",
+      "https://dash.cloudflare.com/?to=/:account/a?x=1",
+      "https://dash.cloudflare.com/?to=/:account/a#x",
+      "https://dash.cloudflare.com/?to=//evil.com",
+      "https://dash.cloudflare.com/?to=/:account/a&b=1",
+      "https://evil.com/?to=/:account/workers-and-pages",
+      "http://dash.cloudflare.com/?to=/:account/workers-and-pages",
+      "https://user@dash.cloudflare.com/?to=/:account/workers-and-pages",
       "https://dash.cloudflare.com/abc",
       "https://dash.cloudflare.com",
       "http://dash.cloudflare.com/",

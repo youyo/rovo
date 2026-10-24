@@ -47,12 +47,22 @@ export function isAllowedPrUrl(url: unknown): url is string {
 }
 
 /**
- * Cloudflare のダッシュボードを開くリンク。許すのはこのトップの URL だけ（アカウント ID を含めない）。
+ * Cloudflare のダッシュボードを開くリンク。許すのはトップと、アカウントを書かない深いリンク
+ * （`?to=/:account/<パス>`。Cloudflare の公式文書にある形）だけ。アカウント ID は含めない。
  * gateway の open_url は使わない（アカウント ID を含みうる）。
  */
 export const CLOUDFLARE_DASH_URL = "https://dash.cloudflare.com/";
+const DEEP_LINK_PREFIX = `${CLOUDFLARE_DASH_URL}?to=/:account/`;
+const DEEP_LINK_PATH = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
+/** 行ごとの深いリンク（`/:account/` より後のパス）を組む。 */
+export const cloudflareDashLink = (path: string) => `${DEEP_LINK_PREFIX}${path}`;
 export function isAllowedCloudflareUrl(url: unknown): url is string {
-  return url === CLOUDFLARE_DASH_URL;
+  if (typeof url !== "string") return false;
+  if (url === CLOUDFLARE_DASH_URL) return true;
+  if (!url.startsWith(DEEP_LINK_PREFIX)) return false;
+  const path = url.slice(DEEP_LINK_PREFIX.length);
+  // アカウント ID らしい 32 桁の 16 進を含むものは許さない
+  return DEEP_LINK_PATH.test(path) && !/[0-9a-f]{32}/i.test(path);
 }
 
 /** Intl に渡すロケール（t の言語。en は en-US、ja は ja-JP）。 */

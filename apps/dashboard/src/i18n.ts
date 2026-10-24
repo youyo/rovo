@@ -180,6 +180,14 @@ const en = {
   "rail.label": "Tasks",
   "rail.emptyDay": "No tasks on this day.",
   "rail.emptyToday": "No tasks today yet.",
+  "rail.tabsLabel": "Rail view (this day / waiting)",
+  "rail.tabDay": "This day",
+  "rail.tabWaiting": "Waiting",
+  "rail.tabWaitingN": "Waiting {n}",
+  "rail.emptyWaiting": "No tasks are waiting.",
+  "rail.waitingError": "Couldn't load the waiting list. Will retry automatically.",
+  "rail.waitingHidden":
+    "{n} waiting task in a repository you can't access.|{n} waiting tasks in repositories you can't access.",
   "timeline.today": "Today's timeline",
   "timeline.day": "Timeline for this day",
   "timeline.emptyToday": "Start a task and the timeline will appear here.",
@@ -225,6 +233,10 @@ const en = {
   "budget.startable": "You can start {n} more task.|You can start {n} more tasks.",
   "budget.hidden":
     "{n} task in a repository you can't access is included in the cost total.|{n} tasks in repositories you can't access are included in the cost total.",
+  "budget.pace":
+    "Day {day} of the UTC month: {spent} spent. At this pace, about {projected} by month end.",
+  "budget.paceOver": "Projected to exceed your {limit} limit.",
+  "budget.paceEarly": "Not enough of the UTC month has passed to project (first day).",
   "models.title": "Cost by model",
   "models.cost": "Tasks {task}, consults {consult}",
 
@@ -493,6 +505,13 @@ const ja: Record<Key, string> = {
   "rail.label": "タスク",
   "rail.emptyDay": "この日のタスクはありません。",
   "rail.emptyToday": "今日のタスクはまだありません。",
+  "rail.tabsLabel": "レールの表示（この日 / 待ち）",
+  "rail.tabDay": "この日",
+  "rail.tabWaiting": "待ち",
+  "rail.tabWaitingN": "待ち {n}",
+  "rail.emptyWaiting": "待っているタスクはありません。",
+  "rail.waitingError": "待ちの一覧を読み込めませんでした。自動で再試行します。",
+  "rail.waitingHidden": "権限の無いリポジトリの待ちが {n} 件あります。",
   "timeline.today": "今日のタイムライン",
   "timeline.day": "この日のタイムライン",
   "timeline.emptyToday": "タスクを始めると、ここにタイムラインが出ます。",
@@ -535,6 +554,10 @@ const ja: Record<Key, string> = {
   "budget.all": "全員の実績",
   "budget.startable": "あと {n} 件始められます。",
   "budget.hidden": "権限の無いリポジトリのタスクが {n} 件、費用の合計に含まれます。",
+  "budget.pace":
+    "UTC の月の {day} 日目で {spent} 使いました。この速さだと月末に約 {projected} の見込みです。",
+  "budget.paceOver": "上限 {limit} を超える見込みです。",
+  "budget.paceEarly": "まだ見込みを出せません（UTC の月の初日）。",
   "models.title": "モデル別の費用",
   "models.cost": "タスク {task}、相談 {consult}",
 

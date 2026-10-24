@@ -1,4 +1,9 @@
-import type { BudgetMeDto, CloudflareSummaryDto, OverviewDto } from "@rovo/dashboard-contract";
+import type {
+  BudgetMeDto,
+  CloudflareSummaryDto,
+  OverviewDto,
+  WaitingDto,
+} from "@rovo/dashboard-contract";
 
 /** 読み取り API の呼び出し（同一オリジン・Cookie のセッション）。契約は型だけ取り込む（zod を画面に入れない）。 */
 
@@ -126,6 +131,50 @@ export async function fetchBudget(fetchImpl: typeof fetch = fetch): Promise<Budg
       typeof o.startable === "number"
       ? { kind: "ok", data: b as BudgetMeDto }
       : { kind: "error" };
+  } catch {
+    return { kind: "error" };
+  }
+}
+
+export type WaitingResult =
+  | { kind: "ok"; data: WaitingDto }
+  | { kind: "unauthorized" }
+  | { kind: "not_found" }
+  | { kind: "error" };
+
+const WAITING = "/dashboard/api/waiting";
+
+/** 日付に関係なく「待ち」だけ。期間は渡さない（scope だけ）。 */
+export function waitingUrl(scope: Scope): string {
+  return `${WAITING}?scope=${scope}`;
+}
+
+function looksLikeWaiting(b: unknown): b is WaitingDto {
+  if (typeof b !== "object" || b === null) return false;
+  const o = b as Record<string, unknown>;
+  return (
+    typeof o.generated_at === "string" &&
+    (o.scope === "all" || o.scope === "me") &&
+    Array.isArray(o.tasks) &&
+    typeof o.truncated === "boolean" &&
+    typeof o.hidden_count === "number"
+  );
+}
+
+export async function fetchWaiting(
+  scope: Scope,
+  fetchImpl: typeof fetch = fetch,
+): Promise<WaitingResult> {
+  try {
+    const res = await fetchImpl(waitingUrl(scope), {
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    if (res.status === 401) return { kind: "unauthorized" };
+    if (res.status === 404) return { kind: "not_found" };
+    if (res.status !== 200) return { kind: "error" };
+    const body: unknown = await res.json();
+    return looksLikeWaiting(body) ? { kind: "ok", data: body } : { kind: "error" };
   } catch {
     return { kind: "error" };
   }

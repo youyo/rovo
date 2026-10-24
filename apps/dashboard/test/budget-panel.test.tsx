@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { BudgetPanel } from "../src/side-panels";
-import { inJa } from "./lang";
+import { inEn, inJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -133,5 +133,71 @@ describe("予算の欄（自分の予算と全員の実績を 1 つの欄にま�
       expect(row(c, k)?.querySelector("dd")?.classList.contains("budget-value"), k).toBe(true);
     }
     expect(row(c, "all")?.classList.contains("budget-row--all")).toBe(true);
+  });
+
+  describe("月のペース（1 行。契約も API も変えず、画面で計算する）", () => {
+    const pace = (c: HTMLElement) => c.querySelector("[data-budget-pace]");
+
+    it("月の N 日目で使った額と、この速さでの月末の見込みを 1 行で出す（UTC の月と明記）", () => {
+      // 2026-10-21T06:00Z は 20.25 日経過（21 日目）。$11.40 → 1 日 $0.563 → 31 日で約 $17.45
+      const c = mount();
+      expect(pace(c)?.textContent).toBe(
+        "UTC の月の 21 日目で $11.40 使いました。この速さだと月末に約 $17.45 の見込みです。",
+      );
+      expect(pace(c)?.getAttribute("data-budget-pace")).toBe("ok");
+      expect(c.querySelectorAll("[data-budget-pace]")).toHaveLength(1);
+    });
+
+    it("上限を超える見込みなら、色だけに頼らず文言で示す", () => {
+      const c = mount({ ...overviewFixture, budget: { ...overviewFixture.budget, spent_usd: 40 } });
+      expect(pace(c)?.getAttribute("data-budget-pace")).toBe("over");
+      expect(pace(c)?.textContent).toContain("約 $61.23");
+      expect(pace(c)?.textContent).toContain("上限 $49.90 を超える見込みです。");
+    });
+
+    it("1 日未満（月の初日）は「まだ見込みを出せません」。0 円は 0 円の見込み", () => {
+      const early = mount({
+        ...overviewFixture,
+        generated_at: "2026-10-01T10:00:00Z",
+      });
+      expect(pace(early)?.getAttribute("data-budget-pace")).toBe("early");
+      expect(pace(early)?.textContent).toBe("まだ見込みを出せません（UTC の月の初日）。");
+      document.body.innerHTML = "";
+      const zero = mount({
+        ...overviewFixture,
+        budget: { ...overviewFixture.budget, spent_usd: 0 },
+      });
+      expect(pace(zero)?.textContent).toContain("約 $0 の見込みです。");
+      expect(pace(zero)?.getAttribute("data-budget-pace")).toBe("ok");
+    });
+
+    it("上限が分からないとき（古い応答で逆算もできない）は超過の判定をしない", () => {
+      const { monthly_budget_usd: _omit, ...legacy } = overviewFixture.budget;
+      const c = mount({
+        ...overviewFixture,
+        budget: { ...legacy, spent_usd: 400, remaining_usd: 0 },
+      });
+      expect(pace(c)?.getAttribute("data-budget-pace")).toBe("ok");
+      expect(pace(c)?.textContent).not.toContain("超える");
+    });
+
+    it("英語の文言", () => {
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      act(() => {
+        root.render(
+          inEn(
+            createElement(BudgetPanel, {
+              data: { ...overviewFixture, budget: { ...overviewFixture.budget, spent_usd: 40 } },
+            }),
+          ),
+        );
+      });
+      expect(pace(container)?.textContent).toBe(
+        "Day 21 of the UTC month: $40.00 spent. At this pace, about $61.23 by month end. Projected to exceed your $49.90 limit.",
+      );
+    });
   });
 });

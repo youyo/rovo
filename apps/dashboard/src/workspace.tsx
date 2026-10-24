@@ -6,7 +6,7 @@ import type { DetailCache } from "./detail-cache";
 import { Header } from "./header";
 import type { T } from "./i18n";
 import { useT } from "./lang";
-import { OverviewView } from "./overview-view";
+import { OverviewView, type RailTab } from "./overview-view";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
 import { daySummary, pickConsoleTask } from "./rail";
 import type { Route } from "./route";
@@ -14,6 +14,7 @@ import { TaskScreen } from "./task-screen";
 import { useBudget } from "./use-budget";
 import { type CloudflareDeps, useCloudflare } from "./use-cloudflare";
 import { type OverviewDeps, useOverview } from "./use-overview";
+import { useWaiting } from "./use-waiting";
 
 /**
  * ログイン後の画面（個別ページは無い）:
@@ -53,7 +54,13 @@ export function Workspace(props: {
   const cloudflare = useCloudflare(autoRefresh, props.cloudflareDeps);
   // 一覧が届くまでのステータスバーの予算（/budget。軽い）
   const budget = useBudget(props.deps);
-  const unauthorized = state.phase === "unauthorized" || cloudflare.phase === "unauthorized";
+  // 日をまたいだ「待ち」。日付に関係なく scope だけで決まる。失敗しても一覧は出す（401 だけは一覧と同じ扱い）
+  const waiting = useWaiting(scope, autoRefresh, props.deps);
+  const [railTab, setRailTab] = useState<RailTab>("day");
+  const unauthorized =
+    state.phase === "unauthorized" ||
+    cloudflare.phase === "unauthorized" ||
+    waiting.state.phase === "unauthorized";
 
   useEffect(() => {
     if (unauthorized) onUnauthorized();
@@ -63,6 +70,12 @@ export function Workspace(props: {
     setAutoRefresh(on);
     saveAutoRefresh(on);
   }, []);
+
+  const refreshWaiting = waiting.refresh;
+  const refreshAll = useCallback(() => {
+    refresh();
+    refreshWaiting();
+  }, [refresh, refreshWaiting]);
 
   const data = state.phase === "ready" ? state.data : null;
   const consoleId =
@@ -141,7 +154,10 @@ export function Workspace(props: {
         budget={budget}
         autoRefresh={autoRefresh}
         onAutoRefreshChange={onAutoRefreshChange}
-        onRefresh={refresh}
+        onRefresh={refreshAll}
+        waiting={waiting.state}
+        railTab={railTab}
+        onRailTabChange={setRailTab}
         selectedId={consoleId}
         onSelectTask={props.onSelectTask}
         console={consoleNode}

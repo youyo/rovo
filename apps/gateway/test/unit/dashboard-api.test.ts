@@ -1215,6 +1215,8 @@ describe("waiting（日をまたいだ待ち）", () => {
     };
     const { dto } = await parse(v);
     expect(new Set(ids(dto))).toEqual(new Set([open.id, unknown.id, input.id]));
+    expect(ids(dto)).not.toContain(merged.id);
+    expect(ids(dto)).not.toContain(closed.id);
     expect(dto.tasks.find((t) => t.task_id === open.id)?.pr?.state).toBe("open");
     expect(dto.tasks.find((t) => t.task_id === unknown.id)?.pr?.state).toBe("unknown");
   });

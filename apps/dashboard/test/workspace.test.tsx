@@ -1,9 +1,11 @@
-import type { OverviewDto, TaskDetailDto } from "@rovo/dashboard-contract";
+import type { OverviewDto, TaskDetailDto, WaitingDto } from "@rovo/dashboard-contract";
 import {
   overviewFixture,
   overviewMeFixture,
   taskDetailRunningFixture,
   taskEventsFixture,
+  waitingFixture,
+  waitingMeFixture,
 } from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -40,6 +42,7 @@ const settle = async () => {
 type Opts = {
   overview?: (url: URL) => OverviewDto;
   detailOf?: (id: string) => TaskDetailDto | null;
+  waiting?: (url: URL) => WaitingDto;
 };
 
 async function mount(path: string, opts: Opts = {}) {
@@ -55,6 +58,13 @@ async function mount(path: string, opts: Opts = {}) {
           ...overviewFixture,
           scope: url.searchParams.get("scope") === "me" ? "me" : "all",
         },
+      );
+    }
+    if (url.pathname === "/dashboard/api/waiting") {
+      const w = opts.waiting?.(url);
+      return json(
+        200,
+        w ?? (url.searchParams.get("scope") === "me" ? waitingMeFixture : waitingFixture),
       );
     }
     const m = /^\/dashboard\/api\/tasks\/([^/]+)(\/events)?$/.exec(url.pathname);
@@ -278,5 +288,84 @@ describe("内訳の引き出しはアプリの中で開閉できる", () => {
     expect(drawer.querySelector("[data-budget='month']")).not.toBeNull();
     expect(drawer.querySelector("[data-models]")).not.toBeNull();
     expect(drawer.querySelector("[data-cloudflare]")).not.toBeNull();
+  });
+});
+
+describe("日をまたいだ「待ち」（レールの切り替え）", () => {
+  const WAITING_ID = waitingFixture.tasks[0]?.task_id as string;
+  const tabBtn = (c: HTMLElement, i: number) =>
+    c.querySelectorAll("fieldset.rail-tabs button")[i] as HTMLButtonElement;
+  const clickBtn = async (b: Element) => {
+    await act(async () => {
+      (b as HTMLElement).click();
+      await settle();
+    });
+  };
+
+  it("初期は「この日」。待ちは scope と同じ絞り込みで取り、件数をタブに添える。「待ち」を開くと日付に関係なく待ちのタスクが出る", async () => {
+    const { c, f } = await mount("/dashboard/");
+    expect(tabBtn(c, 0).getAttribute("aria-pressed")).toBe("true");
+    // 初期の scope は「マイタスク」(me)
+    expect(tabBtn(c, 1).textContent).toBe(`待ち ${waitingMeFixture.tasks.length}`);
+    const waitingCalls = f.mock.calls
+      .map((x) => new URL(String(x[0]), "http://localhost"))
+      .filter((u) => u.pathname === "/dashboard/api/waiting");
+    expect(waitingCalls.map((u) => u.searchParams.get("scope"))).toEqual(["me"]);
+    expect(waitingCalls[0]?.searchParams.has("from")).toBe(false);
+
+    await clickBtn(tabBtn(c, 1));
+    expect(tabBtn(c, 1).getAttribute("aria-pressed")).toBe("true");
+    expect(
+      [...c.querySelectorAll("a.rail-row")].map((a) => (a as HTMLElement).dataset.taskId),
+    ).toEqual(waitingMeFixture.tasks.map((t) => t.task_id));
+  });
+
+  it("全員 / 自分の切り替えは待ちにも効く（チームにすると全員の待ちを取り直す）", async () => {
+    const { c } = await mount("/dashboard/");
+    await clickBtn(tabBtn(c, 1));
+    const team = [...c.querySelectorAll("header.top fieldset.seg:not(.lang) button")].find(
+      (b) => b.textContent === "チーム",
+    ) as HTMLElement;
+    await clickBtn(team);
+    expect(tabBtn(c, 1).textContent).toBe(`待ち ${waitingFixture.tasks.length}`);
+    expect(
+      [...c.querySelectorAll("a.rail-row")].map((a) => (a as HTMLElement).dataset.taskId),
+    ).toEqual(waitingFixture.tasks.map((t) => t.task_id));
+  });
+
+  it("待ちの行を押すと、コンソールにそのタスクが出る（/dashboard/tasks/<ID>）。タブは「待ち」のまま", async () => {
+    const waitingDetail = (id: string) =>
+      id === WAITING_ID
+        ? { ...taskDetailRunningFixture, task: waitingFixture.tasks[0] as never }
+        : null;
+    const { c, f } = await mount("/dashboard/", { detailOf: waitingDetail });
+    await clickBtn(tabBtn(c, 1));
+    const team = [...c.querySelectorAll("header.top fieldset.seg:not(.lang) button")].find(
+      (b) => b.textContent === "チーム",
+    ) as HTMLElement;
+    await clickBtn(team);
+    const row = c.querySelector(`a.rail-row[data-task-id="${WAITING_ID}"]`) as HTMLElement;
+    expect(row).not.toBeNull();
+    await clickBtn(row);
+    expect(location.pathname).toBe(`/dashboard/tasks/${WAITING_ID}`);
+    expect(tabBtn(c, 1).getAttribute("aria-pressed")).toBe("true");
+    expect(
+      c.querySelector(`a.rail-row[data-task-id="${WAITING_ID}"]`)?.getAttribute("aria-current"),
+    ).toBe("true");
+    expect(c.querySelector(".con-head h1, h1")?.textContent).toContain(
+      waitingFixture.tasks[0]?.title,
+    );
+    expect(paths(f)).toContain(`/dashboard/api/tasks/${WAITING_ID}`);
+  });
+
+  it("待ちの取得に失敗しても一覧とコンソールは出る（「待ち」は件数なし）", async () => {
+    const { c } = await mount("/dashboard/", {
+      waiting: () => {
+        throw new Error("x");
+      },
+    });
+    expect(tabBtn(c, 0).getAttribute("aria-pressed")).toBe("true");
+    expect(c.querySelectorAll("a.rail-row").length).toBe(overviewFixture.tasks.length);
+    expect(tabBtn(c, 1).textContent).toBe("待ち");
   });
 });

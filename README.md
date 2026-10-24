@@ -4,6 +4,8 @@
 
 English | [日本語](README.ja.md)
 
+[![CI](https://github.com/youyo/rovo/actions/workflows/ci.yml/badge.svg)](https://github.com/youyo/rovo/actions/workflows/ci.yml)
+
 Rovo lets Claude Code / Cowork hand coding tasks to child agents over Remote MCP. Each task runs in an isolated Sandbox on your own Cloudflare account and comes back as a Draft PR, and you can watch it live in a dashboard.
 
 <p align="center">

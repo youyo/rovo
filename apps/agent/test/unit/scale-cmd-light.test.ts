@@ -37,6 +37,10 @@ describe("isLightCommand（明らかに軽いコマンドだけ true。迷う形
     ["バックグラウンド + 重い", sh("ls & pnpm test"), false],
     ["-c が無い", ["bash", "script.sh"], false],
     ["空の argv", [], false],
+    ["2000 文字を超える（後ろに重いコマンド）", sh(`ls ${"a ".repeat(1100)}; pnpm build`), false],
+    ["プロセス置換 cat <(...)", sh("cat <(pnpm build)"), false],
+    ["プロセス置換 ls >(...)", sh("ls >(pnpm build)"), false],
+    ["プロセス置換 diff <(...) a", sh("diff <(pnpm build) a"), false],
   ];
   it.each(cases)("%s", (_name, argv, expected) => {
     expect(isLightCommand(argv)).toBe(expected);

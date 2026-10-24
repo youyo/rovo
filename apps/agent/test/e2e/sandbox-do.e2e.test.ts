@@ -81,7 +81,8 @@ describe("Sandbox の昇格（コマンドの前に Clef が上げると判断�
   const promoMetrics = (c: ReturnType<typeof sandboxClient>) => c.metrics() as Promise<Promo>;
   /** 子のコマンド（Clef の判断の対象になる）。実際には軽い */
   const AGENT = { origin: "agent_command" };
-  const CMD = ["bash", "-c", "echo started; true"];
+  // 先頭の語 node は isLightCommand の表に無いので Clef を呼ぶ（echo などの軽い語だけだと呼ばれない）
+  const CMD = ["bash", "-c", "node -e 0; echo started"];
 
   /**
    * Clef の応答（answers.<id> が score / choice / noul）。実際の Clef は呼ばず、wrangler dev の SandboxDO に仕込む（ENVIRONMENT=test）。
@@ -115,7 +116,7 @@ describe("Sandbox の昇格（コマンドの前に Clef が上げると判断�
     const c = client("promote-light");
     await c.ensureReady(specFor("promote-light"));
     await c.setClef([clef(0.02, 0.02)]);
-    expect((await c.exec(["echo", "light"], AGENT)).stdout.trim()).toBe("light");
+    expect((await c.exec(["node", "-p", "'light'"], AGENT)).stdout.trim()).toBe("light");
     const m = await promoMetrics(c);
     expect(m.instance).toBe("standard-2");
     expect(m.promotedTo).toBeUndefined();
@@ -124,9 +125,22 @@ describe("Sandbox の昇格（コマンドの前に Clef が上げると判断�
     expect(m.scaleDecisions?.[0]).toMatchObject({
       from: "standard-2",
       to: null,
-      cmd: "echo",
+      cmd: "node",
       exitCode: 0,
     });
+  }, 120_000);
+
+  it("明らかに軽いコマンド（ls）では Clef を呼ばない。skippedLight が 1 増え、判断の記録は増えない", async () => {
+    const c = client("promote-skip-light");
+    await c.ensureReady(specFor("promote-skip-light"));
+    await c.setClef([clef(0.95, 0.9)]); // 呼ばれていれば昇格してしまう応答
+    expect((await c.exec(["ls"], AGENT)).exitCode).toBe(0);
+    const m = await promoMetrics(c);
+    expect(m.instance).toBe("standard-2");
+    expect(m.promotedTo).toBeUndefined();
+    expect(m.scaleStats?.skippedLight).toBe(1);
+    expect(m.scaleStats?.decisions).toBe(0);
+    expect(m.scaleDecisions ?? []).toHaveLength(0);
   }, 120_000);
 
   it("origin の無い exec（Sandbox 自身の内部の exec）は、Clef に聞かず昇格しない", async () => {
@@ -197,8 +211,8 @@ describe("Sandbox の昇格（コマンドの前に Clef が上げると判断�
     expect(m.scaleDecisions?.[0]).toMatchObject({
       from: "standard-2",
       to: "standard-3",
-      // `bash -c "echo started; true"` は、bash ではなくコマンド文字列の先頭の語を残す
-      cmd: "echo",
+      // `bash -c "node -e 0; ..."` は、bash ではなくコマンド文字列の先頭の語を残す
+      cmd: "node",
       exitCode: 0,
     });
     // 昇格はコンテナの作り直し（restarts）に数えない
@@ -235,7 +249,7 @@ describe("Sandbox の昇格（コマンドの前に Clef が上げると判断�
     expect(((await promoMetrics(c)) as Promo).promotedTo).toBe("standard-3");
     // 軽いコマンドでは上げない（下げもしない）
     await c.setClef([clef(0.02, 0.02)]);
-    expect((await c.exec(["echo", "light"], AGENT)).exitCode).toBe(0);
+    expect((await c.exec(["node", "--version"], AGENT)).exitCode).toBe(0);
     expect(((await promoMetrics(c)) as Promo).promotedTo).toBe("standard-3");
     // 2 回目: 3 → 4（スナップショットの名前が 1 回目と違うので、同名で失敗しない）
     await c.setClef([clef(0.95, 0.9)]);

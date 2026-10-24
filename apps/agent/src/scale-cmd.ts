@@ -251,7 +251,7 @@ function lightHead(first: string, second: string | undefined): boolean {
 
 /**
  * Clef に聞かなくてよいほど明らかに軽いコマンドか。迷う形はすべて false（今までどおり Clef に聞く）。
- * true は、次をすべて満たすときだけ: `bash -c <script>` の形で、script が tokenize できて `$(`・バッククォート・here-doc を含まず、
+ * true は、次をすべて満たすときだけ: `bash -c <script>` の形で、script が tokenize できて `$(`・バッククォート・here-doc・プロセス置換（`<(` `>(`）を含まず、2000 文字（SCAN_CHARS）以内で、
  * 区切り（`&&` `||` `;` `|` `&` 改行）で分けた各単純コマンドの先頭の語がすべて表にある（git は 2 語目が読み取り系のときだけ）。
  * shell を通さない直の argv は、argv[0] の basename が表にあれば true。
  */
@@ -262,7 +262,16 @@ export function isLightCommand(argv: readonly string[]): boolean {
     if (first === undefined || SHELLS.has(basename(first))) return false;
     return lightHead(basename(first), second);
   }
-  if (script.includes("$(") || script.includes("`") || script.includes("<<")) return false;
+  // tokenize は先頭の SCAN_CHARS しか読まない。それより長いと後ろに重いコマンドが隠れうる
+  if (script.length > SCAN_CHARS) return false;
+  if (
+    script.includes("$(") ||
+    script.includes("`") ||
+    script.includes("<<") ||
+    script.includes("<(") ||
+    script.includes(">(")
+  )
+    return false;
   // `2>&1`・`&>file` の `&` を区切りと読まないよう、先に fd の複製を取り除く
   const t = tokenize(script.replace(/\d*[<>]&(?:\d+|-)/g, "").replace(/&>>?/g, ">"));
   if (t === null) return false;

@@ -987,25 +987,24 @@ export const register: Register = (on) => {
         " ".repeat(Math.max(0, TRACK_COL - cells.reduce((n, c) => n + displayWidth(c.text), 0)));
       if (isTerminal(t.status)) {
         const cell = terminalCell(t, own?.pr);
-        const g = glyph(t.status);
+        // 結果は線路の位置に文字で出す（✓ PR #n / ✕ 失敗 など）。タイトルの前は選択の帯の位置だけ。
+        const result = truncateWidth(`${glyph(t.status)} ${cell.text}`, TRACK_COL - 2);
         const dim = t.status === "COMPLETED" || t.status === "CANCELLED";
-        const titleW = Math.max(1, cols.title - 2);
         const ago = agoText(now - (t.terminalAt ?? now));
-        const cellPad = " ".repeat(
-          Math.max(0, cols.model - displayWidth(truncateWidth(cell.text, cols.model))) + 1,
-        );
+        const model = shortModel(t.model ?? "");
         return (
           <Button key={`row:${key}:0`} plain onPress={press}>
-            {bar} <Text color={statusColor(t.status)}>{g}</Text>{" "}
+            {bar}{" "}
             <Text dimColor={dim} weight={isShown ? "bold" : undefined}>
-              {padWidth(truncateWidth(t.title, titleW), titleW)}
+              {padWidth(truncateWidth(t.title, cols.title), cols.title)}
             </Text>{" "}
-            {trackCells(track)}
-            {trackPad(track)}
+            <Text color={cell.color}>{result}</Text>
+            {" ".repeat(Math.max(0, TRACK_COL - displayWidth(result)))}
             {cols.model > 0 && (
-              <Text color={cell.color}>{truncateWidth(cell.text, cols.model)}</Text>
+              <Text dimColor={dim}>
+                {`${padWidth(truncateWidth(model, cols.model), cols.model)} `}
+              </Text>
             )}
-            {cols.model > 0 && cellPad}
             <Text dimColor>{padLeft(ago, cols.elapsed)}</Text>
           </Button>
         );

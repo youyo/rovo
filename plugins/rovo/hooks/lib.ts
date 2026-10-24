@@ -1009,8 +1009,8 @@ export const matchRovoTool = (tool: string): { server: string; prefix: string } 
 
 // --- ペインの情報設計（0.6.0） -------------------------------------------------------
 
-/** 線路の列の幅（線路 16 桁 + あき 2）。 */
-export const TRACK_COL = 18;
+/** 線路の列の幅（線路 16 桁 + あき 3。列見出しの駅名とモデルの間を 2 桁以上あける）。 */
+export const TRACK_COL = 19;
 const MODEL_COL = 10;
 const ELAPSED_COL = 9;
 const MARK_COL = 2;

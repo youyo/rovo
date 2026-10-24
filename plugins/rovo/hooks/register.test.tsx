@@ -896,7 +896,7 @@ test("the pane shows the list, the selected task, phases, command and tail on ev
     expect(rows).toHaveLength(3);
     const first = await ui.find({ type: "Button", text: /First/ });
     const second = await ui.find({ type: "Button", text: /Second/ });
-    expect((await rowsOf(ui, "t1"))[0]).toMatch(/✓ First.*完了/);
+    expect((await rowsOf(ui, "t1"))[0]).toMatch(/First.*✓ 完了/);
     const [lane2, doing2] = await rowsOf(ui, "t2");
     expect(lane2).toMatch(/●━━━━●━━━━[◐◓◑◒◉]/);
     expect(doing2).toContain("now-t2");
@@ -1039,9 +1039,8 @@ test("an unknown phase draws no current station; stopped_phase marks the station
 
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   const [lane] = await rowsOf(ui, "t1");
-  expect(lane).toMatch(/●━━━━●━━━━✕┈┈┈┈○/);
-  expect(lane).toContain("✕ A");
-  expect(lane).toContain("失敗");
+  expect(lane).toContain("✕ 失敗"); // the result sits where the track was
+  expect(lane).not.toMatch(/^(▎| ) ✕/); // no glyph in front of the title
   expect(await allText(ui)).toContain("準備 実行 検証 PR");
   await ui.unmount();
 });
@@ -1478,12 +1477,9 @@ test("the glyph of each state has its own theme color", async ($, on) => {
     (n) => `${(n as { text?: string }).text}|${(n as { props?: { color?: string } }).props?.color}`,
   );
   // the glyph in front of an ended worker, and its result, carry the state color; the question note is warning
-  expect(pairs).toContain("✓|success");
-  expect(pairs).toContain("✕|error");
-  expect(pairs).toContain("–|inactive");
-  expect(pairs).toContain("完了|success");
-  expect(pairs).toContain("失敗|error");
-  expect(pairs).toContain("取り消し|inactive");
+  expect(pairs).toContain("✓ 完了|success");
+  expect(pairs).toContain("✕ 失敗|error");
+  expect(pairs).toContain("– 取り消し|inactive");
   expect(pairs).toContain("? 質問に答えてください（会話で task_answer）|warning");
   await ui.unmount();
 });
@@ -1578,7 +1574,7 @@ test("only terminal tasks stored: session.start then open fetches the console on
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   // a finished worker shows its result on the lane; the console below holds the fetched output
   expect(await allText(ui)).toContain("line1");
-  expect((await rowsOf(ui, "t1"))[0]).toMatch(/✓ .*完了/);
+  expect((await rowsOf(ui, "t1"))[0]).toMatch(/✓ 完了/);
   expect(await allText(ui)).not.toContain("まだ取得していません。");
   await ui.unmount();
 });
@@ -1739,7 +1735,8 @@ test("with task_list, workers from other sessions are listed: 2 rows working, 1 
   expect(text).toContain("取出 調査 投稿"); // the review group has its own header
 
   const [c1, c2] = await rowsOf(ui, "L3");
-  expect(c1).toContain("✓ Listed 3");
+  expect(c1).toContain("✓ PR #5");
+  expect(c1).not.toContain("✓ Listed");
   expect(c1).toContain("PR #5");
   expect(c1).not.toContain("┈");
   expect(c2).toBe("");
@@ -1927,7 +1924,7 @@ test("the redraw timer stops when every worker is terminal and starts again for 
   await r.clock.advance(8_000);
   const finished = await laneFrames("L1", 4);
   expect(new Set(finished).size).toBe(1);
-  expect(finished[0]).toMatch(/✓ .*完了/);
+  expect(finished[0]).toMatch(/✓ 完了/);
 
   phase = "again";
   await r.clock.advance(21_000); // an idle list is read less often
@@ -1978,7 +1975,7 @@ test("a failed worker marks the station it stopped at with ✕", async ($, on) =
   await r.clock.settle();
   const ui = await mountPane($);
   const row1 = (await rowsOf(ui, "L1"))[0] ?? "";
-  expect(row1).toContain("✕");
+  expect(row1).toContain("✕ 失敗");
   expect(row1).not.toContain("▶");
   await ui.unmount();
 });
@@ -2495,8 +2492,11 @@ test("a working worker has two rows (title+track+model+time, then repo+doing); a
   expect(w[1]?.text).toMatch(/^(▎| ) {3}repo {2}\$ doing-L1/);
   const e = await buttonsOf(ui, "L3");
   expect(e.map((b) => b.key)).toEqual(["row:rovo-direct/L3:0"]);
-  expect(e[0]?.text).toContain("✓ Listed 3");
-  expect(e[0]?.text).toContain("PR #83");
+  expect(e[0]?.text).toContain("Listed 3");
+  expect(e[0]?.text).not.toContain("✓ Listed"); // no glyph before the title
+  expect(e[0]?.text).toContain("✓ PR #83"); // the result sits where the track is
+  expect(e[0]?.text).toContain("sonnet"); // the model column is filled for ended rows too
+  expect(e[0]?.text).not.toContain("━");
   expect(e[0]?.text).toMatch(/\d+分前$/);
   expect(e[0]?.text).not.toContain("┈");
   await ui.unmount();
@@ -2517,8 +2517,9 @@ test("a failed worker is one row too, and is not dimmed; a completed one is dim 
   expect(flags(/^Listed 1/).every(Boolean)).toBe(true); // completed title: dim
   expect(flags(/^Listed 2/).some(Boolean)).toBe(false); // failed title: not dim
   expect((await buttonsOf(ui, "L2")).map((b) => b.key)).toHaveLength(1);
-  expect((await buttonsOf(ui, "L2"))[0]?.text).toContain("✕ Listed 2");
-  expect((await buttonsOf(ui, "L2"))[0]?.text).toContain("失敗");
+  expect((await buttonsOf(ui, "L2"))[0]?.text).toContain("Listed 2");
+  expect((await buttonsOf(ui, "L2"))[0]?.text).toContain("✕ 失敗");
+  expect((await buttonsOf(ui, "L2"))[0]?.text).toContain("opus");
   await ui.unmount();
 });
 

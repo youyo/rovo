@@ -112,7 +112,7 @@ test("(I3) ログイン後の画面: 英語で出て、日本語に切り替え�
   await expect(page.getByRole("button", { name: "My tasks" })).toBeVisible();
 });
 
-test("(I4) 英語でも子やユーザーのデータは訳さず、状態は英語の語で出る。日付・金額は英語の書式", async ({
+test("(I4) 英語でもワーカーやユーザーのデータは訳さず、状態は英語の語で出る。日付・金額は英語の書式", async ({
   page,
 }) => {
   await loginAs(page, s.users.alice, taskPath(s.tasks.done as string));

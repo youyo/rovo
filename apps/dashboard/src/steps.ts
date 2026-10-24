@@ -50,7 +50,7 @@ const STATUS_TONE: Record<TaskStatusDto, Tone> = {
 const join = (t: T, parts: (string | false | null | undefined)[]) =>
   parts.filter((p): p is string => typeof p === "string" && p !== "").join(t("common.sep"));
 
-/** 子のツール名 → 辞書の文言（tool.<名前>.done / running）。keys は summary（JSON）から取り出してよいキー（先に見つかったものを使う） */
+/** ワーカーのツール名 → 辞書の文言（tool.<名前>.done / running）。keys は summary（JSON）から取り出してよいキー（先に見つかったものを使う） */
 const TOOL_KEYS = {
   bash: ["command"],
   read_file: ["path"],
@@ -165,7 +165,7 @@ function pickString(summary: string, keys: readonly string[]): string | undefine
 }
 
 /**
- * summary は子が書いた非信頼データ。既知のキーの文字列を取り出せるときだけ取り出す（切れた JSON も）。
+ * summary はワーカーが書いた非信頼データ。既知のキーの文字列を取り出せるときだけ取り出す（切れた JSON も）。
  * それ以外（配列・数値・未知のキー・文字列でない値・壊れたエスケープ）は、sanitize した文字列のまま。
  */
 function pickTarget(summary: string, keys: readonly string[]): string {

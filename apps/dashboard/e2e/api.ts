@@ -25,7 +25,7 @@ async function post(baseUrl: string, path: string, body: Record<string, unknown>
   return (await res.json()) as Record<string, unknown>;
 }
 
-/** 偽の子エージェントにイベントを 1 つ積ませる（構造化イベントの台本）。 */
+/** 偽のワーカーにイベントを 1 つ積ませる（構造化イベントの台本）。 */
 export async function emit(
   baseUrl: string,
   taskId: string,
@@ -35,7 +35,7 @@ export async function emit(
   await post(baseUrl, "/__test/agent/emit", { task_id: taskId, type, data });
 }
 
-/** 偽の子エージェントを終端にする。 */
+/** 偽のワーカーを終端にする。 */
 export async function finish(
   baseUrl: string,
   taskId: string,

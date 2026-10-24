@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * 長さの上限（UTF-16 のコード単位）。子エージェント由来の文字列は非信頼データなので、必ず上限を持たせる。
+ * 長さの上限（UTF-16 のコード単位）。ワーカー由来の文字列は非信頼データなので、必ず上限を持たせる。
  * D14 の値（command 1,000 / output_tail 2,000 / path 300 / commit 200）に合わせる。
  */
 export const LIMITS = {
@@ -105,7 +105,7 @@ export const shaSchema = z.string().regex(/^[0-9a-f]{40}$/);
 /** 制御文字（C0 のうち改行・タブ以外、DEL、C1）を含まない文字列。 */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: 制御文字の検出が目的
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/;
-/** 子エージェント由来の非信頼テキスト。長さの上限を必ず付ける（表示前の整形は画面側の責務）。 */
+/** ワーカー由来の非信頼テキスト。長さの上限を必ず付ける（表示前の整形は画面側の責務）。 */
 export const untrustedText = (max: number) => z.string().max(max);
 /** 1 行だけのテキスト（改行・制御文字なし）。 */
 export const singleLineText = (max: number) =>

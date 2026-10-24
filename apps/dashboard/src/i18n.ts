@@ -4,7 +4,7 @@
  * - `t(key, params?)`: `{name}` を params の値で置き換える（単一パス・文字列のまま。HTML としては解釈しない）。
  *   `|` を含む文言は単複の形（`one|other`）で、params.n に応じて選ぶ（英語だけが使う）
  * - 日付・時刻・金額・数の書式は format.ts が `t.lang` のロケール（en は en-US、ja は ja-JP）で Intl に渡す
- * 子やユーザーが書いたデータ（題名・ログ・login 名など）と API の値は訳さない。API の値（状態の enum など）は表示時にここで引く。
+ * ワーカーやユーザーが書いたデータ（題名・ログ・login 名など）と API の値は訳さない。API の値（状態の enum など）は表示時にここで引く。
  */
 
 export type Lang = "en" | "ja";
@@ -327,7 +327,7 @@ const en = {
   "output.running": "Running",
   "output.elapsed": " (elapsed {duration})",
   "output.note":
-    "Part of the output of commands the child agent ran. Secrets such as tokens are masked.",
+    "Part of the output of commands the worker ran. Secrets such as tokens are masked.",
   "output.none": " There is no output to show right now.",
 
   "log.title": "Progress",
@@ -646,7 +646,7 @@ const ja: Record<Key, string> = {
   "output.running": "実行中",
   "output.elapsed": "（経過 {duration}）",
   "output.note":
-    "子エージェントが実行したコマンドの出力の一部です。トークンなどの秘密は伏せて表示しています。",
+    "ワーカーが実行したコマンドの出力の一部です。トークンなどの秘密は伏せて表示しています。",
   "output.none": "いまは表示できる出力がありません。",
 
   "log.title": "進み具合",

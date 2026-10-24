@@ -20,7 +20,7 @@ describe("ソースの禁止事項（D14）", () => {
       expect(text, name).not.toMatch(/dangerouslySetInnerHTML/);
       expect(text, name).not.toMatch(/\.(inner|outer)HTML\s*=/);
       if (LOGO_FILES.includes(name)) {
-        // 子エージェント由来の値が入らないよう、src は同梱の SVG の固定の文字列だけ
+        // ワーカー由来の値が入らないよう、src は同梱の SVG の固定の文字列だけ
         const imgs = [...text.matchAll(/<img\b[^>]*>/g)].map((m) => m[0]);
         expect(imgs, name).toHaveLength(1);
         expect(imgs[0], name).toMatch(/src="\/dashboard\/assets\/brand\/rovo-mark\.svg"/);

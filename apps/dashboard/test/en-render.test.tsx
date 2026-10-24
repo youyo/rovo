@@ -45,7 +45,7 @@ const task = (over: Partial<VisibleTaskDto> = {}): VisibleTaskDto => ({
 });
 
 describe("英語の表示: 部品", () => {
-  it("TaskView: 日本語の文字が 1 つも出ない（子やユーザーのデータ以外はすべて訳されている）", () => {
+  it("TaskView: 日本語の文字が 1 つも出ない（ワーカーやユーザーのデータ以外はすべて訳されている）", () => {
     const c = mount(
       createElement(TaskView, {
         detail: taskDetailRunningFixture,
@@ -61,7 +61,7 @@ describe("英語の表示: 部品", () => {
       }),
     );
     const own = new Set<string>();
-    // 子やユーザーが書いたデータ（題名・コマンド・出力など）は訳さないので、そこに日本語があれば除く
+    // ワーカーやユーザーが書いたデータ（題名・コマンド・出力など）は訳さないので、そこに日本語があれば除く
     for (const e of c.querySelectorAll(".con-title, .step-target, .output, .step-detail")) {
       own.add(e.textContent ?? "");
     }

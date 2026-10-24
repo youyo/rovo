@@ -22,7 +22,7 @@ function isUnsafe(c: number): boolean {
   );
 }
 
-/** 子エージェント由来の非信頼テキストを表示する前に、制御文字と双方向の制御文字を除く（D14）。 */
+/** ワーカー由来の非信頼テキストを表示する前に、制御文字と双方向の制御文字を除く（D14）。 */
 export function sanitizeText(s: string): string {
   let out = "";
   for (let i = 0; i < s.length; i++) {

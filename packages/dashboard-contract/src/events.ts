@@ -17,7 +17,7 @@ import {
 
 /**
  * 進み具合のイベント（`GET /dashboard/api/tasks/:id/events`）。`type` で判別する。
- * 子エージェント由来の文字列（command・パス・commit のメッセージなど）はマスク済みでも非信頼データとして扱い、
+ * ワーカー由来の文字列（command・パス・commit のメッセージなど）はマスク済みでも非信頼データとして扱い、
  * 型ごとに長さの上限と形式を持つ。差分の本文・URL のパスやクエリは持てない（D14）。
  */
 const base = { seq: z.int().min(1), at: isoTimeSchema };
@@ -55,7 +55,7 @@ const ToolEndEvent = z.strictObject({
   summary: untrustedText(LIMITS.summary),
 });
 
-/** 子エージェントの累計の使用量 */
+/** ワーカーの累計の使用量 */
 const UsageEvent = z.strictObject({
   ...base,
   type: z.literal("usage"),

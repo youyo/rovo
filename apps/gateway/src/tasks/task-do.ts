@@ -3555,7 +3555,7 @@ export class TaskDO extends DurableObject<Env> {
    */
   private async postReview(row: TaskRow, status: TaskStatus): Promise<boolean> {
     const rl = this.getReview();
-    if (!rl || rl.posted !== 0) return true;
+    if (rl?.posted !== 0) return true;
     if (this.now() < rl.post_retry_at) return false;
     let dto: ResultDto;
     try {

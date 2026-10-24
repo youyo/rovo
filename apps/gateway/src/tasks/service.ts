@@ -18,7 +18,7 @@ import {
   nextStepsAfterReady,
   nextStepsForReview,
 } from "./next-steps";
-import { isTerminal, type TaskStatus } from "./state";
+import type { TaskStatus } from "./state";
 import type {
   BudgetExtensionOutcome,
   ResultOutcome,

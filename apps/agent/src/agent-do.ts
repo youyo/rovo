@@ -3086,7 +3086,7 @@ export class AgentDO extends DurableObject<Env> {
       : Number.POSITIVE_INFINITY;
     if (spent.costUsd + need > this.budgetLimitUsd(spec)) {
       if (await this.askReviewBudget(spec, spent.costUsd)) return;
-      await this.finishReview(spec, rv, cmds, input, { ok: false, code: "budget" });
+      await this.finishReview(rv, cmds, input, { ok: false, code: "budget" });
       return;
     }
     if (this.refused()) return;
@@ -3094,7 +3094,7 @@ export class AgentDO extends DurableObject<Env> {
     // 3. モデル
     const outcome = await runReviewModel(this.reviewModelCaller(spec, rv.model), input);
     if (this.refused()) return;
-    await this.finishReview(spec, rv, cmds, input, outcome);
+    await this.finishReview(rv, cmds, input, outcome);
   }
 
   /** review_commands を Sandbox で流す口（PR の head を取り出した作業ツリーで、検証コマンドと同じ制限で流す） */
@@ -3249,7 +3249,6 @@ export class AgentDO extends DurableObject<Env> {
 
   /** 段の結果を残して終端にする。budget は BUDGET_EXCEEDED、それ以外の失敗は FAILED（review_failed）、成功は COMPLETED */
   private async finishReview(
-    spec: StoredSpec,
     rv: ReviewSpec,
     cmds: ReviewCommandsOutcome,
     input: ReviewInput,

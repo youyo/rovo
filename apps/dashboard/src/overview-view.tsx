@@ -6,6 +6,10 @@ import { PendingStatusBar, StatusBar } from "./status-bar";
 import { buildLanes, HOUR, taskTime, timelineDomain } from "./timeline";
 import { TimelineView } from "./timeline-view";
 import type { CloudflareState } from "./use-cloudflare";
+import type { WaitingState } from "./use-waiting";
+
+/** レールの表示: その日のタスク / 日をまたいだ待ち */
+export type RailTab = "day" | "waiting";
 
 /**
  * 骨格の本体（純粋な表示。データ取得は use-overview）。
@@ -36,6 +40,11 @@ export function OverviewView(props: {
   railNote?: string;
   /** 自動更新の操作を引き出しに出すか（コンソールが自分の下に持っているときは false） */
   showRefreshControls?: boolean;
+  /** 日をまたいだ待ち（日付に関係なく。全員 / 自分の絞り込みは日のタスクと同じ） */
+  waiting?: WaitingState;
+  /** レールで開いているタブ。onRailTabChange が無ければタブを出さず、日のタスクだけ */
+  railTab?: RailTab;
+  onRailTabChange?: (tab: RailTab) => void;
 }) {
   const { data } = props;
   const t = useT();
@@ -73,6 +82,94 @@ export function OverviewView(props: {
     );
   }
 
+  const dayRail = data ? (
+    <TaskRail
+      tasks={data.tasks}
+      selectedId={props.selectedId}
+      isToday={props.isToday}
+      onSelect={props.onSelectTask}
+      showOwner={data.scope === "all"}
+      at={nowMs}
+    />
+  ) : (
+    <nav className="rail" aria-label={t("rail.label")}>
+      <p className="rail-empty" role="status">
+        {props.railNote ?? ""}
+      </p>
+    </nav>
+  );
+
+  // 「この日 / 待ち」のタブ（onRailTabChange があるときだけ）。待ちは日付に関係なく、全員 / 自分の絞り込みだけに従う
+  let railNode: ReactNode = dayRail;
+  if (props.onRailTabChange) {
+    const tab = props.railTab ?? "day";
+    const waiting = props.waiting ?? { phase: "loading" as const };
+    const count =
+      waiting.phase === "ready"
+        ? `${waiting.data.tasks.length}${waiting.data.truncated ? "+" : ""}`
+        : null;
+    const tabs: { value: RailTab; label: string }[] = [
+      { value: "day", label: t("rail.tabDay") },
+      {
+        value: "waiting",
+        label: count === null ? t("rail.tabWaiting") : t("rail.tabWaitingN", { n: count }),
+      },
+    ];
+    let body: ReactNode = dayRail;
+    if (tab === "waiting") {
+      if (waiting.phase === "ready") {
+        const hidden = waiting.data.hidden_count;
+        body = (
+          <TaskRail
+            tasks={waiting.data.tasks}
+            selectedId={props.selectedId}
+            onSelect={props.onSelectTask}
+            showOwner={waiting.data.scope === "all"}
+            at={Date.parse(waiting.data.generated_at)}
+            emptyText={t("rail.emptyWaiting")}
+            footnote={
+              hidden > 0
+                ? { text: t("rail.waitingHidden", { n: hidden }), attr: "data-waiting-hidden" }
+                : undefined
+            }
+          />
+        );
+      } else {
+        const note =
+          waiting.phase === "loading"
+            ? t("common.loading")
+            : waiting.phase === "unauthorized"
+              ? t("state.expired")
+              : t("rail.waitingError");
+        body = (
+          <nav className="rail" aria-label={t("rail.label")}>
+            <p className="rail-empty" role="status">
+              {note}
+            </p>
+          </nav>
+        );
+      }
+    }
+    railNode = (
+      <div className="rail-col">
+        <fieldset className="rail-tabs" aria-label={t("rail.tabsLabel")}>
+          {tabs.map((x) => (
+            <button
+              key={x.value}
+              type="button"
+              data-rail-tab={x.value}
+              aria-pressed={tab === x.value}
+              onClick={() => props.onRailTabChange?.(x.value)}
+            >
+              {x.label}
+            </button>
+          ))}
+        </fieldset>
+        {body}
+      </div>
+    );
+  }
+
   return (
     <>
       {props.stale ? (
@@ -84,22 +181,7 @@ export function OverviewView(props: {
       {band}
 
       <div className="main">
-        {data ? (
-          <TaskRail
-            tasks={data.tasks}
-            selectedId={props.selectedId}
-            isToday={props.isToday}
-            onSelect={props.onSelectTask}
-            showOwner={data.scope === "all"}
-            at={nowMs}
-          />
-        ) : (
-          <nav className="rail" aria-label={t("rail.label")}>
-            <p className="rail-empty" role="status">
-              {props.railNote ?? ""}
-            </p>
-          </nav>
-        )}
+        {railNode}
         <div className="console-col">{props.console}</div>
       </div>
 

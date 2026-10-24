@@ -114,3 +114,18 @@ export async function waitForIndex(baseUrl: string, taskId: string): Promise<voi
   }
   throw new Error(`索引に行が現れませんでした: ${taskId}`);
 }
+
+/** 索引の行が指定の状態になるまで待つ（偽の agent が start を受理して RUNNING になったあとに、終端にするため）。 */
+export async function waitForStatus(
+  baseUrl: string,
+  taskId: string,
+  status: string,
+): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const body = await post(baseUrl, "/__test/directory/task", { task_id: taskId });
+    if ((body.row as { status?: string } | null)?.status === status) return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`索引の状態が ${status} になりませんでした: ${taskId}`);
+}

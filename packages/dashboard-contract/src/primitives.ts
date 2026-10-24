@@ -23,6 +23,7 @@ export const LIMITS = {
   url: 300,
   overviewTasks: 1_000,
   overviewConsults: 2_000,
+  waitingTasks: 100,
   models: 50,
   eventsPerPage: 200,
 } as const;

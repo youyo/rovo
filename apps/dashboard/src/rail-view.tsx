@@ -35,6 +35,10 @@ export function TaskRail(props: {
   showOwner?: boolean;
   /** 実行中の行の所要の基準にする時刻（ms。一覧の generated_at）。無ければ今 */
   at?: number;
+  /** 行が無いときの案内（無ければ日のタスク向けの文言） */
+  emptyText?: string;
+  /** 行の下に添える注記（権限の無い待ちの件数など） */
+  footnote?: { text: string; attr: string };
 }) {
   const { onSelect } = props;
   const t = useT();
@@ -44,7 +48,7 @@ export function TaskRail(props: {
     <nav className="rail" aria-label={t("rail.label")}>
       {rows.length === 0 ? (
         <p className="rail-empty">
-          {props.isToday === false ? t("rail.emptyDay") : t("rail.emptyToday")}
+          {props.emptyText ?? (props.isToday === false ? t("rail.emptyDay") : t("rail.emptyToday"))}
         </p>
       ) : null}
       {rows.map((task) => {
@@ -93,6 +97,11 @@ export function TaskRail(props: {
           </a>
         );
       })}
+      {props.footnote ? (
+        <p className="rail-empty" {...{ [props.footnote.attr]: "" }}>
+          {props.footnote.text}
+        </p>
+      ) : null}
     </nav>
   );
 }

@@ -7,6 +7,7 @@ import {
   OverviewDtoSchema,
   TaskDetailDtoSchema,
   TaskEventsPageDtoSchema,
+  WaitingDtoSchema,
 } from "@rovo/dashboard-contract";
 import { describe, expect, it, vi } from "vitest";
 import { readApiTuning, snapshotToVisibleTask } from "../../src/dashboard/api";
@@ -1011,6 +1012,237 @@ describe("認可の表（overview / tasks/:id / events / budget）", () => {
   });
 });
 
+describe("waiting（日をまたいだ待ち）", () => {
+  const PRW = (n: number, repository = "acme/widgets") => ({
+    pr_number: n,
+    pr_url: `https://github.com/${repository}/pull/${n}`,
+    pr_draft: false,
+    pr_merged: false,
+    repository,
+  });
+  const waitingPath = (extra = "") => `/waiting${extra}`;
+  const parse = async (v: Viewer, extra = "") => {
+    const r = await api(v, waitingPath(extra));
+    expect(r.status).toBe(200);
+    return { r, dto: WaitingDtoSchema.parse(r.json()) };
+  };
+  const ids = (dto: { tasks: { task_id: string }[] }) => dto.tasks.map((t) => t.task_id);
+
+  it("入力待ちと、COMPLETED で PR が open かつ Draft でないものだけが出る。それ以外は出ない", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const input = await seedTask({ repository_id: repo }, { index: { status: "INPUT_REQUIRED" } });
+    const review = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(31, "acme/w-review") } },
+    );
+    const draft = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(32, "acme/w-draft"), pr_draft: true } },
+    );
+    const draftUnknown = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(33, "acme/w-unk"), pr_draft: null } },
+    );
+    const merged = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(34, "acme/w-merged"), pr_merged: true } },
+    );
+    const noPr = await seedTask({ repository_id: repo }, { index: { status: "COMPLETED" } });
+    const running = await seedTask(
+      { repository_id: repo },
+      { index: { status: "RUNNING", ...PRW(35, "acme/w-run") } },
+    );
+    const failed = await seedTask(
+      { repository_id: repo },
+      { index: { status: "FAILED", ...PRW(36, "acme/w-failed") } },
+    );
+    const { dto } = await parse(v);
+    expect(new Set(ids(dto))).toEqual(new Set([input.id, review.id]));
+    for (const x of [draft, draftUnknown, merged, noPr, running, failed]) {
+      expect(ids(dto)).not.toContain(x.id);
+    }
+    expect(dto.scope).toBe("all");
+    expect(dto.truncated).toBe(false);
+  });
+
+  it("日付に関係なく出る（古いタスクも）。新しい順（created_at の降順）", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const day = 24 * HOUR;
+    const old = await seedTask(
+      { repository_id: repo },
+      {
+        index: {
+          status: "INPUT_REQUIRED",
+          created_at: Date.now() - 20 * day,
+          updated_at: Date.now() - 20 * day,
+        },
+      },
+    );
+    const mid = await seedTask(
+      { repository_id: repo },
+      {
+        index: {
+          status: "INPUT_REQUIRED",
+          created_at: Date.now() - 3 * day,
+          updated_at: Date.now() - 3 * day,
+        },
+      },
+    );
+    const fresh = await seedTask(
+      { repository_id: repo },
+      { index: { status: "INPUT_REQUIRED", created_at: Date.now() - HOUR } },
+    );
+    const { dto } = await parse(v);
+    expect(ids(dto)).toEqual([fresh.id, mid.id, old.id]);
+  });
+
+  it("D7: 見えないリポジトリの待ちは hidden_count にだけ数え、個別の値は応答のどこにも出ない。NULL の repository_id も数える", async () => {
+    const repo = newRepoId();
+    const hiddenRepo = newRepoId();
+    const v = newViewer([repo]);
+    const before = (await parse(v)).dto.hidden_count;
+    await seedTask(
+      { repository_id: repo, title: "WAIT-SHOWN" },
+      { index: { status: "INPUT_REQUIRED" } },
+    );
+    const hidden = await seedTask(
+      {
+        repository_id: hiddenRepo,
+        title: "WAIT-HIDDEN-TITLE-zq",
+        owner_login: "wait-leak-owner-zq",
+      },
+      { index: { status: "INPUT_REQUIRED", model: "wait-leak/model-zq" } },
+    );
+    const hiddenReview = await seedTask(
+      { repository_id: hiddenRepo },
+      { index: { status: "COMPLETED", ...PRW(41, "wait-leak/repo-zq") } },
+    );
+    const nullRepo = await seedTask(
+      { repository_id: repo },
+      { index: { status: "INPUT_REQUIRED", repository_id: null } },
+    );
+    const { r, dto } = await parse(v);
+    expect(dto.hidden_count - before).toBe(3);
+    for (const needle of [
+      hidden.id,
+      hiddenReview.id,
+      nullRepo.id,
+      "WAIT-HIDDEN-TITLE-zq",
+      "wait-leak-owner-zq",
+      "wait-leak/model-zq",
+      "wait-leak/repo-zq",
+    ]) {
+      expect(r.whole, needle).not.toContain(needle);
+    }
+    expect(dto.tasks.map((t) => t.title)).toContain("WAIT-SHOWN");
+    // GitHub への照会にも、見えない PR を含めない
+    expect(JSON.stringify(v.pullCalls)).not.toContain("wait-leak");
+  });
+
+  it("scope=me は所有者が閲覧者のタスクだけ（hidden_count も自分の分だけ）。scope の不正は 400", async () => {
+    const repo = newRepoId();
+    const hiddenRepo = newRepoId();
+    const v = newViewer([repo]);
+    const mine = await seedTask(
+      { repository_id: repo },
+      { index: { status: "INPUT_REQUIRED", owner_id: v.uid } },
+    );
+    const others = await seedTask(
+      { repository_id: repo },
+      { index: { status: "INPUT_REQUIRED", owner_id: v.uid + 1 } },
+    );
+    const beforeMe = (await parse(v, "?scope=me")).dto.hidden_count;
+    await seedTask(
+      { repository_id: hiddenRepo },
+      { index: { status: "INPUT_REQUIRED", owner_id: v.uid + 1 } },
+    );
+    const { dto } = await parse(v, "?scope=me");
+    expect(dto.scope).toBe("me");
+    expect(ids(dto)).toEqual([mine.id]);
+    expect(dto.hidden_count).toBe(beforeMe);
+    expect(ids((await parse(v, "?scope=all")).dto)).toEqual(
+      expect.arrayContaining([mine.id, others.id]),
+    );
+    const bad = await api(v, waitingPath("?scope=everyone"));
+    expect(bad.status).toBe(400);
+    expect(ErrorDtoSchema.parse(bad.json())).toEqual({ error: "bad_request" });
+  });
+
+  it("件数の上限（100）で打ち切り、truncated を立てる", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const base = await seedTask({ repository_id: repo }, { index: { status: "INPUT_REQUIRED" } });
+    const dir = workerEnv.DIRECTORY_DO.getByName(DIRECTORY_NAME);
+    const view = base.view as TaskIndexSnapshot;
+    for (let i = 0; i < 104; i++) {
+      const up = await dir.upsertTask(
+        { ...view, task_id: ulid(), status: "INPUT_REQUIRED", created_at: Date.now() - i * 1000 },
+        1,
+      );
+      if (!up.ok) throw new Error("upsert failed");
+    }
+    const { dto } = await parse(v);
+    expect(dto.tasks).toHaveLength(100);
+    expect(dto.truncated).toBe(true);
+  });
+
+  it("GitHub で閉じた・マージされた PR は待ちから外す（人が GitHub 上でマージしても索引は変わらないため）。取れない（unknown）ものは残す", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const open = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(51, "acme/g-open") } },
+    );
+    const merged = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(52, "acme/g-merged") } },
+    );
+    const closed = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(53, "acme/g-closed") } },
+    );
+    const unknown = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(54, "acme/g-unknown") } },
+    );
+    const input = await seedTask({ repository_id: repo }, { index: { status: "INPUT_REQUIRED" } });
+    v.pullStates = {
+      "acme/g-open#51": "open",
+      "acme/g-merged#52": "merged",
+      "acme/g-closed#53": "closed",
+    };
+    const { dto } = await parse(v);
+    expect(new Set(ids(dto))).toEqual(new Set([open.id, unknown.id, input.id]));
+    expect(ids(dto)).not.toContain(merged.id);
+    expect(ids(dto)).not.toContain(closed.id);
+    expect(dto.tasks.find((t) => t.task_id === open.id)?.pr?.state).toBe("open");
+    expect(dto.tasks.find((t) => t.task_id === unknown.id)?.pr?.state).toBe("unknown");
+  });
+
+  it("GitHub への照会が失敗しても 200（fail-soft）。見える集合が空なら何も見えない。未ログインは 401、POST は 405", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const t = await seedTask(
+      { repository_id: repo },
+      { index: { status: "COMPLETED", ...PRW(61, "acme/f-soft") } },
+    );
+    v.pullStates = () => {
+      throw new Error("boom");
+    };
+    expect(ids((await parse(v)).dto)).toEqual([t.id]);
+
+    const empty = newViewer([]);
+    expect((await parse(empty)).dto.tasks).toEqual([]);
+    expect((await api(v, waitingPath(), { noCookie: true })).status).toBe(401);
+    expect((await api(v, waitingPath(), { method: "POST" })).status).toBe(405);
+    const unavailable = newViewer([repo]);
+    unavailable.visible = { ok: false, code: "unavailable" };
+    expect((await api(unavailable, waitingPath())).status).toBe(503);
+  });
+});
+
 describe("漏れ: 権限の無いタスクの値が応答の全体のどこにも出ない", () => {
   it("overview / tasks/:id / events / budget / 404 の status・ヘッダ・本文のどこにも、task_id・owner_login・repository・pr_url・model・title が無い", async () => {
     const hiddenRepo = newRepoId();
@@ -1046,8 +1278,10 @@ describe("漏れ: 権限の無いタスクの値が応答の全体のどこに�
       await api(v, `/tasks/${t.id}/events?cursor=1`),
       await api(v, "/budget"),
       await api(v, "/tasks/01JZ0000000000000000000099"),
+      await api(v, "/waiting"),
+      await api(v, "/waiting?scope=me"),
     ];
-    expect(responses.map((r) => r.status)).toEqual([200, 200, 404, 404, 404, 200, 404]);
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 404, 404, 404, 200, 404, 200, 200]);
     const needles = [t.id, ...Object.values(secret), "leak-org", "987654", "1.234567"];
     for (const r of responses) {
       for (const needle of needles) {

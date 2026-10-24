@@ -7,6 +7,8 @@ import {
   type ListConsultsResult,
   type ListTasksQuery,
   type ListTasksResult,
+  type ListWaitingQuery,
+  type ListWaitingResult,
   MAX_CONSULT_LIMIT,
   MAX_LIST_LIMIT,
   MAX_REPO_IDS,
@@ -112,6 +114,10 @@ export class DirectoryDO extends DurableObject<Env> {
       "CREATE INDEX IF NOT EXISTS task_index_created ON task_index (created_at DESC, task_id)",
     );
     sql.exec("CREATE INDEX IF NOT EXISTS task_index_repo ON task_index (repository_id)");
+    // 「待ち」の一覧（状態で絞って新しい順）
+    sql.exec(
+      "CREATE INDEX IF NOT EXISTS task_index_status ON task_index (status, created_at DESC, task_id)",
+    );
     // consult の索引（D9）。リポジトリが無いので権限の列は無い。本文は持たない
     sql.exec(`CREATE TABLE IF NOT EXISTS consult_index (
       consult_id TEXT PRIMARY KEY,
@@ -328,6 +334,63 @@ export class DirectoryDO extends DurableObject<Env> {
       .toArray()
       .map(toRow);
     return { ok: true, total, rows };
+  }
+
+  /**
+   * 「待ち」のタスク（期間を切らない）: INPUT_REQUIRED、または COMPLETED で PR があり Draft でなく rovo の記録で未マージ。
+   * 見える分（repoIds）は新しい順にページを切って返し、権限の無い分（repository_id が NULL を含む）は件数だけ返す。
+   */
+  listWaiting(query: ListWaitingQuery): ListWaitingResult {
+    const bad = this.checkIds(query?.repoIds);
+    if (bad) return bad;
+    if (
+      !Number.isSafeInteger(query.limit) ||
+      query.limit < 1 ||
+      !Number.isSafeInteger(query.offset) ||
+      query.offset < 0 ||
+      (query.ownerId !== undefined && !Number.isSafeInteger(query.ownerId))
+    ) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const limit = Math.min(query.limit, MAX_LIST_LIMIT);
+    const owner = query.ownerId ?? null;
+    const sql = this.ctx.storage.sql;
+    const waiting = `(status = 'INPUT_REQUIRED' OR (status = 'COMPLETED' AND pr_number IS NOT NULL
+      AND pr_url IS NOT NULL AND pr_draft = 0 AND pr_merged = 0))
+      AND (? IS NULL OR owner_id = ?)`;
+    const visible = "repository_id IN (SELECT value FROM json_each(?))";
+    const ids = JSON.stringify(query.repoIds);
+    const total = sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM task_index WHERE ${waiting} AND ${visible}`,
+        owner,
+        owner,
+        ids,
+      )
+      .one().n;
+    // NULL の repository_id は IN に一致しない（NOT IN は NULL で不定になるので、IS NULL を別に数える）
+    const hidden = sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM task_index WHERE ${waiting}
+         AND (repository_id IS NULL OR repository_id NOT IN (SELECT value FROM json_each(?)))`,
+        owner,
+        owner,
+        ids,
+      )
+      .one().n;
+    const rows = sql
+      .exec<DbRow>(
+        `SELECT * FROM task_index WHERE ${waiting} AND ${visible}
+         ORDER BY created_at DESC, task_id LIMIT ? OFFSET ?`,
+        owner,
+        owner,
+        ids,
+        limit,
+        query.offset,
+      )
+      .toArray()
+      .map(toRow);
+    return { ok: true, total, hidden, rows };
   }
 
   /**

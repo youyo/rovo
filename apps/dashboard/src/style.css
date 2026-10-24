@@ -211,13 +211,15 @@ fieldset {
 .grow {
   flex: 1 1 auto;
 }
-.seg {
+.seg,
+.rail-tabs {
   display: flex;
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
 }
 .seg button,
+.rail-tabs button,
 .user button {
   min-height: 28px;
   padding: 0;
@@ -226,12 +228,14 @@ fieldset {
   font: inherit;
   cursor: pointer;
 }
-.seg button {
+.seg button,
+.rail-tabs button {
   padding: 3px 12px;
   font-size: var(--fs-small);
   color: var(--dim);
 }
-.seg button[aria-pressed="true"] {
+.seg button[aria-pressed="true"],
+.rail-tabs button[aria-pressed="true"] {
   background: var(--fg);
   color: var(--panel);
 }
@@ -301,6 +305,7 @@ fieldset {
 }
 @media (pointer: coarse) {
   .seg button,
+  .rail-tabs button,
   .user button {
     min-height: 44px;
   }
@@ -623,6 +628,21 @@ fieldset {
   padding: 12px 0;
   background: var(--panel);
   border-right: 1px solid var(--line);
+}
+/* 「この日 / 待ち」のタブ付きの列。タブの下にレール。区切りの線と背景は列が持つ */
+.rail-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+.rail-tabs {
+  align-self: flex-start;
+  margin: 12px 16px 0;
+}
+.rail-col > .rail {
+  border-right: 0;
 }
 .rail-empty {
   padding: 6px 16px;
@@ -1386,6 +1406,12 @@ summary.step-row:hover {
     max-height: none;
     min-height: 0;
   }
+  .rail-col {
+    min-height: 0;
+  }
+  .rail-col > .rail {
+    flex: 1 1 0;
+  }
   .console-col {
     display: flex;
     flex-direction: column;
@@ -1412,6 +1438,13 @@ summary.step-row:hover {
     max-height: 240px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+  .rail-col {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .rail-col > .rail {
+    border-bottom: 0;
   }
   .console-col {
     padding: 14px 16px;

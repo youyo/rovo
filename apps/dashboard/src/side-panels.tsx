@@ -1,6 +1,7 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
 import { formatUsd, shortModel } from "./format";
 import { useT } from "./lang";
+import { monthPace } from "./pace";
 
 /**
  * 月の上限（USD）。契約の monthly_budget_usd が先。無い古い応答だけ、今の逆算（使った額 + 予約 + 残り）に戻す。
@@ -21,6 +22,14 @@ export function BudgetPanel(props: { data: OverviewDto }) {
   const { budget, month } = props.data;
   const t = useT();
   const limit = monthlyLimit(budget);
+  // 月のペース: 一覧の取得時刻（generated_at）を「いま」にして、画面側だけで計算する
+  const pace = monthPace({
+    spentUsd: budget.spent_usd,
+    limitUsd: limit,
+    periodStart: month.period.start,
+    periodEnd: month.period.end,
+    nowMs: Date.parse(props.data.generated_at),
+  });
   const rows = [
     { key: "spent", name: t("budget.spent"), value: formatUsd(budget.spent_usd, t) },
     { key: "remaining", name: t("budget.remaining"), value: formatUsd(budget.remaining_usd, t) },
@@ -47,6 +56,25 @@ export function BudgetPanel(props: { data: OverviewDto }) {
           </div>
         ))}
       </dl>
+      {pace.kind === "early" ? (
+        <p className="soft" data-budget-pace="early">
+          {t("budget.paceEarly")}
+        </p>
+      ) : (
+        <p data-budget-pace={pace.over ? "over" : "ok"}>
+          {t("budget.pace", {
+            day: pace.day,
+            spent: formatUsd(pace.spent, t),
+            projected: formatUsd(pace.projected, t),
+          })}
+          {pace.over && pace.limit !== null ? (
+            <>
+              {" "}
+              <strong>{t("budget.paceOver", { limit: formatUsd(pace.limit, t) })}</strong>
+            </>
+          ) : null}
+        </p>
+      )}
       <p data-budget-startable="">{t("budget.startable", { n: budget.startable })}</p>
       {month.hidden_tasks.count > 0 ? (
         <p className="soft" data-hidden-tasks={month.hidden_tasks.count}>

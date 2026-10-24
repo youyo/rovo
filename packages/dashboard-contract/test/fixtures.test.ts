@@ -10,6 +10,9 @@ import {
   taskDetailFailedSetupFixture,
   taskDetailRunningFixture,
   taskEventsFixture,
+  waitingEmptyFixture,
+  waitingFixture,
+  waitingMeFixture,
 } from "../src/fixtures";
 import {
   CloudflareSummaryDtoSchema,
@@ -18,6 +21,7 @@ import {
   TASK_STATUSES,
   TaskDetailDtoSchema,
   TaskEventsPageDtoSchema,
+  WaitingDtoSchema,
 } from "../src/index";
 
 describe("fixtures はスキーマを通る", () => {
@@ -30,6 +34,23 @@ describe("fixtures はスキーマを通る", () => {
   it("詳細（実行中・準備で失敗）", () => {
     expect(TaskDetailDtoSchema.safeParse(taskDetailRunningFixture).success).toBe(true);
     expect(TaskDetailDtoSchema.safeParse(taskDetailFailedSetupFixture).success).toBe(true);
+  });
+  it("待ち（全員・自分だけ・空）。入力待ちとレビュー待ちの両方を含む", () => {
+    for (const f of [waitingFixture, waitingMeFixture, waitingEmptyFixture]) {
+      expect(WaitingDtoSchema.safeParse(f).success).toBe(true);
+    }
+    const kinds = waitingFixture.tasks.map((t) => t.status);
+    expect(kinds).toContain("INPUT_REQUIRED");
+    expect(kinds).toContain("COMPLETED");
+    expect(waitingFixture.hidden_count).toBeGreaterThan(0);
+    expect(waitingMeFixture.tasks.every((t) => t.owner_login === "alice-example")).toBe(true);
+    expect(waitingEmptyFixture.tasks).toEqual([]);
+  });
+  it("待ち: 見えない分は件数だけ（個別の値の項目を足すと弾かれる）", () => {
+    expect(
+      WaitingDtoSchema.safeParse({ ...waitingFixture, hidden_tasks: [{ task_id: "x" }] }).success,
+    ).toBe(false);
+    expect(WaitingDtoSchema.safeParse({ ...waitingFixture, hidden_count: -1 }).success).toBe(false);
   });
   it("イベント（構造化イベントを含む・古い agent の縮退）", () => {
     expect(TaskEventsPageDtoSchema.safeParse(taskEventsFixture).success).toBe(true);

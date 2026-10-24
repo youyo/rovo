@@ -10,6 +10,7 @@ import {
   startTask,
   WIDGETS,
   waitForIndex,
+  waitForStatus,
 } from "./api";
 import { type E2eState, LONG_STEPS, STATE_ENV } from "./state";
 
@@ -54,6 +55,8 @@ export default async function globalSetup() {
       { key: "xss", user: alice, repo: WIDGETS.fullName, title: XSS_PAYLOAD },
       { key: "secret", user: alice, repo: SECRET.fullName, title: secretTitle },
       { key: "bob", user: bob, repo: WIDGETS.fullName, title: "bob のタスク" },
+      // 完了して PR が Ready（open・Draft でない）になる。レール「待ち」のレビュー待ち
+      { key: "review", user: alice, repo: WIDGETS.fullName, title: "レビュー待ちのタスク" },
       // 画面が縦にあふれる長さの手順（自動スクロールの追従 / 停止を確かめる）。最後に作るので、alice の一覧のコンソールに出る
       { key: "long", user: alice, repo: WIDGETS.fullName, title: "手順が長いタスク" },
     ];
@@ -102,6 +105,16 @@ export default async function globalSetup() {
     });
     await emit(baseUrl, id("secret"), "command", { command: "SECRET-CMD", exitCode: 0 });
     await emit(baseUrl, id("bob"), "command", { command: "bob-cmd", exitCode: 0 });
+
+    // 子が作業ブランチに commit を積んだ状態で完了させる（変更が無いと rovo が空の Draft PR を閉じる）。
+    // 完了すると rovo が PR を自動で Ready にする（クライアントのレビュー待ち）
+    await waitForStatus(baseUrl, id("review"), "RUNNING");
+    const reviewBranch = `agent/task-${id("review")}`;
+    const initial = await github.app<string | null>("branch", WIDGETS.fullName, reviewBranch);
+    if (!initial) throw new Error("review の作業ブランチがありません");
+    const head = await github.app<string>("addCommit", WIDGETS.fullName, initial, "child commit");
+    await github.app("setBranch", WIDGETS.fullName, reviewBranch, head);
+    await finish(baseUrl, id("review"), "completed", completedResult(head));
 
     // 終端
     await finish(baseUrl, id("done"), "completed", completedResult(SHA));

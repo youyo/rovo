@@ -6,6 +6,7 @@ import type { TaskDetailDto } from "./detail";
 import type { ErrorDto } from "./error";
 import type { TaskEventDto, TaskEventsPageDto } from "./events";
 import type { OverviewDto, VisibleTaskDto } from "./overview";
+import type { WaitingDto } from "./waiting";
 
 /** 手で作った ULID 形の ID（Crockford の文字だけ。時刻としての意味は無い） */
 const tid = (n: number): string => `01K8ZF${String(n).padStart(20, "0")}`;
@@ -430,3 +431,61 @@ export const errorFixtures: ErrorDto[] = [
   { error: "bad_request" },
   { error: "unavailable" },
 ];
+
+// 日をまたいだ「待ち」。1 つは前日の入力待ち、もう 1 つは数日前に完了してレビュー待ちの PR（open・Draft でない）
+const waitingTasks: VisibleTaskDto[] = [
+  {
+    task_id: tid(21),
+    owner_login: BOB,
+    repository: "example-org/api-server",
+    title: "認証の設定を整理する",
+    status: "COMPLETED",
+    model: MODEL_L,
+    effort: "high",
+    created_at: "2026-10-18T02:00:00Z",
+    started_at: "2026-10-18T02:01:00Z",
+    ended_at: "2026-10-18T03:00:00Z",
+    updated_at: "2026-10-18T03:00:00Z",
+    cost: cost(1.42),
+    pr: pr(61, "api-server", false, false),
+  },
+  {
+    task_id: tid(22),
+    owner_login: ALICE,
+    repository: "example-org/web-app",
+    title: "検索の並びを決めてほしい",
+    status: "INPUT_REQUIRED",
+    model: MODEL_S,
+    effort: "medium",
+    created_at: "2026-10-20T04:00:00Z",
+    started_at: "2026-10-20T04:01:00Z",
+    ended_at: null,
+    updated_at: "2026-10-20T04:30:00Z",
+    cost: cost(0.38, 40_000, 5_000),
+    pr: pr(104, "web-app", false, true),
+  },
+];
+
+/** 待ちの一覧（全員）。新しい順。権限の無い待ちが 1 件ある */
+export const waitingFixture: WaitingDto = {
+  generated_at: "2026-10-21T06:00:00Z",
+  scope: "all",
+  tasks: [...waitingTasks].sort((a, b) => b.created_at.localeCompare(a.created_at)),
+  truncated: false,
+  hidden_count: 1,
+};
+
+/** 待ちの一覧（自分だけ） */
+export const waitingMeFixture: WaitingDto = {
+  ...waitingFixture,
+  scope: "me",
+  tasks: waitingFixture.tasks.filter((t) => t.owner_login === ALICE),
+  hidden_count: 0,
+};
+
+/** 待っているタスクが無い */
+export const waitingEmptyFixture: WaitingDto = {
+  ...waitingFixture,
+  tasks: [],
+  hidden_count: 0,
+};

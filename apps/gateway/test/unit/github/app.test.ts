@@ -119,6 +119,15 @@ describe("GitHubAppClient", () => {
     expect((await verifyJwt(jwt, pair.publicPem)).ok).toBe(true);
   });
 
+  it("bot の作者: Installation Token を渡すと GET /users/<slug>[bot] をそのトークンで認証して引く（共有 IP の認証なし上限を避ける）", async () => {
+    const { c, calls } = await client({
+      "GET /app": () => json({ slug: "acme-rovo" }),
+      "GET /users/acme-rovo%5Bbot%5D": () => json({ id: 98765 }),
+    });
+    await c.getBotIdentity("ghs_tok");
+    expect((calls[1] as Request).headers.get("authorization")).toBe("Bearer ghs_tok");
+  });
+
   it("bot の作者: slug や id が引けない・不正なら例外（呼び出し側が代わりの作者にする）", async () => {
     const noUser = await client({
       "GET /app": () => json({ slug: "acme-rovo" }),

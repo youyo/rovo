@@ -2,6 +2,12 @@ const TEST_FILE =
   /(^|\/)(tests?|__tests__|spec)\/|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(go|py)$/;
 const TEST_CONFIG =
   /(^|\/)(vitest|jest|playwright|cypress|karma|ava|mocha)\.config\.[cm]?[jt]s$|(^|\/)\.mocharc[^/]*$|(^|\/)(pytest\.ini|tox\.ini|conftest\.py)$/;
+const CI_CONFIG =
+  /^(\.github\/workflows\/[^/]+\.ya?ml|\.circleci\/config\.yml|\.gitlab-ci\.yml|azure-pipelines\.yml|\.buildkite\/.+\.yml)$/;
+const TASK_DEF =
+  /(^|\/)(\.?mise\.toml|mise\.(?!local\.toml$)[^/]+\.toml|Makefile|[Jj]ustfile|Taskfile\.ya?ml|pyproject\.toml|setup\.cfg|noxfile\.py)$/;
+const LINT_CONFIG =
+  /(^|\/)(eslint\.config\.[cm]?[jt]s|\.eslintrc(\.[^/]+)?|biome\.jsonc?|tsconfig(\.[^/]+)?\.json|\.?ruff\.toml|\.?mypy\.ini|\.golangci\.(ya?ml|toml)|\.?oxlintrc\.json)$/;
 
 const SKIP_LINE = new RegExp(
   [
@@ -122,6 +128,14 @@ export function detectTestTampering(input: TamperingInput): string[] {
       warnings.push(`テストファイルが削除されています: ${path}`);
     } else if (!status.startsWith("A") && TEST_CONFIG.test(path)) {
       warnings.push(`テスト設定が変更されています: ${path}`);
+    } else if (!status.startsWith("A") && CI_CONFIG.test(path)) {
+      warnings.push(`CI の設定が変更されています: ${path}`);
+    } else if (!status.startsWith("A") && TASK_DEF.test(path)) {
+      warnings.push(
+        `タスクの定義が変更されています（テストや lint のコマンドが変わっていないか確認）: ${path}`,
+      );
+    } else if (!status.startsWith("A") && LINT_CONFIG.test(path)) {
+      warnings.push(`lint または型の設定が変更されています: ${path}`);
     }
   }
   if (input.testDiff) warnings.push(...detectWeakening(input.testDiff));

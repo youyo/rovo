@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { buildNow, buildOutput, phaseOf, stoppedPhaseOf } from "../dashboard/detail-now";
 import { dashboardUrl } from "../dashboard/url";
+import { DIRECTORY_NAME } from "../directory/types";
 import {
   type ModelChoice,
   type ModelSelection,
@@ -30,6 +31,12 @@ import type {
   TaskEvent,
   TaskView,
 } from "./task-do";
+import {
+  TASK_LIST_DEFAULT_LIMIT,
+  TASK_LIST_RECENT_MS,
+  type TaskListItem,
+  toTaskListItem,
+} from "./task-list";
 import { isTaskId, ulid } from "./ulid";
 import type { ReviewPull, UserDO } from "./user-do";
 import {
@@ -394,6 +401,7 @@ function wrapReviewResult(review: ReviewResultView): ReviewResultView {
 
 export function createTaskService(
   env: Pick<Env, "USER_DO" | "TASK_DO"> &
+    Partial<Pick<Env, "DIRECTORY_DO">> &
     ModelEnv & {
       MAX_CONCURRENT_TASKS?: string;
       PUBLIC_BASE_URL?: string;
@@ -672,6 +680,32 @@ export function createTaskService(
           target_pr: task.target_pr,
           note: REVIEW_NOTE,
           ...withDashboardUrl(task.task_id),
+        },
+      };
+    },
+
+    /**
+     * 呼んだ人のタスクの一覧（新しい順）。元は DirectoryDO の索引で、TaskDO は起こさない。
+     * 所有者（principal）の行だけを引くので、他人のタスクは返らない（task_status の「自分のタスクだけ」と同じ）。
+     */
+    async list(
+      principal: Principal,
+      args: { scope?: "active" | "recent"; limit?: number },
+    ): Promise<ServiceResult<{ tasks: TaskListItem[]; truncated: boolean }>> {
+      if (env.DIRECTORY_DO === undefined)
+        return { ok: true, value: { tasks: [], truncated: false } };
+      const r = await env.DIRECTORY_DO.getByName(DIRECTORY_NAME).listOwnTasks({
+        ownerId: principal.githubUserId,
+        scope: args.scope ?? "active",
+        endedSince: Date.now() - TASK_LIST_RECENT_MS,
+        limit: args.limit ?? TASK_LIST_DEFAULT_LIMIT,
+      });
+      if (!r.ok) return fail("invalid_input", "invalid task_list input");
+      return {
+        ok: true,
+        value: {
+          tasks: r.rows.map((row) => toTaskListItem(row, (id) => dashboardUrl(env, id))),
+          truncated: r.truncated,
         },
       };
     },

@@ -36,6 +36,19 @@ export const TaskIndexSnapshotSchema = z.strictObject({
   failure_phase: z.literal("setup").nullable(),
   deps_cache: z.string().max(40).nullable(),
   sandbox_runtime_ms: z.number().int().min(0).nullable(),
+  // task_list 用（古い TaskDO の snapshot には無い。無い行は stage などを省いて返す）
+  kind: z.enum(["task", "review"]).optional(),
+  /** review の段（waiting / commands / reviewing / posting / done）。review 以外は null */
+  review_stage: z
+    .enum(["waiting", "commands", "reviewing", "posting", "done"])
+    .nullable()
+    .optional(),
+  reached_verifying: z.boolean().optional(),
+  /** 検証の試行回数（検証の結果が出たもののうち最大の attempt）。無ければ null */
+  verify_attempt: z.number().int().min(1).max(1_000).nullable().optional(),
+  /** review の対象の PR */
+  target_pr_number: z.number().int().nullable().optional(),
+  target_pr_url: z.string().max(500).nullable().optional(),
 });
 export type TaskIndexSnapshot = z.infer<typeof TaskIndexSnapshotSchema>;
 
@@ -68,6 +81,19 @@ export type ListTasksQuery = {
 export type ListTasksResult =
   | { ok: true; total: number; rows: TaskIndexRow[] }
   | { ok: false; code: "invalid_input" | "too_many_repo_ids" };
+
+export type ListOwnTasksQuery = {
+  ownerId: number;
+  /** active: 終端でないもの。recent: 終端でないもの + endedSince 以降に終端になったもの（epoch ms） */
+  scope: "active" | "recent";
+  endedSince: number;
+  limit: number;
+};
+
+/** 新しい順の rows（最大 limit 件）と、まだ続きがあるか */
+export type ListOwnTasksResult =
+  | { ok: true; rows: TaskIndexRow[]; truncated: boolean }
+  | { ok: false; code: "invalid_input" };
 
 export type ListWaitingQuery = {
   /** 閲覧者に見える repository id の集合。絞った後でページを切る */

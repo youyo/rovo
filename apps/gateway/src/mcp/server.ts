@@ -14,6 +14,7 @@ import {
   createTaskService,
   type Principal,
 } from "../tasks/service";
+import { taskListSchema } from "../tasks/task-list";
 import type { WebPort } from "../web/contract";
 import {
   isWebBrowseEnabled,
@@ -155,6 +156,10 @@ const MODELS_LIST_DESCRIPTION = [
   "id は task_start の model と consult の model に使える。単価は USD / 100 万トークン。tiers は、入力（input + キャッシュの読み書き）が input_tokens_above を超える呼び出しに、全体へ適用される上位の単価（無ければ空）。default: true が、model を省略したときのモデル（available なモデルの中から決まる。1 つも available でなければ default: true は無い）。available は今そのモデルを使えるか：Anthropic / OpenAI のモデルは、AI Gateway にそのプロバイダーのキー（BYOK。alias は default）が登録されていないと available: false（unavailable_reason: no_provider_key）で、task_start と consult は model_unavailable で拒否する。Workers AI のモデル（provider は workers-ai）はキー不要で常に available。available: true のモデルから選ぶ。effort はそのモデルの思考レベル（off / minimal / low / medium / high / xhigh / max）で、思考レベルはモデルごとに決まっている（これは既定。task_start の effort で上書きできる。そのモデルが対応していないレベルは invalid_input）。考える量が多いほど出力トークン＝費用が増える（思考のトークンは出力として課金される）。",
   "タスクの難しさと予算に合わせて選ぶ。budget_status で残りを確かめられる。",
 ].join("\n");
+
+/** task_list の説明（mod のペインやダッシュボードのように、複数のワーカーを見渡す用途） */
+const TASK_LIST_DESCRIPTION =
+  '呼んだ人自身のタスク（task_start・task_review で始めたもの。どのセッション・どのクライアントから始めたかは問わない）を新しい順に一覧する、読み取り専用のツール。何も書かず、タスクの状態も変えない。Claude Code の画面（mod）のペインやダッシュボードのように、いま動いている複数のワーカーと直近に終わったものを並べて見渡すために使う（1 件の進み具合は task_status・task_console、完了待ちは task_wait）。入力（すべて任意）は {scope, limit}。scope は "active"（終端でないもの。既定）か "recent"（終端でないもの + 直近 24 時間に終端になったもの）、limit は 1〜50（既定 20）。応答は {tasks, truncated}（truncated は limit で打ち切って続きがあること）。tasks の各要素は {task_id, kind, title, repository, status, stage, verify_attempt?, verify_max?, waiting_for_answer, model, created_at, updated_at, ended_at?, pr?, dashboard_url?}。kind は task | review、status は task_status と同じ。stage はペインの段階で、task は setup | work | verify | pr | done（pr は完了して PR のマージ待ち。止まったタスクは止まった段階）、review は fetch | investigate | post | done。verify_attempt は検証の試行回数（検証の結果が出ていれば付き、verify_max は上限）。waiting_for_answer が true のときは INPUT_REQUIRED で、task_status の pending_question を見て task_answer で答える。pr は {number, url}（review のタスクは対象の PR）。費用とワーカーが書いた自由文（質問・要約・理由など）は含まない（title はクライアントが付けたもの）。ダッシュボードの一覧と同じ索引から読むので、更新が数秒〜十数秒遅れることがあり、索引が古いタスクは項目が欠けることがある。自分のタスクだけが返り、他人のタスクは返らない。dashboard_url は task_status と同じ規則で付く（デプロイの設定によっては付かない）。';
 
 const SANDBOX_INSTANCES_LIST_DESCRIPTION = [
   "ワーカーの Sandbox（コンテナ）の大きさの一覧と単価を返す。入力は無い。応答は {instances: [{name, vcpu, memory_gib, disk_gb, usd_per_hour, default, selectable, auto_scale_max}]}。",
@@ -708,6 +713,22 @@ export function createRovoServer(env: Env): McpServer {
         const { task_id } = typed.value;
         const denied = await requireMember(env, principal, userDo);
         return denied ?? service.status(principal, task_id);
+      }),
+  );
+
+  server.registerTool(
+    "task_list",
+    {
+      ...toolConfig("task_list"),
+      description: TASK_LIST_DESCRIPTION,
+      inputSchema: publishedSchema(taskListSchema),
+    },
+    async (args) =>
+      runTool(env, "task_list", async (principal, userDo) => {
+        const typed = parseToolInput(taskListSchema, args);
+        if (!typed.ok) return typed;
+        const denied = await requireMember(env, principal, userDo);
+        return denied ?? service.list(principal, typed.value);
       }),
   );
 

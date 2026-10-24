@@ -1,5 +1,7 @@
+import type { TaskEventDto } from "@rovo/dashboard-contract";
 import { z } from "zod";
 import { buildNow, buildOutput, phaseOf, stoppedPhaseOf } from "../dashboard/detail-now";
+import { toEventDto } from "../dashboard/events";
 import { dashboardUrl } from "../dashboard/url";
 import { DIRECTORY_NAME } from "../directory/types";
 import {
@@ -155,7 +157,45 @@ export type ConsoleValue = {
   /** Draft PR。作成前は null。url は task_status の draft_pr_url と同じ値 */
   pr: { number: number; url: string } | null;
   generated_at: string;
+  /** log_after を渡したときだけ付く。ダッシュボードの events と同じ変換のイベント（ワーカーの文字列は非信頼の囲み付き） */
+  log?: ConsoleLog;
 } & WithDashboardUrl;
+export type ConsoleLog = {
+  entries: Record<string, unknown>[];
+  next_cursor: string;
+  truncated: boolean;
+};
+/** task_console の log の 1 回の最大件数 */
+const CONSOLE_LOG_MAX = 100;
+/** log に含める型（usage と agent_event は含めない） */
+const CONSOLE_LOG_TYPES: ReadonlySet<string> = new Set([
+  "command",
+  "edit",
+  "commit",
+  "web",
+  "tool_start",
+  "tool_end",
+  "status_changed",
+  "draft_pr_created",
+]);
+/** DTO のうち、ワーカーが書いた文字列のフィールド（型ごと） */
+const CONSOLE_LOG_WORKER_FIELDS: Record<string, readonly string[]> = {
+  command: ["command", "cwd", "output_tail"],
+  edit: ["path"],
+  commit: ["message"],
+  web: ["host"],
+  tool_start: ["name", "summary"],
+  tool_end: ["summary"],
+};
+
+function wrapLogEntry(dto: TaskEventDto): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...dto };
+  for (const f of CONSOLE_LOG_WORKER_FIELDS[dto.type] ?? []) {
+    const v = out[f];
+    if (typeof v === "string" && v !== "") out[f] = wrapUntrustedQuestion(v);
+  }
+  return out;
+}
 export type WaitValue = {
   task_id: string;
   status: TaskStatus;
@@ -739,8 +779,14 @@ export function createTaskService(
      * 画面に進み具合を出すための読み取り専用の応答。権限は status と同じ（getStatus が所有者を照合する。他人・未知は not_found）。
      * 照合のあとに、ダッシュボードの詳細と同じ読み取り（dashboardDetail・dashboardLatest。どちらも何も書かない）で材料を集める。
      */
-    async console(principal: Principal, taskId: string): Promise<ServiceResult<ConsoleValue>> {
+    async console(
+      principal: Principal,
+      taskId: string,
+      logAfter?: string,
+    ): Promise<ServiceResult<ConsoleValue>> {
       if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
+      const parsedAfter =
+        logAfter === undefined ? undefined : /^\d{1,15}$/.test(logAfter) ? Number(logAfter) : null;
       const stub = deps.tasks(taskId);
       const owned = await stub.getStatus(principal.githubUserId);
       if (!owned.ok) return fail("not_found", NOT_FOUND);
@@ -749,6 +795,38 @@ export function createTaskService(
       if (!detail.ok || repositoryId === null) return fail("not_found", NOT_FOUND);
       const latest = await stub.dashboardLatest(repositoryId);
       if (!latest.ok) return fail("not_found", NOT_FOUND);
+      let log: ConsoleLog | undefined;
+      if (parsedAfter === null) return fail("invalid_cursor", "log_after is invalid");
+      if (parsedAfter !== undefined) {
+        // ダッシュボードの events API と同じ読み取り（dashboardEvents）と変換（toEventDto）。usage などは除いて数える
+        const entries: Record<string, unknown>[] = [];
+        let scanned = parsedAfter;
+        let lastEntry = parsedAfter;
+        let truncated = false;
+        for (let page = 0; page < 20 && !truncated; page++) {
+          const r = await stub.dashboardEvents(repositoryId, { cursor: scanned, limit: 200 });
+          if (!r.ok) return fail("not_found", NOT_FOUND);
+          for (const row of r.events) {
+            const dto = toEventDto(row);
+            if (dto !== null && CONSOLE_LOG_TYPES.has(dto.type)) {
+              if (entries.length >= CONSOLE_LOG_MAX) {
+                truncated = true;
+                break;
+              }
+              entries.push(wrapLogEntry(dto));
+              lastEntry = row.seq;
+            }
+            scanned = row.seq;
+          }
+          if (r.events.length < 200) break;
+          if (page === 19) truncated = true;
+        }
+        log = {
+          entries,
+          next_cursor: String(truncated ? lastEntry : scanned),
+          truncated,
+        };
+      }
       const { view, reached } = detail;
       const phase = phaseOf(view.status);
       const now = buildNow(latest.recent, view.status, phase, detail.awaiting_budget);
@@ -780,6 +858,7 @@ export function createTaskService(
                 },
           pr,
           generated_at: new Date().toISOString(),
+          ...(log !== undefined ? { log } : {}),
           ...withDashboardUrl(taskId),
         },
       };

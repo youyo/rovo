@@ -84,8 +84,14 @@ describe("Cloudflare の枠", () => {
     expect(cfCalls(f)[0]?.searchParams.get("range")).toBe("24h");
     const links = [...p.querySelectorAll("a")];
     expect(links).toHaveLength(5);
+    expect(links.map((a) => a.getAttribute("href"))).toEqual([
+      "https://dash.cloudflare.com/?to=/:account/workers-and-pages",
+      "https://dash.cloudflare.com/?to=/:account/workers/containers",
+      "https://dash.cloudflare.com/?to=/:account/ai/ai-gateway",
+      "https://dash.cloudflare.com/?to=/:account/ai/workers-ai",
+      "https://dash.cloudflare.com/?to=/:account/ai/ai-gateway",
+    ]);
     for (const a of links) {
-      expect(a.getAttribute("href")).toBe("https://dash.cloudflare.com/");
       expect(a.getAttribute("rel")).toBe("noopener noreferrer");
       expect(a.getAttribute("target")).toBe("_blank");
     }

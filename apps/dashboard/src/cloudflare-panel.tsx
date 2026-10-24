@@ -6,7 +6,7 @@ import type { CloudflareState } from "./use-cloudflare";
 
 /**
  * 右の列の Cloudflare の枠（直近 24 時間）。取れない項目は理由の言葉で出し、
- * 枠全体が取れなくても他の部分は出す。リンクは Cloudflare のトップだけ（アカウント ID を含めない）。
+ * 枠全体が取れなくても他の部分は出す。リンクは行ごとの ?to=/:account/ 形（アカウント ID を含めない）。
  */
 export function CloudflarePanel(props: { state: CloudflareState }) {
   const { state } = props;

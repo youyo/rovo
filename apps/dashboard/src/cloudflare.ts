@@ -1,5 +1,5 @@
 import type { CloudflareSummaryDto } from "@rovo/dashboard-contract";
-import { CLOUDFLARE_DASH_URL, formatCount, formatUsd } from "./format";
+import { CLOUDFLARE_DASH_URL, cloudflareDashLink, formatCount, formatUsd } from "./format";
 import type { T } from "./i18n";
 
 /** Cloudflare の枠の整形（純関数）。値は数値と固定の語だけで組み、上流の文字列は通さない。 */
@@ -33,6 +33,18 @@ export const formatVcpuHours = (seconds: number, t: T) =>
 export const formatGibHours = (seconds: number, t: T) => t("cf.gibHours", { h: hours(seconds, t) });
 export const formatNeurons = (n: number, t: T) => `${formatCount(Math.round(n), t)} Neuron`;
 
+/**
+ * 行ごとの開き先（Cloudflare 公式文書の ?to=/:account/ 形。アカウント ID は載せない）。
+ * クレジット残高は AI Gateway のページの「Credits Available」で見る（Unified Billing の文書）。
+ */
+const DASH_PATHS = {
+  workers: "workers-and-pages",
+  containers: "workers/containers",
+  ai_gateway: "ai/ai-gateway",
+  workers_ai: "ai/workers-ai",
+  credit_balance: "ai/ai-gateway",
+} as const;
+
 export type CloudflareRow = {
   key: "workers" | "containers" | "ai_gateway" | "workers_ai" | "credit_balance";
   name: string;
@@ -63,7 +75,7 @@ function row<V>(
   const base = {
     key,
     name: t(`cf.${key}.name`),
-    href: CLOUDFLARE_DASH_URL,
+    href: cloudflareDashLink(DASH_PATHS[key]),
     ariaLabel: t("cf.openAria", { name: t(`cf.${key}.open`) }),
     // 取れなかった項目（ok が false）と推定が null の項目は金額を出さない
     cost: item?.ok && cost !== null && cost !== undefined ? costText(cost) : null,
@@ -101,7 +113,7 @@ export function cloudflareEstimateHead(
   return { text: t("cf.head", { amount }), partial: e.partial };
 }
 
-/** 画面の行。リンクはどれも Cloudflare のトップ（DTO の open_url は使わない）。 */
+/** 画面の行。リンクは行ごとの ?to=/:account/ 形（DTO の open_url は使わない）。 */
 export function cloudflareRows(s: CloudflareSummaryDto, t: T): CloudflareRow[] {
   const e = s.cost_estimate?.items;
   return [

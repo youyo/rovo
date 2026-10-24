@@ -2514,6 +2514,11 @@ export class AgentDO extends DurableObject<Env> {
             : undefined,
       },
       {
+        // テストの出力は一度読むと会話に残り、以後の呼び出しのたびにキャッシュから読み直されるので、絞ってから読ませる
+        key: "test_output",
+        text: 'When you run tests, linters, or type checks, filter the output down to failures and summary lines before reading it, for example `pnpm test 2>&1 | grep -E "FAIL|✗|×|Error|Tests |Test Files" | head -50`. Every line you read stays in the conversation and is read again on every later turn, so a full test log costs tokens for the rest of the task. Read the full output only when the filtered lines are not enough to find the cause, and then only the part around the failure (e.g. with `tail -n 80` or `grep -A 20`).',
+      },
+      {
         key: "no_push",
         text: "Every git_commit is pushed to the task branch automatically; do not run git push yourself (a push from a bash command is rejected), do not change git remotes or credentials, and do not create pull requests. Credentials are not available inside the sandbox. Each bash call starts at the workspace root. Do not prefix commands with `cd <dir> &&`; pass the directory as the cwd argument instead. The gateway creates the draft pull request for the task branch (you never create it), and the client reviews and merges it. So do not say in your summary that you did not create a pull request, and do not report the missing pull request as a problem: describe the changes you committed instead.",
       },

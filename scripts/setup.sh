@@ -131,7 +131,7 @@ elif [ "$github_app" != true ]; then
     手で作るとき（GitHub の Settings > Developer settings > GitHub Apps。OAuth App は使わない）:
     Callback URL                 : ${base_url}/callback
     Webhook                      : 無効
-    Repository permissions       : Metadata = Read-only / Contents = Read and write / Pull requests = Read and write / Checks = Read-only / Commit statuses = Read-only
+    Repository permissions       : Metadata = Read-only / Contents = Read and write / Pull requests = Read and write / Checks = Read-only（任意） / Commit statuses = Read-only（任意。あると task_pr_merge が CI の結果を確かめる）
     Organization permissions     : Members = Read-only（org / team で認可するときだけ）
     作ったら「Install App」で対象の org / リポジトリに入れ、App ID・Client ID・Client secret・秘密鍵（.pem）を控える。
     rovo.config.json の githubApp.id と githubApp.clientId に App ID と Client ID を入れ、次を実行する

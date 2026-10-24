@@ -406,7 +406,7 @@ export class GitHubClient {
    * - failing: completed の check run の conclusion が success / skipped / neutral 以外、または commit status が failure / error
    * - pending: failing は無いが、completed でない check run か、pending の commit status がある
    * - passing: 1 つ以上あり、すべて成功
-   * 読めなかったとき（Checks の read 権限が無い 403 など）は GitHubError を投げる（通してしまわない）。
+   * 読めなかったとき（Checks の read 権限が無い 403 など）は GitHubError を投げる。通すか止めるかは呼び出し側（UserDO.prMerge は止めずに通し、warnings に checks_unreadable を残す）が決める。
    */
   async getCheckState(
     accessToken: string,

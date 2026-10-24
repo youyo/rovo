@@ -581,7 +581,7 @@ M6 / M8 は次の 2 つに分ける（番号は同じ M のまま）。
 
 **2 つに分ける**。**8a（rovo 可）**: コンポーネント・純関数（動詞・帯・テキスト整形・リンク許可）・jsdom の Unit・fixtures で動く画面。**8b（手元）**: Playwright E2E（XSS・秘密・権限）と実 API 接続。最初の版の範囲: M7 の構造化イベントで、動詞つきの進み具合と出力の末尾を出す。古い agent の履歴は動詞の無い素の一覧に縮退する（D14 の互換）。
 
-- 作るもの: 見本 `Task.dc.html`。状態（脈動。reduced-motion で停止）、題名、「いまは X を実行中」（最新の `command` / `edit` から。無ければ「待機中」等）、準備 → 実行 → 検証 → 完了の帯（`failure_phase` が `setup` なら準備で止まった表示）、進み具合（人の言葉の動詞で時系列。いまの手順は青。**動詞への変換は純関数**）、出力の末尾（暗い枠・JetBrains Mono・「秘密を伏せています」を常に表示）、費用（タスクの費用の内訳）、設定（モデル・effort・merge_policy・deps_cache・`sandbox_instance`〔あれば〕）、Draft PR（URL は D14 の規則に合うものだけリンク）、自動更新のチェック。404 の画面。
+- 作るもの: 見本 `Task.dc.html`。状態（脈動。reduced-motion で停止）、題名、「いまは X を実行中」（最新の `command` / `edit` から。無ければ「待機中」等）、準備 → 実行 → 検証 → 完了の帯（`failure_phase` が `setup` なら準備で止まった表示）、進み具合（人の言葉の動詞で時系列。いまの手順は青。**動詞への変換は純関数**）、出力の末尾（暗い枠・JetBrains Mono・「秘密を伏せています」を常に表示）、費用（タスクの費用の内訳）、設定（モデル・effort・review_policy・deps_cache・`sandbox_instance`〔あれば〕）、Draft PR（URL は D14 の規則に合うものだけリンク）、自動更新のチェック。404 の画面。
 - 完了条件: `mise run test` / `lint`。E2E で詳細が見本の構成で出て、実行中のタスクの手順が 5 秒ごとに増える。
 - テスト（先に書く）:
   - Unit: 動詞への変換（全イベントの型 × 失敗 / 成功）、帯の状態の写像（`CREATING` → 準備、`RUNNING` → 実行、`VERIFYING` → 検証、終端 → 完了 / 失敗の印。`RECOVERING` / `INPUT_REQUIRED` の見せ方も）、テキスト整形（制御文字・双方向文字・長い 1 行・HTML 風の文字列・`javascript:` を含む文字列がそのまま文字として出る）、リンク許可の判定（PR の URL の正規表現。`javascript:`・`data:`・他のホスト・`github.com.evil.com` を拒否）。

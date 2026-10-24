@@ -348,6 +348,30 @@ describe("完了時の自動の Ready（client_review）", () => {
     expect(await stub.prContext(OWNER, "ready")).toMatchObject({ ok: true });
   });
 
+  it("PR の node_id を読めない（応答に node_id が無い）ときは GraphQL を呼ばず、COMPLETED のまま warning イベントを残す", async () => {
+    // 終端の処理の最初の GET /pulls/1 だけ、node_id の無い応答にする
+    app().setFault({
+      pattern: "^GET /repos/acme/widgets/pulls/1$",
+      status: 200,
+      count: 1,
+      body: {
+        number: 1,
+        html_url: "https://github.test/acme/widgets/pull/1",
+        draft: true,
+        state: "open",
+        body: "",
+        head: { sha: "a".repeat(40) },
+        base: { ref: "main" },
+      },
+    });
+    const { stub, branch } = await runToCompleted();
+    const st = await stub.getStatus(OWNER);
+    expect(st.ok && st.task.status).toBe("COMPLETED");
+    expect(graphqlCalls()).toEqual([]);
+    expect(draftOf(branch)).toBe(true);
+    expect(await warningCodes(stub)).toContain("auto_ready_failed");
+  });
+
   it("FAILED では Ready にしない（Draft のまま）", async () => {
     const t = await createTask();
     await t.stub.advance();

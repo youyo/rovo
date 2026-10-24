@@ -402,26 +402,41 @@ describe("service.prMerge: PR の head に付いた GitHub の check", () => {
     expect((await w.service.prMerge(w.principal, { task_id: w.t.id })).ok).toBe(true);
   });
 
-  it("check を読めない（GitHub が 403・5xx）ときはマージしない（通してしまわない）", async () => {
-    const w = await checksWorld();
-    app().setFault({ pattern: "check-runs$", status: 403, count: 1 });
-    const denied = await w.service.prMerge(w.principal, { task_id: w.t.id });
-    expect(denied).toMatchObject({ ok: false, error: { code: "forbidden" } });
-    app().setFault({ pattern: "check-runs$", status: 502, count: 1 });
-    const down = await w.service.prMerge(w.principal, { task_id: w.t.id });
-    expect(down).toMatchObject({ ok: false, error: { code: "upstream_unavailable" } });
-    expect(w.pull()?.merged).toBe(false);
-    expect(w.githubCalls().filter((c) => c.method === "PUT")).toHaveLength(0);
+  it("check を読めない（GitHub が 403・5xx・ネットワークの失敗）ときは、マージを止めずに通す。応答の warnings に checks_unreadable を入れる", async () => {
+    for (const status of [403, 404, 502]) {
+      const w = await checksWorld();
+      app().setFault({ pattern: "check-runs$", status, count: 1 });
+      const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
+      expect(r, String(status)).toMatchObject({ ok: true, value: { merged: true } });
+      const warnings = r.ok ? r.value.warnings : [];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("checks_unreadable");
+      expect(warnings[0]).toContain("Checks");
+      expect(w.pull()?.merged).toBe(true);
+    }
   });
 
-  it("App に Checks / Commit statuses の read 権限が無い（check を読めない）ときは、通さずに forbidden。権限の案内を返す", async () => {
+  it("commit status だけ読めなくても通し、警告を付ける", async () => {
+    const w = await checksWorld();
+    app().setFault({ pattern: "/status$", status: 500, count: 1 });
+    const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
+    expect(r).toMatchObject({ ok: true, value: { merged: true } });
+    expect(r.ok && r.value.warnings[0]).toContain("checks_unreadable");
+  });
+
+  it("読めたときは警告を付けない（check が無い・成功）", async () => {
+    const w = await checksWorld();
+    const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
+    expect(r).toMatchObject({ ok: true, value: { warnings: [] } });
+  });
+
+  it("App に Checks / Commit statuses の read 権限が無い（check を読めない）ときも通す。警告で権限の追加を案内する", async () => {
     const w = await checksWorld();
     app().setUserPermissions({ contents: "write", pull_requests: "write" });
     const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
-    expect(r).toMatchObject({ ok: false, error: { code: "forbidden" } });
-    expect(!r.ok && r.error.message).toContain("Checks");
-    expect(w.pull()?.merged).toBe(false);
-    expect(w.githubCalls().filter((c) => c.method === "PUT")).toHaveLength(0);
+    expect(r).toMatchObject({ ok: true, value: { merged: true } });
+    expect(r.ok && r.value.warnings[0]).toContain("checks_unreadable");
+    expect(w.pull()?.merged).toBe(true);
   });
 
   it("マージ済みの冪等な再実行では check を見ない（すでに終わっている）", async () => {

@@ -395,8 +395,8 @@ Create it under GitHub's Settings > Developer settings > GitHub Apps (do not use
   - Metadata: Read-only
   - Contents: Read and write
   - Pull requests: Read and write
-  - Checks: Read-only
-  - Commit statuses: Read-only
+  - Checks: Read-only (optional; lets `task_pr_merge` check CI results. Without it the merge goes ahead with a `checks_unreadable` warning)
+  - Commit statuses: Read-only (optional; same as above)
 - **Organization permissions**
   - Members: Read-only (used to check team membership)
 - **Install** the App on the target org / repositories. `task_start` succeeds only when the target repository is included in an Installation visible with the user's token and the user has push permission (even for a public repository, if the App is not installed, you get `forbidden`)

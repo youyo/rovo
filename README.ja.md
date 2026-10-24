@@ -395,8 +395,8 @@ GitHub の Settings > Developer settings > GitHub Apps で作る（OAuth App は
   - Metadata: Read-only
   - Contents: Read and write
   - Pull requests: Read and write
-  - Checks: Read-only
-  - Commit statuses: Read-only
+  - Checks: Read-only（任意。あると `task_pr_merge` が CI の結果を確かめる。無いと `checks_unreadable` の警告つきでマージする）
+  - Commit statuses: Read-only（任意。同上）
 - **Organization permissions**
   - Members: Read-only（team 所属の確認に使う）
 - App を対象の org / リポジトリに **Install** する。`task_start` は、利用者のトークンで見える Installation に対象リポジトリが含まれ、利用者に push 権限があるときだけ成功する（公開リポジトリでも App が未導入なら `forbidden`）

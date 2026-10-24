@@ -504,10 +504,10 @@ M6（点検）と M11（公開）の結果の記録。履歴の処理・push・�
 - [ ] FAILED（または CANCELLED）のタスクで `task_pr_ready` が拒否される: `conflict`。PR は Draft のまま（rovo は Ready にしない）。実行中のタスクは `not_ready`
 - [ ] `review_policy` を省略した（`client_review`）タスクで `task_pr_merge` が通る（`forbidden` にならない）。Draft のままの `task_pr_merge` は `conflict`（`task_pr_ready` を先に呼ぶよう返る）。Ready の PR を `task_pr_merge` でマージできる（既定は squash）。GitHub 上で PR が merged、`merge_sha` がマージのコミットを指している。`delete_branch: true` で作業ブランチ `agent/task-<id>` が消える
 - [ ] ブランチ保護で拒否される: 検証用リポジトリのデフォルトブランチに、必須レビュー（1 人の承認）または必須チェックの ruleset を入れ、タスクで `task_pr_merge` を呼ぶ。`merge_blocked` と GitHub の理由（例: 承認が必要）が返り、マージされない。承認（または保護の解除）のあとの再実行でマージできる。利用者が保護をバイパスできる設定の場合は、利用者本人の扱いで通る（App の権限ではない）ことを備考に書く
-- [ ] PR の head に GitHub Actions などの check が付いているとき: 失敗していれば `merge_blocked`（`checks_failing`）、実行中なら `merge_blocked`（`checks_pending`）、すべて成功なら通る。check が 1 つも無いリポジトリでは通る。App に Checks / Commit statuses の read 権限が無いと `forbidden`（権限の案内つき）
+- [ ] PR の head に GitHub Actions などの check が付いているとき: 失敗していれば `merge_blocked`（`checks_failing`）、実行中なら `merge_blocked`（`checks_pending`）、すべて成功なら通る。check が 1 つも無いリポジトリでは通る。App に Checks / Commit statuses の read 権限が無い（任意の権限）と、止めずにマージし、応答の `warnings` に `checks_unreadable`（権限の案内つき）が入る
 - [ ] 検証のあとに PR のブランチへ手で push してから `task_pr_merge` を呼ぶと、`head_moved` でマージされない（`task_result` の `head_matches_verified` が false になった場合は `conflict`）
 - [ ] 監査ログに `pr_ready` / `pr_merged` / `pr_denied`（`taskId`・`userId`・`review_policy`。自動の Ready は `caller: system`・`reason: auto_ready`）が出ていて、トークン・PR の本文・GitHub のメッセージは含まれない
-- [ ] App の権限は Pull requests: Read and write / Contents: Read and write / Checks: Read-only / Commit statuses: Read-only で足りた（Pull requests・Contents を read にすると `forbidden` になる）。足りなければ `docs/deploy.md` の権限の節を直す
+- [ ] App の権限は Pull requests: Read and write / Contents: Read and write / Checks: Read-only / Commit statuses: Read-only（この 2 つは任意。無いと `task_pr_merge` が `checks_unreadable` の警告つきでマージする）で足りた（Pull requests・Contents を read にすると `forbidden` になる）。足りなければ `docs/deploy.md` の権限の節を直す
 - [ ] 実 Claude Code から、MCP の `instructions` と `next_steps` だけを頼りに（手順を教えずに）手元の全体のテストとレビュー → `task_pr_merge`（または直接マージ）まで進められた。迷った点を備考に書く
 
 ### D9 の結果

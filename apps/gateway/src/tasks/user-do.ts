@@ -1510,6 +1510,7 @@ export class UserDO extends DurableObject<Env> {
   async prMerge(target: PrTarget, opts: PrMergeOptions): Promise<PrMergeResult> {
     const { client, credentials } = this.github();
     let outcome: { already: boolean; sha: string | null };
+    let checksUnreadable = false;
     try {
       const merged = await credentials.withToken(
         async (tok): Promise<PrFailure | { already: boolean; sha: string | null }> => {
@@ -1531,8 +1532,22 @@ export class UserDO extends DurableObject<Env> {
           }
           if (pull.headSha !== opts.expectedSha) return this.headMoved(pull.headSha);
           // head の commit に GitHub の check（check run / commit status）が付いていれば、すべて成功していること。
-          // 1 つも無ければ通す（厳しくしたいときは GitHub のブランチ保護を使う）。読めなければ throw（通さない）
-          const checks = await client.getCheckState(tok, target.repository, opts.expectedSha);
+          // 1 つも無ければ通す（厳しくしたいときは GitHub のブランチ保護を使う）。
+          // 読めないとき（権限不足の 403 / 404・5xx・ネットワークの失敗）は止めずに通し、warnings に checks_unreadable を残す
+          // （止めるかどうかは GitHub のブランチルールの責務）。読めて failing / pending なら止める
+          checksUnreadable = false;
+          let checks: Awaited<ReturnType<typeof client.getCheckState>> = "none";
+          try {
+            checks = await client.getCheckState(tok, target.repository, opts.expectedSha);
+          } catch (e) {
+            if (
+              !(e instanceof GitHubError) ||
+              !["forbidden", "upstream_unavailable"].includes(e.code)
+            ) {
+              throw e;
+            }
+            checksUnreadable = true;
+          }
           if (checks === "failing" || checks === "pending") {
             return {
               ok: false,
@@ -1560,6 +1575,11 @@ export class UserDO extends DurableObject<Env> {
     // マージは取り消せない。ブランチの削除に失敗しても成功として返し、warnings に残す。
     let branchDeleted: boolean | null = null;
     const warnings: string[] = [];
+    if (checksUnreadable) {
+      warnings.push(
+        "checks_unreadable: the GitHub checks (CI results) of the pull request head could not be read, so the pull request was merged without checking them; add the Checks: Read-only and Commit statuses: Read-only permissions to the GitHub App to have them checked (see docs/deploy.md)",
+      );
+    }
     if (opts.deleteBranch) {
       try {
         await credentials.withToken((tok) =>

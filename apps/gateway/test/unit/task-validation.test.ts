@@ -298,14 +298,15 @@ describe("task_answer / task_steer の入力", () => {
 });
 
 describe("review_policy（全体のテストとレビューの方針）", () => {
-  it("省略は client_review。worker_review は受け付けるだけで、未対応（近日）として拒否する。他の値も拒否する", () => {
+  it("省略は client_review。worker_review は review_model が要る（review_policy だけでは拒否）。他の値も拒否する", () => {
     expect(taskInputSchema.parse(base).review_policy).toBe("client_review");
     expect(taskInputSchema.parse({ ...base, review_policy: "client_review" }).review_policy).toBe(
       "client_review",
     );
     const worker = taskInputSchema.safeParse({ ...base, review_policy: "worker_review" });
     expect(worker.success).toBe(false);
-    expect(JSON.stringify(worker.error?.issues)).toContain("not supported yet");
+    expect(JSON.stringify(worker.error?.issues)).toContain("review_model");
+    expect(JSON.stringify(worker.error?.issues)).not.toContain("not supported yet");
     for (const bad of ["auto", "CLIENT_REVIEW", "", 1, null]) {
       expect(taskInputSchema.safeParse({ ...base, review_policy: bad }).success).toBe(false);
     }
@@ -448,5 +449,116 @@ describe("budget_policy", () => {
     const stop = await computeFingerprint(parse({ ...base, budget_policy: "stop" }));
     expect(stop).not.toBe(a);
     expect(stop).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("worker_review（段階 3: review_fix_rounds: 0）", () => {
+  const worker = {
+    ...base,
+    review_policy: "worker_review",
+    review_model: "anthropic/claude-sonnet-5-5",
+  };
+  const issues = (input: unknown) => {
+    const r = taskInputSchema.safeParse(input);
+    return r.success ? undefined : JSON.stringify(r.error.issues);
+  };
+
+  it("review_model を渡せば受け付ける。review_commands は省略で空、review_fix_rounds は省略で 0", () => {
+    const r = taskInputSchema.parse(worker);
+    expect(r.review_policy).toBe("worker_review");
+    expect(r.review_model).toBe("anthropic/claude-sonnet-5-5");
+    expect(r.review_commands ?? []).toEqual([]);
+    expect(r.review_fix_rounds ?? 0).toBe(0);
+    const withCmd = taskInputSchema.parse({
+      ...worker,
+      review_commands: [{ argv: ["pnpm", "test"], cwd: "apps/x", timeout_seconds: 900 }],
+      review_fix_rounds: 0,
+    });
+    expect(withCmd.review_commands).toEqual([
+      { argv: ["pnpm", "test"], cwd: "apps/x", timeout_seconds: 900 },
+    ]);
+  });
+
+  it("review_model は必須（作業のモデルを黙って流用しない）。空・文字列以外・長すぎるものは拒否する", () => {
+    const { review_model: _omit, ...without } = worker;
+    expect(issues(without)).toContain("review_model");
+    for (const bad of ["", 1, null, "x".repeat(101)]) {
+      expect(issues({ ...worker, review_model: bad }), String(bad)).toBeDefined();
+    }
+    // 作業の model を渡しても代わりにならない
+    expect(issues({ ...without, model: "anthropic/claude-haiku-5-5" })).toContain("review_model");
+  });
+
+  it("review_fix_rounds: 1 は「修正の回は未実装」として拒否する。2 以上・負・小数・文字列も拒否する", () => {
+    expect(issues({ ...worker, review_fix_rounds: 1 })).toContain("修正の回は未実装");
+    for (const bad of [2, 3, -1, 0.5, "0", null]) {
+      expect(issues({ ...worker, review_fix_rounds: bad }), String(bad)).toBeDefined();
+    }
+  });
+
+  it("review_commands は verification_commands と同じ形・同じ上限（件数 10、argv 必須、相対パスの cwd）", () => {
+    expect(issues({ ...worker, review_commands: [{ argv: [] }] })).toBeDefined();
+    expect(issues({ ...worker, review_commands: [{ argv: ["a"], cwd: "/abs" }] })).toBeDefined();
+    expect(issues({ ...worker, review_commands: [{ argv: ["a"], cwd: "../x" }] })).toBeDefined();
+    expect(issues({ ...worker, review_commands: [{ argv: ["a"], extra: 1 }] })).toBeDefined();
+    const eleven = Array.from({ length: 11 }, () => ({ argv: ["a"] }));
+    expect(issues({ ...worker, review_commands: eleven })).toBeDefined();
+  });
+
+  it("client_review で review_model・review_commands・review_fix_rounds を渡したら invalid_input（黙って無視しない）", () => {
+    for (const extra of [
+      { review_model: "anthropic/claude-sonnet-5-5" },
+      { review_commands: [] },
+      { review_commands: [{ argv: ["pnpm", "test"] }] },
+      { review_fix_rounds: 0 },
+    ]) {
+      expect(issues({ ...base, ...extra }), JSON.stringify(extra)).toContain("worker_review");
+      expect(
+        issues({ ...base, review_policy: "client_review", ...extra }),
+        JSON.stringify(extra),
+      ).toContain("worker_review");
+    }
+  });
+
+  it("fingerprint: v6。review_policy・review_model・review_commands・review_fix_rounds を含み、client_review の指紋は変えない", async () => {
+    const hash = async (v: unknown) => {
+      const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(v)));
+      return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    };
+    const fp = (input: Record<string, unknown>) => computeFingerprint(taskInputSchema.parse(input));
+    // client_review の指紋は変わらない（v1）
+    expect(await fp(base)).toBe(
+      await hash(["v1", "owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]]),
+    );
+    const head = ["owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]];
+    expect(await fp(worker)).toBe(
+      await hash([
+        "v6",
+        ...head,
+        [],
+        "worker_review",
+        null,
+        null,
+        "anthropic/claude-sonnet-5-5",
+        [],
+        0,
+      ]),
+    );
+    const a = await fp(worker);
+    // review_fix_rounds の省略は 0 と同じタスク
+    expect(await fp({ ...worker, review_fix_rounds: 0 })).toBe(a);
+    // review_model・review_commands が違えば別のタスク
+    expect(await fp({ ...worker, review_model: "openai/gpt-6-sol" })).not.toBe(a);
+    const withCmd = await fp({ ...worker, review_commands: [{ argv: ["pnpm", "test"] }] });
+    expect(withCmd).not.toBe(a);
+    expect(
+      await fp({ ...worker, review_commands: [{ argv: ["pnpm", "test"], cwd: "x" }] }),
+    ).not.toBe(withCmd);
+    // client_review とは別のタスク。verification_commands・model・予算の方針・effort とも組み合わさる
+    expect(a).not.toBe(await fp(base));
+    expect(await fp({ ...worker, model: "anthropic/claude-haiku-5-5" })).not.toBe(a);
+    expect(await fp({ ...worker, budget_policy: "stop" })).not.toBe(a);
+    expect(await fp({ ...worker, effort: "high" })).not.toBe(a);
+    expect(await fp({ ...worker, verification_commands: [{ argv: ["npm", "test"] }] })).not.toBe(a);
   });
 });

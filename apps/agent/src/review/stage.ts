@@ -1,11 +1,12 @@
 /**
  * レビューの段（docs/specs/worker-review.md の②③）の手順。Sandbox とモデルは呼び出し側（AgentDO）が差し込むので、
- * ここは順番と再試行の規則だけを持つ（task_review と、後の worker_review の両方から呼ぶ部品）。
+ * ここは順番と再試行の規則だけを持つ（task_review と worker_review の両方から呼ぶ部品）。
  *   1. runReviewCommands: review_commands を先頭から順に、失敗しても止めずに全部流す（段の時間の上限を過ぎたら残りを飛ばす）
  *   2. runReviewModel: レビューのモデルを呼ぶ。読み取りの道具（read_file / list_files / search）を往復させてから JSON を返させる
  *      （往復は REVIEW_MAX_TOOL_ROUNDS 回まで。上限に達したら道具を外して 1 回だけ「JSON だけ」と求める）。
  *      失敗・形の違う答えは 1 回だけ再試行する
  *   3. reviewWarnings: 段の結果から warnings の固定コードを作る
+ *   4. workerReviewWarnings: worker_review の結果の分類（件数から warnings の固定コードを作る）
  */
 import type { ReviewCommandResult, ReviewInput } from "./input";
 import { REVIEW_JSON_ONLY_RETRY, REVIEW_TOOLS_CLOSED_NOTICE } from "./input";
@@ -158,6 +159,7 @@ export interface ModelCaller {
 }
 
 export type ReviewFailureCode =
+  | "diff_unavailable"
   | "model_error"
   | "model_rejected"
   | "timeout"
@@ -342,4 +344,22 @@ export function reviewWarnings(s: {
   if (s.failure === "budget") out.push("review_skipped_budget");
   else if (s.failure !== undefined) out.push(`review_failed: ${s.failure}`);
   return out;
+}
+
+/**
+ * worker_review の結果の分類（docs/specs/worker-review.md「直し切れなかったとき」の表のうち、修正の回が無い行）。
+ * レビューが得られたときだけ件数から決める（失敗・予算で飛ばしたときの review_failed / review_skipped_budget は reviewWarnings が出す）。
+ * - must_fix が 1 件以上（直さない）: review_must_fix_unaddressed: <件数>
+ * - must_fix が 0 件で suggestions がある: review_suggestions: <件数>
+ * - どちらも 0 件: なし
+ */
+export function workerReviewWarnings(s: {
+  failure: ReviewFailureCode | undefined;
+  mustFixCount: number;
+  suggestionCount: number;
+}): string[] {
+  if (s.failure !== undefined) return [];
+  if (s.mustFixCount > 0) return [`review_must_fix_unaddressed: ${s.mustFixCount}`];
+  if (s.suggestionCount > 0) return [`review_suggestions: ${s.suggestionCount}`];
+  return [];
 }

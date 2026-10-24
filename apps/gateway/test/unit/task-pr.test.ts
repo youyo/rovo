@@ -39,7 +39,7 @@ describe("review_policy の保存", () => {
     expect(r).toEqual({ ok: false, code: "invalid_input" });
   });
 
-  it("worker_review は受け付けるだけで、未対応（近日）として invalid_input にする", async () => {
+  it("worker_review は review_model が無ければ invalid_input にする", async () => {
     const id = newTaskId();
     const r = await taskStub(id).ensureCreated(
       sampleInput(id, OWNER, { review_policy: "worker_review" }),

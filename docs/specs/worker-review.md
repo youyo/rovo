@@ -1,6 +1,6 @@
 # 仕様: ワーカーによるレビュー（worker_review）と task_review
 
-`task_start` の `review_policy: "worker_review"` と、新しいツール `task_review` の仕様（**承認済み（2026-10-24）**。決定の記録と、実装時に確定する点は「未決定の事項」の表にある）。実装はまだ無い。
+`task_start` の `review_policy: "worker_review"` と、新しいツール `task_review` の仕様（**承認済み（2026-10-24）**。決定の記録と、実装時に確定する点は「未決定の事項」の表にある）。実装は段階ごとに進めている（「段階的な導入の順番」）: 段階 3（`worker_review`・`review_fix_rounds: 0`）まで実装済み。修正の回（段階 4）は未実装で、`review_fix_rounds: 1` は `invalid_input`（省略は 0）。
 
 背景: PR のフローは `review_policy` に変わった。既定の `client_review` は、ワーカーの作業が完了すると rovo が PR を Ready にし、全体のテストとレビューはクライアントの手元で行う。`worker_review` は定義だけあり、今は `task_start` が invalid_input（`review_policy worker_review is not supported yet`）で断る。この文書は、その中身を決める。マージはどちらの方針でも常にクライアントが行う。
 

@@ -227,6 +227,79 @@ describe("SandboxDO: prepareWorkspace（作業ブランチの checkout）", () =
     ).toBe(false);
   });
 
+  describe("task_review（checkout の指定）: PR の head を detached で取り出す", () => {
+    const HEAD = "c".repeat(40);
+    const reviewSpec = () =>
+      spec({
+        baseSha: HEAD,
+        initialSha: HEAD,
+        branch: "pull/7/head",
+        checkout: { pullNumber: 7, sha: HEAD },
+      });
+
+    it("作業ツリーが無ければ clone（checkout しない）→ refs/pull/<n>/head を取り出す → head を detached で checkout", async () => {
+      let head = "";
+      const c = new GitContainer((argv) => {
+        const a = gitArgs(argv);
+        if (a[0] === "rev-parse" && a.includes("--verify"))
+          return head ? { stdout: `${head}\n` } : { exitCode: 128 };
+        if (a[0] === "rev-parse" && a.includes("HEAD")) return { stdout: `${head}\n` };
+        if (a[0] === "checkout") head = HEAD;
+        return {};
+      });
+      await runInDO(sandbox("prep-review"), async (inst) => {
+        inst.maybeContainer = () => c;
+        await inst.prepareWorkspace(reviewSpec());
+      });
+      const cloneCall = c.calls.find((a) => a[0] === "git" && a.includes("clone"));
+      expect(cloneCall).toEqual([
+        "git",
+        "clone",
+        "-q",
+        "--no-checkout",
+        "https://github.com/acme/hello.git",
+        "/workspace",
+      ]);
+      const sub = c.calls.map(gitArgs);
+      expect(sub).toContainEqual([
+        "fetch",
+        "-q",
+        "origin",
+        "+refs/pull/7/head:refs/remotes/origin/pull/7/head",
+      ]);
+      expect(sub).toContainEqual(["checkout", "-q", "--detach", HEAD]);
+      // 作業ブランチの経路（--branch・base の祖先の確認）は使わない
+      expect(cloneCall).not.toContain("--branch");
+      expect(sub.some((a) => a[0] === "merge-base")).toBe(false);
+    });
+
+    it("すでに head を取り出していれば何もしない", async () => {
+      const c = new GitContainer((argv) => {
+        const a = gitArgs(argv);
+        if (a[0] === "rev-parse") return { stdout: `${HEAD}\n` };
+        return {};
+      });
+      await runInDO(sandbox("prep-review-idem"), async (inst) => {
+        inst.maybeContainer = () => c;
+        await inst.prepareWorkspace(reviewSpec());
+      });
+      expect(c.calls.some((a) => a.includes("clone") || a.includes("fetch"))).toBe(false);
+    });
+
+    it("取り出した HEAD が head と違えば失敗する（fail-closed）", async () => {
+      const c = new GitContainer((argv) => {
+        const a = gitArgs(argv);
+        if (a[0] === "rev-parse" && a.includes("--verify")) return { exitCode: 128 };
+        if (a[0] === "rev-parse") return { stdout: `${"d".repeat(40)}\n` };
+        return {};
+      });
+      await runInDO(sandbox("prep-review-mismatch"), async (inst) => {
+        inst.maybeContainer = () => c;
+        await expect(inst.prepareWorkspace(reviewSpec())).rejects.toThrow(/pull request head/);
+      });
+    });
+  });
+
   it("再起動のメッセージは「最後に push したチェックポイントから再 clone した」旨を伝える", async () => {
     await runInDO(sandbox("prep-message"), async (inst) => {
       inst.ensureRunning = async () => true;

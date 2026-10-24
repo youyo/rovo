@@ -44,6 +44,10 @@ export const AUDIT_EVENTS = [
   // gateway（D10）: consult（セカンドオピニオン。会話の内容は出さない。モデルと費用だけ）
   "consult_started",
   "consult_finished",
+  // gateway（task_review）: レビューの段（差分・本文は出さない。モデル・費用・件数だけ）
+  "review_started",
+  "review_posted",
+  "review_failed",
 ] as const;
 
 export type AuditEventName = (typeof AUDIT_EVENTS)[number];
@@ -79,8 +83,11 @@ export type AuditFields = {
   model?: string;
   /** consult_started / consult_finished だけ: consult の ID（`consult-<ULID>`） */
   consult_id?: string;
-  /** consult_finished だけ: 実費（USD。非負の有限数） */
+  /** consult_finished・review_* だけ: 実費（USD。非負の有限数） */
   cost_usd?: number;
+  /** review_* だけ: 直すべき点・提案の件数（非負の整数） */
+  must_fix_count?: number;
+  suggestion_count?: number;
 };
 
 /** 出力される 1 件。キーの順序は固定。 */
@@ -141,7 +148,7 @@ const EVENT_FIELDS: Readonly<
   Partial<
     Record<
       AuditEventName,
-      readonly ("op" | "dest" | "metrics" | "prefix" | "bytes" | "policy" | "consult")[]
+      readonly ("op" | "dest" | "metrics" | "prefix" | "bytes" | "policy" | "consult" | "review")[]
     >
   >
 > = {
@@ -154,6 +161,9 @@ const EVENT_FIELDS: Readonly<
   pr_denied: ["policy"],
   consult_started: ["consult"],
   consult_finished: ["consult"],
+  review_started: ["review"],
+  review_posted: ["review"],
+  review_failed: ["review"],
 };
 
 /** モデルの id（`<provider>/<id>`）。許可リストの形だけを通す。 */
@@ -275,6 +285,18 @@ export function buildAudit(
       "cost_usd",
       typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined,
     );
+  }
+  if (extra.includes("review")) {
+    put("model", safeCode(own("model"), MODEL_RE));
+    const cost = own("cost_usd");
+    put(
+      "cost_usd",
+      typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined,
+    );
+    for (const key of ["must_fix_count", "suggestion_count"]) {
+      const n = own(key);
+      put(key, typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : undefined);
+    }
   }
   return record as AuditRecord;
 }

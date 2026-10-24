@@ -347,3 +347,69 @@ describe("偽 GitHub: Installation Token での Ready 化と、コミットの c
     expect(runs.json).toMatchObject({ total_count: 1 });
   });
 });
+
+describe("偽 GitHub: task_review（クライアントの PR・レビューの投稿・差分）", () => {
+  async function clientPull(opts: { headRepo?: string } = {}) {
+    const app = gh.app;
+    if (!app) throw new Error("app disabled");
+    const t = await appClient().createInstallationToken(77, 4242);
+    const a = repoApi(t.token);
+    const base = await a.getCommit("0123456789abcdef");
+    app.setBranch("acme/widgets", "main", base.sha);
+    const head = await app.addCommit("acme/widgets", base.sha, "client work");
+    if (!opts.headRepo) app.setBranch("acme/widgets", "feature/sum", head);
+    const number = app.seedPull("acme/widgets", {
+      head: "feature/sum",
+      base: "main",
+      title: "Fix sum",
+      draft: false,
+      ...(opts.headRepo ? { headRepo: opts.headRepo, headSha: head } : {}),
+    });
+    return { app, t, a, number, head, baseSha: base.sha };
+  }
+
+  it("PR の JSON に base.sha・head.repo が入り、refs/pull/<n>/head が置かれる", async () => {
+    const { app, t, number, head, baseSha } = await clientPull();
+    const res = await fetch(`${gh.url}/repos/acme/widgets/pulls/${number}`, {
+      headers: { authorization: `Bearer ${t.token}` },
+    });
+    const pr = (await res.json()) as {
+      title: string;
+      head: { sha: string; repo: { full_name: string } };
+      base: { sha: string };
+    };
+    expect(pr.title).toBe("Fix sum");
+    expect(pr.head).toMatchObject({ sha: head, repo: { full_name: "acme/widgets" } });
+    expect(pr.base.sha).toBe(baseSha);
+    expect(app.ref("acme/widgets", `refs/pull/${number}/head`)).toBe(head);
+  });
+
+  it("fork の PR は head.repo が fork のリポジトリになる", async () => {
+    const { t, number, head } = await clientPull({ headRepo: "mallory/widgets" });
+    const res = await fetch(`${gh.url}/repos/acme/widgets/pulls/${number}`, {
+      headers: { authorization: `Bearer ${t.token}` },
+    });
+    const pr = (await res.json()) as { head: { sha: string; repo: { full_name: string } } };
+    expect(pr.head).toEqual(
+      expect.objectContaining({ sha: head, repo: { full_name: "mallory/widgets" } }),
+    );
+  });
+
+  it("POST /pulls/<n>/reviews を記録して、レビューの URL を返す", async () => {
+    const { app, a, number, head } = await clientPull();
+    const r = await a.createPullReview(number, "review body", head);
+    expect(r.url).toMatch(new RegExp(`/acme/widgets/pull/${number}#pullrequestreview-\\d+$`));
+    expect(app.reviews("acme/widgets", number)).toEqual([
+      { id: r.id, body: "review body", event: "COMMENT", commitId: head },
+    ]);
+  });
+
+  it("compare を diff のメディア型で読むと、置いた差分を返す", async () => {
+    const { app, a, head, baseSha } = await clientPull();
+    app.seedDiff("acme/widgets", baseSha, head, "diff --git a/x b/x\n");
+    expect(await a.getCompareDiff(baseSha, head, 1024)).toEqual({
+      diff: "diff --git a/x b/x\n",
+      truncated: false,
+    });
+  });
+});

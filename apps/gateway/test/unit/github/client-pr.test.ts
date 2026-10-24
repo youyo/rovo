@@ -56,6 +56,10 @@ describe("getPull（利用者のトークン）", () => {
       headRepo: "acme/widgets",
       baseRef: "main",
       baseRepo: "acme/widgets",
+      // task_review が読む項目（応答に無ければ null / 空）
+      baseSha: null,
+      title: "",
+      body: "",
     });
     expect(calls[0]?.headers.get("authorization")).toBe("Bearer tok");
   });

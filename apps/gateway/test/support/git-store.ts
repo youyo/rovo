@@ -122,5 +122,14 @@ export function gitRepoStore(dir: string): RepoStore {
       return undefined;
     }
   };
-  return { commits, refs, tree };
+  const diff: RepoStore["diff"] = (base, head) => {
+    if (!SHA.test(base) || !SHA.test(head)) return undefined;
+    try {
+      // task_review の compare（3 点。分岐点からの差分）
+      return git(dir, ["diff", "--no-color", "--no-ext-diff", `${base}...${head}`]);
+    } catch {
+      return undefined;
+    }
+  };
+  return { commits, refs, tree, diff };
 }

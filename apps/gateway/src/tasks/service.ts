@@ -12,21 +12,39 @@ import { autoCandidates, effortRejection, type ModelEnv, resolveModel } from "..
 import type { ProviderKeysDeps } from "../provider-keys";
 import { maxConcurrentTasks } from "./budget";
 import { BUDGET_EXTENSION_KIND } from "./budget-question";
-import { nextSteps, nextStepsAfterMerge, nextStepsAfterReady } from "./next-steps";
+import {
+  nextSteps,
+  nextStepsAfterMerge,
+  nextStepsAfterReady,
+  nextStepsForReview,
+} from "./next-steps";
 import type { TaskStatus } from "./state";
-import type { BudgetExtensionOutcome, ResultView, TaskDO, TaskEvent, TaskView } from "./task-do";
+import type {
+  BudgetExtensionOutcome,
+  ResultOutcome,
+  ResultView,
+  ReviewResultView,
+  ReviewStage,
+  TargetPr,
+  TaskDO,
+  TaskEvent,
+  TaskView,
+} from "./task-do";
 import { isTaskId, ulid } from "./ulid";
-import type { UserDO } from "./user-do";
+import type { ReviewPull, UserDO } from "./user-do";
 import {
   type AnswerInput,
   answerInputSchema,
   computeFingerprint,
+  computeReviewFingerprint,
   exceedsInputLimit,
   isValidIdempotencyKey,
   type MergeMethod,
   prMergeInputSchema,
   prReadyInputSchema,
+  type ReviewInput,
   type ReviewPolicy,
+  reviewInputSchema,
   type SteerInput,
   steerInputSchema,
   type TaskInput,
@@ -151,6 +169,40 @@ export type CancelValue = { task_id: string; status: TaskStatus };
 export type ResultValue = { task_id: string } & ResultView & {
     next_steps: string;
   } & WithDashboardUrl;
+
+/**
+ * task_review のタスクの task_result の応答。作業用の summary・verification・patch・pr（rovo が開いた PR ではない）は付けず、
+ * pr の代わりに target_pr、レビューの結果を review に返す。review の commands の output と body は非信頼データとして囲む。
+ */
+export type ReviewResultValue = {
+  task_id: string;
+  kind: "review";
+  next_steps: string;
+} & Pick<
+  ResultView,
+  | "status"
+  | "reason"
+  | "failure_phase"
+  | "warnings"
+  | "budget_policy"
+  | "model"
+  | "effort"
+  | "model_selection"
+  | "usage"
+> & { review: ReviewResultView; target_pr: TargetPr } & WithDashboardUrl;
+
+/** task_review の応答（task_start と同じく task_id と状態。review.stage を含む） */
+export type ReviewStartValue = {
+  task_id: string;
+  status: TaskStatus;
+  kind: "review";
+  review: { stage: ReviewStage; model: string };
+  target_pr: TargetPr;
+  note: string;
+} & WithDashboardUrl;
+
+export const REVIEW_NOTE =
+  "task_review: クライアントの PR のレビューだけを rovo に頼んだ（ワーカーの LLM は動かさない）。review_commands があれば Sandbox で PR の head を取り出して全部流し（失敗しても止めない）、review_model に差分と結果を 1 回読ませて、PR に COMMENT のレビューとして投稿する。PR の状態・本文・ブランチは変えない（Ready にもマージにもしない。承認・変更の要求も送らない）。進み具合は task_wait / task_status の review.stage（waiting → commands → reviewing → done / skipped）、結果は終端のあと task_result の review（comment_url・must_fix_count・suggestion_count・commands・usage）と target_pr。同じ PR の同じ head に同じ条件で頼み直すと、同じタスクが返る（二重に投稿しない）。";
 export type PrReadyValue = {
   task_id: string;
   pr_number: number;
@@ -312,6 +364,34 @@ export function checkStartInput(rawInput: unknown): ServiceResult<CheckedStartIn
   return { ok: true, value: { input, idempotency_key: key } };
 }
 
+const reviewToolSchema = reviewInputSchema.extend({ idempotency_key: z.unknown().optional() });
+
+export type CheckedReviewInput = { input: ReviewInput; idempotency_key: string | undefined };
+
+/** task_review の入力検証（形式・サイズ・idempotency_key）。外部（GitHub / DO）を呼ぶ前に行う。 */
+export function checkReviewInput(rawInput: unknown): ServiceResult<CheckedReviewInput> {
+  const parsed = reviewToolSchema.safeParse(rawInput ?? {});
+  if (!parsed.success) return invalidInput(parsed.error);
+  const { idempotency_key: key, ...input } = parsed.data;
+  if (key !== undefined && !isValidIdempotencyKey(key)) {
+    return fail("invalid_input", "idempotency_key must match [A-Za-z0-9_-]{1,128}");
+  }
+  if (exceedsInputLimit(input)) return fail("invalid_input", "input is too large");
+  return { ok: true, value: { input, idempotency_key: key } };
+}
+
+/** task_review の結果の、非信頼の文字列（コマンドの出力・本文）を囲む */
+function wrapReviewResult(review: ReviewResultView): ReviewResultView {
+  return {
+    ...review,
+    commands: review.commands.map((c) => ({
+      ...c,
+      output: c.output === "" ? "" : wrapUntrustedQuestion(c.output),
+    })),
+    ...(review.body !== undefined ? { body: wrapUntrustedQuestion(review.body) } : {}),
+  };
+}
+
 export function createTaskService(
   env: Pick<Env, "USER_DO" | "TASK_DO"> &
     ModelEnv & {
@@ -370,6 +450,49 @@ export function createTaskService(
         model: fallback,
         selection: { mode: "auto", chosen: fallback, reason: "fallback_error" },
       };
+    }
+  };
+
+  /** TaskDO の result を、通常のタスクの task_result の形にする（非信頼の文字列は囲む） */
+  const shapeResultOutcome = (taskId: string, r: ResultOutcome): ServiceResult<ResultValue> => {
+    if (r.ok) {
+      return {
+        ok: true,
+        value: {
+          task_id: taskId,
+          ...r.result,
+          // ワーカーが書いた summary は非信頼データとして囲む（question と同じ囲み）
+          summary: r.result.summary === "" ? "" : wrapUntrustedQuestion(r.result.summary),
+          // 検証コマンドの出力も、ワーカーが書いたコードの実行結果なので囲む（argv・exit_code などの固定値は囲まない）
+          verification: {
+            ...r.result.verification,
+            results: r.result.verification.results.map((res) => ({
+              ...res,
+              output: res.output === "" ? "" : wrapUntrustedQuestion(res.output),
+            })),
+          },
+          next_steps: nextSteps({
+            task_id: taskId,
+            status: r.result.status,
+            ...(r.result.reason !== undefined ? { reason: r.result.reason } : {}),
+            ...(r.result.failure_phase !== undefined
+              ? { failure_phase: r.result.failure_phase }
+              : {}),
+            review_policy: r.result.review_policy,
+            verification: r.result.verification,
+            pr: r.result.pr,
+          }),
+          ...withDashboardUrl(taskId),
+        },
+      };
+    }
+    switch (r.code) {
+      case "not_ready":
+        return fail("not_ready", "the task has not finished yet");
+      case "upstream_unavailable":
+        return fail("upstream_unavailable", "the agent is temporarily unavailable; retry later");
+      default:
+        return fail("not_found", NOT_FOUND);
     }
   };
 
@@ -465,6 +588,90 @@ export function createTaskService(
             : {}),
           note: START_NOTE,
           ...withDashboardUrl(created.task.task_id),
+        },
+      };
+    },
+
+    /**
+     * task_review: クライアントが作った PR のレビューだけを頼む。権限（UserDO.authorizeReview）は呼び出し側が済ませ、
+     * 固定した PR（head の SHA など）を options.pull に渡す。順番は start と同じ: モデルの確認 → 予約 → TaskDO の作成 → advance。
+     * idempotency_key を省略したときは、指紋（同じ PR の同じ head・同じ条件）から要求のキーを作るので、頼み直しても二重に投稿しない。
+     */
+    async review(
+      principal: Principal,
+      rawInput: unknown,
+      options: { repositoryId: number; installationId: number; pull: ReviewPull },
+    ): Promise<ServiceResult<ReviewStartValue>> {
+      const checked = checkReviewInput(rawInput);
+      if (!checked.ok) return checked;
+      const { idempotency_key: key, input: raw } = checked.value;
+      const resolved = await resolveModel(env, raw.review_model, providerKeys);
+      if (!resolved.ok) return fail(resolved.code, resolved.message);
+      const input: ReviewInput = { ...raw, review_model: resolved.model };
+      if (options.pull.number !== input.pull_number) return fail("internal", "internal error");
+      const fingerprint = await computeReviewFingerprint(input, options.pull.headSha);
+      const requestKey = key ?? `review:${fingerprint}`;
+      const reserved = await deps.users(principal.githubUserId).reserve(requestKey, fingerprint);
+      if (!reserved.ok) {
+        switch (reserved.code) {
+          case "conflict":
+            return fail("conflict", "idempotency_key was already used with different input");
+          case "budget_exceeded":
+            return fail("budget_exceeded", "the monthly budget is insufficient for a new task");
+          default:
+            return fail(
+              "concurrency_limit",
+              `the concurrent task limit (${maxConcurrentTasks(env)}) has been reached for this user; wait for a running task to finish or cancel one (budget_status shows concurrency_limit)`,
+            );
+        }
+      }
+      const created = await deps.tasks(reserved.task_id).ensureReviewCreated({
+        task_id: reserved.task_id,
+        owner_id: principal.githubUserId,
+        owner_login: principal.login,
+        repository_id: options.repositoryId,
+        installation_id: options.installationId,
+        repository: input.repository,
+        pull_number: input.pull_number,
+        review_model: input.review_model,
+        review_commands: input.review_commands,
+        budget_policy: input.budget_policy,
+        ...(input.sandbox_instance !== undefined
+          ? { sandbox_instance: input.sandbox_instance }
+          : {}),
+        pull: options.pull,
+      });
+      if (!created.ok) {
+        switch (created.code) {
+          case "expired":
+            return fail("expired", "this idempotency_key has expired; use a new key");
+          case "conflict":
+            return fail("conflict", "idempotency_key was already used with different input");
+          default:
+            return fail("invalid_input", created.message ?? "invalid review input");
+        }
+      }
+      let task = created.task;
+      try {
+        await deps.tasks(reserved.task_id).advance();
+        const now = await deps.tasks(reserved.task_id).getStatus(principal.githubUserId);
+        if (now.ok) task = now.task;
+      } catch (e) {
+        console.error("task_review_advance_error", e instanceof Error ? e.name : typeof e);
+      }
+      if (task.review === undefined || task.target_pr === undefined) {
+        return fail("internal", "internal error");
+      }
+      return {
+        ok: true,
+        value: {
+          task_id: task.task_id,
+          status: task.status,
+          kind: "review",
+          review: task.review,
+          target_pr: task.target_pr,
+          note: REVIEW_NOTE,
+          ...withDashboardUrl(task.task_id),
         },
       };
     },
@@ -665,49 +872,55 @@ export function createTaskService(
       };
     },
 
-    /** 終端（かつ AgentDO の停止確認済み）のタスクの成果を返す。それ以外は not_ready。 */
+    /** 終端（かつ AgentDO の停止確認済み）のタスクの成果を返す（通常のタスクの形）。それ以外は not_ready。 */
     async result(principal: Principal, taskId: string): Promise<ServiceResult<ResultValue>> {
       if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
+      return shapeResultOutcome(taskId, await deps.tasks(taskId).result(principal.githubUserId));
+    },
+
+    /**
+     * MCP の task_result。task_review のタスクは、レビューの形（review・target_pr。summary・patch・pr は付けない）で返し、
+     * それ以外は result と同じ。
+     */
+    async taskResult(
+      principal: Principal,
+      taskId: string,
+    ): Promise<ServiceResult<ResultValue | ReviewResultValue>> {
+      if (!isTaskId(taskId)) return fail("not_found", NOT_FOUND);
       const r = await deps.tasks(taskId).result(principal.githubUserId);
-      if (r.ok) {
+      if (r.ok && r.result.kind === "review" && r.result.review && r.result.target_pr) {
+        const res = r.result;
+        const review = res.review as ReviewResultView;
+        const target = res.target_pr as TargetPr;
         return {
           ok: true,
           value: {
             task_id: taskId,
-            ...r.result,
-            // ワーカーが書いた summary は非信頼データとして囲む（question と同じ囲み）
-            summary: r.result.summary === "" ? "" : wrapUntrustedQuestion(r.result.summary),
-            // 検証コマンドの出力も、ワーカーが書いたコードの実行結果なので囲む（argv・exit_code などの固定値は囲まない）
-            verification: {
-              ...r.result.verification,
-              results: r.result.verification.results.map((res) => ({
-                ...res,
-                output: res.output === "" ? "" : wrapUntrustedQuestion(res.output),
-              })),
-            },
-            next_steps: nextSteps({
-              task_id: taskId,
-              status: r.result.status,
-              ...(r.result.reason !== undefined ? { reason: r.result.reason } : {}),
-              ...(r.result.failure_phase !== undefined
-                ? { failure_phase: r.result.failure_phase }
-                : {}),
-              review_policy: r.result.review_policy,
-              verification: r.result.verification,
-              pr: r.result.pr,
+            kind: "review",
+            status: res.status,
+            ...(res.reason !== undefined ? { reason: res.reason } : {}),
+            ...(res.failure_phase !== undefined ? { failure_phase: res.failure_phase } : {}),
+            warnings: res.warnings,
+            budget_policy: res.budget_policy,
+            model: res.model,
+            effort: res.effort,
+            ...(res.model_selection !== undefined ? { model_selection: res.model_selection } : {}),
+            usage: res.usage,
+            review: wrapReviewResult(review),
+            target_pr: target,
+            next_steps: nextStepsForReview({
+              status: res.status,
+              comment_url: review.comment_url,
+              must_fix_count: review.must_fix_count,
+              failure: review.failure,
+              comment_failed: res.warnings.includes("review_comment_failed"),
+              target_pr: target.url,
             }),
             ...withDashboardUrl(taskId),
           },
         };
       }
-      switch (r.code) {
-        case "not_ready":
-          return fail("not_ready", "the task has not finished yet");
-        case "upstream_unavailable":
-          return fail("upstream_unavailable", "the agent is temporarily unavailable; retry later");
-        default:
-          return fail("not_found", NOT_FOUND);
-      }
+      return shapeResultOutcome(taskId, r);
     },
 
     /**

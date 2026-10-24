@@ -69,6 +69,11 @@ export interface UserPull {
   headRepo: string | null;
   baseRef: string;
   baseRepo: string | null;
+  /** base の SHA（task_review の差分の起点）。読めなければ null */
+  baseSha: string | null;
+  /** タイトルと本文（task_review。本文は非信頼データ）。読めなければ空 */
+  title: string;
+  body: string;
 }
 
 /** PR の状態（ダッシュボード用）。取れなかったものは "unknown"。 */
@@ -267,8 +272,10 @@ export class GitHubClient {
       draft?: unknown;
       state?: unknown;
       merged?: unknown;
+      title?: unknown;
+      body?: unknown;
       head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } | null };
-      base?: { ref?: unknown; repo?: { full_name?: unknown } | null };
+      base?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } | null };
     } | null;
     if (
       typeof p?.number !== "number" ||
@@ -295,6 +302,9 @@ export class GitHubClient {
       headRepo: repoName(p.head.repo),
       baseRef: p.base.ref,
       baseRepo: repoName(p.base.repo),
+      baseSha: typeof p.base.sha === "string" ? p.base.sha : null,
+      title: typeof p.title === "string" ? p.title : "",
+      body: typeof p.body === "string" ? p.body : "",
     };
   }
 

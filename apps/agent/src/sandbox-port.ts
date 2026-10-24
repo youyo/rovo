@@ -62,6 +62,12 @@ export interface WorkspaceSpec {
    * 依存関係のキャッシュを作るコンテナ（deps-<key>）には使わない（常に既定のまま）。
    */
   instance?: string;
+  /**
+   * task_review（docs/specs/worker-review.md）: 作業ブランチの代わりに、base リポジトリの `refs/pull/<pullNumber>/head` を取り出し、
+   * sha を detached で checkout する（クライアントの PR の head。push はしない）。あるとき branch は照合だけに使い、clone しない。
+   * ensureReady の同一性（conflict）の判定に含める。
+   */
+  checkout?: { pullNumber: number; sha: string };
 }
 
 /** peekOutput の結果。stdout / stderr はそれぞれ末尾 64KiB までの途中の出力（未マスク）。 */

@@ -108,7 +108,8 @@ const baseName = (command: string): string =>
   command.startsWith("rovo:") ? command.slice(5) : command;
 
 // 自分のコマンド（名前空間なし・rovo: 付き）。baseName と同じ範囲。
-const OWN_COMMANDS = /^(?:(?:rovo:)?create-task|rovo-console)$/;
+// 正規表現ではなく名前の一覧にする（正規表現の matcher だと、他の mod のコマンドにも rovo が関わったと表示される）
+const OWN_COMMANDS = ["create-task", "rovo:create-task", "rovo-console"];
 
 const endpointKey = (e: { server: string; prefix: string }): string => `${e.server}/${e.prefix}`;
 

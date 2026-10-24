@@ -38,22 +38,22 @@ export interface TaskSpec {
   acceptanceCriteria?: string[];
   verificationCommands?: VerificationCommand[];
   constraints?: string[];
-  /** 子のモデル（D10。"anthropic/claude-haiku-5-5" など）。省略は AgentDO の env の AGENT_MODEL */
+  /** ワーカーのモデル（D10。"anthropic/claude-haiku-5-5" など）。省略は AgentDO の env の AGENT_MODEL */
   model?: string;
   /**
-   * 子のモデルの思考レベル（task_start の effort。そのモデルが受け付けるレベルだけを TaskDO が通している）。**ある = 利用者がこのタスクで指定した**
+   * ワーカーのモデルの思考レベル（task_start の effort。そのモデルが受け付けるレベルだけを TaskDO が通している）。**ある = 利用者がこのタスクで指定した**
    * ので、モデルごとの既定（AgentDO の env の MODEL_EFFORTS）より優先する。off なら AgentDO は reasoning を渡さない。
    * 省略したときはこの項目自体を付けない（AgentDO が従来どおり MODEL_EFFORTS から決める。spec の同一性も変えない）。
    */
   effort?: Effort;
   /**
-   * 子の Sandbox の大きさ（task_start の sandbox_instance。standard-1〜4）。**ある = 利用者が明示した**ので、そのタスクの間はずっとその大きさ
+   * ワーカーの Sandbox の大きさ（task_start の sandbox_instance。standard-1〜4）。**ある = 利用者が明示した**ので、そのタスクの間はずっとその大きさ
    * （後段の自動の昇格もしない）。省略は agent の env の既定（SANDBOX_INSTANCE）で、省略したときはこの項目自体を付けない（spec の同一性を変えない）。
    */
   sandboxInstance?: string;
   budgetUsd: number;
   /**
-   * 予算に近づいたときの扱い（task_start の budget_policy）。ask: 止めずに親へ「あと budgetUsd 使って続けるか」を聞く
+   * 予算に近づいたときの扱い（task_start の budget_policy）。ask: 止めずにクライアントへ「あと budgetUsd 使って続けるか」を聞く
    * （延長は 1 タスク 2 回まで。承認の予約は TaskDO が月の枠から行う）/ stop: 今までどおり budget_exceeded で止まる。
    * AgentDO は無ければ stop として扱う。
    */
@@ -71,7 +71,7 @@ export interface TaskSpec {
    */
   deps?: DepsDto | null;
   /**
-   * 子の commit の作者（GitHub App の bot）。TaskDO が初期コミットと同じものを渡す。
+   * ワーカーの commit の作者（GitHub App の bot）。TaskDO が初期コミットと同じものを渡す。
    * 引けなかったときは `rovo <rovo@noreply.invalid>`（GitHub のアカウントに結び付かない）。
    */
   commitAuthor?: { name: string; email: string };
@@ -123,7 +123,7 @@ export interface UsageDto {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  /** 子が使った web の回数（タスクごとの累計。Phase 5）。web 自体の費用は costUsd に含めない */
+  /** ワーカーが使った web の回数（タスクごとの累計。Phase 5）。web 自体の費用は costUsd に含めない */
   web: WebUsageDto;
   /**
    * Sandbox のカウンタ（Phase 6 M2。agent が読めたときだけ付く）。公開用の形への写しは M3（agent-events.ts）。
@@ -320,7 +320,7 @@ export interface AgentRpc {
   /** Installation Token の更新。冪等で、成功（ok:true）するまで TaskDO が再送する */
   setGitCredential(c: GitCredential): Promise<{ ok: boolean }>;
   /**
-   * 子の質問への回答。question_id で冪等。ok:false なら TaskDO が再送する。
+   * ワーカーの質問への回答。question_id で冪等。ok:false なら TaskDO が再送する。
    * ignored:true は「もう効果が無い」（回答済み・終端・cancel 済み）ことを示し、TaskDO は再送をやめる。
    */
   answer(questionId: string, answer: string): Promise<{ ok: boolean; ignored?: boolean }>;

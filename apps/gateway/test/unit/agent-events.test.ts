@@ -358,7 +358,7 @@ describe("usage の Sandbox の昇格（重いコマンドの初回に大きい 
   });
 });
 
-describe("usage の Sandbox の昇格の履歴（sandbox_promotions）と、子が上げたあとの重いコマンドの本数", () => {
+describe("usage の Sandbox の昇格の履歴（sandbox_promotions）と、ワーカーが上げたあとの重いコマンドの本数", () => {
   const usage = (sandbox: Record<string, unknown>) =>
     payloadOf(mapAgentEvent(ev("usage", { costUsd: 1, sandbox: { runtimeMs: 100, ...sandbox } })));
   const promotionsOf = (p: Record<string, unknown>) =>
@@ -583,7 +583,7 @@ describe("予算の延長の質問（kind: budget_extension）", () => {
     });
   });
 
-  it("数値が足りない・不正なときは、子の質問として扱う（kind を付けない）", () => {
+  it("数値が足りない・不正なときは、ワーカーの質問として扱う（kind を付けない）", () => {
     for (const bad of [
       { ...nums, budget_spent_usd: "2" },
       { ...nums, budget_extensions_left: 3 },

@@ -4,7 +4,7 @@ import { wrapUntrustedWeb } from "./untrusted";
 /** web が一時的に使えないときにクライアントへ示す待ち時間。 */
 export const WEB_UPSTREAM_RETRY_AFTER_SECONDS = 30;
 
-/** 返す URL の長さの上限。web 側の入力の上限（MAX_URL_LENGTH）と同じ。超える URL は親のモデルに渡さない。 */
+/** 返す URL の長さの上限。web 側の入力の上限（MAX_URL_LENGTH）と同じ。超える URL はクライアントのモデルに渡さない。 */
 export const MAX_RETURNED_URL_LENGTH = 2000;
 const URL_OMITTED = "[url omitted: too long]";
 
@@ -101,8 +101,8 @@ const PROVIDER_ERROR_DETAIL = /^provider=([a-z0-9_-]{1,40}) status=([1-5]\d\d)$/
 
 /**
  * web の RPC のエラーを MCP のエラーに写す。RPC 越しに届くのは message だけなので、先頭の "code: " で分類する。
- * 呼び出し側（親）が入力した値に関する検査のメッセージ（invalid_request / invalid_url）だけを返し、
- * それ以外は固定の文言にする（取得先が決めうる文字列を、親のモデルに渡さない）。
+ * 呼び出し側（クライアント）が入力した値に関する検査のメッセージ（invalid_request / invalid_url）だけを返し、
+ * それ以外は固定の文言にする（取得先が決めうる文字列を、クライアントのモデルに渡さない）。
  */
 export function mapWebError(e: unknown): WebToolError {
   const message = e instanceof Error ? e.message : "";

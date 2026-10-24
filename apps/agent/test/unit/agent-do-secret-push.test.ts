@@ -104,7 +104,7 @@ describe("完了時の作業ブランチの同期（--force-with-lease の push�
 
   it("送る commit に秘密があれば（足して消した commit でも）push せず、push_failed（final）と警告に出る。head_matches_verified が false になる側（pushedSha なし）", async () => {
     const git = fakeGitRange({ base: INITIAL });
-    // 子が bash で積んだ commit: 途中で秘密を足し、次の commit で消している（HEAD の木には秘密が無い）
+    // ワーカーが bash で積んだ commit: 途中で秘密を足し、次の commit で消している（HEAD の木には秘密が無い）
     const leak = git.commitDirect(file("src/leak.ts", "const a = 1;", `const t = "${GHP}";`));
     git.commitDirect({ path: "src/leak.ts", deleted: true });
     expect(git.treeDiff()).not.toContain(GHP);

@@ -55,7 +55,7 @@ function textOf(content: string | readonly { type: string; text?: string }[]): s
 
 /**
  * 台本のキー。最初の user メッセージの先頭の text だけを使う
- * （親からの追加の指示 = steer は、後ろの text として添えられるので、キーを変えない）。
+ * （クライアントからの追加の指示 = steer は、後ろの text として添えられるので、キーを変えない）。
  */
 function userText(context: TranscriptContext): string {
   const first = context.messages.find((m) => m.role === "user");

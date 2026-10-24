@@ -52,7 +52,7 @@ const LOCK_DIR = join(tmpdir(), "rovo-e2e-docker.lock");
 export const LOCK_WAIT_MS = 60_000;
 export const DEFAULT_READY_MS = 300_000;
 
-/** この起動で立てた wrangler の子（プロセスグループ）。exit / SIGINT / SIGTERM で止める。 */
+/** この起動で立てた wrangler の子プロセス（プロセスグループ）。exit / SIGINT / SIGTERM で止める。 */
 const liveChildren = new Map<ChildProcess, Set<string>>();
 let cleanupInstalled = false;
 

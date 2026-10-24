@@ -363,7 +363,7 @@ describe("本物の git: リモートに実在する SHA（ls-remote）を除外
   });
 });
 
-describe("本物の git: 子が書き換えられる git の状態に左右されない", () => {
+describe("本物の git: ワーカーが書き換えられる git の状態に左右されない", () => {
   const range = (r: RealRepo, base: string) =>
     scanRangeForSecrets(r.scanGit(), [`${base}..HEAD`], "push");
 

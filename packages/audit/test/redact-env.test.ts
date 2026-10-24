@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { maskSecrets } from "../src";
 
-// env の KEY=value は、値が秘密らしいときだけ伏せる（子モデルが読むツール結果の誤検出を減らす）
+// env の KEY=value は、値が秘密らしいときだけ伏せる（ワーカーのモデルが読むツール結果の誤検出を減らす）
 describe("maskSecrets: env の KEY=value", () => {
   it.each([
     "MAX_TOKENS=4096",

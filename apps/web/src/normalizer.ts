@@ -8,7 +8,7 @@
 
 export const MAX_CONTENT_CHARS = 50_000;
 
-// ゼロ幅（U+200B-200F）、行・段落区切り〜双方向上書き（U+2028-202E）、Word Joiner〜不可視演算子（U+2060-2064）、
+// ゼロ幅（U+200B-200F）、行・段落区切り〜双方向上書き（U+2028-202E）、Word Joiner〜不可視演算ワーカー（U+2060-2064）、
 // 双方向 isolate（U+2066-2069）、BOM（U+FEFF）、Tag 文字（U+E0000-E007F）、
 // C0 制御（\n \t を除く）、DEL、C1 制御
 const HIDDEN =

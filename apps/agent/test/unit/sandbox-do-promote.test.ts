@@ -93,7 +93,7 @@ describe("SandboxDO: Clef が上げると判断したら、コマンドの前に
     });
   });
 
-  it("子のコマンドと検証コマンド（origin 付き）だけを Clef に聞く。Sandbox 自身の内部の exec（origin なし）は聞かない", async () => {
+  it("ワーカーのコマンドと検証コマンド（origin 付き）だけを Clef に聞く。Sandbox 自身の内部の exec（origin なし）は聞かない", async () => {
     await runInDO(sandboxStub("promote-origin"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());

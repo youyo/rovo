@@ -9,7 +9,7 @@ import {
 } from "../../src/tasks/service";
 import { fakeAgent, newUserId, taskStub, userStub } from "./helpers";
 
-// 予算のソフトリミット（budget_policy）の service 層: 質問の囲みの扱い（子の質問は囲み、予算の延長の質問は囲まない）、
+// 予算のソフトリミット（budget_policy）の service 層: 質問の囲みの扱い（ワーカーの質問は囲み、予算の延長の質問は囲まない）、
 // task_answer の応答、task_console の awaiting。
 
 function createTaskService(...args: Parameters<typeof createRealTaskService>) {
@@ -65,7 +65,7 @@ describe("task service: budget_policy と予算の延長の質問", () => {
     expect(r).toMatchObject({ ok: false, error: { code: "invalid_input" } });
   });
 
-  it("task_status の pending_question: 予算の延長の質問は囲まず kind が付く。子の質問は今までどおり囲み、kind は付かない", async () => {
+  it("task_status の pending_question: 予算の延長の質問は囲まず kind が付く。ワーカーの質問は今までどおり囲み、kind は付かない", async () => {
     const a = await started();
     await fakeAgent(a.taskId).askBudget("q1", NUMS);
     await taskStub(a.taskId).advance();
@@ -92,7 +92,7 @@ describe("task service: budget_policy と予算の延長の質問", () => {
     expect(cs.value.pending_question).not.toHaveProperty("kind");
   });
 
-  it("task_wait の question イベント: 予算の延長の質問は囲まず kind と数値が付く。子の質問は囲まれる", async () => {
+  it("task_wait の question イベント: 予算の延長の質問は囲まず kind と数値が付く。ワーカーの質問は囲まれる", async () => {
     const a = await started();
     await fakeAgent(a.taskId).askBudget("q1", NUMS);
     await taskStub(a.taskId).advance();
@@ -137,7 +137,7 @@ describe("task service: budget_policy と予算の延長の質問", () => {
     ]);
   });
 
-  it("task_console: 予算の延長の承認待ちのときだけ awaiting: budget_extension が付く。子の質問では付かない", async () => {
+  it("task_console: 予算の延長の承認待ちのときだけ awaiting: budget_extension が付く。ワーカーの質問では付かない", async () => {
     const a = await started();
     await fakeAgent(a.taskId).askBudget("q1", NUMS);
     await taskStub(a.taskId).advance();

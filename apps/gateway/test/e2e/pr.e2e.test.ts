@@ -22,8 +22,8 @@ beforeEach(async () => {
   await admin.reset();
 });
 
-// childCommit: 子が commit を push した状態にする（既定 true）。変更の無いまま終わると rovo が空の Draft PR を閉じるので、
-// Ready・マージの流れを確かめるテストは、作業ブランチに子の commit を積んでから終端にする。
+// childCommit: ワーカーが commit を push した状態にする（既定 true）。変更の無いまま終わると rovo が空の Draft PR を閉じるので、
+// Ready・マージの流れを確かめるテストは、作業ブランチにワーカーの commit を積んでから終端にする。
 async function setup(childCommit = true, extra: Record<string, unknown> = {}) {
   const user = newUser("pr");
   await addMember(user);
@@ -36,7 +36,7 @@ async function setup(childCommit = true, extra: Record<string, unknown> = {}) {
     }),
   );
   const taskId = started.task_id as string;
-  // 子エージェントが start を受理して RUNNING になってから終端にする（受理前に終端にすると順序が変わる）
+  // ワーカーが start を受理して RUNNING になってから終端にする（受理前に終端にすると順序が変わる）
   const deadline = Date.now() + 30_000;
   for (;;) {
     const st = bodyOf(
@@ -329,7 +329,7 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
     async () => {
       const t = await setup(false);
       try {
-        // Sandbox を起動せず終わる COMPLETED（子の commit も pushedSha も無い）
+        // Sandbox を起動せず終わる COMPLETED（ワーカーの commit も pushedSha も無い）
         await finishAgent(t.taskId, "completed", {
           ...completedResult(t.head),
           pushedSha: undefined,

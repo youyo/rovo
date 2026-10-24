@@ -7,8 +7,8 @@ const MARKER_RE = /<<<(?:BEGIN|END)_UNTRUSTED_OUTPUT(?: \(escaped\))?>>>\n?/g;
 
 /**
  * wrapUntrusted が付けた前置きの行と BEGIN・END を剥がす（本文の中でエスケープされた記号も）。
- * モデルに渡す囲みを、親に返すイベントの文字列（summary など）に持ち込まないために使う。
- * 親側の囲みは gateway が別に付けるので、ここで剥がしても安全性は下がらない。
+ * モデルに渡す囲みを、クライアントに返すイベントの文字列（summary など）に持ち込まないために使う。
+ * クライアント側の囲みは gateway が別に付けるので、ここで剥がしても安全性は下がらない。
  */
 export function stripUntrustedMarkers(text: string): string {
   return text.replace(PREAMBLE_RE, "").replace(MARKER_RE, "").replace(/\n$/, "");

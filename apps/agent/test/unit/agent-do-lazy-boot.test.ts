@@ -229,7 +229,7 @@ describe("lazy boot: Sandbox は必要になるまで起動しない", () => {
     expect(fx.sandbox.readySpecs).toHaveLength(1);
   });
 
-  it("依存キャッシュの結果は起動のときに読む（子のプロンプトの「依存は導入済み」の判断に使う）", async () => {
+  it("依存キャッシュの結果は起動のときに読む（ワーカーのプロンプトの「依存は導入済み」の判断に使う）", async () => {
     const fx = newFixture("lazy-deps", [call("gate"), call("write_note", { text: "a" }), report()]);
     fx.sandbox.metricsValue = { runtimeMs: 0, restarts: 0, bootRetries: 0, depsCache: "hit" };
     await fx.stub.start(noVerify("lazy-deps"));
@@ -393,7 +393,7 @@ describe("sandbox の昇格（usage とプロンプト）", () => {
   });
 });
 
-describe("子のシステムプロンプト", () => {
+describe("ワーカーのシステムプロンプト", () => {
   const sections = async (name: string) => {
     const fx = newFixture(name, [call("gate")]);
     await fx.stub.start(noVerify(name));
@@ -415,7 +415,7 @@ describe("子のシステムプロンプト", () => {
   });
 });
 
-describe("子のシステムプロンプト（Pi が実際に組み立てたもの）", () => {
+describe("ワーカーのシステムプロンプト（Pi が実際に組み立てたもの）", () => {
   it("dependencies の節が実際のプロンプトに出る。起動前でも正しい文（最初のコマンドの前に導入される）", async () => {
     const fx = newFixture("prompt-deps", [call("echo", { text: "x" }), report()]);
     await fx.stub.start(noVerify("prompt-deps", { deps: DEPS }));

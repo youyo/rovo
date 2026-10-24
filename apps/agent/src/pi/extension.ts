@@ -25,7 +25,7 @@ export interface AgentPiHooks {
   reportCompletion(
     summary: string,
   ): Promise<{ text: string; isError: boolean; terminate: boolean }>;
-  /** 親への質問。terminate が true なら、このラウンドで run を終える（回答まで再開しない） */
+  /** クライアントへの質問。terminate が true なら、このラウンドで run を終える（回答まで再開しない） */
   askParent(args: {
     question: string;
     options?: string[];
@@ -72,7 +72,7 @@ export function createAgentExtension(
     name: "report_completion",
     description:
       "Report that the task is finished. Call this only after all changes are committed with git_commit. " +
-      "The parent verifies the committed HEAD; if verification fails you get the output back and must fix it.",
+      "The client verifies the committed HEAD; if verification fails you get the output back and must fix it.",
     parameters: Type.Object({
       summary: Type.String({ description: "What you did and the result" }),
     }),
@@ -90,15 +90,15 @@ export function createAgentExtension(
   const askParent = defineTool({
     name: "ask_parent",
     description:
-      "Ask the parent a question and stop until it answers. Use it only for a decision you cannot make yourself " +
+      "Ask the client a question and stop until it answers. Use it only for a decision you cannot make yourself " +
       "(see the system prompt). Commit your work with git_commit first (WIP is fine). " +
       "Limits: question and context together up to 4000 characters, up to 10 options of up to 500 characters each.",
     parameters: Type.Object({
-      question: Type.String({ description: "The question for the parent" }),
+      question: Type.String({ description: "The question for the client" }),
       options: Type.Optional(
         Type.Array(Type.String(), { description: "Answer choices, if the answer is a choice" }),
       ),
-      context: Type.Optional(Type.String({ description: "Background the parent needs" })),
+      context: Type.Optional(Type.String({ description: "Background the client needs" })),
     }),
     replay: "unsafe",
     async execute(args) {

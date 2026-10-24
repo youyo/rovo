@@ -108,7 +108,7 @@ export interface TamperingInput {
   headScripts: Record<string, string> | undefined;
 }
 
-/** モデルが検証の門番を書き換えていないかを検出し、親のレビュー向けの警告文を返す。 */
+/** モデルが検証の門番を書き換えていないかを検出し、クライアントのレビュー向けの警告文を返す。 */
 export function detectTestTampering(input: TamperingInput): string[] {
   const warnings: string[] = [];
   for (const line of input.nameStatus.split("\n")) {

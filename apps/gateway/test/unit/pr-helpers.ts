@@ -55,7 +55,7 @@ export function completedResult(sha: string, over: Record<string, unknown> = {})
   } as ResultDto;
 }
 
-/** 子の commit が 1 つ push された状態にする（head ≠ initial_sha。変更なしだと空の Draft PR は閉じられる）。新しい head を返す。 */
+/** ワーカーの commit が 1 つ push された状態にする（head ≠ initial_sha。変更なしだと空の Draft PR は閉じられる）。新しい head を返す。 */
 export async function pushChildCommit(branch: string): Promise<string> {
   const initial = app().branch(REPO, branch) as string;
   const head = await app().addCommit(REPO, initial, "child commit");

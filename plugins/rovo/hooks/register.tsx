@@ -73,7 +73,7 @@ const textOf = (result: McpToolResult): string =>
     .map((block) => (block.type === "text" && typeof block.text === "string" ? block.text : ""))
     .join("");
 
-/** 段階の各ステップ。子の文字列は入らない（サーバーが決めた段階名だけを見る）。 */
+/** 段階の各ステップ。ワーカーの文字列は入らない（サーバーが決めた段階名だけを見る）。 */
 const phaseSteps = (
   phase: string | null,
 ): { mark: string; label: string; color: ThemeKey }[] | null => {

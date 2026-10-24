@@ -137,7 +137,7 @@ const MAX_SCALE_DECISIONS = 50;
 /** リポジトリの事実（設定ファイルの生のテキスト）の最大の文字数と、集めるのに許す時間 */
 const SCALE_FACTS_MAX_CHARS = 6_000;
 const SCALE_FACTS_TIMEOUT_MS = 10_000;
-/** 事実を覚えておく時間（子が設定ファイルを書き換えたときに作り直す）と、覚えておく cwd の数 */
+/** 事実を覚えておく時間（ワーカーが設定ファイルを書き換えたときに作り直す）と、覚えておく cwd の数 */
 const SCALE_FACTS_TTL_MS = 10 * 60_000;
 const SCALE_FACTS_KEEP = 3;
 /** state に入れる直近のコマンドの数 */
@@ -190,7 +190,7 @@ async function withDeadline<T>(promise: Promise<T>, until: number): Promise<T | 
 
 /**
  * 昇格のスナップショットの名前（人が見分けるための名前。識別は id で行う）。DO の名前（= タスク ID）と、何回目の昇格か（seq）から作る。
- * 昇格は子の要求で何回も起きるので、同じ名前を使い回さない（同名の扱いに依存しない）。
+ * 昇格はワーカーの要求で何回も起きるので、同じ名前を使い回さない（同名の扱いに依存しない）。
  */
 function promoteSnapshotName(taskId: string | undefined, seq: number): string {
   return `promote-${(taskId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}-${seq}`;
@@ -289,7 +289,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private slowCommandMs = SLOW_COMMAND_MS;
   /** 設定の警告を 1 回だけ出すための印（永続しない） */
   private warnedScaleConfig = new Set<string>();
-  /** 実行中の子のコマンド（origin 付き）の出力バッファ。peekOutput が serial の外から読む（永続しない）。 */
+  /** 実行中のワーカーのコマンド（origin 付き）の出力バッファ。peekOutput が serial の外から読む（永続しない）。 */
   private activeExec?: { startedAt: number; out: TailBuffer; err: TailBuffer };
   /** キャッシュを作る処理（builder として使われたとき）。同時の依頼は 1 つを共有する。 */
   private depsBuilding?: Promise<DepsBuildResult>;
@@ -649,7 +649,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /**
-   * 実行中の子のコマンドの途中の出力。serial を通さない（exec が鎖の中で待っている間も返る）ので、ストレージにも触れない。
+   * 実行中のワーカーのコマンドの途中の出力。serial を通さない（exec が鎖の中で待っている間も返る）ので、ストレージにも触れない。
    * origin の無い内部の exec（git など）は見せない。
    */
   async peekOutput(): Promise<PeekedOutput> {
@@ -670,7 +670,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       if (this.terminated()) return TERMINATED_RESULT;
       this.requireSpec();
       await this.runningOrThrowRestarted();
-      // 子のコマンドと検証コマンド（origin 付き）の前に、Clef が「今の大きさで足りるか」を判断し、足りなければ大きい Sandbox へ昇格する
+      // ワーカーのコマンドと検証コマンド（origin 付き）の前に、Clef が「今の大きさで足りるか」を判断し、足りなければ大きい Sandbox へ昇格する
       // （fail-soft。判断・昇格に失敗しても、今の大きさでコマンドは動く）。Sandbox 自身の内部の exec（origin なし）は判断しない。
       let pending = false;
       if (options.origin !== undefined) {
@@ -1276,7 +1276,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   // ---- 昇格（小さく始めて、コマンドの前に Clef が上げると判断したら大きい Sandbox へ。docs/deploy.md の 11）----
   //
-  // 判断は Clef（Workers AI の決定モデル。sandbox-scale-decision.ts）だけが行う。子のコマンド（bash ツール）と検証コマンド
+  // 判断は Clef（Workers AI の決定モデル。sandbox-scale-decision.ts）だけが行う。ワーカーのコマンド（bash ツール）と検証コマンド
   // （exec の options.origin）の前に、コマンド・cwd・今の大きさ・リポジトリの事実・直近のコマンドを渡して「今の大きさで足りるか」を聞き、
   // 足りなければ上限（env SANDBOX_MAX_INSTANCE）までの大きさへ上げる。コマンドの種類を表で判定する規則は持たない。
   // 上げる方向だけで、下げない。何回でも上げられる（2 → 3 → 4）。手順は runPromotion。
@@ -1534,7 +1534,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   }
 
   /**
-   * 子のコマンド・検証コマンドの実行後。直近のコマンド（次の判断の state）に足し、直前の判断の記録に実行時間と終了コードを足す。
+   * ワーカーのコマンド・検証コマンドの実行後。直近のコマンド（次の判断の state）に足し、直前の判断の記録に実行時間と終了コードを足す。
    * 上げなかったのに（Clef が失敗したときは数えない）長くかかったコマンドは、集計に数える（Clef の見落としの振り返り用）。
    */
   private finishCommand(argv: string[], result: ExecResult, ms: number, pending: boolean): void {
@@ -1921,7 +1921,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
 
   /**
    * 作業ツリーを clone した後に、スナップショットから起動していたら node_modules を戻す。usage に出す結果を返す。
-   * 戻すのに失敗してもタスクは続ける（miss。子は自分で導入する）。
+   * 戻すのに失敗してもタスクは続ける（miss。ワーカーは自分で導入する）。
    */
   private async finishDeps(
     deps: DepsPlan,
@@ -2355,7 +2355,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         // 正常に終わったコマンドの後の片付け（ベストエフォート）。失敗したらコンテナごと破棄する
         await this.reapOrDestroy();
       }
-      // 子が掴んだままのパイプで読み取りが終わらないことがある。少しだけ待って打ち切る。
+      // ワーカーが掴んだままのパイプで読み取りが終わらないことがある。少しだけ待って打ち切る。
       await Promise.race([Promise.all([a.done, b.done]), sleep(STREAM_GRACE_MS)]);
       a.cancel();
       b.cancel();

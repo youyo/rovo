@@ -321,7 +321,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
   if (raw.sandbox !== undefined && !isObj(raw.sandbox)) errors.push("sandbox: オブジェクトにする");
   for (const k of Object.keys(sb)) {
     if (k === "heavyInstance" || k === "agentMaxInstance") {
-      // 重いコマンドの規則と子の sandbox_scale_up は無くなった（Clef に一本化）。上限は maxInstance 1 つ
+      // 重いコマンドの規則とワーカーの sandbox_scale_up は無くなった（Clef に一本化）。上限は maxInstance 1 つ
       errors.push(
         `sandbox.${k}: 廃止した（Sandbox の昇格は Clef に一本化した）。上限は sandbox.maxInstance（standard-1〜standard-4 か null。既定 ${DEFAULT_MAX_SANDBOX_INSTANCE}）で設定する`,
       );

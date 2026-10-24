@@ -111,7 +111,7 @@ describe("予算超過で止まるとき、未 commit の変更を WIP として
     const t = await runToBudgetStop("wip-ok");
     const commit = t.ran("commit")[0];
     expect(commit).toBeDefined();
-    // メッセージは固定文。子の自由文は入れない
+    // メッセージは固定文。ワーカーの自由文は入れない
     expect(commit?.[commit.indexOf("-m") + 1]).toBe(WIP_MESSAGE);
     expect(commit).toContain("--no-verify");
     expect(t.ran("push")[0]).toEqual([
@@ -124,7 +124,7 @@ describe("予算超過で止まるとき、未 commit の変更を WIP として
       "https://github.com/octo/repo.git",
       `${SHA}:refs/heads/agent/task-wip-ok`,
     ]);
-    // 許可証は push の exec だけに付き、env で子の gitconfig（global・system）を切り離す
+    // 許可証は push の exec だけに付き、env でワーカーの gitconfig（global・system）を切り離す
     const pushCall = t.sandbox.calls.find((c) => c.argv.includes("push"));
     expect(pushCall?.options.pushPermit).toEqual({
       ref: "refs/heads/agent/task-wip-ok",
@@ -203,7 +203,7 @@ describe("予算超過で止まるとき、未 commit の変更を WIP として
     expect(done(await t.stub.getResult()).warnings.join("\n")).toContain("秘密");
   });
 
-  it("commit 前の差分は clean でも、push 前に last_pushed..HEAD の秘密（子が自分で積んだ commit など）が見つかれば push しない。commit は残り、push_failed が出る", async () => {
+  it("commit 前の差分は clean でも、push 前に last_pushed..HEAD の秘密（ワーカーが自分で積んだ commit など）が見つかれば push しない。commit は残り、push_failed が出る", async () => {
     const leaked = `ghp_${"a1B2".repeat(9)}`;
     const t = await runToBudgetStop("wip-range-secret", {
       rangeDiff: `\u0001${"c".repeat(40)}\n\ndiff --git a/x.env b/x.env\n--- /dev/null\n+++ b/x.env\n@@ -0,0 +1,2 @@\n+A=1\n+T=${leaked}\n`,

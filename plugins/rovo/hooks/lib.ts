@@ -44,7 +44,7 @@ export const httpsOnly = (url: unknown): string | undefined =>
     : undefined;
 
 /**
- * 子が書いた文字列の表示用の整え方。囲み（UNTRUSTED_CHILD_QUESTION）を外し、
+ * ワーカーが書いた文字列の表示用の整え方。囲み（UNTRUSTED_CHILD_QUESTION）を外し、
  * 端末を動かす制御列（ANSI・OSC）と、向きを偽装する文字を落とす。Markdown には触らない
  * （描くときにプレーンな Text に入れるので、そのまま文字として出る）。
  */

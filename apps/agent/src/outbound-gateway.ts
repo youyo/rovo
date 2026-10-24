@@ -322,7 +322,7 @@ export async function handleOutbound(request: Request, deps: OutboundDeps): Prom
       limits.headTimeoutMs ?? RECEIVE_PACK_HEAD_TIMEOUT_MS,
     );
     if (!head.ok) return denied(deps, url, head.code, head.status);
-    // 自動の push（SandboxDO が秘密の検査を通した commit）だけを通す。子が bash から直接送る push は許可証が無いので拒否する。
+    // 自動の push（SandboxDO が秘密の検査を通した commit）だけを通す。ワーカーが bash から直接送る push は許可証が無いので拒否する。
     // 許可証は ref と newSha の両方が一致したときだけ有効（認証を付ける前に確かめる）
     const permit = await readPermit(deps);
     if (

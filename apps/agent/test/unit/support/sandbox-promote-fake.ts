@@ -10,7 +10,7 @@ export const HEAVY = ["pnpm", "test"];
 export const BUILD = ["pnpm", "build"];
 // Clef が軽いと判断するが、isLightCommand の表には無い（Clef を呼ぶ）コマンド
 export const LIGHT = ["node", "--version"];
-/** 子（bash ツール）が実行したコマンド。Clef の判断の対象になる（Sandbox 自身の内部の exec には付けない） */
+/** ワーカー（bash ツール）が実行したコマンド。Clef の判断の対象になる（Sandbox 自身の内部の exec には付けない） */
 export const AGENT = { origin: "agent_command" } as const;
 
 // biome-ignore lint/suspicious/noExplicitAny: private メンバーを差し替えるテスト

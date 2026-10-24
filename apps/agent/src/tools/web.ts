@@ -1,7 +1,7 @@
 import { wrapUntrusted } from "./untrusted";
 
 /**
- * apps/web（Web Research Service）の RPC の型と、子（Pi のツール）への見せ方。
+ * apps/web（Web Research Service）の RPC の型と、ワーカー（Pi のツール）への見せ方。
  * agent は web の実装を import しない（Env の型が混ざるため）ので、使う分だけをここに写す。
  * web 側の実装との一致は apps/web/test/contract/consumers.ts（型の検査）で確かめる。
  */

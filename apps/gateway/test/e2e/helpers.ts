@@ -149,7 +149,7 @@ export async function tokenState(taskId: string): Promise<TokenState> {
   return (await res.json()) as TokenState;
 }
 
-/** 偽の子エージェントを終端にする（ENVIRONMENT=test のときだけある /__test/agent/finish）。 */
+/** 偽のワーカーを終端にする（ENVIRONMENT=test のときだけある /__test/agent/finish）。 */
 export async function finishAgent(
   taskId: string,
   phase: "completed" | "failed",
@@ -164,7 +164,7 @@ export async function finishAgent(
 }
 
 /**
- * 偽の子エージェントにイベントを 1 つ積ませる（ENVIRONMENT=test のときだけある /__test/agent/emit）。
+ * 偽のワーカーにイベントを 1 つ積ませる（ENVIRONMENT=test のときだけある /__test/agent/emit）。
  * 構造化イベント（command / edit / commit / web）の台本に使う。秘密入りの値も、そのまま（マスクせずに）送れる。
  */
 export async function emitAgentEvent(

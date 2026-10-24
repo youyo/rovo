@@ -79,7 +79,7 @@ describe("Sandbox の昇格（コマンドの前に Clef が上げると判断�
     runtimeMs: number;
   };
   const promoMetrics = (c: ReturnType<typeof sandboxClient>) => c.metrics() as Promise<Promo>;
-  /** 子のコマンド（Clef の判断の対象になる）。実際には軽い */
+  /** ワーカーのコマンド（Clef の判断の対象になる）。実際には軽い */
   const AGENT = { origin: "agent_command" };
   // 先頭の語 node は isLightCommand の表に無いので Clef を呼ぶ（echo などの軽い語だけだと呼ばれない）
   const CMD = ["bash", "-c", "node -e 0; echo started"];
@@ -440,7 +440,7 @@ describe("依存関係のキャッシュ（D14）", () => {
   }, 280_000);
 });
 
-describe("イメージに入っている道具（子が自分で入れなくても使える）", () => {
+describe("イメージに入っている道具（ワーカーが自分で入れなくても使える）", () => {
   it("pnpm（corepack の shim）と python3 が PATH にあり、動く。corepack はダウンロードの確認で止まらない設定", async () => {
     const c = client("tools");
     await c.ensureReady(specFor("tools"));

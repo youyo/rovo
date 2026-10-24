@@ -346,7 +346,7 @@ export class UserDO extends DurableObject<Env> {
     addColumnIfMissing(sql, "task_budget", "settled_estimated", "INTEGER NOT NULL DEFAULT 0");
     // 予算の延長（budget_policy: ask）で承認された回数。延長のたびに reserved_micro へタスク予算と同じ額を足す
     addColumnIfMissing(sql, "task_budget", "extensions", "INTEGER NOT NULL DEFAULT 0");
-    // 親（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
+    // クライアント（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
     sql.exec(`CREATE TABLE IF NOT EXISTS web_usage (
       day TEXT NOT NULL,
       kind TEXT NOT NULL,
@@ -940,7 +940,7 @@ export class UserDO extends DurableObject<Env> {
   /**
    * TaskDO に照合して、予約を解放してよいか判定する。
    * 回収できるのは「一度も作られなかった」予約だけ（abandoned、または未作成で tombstone を打てたもの）。
-   * Phase 1 のタスク（agent_link が無い CREATING。子エージェントも精算も無い）も同じ扱いで回収する。
+   * Phase 1 のタスク（agent_link が無い CREATING。ワーカーも精算も無い）も同じ扱いで回収する。
    * 作成済みのタスクは、停止が確認できていても返さない。予算と同時実行枠の返却は、最終精算と同じ
    * トランザクションの finishTask だけが行う（未精算の予算を返して二重に渡さないため）。
    * finishTask が届かないときは、TaskDO の alarm が再送して収束する。
@@ -1015,7 +1015,7 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * タスクの予算の延長（budget_policy: ask で親が「続ける」を選んだとき）。n 回目（1 または 2）の延長として、
+   * タスクの予算の延長（budget_policy: ask でクライアントが「続ける」を選んだとき）。n 回目（1 または 2）の延長として、
    * タスク予算（task_budget_usd）と同じ額を、月の枠から「その場で」そのタスクの予約に足す。
    * 月の枠はハードリミットのまま: 予約済み + 使用済み + 延長分が上限を超えるなら予約せず budget_exceeded。
    * 同じ n の再送は冪等（applied: false）。n は 1 から順に（2 回目は 1 回目の後）。精算済み（closed）のタスクは closed。

@@ -37,7 +37,7 @@ export const AUDIT_EVENTS = [
   "archive_completed",
   // web（M5）
   "web_blocked",
-  // gateway（D9）: 呼び出し元の AI による PR の Ready 化とマージ（利用者の GitHub トークンで行う）
+  // gateway（D9）: クライアント による PR の Ready 化とマージ（利用者の GitHub トークンで行う）
   "pr_ready",
   "pr_merged",
   "pr_denied",

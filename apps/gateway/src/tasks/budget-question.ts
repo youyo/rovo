@@ -1,7 +1,7 @@
 /**
- * 予算の延長の質問（kind: budget_extension）。タスクが予算に近づいたとき、子ではなく rovo（システム）が親に出す。
- * 文は rovo が数値だけで書く固定文で、子の自由文は入らない（なので <<<UNTRUSTED_CHILD_QUESTION>>> で囲まない。
- * 子の質問 ask_parent は今までどおり囲む）。AgentDO は数値だけを送り、文と選択肢は gateway がここで作る。
+ * 予算の延長の質問（kind: budget_extension）。タスクが予算に近づいたとき、ワーカーではなく rovo（システム）がクライアントに出す。
+ * 文は rovo が数値だけで書く固定文で、ワーカーの自由文は入らない（なので <<<UNTRUSTED_CHILD_QUESTION>>> で囲まない。
+ * ワーカーの質問 ask_parent は今までどおり囲む）。AgentDO は数値だけを送り、文と選択肢は gateway がここで作る。
  */
 export const BUDGET_EXTENSION_KIND = "budget_extension";
 
@@ -28,7 +28,7 @@ export function budgetQuestionText(n: BudgetQuestionNumbers): {
   };
 }
 
-/** 数値の項目を検証して取り出す。1 つでも不正なら undefined（その質問は子の質問として扱う） */
+/** 数値の項目を検証して取り出す。1 つでも不正なら undefined（その質問はワーカーの質問として扱う） */
 export function parseBudgetNumbers(d: Record<string, unknown>): BudgetQuestionNumbers | undefined {
   const get = (k: string): number | undefined => {
     const v = d[k];

@@ -201,7 +201,7 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
         a[0] === "git" && (a[1] === "push" || (a[1] === "ls-remote" && !a.includes("--heads")))
       );
     });
-    // ls-remote も push も、子の gitconfig から切り離し（-c と env）、origin ではなくリポジトリの URL へ直接送る
+    // ls-remote も push も、ワーカーの gitconfig から切り離し（-c と env）、origin ではなくリポジトリの URL へ直接送る
     const isolation = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper="];
     const URL = "https://github.com/octo/repo.git";
     expect(calls.map((c) => c.argv)).toEqual([
@@ -228,7 +228,7 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
       { ref: REF("sync-ok"), newSha: "c0ffee" },
       undefined,
     ]);
-    // 同期のとき以外（子の bash・検証コマンド）の exec には、許可証が付かない
+    // 同期のとき以外（ワーカーの bash・検証コマンド）の exec には、許可証が付かない
     expect(
       fx.sandbox.calls.filter((c) => c.options.pushPermit !== undefined && c.argv[0] !== "git"),
     ).toHaveLength(0);
@@ -535,13 +535,13 @@ describe("システムプロンプト", () => {
     await waitForTerminal(fx);
   });
 
-  it("no_push の節は「Draft PR は gateway が作る（子は作らない）」と書き、summary で「PR を作っていない」と誤解させない", async () => {
+  it("no_push の節は「Draft PR は gateway が作る（ワーカーは作らない）」と書き、summary で「PR を作っていない」と誤解させない", async () => {
     const fx = newFixture("prompt-pr", [call("gate")]);
     await fx.stub.start(makeSpec("prompt-pr"));
     const section = await runInDO(fx.stub, (inst) =>
       inst.promptSections().find((s: { key: string }) => s.key === "no_push"),
     );
-    // 子は PR を作らない。作るのは gateway で、Draft PR がすでにある（または後から作られる）
+    // ワーカーは PR を作らない。作るのは gateway で、Draft PR がすでにある（または後から作られる）
     expect(section.text).toMatch(/do not create pull requests/i);
     expect(section.text).toMatch(/gateway creates the draft pull request/i);
     expect(section.text).toMatch(/not your job|do not mention|do not say/i);

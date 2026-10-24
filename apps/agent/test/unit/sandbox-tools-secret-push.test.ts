@@ -67,7 +67,7 @@ describe("git_commit の push 前の秘密の検査", () => {
         error: `blocked: possible secret (github-token) in src/a.ts:2 (commit ${t.git.head().slice(0, 7)})`,
       },
     ]);
-    // commit は成功のまま（ローカルに残る）。子に返る文は file:line・category・やり直しの案内。値は出ない
+    // commit は成功のまま（ローカルに残る）。ワーカーに返る文は file:line・category・やり直しの案内。値は出ない
     expect(r.isError).toBe(false);
     expect(r.text).toContain(`committed ${t.git.head()}`);
     expect(r.text).toMatch(/not pushed/i);
@@ -175,7 +175,7 @@ describe("git_commit の push 前の秘密の検査", () => {
     expect(r.text).not.toContain(GHP);
   });
 
-  it("子に返る文のパスにトークンが入っていても、値は出ない（イベント・onPush と同じく maskSecrets を通す）", async () => {
+  it("ワーカーに返る文のパスにトークンが入っていても、値は出ない（イベント・onPush と同じく maskSecrets を通す）", async () => {
     const t = setup();
     t.git.stage(file(`src/${GHP}.ts`, `const t = "${GHP}";`));
     const r = await t.commit();

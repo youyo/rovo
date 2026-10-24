@@ -337,7 +337,7 @@ describe("AgentDO: web_search / web_fetch", () => {
     expect(seen).toMatch(/\[web_fetch\] The page could not be judged \(reason: dns_check_failed\)/);
   });
 
-  it("tool_end の summary（親の task_wait に流れる）に、Web 由来の本文を載せない", async () => {
+  it("tool_end の summary（クライアントの task_wait に流れる）に、Web 由来の本文を載せない", async () => {
     const web = fakeWeb({
       async fetchUrl(req) {
         return {

@@ -88,7 +88,7 @@ export type SummaryInput = {
     outputTokens: number;
     cacheReadTokens: number;
     cacheWriteTokens: number;
-    /** 子が使った分だけ */
+    /** ワーカーが使った分だけ */
     web: { search: number; fetch: number; browse: number };
     /** agent が読めなかったタスクは null */
     sandbox: {
@@ -107,9 +107,9 @@ export type SummaryInput = {
       promotionReason?: SandboxPromotionReason;
       /** 成功した昇格の履歴（公開用の形に検証済みのもの。古い順）。あれば、区間ごとに按分する */
       promotions?: PublicPromotion[];
-      /** 古いタスクの記録: 子が上げたあと、規則で重いと判定されたコマンドを実行した本数 */
+      /** 古いタスクの記録: ワーカーが上げたあと、規則で重いと判定されたコマンドを実行した本数 */
       heavyCommandsAfterAgentScaleUp?: number;
-      /** 古いタスクの記録: そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数 */
+      /** 古いタスクの記録: そのうち、ワーカーが規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数 */
       heavyCommandsCoveredByAgent?: number;
       /** Clef の判断の集計（Clef を呼んだタスクだけ） */
       scaleStats?: {
@@ -166,9 +166,9 @@ export type TaskSummary = {
     promotion_reason?: SandboxPromotionReason;
     /** 成功した昇格の履歴（古い順）。trigger は clef（Clef が上げると判断した）。古いタスクは agent / rule / verification で、rule_match は規則で上がったときだけ。昇格していなければ無い */
     promotions?: PublicPromotion[];
-    /** 古いタスクの記録: 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。今のタスクには付かない */
+    /** 古いタスクの記録: ワーカーが sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。今のタスクには付かない */
     heavy_commands_after_agent_scale_up?: number;
-    /** 古いタスクの記録: 上の本数のうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数 */
+    /** 古いタスクの記録: 上の本数のうち、ワーカーが規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数 */
     heavy_commands_covered_by_agent?: number;
     /** Clef の判断の集計（Clef を呼んだタスクだけ）。判断ごとの記録は summary には入れず、task_result の usage.sandbox_scale_log にだけ出す */
     scale?: PublicScaleStats;
@@ -184,7 +184,7 @@ export type TaskSummary = {
   /** 推定。単価（unit_prices）をかけた値で、タスクの予算には含めない */
   sandbox_usd_estimate: number;
   web: { search: number; fetch: number; browse: number };
-  /** 推定。子が使った分だけ。親が MCP から使う分は含まない */
+  /** 推定。ワーカーが使った分だけ。クライアントが MCP から使う分は含まない */
   web_usd_estimate: number;
   unit_prices: {
     sandbox_usd_per_hour: number;
@@ -376,7 +376,7 @@ export function summaryMetrics(s: TaskSummary): Record<string, number> {
 }
 
 /**
- * 子の usage イベントの公開 payload から、累計の数値だけを覚えておくための形（agent_link.usage_public に JSON で持つ）。
+ * ワーカーの usage イベントの公開 payload から、累計の数値だけを覚えておくための形（agent_link.usage_public に JSON で持つ）。
  * どの項目も累計で単調に増えるので、新しい値と覚えている値の大きい方を取る（順序の入れ替わりや、古い値の再送で下がらない）。
  */
 export const USAGE_PUBLIC_KEYS = [

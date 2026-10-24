@@ -809,7 +809,7 @@ describe("終端: PR の更新とトークンの失効", () => {
     expect((pullOf(t.branch)?.body ?? "").length).toBeLessThanOrEqual(65_536);
   });
 
-  it("キャンセルされたタスクの PR は、子の commit があれば閉じずに残し、本文だけ更新する", async () => {
+  it("キャンセルされたタスクの PR は、ワーカーの commit があれば閉じずに残し、本文だけ更新する", async () => {
     const { stub, branch } = await createTask();
     await stub.advance();
     const initial = app().branch(REPO, branch) as string;
@@ -1172,7 +1172,7 @@ describe("変更なしで終端: 空の Draft PR を閉じる", () => {
     expect(r.result.pr).toMatchObject({ closed_empty: true });
   });
 
-  it("子の commit がある（head ≠ initial_sha）と何もしない", async () => {
+  it("ワーカーの commit がある（head ≠ initial_sha）と何もしない", async () => {
     const t = await finishUnchanged({}, true);
     expect(pullOf(t.branch)?.state).toBe("open");
     expect(closeCalls()).toHaveLength(0);
@@ -1183,7 +1183,7 @@ describe("変更なしで終端: 空の Draft PR を閉じる", () => {
     expect(r.result.pr?.closed_empty).toBeUndefined();
   });
 
-  // 終端の種類ごとに、子の commit が無い（pushedSha なし）/ ある場合を作る
+  // 終端の種類ごとに、ワーカーの commit が無い（pushedSha なし）/ ある場合を作る
   async function finishWith(
     phase: "completed" | "failed" | "budget_exceeded" | "cancelled",
     childCommit: boolean,
@@ -1221,7 +1221,7 @@ describe("変更なしで終端: 空の Draft PR を閉じる", () => {
   }
 
   for (const phase of ["failed", "budget_exceeded", "cancelled"] as const) {
-    it(`${phase} で子の commit が無い（pushedSha なし）と閉じる`, async () => {
+    it(`${phase} でワーカーの commit が無い（pushedSha なし）と閉じる`, async () => {
       const t = await finishWith(phase, false);
       expect(pullOf(t.branch)?.state).toBe("closed");
       expect(closeCalls()).toHaveLength(1);
@@ -1233,7 +1233,7 @@ describe("変更なしで終端: 空の Draft PR を閉じる", () => {
       expect(r.result.pr).toMatchObject({ closed_empty: true, head_sha: null });
     });
 
-    it(`${phase} で子の commit があれば閉じない`, async () => {
+    it(`${phase} でワーカーの commit があれば閉じない`, async () => {
       const t = await finishWith(phase, true);
       expect(pullOf(t.branch)?.state).toBe("open");
       expect(closeCalls()).toHaveLength(0);

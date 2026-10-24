@@ -82,7 +82,7 @@ const count0 = (v: unknown): number =>
 
 /**
  * 昇格の履歴を公開用の形に絞る。表に無い大きさ・引き金の要素は捨て、古い記録の規則名は trigger が rule で安全な短い名前のときだけ通す。
- * 子の自由文・argv など、決まったキー以外は読まない。camel は agent の報告（runtimeMsBefore / ruleMatch）、snake は公開用の形（runtime_ms_before / rule_match）。
+ * ワーカーの自由文・argv など、決まったキー以外は読まない。camel は agent の報告（runtimeMsBefore / ruleMatch）、snake は公開用の形（runtime_ms_before / rule_match）。
  */
 export function sanitizePromotions(v: unknown, form: "camel" | "snake"): PublicPromotion[] {
   if (!Array.isArray(v)) return [];

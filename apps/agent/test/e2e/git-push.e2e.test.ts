@@ -45,7 +45,7 @@ const GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@e"];
 const bash = (c: ReturnType<typeof sandboxClient>, script: string) =>
   c.exec(["bash", "-c", script], { timeoutMs: 120_000 });
 
-/** 自動の push と同じ形（子の gitconfig から切り離し、URL へ直接、<sha>:<ref> を送る）。許可証は渡さなければ付かない */
+/** 自動の push と同じ形（ワーカーの gitconfig から切り離し、URL へ直接、<sha>:<ref> を送る）。許可証は渡さなければ付かない */
 const ISOLATION = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper="];
 const ISOLATION_ENV = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 const HELLO_URL = "https://github.com/acme/hello.git";
@@ -123,7 +123,7 @@ describe("作業ブランチへの push（proxy の許可と拒否）", () => {
     expect(rp.every((q) => q.headers["content-encoding"] === undefined)).toBe(true);
   });
 
-  it("子の bash からの git push は、作業ブランチ向きでも拒否される（許可証が無い）。秘密の検査を通らずに送れない", async () => {
+  it("ワーカーの bash からの git push は、作業ブランチ向きでも拒否される（許可証が無い）。秘密の検査を通らずに送れない", async () => {
     const { c } = await sandboxTask("bash-push");
     await c.writeFile("/workspace/a.txt", "a\n");
     await bash(c, `cd /workspace && git add -A && git ${GIT_ID.join(" ")} commit -q -m a`);
@@ -137,7 +137,7 @@ describe("作業ブランチへの push（proxy の許可と拒否）", () => {
       const r = await bash(c, `cd /workspace && ${cmd}`);
       expect(r.exitCode, `${cmd}: ${r.stderr}`).not.toBe(0);
     }
-    // 子が自分で設定を直しても（フック・credential helper）、許可証が無いので通らない
+    // ワーカーが自分で設定を直しても（フック・credential helper）、許可証が無いので通らない
     const r = await bash(
       c,
       `cd /workspace && git -c credential.helper= -c core.hooksPath=/dev/null push origin HEAD:${ref("bash-push")}`,
@@ -171,7 +171,7 @@ describe("作業ブランチへの push（proxy の許可と拒否）", () => {
     expect(upstream.refSha("hello", ref("permit-mismatch"))).toBe(mine);
   });
 
-  it("自動の push は、子が /root/.gitconfig・.git/config に書いたフック・credential helper・pushurl の影響を受けない", async () => {
+  it("自動の push は、ワーカーが /root/.gitconfig・.git/config に書いたフック・credential helper・pushurl の影響を受けない", async () => {
     const { c } = await sandboxTask("iso");
     await c.writeFile("/workspace/a.txt", "a\n");
     await bash(
@@ -246,7 +246,7 @@ describe("作業ブランチへの push（proxy の許可と拒否）", () => {
     expect(upstream.refSha("calc", ref("deny"))).toBeUndefined();
   });
 
-  it("履歴を書き換えた force push は、子の bash からは拒否される。自動の push（許可証付き）だけが送れる", async () => {
+  it("履歴を書き換えた force push は、ワーカーの bash からは拒否される。自動の push（許可証付き）だけが送れる", async () => {
     const { c } = await sandboxTask("force");
     const git = (s: string) => bash(c, `cd /workspace && ${s}`);
     await c.writeFile("/workspace/one.txt", "1\n");
@@ -460,7 +460,7 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
     });
   });
 
-  it("子が bash で履歴を差し替えて force push しようとしても拒否され、完了時は検証済みの SHA になる", async () => {
+  it("ワーカーが bash で履歴を差し替えて force push しようとしても拒否され、完了時は検証済みの SHA になる", async () => {
     const task = "force-fix";
     const s0 = spec(task);
     const evil = [
@@ -486,7 +486,7 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
     const r = await agent.getResult();
     if (r.status !== "completed") throw new Error(`unexpected ${r.status}`);
     const sha = r.verification.commitSha;
-    // 子の push は許可証が無いので拒否され、リモートは検証済みの commit のまま（自動の push と完了時の同期は通る）
+    // ワーカーの push は許可証が無いので拒否され、リモートは検証済みの commit のまま（自動の push と完了時の同期は通る）
     const bashEnd = (await agent.allEvents()).find(
       (e) => e.type === "tool_end" && e.data.name === "bash",
     );

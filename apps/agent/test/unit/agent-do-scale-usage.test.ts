@@ -15,7 +15,7 @@ import {
 
 afterEach(() => clearAgentTestOverrides());
 
-// Sandbox の昇格を Clef に一本化したあとの AgentDO 側: 子にツールは無い（sandbox_scale_up は削除）。システムプロンプトの説明、
+// Sandbox の昇格を Clef に一本化したあとの AgentDO 側: ワーカーにツールは無い（sandbox_scale_up は削除）。システムプロンプトの説明、
 // usage（昇格の履歴・Clef の判断の集計と記録）の載せ方。判断そのものは SandboxDO（sandbox-do-clef-scale.test.ts）。
 
 // biome-ignore lint/suspicious/noExplicitAny: private メンバーの観測
@@ -34,7 +34,7 @@ async function start(fx: Fixture, name: string, over: Record<string, unknown> = 
 }
 
 describe("AgentDO: sandbox_scale_up は無い", () => {
-  it("子に sandbox_scale_up は見えない（呼んでも未知のツール）。システムプロンプトにも出ない", async () => {
+  it("ワーカーに sandbox_scale_up は見えない（呼んでも未知のツール）。システムプロンプトにも出ない", async () => {
     const fx = newFixture("clef-no-tool", [
       boot(),
       call("sandbox_scale_up", { instance: "standard-3" }),

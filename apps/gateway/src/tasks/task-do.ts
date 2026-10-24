@@ -82,7 +82,7 @@ import {
   WAIT_RETRY_AFTER_SECONDS,
 } from "./validation";
 
-/** 子エージェントに許す実行時間（開始から）。AgentDO も同じ上限で丸める。 */
+/** ワーカーに許す実行時間（開始から）。AgentDO も同じ上限で丸める。 */
 export const AGENT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 /** alarm の間隔。start / cancel の再送、取り込み、精算の再試行に使う。 */
 export const ALARM_INTERVAL_MS = 10_000;
@@ -169,11 +169,11 @@ export type TaskView = {
   draft_pr_url: string | null;
   /** 全体のテストとレビューをどこで行うか（task_start で指定。既定 client_review） */
   review_policy: ReviewPolicy;
-  /** 予算に近づいたときの扱い（task_start で指定。既定 ask = 止めずに親へ延長を聞く / stop = 止める）。この変更より前のタスクは stop */
+  /** 予算に近づいたときの扱い（task_start で指定。既定 ask = 止めずにクライアントへ延長を聞く / stop = 止める）。この変更より前のタスクは stop */
   budget_policy: BudgetPolicy;
-  /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
+  /** ワーカーのモデル（task_start の model。省略時は既定のモデル。D10） */
   model: string;
-  /** 子のモデルの思考レベル（task_start の effort で上書きした値、無ければモデルごとの既定。タスクの開始時の値。考える量が多いほど出力トークン＝費用が増える） */
+  /** ワーカーのモデルの思考レベル（task_start の effort で上書きした値、無ければモデルごとの既定。タスクの開始時の値。考える量が多いほど出力トークン＝費用が増える） */
   effort: Effort;
   /** モデルの選び方（task_start の mode: explicit | auto と、理由の固定コード）。記録の無いタスク（古いタスク）には付かない */
   model_selection?: ModelSelection;
@@ -183,12 +183,12 @@ export type TaskView = {
   updated_at: string;
   /** 最後のイベントの seq（不透明な cursor 文字列）。 */
   latest_cursor: string;
-  /** 子の未回答の質問（終端でないとき）。message は子が作った非信頼データ */
+  /** ワーカーの未回答の質問（終端でないとき）。message はワーカーが作った非信頼データ */
   pending_question: {
     question_id: string;
     message: string;
     options: string[];
-    /** budget_extension: 予算の延長の質問（rovo が数値だけで書く固定文。子の質問ではない）。子の質問（ask_parent）には付かない */
+    /** budget_extension: 予算の延長の質問（rovo が数値だけで書く固定文。ワーカーの質問ではない）。ワーカーの質問（ask_parent）には付かない */
     kind?: "budget_extension";
   } | null;
 };
@@ -215,7 +215,7 @@ export type TaskInspection =
   | { kind: "abandoned" }
   | { kind: "created"; status: TaskStatus; stopped: boolean }
   /**
-   * Phase 1 で作られたタスク（agent_link が無い）。子エージェントは存在せず、精算するものも無い。
+   * Phase 1 で作られたタスク（agent_link が無い）。ワーカーは存在せず、精算するものも無い。
    * UserDO は abandoned と同じ扱いで予約を回収してよい。
    */
   | { kind: "legacy" };
@@ -253,9 +253,9 @@ export type ResultView = {
   review_policy: ReviewPolicy;
   /** 予算に近づいたときの扱い（task_start の budget_policy。ask | stop） */
   budget_policy: BudgetPolicy;
-  /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
+  /** ワーカーのモデル（task_start の model。省略時は既定のモデル。D10） */
   model: string;
-  /** 子のモデルの思考レベル（task_start の effort で上書きした値、無ければモデルごとの既定。タスクの開始時の値） */
+  /** ワーカーのモデルの思考レベル（task_start の effort で上書きした値、無ければモデルごとの既定。タスクの開始時の値） */
   effort: Effort;
   /** モデルの選び方（task_start と同じ記録。無いタスクには付かない） */
   model_selection?: ModelSelection;
@@ -283,7 +283,7 @@ export type ResultView = {
     output_tokens: number;
     cache_read_tokens: number;
     cache_write_tokens: number;
-    /** 子が使った web の回数 */
+    /** ワーカーが使った web の回数 */
     web: { search: number; fetch: number; browse: number };
     /** 依存関係のキャッシュ（D14）の結果。agent がカウンタを読めたときだけ付く */
     deps_cache?: "hit" | "miss" | "built" | "disabled";
@@ -303,7 +303,7 @@ export type ResultView = {
     sandbox_runtime_ms_before_promotion?: number;
     /** 昇格を見送った・失敗した理由の固定コード（fixed_instance / already_large / state_unreadable / snapshot_unsupported / snapshot_failed / start_failed / cert_missing / workspace_mismatch / fallback_failed）。最後に残したもの（あとで昇格が成功しても消さない）。設定で無効のときは付かない */
     sandbox_promotion_reason?: string;
-    /** 成功した昇格の履歴（古い順）。trigger は agent（子が sandbox_scale_up で頼んだ）/ rule（重いコマンドの規則＝保険）/ verification（検証コマンド）、rule_match は規則で上がったときだけ（固定の表の名前。コマンドの文字列は入らない）、runtime_ms_before はその昇格までの Sandbox の累計時間（ms）。昇格していなければ付かない。子の自由文（reason）は残らない */
+    /** 成功した昇格の履歴（古い順）。trigger は agent（ワーカーが sandbox_scale_up で頼んだ）/ rule（重いコマンドの規則＝保険）/ verification（検証コマンド）、rule_match は規則で上がったときだけ（固定の表の名前。コマンドの文字列は入らない）、runtime_ms_before はその昇格までの Sandbox の累計時間（ms）。昇格していなければ付かない。ワーカーの自由文（reason）は残らない */
     sandbox_promotions?: {
       to: string;
       at: number;
@@ -311,9 +311,9 @@ export type ResultView = {
       runtime_ms_before: number;
       rule_match?: string;
     }[];
-    /** 子が sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。0 なら、規則（保険）が要らなかった = 不要だったかもしれない昇格。子が上げていなければ付かない */
+    /** ワーカーが sandbox_scale_up で上げたあと、規則で重いと判定されたコマンドを実行した本数。0 なら、規則（保険）が要らなかった = 不要だったかもしれない昇格。ワーカーが上げていなければ付かない */
     sandbox_heavy_commands_after_agent_scale_up?: number;
-    /** そのうち、子が規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（子の見立ての的中）。子が上げていなければ付かない */
+    /** そのうち、ワーカーが規則の昇格先以上に上げていたために規則が昇格しなくて済んだ本数（ワーカーの見立ての的中）。ワーカーが上げていなければ付かない */
     sandbox_heavy_commands_covered_by_agent?: number;
     /** 昇格の試みが見送り・失敗になった記録（古い順、最大 8 件）。trigger は clef（古いタスクは agent / rule / verification）、reason は sandbox_promotion_reason と同じ固定コード。Clef の失敗（判断できなかった）は入らない（sandbox_scale_clef_failures）。無ければ付かない */
     sandbox_promotion_failures?: { trigger: string; reason: string }[];
@@ -404,7 +404,7 @@ export type CancelResult =
   | { ok: false; code: "not_found" };
 
 /**
- * 予算の延長の質問への回答の結果: extended = 月の枠から延長分を予約して続ける / declined = 親が止めることを選んだ /
+ * 予算の延長の質問への回答の結果: extended = 月の枠から延長分を予約して続ける / declined = クライアントが止めることを選んだ /
  * monthly_limit = 続けたいが月の枠が足りず予約できなかったので止まる / limit_reached = 延長の上限（2 回）に達していたので止まる。
  */
 export type BudgetExtensionOutcome = "extended" | "declined" | "monthly_limit" | "limit_reached";
@@ -636,7 +636,7 @@ export class TaskDO extends DurableObject<Env> {
   /** GitHub API への fetch。テストで偽の GitHub に差し替える。 */
   protected githubFetch: typeof fetch | undefined = undefined;
 
-  /** 子エージェントの RPC。テストで差し替える。 */
+  /** ワーカーの RPC。テストで差し替える。 */
   protected agentStub(): AgentRpc {
     const taskId = this.getRow()?.id;
     if (!taskId) throw new Error("task row missing");
@@ -692,7 +692,7 @@ export class TaskDO extends DurableObject<Env> {
     sql.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS events_agent_seq ON events (operation_id, agent_seq) WHERE agent_seq IS NOT NULL",
     );
-    // 子エージェントとの配送状態（1 行）。start / cancel の意図、取り込みカーソル、精算の進み具合。
+    // ワーカーとの配送状態（1 行）。start / cancel の意図、取り込みカーソル、精算の進み具合。
     sql.exec(`CREATE TABLE IF NOT EXISTS agent_link (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       spec TEXT NOT NULL,
@@ -798,15 +798,15 @@ export class TaskDO extends DurableObject<Env> {
     addColumnIfMissing(this.ctx.storage.sql, "github_link", "deps", "TEXT");
     // 予算に近づいたときの扱い（task_start の budget_policy。NULL = この変更より前のタスク = stop）
     addColumnIfMissing(this.ctx.storage.sql, "task", "budget_policy", "TEXT");
-    // D10: 子のモデル（task_start の model。NULL は既定のモデル）
+    // D10: ワーカーのモデル（task_start の model。NULL は既定のモデル）
     addColumnIfMissing(this.ctx.storage.sql, "task", "model", "TEXT");
-    // D10: 子のモデルの思考レベル（開始時の値。NULL は現在の設定から求める）
+    // D10: ワーカーのモデルの思考レベル（開始時の値。NULL は現在の設定から求める）
     addColumnIfMissing(this.ctx.storage.sql, "task", "effort", "TEXT");
     // モデルの選び方の記録（task_start の mode / reason / scores。JSON。NULL は記録なし = 古いタスク）
     addColumnIfMissing(this.ctx.storage.sql, "task", "model_selection", "TEXT");
     // task_start の sandbox_instance（明示した Sandbox の大きさ。NULL は省略 = agent の既定）
     addColumnIfMissing(this.ctx.storage.sql, "task", "sandbox_instance", "TEXT");
-    // Phase 4: 子の質問と回答、親からの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
+    // Phase 4: ワーカーの質問と回答、クライアントからの追加の指示。配送の意図（delivery_state）を永続化し、alarm で再送する。
     sql.exec(`CREATE TABLE IF NOT EXISTS questions (
       question_id TEXT PRIMARY KEY,
       message TEXT NOT NULL,
@@ -815,7 +815,7 @@ export class TaskDO extends DurableObject<Env> {
       delivery_state TEXT NOT NULL DEFAULT 'none',
       asked_at INTEGER NOT NULL
     )`);
-    // 予算の延長の質問（kind = 'budget_extension'）と、その回答の決定（extend | stop。親の答えと月の枠の予約結果から gateway が決める）
+    // 予算の延長の質問（kind = 'budget_extension'）と、その回答の決定（extend | stop。クライアントの答えと月の枠の予約結果から gateway が決める）
     addColumnIfMissing(sql, "questions", "kind", "TEXT");
     addColumnIfMissing(sql, "questions", "decision", "TEXT");
     sql.exec(`CREATE TABLE IF NOT EXISTS steers (
@@ -1512,7 +1512,7 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /**
-   * 子の質問への回答を受け付ける（task_answer）。
+   * ワーカーの質問への回答を受け付ける（task_answer）。
    * 保存済みの回答と一致すれば、状態に関係なく成功（再送。RUNNING に戻った後でも conflict にしない）。この判定を最初に行う。
    * それ以外は INPUT_REQUIRED の未回答の質問にだけ答えられる。配送は alarm で成功するまで再送する。
    */
@@ -1741,7 +1741,7 @@ export class TaskDO extends DurableObject<Env> {
     }
 
     // 待機者を登録してから再読する（登録前に追加されたイベントを取りこぼさない）。
-    // 子エージェントが動いている間は、pollIntervalMs ごとに取り込み直す（alarm の 10 秒を待たせない）。
+    // ワーカーが動いている間は、pollIntervalMs ごとに取り込み直す（alarm の 10 秒を待たせない）。
     const waiter: Waiter = { wake: () => {} };
     this.waiters.add(waiter);
     try {
@@ -1766,7 +1766,7 @@ export class TaskDO extends DurableObject<Env> {
     return this.waitResult(c.value, events);
   }
 
-  // ---- 子エージェント（AgentDO）との配送・取り込み・精算 ----
+  // ---- ワーカー（AgentDO）との配送・取り込み・精算 ----
 
   /**
    * 配送と取り込みを 1 回進める（task_start / task_cancel が呼び、alarm からも呼ばれる）。
@@ -2157,7 +2157,7 @@ export class TaskDO extends DurableObject<Env> {
       )
       .toArray();
     for (const q of pending) {
-      // 予算の延長の質問には、親の答えの文ではなく、gateway が決めた固定の語（extend | stop）を渡す
+      // 予算の延長の質問には、クライアントの答えの文ではなく、gateway が決めた固定の語（extend | stop）を渡す
       const delivered =
         q.kind === BUDGET_EXTENSION_KIND ? (q.decision === "extend" ? "extend" : "stop") : q.answer;
       const r = await this.agentStub().answer(q.question_id, delivered);
@@ -3687,7 +3687,7 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /**
-   * 次の alarm までの間隔。INPUT_REQUIRED の間は 60 秒に延ばす（親の回答を待っているだけなので）。
+   * 次の alarm までの間隔。INPUT_REQUIRED の間は 60 秒に延ばす（クライアントの回答を待っているだけなので）。
    * 回答や steer の配送が pending、cancel / start の再送、トークンの更新・配送が必要なときは 10 秒。
    */
   private alarmDelay(): number {
@@ -3840,7 +3840,7 @@ function sandboxPromotionUsage(sb: UsageDto["sandbox"]): {
       : {}),
     ...(reason !== undefined ? { sandbox_promotion_reason: reason } : {}),
     ...(promotions.length > 0 ? { sandbox_promotions: promotions } : {}),
-    // 古い agent の報告（子の sandbox_scale_up と規則があった頃の本数）。今の agent は報告しない
+    // 古い agent の報告（ワーカーの sandbox_scale_up と規則があった頃の本数）。今の agent は報告しない
     ...(typeof legacy?.heavyCommandsAfterAgentScaleUp === "number"
       ? { sandbox_heavy_commands_after_agent_scale_up: ms(legacy.heavyCommandsAfterAgentScaleUp) }
       : {}),

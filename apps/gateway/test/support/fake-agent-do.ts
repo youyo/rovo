@@ -242,7 +242,7 @@ export class FakeAgentDO extends DurableObject {
     };
   }
 
-  /** 子の質問を再現する: question イベントを積み、phase を input_required にする。 */
+  /** ワーカーの質問を再現する: question イベントを積み、phase を input_required にする。 */
   ask(questionId: string, message: string, options: string[] = []): void {
     this.append("question", { question_id: questionId, message, options: JSON.stringify(options) });
     this.pendingQuestion = questionId;

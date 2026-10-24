@@ -375,7 +375,7 @@ describe("UserDO: Phase 1 の CREATING(agent_link なし)は照合で回収す�
     const id = await reserveOk(user, "k1");
     const task = taskStub(id);
     await task.ensureCreated(sampleInput(id, uid));
-    // Phase 1 で作られたタスクを再現する: 子エージェントとの配送状態が無い
+    // Phase 1 で作られたタスクを再現する: ワーカーとの配送状態が無い
     await runInDurableObject(task, (_i, s) => {
       s.storage.sql.exec("DELETE FROM agent_link");
     });

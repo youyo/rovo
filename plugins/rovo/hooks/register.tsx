@@ -52,6 +52,9 @@ const CLOSE_COMMAND = "close-console";
 const baseName = (command: string): string =>
   command.startsWith("rovo:") ? command.slice(5) : command;
 
+// 自分のコマンド（名前空間なし・rovo: 付き）。baseName と同じ範囲。
+const OWN_COMMANDS = /^(?:rovo:)?(?:create-task|open-console|close-console)$/;
+
 // ヘッダーに出すタスク一覧の最大行数（ペインが狭いことがある）。選んでいるタスクは必ず入れる。
 const LIST_MAX = 4;
 
@@ -460,7 +463,8 @@ export const register: Register = (on) => {
 
   // open-console / close-console は skill（中身なし）の実行を拾い、next を呼ばずに自分で答える。
   // create-task は next で本来の処理（モデルへ手順を渡す）に続ける。mod は task_start を呼ばない。
-  on("command.run", async ($, e, next) => {
+  // matcher で自分のコマンドだけに絞る（他の mod のコマンドの結果に rovo が混ざらないように）。
+  on("command.run", { command: OWN_COMMANDS }, async ($, e, next) => {
     const name = baseName(e.command);
     if (name === CLOSE_COMMAND) {
       try {

@@ -116,6 +116,10 @@ export interface Fixture {
   lsRemoteResults: Partial<ExecResult>[];
   /** push の呼び出し（argv） */
   pushCalls: string[][];
+  /** worker_review のレビューの段が読む差分（git diff --no-ext-diff の出力）。既定は空 */
+  reviewDiff: { value: string };
+  /** git diff --no-ext-diff の呼び出し（argv） */
+  reviewDiffCalls: string[][];
 }
 
 /** AgentDO を 1 つ用意する。sandbox は fake、モデルは台本、ツールはテスト用の小さな factory。 */
@@ -181,6 +185,8 @@ export function newFixture(
   const pushResults: Partial<ExecResult>[] = [];
   const lsRemoteResults: Partial<ExecResult>[] = [];
   const pushCalls: string[][] = [];
+  const reviewDiff = { value: "" };
+  const reviewDiffCalls: string[][] = [];
 
   const sandbox = new FakeSandbox(async (raw) => {
     // 自動の git の、ワーカーの gitconfig を切り離す上書きは読み飛ばす
@@ -226,6 +232,10 @@ export function newFixture(
         while (patchState.held) await new Promise((r) => setTimeout(r, 10));
       }
       return { stdout: patch.value };
+    }
+    if (a0 === "git" && a1 === "diff" && argv.includes("--no-ext-diff")) {
+      reviewDiffCalls.push(argv);
+      return { stdout: reviewDiff.value };
     }
     if (a0 === "git" && a1 === "diff" && argv.includes("--name-status")) {
       return { stdout: nameStatus.value };
@@ -348,6 +358,8 @@ export function newFixture(
     pushResults,
     lsRemoteResults,
     pushCalls,
+    reviewDiff,
+    reviewDiffCalls,
     usageGate: gateOf(usageState),
     submitGate: gateOf(submitState),
     askGate: gateOf(askState),

@@ -381,7 +381,7 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
     }
   });
 
-  it("task_start: worker_review は未対応（近日）、旧 merge_policy は廃止で、どちらも invalid_input", async () => {
+  it("task_start: review_model の無い worker_review、旧 merge_policy は廃止で、どちらも invalid_input", async () => {
     const user = newUser("rp");
     await addMember(user);
     await installApp();
@@ -394,7 +394,7 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
       expect(worker.isError).toBe(true);
       expect(bodyOf(worker)).toMatchObject({
         code: "invalid_input",
-        message: expect.stringContaining("not supported yet"),
+        message: expect.stringContaining("review_model"),
       });
       const old = await client.callTool({
         name: "task_start",

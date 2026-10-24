@@ -1416,7 +1416,9 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
     expect(props.merge_policy).toBeUndefined();
     expect(start?.description).toContain("review_policy");
     expect(start?.description).toContain("worker_review");
-    expect(start?.description).toContain("近日対応");
+    expect(start?.description).toContain("review_model");
+    expect(start?.description).toContain("review_fix_rounds");
+    expect(start?.description).not.toContain("近日対応");
     expect(start?.description).toContain("自動で Ready for review");
     expect(start?.description).toContain("変更に関係するテストだけ");
     // 古い説明（Draft のまま返り、merge_policy でマージの可否を決める）を残さない
@@ -1636,7 +1638,7 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     await t.client.close();
   });
 
-  it("task_start に不正な review_policy を渡すと invalid_input。worker_review は未対応（近日）として invalid_input", async () => {
+  it("task_start に不正な review_policy を渡すと invalid_input。worker_review は review_model が無ければ invalid_input", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const bad = await client.callTool({
@@ -1651,7 +1653,7 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     });
     expect(worker.isError).toBe(true);
     expect(body(worker).code).toBe("invalid_input");
-    expect(String(body(worker).message)).toContain("not supported yet");
+    expect(String(body(worker).message)).toContain("review_model");
     await client.close();
   });
 

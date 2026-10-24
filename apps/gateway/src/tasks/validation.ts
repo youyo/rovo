@@ -240,23 +240,27 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
           input.model ?? null,
           input.sandbox_instance ?? null,
           input.review_model ?? null,
-          (input.review_commands ?? []).map((c) => [c.argv, c.cwd ?? null, c.timeout_seconds ?? null]),
+          (input.review_commands ?? []).map((c) => [
+            c.argv,
+            c.cwd ?? null,
+            c.timeout_seconds ?? null,
+          ]),
           input.review_fix_rounds ?? 0,
         ]
       : input.sandbox_instance !== undefined
-      ? [
-          "v5",
-          ...fields,
-          commands,
-          input.review_policy,
-          input.model ?? null,
-          input.sandbox_instance,
-        ]
-      : input.model !== undefined
-        ? ["v4", ...fields, commands, input.review_policy, input.model]
-        : commands.length === 0
-          ? ["v1", ...fields]
-          : ["v2", ...fields, commands];
+        ? [
+            "v5",
+            ...fields,
+            commands,
+            input.review_policy,
+            input.model ?? null,
+            input.sandbox_instance,
+          ]
+        : input.model !== undefined
+          ? ["v4", ...fields, commands, input.review_policy, input.model]
+          : commands.length === 0
+            ? ["v1", ...fields]
+            : ["v2", ...fields, commands];
   const withBudget = input.budget_policy === "stop" ? ["v6", base] : base;
   const canonical = JSON.stringify(
     input.effort !== undefined ? ["v7", withBudget, input.effort] : withBudget,

@@ -49,7 +49,7 @@ function workerReviewAdvice(r: NonNullable<NextStepsInput["review"]>): string {
   if (r.failure !== undefined) {
     parts.push(
       r.failure === "budget"
-        ? "予算が足りず、レビューのモデルを呼ばなかった（warnings: review_skipped_budget）。PR にレビューのコメントは無いので、差分を自分で読んでレビューする（安いモデルの review_model や budget_policy: \"ask\" でやり直すこともできる）。"
+        ? '予算が足りず、レビューのモデルを呼ばなかった（warnings: review_skipped_budget）。PR にレビューのコメントは無いので、差分を自分で読んでレビューする（安いモデルの review_model や budget_policy: "ask" でやり直すこともできる）。'
         : `レビューのモデルが答えられず、レビューは得られなかった（warnings: review_failed。review.failure: ${r.failure}）。PR にレビューのコメントは無いので、差分を自分で読んでレビューする。`,
     );
   } else if (r.comment_url !== null) {

@@ -3625,9 +3625,11 @@ export class TaskDO extends DurableObject<Env> {
     if (this.getWorkerReview() && gl.pr_number !== null && !(await this.postReview(row, status))) {
       return;
     }
-    if (gl.pr_number !== null && gl.body_done === 0) {
+    // 投稿で warnings（review_comment_failed）が増えたかもしれないので、本文の更新には読み直した行を使う
+    const fresh = this.getGithub() ?? gl;
+    if (fresh.pr_number !== null && fresh.body_done === 0) {
       try {
-        await this.updatePullBody(row, gl, status);
+        await this.updatePullBody(row, fresh, status);
       } catch (e) {
         this.onGithubError(e, "finalize");
         // 本文の更新が済んでいない（再試行待ち）あいだは、失効しない

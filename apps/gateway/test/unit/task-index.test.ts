@@ -132,6 +132,18 @@ describe("outbox: 各更新点で revision が上がる", () => {
     expect(await sent(t.stub)).toBe(before + 2);
   });
 
+  it("完了時の自動の Ready でも上がり、Directory には pr_draft: false が届く", async () => {
+    const t = await runToCompleted({}, OWNER);
+    const dir = new FakeDirectory();
+    await useDirectory(t.stub, dir);
+    await t.stub.advance();
+    for (let i = 0; i < 4 && (await alarmOf(t.stub)) !== null; i++) {
+      await runDurableObjectAlarm(t.stub);
+    }
+    expect(dir.calls.at(-1)?.snapshot.pr_draft).toBe(false);
+    expect(await sent(t.stub)).toBe(await revision(t.stub));
+  });
+
   it("行の更新と revision の上昇は同じトランザクション（途中で例外なら、どちらも反映されない）", async () => {
     const t = await createTask({}, OWNER);
     await t.stub.advance();

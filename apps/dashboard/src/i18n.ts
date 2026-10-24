@@ -639,7 +639,8 @@ const ja: Record<Key, string> = {
   "fact.sandboxRuntime": "Sandbox の稼働",
   "fact.sandboxSize": "Sandbox の大きさ",
   "fact.created": "作成",
-  "log.readyNote": "完了して検証に通ったら、rovo が Ready にします。全体のテストとレビューは依頼した側（クライアント）が手元で行い、マージします。",
+  "log.readyNote":
+    "完了して検証に通ったら、rovo が Ready にします。全体のテストとレビューは依頼した側（クライアント）が手元で行い、マージします。",
   "screen.label": "進み具合のコンソール",
   "screen.older": "さらに読む",
   "screen.olderError": "古い手順を読み込めませんでした。",

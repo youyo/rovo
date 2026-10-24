@@ -49,7 +49,9 @@ export function stageOf(row: StageInput): TaskStage | ReviewStageName {
       case "posting":
         return "post";
       case "done":
-        return row.status === "COMPLETED" ? "done" : "fetch";
+        // COMPLETED 以外で "done" になるのは投稿の段を過ぎた（または飛ばした）場合。
+        // 索引の値だけでは実際にどこで止まったか分からないため、分かる最後の段 "post" を返す。
+        return row.status === "COMPLETED" ? "done" : "post";
       default:
         return "fetch";
     }

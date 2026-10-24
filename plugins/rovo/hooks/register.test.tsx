@@ -243,6 +243,34 @@ test("the hook returns next's result unchanged and passes the call through", asy
   expect(r.seen[0]).toMatchObject({ title: "Same", repository: "o/r", instructions: "do it" });
 });
 
+test("open-console and close-console are registered as immediate commands at session start", async ($, on) => {
+  const specs: { name: string; immediate?: true }[] = [];
+  rig(on);
+  on("command.register", (_, e) => {
+    specs.push(e as never);
+    return { value: { command: e.name } };
+  });
+  await startSession($);
+  const byName = new Map(specs.map((s) => [s.name, s]));
+  expect(byName.get("open-console")?.immediate).toBe(true);
+  expect(byName.get("close-console")?.immediate).toBe(true);
+  // create-task は Claude に頼む中身があるのでスキルのまま（mod は登録しない）。
+  expect(byName.has("create-task")).toBe(false);
+});
+
+test("the immediate commands open and close the pane without depending on a turn", async ($, on) => {
+  const r = rig(on);
+  on("command.register", (_, e) => ({ value: { command: e.name } }));
+  on("command.run", () => ({ text: "engine" }));
+  await startSession($);
+  const o = await $.command.run({ command: "open-console", args: "" } as never);
+  expect(r.opened).toEqual(["rovo"]);
+  expect(o.text).toContain("開き");
+  const c = await $.command.run({ command: "close-console", args: "" } as never);
+  expect(r.closed).toEqual(["rovo"]);
+  expect(c.text).toContain("閉じ");
+});
+
 test("the pane opens at each new task, not again for the same task, and by /rovo:open-console", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
@@ -289,7 +317,7 @@ test("a pane that is not drawn (narrow terminal) toasts how to open it", async (
 
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
 
-  expect(r.toasts).toEqual(["rovo のタスクを始めました。/rovo:open-console で開けます"]);
+  expect(r.toasts).toEqual(["rovo のタスクを始めました。/open-console で開けます"]);
 });
 
 test("a drawn pane gives no start toast", async ($, on) => {

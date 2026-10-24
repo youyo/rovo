@@ -691,7 +691,7 @@ const track = async (
   if (isNew) {
     // 新しいタスクを拾うたびに開く。狭い端末では待ちになるので、トーストで知らせる。
     const isPlaced = await openPane($);
-    if (!isPlaced) $.ui.toast("rovo のタスクを始めました。/rovo:open-console で開けます");
+    if (!isPlaced) $.ui.toast("rovo のタスクを始めました。/open-console で開けます");
   }
 };
 
@@ -818,6 +818,18 @@ const startOf = (m: PaneModel, s: { follow: boolean; offset: number }): number =
 
 export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
+    // ペインを開け閉めするだけなので、作業中のターンを待たせずその場で動かす（immediate）。
+    // run はターンの状態に依存しない。スキルだと作業中に打ったとき終わりを待つため mod のコマンドにする。
+    for (const [name, description] of [
+      [OPEN_COMMAND, "rovo のコンソールのペインを開く"],
+      [CLOSE_COMMAND, "rovo のコンソールのペインを閉じる"],
+    ] as const) {
+      try {
+        await $.command.register({ name, description, immediate: true });
+      } catch {
+        // 登録できなくてもほかの機能は動かす。
+      }
+    }
     try {
       const stored = coerceTasks(await $.store.get(STORE_KEY));
       await mutate($, () => stored);
@@ -850,7 +862,7 @@ export const register: Register = (on) => {
     return next(e);
   });
 
-  // open-console / close-console は skill（中身なし）の実行を拾い、next を呼ばずに自分で答える。
+  // open-console / close-console は mod 自身が登録した immediate のコマンドで、next を呼ばずに自分で答える。
   // create-task は next で本来の処理（モデルへ手順を渡す）に続ける。mod は task_start を呼ばない。
   // matcher で自分のコマンドだけに絞る（他の mod のコマンドの結果に rovo が混ざらないように）。
   on("command.run", { command: OWN_COMMANDS }, async ($, e, next) => {

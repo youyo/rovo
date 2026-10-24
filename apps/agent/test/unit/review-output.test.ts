@@ -64,18 +64,17 @@ describe("parseReviewResponse", () => {
     }
   });
 
-  it("差分に無いパスの指摘は捨てて、数を数える", () => {
+  it("must_fix の差分に無いパスの指摘は捨てて、数を数える（suggestions は落とさない。下の describe）", () => {
     const r = parseReviewResponse(
       json({
-        must_fix: [item(), item({ path: "src/elsewhere.ts" })],
-        suggestions: [item({ path: "/etc/passwd" })],
+        must_fix: [item(), item({ path: "src/elsewhere.ts" }), item({ path: "/etc/passwd" })],
+        suggestions: [],
       }),
       paths,
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.verdict.mustFix).toHaveLength(1);
-    expect(r.verdict.suggestions).toHaveLength(0);
     expect(r.droppedUnknownPath).toBe(2);
   });
 
@@ -112,5 +111,31 @@ describe("parseReviewResponse", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.verdict.mustFix[0]?.reason.length).toBeLessThanOrEqual(2000);
+  });
+});
+
+describe("parseReviewResponse: 差分の外のパス（道具で調べた根拠）", () => {
+  it("suggestions の差分の外のパスと、理由の文の中の path:line は落とさない。捨てるのは must_fix の path だけ", () => {
+    const r = parseReviewResponse(
+      json({
+        must_fix: [
+          item({ reason: "src/elsewhere.ts:12 re-exports it, so the import is used" }),
+          item({ path: "src/elsewhere.ts" }),
+        ],
+        suggestions: [
+          item({ path: "src/elsewhere.ts", line: 40, reason: "see src/other.ts:7 for the caller" }),
+          item({ path: "/etc/passwd", line: null }),
+        ],
+      }),
+      paths,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.verdict.mustFix).toHaveLength(1);
+    expect(r.verdict.mustFix[0]?.reason).toContain("src/elsewhere.ts:12");
+    expect(r.verdict.suggestions.map((s) => s.path)).toEqual(["src/elsewhere.ts", "/etc/passwd"]);
+    expect(r.verdict.suggestions[0]?.reason).toContain("src/other.ts:7");
+    // 数えるのは捨てた must_fix だけ
+    expect(r.droppedUnknownPath).toBe(1);
   });
 });

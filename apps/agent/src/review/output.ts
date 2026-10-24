@@ -32,7 +32,7 @@ export type ParsedReview =
   | {
       ok: true;
       verdict: ReviewVerdict;
-      /** 差分に無いパスを指していたので捨てた件数（警告にはしない） */
+      /** 差分に無いパスを指していたので捨てた must_fix の件数（警告にはしない） */
       droppedUnknownPath: number;
       /** 件数の上限で切った件数 */
       cut: { mustFix: number; suggestions: number };
@@ -81,7 +81,7 @@ function top(list: ReviewFinding[], max: number): { kept: ReviewFinding[]; cut: 
 }
 
 /**
- * 答えを検査する。paths は差分に現れるパス（それ以外を指す指摘は捨てる）。
+ * 答えを検査する。paths は差分に現れるパス（それ以外を指す must_fix は捨てる。suggestions は捨てない）。
  * JSON でなければ not_json、形が違えば schema_mismatch（呼び出し側が 1 回だけ再要求する）。
  */
 export function parseReviewResponse(text: string, paths: readonly string[]): ParsedReview {
@@ -113,12 +113,13 @@ export function parseReviewResponse(text: string, paths: readonly string[]): Par
       out.push(f);
     }
   }
+  // 捨てるのは must_fix の path だけ（差分に無いファイルへの指摘は、投稿の根拠にならない）。
+  // suggestions の path と、理由の文の中の path:line は、道具で調べた差分の外の根拠として落とさない
   const known = new Set(paths);
-  const inDiff = (f: ReviewFinding) => known.has(f.path);
-  const dropped =
-    mustFix.filter((f) => !inDiff(f)).length + suggestions.filter((f) => !inDiff(f)).length;
-  const m = top(mustFix.filter(inDiff), MAX_MUST_FIX);
-  const s = top(suggestions.filter(inDiff), MAX_SUGGESTIONS);
+  const keptMustFix = mustFix.filter((f) => known.has(f.path));
+  const dropped = mustFix.length - keptMustFix.length;
+  const m = top(keptMustFix, MAX_MUST_FIX);
+  const s = top(suggestions, MAX_SUGGESTIONS);
   return {
     ok: true,
     verdict: {

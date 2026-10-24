@@ -79,6 +79,8 @@ export interface Fixture {
     /** モデル呼び出しごとの system プロンプト（Pi が組み立てたもの） */
     systemTexts: string[];
     maxTokens: (number | undefined)[];
+    /** モデル呼び出しごとの、そのリクエストでモデルに渡った道具の名前 */
+    toolNames: string[][];
   };
   /** ask_parent の本体に入る直前（未回答の質問を記録する前）を止める */
   askGate: ExecGate;
@@ -148,6 +150,7 @@ export function newFixture(
     reasoning: [] as (string | undefined)[],
     systemTexts: [] as string[],
     maxTokens: [] as (number | undefined)[],
+    toolNames: [] as string[][],
   };
   const patch = { value: "From abc\n--- a\n+++ b\n" };
   const nameStatus = { value: "" };
@@ -316,6 +319,7 @@ export function newFixture(
       modelCalls.reasoning.push(ctx?.reasoning);
       modelCalls.systemTexts.push(ctx?.systemText ?? "");
       modelCalls.maxTokens.push(ctx?.maxTokens);
+      modelCalls.toolNames.push(ctx?.toolNames ?? []);
     },
   });
   return {

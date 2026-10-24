@@ -137,7 +137,7 @@ export interface ReviewResultDto {
   suggestionCount: number;
   commands: ReviewCommandResultDto[];
   commandsUnavailable: boolean;
-  /** 飛ばした理由の固定コード（model_error / model_rejected / timeout / budget / invalid_response） */
+  /** 飛ばした理由の固定コード（model_error / model_rejected / timeout / budget / invalid_response / tool_rounds_exceeded） */
   failure?: string;
   usage: ReviewUsageDto;
 }

@@ -54,7 +54,7 @@ const tailLines = (text: string) => {
 
 function findingLines(list: ReviewFinding[]): string[] {
   return list.map((f, i) => {
-    const where = `\`${f.path.replaceAll("`", "'")}${f.line !== null ? `:${f.line}` : ""}\``;
+    const where = `\`${f.path.replaceAll("`", "'").replace(/\s+/g, " ")}${f.line !== null ? `:${f.line}` : ""}\``;
     const change = f.change !== "" ? `\n   - 求める変更: ${plain(f.change)}` : "";
     return `${i + 1}. ${where}（${f.severity}）\n   - 理由: ${plain(f.reason)}${change}`;
   });

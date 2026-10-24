@@ -3,10 +3,13 @@ import {
   type Api,
   type AssistantMessage,
   createModels,
+  type JsonObject,
+  type Message,
   type Model,
   normalizeContext,
   type Provider,
   type ThinkingLevel,
+  type TSchema,
 } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
 import { type AuditFields, hostOfUrl, normalizeStructuredEvent } from "@rovo/audit";
@@ -93,11 +96,14 @@ import {
   REVIEW_MODEL_TIMEOUT_MS,
   REVIEW_STAGE_LIMIT_MS,
   type ReviewCommandsOutcome,
+  type ReviewMessage,
   type ReviewModelOutcome,
+  type ReviewTranscript,
   reviewWarnings,
   runReviewCommands,
   runReviewModel,
 } from "./review/stage";
+import { createReviewToolRunner, type ReviewToolDef, type ReviewToolRunner } from "./review/tools";
 import type {
   ExecResult,
   PeekedOutput,
@@ -112,7 +118,7 @@ import {
   scanUnpushedForSecrets,
 } from "./secret-scan";
 import { headChars, stripAnsi, tailChars } from "./text-util";
-import { createSandboxTools } from "./tools";
+import { createReadOnlySandboxTools, createSandboxTools } from "./tools";
 import { commitAuthorOf, createToolContext } from "./tools/context";
 import type { PushResult, SandboxToolsFactory } from "./tools/types";
 import { stripUntrustedMarkers, wrapUntrusted } from "./tools/untrusted";
@@ -262,6 +268,14 @@ interface StoredReview {
   result: ReviewResultDto;
   warnings: string[];
 }
+/** 予算の延長の質問で止まっている間の、往復の途中の会話（meta の review_convo。承認されたらここから続ける） */
+interface StoredReviewConvo {
+  transcript: ReviewTranscript;
+  /** それまでの道具の結果に、伏せ字にした秘密があった */
+  redacted: boolean;
+}
+/** review_convo を残す大きさの上限（DO の記録の 1 行の上限 2 MB に余裕を見る） */
+const REVIEW_CONVO_MAX_BYTES = 1_500_000;
 const ZERO_REVIEW_USAGE: ReviewUsageDto = {
   costUsd: 0,
   inputTokens: 0,
@@ -834,14 +848,16 @@ export class AgentDO extends DurableObject<Env> {
   private workspaceSpec(spec: StoredSpec): WorkspaceSpec {
     const rv = spec.kind === "review" ? spec.review : undefined;
     if (rv) {
-      // task_review: 作業ブランチは持たない。base リポジトリの refs/pull/<n>/head を取り出し、固定した head を checkout する
+      // task_review: 作業ブランチは持たない。base リポジトリの refs/pull/<n>/head を、review_commands の有無によらず常に取り出し、
+      // 固定した head を checkout する（レビューのモデルの読み取りの道具が調べる場所。レビューが終わるまで止めない）
       return {
         repository: spec.repository,
         baseSha: rv.headSha,
         branch: `pull/${rv.pullNumber}/head`,
         initialSha: rv.headSha,
         deadlineAt: this.deadlineAt(),
-        deps: spec.deps ?? null,
+        // review_commands が空なら依存の導入は要らない（読み取りの道具に依存は要らない）。取り出しだけにする
+        deps: rv.commands.length > 0 ? (spec.deps ?? null) : null,
         ...(spec.sandboxInstance !== undefined ? { instance: spec.sandboxInstance } : {}),
         checkout: { pullNumber: rv.pullNumber, sha: rv.headSha },
       };
@@ -1660,6 +1676,15 @@ export class AgentDO extends DurableObject<Env> {
     const deadlineAt = this.baseDeadline() + pausedTotal;
     // task_review の予算の延長: Pi に渡す run は無い。予算を 1 回分増やして、レビューの段の続き（モデルの呼び出し）に戻る
     if (this.spec()?.kind === "review" && q.kind === "budget_extension") {
+      // 質問の間に延ばした SandboxDO の期限を、待った分だけ延びた正確な値へ戻す（中断した Sandbox は次の道具の呼び出しで戻る）
+      if (this.sandboxBooted()) {
+        try {
+          await this.sandbox().setDeadline(deadlineAt);
+          this.recordPrivilegedOp("set_deadline");
+        } catch {
+          // 戻せなくても続ける（期限は長いまま。レビューが終わるか取消しで止める）
+        }
+      }
       this.store.tx(() => {
         this.store.setMeta("questions", {
           ...this.questions(),
@@ -2978,10 +3003,15 @@ export class AgentDO extends DurableObject<Env> {
   // ---- task_review（kind: review。docs/specs/worker-review.md）----
   //
   // Pi（ワーカーの LLM）は動かさない。レビューの段を AgentDO が直接進める:
+  //  0. PR の head を Sandbox に取り出す（review_commands の有無によらず常に。空なら依存の導入は省く）
   //  1. review_commands を PR の head で、失敗しても止めずに全部流す（結果は meta の review_commands に残す）
   //  2. レビューのモデルへの入力を組み立て、予算に収まるかを確かめる（足りなければ budget_policy に従う）
-  //  3. モデルを呼ぶ（ツールなし。失敗・形の違う答えは 1 回だけ再試行）。費用は meta の review_usage に積み、タスクの usage に入る
+  //  3. モデルを呼ぶ。読み取りの道具（read_file / list_files / search だけ）を、Sandbox の作業ツリーに対して往復させる
+  //     （往復は 20 回まで。各往復の前に使った額と残りを確かめる）。失敗・形の違う答えは 1 回だけ再試行。
+  //     費用は meta の review_usage に積み、タスクの usage に入る
   //  4. 検査済みの答えから投稿する本文を組み立て、結果（review_result）に残して終端にする。投稿は gateway（TaskDO）が行う
+  // Sandbox はレビューが終わる（finishReview）まで止めない。予算の延長の質問で止まる間は中断し（承認されたら次の道具の呼び出しで戻る）、
+  // stop・取消しで打ち切るときは終端として止める。
   // 途中で止まった（DO の再起動・回答待ち）ときは、tick / 回答から launch が呼ばれ、残っている続きから進む。
 
   /** レビューのモデルの費用の累計 */
@@ -3010,8 +3040,10 @@ export class AgentDO extends DurableObject<Env> {
     spec: StoredSpec,
     rv: ReviewSpec,
     cmds: ReviewCommandsOutcome,
+    toolsAvailable: boolean,
   ): ReviewInput {
     return buildReviewInput({
+      toolsAvailable,
       header: spec.instructions,
       title: rv.title,
       body: rv.body,
@@ -3045,9 +3077,19 @@ export class AgentDO extends DurableObject<Env> {
     }
     const startedAt = this.store.meta<number>("review_started_at") ?? this.now();
 
-    // 1. review_commands
+    // 0・1. PR の head を取り出し、review_commands を流す
     let cmds = this.store.meta<ReviewCommandsOutcome>("review_commands");
     if (!cmds) {
+      // review_commands が空でも、読み取りの道具が調べる場所として PR の head を取り出す（依存の導入は省く）。
+      // 取り出せなければ、道具なしの差分だけのレビューに進む（テストを頼まれていないので review_commands_unavailable にはしない）
+      if (rv.commands.length === 0) {
+        try {
+          await this.ensureSandboxReady();
+        } catch {
+          // 道具なしで進む（sandbox_booted が立たないので、下で toolsAvailable が false になる）
+        }
+        if (this.refused()) return;
+      }
       const outcome = await runReviewCommands(
         this.reviewRunner(),
         rv.commands,
@@ -3068,33 +3110,66 @@ export class AgentDO extends DurableObject<Env> {
           });
         }
       });
-      // コマンドが終われば、レビューに Sandbox は要らない（モデルを待つ間の費用を止める）
-      if (this.sandboxBooted()) await this.terminalStop("finished");
+      // Sandbox はここでは止めない（読み取りの道具が、レビューが終わるまで作業ツリーを読む）
     }
     if (this.refused()) return;
 
-    // 2. 入力と予算（モデルを呼ぶ前に、入力の上限と出力の上限から最大額を見積もる）
-    const input = this.reviewInputOf(spec, rv, cmds);
+    // 2. 入力と予算（モデルを呼ぶ前に、入力の上限と出力の上限から最大額を見積もる）。取り出せていれば読み取りの道具を使う
+    const toolsAvailable = this.sandboxBooted();
+    const tools = toolsAvailable ? this.reviewToolRunner() : undefined;
+    const input = this.reviewInputOf(spec, rv, cmds, toolsAvailable);
     const price = priceFor(this.modelId(rv.model), (this.env as AgentEnv).ENVIRONMENT === "test");
     const spent = await this.refreshUsage();
     const need = price
       ? estimateCallCostUsd(
           price,
-          this.reviewInputTokens(input.system, input.blocks),
+          this.reviewInputTokens(input.system, { blocks: input.blocks, tools: tools?.definitions }),
           REVIEW_MAX_OUTPUT_TOKENS,
         )
       : Number.POSITIVE_INFINITY;
     if (spent.costUsd + need > this.budgetLimitUsd(spec)) {
       if (await this.askReviewBudget(spec, spent.costUsd)) return;
-      await this.finishReview(rv, cmds, input, { ok: false, code: "budget" });
+      await this.finishReview(rv, cmds, input, { ok: false, code: "budget" }, tools);
       return;
     }
     if (this.refused()) return;
 
-    // 3. モデル
-    const outcome = await runReviewModel(this.reviewModelCaller(spec, rv.model), input);
+    // 3. モデル（道具の往復つき）。予算の延長のあとは、保存した会話の続きから進む
+    const saved = this.store.meta<StoredReviewConvo | null>("review_convo") ?? undefined;
+    const outcome = await runReviewModel(this.reviewModelCaller(spec, rv.model), input, {
+      ...(tools ? { tools } : {}),
+      ...(saved ? { resume: saved.transcript } : {}),
+    });
     if (this.refused()) return;
-    await this.finishReview(rv, cmds, input, outcome);
+    // 往復の途中で予算が足りなくなった: ask なら会話を残して質問し（Sandbox は中断）、承認のあとに続ける。stop なら打ち切る
+    if (!outcome.ok && outcome.code === "budget" && outcome.resume) {
+      const now = await this.refreshUsage();
+      this.saveReviewConvo(outcome.resume, saved?.redacted === true || tools?.redacted() === true);
+      if (await this.askReviewBudget(spec, now.costUsd)) return;
+      this.store.setMeta("review_convo", null);
+    }
+    await this.finishReview(rv, cmds, input, outcome, tools, saved?.redacted === true);
+  }
+
+  /** 読み取りの道具（read_file / list_files / search だけ）。ワーカーの道具を流用し、Sandbox の作業ツリー（PR の head）を読む */
+  private reviewToolRunner(): ReviewToolRunner {
+    const tools = createReadOnlySandboxTools(
+      this.lazySandbox(),
+      createToolContext(WORKSPACE_ROOT, () => this.deadlineAt(), {
+        commitAuthor: () => this.spec()?.commitAuthor,
+      }),
+    );
+    return createReviewToolRunner(tools as unknown as Parameters<typeof createReviewToolRunner>[0]);
+  }
+
+  /**
+   * 予算の延長の質問の前に、往復の途中の会話を残す（承認されたら続ける）。DO の記録の上限に収まらない大きさなら残さない
+   * （そのときは、承認のあとに会話を最初から組み直す。使った費用は数え済み）
+   */
+  private saveReviewConvo(transcript: ReviewTranscript, redacted: boolean): void {
+    const value: StoredReviewConvo = { transcript, redacted };
+    const size = new TextEncoder().encode(JSON.stringify(value)).length;
+    this.store.setMeta("review_convo", size <= REVIEW_CONVO_MAX_BYTES ? value : null);
   }
 
   /** review_commands を Sandbox で流す口（PR の head を取り出した作業ツリーで、検証コマンドと同じ制限で流す） */
@@ -3123,12 +3198,13 @@ export class AgentDO extends DurableObject<Env> {
    */
   private reviewModelCaller(spec: StoredSpec, rovoModel: string): ModelCaller {
     return {
-      call: async ({ system, messages }) => {
+      call: async ({ system, messages, tools }) => {
         const env = this.env as AgentEnv;
         const effective = this.modelId(rovoModel);
         const price = priceFor(effective, env.ENVIRONMENT === "test");
         if (!price) return { ok: false, code: "model_rejected" };
-        const inputTokens = this.reviewInputTokens(system, messages);
+        // 各往復の前に、それまでに使った額と残りを確かめる（残りに出力の上限が収まらなければ budget）
+        const inputTokens = this.reviewInputTokens(system, { messages, tools });
         const spent = (await this.refreshUsage()).costUsd;
         const fits = maxOutputTokensWithin(price, inputTokens, this.budgetLimitUsd(spec) - spent);
         if (fits < REVIEW_MAX_OUTPUT_TOKENS) return { ok: false, code: "budget" };
@@ -3147,24 +3223,59 @@ export class AgentDO extends DurableObject<Env> {
         };
         const context = normalizeContext({
           systemPrompt: system,
-          messages: messages.map((m) =>
-            m.role === "user"
-              ? {
+          ...(tools
+            ? {
+                tools: tools.map((t: ReviewToolDef) => ({
+                  name: t.name,
+                  description: t.description,
+                  parameters: t.parameters as TSchema,
+                })),
+              }
+            : {}),
+          messages: messages.flatMap((m: ReviewMessage): Message[] => {
+            if (m.role === "user") {
+              return [
+                {
                   role: "user" as const,
                   content: m.blocks.map((text) => ({ type: "text" as const, text })),
                   timestamp: now,
-                }
-              : {
-                  role: "assistant" as const,
-                  content: [{ type: "text" as const, text: m.text }],
-                  api: model.api,
-                  provider: model.provider,
-                  model: model.id,
-                  usage: zero,
-                  stopReason: "stop" as const,
-                  timestamp: now,
                 },
-          ),
+              ];
+            }
+            if (m.role === "tool") {
+              return m.results.map((r) => ({
+                role: "toolResult" as const,
+                toolCallId: r.id,
+                toolName: r.name,
+                content: [{ type: "text" as const, text: r.text }],
+                isError: r.isError,
+                timestamp: now,
+              }));
+            }
+            const calls = m.toolCalls ?? [];
+            return [
+              {
+                role: "assistant" as const,
+                content: [
+                  ...(m.text !== "" || calls.length === 0
+                    ? [{ type: "text" as const, text: m.text }]
+                    : []),
+                  ...calls.map((c) => ({
+                    type: "toolCall" as const,
+                    id: c.id,
+                    name: c.name,
+                    arguments: c.arguments as JsonObject,
+                  })),
+                ],
+                api: model.api,
+                provider: model.provider,
+                model: model.id,
+                usage: zero,
+                stopReason: calls.length > 0 ? ("toolUse" as const) : ("stop" as const),
+                timestamp: now,
+              },
+            ];
+          }),
         });
         const reasoning = this.reasoningOf(rovoModel);
         const guarded = guardProvider(access.provider, async () => ({
@@ -3228,22 +3339,63 @@ export class AgentDO extends DurableObject<Env> {
         );
         await this.refreshUsage().catch(() => undefined);
         const text = message.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
-        return { ok: true, text, truncated: message.stopReason === "length" };
+        const toolCalls = tools
+          ? message.content.flatMap((c) =>
+              c.type === "toolCall" ? [{ id: c.id, name: c.name, arguments: c.arguments }] : [],
+            )
+          : [];
+        return {
+          ok: true,
+          text,
+          truncated: message.stopReason === "length",
+          ...(toolCalls.length > 0 ? { toolCalls } : {}),
+        };
       },
     };
   }
 
-  /** 予算が足りないとき、budget_policy が ask なら延長を聞く（聞いたら true）。Sandbox は止めてある（コマンドは済んでいる） */
+  /**
+   * 予算が足りないとき、budget_policy が ask なら延長を聞く（聞いたら true）。質問で止まっている間は Sandbox を中断する
+   * （道具の往復の途中でも。承認されたら次の道具の呼び出しで戻る）。
+   */
   private async askReviewBudget(spec: StoredSpec, spentUsd: number): Promise<boolean> {
     if (spec.budgetPolicy !== "ask") return false;
     const used = this.budgetExtensions();
     if (used >= MAX_BUDGET_EXTENSIONS) return false;
     if (this.refused() || this.openQuestionId()) return false;
     try {
+      await this.suspendSandboxForReview();
+      if (this.refused()) return false;
       await this.recordBudgetQuestion(spec, spentUsd, used);
       return true;
     } catch {
       return this.store.phase() === "input_required";
+    }
+  }
+
+  /**
+   * 質問で止まっている間、Sandbox を中断する。作業ツリーは読み取りだけで変更が無いので、戻せなければ image から取り出し直すだけで何も失わない。
+   * 回答待ちの間 SandboxDO の期限が切れないよう、先に回答待ちの上限まで延ばす。失敗しても質問は続ける（止められなくても待てる）。
+   */
+  private async suspendSandboxForReview(): Promise<void> {
+    if (!this.sandboxBooted()) return;
+    const sb = this.sandbox();
+    try {
+      const sandboxDeadline = Math.min(
+        this.deadlineAt() + Math.max(0, MAX_INPUT_WAIT_MS - this.pausedTotal()),
+        this.baseDeadline() + MAX_INPUT_WAIT_MS,
+      );
+      await sb.extendDeadline(sandboxDeadline);
+      this.recordPrivilegedOp("extend_deadline");
+      if (!sb.suspend) return;
+      await this.raceTimeout(
+        sb.suspend({ allowReclone: true }).then(() => {
+          this.recordPrivilegedOp("suspend");
+        }),
+        BUDGET_SUSPEND_WAIT_MS,
+      );
+    } catch {
+      // 中断できなくても待てる（コンテナは動いたまま）
     }
   }
 
@@ -3253,6 +3405,8 @@ export class AgentDO extends DurableObject<Env> {
     cmds: ReviewCommandsOutcome,
     input: ReviewInput,
     outcome: ReviewModelOutcome,
+    tools?: ReviewToolRunner,
+    toolsRedactedBefore = false,
   ): Promise<void> {
     const built = outcome.ok
       ? buildReviewBody({
@@ -3282,13 +3436,18 @@ export class AgentDO extends DurableObject<Env> {
       warnings: reviewWarnings({
         unavailable: cmds.unavailable,
         timedOut: cmds.timedOut,
-        redacted: input.redacted || built?.redacted === true,
+        redacted:
+          input.redacted ||
+          built?.redacted === true ||
+          toolsRedactedBefore ||
+          tools?.redacted() === true,
         failure,
       }),
     };
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
       this.store.setMeta("review_result", stored);
+      this.store.setMeta("review_convo", null);
     });
     if (failure === "budget") {
       this.requestStop("budget_exceeded");

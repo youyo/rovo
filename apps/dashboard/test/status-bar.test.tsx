@@ -129,10 +129,24 @@ describe("ステータスバー（tmux 風。下に 1 行、狭いと折り返�
     expect(parts.length).toBe(2);
   });
 
-  it("Cloudflare の要約とクレジット残高", () => {
+  it("Cloudflare: Workers の件数はバーに出さず、エラーがあるときだけ「Workers のエラー M 件」を出す。クレジット残高は出す", () => {
     const c = mount();
-    expect(item(c, "cloudflare")?.textContent).toBe("Workers 2,489 件  エラー 15 件");
+    expect(item(c, "cloudflare")?.textContent).toBe("Workers のエラー 15 件");
     expect(item(c, "credit")?.textContent).toBe("クレジット $954.63");
+    expect(c.querySelector(".statusbar")?.textContent).not.toContain("2,489");
+  });
+
+  it("Workers のエラーが 0 件なら、バーに Workers に関する何も出さない（件数も出さない）", () => {
+    const c = mount(overviewFixture, {
+      phase: "ready",
+      data: { ...cfData, workers: { ok: true, value: { period, requests: 2489, errors: 0 } } },
+    });
+    expect(item(c, "cloudflare")).toBeNull();
+    expect(c.querySelector(".statusbar")?.textContent).not.toContain("Workers");
+    expect(c.querySelector(".statusbar")?.textContent).not.toContain("2,489");
+    expect(item(c, "credit")?.textContent).toBe("クレジット $954.63");
+    // 件数は内訳の Cloudflare の欄に残る
+    expect(c.querySelector(".drawer [data-cloudflare]")?.textContent).toContain("2,489");
   });
 
   it("Cloudflare の取得に失敗したら、取得できない旨を言葉で出す（値は作らない）", () => {
@@ -144,12 +158,15 @@ describe("ステータスバー（tmux 風。下に 1 行、狭いと折り返�
     expect(item(loading, "cloudflare")?.textContent).toContain("読み込み中");
   });
 
-  it("項目ごとに取れなかった理由の言葉が出る（Workers だけ取れない場合）", () => {
+  it("Workers だけ取れない場合、バーには出さない（理由は内訳の Cloudflare の欄に出る）", () => {
     const c = mount(overviewFixture, {
       phase: "ready",
       data: { ...cfData, workers: { ok: false, reason: "forbidden" } },
     });
-    expect(item(c, "cloudflare")?.textContent).toContain("取得できない（トークンの権限を確認）");
+    expect(item(c, "cloudflare")).toBeNull();
+    expect(c.querySelector(".drawer [data-cloudflare]")?.textContent).toContain(
+      "取得できない（トークンの権限を確認）",
+    );
   });
 });
 

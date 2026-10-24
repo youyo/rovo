@@ -217,7 +217,7 @@ const en = {
   "bar.modelsLoading": "Models Loading…",
   "bar.cloudflare": "Cloudflare {text}",
   "bar.cloudflareFailed": "unavailable",
-  "bar.workers": "Workers {text}",
+  "bar.workersErrors": "Workers errors {errors}",
   "bar.credit": "Credit {text}",
   "bar.meter": "Usage this month {spent} / {limit}",
   "drawer.updated":
@@ -540,7 +540,7 @@ const ja: Record<Key, string> = {
   "bar.modelsLoading": "モデル別 読み込み中…",
   "bar.cloudflare": "Cloudflare {text}",
   "bar.cloudflareFailed": "取得できませんでした",
-  "bar.workers": "Workers {text}",
+  "bar.workersErrors": "Workers のエラー {errors} 件",
   "bar.credit": "クレジット {text}",
   "bar.meter": "今月の使用量 {spent} / {limit}",
   "drawer.updated":

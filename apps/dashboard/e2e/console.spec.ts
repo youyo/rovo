@@ -85,7 +85,8 @@ test("(13) ステータスバーに今月の自分・全員・モデル別・Clo
   await expect(bar.locator('[data-sb="budget-me"]')).toContainText("今月");
   await expect(bar.locator('[data-sb="budget-left"]')).toContainText("残り");
   await expect(bar.locator('[data-sb="budget-all"]')).toContainText("全員");
-  await expect(bar.locator('[data-sb="cloudflare"]')).toBeVisible();
+  // Workers の件数はバーに出さない（内訳の Cloudflare の欄だけ）。エラーが 1 件以上のときだけ文言で出る
+  await expect(bar).not.toContainText(/Workers [\d,]+ 件/);
 
   const button = page.getByRole("button", { name: "内訳" });
   const drawer = page.locator(".drawer");

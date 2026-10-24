@@ -1165,9 +1165,18 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - 出力の形に効く設定（`core.quotepath` など）を `-c` で固定する。
   - `origin` を使わず、リポジトリの URL を直接指定して `ls-remote` する。`-C /` でリポジトリの外から呼ぶ。
   - `baseSha` は、`ls-remote` で得た SHA の祖先のときだけ除外に使う。
+- 子が bash で直接 `git push` する経路は、push の許可証で塞ぐ。
+  - 自動の push（`git_commit`・WIP・完了時の同期の 3 か所）は、秘密の検査を通した commit の SHA を確定してから、`<sha>:refs/heads/<branch>` の形で送る。このとき `ExecOptions.pushPermit`（`{ ref, newSha }`）を渡す。
+  - SandboxDO は、その exec の間だけ（serial の中で実行の直前に置き、`finally` で必ず消す）許可証を storage に預かる。期限は exec の時間切れ + 猶予。terminate でも消える。
+  - OutboundGateway は、receive-pack のコマンド部を検証した後・認証を付ける前に、`readPushPermit`（SandboxDO の RPC）で許可証を読み、無い・ref が違う・コマンドの `newSha` が違うときは 403（`push_not_permitted`）で拒否し、違反として記録する。fetch 系（upload-pack）と receive-pack の advert（`info/refs`）は今までどおり通す（本文を送れず害が無い）。
+  - 許可証を渡せるのは自動の push の exec だけ。子の bash ツール（`origin: "agent_command"`）と検証コマンド（`origin: "verification"`）には渡さない。
+- 自動の git を子の設定から切り離す。子は root で、`/root/.gitconfig`・`/etc/gitconfig`・`/workspace/.git/config` を書き換えられるため。
+  - 対象は、自動の push と、その前後の `ls-remote`・`rev-parse`、push 前の検査の git（`ls-remote` を含む）。
+  - env で `GIT_CONFIG_GLOBAL=/dev/null`・`GIT_CONFIG_NOSYSTEM=1` を渡し、global と system の設定を読ませない（`safe.directory` は `BASE_ENV` の `GIT_CONFIG_COUNT` 側に残る）。
+  - `git` の直後に `-c core.hooksPath=/dev/null -c credential.helper=` を付け、子が置いた pre-push フックと credential helper を使わない（`-c` は `.git/config` より優先する）。
+  - `push` と `ls-remote` は `origin` ではなくリポジトリの URL（`https://github.com/<owner>/<name>.git`）を直接指定する。`remote.origin.url`・`remote.origin.pushurl` に左右されない。`url.<base>.insteadOf` は打ち消せない（同じ長さなら先に書かれた設定が勝つ）ので上書きしない。書き換えられても、行き先は gateway の判定と許可証が止めるので、push が失敗するだけで、秘密の検査を通らない push にはならない。
 - 既知の課題（今回の対象外）:
-  - 子が bash で自分で `git push` する経路は、この検査を通らない。ただし外向きの gateway が認証を足すのはタスクのリポジトリだけなので、ほかのリポジトリへは送れない。
-  - 子は Sandbox の `~/.gitconfig`・システムの設定、または `/` に作った `.git` で、`ls-remote` の行き先や設定を変えられる。
+  - 子が `/` などに作った `.git` や、`PATH` の差し替えで、子のコマンドの中の git の振る舞いを変えることは止めない（自動の git はこの影響を受けない）。
   - 本物の git を使うテストは `apps/agent/vitest.node.config.ts`（`mise run test:unit:agent-git`）で流れる。秘密の検査を変えるときは、rovo の検証コマンドに `pnpm exec vitest run --config vitest.node.config.ts`（`apps/agent` で実行）も入れる。
 
 ### 15.8 Phase 7: End-to-End Test と公開の準備（2026-10-19 決定）

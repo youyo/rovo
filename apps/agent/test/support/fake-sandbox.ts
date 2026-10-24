@@ -7,6 +7,15 @@ import type {
   WorkspaceSpec,
 } from "../../src/sandbox-port";
 
+/**
+ * 自動の git（push・ls-remote・rev-parse）が先頭に付ける、子の gitconfig を切り離す上書き（src/git-isolation.ts の GIT_ISOLATION_ARGS）を
+ * 取り除いた argv。ハンドラが `argv[1]` をサブコマンドとして読む台本で使う。
+ */
+export function stripGitIsolation(argv: string[]): string[] {
+  const head = ["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper="];
+  return head.every((h, i) => argv[i] === h) ? ["git", ...argv.slice(head.length)] : argv;
+}
+
 export type ExecHandler = (
   argv: string[],
   options: ExecOptions,

@@ -509,25 +509,60 @@ describe("git_commit の push（チェックポイント）", () => {
     };
   const pushes = (sandbox: FakeSandbox) => sandbox.calls.filter((c) => c.argv.includes("push"));
 
-  it("commit が成功したら、作業ブランチへ push する（HEAD:refs/heads/<branch>）。結果は onPush に渡す", async () => {
+  it("commit が成功したら、作業ブランチへ <sha>:refs/heads/<branch> を push する。結果は onPush に渡す", async () => {
     const results: unknown[] = [];
     const { sandbox, run } = setup(handler(), {
       branch: "agent/task-t1",
+      repository: () => "acme/hello",
       onPush: async (r) => void results.push(r),
     });
     const r = await run("git_commit", { message: "m" });
     expect(r.isError).toBe(false);
     expect(r.text).toContain(SHA);
+    // push は子の gitconfig（フック・credential helper）の影響を受けない形で、リポジトリの URL へ直接送る
     expect(pushes(sandbox).map((c) => c.argv)).toEqual([
-      ["git", "push", "origin", "HEAD:refs/heads/agent/task-t1"],
+      [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "credential.helper=",
+        "push",
+        "https://github.com/acme/hello.git",
+        `${SHA}:refs/heads/agent/task-t1`,
+      ],
     ]);
     expect(pushes(sandbox)[0]?.options.cwd).toBe("/workspace");
+    expect(pushes(sandbox)[0]?.options.env).toMatchObject({
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    });
+    // 許可証は、push する commit（ref と newSha）だけ
+    expect(pushes(sandbox)[0]?.options.pushPermit).toEqual({
+      ref: "refs/heads/agent/task-t1",
+      newSha: SHA,
+    });
     // push は commit の後
     const order = sandbox.calls.map((c) =>
       c.argv.includes("push") ? "push" : c.argv.includes("commit") ? "commit" : "",
     );
     expect(order.indexOf("commit")).toBeLessThan(order.indexOf("push"));
     expect(results).toEqual([{ ok: true, sha: SHA }]);
+  });
+
+  it("許可証を渡すのは push の exec だけ。git_commit の他の exec と bash ツールには渡さない", async () => {
+    const { sandbox, run } = setup(handler(), {
+      branch: "agent/task-t1",
+      repository: () => "acme/hello",
+      onPush: async () => {},
+    });
+    await run("git_commit", { message: "m" });
+    await run("bash", { command: "git push origin HEAD" });
+    const withPermit = sandbox.calls.filter((c) => c.options.pushPermit !== undefined);
+    expect(withPermit.map((c) => c.argv.includes("push"))).toEqual([true]);
+    const bash = sandbox.calls.filter((c) => c.options.origin === "agent_command");
+    expect(bash).toHaveLength(1);
+    expect(bash[0]?.options.pushPermit).toBeUndefined();
   });
 
   it("push が失敗しても git_commit は成功のまま。失敗は onPush に渡し、結果の文面にも出す", async () => {

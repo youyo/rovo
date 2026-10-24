@@ -192,6 +192,13 @@ const GATEWAY_CASES: Record<string, Case> = {
     status: 403,
     dest: "github",
   },
+  push_not_permitted: {
+    // コマンドは作業ブランチ向きで正しいが、SandboxDO に push の許可証が無い（子の bash の直接の git push）
+    request: () => recv(streamOf(cmd())),
+    deps: { readPushPermit: async () => undefined },
+    status: 403,
+    dest: "github",
+  },
   read_error: { request: () => recv(erroring()), status: 403, dest: "github" },
 };
 
@@ -248,6 +255,7 @@ function setup(over: Partial<OutboundDeps> = {}) {
   const deps: OutboundDeps = {
     props: { repo: { owner: "acme", name: "hello" }, task: "agent/task-t1", taskId: "t1" },
     readCredential: async () => CRED,
+    readPushPermit: async () => ({ ref: REF, newSha: B }),
     fetchUpstream: async (url) => {
       upstream.push(url);
       return new Response("upstream-ok");

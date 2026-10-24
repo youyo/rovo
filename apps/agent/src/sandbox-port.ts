@@ -14,6 +14,18 @@ export interface ExecOptions {
    * 無ければ Sandbox 自身の内部の exec（git・ファイルの確認など）として、判断しない。コマンドの重さの規則ではなく、誰のコマンドかの区別。
    */
   origin?: "agent_command" | "verification";
+  /**
+   * 自動の push（git_commit・WIP・完了時の同期）の exec にだけ付ける許可証。SandboxDO は exec の間だけ（終わったら必ず）これを
+   * 預かり、OutboundGateway は receive-pack の ref と newSha がこれと一致するときだけ認証を付けて転送する。
+   * 子の bash（agent_command）と検証コマンド（verification）には渡さない（渡せる経路を作らない）。
+   */
+  pushPermit?: PushPermit;
+}
+
+/** push を許す更新 1 件。ref は `refs/heads/<branch>`、newSha は送る commit の SHA（40 桁の 16 進）。 */
+export interface PushPermit {
+  ref: string;
+  newSha: string;
 }
 
 export interface ExecResult {

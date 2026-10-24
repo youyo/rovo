@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides, setAgentTestOverrides } from "../../src/agent/deps";
 import { type FakeFile, fakeGitRange } from "../support/fake-git-range";
-import { FakeSandbox } from "../support/fake-sandbox";
+import { FakeSandbox, stripGitIsolation } from "../support/fake-sandbox";
 import {
   allEvents,
   call,
@@ -24,7 +24,8 @@ const file = (path: string, ...lines: string[]): FakeFile => ({ path, lines });
 /** 本番のツール配線 + git のモデル。完了のための git（status / ls-remote / format-patch）も答える */
 function prod(git: ReturnType<typeof fakeGitRange>, afterCommit?: (n: number) => void) {
   let commits = 0;
-  return new FakeSandbox((argv, o) => {
+  return new FakeSandbox((raw, o) => {
+    const argv = stripGitIsolation(raw);
     if (argv[0] !== "git") return {};
     if (argv.includes("commit")) {
       const r = git.handler(argv, o);

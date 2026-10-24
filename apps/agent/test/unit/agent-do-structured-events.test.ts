@@ -2,7 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides, setAgentTestOverrides } from "../../src/agent/deps";
 import type { WebPort } from "../../src/tools/web";
-import { FakeSandbox } from "../support/fake-sandbox";
+import { FakeSandbox, stripGitIsolation } from "../support/fake-sandbox";
 import {
   allEvents,
   call,
@@ -46,7 +46,8 @@ const web: WebPort = {
 // toolsFactory を差し替えず、本番の配線（createSandboxTools → AgentDO.emit）で動かす
 describe("AgentDO: 構造化イベント（D14）", () => {
   it("bash / write_file / edit_file / git_commit / web_fetch が command / edit / commit / web を積み、どこにも秘密が平文で残らない", async () => {
-    const sandbox = new FakeSandbox((argv) => {
+    const sandbox = new FakeSandbox((raw) => {
+      const argv = stripGitIsolation(raw);
       if (argv[0] === "git" && argv[1] === "diff") return { exitCode: 1 };
       if (argv[0] === "git" && argv[1] === "rev-parse") return { stdout: `${SHA}\n` };
       if (argv[0] === "git" && argv[1] === "diff-tree") return { stdout: "a.txt\nb.txt\n" };
@@ -112,7 +113,8 @@ describe("AgentDO: 構造化イベント（D14）", () => {
   });
 
   it("bash の実行中の途中の出力は command_progress として積まれ（既定の間隔 4 秒）、秘密は平文で残らない。command より前", async () => {
-    const sandbox = new FakeSandbox(async (argv) => {
+    const sandbox = new FakeSandbox(async (raw) => {
+      const argv = stripGitIsolation(raw);
       if (argv[0] === "git" && argv[1] === "diff") return { exitCode: 1 };
       if (argv[0] === "git" && argv[1] === "rev-parse") return { stdout: `${SHA}\n` };
       if (argv[0] === "git" && argv[1] === "diff-tree") return { stdout: "a.txt\n" };

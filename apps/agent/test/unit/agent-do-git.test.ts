@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides, setAgentTestOverrides } from "../../src/agent/deps";
-import { FakeSandbox } from "../support/fake-sandbox";
+import { FakeSandbox, stripGitIsolation } from "../support/fake-sandbox";
 import {
   allEvents,
   boot,
@@ -195,23 +195,43 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     fx.remote.sha = D; // モデルが履歴を書き換えて、リモートの先頭が別の commit になっている
     await fx.stub.start(makeSpec("sync-ok"));
     expect(await waitForTerminal(fx)).toBe("completed");
-    const git = fx.sandbox.calls
-      .map((c) => c.argv)
-      .filter(
-        (a) =>
-          a[0] === "git" && (a[1] === "push" || (a[1] === "ls-remote" && !a.includes("--heads"))),
+    const calls = fx.sandbox.calls.filter((c) => {
+      const a = stripGitIsolation(c.argv);
+      return (
+        a[0] === "git" && (a[1] === "push" || (a[1] === "ls-remote" && !a.includes("--heads")))
       );
-    expect(git).toEqual([
-      ["git", "ls-remote", "origin", REF("sync-ok")],
+    });
+    // ls-remote も push も、子の gitconfig から切り離し（-c と env）、origin ではなくリポジトリの URL へ直接送る
+    const isolation = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper="];
+    const URL = "https://github.com/octo/repo.git";
+    expect(calls.map((c) => c.argv)).toEqual([
+      ["git", ...isolation, "ls-remote", URL, REF("sync-ok")],
       [
         "git",
+        ...isolation,
         "push",
         `--force-with-lease=${REF("sync-ok")}:${D}`,
-        "origin",
+        URL,
         `c0ffee:${REF("sync-ok")}`,
       ],
-      ["git", "ls-remote", "origin", REF("sync-ok")],
+      ["git", ...isolation, "ls-remote", URL, REF("sync-ok")],
     ]);
+    for (const c of calls) {
+      expect(c.options.env).toMatchObject({
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+      });
+    }
+    // 許可証は push の exec だけ（ref と、同期する SHA）。ls-remote には付けない
+    expect(calls.map((c) => c.options.pushPermit)).toEqual([
+      undefined,
+      { ref: REF("sync-ok"), newSha: "c0ffee" },
+      undefined,
+    ]);
+    // 同期のとき以外（子の bash・検証コマンド）の exec には、許可証が付かない
+    expect(
+      fx.sandbox.calls.filter((c) => c.options.pushPermit !== undefined && c.argv[0] !== "git"),
+    ).toHaveLength(0);
     expect(fx.remote.sha).toBe("c0ffee");
     const r = done(await fx.stub.getResult());
     expect(r.status).toBe("completed");
@@ -251,7 +271,7 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(fx.pushCalls).toHaveLength(3);
     const lsRemotes = fx.sandbox.calls.filter(
-      (c) => c.argv[1] === "ls-remote" && !c.argv.includes("--heads"),
+      (c) => stripGitIsolation(c.argv)[1] === "ls-remote" && !c.argv.includes("--heads"),
     );
     expect(lsRemotes.length).toBeGreaterThanOrEqual(4); // 試行ごとに読み直し + 最後の確認
     const r = done(await fx.stub.getResult());
@@ -340,7 +360,7 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     await fx.stub.start(makeSpec("sync-vfail"));
     expect(await waitForTerminal(fx)).toBe("failed");
     expect(fx.pushCalls).toHaveLength(0);
-    expect(fx.sandbox.calls.some((c) => c.argv[1] === "ls-remote")).toBe(false);
+    expect(fx.sandbox.calls.some((c) => stripGitIsolation(c.argv)[1] === "ls-remote")).toBe(false);
     const r = done(await fx.stub.getResult());
     expect("pushedSha" in r ? r.pushedSha : undefined).toBeUndefined();
   });
@@ -368,7 +388,9 @@ describe("完了時の作業ブランチの同期（検証済みの SHA に揃�
     await fx.stub.cancel();
     fx.gate.release();
     await waitForPhase(fx, "cancelled");
-    expect(fx.sandbox.calls.some((c) => c.argv[1] === "format-patch")).toBe(false);
+    expect(fx.sandbox.calls.some((c) => stripGitIsolation(c.argv)[1] === "format-patch")).toBe(
+      false,
+    );
     const r = done(await fx.stub.getResult());
     expect(r.patch).toBeUndefined();
     expect(r.diffstat).toBeUndefined();
@@ -379,14 +401,15 @@ describe("git_commit のたびの push（本番のツール配線）", () => {
   const SHA = "c".repeat(40);
   function prodSandbox(push: () => { exitCode?: number; stderr?: string }, onPatch?: () => void) {
     const pushes: string[][] = [];
-    const sandbox = new FakeSandbox((argv) => {
+    const sandbox = new FakeSandbox((raw) => {
+      const argv = stripGitIsolation(raw);
       const [a, b] = argv;
       if (a !== "git") return {};
       if (b === "diff" && argv.includes("--cached")) return { exitCode: 1 };
       if (b === "rev-parse") return { stdout: `${SHA}\n` };
       if (b === "status") return { stdout: "" };
       if (b === "push") {
-        pushes.push(argv);
+        pushes.push(raw);
         return push();
       }
       if (b === "ls-remote") return { stdout: `${SHA}\t${argv[3]}\n` };
@@ -414,10 +437,17 @@ describe("git_commit のたびの push（本番のツール配線）", () => {
       makeSpec("ck-push", { verificationCommands: [], deadlineAt: Date.now() + 3_600_000 }),
     );
     expect(await waitForTerminal(asFx(stub))).toBe("completed");
-    expect(pushes.slice(0, 2)).toEqual([
-      ["git", "push", "origin", "HEAD:refs/heads/agent/task-ck-push"],
-      ["git", "push", "origin", "HEAD:refs/heads/agent/task-ck-push"],
-    ]);
+    const push = [
+      "git",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "credential.helper=",
+      "push",
+      "https://github.com/octo/repo.git",
+      `${SHA}:refs/heads/agent/task-ck-push`,
+    ];
+    expect(pushes.slice(0, 2)).toEqual([push, push]);
     const events = await allEvents(asFx(stub));
     const pushed = events.filter((e) => e.type === "pushed" && e.data.final !== true);
     expect(pushed.map((e) => e.data.sha)).toEqual([SHA, SHA]);
@@ -487,6 +517,19 @@ describe("システムプロンプト", () => {
     expect(section.text).toMatch(/do not (run )?git push|never run git push|do not push/i);
     expect(section.text).not.toMatch(
       /Credentials are not available\. Delivery happens through the committed patch only/,
+    );
+    fx.gate.release();
+    await waitForTerminal(fx);
+  });
+
+  it("no_push の節は、bash の cd ではなく cwd 引数を使うよう指示する", async () => {
+    const fx = newFixture("prompt-cwd", [call("gate")]);
+    await fx.stub.start(makeSpec("prompt-cwd"));
+    const section = await runInDO(fx.stub, (inst) =>
+      inst.promptSections().find((s: { key: string }) => s.key === "no_push"),
+    );
+    expect(section.text).toContain(
+      "Each bash call starts at the workspace root. Do not prefix commands with `cd <dir> &&`; pass the directory as the cwd argument instead.",
     );
     fx.gate.release();
     await waitForTerminal(fx);

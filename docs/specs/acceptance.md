@@ -407,7 +407,8 @@ Phase 2（子エージェントと Sandbox）の実機の確認。番号は、�
 - [ ] 本物の Containers で SandboxDO が起動し、タスクが `RUNNING` に入る
 - [ ] 外向き通信が `enableInternet: false` と OutboundGateway で強制される。許可外の宛先に子のコマンドから到達できない（ホスト名、IP の直指定、DNS 経由のどれも）。`outbound_denied` が監査ログに出る
 - [ ] 子が `git push origin HEAD:main` を試みても拒否される（6 節と合わせて確かめる）
-- [ ] Git credential helper が Sandbox の中でトークンを渡し、トークンが環境変数・ファイル・ログ・`events.jsonl` に残らない
+- [ ] Git のトークンは Sandbox の中に入らない。OutboundGateway が、判定を通った通信にだけ認証を付けて転送し、トークンが環境変数・ファイル・ログ・`events.jsonl` に残らない
+- [ ] 子の bash からの `git push` は、作業ブランチ向きでも拒否される（push の許可証が無い）。自動の push（`git_commit`・WIP・完了時の同期）は通る。自動の push は、子が書き換えた gitconfig（フック・credential helper・pushurl）の影響を受けない
 - [ ] コンテナを止めた後に、起動のやり直し・作り直しが働き、push 済みのチェックポイントから続きが進む。`task_result` の summary に `restarts` / `bootRetries` が出る（**実機では行わない**。下の「実機で行わない理由」を参照）
 - [ ] 復旧に失敗するほど止め続けたとき、タスクが `FAILED` で終わり、トークンが失効する（**実機では行わない**）
 

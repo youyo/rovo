@@ -116,10 +116,27 @@ describe("予算超過で止まるとき、未 commit の変更を WIP として
     expect(commit).toContain("--no-verify");
     expect(t.ran("push")[0]).toEqual([
       "git",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "credential.helper=",
       "push",
-      "origin",
-      "HEAD:refs/heads/agent/task-wip-ok",
+      "https://github.com/octo/repo.git",
+      `${SHA}:refs/heads/agent/task-wip-ok`,
     ]);
+    // 許可証は push の exec だけに付き、env で子の gitconfig（global・system）を切り離す
+    const pushCall = t.sandbox.calls.find((c) => c.argv.includes("push"));
+    expect(pushCall?.options.pushPermit).toEqual({
+      ref: "refs/heads/agent/task-wip-ok",
+      newSha: SHA,
+    });
+    expect(pushCall?.options.env).toMatchObject({
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    });
+    expect(
+      t.sandbox.calls.filter((c) => c.options.pushPermit !== undefined).map((c) => c.argv),
+    ).toHaveLength(1);
     // 順序: add → 秘密の確認（staged の diff）→ commit → push → patch の取得
     const subs = t.git.map((a) =>
       a.find((x) => ["add", "commit", "push", "format-patch"].includes(x)),

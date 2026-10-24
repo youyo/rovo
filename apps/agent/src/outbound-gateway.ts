@@ -3,6 +3,7 @@ import { type AuditFields, audit } from "@rovo/audit";
 import type { GitCredential } from "./agent/types";
 import { parseReceivePackHead, type ReceivePackRejectCode } from "./git-pkt";
 import { decideOutbound, type GitRoute, gitRoute, type PolicyDenyCode } from "./outbound-policy";
+import type { PushPermit } from "./sandbox-port";
 
 export interface OutboundGatewayProps {
   /** clone / push を許す唯一のリポジトリ。未設定なら github.com へは何も通さない。 */
@@ -16,7 +17,7 @@ export interface OutboundGatewayProps {
   taskId: string;
 }
 
-export type { GitCredential };
+export type { GitCredential, PushPermit };
 
 /**
  * このファイルが自分で出す違反コードの全部（policy の判定と receive-pack の解析のコードは別に持つ）。
@@ -31,6 +32,7 @@ export const GATEWAY_DENY_CODES = [
   "head_timeout",
   "truncated_head",
   "ref_not_allowed",
+  "push_not_permitted",
   "read_error",
 ] as const;
 export type GatewayDenyCode = (typeof GATEWAY_DENY_CODES)[number];
@@ -124,6 +126,11 @@ export interface OutboundDeps {
   props: OutboundGatewayProps;
   /** SandboxDO からトークンを読む。taskId は props のものだけを渡す。 */
   readCredential(taskId: string): Promise<GitCredential | undefined>;
+  /**
+   * SandboxDO から、いま自動の push が走っているときの許可証（ref と newSha）を読む。無ければ undefined。
+   * receive-pack は、これと本文のコマンドが一致するときだけ認証を付ける。taskId は props のものだけを渡す。
+   */
+  readPushPermit(taskId: string): Promise<PushPermit | undefined>;
   fetchUpstream(url: string, init: RequestInit): Promise<Response>;
   now(): number;
   /**
@@ -184,8 +191,19 @@ async function authorization(deps: OutboundDeps): Promise<string | undefined> {
   }
 }
 
+/** push の許可証を読む。無い・読み出し失敗は undefined（= 拒否）。 */
+async function readPermit(deps: OutboundDeps): Promise<PushPermit | undefined> {
+  const taskId = deps.props.taskId;
+  if (!taskId) return undefined;
+  try {
+    return await deps.readPushPermit(taskId);
+  } catch {
+    return undefined;
+  }
+}
+
 type HeadResult =
-  | { ok: true; body: ReadableStream<Uint8Array> }
+  | { ok: true; body: ReadableStream<Uint8Array>; newSha: string }
   | { ok: false; code: DenyCode; status: number };
 
 /**
@@ -202,6 +220,7 @@ async function readReceivePackHead(
   const chunks: Uint8Array[] = [];
   let size = 0;
   let buf = new Uint8Array(0);
+  let newSha = "";
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), headTimeoutMs);
@@ -228,6 +247,7 @@ async function readReceivePackHead(
       if (head.kind === "need_more") continue;
       if (head.kind === "reject") return fail(head.code);
       if (head.command.ref !== expectedRef) return fail("ref_not_allowed");
+      newSha = head.command.newSha;
       break;
     }
   } catch {
@@ -252,7 +272,7 @@ async function readReceivePackHead(
       return reader.cancel(reason);
     },
   });
-  return { ok: true, body: joined };
+  return { ok: true, body: joined, newSha };
 }
 
 /**
@@ -302,6 +322,17 @@ export async function handleOutbound(request: Request, deps: OutboundDeps): Prom
       limits.headTimeoutMs ?? RECEIVE_PACK_HEAD_TIMEOUT_MS,
     );
     if (!head.ok) return denied(deps, url, head.code, head.status);
+    // 自動の push（SandboxDO が秘密の検査を通した commit）だけを通す。子が bash から直接送る push は許可証が無いので拒否する。
+    // 許可証は ref と newSha の両方が一致したときだけ有効（認証を付ける前に確かめる）
+    const permit = await readPermit(deps);
+    if (
+      !permit ||
+      permit.ref !== workRef ||
+      permit.newSha.toLowerCase() !== head.newSha.toLowerCase()
+    ) {
+      void head.body.cancel().catch(() => {});
+      return denied(deps, url, "push_not_permitted");
+    }
     body = limitBody(head.body, maxBody);
   } else if (hasBody && request.body) {
     body = limitBody(request.body, maxBody);
@@ -358,6 +389,12 @@ export class OutboundGateway extends WorkerEntrypoint<Env, OutboundGatewayProps>
           readGitCredential(): Promise<GitCredential | undefined>;
         };
         return stub.readGitCredential();
+      },
+      readPushPermit: async (taskId) => {
+        const stub = env.SANDBOX_DO.getByName(taskId) as unknown as {
+          readPushPermit(): Promise<PushPermit | undefined>;
+        };
+        return stub.readPushPermit();
       },
       fetchUpstream: (url, init) => fetch(url, init),
       now: () => Date.now(),

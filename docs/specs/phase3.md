@@ -17,8 +17,11 @@ GitHub App のユーザー認可（ログイン）は Phase 1 で済んでいる
   - push できるのは、対象リポジトリの `refs/heads/agent/task-<id>` だけ。
   - 次のものは拒否する: 削除、タグ、他の ref、複数コマンド、push-options、shallow、sha256。
 - 保証しないこと
-  - **non-fast-forward（force push）は proxy では止められない。** wire protocol に force の印は無く、GitHub が確かめるのは old の CAS 一致だけで、祖先関係は確かめないため。
-  - **モデルが bash から `git push` することは止められない。** AgentDO の push も同じコンテナ内の git を通り、proxy から見て区別できない。
+  - **non-fast-forward（force push）は proxy では止められない。** wire protocol に force の印は無く、GitHub が確かめるのは old の CAS 一致だけで、祖先関係は確かめないため。ただし、送れるのは自動の push（許可証つき）だけで、モデルは送れない（下記）。
+- モデルの `git push` の扱い
+  - **モデルが bash から `git push` しても通らない。** receive-pack は、SandboxDO が自動の push の exec の間だけ預かる許可証（ref と newSha）が、本文のコマンドと一致するときだけ認証を付けて転送する。許可証が無い・違うときは 403（`push_not_permitted`）。
+  - 許可証を渡すのは自動の push（`git_commit`・WIP・完了時の同期）だけで、どれも push の前に秘密の検査を通している。bash ツールと検証コマンドには渡さない。
+  - 自動の push は、子の gitconfig（global・system・`core.hooksPath`・`credential.helper`・`origin` の URL）の影響を受けないよう切り離す。
 - そのため、真偽は信頼できる側で確かめる。
   - 完了時に、AgentDO が検証済みの SHA をブランチの先頭に揃え、`ls-remote` で確かめる。
   - 終端で、TaskDO が GitHub 上の PR の head SHA を読み、検証済みの SHA と比べる。違えば警告する。

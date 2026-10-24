@@ -102,14 +102,13 @@ const shownAtom = atom({ plugin: "rovo", key: "shown" } as const, null);
 const creatingAtom = atom({ plugin: "rovo", key: "creating" } as const, null);
 const CREATING_MS = 10 * 60 * 1000;
 const CREATE_COMMAND = "create-task";
-const OPEN_COMMAND = "open-console";
-const CLOSE_COMMAND = "close-console";
+const CONSOLE_COMMAND = "rovo-console";
 // 名前空間なし（create-task）と rovo: 付き（rovo:create-task）だけを同じ名前として扱う。旧名は拾わない。
 const baseName = (command: string): string =>
   command.startsWith("rovo:") ? command.slice(5) : command;
 
 // 自分のコマンド（名前空間なし・rovo: 付き）。baseName と同じ範囲。
-const OWN_COMMANDS = /^(?:rovo:)?(?:create-task|open-console|close-console)$/;
+const OWN_COMMANDS = /^(?:(?:rovo:)?create-task|rovo-console)$/;
 
 const endpointKey = (e: { server: string; prefix: string }): string => `${e.server}/${e.prefix}`;
 
@@ -691,7 +690,7 @@ const track = async (
   if (isNew) {
     // 新しいタスクを拾うたびに開く。狭い端末では待ちになるので、トーストで知らせる。
     const isPlaced = await openPane($);
-    if (!isPlaced) $.ui.toast("rovo のタスクを始めました。/open-console で開けます");
+    if (!isPlaced) $.ui.toast("rovo のタスクを始めました。/rovo-console で開けます");
   }
 };
 
@@ -818,17 +817,16 @@ const startOf = (m: PaneModel, s: { follow: boolean; offset: number }): number =
 
 export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
-    // ペインを開け閉めするだけなので、作業中のターンを待たせずその場で動かす（immediate）。
+    // 開け閉めするだけなので、作業中のターンを待たせずその場で動かす（immediate）。
     // run はターンの状態に依存しない。スキルだと作業中に打ったとき終わりを待つため mod のコマンドにする。
-    for (const [name, description] of [
-      [OPEN_COMMAND, "rovo のコンソールのペインを開く"],
-      [CLOSE_COMMAND, "rovo のコンソールのペインを閉じる"],
-    ] as const) {
-      try {
-        await $.command.register({ name, description, immediate: true });
-      } catch {
-        // 登録できなくてもほかの機能は動かす。
-      }
+    try {
+      await $.command.register({
+        name: CONSOLE_COMMAND,
+        description: "rovo のペインを開く・閉じる",
+        immediate: true,
+      });
+    } catch {
+      // 登録できなくてもほかの機能は動かす。
     }
     try {
       const stored = coerceTasks(await $.store.get(STORE_KEY));
@@ -862,26 +860,33 @@ export const register: Register = (on) => {
     return next(e);
   });
 
-  // open-console / close-console は mod 自身が登録した immediate のコマンドで、next を呼ばずに自分で答える。
+  // rovo-console は mod 自身が登録した immediate のコマンド（開閉の切り替え）で、next を呼ばずに自分で答える。
   // create-task は next で本来の処理（モデルへ手順を渡す）に続ける。mod は task_start を呼ばない。
   // matcher で自分のコマンドだけに絞る（他の mod のコマンドの結果に rovo が混ざらないように）。
   on("command.run", { command: OWN_COMMANDS }, async ($, e, next) => {
     const name = baseName(e.command);
-    if (name === CLOSE_COMMAND) {
+    if (name === CONSOLE_COMMAND) {
+      // 開いて見えているときは閉じる。閉じている・他のタブの裏にあるときは開く（前に出す）。
+      let isShown = false;
       try {
-        await $.ui.close({ id: PANE_ID });
+        isShown = (await $.ui.panes()).some((p) => p.id === PANE_ID && p.isShown);
       } catch {
-        // 閉じられなくても続ける。
+        // 分からなければ開く側に倒す。
       }
-      try {
-        await update($, creatingAtom, () => null);
-      } catch {
-        // 作成中の表示が消せなくても続ける。
-      }
+      if (isShown) {
+        try {
+          await $.ui.close({ id: PANE_ID });
+        } catch {
+          // 閉じられなくても続ける。
+        }
+        try {
+          await update($, creatingAtom, () => null);
+        } catch {
+          // 作成中の表示が消せなくても続ける。
+        }
 
-      return { text: "コンソールのペインを閉じました。" };
-    }
-    if (name === OPEN_COMMAND) {
+        return { text: "コンソールのペインを閉じました。" };
+      }
       try {
         // 作成中の逃げ道: 作成中の表示を消して、通常の表示（前のタスク）に戻す。
         await update($, creatingAtom, () => null);

@@ -62,6 +62,8 @@ type Rig = {
   opened: string[];
   closed: string[];
   placed: { value: boolean };
+  /** ペインの状態。open: 開いている、behind: 他の mod のタブの裏で見えていない。 */
+  pane: { open: boolean; behind: boolean };
   forbidden: string[];
   seen: unknown[];
   answers: Map<string, unknown>;
@@ -91,6 +93,7 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
   const opened: string[] = [];
   const closed: string[] = [];
   const placed = { value: true };
+  const pane = { open: false, behind: false };
   const forbidden: string[] = [];
   const seen: unknown[] = [];
   const answers = new Map<string, unknown>();
@@ -101,14 +104,26 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
   on("session.start", (_, e) => ({ cwd: e.cwd }));
   on("ui.open", (_, e) => {
     opened.push(e.id);
+    if (placed.value) {
+      pane.open = true;
+      pane.behind = false;
+    }
     return {
       value: placed.value ? { isPlaced: true } : { isPlaced: false, reason: "narrow" },
     } as never;
   });
   on("ui.close", (_, e, next) => {
     closed.push(e.id);
+    pane.open = false;
     return next(e);
   });
+  on(
+    "ui.panes",
+    () =>
+      ({
+        value: pane.open ? [{ id: "rovo", isShown: !pane.behind }] : [],
+      }) as never,
+  );
   on("ui.toast", (_, e) => {
     toasts.push(e.text);
     return { value: undefined };
@@ -149,6 +164,7 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
     opened,
     closed,
     placed,
+    pane,
     forbidden,
     seen,
     answers,
@@ -243,7 +259,7 @@ test("the hook returns next's result unchanged and passes the call through", asy
   expect(r.seen[0]).toMatchObject({ title: "Same", repository: "o/r", instructions: "do it" });
 });
 
-test("open-console and close-console are registered as immediate commands at session start", async ($, on) => {
+test("rovo-console is registered as an immediate command at session start; open/close-console are not", async ($, on) => {
   const specs: { name: string; immediate?: true }[] = [];
   rig(on);
   on("command.register", (_, e) => {
@@ -252,26 +268,34 @@ test("open-console and close-console are registered as immediate commands at ses
   });
   await startSession($);
   const byName = new Map(specs.map((s) => [s.name, s]));
-  expect(byName.get("open-console")?.immediate).toBe(true);
-  expect(byName.get("close-console")?.immediate).toBe(true);
+  expect(byName.get("rovo-console")?.immediate).toBe(true);
+  expect(byName.has("open-console")).toBe(false);
+  expect(byName.has("close-console")).toBe(false);
   // create-task は Claude に頼む中身があるのでスキルのまま（mod は登録しない）。
   expect(byName.has("create-task")).toBe(false);
 });
 
-test("the immediate commands open and close the pane without depending on a turn", async ($, on) => {
+test("/rovo-console opens a closed pane, closes a shown one, and brings a hidden one forward", async ($, on) => {
   const r = rig(on);
-  on("command.register", (_, e) => ({ value: { command: e.name } }));
   on("command.run", () => ({ text: "engine" }));
   await startSession($);
-  const o = await $.command.run({ command: "open-console", args: "" } as never);
+  const o = await $.command.run({ command: "rovo-console", args: "" } as never);
   expect(r.opened).toEqual(["rovo"]);
   expect(o.text).toContain("開き");
-  const c = await $.command.run({ command: "close-console", args: "" } as never);
+  const c = await $.command.run({ command: "rovo-console", args: "" } as never);
   expect(r.closed).toEqual(["rovo"]);
   expect(c.text).toContain("閉じ");
+
+  await $.command.run({ command: "rovo-console", args: "" } as never);
+  expect(r.opened).toEqual(["rovo", "rovo"]);
+  r.pane.behind = true; // 他の mod のタブの裏で見えていない
+  const f = await $.command.run({ command: "rovo-console", args: "" } as never);
+  expect(r.closed).toEqual(["rovo"]);
+  expect(r.opened).toEqual(["rovo", "rovo", "rovo"]);
+  expect(f.text).toContain("開き");
 });
 
-test("the pane opens at each new task, not again for the same task, and by /rovo:open-console", async ($, on) => {
+test("the pane opens at each new task, not again for the same task, and by /rovo-console", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
   on("command.run", () => ({ text: "engine" }));
@@ -285,19 +309,20 @@ test("the pane opens at each new task, not again for the same task, and by /rovo
   await $.tool.call({ tool: START, title: "B", repository: "o/r" });
   expect(r.opened).toEqual(["rovo", "rovo"]);
 
-  const out = await $.command.run({ command: "rovo:open-console", args: "" } as never);
+  r.pane.open = false; // 利用者が閉じた
+  const out = await $.command.run({ command: "rovo-console", args: "" } as never);
   expect(r.opened).toEqual(["rovo", "rovo", "rovo"]);
   expect(out.text).toBeDefined();
 });
 
-test("a new task after /rovo:close-console opens the pane again", async ($, on) => {
+test("a new task after /rovo-console closes and opens the pane again", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
   on("command.run", () => ({ text: "engine" }));
   await startSession($);
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
 
-  const out = await $.command.run({ command: "rovo:close-console", args: "" } as never);
+  const out = await $.command.run({ command: "rovo-console", args: "" } as never);
   expect(r.closed).toEqual(["rovo"]);
   expect(r.opened).toEqual(["rovo"]);
   expect(out.text).toContain("閉じ");
@@ -317,7 +342,7 @@ test("a pane that is not drawn (narrow terminal) toasts how to open it", async (
 
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
 
-  expect(r.toasts).toEqual(["rovo のタスクを始めました。/open-console で開けます"]);
+  expect(r.toasts).toEqual(["rovo のタスクを始めました。/rovo-console で開けます"]);
 });
 
 test("a drawn pane gives no start toast", async ($, on) => {
@@ -347,7 +372,7 @@ test('/rovo:create-task opens the pane, shows "creating", and lets the command r
   await ui.unmount();
 });
 
-test("the bare names create-task / open-console / close-console are caught too", async ($, on) => {
+test("the bare name create-task and rovo-console are caught too", async ($, on) => {
   const r = rig(on);
   on("command.run", () => ({ text: "engine" }));
   await startSession($);
@@ -356,12 +381,12 @@ test("the bare names create-task / open-console / close-console are caught too",
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   expect(await allText(ui)).toContain("タスクを作成中…");
   await ui.unmount();
-  const o = await $.command.run({ command: "open-console", args: "" } as never);
-  expect(r.opened).toEqual(["rovo", "rovo"]);
-  expect(o.text).not.toBe("engine");
-  const c = await $.command.run({ command: "close-console", args: "" } as never);
+  const c = await $.command.run({ command: "rovo-console", args: "" } as never);
   expect(r.closed).toEqual(["rovo"]);
   expect(c.text).not.toBe("engine");
+  const o = await $.command.run({ command: "rovo-console", args: "" } as never);
+  expect(r.opened).toEqual(["rovo", "rovo"]);
+  expect(o.text).not.toBe("engine");
 });
 
 test("other mods' commands never reach the rovo hook", async ($, on) => {
@@ -369,11 +394,12 @@ test("other mods' commands never reach the rovo hook", async ($, on) => {
   on("command.run", () => ({ text: "engine" }));
   await startSession($);
   for (const command of [
-    "other:open-console",
+    "other:rovo-console",
     "other:create-task",
     "compact",
     "rovo:other",
-    "open-console2",
+    "rovo-console2",
+    "rovo:rovo-console",
   ]) {
     const out = await $.command.run({ command, args: "" } as never);
     expect(out.text).toBe("engine");
@@ -389,6 +415,10 @@ test("the old names do nothing: the engine answers", async ($, on) => {
   for (const [command, args] of [
     ["rovo", ""],
     ["rovo", "close"],
+    ["open-console", ""],
+    ["close-console", ""],
+    ["rovo:open-console", ""],
+    ["rovo:close-console", ""],
     ["rovo-create-task", "x"],
     ["rovo:rovo-create-task", "x"],
   ]) {
@@ -402,7 +432,7 @@ test("the old names do nothing: the engine answers", async ($, on) => {
   await ui.unmount();
 });
 
-test("open-console and close-console answer themselves and never call next", async ($, on) => {
+test("rovo-console answers itself and never calls next", async ($, on) => {
   rig(on);
   let reached = 0;
   on("command.run", () => {
@@ -410,8 +440,8 @@ test("open-console and close-console answer themselves and never call next", asy
     return { text: "engine" };
   });
   await startSession($);
-  const o = await $.command.run({ command: "rovo:open-console", args: "" } as never);
-  const c = await $.command.run({ command: "rovo:close-console", args: "" } as never);
+  const o = await $.command.run({ command: "rovo-console", args: "" } as never);
+  const c = await $.command.run({ command: "rovo-console", args: "" } as never);
   expect(reached).toBe(0);
   expect(o.text).toContain("開き");
   expect(c.text).toContain("閉じ");
@@ -422,7 +452,7 @@ test('closing the console also clears "creating"', async ($, on) => {
   on("command.run", () => ({ text: "engine" }));
   await startSession($);
   await $.command.run({ command: "rovo:create-task", args: "x" } as never);
-  await $.command.run({ command: "rovo:close-console", args: "" } as never);
+  await $.command.run({ command: "rovo-console", args: "" } as never);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   expect(await allText(ui)).not.toContain("タスクを作成中…");
   await ui.unmount();
@@ -506,12 +536,13 @@ test("a new task picked up while creating switches to the normal view with that 
   await ui.unmount();
 });
 
-test("/rovo:open-console while creating clears the note and shows the previous task", async ($, on) => {
+test("/rovo-console while creating clears the note and shows the previous task", async ($, on) => {
   const r = rig(on);
   on("command.run", () => ({ text: "engine" }));
   await seedOld($, r);
   await $.command.run({ command: "rovo:create-task", args: "x" } as never);
-  const out = await $.command.run({ command: "rovo:open-console", args: "" } as never);
+  r.pane.behind = true; // 作成中の表示は他のタブの裏にある
+  const out = await $.command.run({ command: "rovo-console", args: "" } as never);
   expect(out.text).not.toBe("engine");
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   const text = await allText(ui);
@@ -1588,8 +1619,7 @@ const terminalStore = () => ({
 });
 const doneConsole = (call: McpCall) =>
   ok(consoleBody(String(call.args.task_id), { status: "COMPLETED", phase: "done" }));
-const openConsole = ($: Engine) =>
-  $.command.run({ command: "rovo:open-console", args: "" } as never);
+const openConsole = ($: Engine) => $.command.run({ command: "rovo-console", args: "" } as never);
 
 test("only terminal tasks stored: session.start then open fetches the console once, and shows it", async ($, on) => {
   const r = rig(on, { store: terminalStore() });
@@ -1824,7 +1854,7 @@ test("when task_list starts working later, the listed workers appear", async ($,
 
   r.setListHandler(() => listOf(item(1)));
   await r.clock.advance(61_000);
-  await $.command.run({ command: "rovo:open-console", args: "" } as never); // retries task_list
+  await $.command.run({ command: "rovo-console", args: "" } as never); // retries task_list
   await r.clock.settle();
   const ui = await mountPane($);
   expect(await ui.find({ type: "Button", text: /Listed 1/ })).toBeDefined();

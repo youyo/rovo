@@ -104,6 +104,71 @@ export interface TaskSpec {
    * gateway が決めて渡す（初期コミットと同じ作者にする）。無い・使えない形なら `rovo <rovo@noreply.invalid>`。
    */
   commitAuthor?: { name: string; email: string };
+  /**
+   * タスクの種類。省略は通常のタスク（ワーカーの LLM が作業する）。"review" は task_review（docs/specs/worker-review.md）:
+   * ワーカーは動かさず、review の PR の head で review_commands を流し、レビューのモデルを 1 回呼んで、投稿する本文を結果に返す。
+   * review のとき branch は空（作業ブランチを持たない = push の経路が無い）、initialSha は review.headSha。
+   */
+  kind?: "review";
+  /** kind が "review" のときだけ（必須）。TaskDO が PR を読んで作る */
+  review?: ReviewSpec;
+}
+
+/** task_review のレビューの段の指定。値はすべて TaskDO が GitHub から読んだもの（PR の本文・差分は非信頼データ） */
+export interface ReviewSpec {
+  /** base リポジトリの PR の番号（refs/pull/<n>/head を取り出す） */
+  pullNumber: number;
+  /** レビューする head の SHA（task_review を受けた時点で固定） */
+  headSha: string;
+  /** PR の base の SHA */
+  baseSha: string;
+  /** レビューを書くモデル（AGENT_MODELS の中だけ） */
+  model: string;
+  /** 全体のテスト。失敗しても止めずに全部流す。空なら差分だけのレビュー */
+  commands: VerificationCommand[];
+  title: string;
+  body: string;
+  /** base...head の unified diff */
+  diff: string;
+  /** gateway が取得の段階で差分を上限で切った */
+  diffTruncated: boolean;
+}
+
+/** review_commands の 1 本の結果。output は伏せ字・切り詰め済み */
+export interface ReviewCommandResultDto {
+  argv: string[];
+  exitCode: number;
+  timedOut: boolean;
+  output: string;
+  durationMs?: number;
+  /** 段の時間の上限で実行しなかった */
+  skipped?: boolean;
+}
+
+/** レビューに使った費用（作業の費用と分けて見せる）。estimated は実費が分からず見積額で数えた */
+export interface ReviewUsageDto {
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estimated: boolean;
+}
+
+/** レビューの段の結果（ResultDto の review）。body は投稿する本文（検査済みの JSON から組み立て、伏せ字済み） */
+export interface ReviewResultDto {
+  /** done: レビューが得られた / skipped: 予算・失敗で飛ばした */
+  stage: "done" | "skipped";
+  model: string;
+  headSha: string;
+  body?: string;
+  mustFixCount: number;
+  suggestionCount: number;
+  commands: ReviewCommandResultDto[];
+  commandsUnavailable: boolean;
+  /** 飛ばした理由の固定コード（model_error / model_rejected / timeout / budget / invalid_response） */
+  failure?: string;
+  usage: ReviewUsageDto;
 }
 
 export type StartResult =
@@ -355,4 +420,6 @@ export type ResultDto =
        */
       pushedSha?: string;
       usage: UsageDto;
+      /** task_review（kind: "review"）の結果。通常のタスクには付かない */
+      review?: ReviewResultDto;
     };

@@ -51,6 +51,9 @@ import {
   type GitCredential,
   isTerminal,
   type ResultDto,
+  type ReviewResultDto,
+  type ReviewSpec,
+  type ReviewUsageDto,
   type SandboxMetrics,
   type SandboxPromotionFailure,
   type SandboxPromotionRecord,
@@ -81,6 +84,20 @@ import {
   type ScriptStep,
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
+import { buildReviewBody } from "./review/body";
+import { buildReviewInput, clampCommandOutput, type ReviewInput } from "./review/input";
+import {
+  type CommandRunner,
+  type ModelCaller,
+  REVIEW_MAX_OUTPUT_TOKENS,
+  REVIEW_MODEL_TIMEOUT_MS,
+  REVIEW_STAGE_LIMIT_MS,
+  type ReviewCommandsOutcome,
+  type ReviewModelOutcome,
+  reviewWarnings,
+  runReviewCommands,
+  runReviewModel,
+} from "./review/stage";
 import type {
   ExecResult,
   PeekedOutput,
@@ -237,6 +254,22 @@ const SYNC_RETRY_BASE_MS = 2_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** コンテナから返った SHA（ls-remote の出力など）。argv に入れるので形を厳しく見る。 */
 const SHA_RE = /^[0-9a-f]{4,64}$/;
+/** 完全な commit SHA（SHA-1 の 40 桁 / SHA-256 の 64 桁） */
+const FULL_SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/** task_review のレビューの段の結果（meta の review_result）。warnings は結果の warnings に足す固定コード */
+interface StoredReview {
+  result: ReviewResultDto;
+  warnings: string[];
+}
+const ZERO_REVIEW_USAGE: ReviewUsageDto = {
+  costUsd: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  estimated: false,
+};
 
 function isValidCredential(c: unknown): c is GitCredential {
   if (typeof c !== "object" || c === null) return false;
@@ -680,6 +713,8 @@ export class AgentDO extends DurableObject<Env> {
         const attempts = (this.store.meta<number>("setup_attempts") ?? 0) + 1;
         this.store.setMeta("setup_attempts", attempts);
         if (attempts >= MAX_SETUP_ATTEMPTS) {
+          // task_review: Sandbox が使えなくても、テストの結果なしでレビューに進む（タスクは終えない）
+          if (spec.kind === "review") throw e;
           this.emit("error", { message: `sandbox setup failed: ${String(e)}` });
           await this.finalize({ phase: "failed", reason: "sandbox_setup_failed", skipPatch: true });
           throw e;
@@ -797,6 +832,20 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   private workspaceSpec(spec: StoredSpec): WorkspaceSpec {
+    const rv = spec.kind === "review" ? spec.review : undefined;
+    if (rv) {
+      // task_review: 作業ブランチは持たない。base リポジトリの refs/pull/<n>/head を取り出し、固定した head を checkout する
+      return {
+        repository: spec.repository,
+        baseSha: rv.headSha,
+        branch: `pull/${rv.pullNumber}/head`,
+        initialSha: rv.headSha,
+        deadlineAt: this.deadlineAt(),
+        deps: spec.deps ?? null,
+        ...(spec.sandboxInstance !== undefined ? { instance: spec.sandboxInstance } : {}),
+        checkout: { pullNumber: rv.pullNumber, sha: rv.headSha },
+      };
+    }
     return {
       repository: spec.repository,
       baseSha: spec.baseSha,
@@ -981,6 +1030,28 @@ export class AgentDO extends DurableObject<Env> {
       patchTooLarge: r?.patchTooLarge ?? false,
       ...(r?.pushedSha !== undefined ? { pushedSha: r.pushedSha } : {}),
       usage: this.store.usage(),
+      ...this.reviewResultPart(),
+    };
+  }
+
+  /** task_review の結果（getResult の review）。段の結果が無いまま終わった（cancel など）ときは、飛ばしたものとして返す */
+  private reviewResultPart(): { review?: ReviewResultDto } {
+    const spec = this.spec();
+    if (spec?.kind !== "review" || !spec.review) return {};
+    const stored = this.store.meta<StoredReview>("review_result");
+    if (stored) return { review: stored.result };
+    const cmds = this.store.meta<ReviewCommandsOutcome>("review_commands");
+    return {
+      review: {
+        stage: "skipped",
+        model: spec.review.model,
+        headSha: spec.review.headSha,
+        mustFixCount: 0,
+        suggestionCount: 0,
+        commands: cmds?.results ?? [],
+        commandsUnavailable: cmds?.unavailable ?? false,
+        usage: this.reviewUsage(),
+      },
     };
   }
 
@@ -1244,6 +1315,11 @@ export class AgentDO extends DurableObject<Env> {
     if (!spec.taskId || !spec.repository || !spec.baseSha || !spec.instructions) {
       return "invalid_spec";
     }
+    if (spec.kind !== undefined) {
+      if (spec.kind !== "review") return "invalid_spec: kind";
+      return this.validateReview(spec);
+    }
+    if (spec.review !== undefined) return "invalid_spec: review";
     // push は agent/task-<taskId> だけが許される（OutboundGateway が同じ名前で判定する）。ずれていれば始めない
     if (spec.branch !== `agent/task-${spec.taskId}`) return "invalid_spec: branch";
     if (
@@ -1286,6 +1362,66 @@ export class AgentDO extends DurableObject<Env> {
     return undefined;
   }
 
+  /**
+   * task_review の spec の検査（fail-closed）。作業ブランチを持たない（push の経路を作らない）こと、PR の番号と head の SHA、
+   * レビューのモデル（AGENT_MODELS の中で単価が分かるもの）、コマンドの形を確かめる。
+   */
+  private validateReview(spec: TaskSpec): string | undefined {
+    const rv = spec.review;
+    if (spec.branch !== "") return "invalid_spec: review branch";
+    if (typeof rv !== "object" || rv === null) return "invalid_spec: review";
+    if (!Number.isSafeInteger(rv.pullNumber) || rv.pullNumber < 1) {
+      return "invalid_spec: review pullNumber";
+    }
+    if (typeof rv.headSha !== "string" || !FULL_SHA_RE.test(rv.headSha)) {
+      return "invalid_spec: review headSha";
+    }
+    if (typeof rv.baseSha !== "string" || !FULL_SHA_RE.test(rv.baseSha)) {
+      return "invalid_spec: review baseSha";
+    }
+    if (spec.initialSha !== rv.headSha) return "invalid_spec: initialSha";
+    if (
+      typeof rv.title !== "string" ||
+      typeof rv.body !== "string" ||
+      typeof rv.diff !== "string" ||
+      typeof rv.diffTruncated !== "boolean"
+    ) {
+      return "invalid_spec: review";
+    }
+    if (
+      !Array.isArray(rv.commands) ||
+      rv.commands.some(
+        (c) =>
+          !Array.isArray(c?.argv) ||
+          c.argv.length === 0 ||
+          c.argv.some((a) => typeof a !== "string" || a === ""),
+      )
+    ) {
+      return "invalid_spec: review commands";
+    }
+    if (!isValidCredential(spec.gitCredential)) return "invalid_spec: gitCredential";
+    if (!(spec.budgetUsd > 0) || !Number.isFinite(spec.deadlineAt)) return "invalid_spec";
+    if (
+      spec.budgetPolicy !== undefined &&
+      spec.budgetPolicy !== "ask" &&
+      spec.budgetPolicy !== "stop"
+    ) {
+      return "invalid_spec: budgetPolicy";
+    }
+    if (spec.sandboxInstance !== undefined && !isSelectableSandboxInstance(spec.sandboxInstance)) {
+      return "invalid_spec: sandboxInstance";
+    }
+    const gw = aiGatewayRejection(this.env as AgentEnv);
+    if (gw) return gw;
+    if (typeof rv.model !== "string" || !agentModels(this.env as AgentEnv).includes(rv.model)) {
+      return "unknown_model: not in AGENT_MODELS";
+    }
+    if (!priceFor(this.modelId(rv.model), (this.env as AgentEnv).ENVIRONMENT === "test")) {
+      return `unknown_model: ${rv.model}`;
+    }
+    return undefined;
+  }
+
   private async scheduleJobs(deadlineAt: number): Promise<void> {
     await this.lifecycle.jobs.push({ id: "deadline", fn: "deadline", time: deadlineAt });
     await this.lifecycle.jobs.push({ id: "tick", fn: "tick", time: Date.now() + TICK_MS });
@@ -1314,6 +1450,11 @@ export class AgentDO extends DurableObject<Env> {
   private async doLaunch(): Promise<void> {
     const spec = this.spec();
     if (!spec) return;
+    // task_review: Pi は起動しない。レビューの段（コマンド → モデル）を進める（何度呼んでも続きから進む）
+    if (spec.kind === "review") {
+      await this.runReview();
+      return;
+    }
     if (!this.store.meta("launched")) {
       // Sandbox は起動しない（最初に Sandbox を使うツールが呼ばれたときに起動する）。cancel などで終端停止された後は投入しない
       if (this.store.meta("tombstone") || isTerminal(this.store.phase())) return;
@@ -1402,6 +1543,8 @@ export class AgentDO extends DurableObject<Env> {
     if (this.store.meta("fingerprint") === undefined || this.refused()) {
       return { ok: true, ignored: true };
     }
+    // task_review にはワーカーの LLM が無いので、届け先が無い
+    if (this.spec()?.kind === "review") return { ok: true, ignored: true };
     if (!this.store.steer(steerId)) {
       this.store.insertSteer(steerId, message, this.canSubmitSteer() ? "received" : "buffered");
     }
@@ -1515,6 +1658,28 @@ export class AgentDO extends DurableObject<Env> {
     const pausedAt = this.pausedAt() ?? this.now();
     const pausedTotal = this.pausedTotal() + Math.max(0, this.now() - pausedAt);
     const deadlineAt = this.baseDeadline() + pausedTotal;
+    // task_review の予算の延長: Pi に渡す run は無い。予算を 1 回分増やして、レビューの段の続き（モデルの呼び出し）に戻る
+    if (this.spec()?.kind === "review" && q.kind === "budget_extension") {
+      this.store.tx(() => {
+        this.store.setMeta("questions", {
+          ...this.questions(),
+          [questionId]: { ...q, answered: true, answer },
+        });
+        this.store.setMeta("paused_total", pausedTotal);
+        this.store.setMeta("paused_at", null);
+        this.store.setMeta("deadline_at", deadlineAt);
+        this.store.setMeta("budget_extensions", this.budgetExtensions() + 1);
+        this.store.appendEvent("answered", { question_id: questionId });
+        this.store.setPhase("verifying");
+      });
+      try {
+        await this.lifecycle.jobs.push({ id: "deadline", fn: "deadline", time: deadlineAt });
+      } catch {
+        // tick が代わりに見張る
+      }
+      void this.launch().catch(() => undefined);
+      return { ok: true };
+    }
     try {
       // 起動していない Sandbox には期限が無い（起動するときに、そのときの deadlineAt() で作る）
       if (this.sandboxBooted()) {
@@ -1787,6 +1952,8 @@ export class AgentDO extends DurableObject<Env> {
     const spec = this.spec();
     // Sandbox を一度も起動していない（ファイルにも git にも触れなかった）なら、変更は無い。commit のために起動しない
     if (!spec || !this.sandboxBooted()) return;
+    // task_review は作業ブランチを持たない（クライアントの PR に何も push しない）
+    if (spec.kind === "review") return;
     // 予算の質問の前に WIP を済ませて Sandbox を中断している。止めるためだけに起こさない（変更は無い）
     if (this.store.meta("budget_suspended") === true) return;
     const limit = this.overrides().wipCommitWaitMs ?? WIP_COMMIT_WAIT_MS;
@@ -1951,7 +2118,7 @@ export class AgentDO extends DurableObject<Env> {
     const stopped = intents.length > 0;
     const wantsPatch =
       patchRequest !== undefined || (stopped && !this.requests.some((r) => r.skipPatch));
-    if (spec && wantsPatch && !sandboxDestroyedBy(intents)) {
+    if (spec && spec.kind !== "review" && wantsPatch && !sandboxDestroyedBy(intents)) {
       try {
         const capturing = this.capturePatch(spec, patchRequest?.sha);
         let cap: Awaited<typeof capturing> | undefined;
@@ -2005,7 +2172,11 @@ export class AgentDO extends DurableObject<Env> {
       // 予算超過の停止は patch を残す。cancel・期限・回答待ちの期限（Sandbox を破棄した）は残さない
       const keepPatch = !sandboxDestroyedBy(this.stopIntents());
       const verification = this.store.meta<VerificationSummary>("verification");
-      if (decision.phase === "completed" && !verification?.verified) {
+      const review = this.store.meta<StoredReview>("review_result");
+      if (spec?.kind === "review") {
+        // task_review: 検証コマンドの代わりに、レビューの段の warnings（固定コード）を返す
+        if (review) warnings.push(...review.warnings);
+      } else if (decision.phase === "completed" && !verification?.verified) {
         warnings.push("検証コマンドが指定されていないため未検証です（モデルの申告のみ）");
       }
       if (keepPatch && patch !== undefined) this.store.savePatch(patch);
@@ -2203,6 +2374,13 @@ export class AgentDO extends DurableObject<Env> {
     }
     // usage が返らなかった成功の呼び出しの見積額（noteMissingUsage）を上乗せする
     total.costUsd += this.store.meta<number>("usage_missing_usd") ?? 0;
+    // task_review のレビューのモデル（Pi の外で呼ぶ）の費用
+    const review = this.reviewUsage();
+    total.costUsd += review.costUsd;
+    total.inputTokens += review.inputTokens;
+    total.outputTokens += review.outputTokens;
+    total.cacheReadTokens += review.cacheReadTokens;
+    total.cacheWriteTokens += review.cacheWriteTokens;
     // 累計は単調増加。古い読み取りで巻き戻さない
     if (total.costUsd >= prev.costUsd && !sameUsage(prev, total)) {
       this.store.tx(() => {
@@ -2741,42 +2919,7 @@ export class AgentDO extends DurableObject<Env> {
       await this.suspendSandboxForBudget(spec);
       if (this.refused()) return false;
       // 4. 質問を記録して INPUT_REQUIRED にする
-      const seq = (this.store.meta<number>("question_seq") ?? 0) + 1;
-      const questionId = `q-${seq}`;
-      const extra = spec.budgetUsd;
-      const total = this.budgetLimitUsd(spec);
-      const left = MAX_BUDGET_EXTENSIONS - used;
-      const message = `タスクの予算 ${usd(total)} のうち ${usd(spentUsd)} を使いました。あと ${usd(extra)} 使って続けますか。延長できる残り回数: ${left} 回。`;
-      const options = [`あと ${usd(extra)} 使って続ける`, "ここで止める"];
-      this.store.tx(() => {
-        this.store.setMeta("question_seq", seq);
-        this.store.setMeta("questions", {
-          ...this.questions(),
-          [questionId]: { kind: "budget_extension", message, options, answered: false },
-        });
-        this.store.setMeta("paused_at", this.now());
-        this.store.appendEvent("question", {
-          question_id: questionId,
-          message,
-          options: JSON.stringify(options),
-          kind: "budget_extension",
-          budget_spent_usd: Math.round(spentUsd * 1e6) / 1e6,
-          budget_total_usd: total,
-          budget_extension_usd: extra,
-          budget_extensions_left: left,
-        });
-        this.store.setPhase("input_required");
-      });
-      await this.overrides().afterQuestion?.();
-      try {
-        await this.lifecycle.jobs.push({
-          id: "deadline",
-          fn: "input_timeout",
-          time: this.inputTimeoutAt(),
-        });
-      } catch {
-        // tick が代わりに見張る
-      }
+      await this.recordBudgetQuestion(spec, spentUsd, used);
       try {
         await this.reclaimQueuedSteers();
       } catch {
@@ -2787,6 +2930,378 @@ export class AgentDO extends DurableObject<Env> {
       // 聞けなかった。すでに質問を記録していれば待つ。そうでなければ止める
       return this.store.phase() === "input_required";
     }
+  }
+
+  /**
+   * 予算の延長の質問（kind: budget_extension。rovo が数値だけで書く固定文）を記録して INPUT_REQUIRED にし、
+   * 回答待ちの上限の job を入れる。通常のタスク（askBudgetExtension）と task_review（askReviewBudget）が使う。
+   */
+  private async recordBudgetQuestion(spec: StoredSpec, spentUsd: number, used: number) {
+    const seq = (this.store.meta<number>("question_seq") ?? 0) + 1;
+    const questionId = `q-${seq}`;
+    const extra = spec.budgetUsd;
+    const total = this.budgetLimitUsd(spec);
+    const left = MAX_BUDGET_EXTENSIONS - used;
+    const message = `タスクの予算 ${usd(total)} のうち ${usd(spentUsd)} を使いました。あと ${usd(extra)} 使って続けますか。延長できる残り回数: ${left} 回。`;
+    const options = [`あと ${usd(extra)} 使って続ける`, "ここで止める"];
+    this.store.tx(() => {
+      this.store.setMeta("question_seq", seq);
+      this.store.setMeta("questions", {
+        ...this.questions(),
+        [questionId]: { kind: "budget_extension", message, options, answered: false },
+      });
+      this.store.setMeta("paused_at", this.now());
+      this.store.appendEvent("question", {
+        question_id: questionId,
+        message,
+        options: JSON.stringify(options),
+        kind: "budget_extension",
+        budget_spent_usd: Math.round(spentUsd * 1e6) / 1e6,
+        budget_total_usd: total,
+        budget_extension_usd: extra,
+        budget_extensions_left: left,
+      });
+      this.store.setPhase("input_required");
+    });
+    await this.overrides().afterQuestion?.();
+    try {
+      await this.lifecycle.jobs.push({
+        id: "deadline",
+        fn: "input_timeout",
+        time: this.inputTimeoutAt(),
+      });
+    } catch {
+      // tick が代わりに見張る
+    }
+  }
+
+  // ---- task_review（kind: review。docs/specs/worker-review.md）----
+  //
+  // Pi（ワーカーの LLM）は動かさない。レビューの段を AgentDO が直接進める:
+  //  1. review_commands を PR の head で、失敗しても止めずに全部流す（結果は meta の review_commands に残す）
+  //  2. レビューのモデルへの入力を組み立て、予算に収まるかを確かめる（足りなければ budget_policy に従う）
+  //  3. モデルを呼ぶ（ツールなし。失敗・形の違う答えは 1 回だけ再試行）。費用は meta の review_usage に積み、タスクの usage に入る
+  //  4. 検査済みの答えから投稿する本文を組み立て、結果（review_result）に残して終端にする。投稿は gateway（TaskDO）が行う
+  // 途中で止まった（DO の再起動・回答待ち）ときは、tick / 回答から launch が呼ばれ、残っている続きから進む。
+
+  /** レビューのモデルの費用の累計 */
+  private reviewUsage(): ReviewUsageDto {
+    return this.store.meta<ReviewUsageDto>("review_usage") ?? ZERO_REVIEW_USAGE;
+  }
+
+  private addReviewUsage(
+    u: { costUsd: number; input: number; output: number; cacheRead: number; cacheWrite: number },
+    estimated: boolean,
+  ): void {
+    this.store.tx(() => {
+      const prev = this.reviewUsage();
+      this.store.setMeta("review_usage", {
+        costUsd: prev.costUsd + u.costUsd,
+        inputTokens: prev.inputTokens + u.input,
+        outputTokens: prev.outputTokens + u.output,
+        cacheReadTokens: prev.cacheReadTokens + u.cacheRead,
+        cacheWriteTokens: prev.cacheWriteTokens + u.cacheWrite,
+        estimated: prev.estimated || estimated,
+      } satisfies ReviewUsageDto);
+    });
+  }
+
+  private reviewInputOf(
+    spec: StoredSpec,
+    rv: ReviewSpec,
+    cmds: ReviewCommandsOutcome,
+  ): ReviewInput {
+    return buildReviewInput({
+      header: spec.instructions,
+      title: rv.title,
+      body: rv.body,
+      diff: rv.diff,
+      diffTruncatedUpstream: rv.diffTruncated,
+      commands: cmds.results,
+      commandsUnavailable: cmds.unavailable,
+    });
+  }
+
+  /** モデルに渡す入力の見積もり（トークン数の上限。UTF-8 のバイト数 + 枠の余裕） */
+  private reviewInputTokens(system: string, payload: unknown): number {
+    return estimateTokens(JSON.stringify({ system, payload })) + REQUEST_OVERHEAD_TOKENS;
+  }
+
+  private async runReview(): Promise<void> {
+    const spec = this.spec();
+    const rv = spec?.kind === "review" ? spec.review : undefined;
+    if (!spec || !rv || this.refused()) return;
+    if (this.store.phase() === "input_required") return;
+    if (this.store.meta<StoredReview>("review_result")) return;
+    if (this.store.meta<number>("review_started_at") === undefined) {
+      this.store.tx(() => {
+        this.store.setMeta("review_started_at", this.now());
+        this.store.setPhase("verifying");
+        this.store.appendEvent("review_started", {
+          model: rv.model,
+          commands: rv.commands.length,
+        });
+      });
+    }
+    const startedAt = this.store.meta<number>("review_started_at") ?? this.now();
+
+    // 1. review_commands
+    let cmds = this.store.meta<ReviewCommandsOutcome>("review_commands");
+    if (!cmds) {
+      const outcome = await runReviewCommands(
+        this.reviewRunner(),
+        rv.commands,
+        startedAt + REVIEW_STAGE_LIMIT_MS,
+      );
+      if (outcome.stopped || this.refused()) return;
+      const results = outcome.results.map((r) => ({ ...r, output: clampCommandOutput(r.output) }));
+      cmds = { ...outcome, results };
+      const saved = cmds;
+      this.store.tx(() => {
+        this.store.setMeta("review_commands", saved);
+        if (rv.commands.length > 0 && !isTerminal(this.store.phase())) {
+          const ran = saved.results.filter((r) => !r.skipped);
+          this.store.appendEvent("review_commands_finished", {
+            passed: ran.filter((r) => r.exitCode === 0 && !r.timedOut).length,
+            failed: ran.filter((r) => r.exitCode !== 0 && !r.timedOut).length,
+            timed_out: ran.filter((r) => r.timedOut).length,
+          });
+        }
+      });
+      // コマンドが終われば、レビューに Sandbox は要らない（モデルを待つ間の費用を止める）
+      if (this.sandboxBooted()) await this.terminalStop("finished");
+    }
+    if (this.refused()) return;
+
+    // 2. 入力と予算（モデルを呼ぶ前に、入力の上限と出力の上限から最大額を見積もる）
+    const input = this.reviewInputOf(spec, rv, cmds);
+    const price = priceFor(this.modelId(rv.model), (this.env as AgentEnv).ENVIRONMENT === "test");
+    const spent = await this.refreshUsage();
+    const need = price
+      ? estimateCallCostUsd(
+          price,
+          this.reviewInputTokens(input.system, input.blocks),
+          REVIEW_MAX_OUTPUT_TOKENS,
+        )
+      : Number.POSITIVE_INFINITY;
+    if (spent.costUsd + need > this.budgetLimitUsd(spec)) {
+      if (await this.askReviewBudget(spec, spent.costUsd)) return;
+      await this.finishReview(spec, rv, cmds, input, { ok: false, code: "budget" });
+      return;
+    }
+    if (this.refused()) return;
+
+    // 3. モデル
+    const outcome = await runReviewModel(this.reviewModelCaller(spec, rv.model), input);
+    if (this.refused()) return;
+    await this.finishReview(spec, rv, cmds, input, outcome);
+  }
+
+  /** review_commands を Sandbox で流す口（PR の head を取り出した作業ツリーで、検証コマンドと同じ制限で流す） */
+  private reviewRunner(): CommandRunner {
+    const sb = this.lazySandbox();
+    return {
+      now: () => this.now(),
+      stopped: () => this.refused(),
+      prepare: () => this.ensureSandboxReady(),
+      run: async (cmd, timeoutMs) => {
+        const cwd = this.resolveCwd(cmd.cwd);
+        if (cwd === undefined) return { exitCode: -1, timedOut: false, output: "invalid cwd" };
+        const r = await sb.exec(cmd.argv, { cwd, timeoutMs, origin: "verification" });
+        return {
+          exitCode: r.exitCode,
+          timedOut: r.timedOut,
+          output: `${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`,
+        };
+      },
+    };
+  }
+
+  /**
+   * レビューのモデルを呼ぶ口。呼ぶたびに残りの予算に出力の上限（8,000 トークン）が収まるかを確かめ、収まらなければ budget。
+   * 費用は実費（単価表とプロバイダーの報告の大きい方）、実費が分からない失敗・時間切れは見積額（estimated）で review_usage に積む。
+   */
+  private reviewModelCaller(spec: StoredSpec, rovoModel: string): ModelCaller {
+    return {
+      call: async ({ system, messages }) => {
+        const env = this.env as AgentEnv;
+        const effective = this.modelId(rovoModel);
+        const price = priceFor(effective, env.ENVIRONMENT === "test");
+        if (!price) return { ok: false, code: "model_rejected" };
+        const inputTokens = this.reviewInputTokens(system, messages);
+        const spent = (await this.refreshUsage()).costUsd;
+        const fits = maxOutputTokensWithin(price, inputTokens, this.budgetLimitUsd(spec) - spent);
+        if (fits < REVIEW_MAX_OUTPUT_TOKENS) return { ok: false, code: "budget" };
+        const maxTokens = REVIEW_MAX_OUTPUT_TOKENS;
+        const estimate = estimateCallCostUsd(price, inputTokens, maxTokens);
+        const access = this.modelAccess();
+        const model = access.model(effective);
+        const now = this.now();
+        const zero = {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        };
+        const context = normalizeContext({
+          systemPrompt: system,
+          messages: messages.map((m) =>
+            m.role === "user"
+              ? {
+                  role: "user" as const,
+                  content: m.blocks.map((text) => ({ type: "text" as const, text })),
+                  timestamp: now,
+                }
+              : {
+                  role: "assistant" as const,
+                  content: [{ type: "text" as const, text: m.text }],
+                  api: model.api,
+                  provider: model.provider,
+                  model: model.id,
+                  usage: zero,
+                  stopReason: "stop" as const,
+                  timestamp: now,
+                },
+          ),
+        });
+        const reasoning = this.reasoningOf(rovoModel);
+        const guarded = guardProvider(access.provider, async () => ({
+          maxTokens,
+          metadata: { userId: spec.userId, taskId: spec.taskId, caller: "review" },
+          ...(reasoning !== undefined ? { reasoning } : {}),
+        }));
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let message: AssistantMessage;
+        try {
+          message = await Promise.race([
+            guarded.streamSimple(model, context, { maxTokens }).result(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("review model timeout")),
+                REVIEW_MODEL_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } catch {
+          // 時間切れ・例外: 呼んだかどうかも実費も分からないので、見積額で数える（少なく数えない）
+          this.addReviewUsage(
+            { costUsd: estimate, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            true,
+          );
+          await this.refreshUsage().catch(() => undefined);
+          return { ok: false, code: "timeout" };
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+        const usage = {
+          input: finiteCount(message.usage?.input),
+          output: finiteCount(message.usage?.output),
+          cacheRead: finiteCount(message.usage?.cacheRead),
+          cacheWrite: finiteCount(message.usage?.cacheWrite),
+        };
+        const costUsd = Math.max(
+          computeCostUsd(price, usage),
+          finiteCount(message.usage?.cost?.total),
+        );
+        const reported = usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0;
+        if (message.stopReason === "error" || message.stopReason === "aborted") {
+          const status = message.stopReason === "error" ? upstreamStatus(message) : undefined;
+          // 4xx は生成の前に拒否された応答なので課金されない（usage が無くても見積額では数えない）
+          if (isRequestRejection(status)) {
+            this.addReviewUsage({ costUsd, ...usage }, false);
+            await this.refreshUsage().catch(() => undefined);
+            return { ok: false, code: "model_rejected" };
+          }
+          this.addReviewUsage(
+            reported ? { costUsd, ...usage } : { costUsd: estimate, ...usage },
+            !reported,
+          );
+          await this.refreshUsage().catch(() => undefined);
+          return { ok: false, code: "model_error" };
+        }
+        // 成功なのに usage が返らないときは、最悪の場合の見積りで数える
+        this.addReviewUsage(
+          reported ? { costUsd, ...usage } : { costUsd: Math.max(costUsd, estimate), ...usage },
+          !reported,
+        );
+        await this.refreshUsage().catch(() => undefined);
+        const text = message.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+        return { ok: true, text, truncated: message.stopReason === "length" };
+      },
+    };
+  }
+
+  /** 予算が足りないとき、budget_policy が ask なら延長を聞く（聞いたら true）。Sandbox は止めてある（コマンドは済んでいる） */
+  private async askReviewBudget(spec: StoredSpec, spentUsd: number): Promise<boolean> {
+    if (spec.budgetPolicy !== "ask") return false;
+    const used = this.budgetExtensions();
+    if (used >= MAX_BUDGET_EXTENSIONS) return false;
+    if (this.refused() || this.openQuestionId()) return false;
+    try {
+      await this.recordBudgetQuestion(spec, spentUsd, used);
+      return true;
+    } catch {
+      return this.store.phase() === "input_required";
+    }
+  }
+
+  /** 段の結果を残して終端にする。budget は BUDGET_EXCEEDED、それ以外の失敗は FAILED（review_failed）、成功は COMPLETED */
+  private async finishReview(
+    spec: StoredSpec,
+    rv: ReviewSpec,
+    cmds: ReviewCommandsOutcome,
+    input: ReviewInput,
+    outcome: ReviewModelOutcome,
+  ): Promise<void> {
+    const built = outcome.ok
+      ? buildReviewBody({
+          model: rv.model,
+          headSha: rv.headSha,
+          verdict: outcome.verdict,
+          commands: input.commands,
+          commandsUnavailable: cmds.unavailable,
+          diffPartial: input.diffPartial,
+          timedOut: cmds.timedOut,
+        })
+      : undefined;
+    const failure = outcome.ok ? undefined : outcome.code;
+    const stored: StoredReview = {
+      result: {
+        stage: outcome.ok ? "done" : "skipped",
+        model: rv.model,
+        headSha: rv.headSha,
+        ...(built ? { body: built.body } : {}),
+        mustFixCount: outcome.ok ? outcome.verdict.mustFix.length : 0,
+        suggestionCount: outcome.ok ? outcome.verdict.suggestions.length : 0,
+        commands: cmds.results,
+        commandsUnavailable: cmds.unavailable,
+        ...(failure !== undefined ? { failure } : {}),
+        usage: this.reviewUsage(),
+      },
+      warnings: reviewWarnings({
+        unavailable: cmds.unavailable,
+        timedOut: cmds.timedOut,
+        redacted: input.redacted || built?.redacted === true,
+        failure,
+      }),
+    };
+    this.store.tx(() => {
+      if (isTerminal(this.store.phase())) return;
+      this.store.setMeta("review_result", stored);
+    });
+    if (failure === "budget") {
+      this.requestStop("budget_exceeded");
+      return;
+    }
+    if (this.stopIntents().length > 0) return;
+    await this.finalize(
+      failure === undefined
+        ? { phase: "completed", skipPatch: true }
+        : { phase: "failed", reason: `review_failed: ${failure}`, skipPatch: true },
+    );
+    await this.terminalStop("finished");
   }
 
   /** クライアントへの質問。記録して phase を input_required にし、run を終える（terminate）。 */

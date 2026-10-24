@@ -534,7 +534,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         stored.repository !== spec.repository ||
         stored.baseSha !== spec.baseSha ||
         stored.branch !== spec.branch ||
-        stored.initialSha !== spec.initialSha
+        stored.initialSha !== spec.initialSha ||
+        stored.checkout?.pullNumber !== spec.checkout?.pullNumber ||
+        stored.checkout?.sha !== spec.checkout?.sha
       ) {
         throw new Error("conflict: this sandbox is already bound to a different workspace");
       }
@@ -1984,6 +1986,49 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         );
       }
     };
+    // task_review: 作業ブランチの代わりに、PR の head（refs/pull/<n>/head）を detached で取り出す。push はしない
+    if (spec.checkout) {
+      const { pullNumber, sha } = spec.checkout;
+      const at = await git(["rev-parse", "--verify", "-q", "HEAD"]);
+      if (at.exitCode === 0 && at.stdout.trim() === sha) return;
+      if (at.exitCode !== 0) {
+        await this.rawExec(["find", WORKSPACE, "-mindepth", "1", "-delete"], { timeoutMs: 60_000 });
+        must(
+          await this.rawExec(
+            [
+              "git",
+              "clone",
+              "-q",
+              "--no-checkout",
+              `https://github.com/${spec.repository}.git`,
+              WORKSPACE,
+            ],
+            { timeoutMs: CLONE_TIMEOUT_MS },
+          ),
+          "git clone",
+        );
+      }
+      const ref = `refs/pull/${pullNumber}/head`;
+      must(
+        await git(
+          ["fetch", "-q", "origin", `+${ref}:refs/remotes/origin/pull/${pullNumber}/head`],
+          CLONE_TIMEOUT_MS,
+        ),
+        "git fetch",
+      );
+      let checkout = await git(["checkout", "-q", "--detach", sha]);
+      if (checkout.exitCode !== 0) {
+        // head が動いた（force push など）後でも、固定した SHA をリモートから直接取れることがある
+        must(await git(["fetch", "-q", "origin", sha], CLONE_TIMEOUT_MS), "git fetch");
+        checkout = await git(["checkout", "-q", "--detach", sha]);
+      }
+      must(checkout, "git checkout");
+      const head = await git(["rev-parse", "HEAD"]);
+      if (head.exitCode !== 0 || head.stdout.trim() !== sha) {
+        throw new Error(`could not check out the pull request head ${sha}`);
+      }
+      return;
+    }
     // checkout したブランチに base_sha が含まれること（fail-closed）。0: 祖先、1: 祖先ではない、他: 判定できない
     const verifyBase = async () => {
       const r = await git(["merge-base", "--is-ancestor", spec.baseSha, "HEAD"]);

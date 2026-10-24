@@ -59,6 +59,11 @@ function tailBytes(text: string, maxBytes: number): string {
   return new TextDecoder().decode(b.subarray(start));
 }
 
+/** 1 本の出力を、秘密を伏せ字にしてから末尾 8KB に切る（保存・モデルへの入力の前に通す） */
+export function clampCommandOutput(text: string, maxBytes = REVIEW_OUTPUT_MAX_BYTES): string {
+  return tailBytes(maskSecrets(text), maxBytes);
+}
+
 const failed = (r: ReviewCommandResult) => r.exitCode !== 0 || r.timedOut;
 
 /**
@@ -70,7 +75,7 @@ export function fitCommandOutputs(
   perBytes = REVIEW_OUTPUT_MAX_BYTES,
   totalBytes = REVIEW_OUTPUT_TOTAL_MAX_BYTES,
 ): ReviewCommandResult[] {
-  const masked = results.map((r) => ({ ...r, output: tailBytes(maskSecrets(r.output), perBytes) }));
+  const masked = results.map((r) => ({ ...r, output: clampCommandOutput(r.output, perBytes) }));
   const order = [
     ...masked.map((r, i) => ({ r, i })).filter(({ r }) => failed(r)),
     ...masked.map((r, i) => ({ r, i })).filter(({ r }) => !failed(r)),

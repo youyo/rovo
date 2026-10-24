@@ -67,6 +67,19 @@ export function validateWorkspaceSpec(spec: WorkspaceSpec): WorkspaceSpec {
   ) {
     throw new Error("invalid branch name");
   }
+  if (spec.checkout !== undefined) {
+    const c = spec.checkout;
+    if (
+      typeof c !== "object" ||
+      c === null ||
+      !Number.isSafeInteger(c.pullNumber) ||
+      c.pullNumber < 1 ||
+      typeof c.sha !== "string" ||
+      !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(c.sha)
+    ) {
+      throw new Error("invalid checkout: expected a pull request number and a full commit sha");
+    }
+  }
   if (typeof spec.deadlineAt !== "number" || !Number.isFinite(spec.deadlineAt)) {
     throw new Error("invalid deadlineAt");
   }

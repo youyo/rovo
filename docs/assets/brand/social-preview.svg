@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="Rovo">
+  <title>Rovo</title>
+  <defs>
+    <radialGradient id="glow" cx="0.85" cy="0.5" r="0.7">
+      <stop offset="0" stop-color="#f08c16" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#f08c16" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity="0.55"/>
+    </filter>
+    <clipPath id="round"><rect x="0" y="0" width="560" height="438" rx="14"/></clipPath>
+  </defs>
+  <rect width="1280" height="640" fill="#0a0d18"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <image href="rovo-lockup-dark.svg" xlink:href="rovo-lockup-dark.svg" x="76" y="84" width="388" height="128"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#e6e9f2">
+    <text x="80" y="296" font-size="32" font-weight="600">Delegate coding tasks from</text>
+    <text x="80" y="342" font-size="32" font-weight="600">Claude Code to sandboxed agents.</text>
+    <text x="80" y="388" font-size="32" font-weight="600" fill="#ffd54a">Get Draft PRs back.</text>
+    <text x="80" y="450" font-size="22" fill="#9aa3b8">Remote MCP · isolated Sandbox on your Cloudflare account</text>
+    <text x="80" y="548" font-size="22" fill="#6c7690" font-family="Menlo, 'SF Mono', Consolas, monospace">github.com/youyo/rovo</text>
+  </g>
+  <g transform="translate(710 150) scale(0.88) rotate(-4 280 219)" filter="url(#shadow)">
+    <g clip-path="url(#round)">
+      <image href="../screenshots/dashboard-dark.png" xlink:href="../screenshots/dashboard-dark.png" x="0" y="0" width="560" height="438" preserveAspectRatio="xMidYMin slice"/>
+    </g>
+    <rect x="0.5" y="0.5" width="559" height="437" rx="14" fill="none" stroke="#ffffff" stroke-opacity="0.15"/>
+  </g>
+</svg>

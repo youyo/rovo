@@ -164,6 +164,12 @@ depends = ["build:dashboard", "test:e2e:dashboard:install"]
 dir = "apps/dashboard"
 run = "pnpm exec playwright test -c playwright.docs.config.ts"
 
+[tasks."docs:social-preview"]
+description = "GitHub の Social preview 用の画像 docs/assets/brand/social-preview.png（1280x640）を social-preview.svg から書き出す（Playwright + Chromium）。サーバーは起動しない"
+depends = ["test:e2e:dashboard:install"]
+dir = "apps/dashboard"
+run = "node scripts/social-preview.mjs"
+
 [tasks."clef:model-experiment"]
 description = "モデルの自動選択の閾値の実験（実際の Clef に apps/gateway/test/fixtures/model-selection-samples.json の見本を投げて確率を JSON に書く）。使い方: mise run clef:model-experiment -- <出力パス>。接続は CLEF_PROXY_URL（AI バインディングを持つ wrangler dev --remote の Worker）か、CLOUDFLARE_API_TOKEN と CLOUDFLARE_ACCOUNT_ID（Workers AI の REST）。数セントかかる。CI では実行しない"
 run = "node scripts/clef-model-experiment.mjs"

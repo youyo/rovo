@@ -535,6 +535,19 @@ describe("システムプロンプト", () => {
     await waitForTerminal(fx);
   });
 
+  it("test_output の節は、テストの出力を失敗と要約の行に絞って読むよう指示する（トークンを節約する）", async () => {
+    const fx = newFixture("prompt-test-output", [call("gate")]);
+    await fx.stub.start(makeSpec("prompt-test-output"));
+    const section = await runInDO(fx.stub, (inst) =>
+      inst.promptSections().find((s: { key: string }) => s.key === "test_output"),
+    );
+    expect(section?.text).toMatch(/filter/i);
+    expect(section?.text).toContain("grep");
+    expect(section?.text).toMatch(/full output only when/i);
+    fx.gate.release();
+    await waitForTerminal(fx);
+  });
+
   it("no_push の節は「Draft PR は gateway が作る（ワーカーは作らない）」と書き、summary で「PR を作っていない」と誤解させない", async () => {
     const fx = newFixture("prompt-pr", [call("gate")]);
     await fx.stub.start(makeSpec("prompt-pr"));

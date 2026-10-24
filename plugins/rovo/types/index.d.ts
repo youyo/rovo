@@ -22,6 +22,20 @@ export type RovoTask = {
   noConsole?: boolean;
   /** noConsole の間、task_console を次に試し直す時刻（ms）。60 秒に 1 回。 */
   consoleRetryAt?: number;
+  /** ここから下は task_list（呼んだ人の全タスク）から来る。task_list が無いサーバーでは入らない。 */
+  kind?: "task" | "review";
+  repository?: string;
+  model?: string;
+  /** task: setup|work|verify|pr|done、review: fetch|investigate|post|done。 */
+  stage?: string;
+  verifyAttempt?: number;
+  verifyMax?: number;
+  /** 質問への答え待ち（waiting_for_answer）。 */
+  waiting?: boolean;
+  /** task_list から入ったタスク。一覧の上限が task_start で拾ったものと別（50 件）。 */
+  listed?: boolean;
+  /** task_list の pr（https のみ）。task_console の pr があればそちらを優先する。 */
+  pr?: { number: number | null; url: string };
 };
 
 /** task_console（か task_status）の最後の取得結果。囲みは外し、制御文字は落としてある。 */
@@ -59,6 +73,14 @@ declare module "claude-code" {
       shown: string | null;
       /** /rovo-create-task が実行された時刻（ms）。タスクを拾うと null に戻る。10 分たつと表示しない。 */
       creating: number | null;
+      /** 描き直しの番号。0.7 秒ごとに 1 つ進み、スピナー・▶・点滅の位置を決める。 */
+      frame: number;
+      /** 各ワーカーが今いる駅と、その駅に着いたフレーム（着いた直後の ◉ のため）。キーは taskKey。 */
+      arrivals: Record<string, { at: number; since: number }>;
+      /** rovo のツールを呼んだ接続先（server と prefix）。task_list を呼ぶ先。$.store にも残す。 */
+      endpoints: { server: string; prefix: string }[];
+      /** task_list の接続先（server と prefix の組）ごとの状態。キーは `${server}/${prefix}`。 */
+      lists: Record<string, { supported: boolean; retryAt: number; lastAt: number }>;
     };
   }
 }

@@ -3,10 +3,14 @@ import type { ThemeKey } from "claude-code";
 import type { RovoTask } from "../types";
 
 export const MAX_TASKS = 10;
+/** task_list から入ったタスクの上限（task_list の limit の最大と同じ）。 */
+export const MAX_LISTED = 50;
 export const KEEP_AFTER_TERMINAL_MS = 60 * 60 * 1000;
 export const TAIL_LINES = 30;
 const MAX_LINE = 300;
 const MAX_TITLE = 120;
+const MAX_REPO = 100;
+const MAX_MODEL = 60;
 
 /** PR へのリンク。number は task_status の URL から取れなかったとき null（「PR」とだけ出す）。 */
 export type PrLink = { number: number | null; url: string };
@@ -16,7 +20,11 @@ export type ParsedConsole = {
   phase: string | null;
   stoppedPhase: string | null;
   nowText: string | null;
+  /** nowText のコマンドの場所（/workspace からの相対）。 */
+  nowWhere?: string;
   command: string | null;
+  /** command の場所（/workspace からの相対）。 */
+  commandWhere?: string;
   tail: string | null;
   isRunning: boolean;
   dashboardUrl?: string;
@@ -308,6 +316,10 @@ export const toastText = (title: string, status: string): string => {
 export const budgetToastText = (title: string): string =>
   `${title} が予算の承認待ち（利用者に確認してから task_answer で答える）`;
 
+/** 質問への答え待ち。INPUT_REQUIRED か、終端でない間の waiting_for_answer。 */
+export const isWaiting = (t: { status: string; waiting?: boolean }): boolean =>
+  t.status === "INPUT_REQUIRED" || (t.waiting === true && !isTerminal(t.status));
+
 export const taskKey = (t: Pick<RovoTask, "server" | "taskId">): string =>
   `${t.server}/${t.taskId}`;
 
@@ -316,11 +328,73 @@ export const cleanTitle = (title: unknown, fallback: string): string => {
   return (text === "" ? fallback : text).slice(0, MAX_TITLE);
 };
 
-/** 終端から 1 時間たったものを消し、新しい方から 10 件に絞る。 */
-export const pruneTasks = (list: RovoTask[], now: number): RovoTask[] =>
-  list
-    .filter((t) => t.terminalAt === undefined || now - t.terminalAt < KEEP_AFTER_TERMINAL_MS)
-    .slice(-MAX_TASKS);
+/** 終端から 1 時間たったものを消す。task_start で拾ったものは新しい方から 10 件、task_list から入ったものは 50 件に絞る。 */
+export const pruneTasks = (list: RovoTask[], now: number): RovoTask[] => {
+  const live = list.filter(
+    (t) => t.terminalAt === undefined || now - t.terminalAt < KEEP_AFTER_TERMINAL_MS,
+  );
+  const keep = new Set<RovoTask>([
+    ...live.filter((t) => t.listed !== true).slice(-MAX_TASKS),
+    ...live.filter((t) => t.listed === true).slice(-MAX_LISTED),
+  ]);
+  return live.filter((t) => keep.has(t));
+};
+
+const asCount = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 99
+    ? value
+    : undefined;
+
+/** PrLink（number は null もある）。url は https のみ。 */
+const asPrLink = (value: unknown): PrLink | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const { number, url } = value as Record<string, unknown>;
+  const safe = httpsOnly(url);
+  if (safe === undefined) return undefined;
+  if (number === null) return { number: null, url: safe };
+  return typeof number === "number" && Number.isInteger(number) && number >= 1
+    ? { number, url: safe }
+    : undefined;
+};
+
+const shortText = (value: unknown, max: number): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const text = stripFence(value).replace(/\s+/g, " ").trim().slice(0, max);
+  return text === "" ? undefined : text;
+};
+
+export type TaskKind = "task" | "review";
+
+/** task_list の stage。駅の並びと同じ順で、最後の done は全部済んだ印。 */
+const STAGES: Record<TaskKind, readonly string[]> = {
+  task: ["setup", "work", "verify", "pr", "done"],
+  review: ["fetch", "investigate", "post", "done"],
+};
+
+const asStage = (kind: TaskKind, value: unknown): string | undefined =>
+  typeof value === "string" && STAGES[kind].includes(value) ? value : undefined;
+
+/** task_list 由来のフィールドを、形を確かめて取り出す（$.store の値も同じ規則で通す）。 */
+const coerceListed = (t: Record<string, unknown>): Partial<RovoTask> => {
+  const kind: TaskKind | undefined = t.kind === "task" || t.kind === "review" ? t.kind : undefined;
+  const repository = shortText(t.repository, MAX_REPO);
+  const model = shortText(t.model, MAX_MODEL);
+  const stage = kind === undefined ? undefined : asStage(kind, t.stage);
+  const verifyAttempt = asCount(t.verifyAttempt);
+  const verifyMax = asCount(t.verifyMax);
+  const pr = asPrLink(t.pr);
+  return {
+    ...(kind !== undefined ? { kind } : {}),
+    ...(repository !== undefined ? { repository } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(stage !== undefined ? { stage } : {}),
+    ...(verifyAttempt !== undefined ? { verifyAttempt } : {}),
+    ...(verifyMax !== undefined ? { verifyMax } : {}),
+    ...(t.waiting === true ? { waiting: true } : {}),
+    ...(t.listed === true ? { listed: true } : {}),
+    ...(pr !== undefined ? { pr } : {}),
+  };
+};
 
 /** $.store から読んだ値を信用せず、形を確かめて作り直す。 */
 export const coerceTasks = (value: unknown): RovoTask[] => {
@@ -352,7 +426,351 @@ export const coerceTasks = (value: unknown): RovoTask[] => {
       ...(t.noConsole === true ? { noConsole: true } : {}),
       ...(t.awaiting === "budget_extension" ? { awaiting: "budget_extension" as const } : {}),
       ...(typeof t.consoleRetryAt === "number" ? { consoleRetryAt: t.consoleRetryAt } : {}),
+      ...coerceListed(t),
     });
   }
   return out;
+};
+
+// --- パイプラインの列（lanes） ------------------------------------------------
+
+/** 駅の名前（列の下の行に出す）。 */
+export const STATIONS: Record<TaskKind, readonly string[]> = {
+  task: ["準備", "実行", "検証", "PR"],
+  review: ["取出", "調査", "投稿"],
+};
+
+/** task_console の phase（task_list が無いサーバー）を task の stage に読み替える。 */
+const PHASE_TO_STAGE: Record<string, string> = {
+  prepare: "setup",
+  run: "work",
+  verify: "verify",
+  done: "done",
+};
+
+/**
+ * いまの駅の番号。済んだ印（done）は駅の数と同じ値。stage が無い・知らない・別の kind のものは null。
+ * kind が task のときは console の phase（prepare|run|verify|done）も読む。
+ */
+export const stageIndex = (kind: TaskKind, stage: string | null | undefined): number | null => {
+  if (typeof stage !== "string") return null;
+  const names = STAGES[kind];
+  const direct = names.indexOf(stage);
+  if (direct >= 0) return direct;
+  const mapped = kind === "task" ? PHASE_TO_STAGE[stage] : undefined;
+  const at = mapped === undefined ? -1 : names.indexOf(mapped);
+  return at >= 0 ? at : null;
+};
+
+const isWide = (cp: number): boolean =>
+  (cp >= 0x1100 && cp <= 0x115f) ||
+  (cp >= 0x2e80 && cp <= 0xa4cf) ||
+  (cp >= 0xac00 && cp <= 0xd7a3) ||
+  (cp >= 0xf900 && cp <= 0xfaff) ||
+  (cp >= 0xfe30 && cp <= 0xfe6f) ||
+  (cp >= 0xff00 && cp <= 0xff60) ||
+  (cp >= 0xffe0 && cp <= 0xffe6) ||
+  (cp >= 0x1f300 && cp <= 0x1faff) ||
+  (cp >= 0x20000 && cp <= 0x3fffd);
+
+/** 端末での表示幅。全角（日本語など）は 2 桁、それ以外は 1 桁。 */
+export const displayWidth = (s: string): number => {
+  let w = 0;
+  for (const ch of s) w += isWide(ch.codePointAt(0) ?? 0) ? 2 : 1;
+  return w;
+};
+
+export const padWidth = (s: string, width: number): string =>
+  s + " ".repeat(Math.max(0, width - displayWidth(s)));
+
+/** 表示幅が width 以下になるよう切り、切ったら末尾に … を付ける。 */
+export const truncateWidth = (s: string, width: number): string => {
+  if (displayWidth(s) <= width) return s;
+  let out = "";
+  let w = 0;
+  for (const ch of s) {
+    const cw = isWide(ch.codePointAt(0) ?? 0) ? 2 : 1;
+    if (w + cw > width - 1) break;
+    out += ch;
+    w += cw;
+  }
+  return `${out}…`;
+};
+
+/** 線路 1 区間の長さ。1 駅ぶんの幅は駅 1 + 線路 SEG。名前の行もこの幅で並べる。 */
+const SEG = 4;
+const COLUMN = SEG + 1;
+
+/** 列の下の行（駅の名前）。 */
+export const labelRow = (kind: TaskKind): string =>
+  STATIONS[kind].map((name) => padWidth(name, COLUMN)).join("");
+
+export type Cell = { text: string; color?: ThemeKey; bold?: boolean };
+
+export type LaneState = "active" | "waiting" | "done" | "failed";
+
+const SPINNER = "◐◓◑◒";
+
+/** 同じ色が続く文字をまとめて 1 つの Cell にする。 */
+const runs = (parts: { text: string; color?: ThemeKey }[]): Cell[] => {
+  const out: Cell[] = [];
+  for (const p of parts) {
+    const last = out[out.length - 1];
+    if (last !== undefined && last.color === p.color) last.text += p.text;
+    else out.push({ text: p.text, ...(p.color !== undefined ? { color: p.color } : {}) });
+  }
+  return out;
+};
+
+/**
+ * 駅と線路 1 行ぶん。済んだ駅は ●━━、いまの駅はスピナー（着いた直後は白い ◉）、
+ * その先の線路に ▶ の光が frame ごとに 1 つ進む。質問待ちは流れを止めて ? を点滅。
+ * at は いまの駅の番号（駅の数と同じなら全部済み）。null は分からない（全部これから）。
+ */
+export const laneCells = (opts: {
+  kind: TaskKind;
+  at: number | null;
+  state: LaneState;
+  frame: number;
+  arrived: boolean;
+}): Cell[] => {
+  const n = STATIONS[opts.kind].length;
+  const { state, frame } = opts;
+  const at = state === "done" ? n : opts.at === null ? -1 : Math.min(opts.at, n);
+  const cells: Cell[] = [];
+  for (let j = 0; j < n; j++) {
+    if (j < at) cells.push({ text: "●", color: "success" });
+    else if (j === at && state === "waiting") {
+      cells.push(frame % 2 === 0 ? { text: "?", color: "warning" } : { text: " " });
+    } else if (j === at && state === "failed") cells.push({ text: "✕", color: "error" });
+    else if (j === at && opts.arrived) cells.push({ text: "◉", color: "text", bold: true });
+    else if (j === at) {
+      cells.push({ text: SPINNER[frame % SPINNER.length] ?? "◐", color: "suggestion" });
+    } else cells.push({ text: "○", color: "subtle" });
+    if (j === n - 1) break;
+    if (j < at) cells.push({ text: "━".repeat(SEG), color: "success" });
+    else if (j === at && state === "active") {
+      const p = frame % (SEG + 2);
+      const bar: { text: string; color?: ThemeKey }[] = [];
+      for (let k = 0; k < SEG; k++) {
+        if (k === p) bar.push({ text: "▶", color: "claude" });
+        else if (k === p - 1) bar.push({ text: "━", color: "suggestion" });
+        else bar.push({ text: "┈", color: "subtle" });
+      }
+      cells.push(...runs(bar));
+    } else cells.push({ text: "┈".repeat(SEG), color: "subtle" });
+  }
+  return cells;
+};
+
+/** ペインの見出しの数え方。作業中（質問待ちでない実行中）・質問待ち・完了。費用は出さない。 */
+export const headingText = (tasks: readonly RovoTask[]): string => {
+  let run = 0;
+  let wait = 0;
+  let done = 0;
+  for (const t of tasks) {
+    if (t.status === "COMPLETED") done++;
+    else if (isTerminal(t.status)) continue;
+    else if (isWaiting(t)) wait++;
+    else run++;
+  }
+  return `作業中 ${run} · 質問待ち ${wait} · 完了 ${done}`;
+};
+
+const MAX_RIGHT = 40;
+
+/** 列の右に出す文字。実行中はいまの道具と対象、終われば結果、質問待ちはその旨。 */
+export const rightText = (
+  t: RovoTask,
+  nowText: string | null,
+  pr?: PrLink,
+): { text: string; color?: ThemeKey } => {
+  if (isTerminal(t.status)) {
+    const link = pr ?? t.pr;
+    const text =
+      t.status === "COMPLETED"
+        ? link === undefined
+          ? "✓ 完了"
+          : link.number === null
+            ? "✓ PR"
+            : `✓ PR #${link.number}`
+        : `${glyph(t.status)} ${statusLabel(t.status)}`;
+    const color = statusColor(t.status);
+    return { text: truncateWidth(text, MAX_RIGHT), ...(color !== undefined ? { color } : {}) };
+  }
+  if (isWaiting(t)) {
+    const label = statusLabel(
+      "INPUT_REQUIRED",
+      t.status === "INPUT_REQUIRED" ? t.awaiting : undefined,
+    );
+    return { text: truncateWidth(label, MAX_RIGHT), color: "warning" };
+  }
+  const attempt =
+    t.stage === "verify" && t.verifyAttempt !== undefined
+      ? `[${t.verifyAttempt}${t.verifyMax !== undefined ? `/${t.verifyMax}` : ""}]`
+      : "";
+  const text = [attempt, nowText ?? ""].filter((x) => x !== "").join(" ");
+  return { text: truncateWidth(text, MAX_RIGHT) };
+};
+
+// --- task_list ----------------------------------------------------------------
+
+/** task_list の 1 件（整えたもの）。 */
+export type ListedTask = {
+  taskId: string;
+  kind: TaskKind;
+  title: string;
+  repository?: string;
+  status: string;
+  stage?: string;
+  verifyAttempt?: number;
+  verifyMax?: number;
+  waiting: boolean;
+  model?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  endedAt?: number;
+  pr?: PrLink;
+  dashboardUrl?: string;
+};
+
+const asTime = (value: unknown): number | undefined => {
+  if (typeof value !== "string") return undefined;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : undefined;
+};
+
+/**
+ * task_list の結果。形が違うもの（task_list が無いサーバーのエラーなど）は null。
+ * 1 件ずつ形を確かめ、task_id か status が無い行は落とす。ワーカーが書いた文字列は整える。
+ */
+export const parseTaskList = (text: string): { tasks: ListedTask[]; truncated: boolean } | null => {
+  const body = asObject(text);
+  if (body === null || !Array.isArray(body.tasks)) return null;
+  const tasks: ListedTask[] = [];
+  for (const raw of body.tasks as unknown[]) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.task_id !== "string" || r.task_id === "" || typeof r.status !== "string") continue;
+    const taskId = stripFence(r.task_id);
+    const kind: TaskKind = r.kind === "review" ? "review" : "task";
+    const repository = shortText(r.repository, MAX_REPO);
+    const model = shortText(r.model, MAX_MODEL);
+    const stage = asStage(kind, r.stage);
+    const verifyAttempt = asCount(r.verify_attempt);
+    const verifyMax = asCount(r.verify_max);
+    const createdAt = asTime(r.created_at);
+    const updatedAt = asTime(r.updated_at);
+    const endedAt = asTime(r.ended_at);
+    const pr = asPrLink(r.pr);
+    const dashboardUrl = httpsOnly(r.dashboard_url);
+    tasks.push({
+      taskId,
+      kind,
+      title: cleanTitle(r.title, taskId),
+      ...(repository !== undefined ? { repository } : {}),
+      status: stripFence(r.status),
+      ...(stage !== undefined ? { stage } : {}),
+      ...(verifyAttempt !== undefined ? { verifyAttempt } : {}),
+      ...(verifyMax !== undefined ? { verifyMax } : {}),
+      waiting: r.waiting_for_answer === true,
+      ...(model !== undefined ? { model } : {}),
+      ...(createdAt !== undefined ? { createdAt } : {}),
+      ...(updatedAt !== undefined ? { updatedAt } : {}),
+      ...(endedAt !== undefined ? { endedAt } : {}),
+      ...(pr !== undefined ? { pr } : {}),
+      ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
+    });
+  }
+  return { tasks, truncated: body.truncated === true };
+};
+
+/**
+ * task_list の結果を追跡リストに混ぜる。新しいものは足し、知っているものは状態を更新する
+ * （startedAt と task_start で付けた印は保つ）。すでに終わっていたものは通知済みにして、トーストを出さない。
+ * 終端に変わったことを知らせる（トースト・notified）のは呼ぶ側。開始時刻の古い順に並べる。
+ */
+export const mergeListed = (
+  existing: RovoTask[],
+  listed: readonly ListedTask[],
+  endpoint: { server: string; prefix: string },
+  now: number,
+): RovoTask[] => {
+  const out = [...existing];
+  for (const l of listed) {
+    const key = taskKey({ server: endpoint.server, taskId: l.taskId });
+    const at = out.findIndex((x) => taskKey(x) === key);
+    const prev = at >= 0 ? out[at] : undefined;
+    const terminal = isTerminal(l.status);
+    const fields: Partial<RovoTask> = {
+      kind: l.kind,
+      ...(l.repository !== undefined ? { repository: l.repository } : {}),
+      ...(l.model !== undefined ? { model: l.model } : {}),
+      ...(l.stage !== undefined ? { stage: l.stage } : {}),
+      ...(l.verifyAttempt !== undefined ? { verifyAttempt: l.verifyAttempt } : {}),
+      ...(l.verifyMax !== undefined ? { verifyMax: l.verifyMax } : {}),
+      ...(l.waiting ? { waiting: true as const } : {}),
+      ...(l.pr !== undefined ? { pr: l.pr } : {}),
+    };
+    const dashboardUrl = l.dashboardUrl ?? prev?.dashboardUrl;
+    if (prev === undefined) {
+      out.push({
+        taskId: l.taskId,
+        title: l.title,
+        server: endpoint.server,
+        prefix: endpoint.prefix,
+        startedAt: l.createdAt ?? now,
+        status: l.status,
+        ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
+        ...fields,
+        listed: true,
+        ...(terminal
+          ? { terminalAt: l.endedAt ?? l.updatedAt ?? now, notified: true as const }
+          : {}),
+      });
+      continue;
+    }
+    // list が毎回言い直すフィールドは、前の値を捨ててから入れ直す。
+    const {
+      stage: _stage,
+      verifyAttempt: _attempt,
+      verifyMax: _max,
+      waiting: _waiting,
+      pr: _pr,
+      awaiting: _awaiting,
+      ...rest
+    } = prev;
+    const becameTerminal = !isTerminal(prev.status) && terminal;
+    out[at] = {
+      ...rest,
+      title: l.title,
+      status: l.status,
+      ...(l.status === "INPUT_REQUIRED" && prev.awaiting !== undefined
+        ? { awaiting: prev.awaiting }
+        : {}),
+      ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
+      ...fields,
+      listed: true,
+      ...(becameTerminal ? { terminalAt: l.endedAt ?? now } : {}),
+    };
+  }
+  return out
+    .map((t, i) => ({ t, i }))
+    .sort((a, b) => a.t.startedAt - b.t.startedAt || a.i - b.i)
+    .map(({ t }) => t);
+};
+
+/** `mcp__<server>__<prefix>task_*` のどれか。task_list を呼ぶ先（server と prefix）を知るのに使う。 */
+export const matchRovoTool = (tool: string): { server: string; prefix: string } | null => {
+  if (!tool.startsWith("mcp__")) return null;
+  const parts = tool.split("__");
+  if (parts.length < 3) return null;
+  const name = parts[parts.length - 1] ?? "";
+  const hit =
+    /^((?:[A-Za-z0-9-]+_)*)task_(?:start|status|console|result|review|list|wait|answer|steer|cancel)$/.exec(
+      name,
+    );
+  const server = parts.slice(1, -1).join("__");
+  if (hit === null || server === "") return null;
+  return { server, prefix: hit[1] ?? "" };
 };

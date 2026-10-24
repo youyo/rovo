@@ -221,3 +221,88 @@ describe("パスの表記と差分の読み取りの堅牢さ", () => {
     expect(w.join("\n")).toContain("test/old.test.ts");
   });
 });
+
+describe("detectTestTampering: CI・タスク定義・lint と型の設定", () => {
+  const CI = "CI の設定が変更されています: ";
+  const TASK = "タスクの定義が変更されています（テストや lint のコマンドが変わっていないか確認）: ";
+  const LINT = "lint または型の設定が変更されています: ";
+  const run = (status: string, path: string) =>
+    detectTestTampering({ nameStatus: `${status}\t${path}`, ...NO_SCRIPTS });
+  const cases: [string, string, string[], string[]][] = [
+    [
+      "CI",
+      CI,
+      [
+        ".github/workflows/ci.yml",
+        ".github/workflows/ci.yaml",
+        ".circleci/config.yml",
+        ".gitlab-ci.yml",
+        "azure-pipelines.yml",
+        ".buildkite/pipeline.yml",
+      ],
+      [
+        ".github/workflows/README.md",
+        ".github/workflows/sub/ci.yml",
+        "apps/web/.github/workflows/ci.yml",
+        "docs/.gitlab-ci.yml.md",
+      ],
+    ],
+    [
+      "task",
+      TASK,
+      [
+        "mise.toml",
+        ".mise.toml",
+        "mise.ci.toml",
+        "Makefile",
+        "justfile",
+        "Justfile",
+        "Taskfile.yml",
+        "Taskfile.yaml",
+        "pyproject.toml",
+        "setup.cfg",
+        "noxfile.py",
+        "packages/x/pyproject.toml",
+        "apps/web/Makefile",
+      ],
+      ["docs/Makefile.md", "mise.local.toml", "src/mise.toml.bak", "Makefile.md"],
+    ],
+    [
+      "lint",
+      LINT,
+      [
+        "eslint.config.js",
+        "eslint.config.mts",
+        ".eslintrc",
+        ".eslintrc.json",
+        "biome.json",
+        "biome.jsonc",
+        "tsconfig.json",
+        "tsconfig.build.json",
+        "ruff.toml",
+        ".ruff.toml",
+        "mypy.ini",
+        ".mypy.ini",
+        ".golangci.yml",
+        ".golangci.yaml",
+        ".golangci.toml",
+        "oxlintrc.json",
+        ".oxlintrc.json",
+        "apps/web/tsconfig.json",
+      ],
+      ["src/tsconfig-helper.ts", "docs/tsconfig.json.md", "eslint.config.json", "mytsconfig.json"],
+    ],
+  ];
+  for (const [name, msg, hits, misses] of cases) {
+    it(`${name}: M と D で警告し、A では警告しない`, () => {
+      for (const p of hits) {
+        expect(run("M", p)).toEqual([`${msg}${p}`]);
+        expect(run("D", p)).toEqual([`${msg}${p}`]);
+        expect(run("A", p)).toEqual([]);
+      }
+    });
+    it(`${name}: 対象外のパスは警告しない`, () => {
+      for (const p of misses) expect(run("M", p)).toEqual([]);
+    });
+  }
+});

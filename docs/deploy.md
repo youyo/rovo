@@ -184,8 +184,6 @@ AI Gateway の ID・KV の id・アーカイブのバケット名は Terraform �
 | `deploy/*.wrangler.jsonc`、`deploy/infra.json` | `deploy:config` の生成物。コミットする |
 | `infra/backend.tf` | Terraform の state の置き場所（任意。upstream は `backend` を持たない。`infra/README.md`） |
 
-upstream の `.gitignore` は、公開リポジトリに実際の設定が入らないよう、`rovo.config.json` と `deploy/` を除外している。**下流では、初回だけ `git add -f rovo.config.json deploy/` で追加する**（追加したあとは通常どおり追跡される）。または下流の `.gitignore` の末尾に `!/rovo.config.json` と `!/deploy/` を足す。
-
 > rovo の `apps/*/wrangler.jsonc` に本番の値を書かないこと。特に `r2_buckets` は下流の設定にだけ置く。
 
 確かめた範囲（2026-10-20）: `deploy.example/` の gateway と web を `wrangler deploy --dry-run -c <設定>`（`apps/<name>` で実行）でバンドルし、`main` が設定ファイルからの相対パスで解決されることを確かめた。agent も `--containers-rollout=none` で通った。コンテナのイメージのビルド（`dockerfile` の相対パスの解決）は、実際のデプロイでしか確かめられない。**【実機で確認して追記】** D12 の生成器を使った `setup` の通し（実アカウント）も未確認。**【実機で確認して追記】** D12b の manifest の受理（GitHub が manifest を受け付けるか、`redirect_url` が loopback で通るか）、User-to-server token expiration の既定、`byok` の権限（Secrets Store）と PUT（Rotate）の形も未確認。**【実機で確認して追記】**

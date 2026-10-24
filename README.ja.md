@@ -4,6 +4,8 @@
 
 [English](README.md) | 日本語
 
+[![CI](https://github.com/youyo/rovo/actions/workflows/ci.yml/badge.svg)](https://github.com/youyo/rovo/actions/workflows/ci.yml)
+
 Rovo は、Claude Code / Cowork から Remote MCP 経由でコーディングタスクを子エージェントに任せる仕組み。タスクは自分の Cloudflare アカウント上の隔離された Sandbox で実行され、成果は Draft PR として返り、進み具合はダッシュボードで見られる。
 
 <p align="center">

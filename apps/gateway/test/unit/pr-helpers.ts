@@ -73,3 +73,12 @@ export async function runToCompleted(overrides: Record<string, unknown> = {}, ow
   await t.stub.advance();
   return { ...t, head };
 }
+
+/**
+ * 完了時の自動の Ready を 1 回だけ失敗させて、PR が Draft のまま COMPLETED になった状態にする
+ * （task_pr_ready / recordPrAction の「Draft → Ready」を確かめるテスト用）。
+ */
+export async function runToCompletedDraft(overrides: Record<string, unknown> = {}, owner = 801) {
+  app().setFault({ pattern: "^POST /graphql$", status: 502, count: 1 });
+  return runToCompleted(overrides, owner);
+}

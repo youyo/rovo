@@ -179,7 +179,7 @@ describe("タスク詳細（実行中。値のある now / output）", () => {
     expect(text(c)).toContain("$0.90");
     expect(text(c)).toContain("入力");
     expect(text(c)).toContain("standard-2");
-    expect(text(c)).toContain("人のレビューを待つ");
+    expect(text(c)).toContain("全体のテストとレビューはクライアントが行う");
     expect(text(c)).toContain("high");
     const pr = c.querySelector("a[href^='https://github.com/']") as HTMLAnchorElement;
     expect(pr.getAttribute("href")).toBe(t.pr?.url);

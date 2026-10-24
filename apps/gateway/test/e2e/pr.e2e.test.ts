@@ -15,8 +15,8 @@ import {
   waitForResult,
 } from "./helpers";
 
-// PR のレビュー後の Ready 化とマージ（D9）を、実 Worker（wrangler dev）と偽 GitHub で通しで確かめる。
-// Ready 化とマージは利用者の GitHub トークン（偽 GitHub が OAuth で発行した ghu_）で行われる。
+// 完了時の自動の Ready 化と、クライアントによるマージ（D9）を、実 Worker（wrangler dev）と偽 GitHub で通しで確かめる。
+// 自動の Ready は GitHub App の Installation Token（ghs_）、task_pr_ready とマージは利用者の GitHub トークン（偽 GitHub が OAuth で発行した ghu_）で行われる。
 
 beforeEach(async () => {
   await admin.reset();
@@ -24,7 +24,7 @@ beforeEach(async () => {
 
 // childCommit: 子が commit を push した状態にする（既定 true）。変更の無いまま終わると rovo が空の Draft PR を閉じるので、
 // Ready・マージの流れを確かめるテストは、作業ブランチに子の commit を積んでから終端にする。
-async function setup(mergePolicy?: "agent_merge" | "human_review", childCommit = true) {
+async function setup(childCommit = true, extra: Record<string, unknown> = {}) {
   const user = newUser("pr");
   await addMember(user);
   await installApp();
@@ -32,7 +32,7 @@ async function setup(mergePolicy?: "agent_merge" | "human_review", childCommit =
   const started = bodyOf(
     await client.callTool({
       name: "task_start",
-      arguments: startArgs("pr-task", mergePolicy ? { merge_policy: mergePolicy } : {}),
+      arguments: startArgs("pr-task", extra),
     }),
   );
   const taskId = started.task_id as string;
@@ -71,98 +71,82 @@ const LONG = 120_000;
 
 describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => {
   it(
-    "human_review: task_pr_ready で Ready になり（冪等）、task_result の next_steps と pr.draft が変わる。task_pr_merge は forbidden",
+    "client_review（既定）: 完了で rovo が自動で Ready にする（Installation Token）→ task_pr_ready は冪等 → check の失敗・実行中は merge_blocked → ブランチ保護の拒否 → head_moved → 通ればマージ（検証済みの sha。delete_branch で作業ブランチも消える）",
     async () => {
-      const t = await setup("human_review");
+      const t = await setup();
       try {
         const before = await complete(t, t.client);
         expect(before).toMatchObject({
           status: "COMPLETED",
-          merge_policy: "human_review",
-          pr: { draft: true, merged: false, head_sha: t.head, head_matches_verified: true },
+          review_policy: "client_review",
+          pr: { draft: false, merged: false, head_sha: t.head, head_matches_verified: true },
         });
-        expect(String(before.next_steps)).toContain("task_pr_ready");
-        expect((await pullOf(t.branch))?.draft).toBe(true);
-
-        const ready = bodyOf(
-          await t.client.callTool({ name: "task_pr_ready", arguments: { task_id: t.taskId } }),
-        );
-        expect(ready).toMatchObject({
-          task_id: t.taskId,
-          draft: false,
-          changed: true,
-          merge_policy: "human_review",
-        });
+        // 新しいフロー: task_pr_ready を呼ばずに Ready。次の一手は手元の全体のテストとレビュー → マージ
         expect((await pullOf(t.branch))?.draft).toBe(false);
-        const again = bodyOf(
-          await t.client.callTool({ name: "task_pr_ready", arguments: { task_id: t.taskId } }),
-        );
-        expect(again).toMatchObject({ draft: false, changed: false });
+        expect(String(before.next_steps)).toContain("全体のテスト");
+        expect(String(before.next_steps)).toContain("task_pr_merge でマージ");
+        expect(String(before.next_steps)).not.toContain("task_pr_ready で Ready にする");
 
-        const after = bodyOf(
-          await t.client.callTool({ name: "task_result", arguments: { task_id: t.taskId } }),
-        );
-        expect(after).toMatchObject({ pr: { draft: false } });
-        expect(String(after.next_steps)).toContain("人のレビューを待つ");
-
-        // human_review のタスクでは task_pr_merge を拒否する。GitHub は変わらない
-        const merge = await t.client.callTool({
-          name: "task_pr_merge",
-          arguments: { task_id: t.taskId },
-        });
-        expect(merge.isError).toBe(true);
-        expect(bodyOf(merge).code).toBe("forbidden");
-        expect(await pullOf(t.branch)).toMatchObject({ draft: false, merged: false });
-
-        // 監査: pr_ready は 1 回だけ（冪等な 2 回目は出さない）。拒否は pr_denied
-        const records = await auditRecords(t.taskId);
-        const ev = records.filter((r) => r.event === "pr_ready");
-        expect(ev).toHaveLength(1);
-        expect(ev[0]).toMatchObject({
+        // 自動の Ready は Installation Token の GraphQL（利用者のトークンではない）。監査は caller: system
+        const gh1 = await admin.app<{ method: string; path: string; auth: string }[]>("requests");
+        const graphql = gh1.filter((r) => r.path === "/graphql");
+        expect(graphql.map((r) => r.auth)).toEqual(["token"]);
+        const auto = (await auditRecords(t.taskId)).filter((r) => r.event === "pr_ready");
+        expect(auto).toHaveLength(1);
+        expect(auto[0]).toMatchObject({
           taskId: t.taskId,
-          userId: t.user.id,
-          merge_policy: "human_review",
-        });
-        expect(records.filter((r) => r.event === "pr_denied").at(-1)).toMatchObject({
-          kind: "merge",
-          reason: "policy_human_review",
-          merge_policy: "human_review",
-          userId: t.user.id,
+          caller: "system",
+          reason: "auto_ready",
+          review_policy: "client_review",
         });
 
-        // 利用者のトークンで呼ばれている（偽 GitHub の User API 経由。Installation Token ではない）
-        const gh = await admin.app<{ method: string; path: string; auth: string }[]>("requests");
-        const userCalls = gh.filter((r) => r.auth === "user").map((r) => `${r.method} ${r.path}`);
-        expect(userCalls).toContain("POST /graphql");
-        expect(userCalls.some((c) => c.startsWith("PUT "))).toBe(false);
-      } finally {
-        await t.client.close();
-      }
-    },
-    LONG,
-  );
-
-  it(
-    "agent_merge: Draft のマージは拒否 → ready → ブランチ保護の拒否（merge_blocked）→ 解除 → ブランチが動いたら head_moved → 戻すとマージできる（検証済みの sha を渡す。delete_branch で作業ブランチも消える）",
-    async () => {
-      const t = await setup("agent_merge");
-      try {
-        await complete(t, t.client);
         const call = (name: string, args: Record<string, unknown> = {}) =>
           t.client.callTool({ name, arguments: { task_id: t.taskId, ...args } });
 
-        // Draft のままのマージは、先に task_pr_ready を促されて拒否される
-        const early = await call("task_pr_merge");
-        expect(early.isError).toBe(true);
-        expect(bodyOf(early)).toMatchObject({
-          code: "conflict",
-          message: expect.stringContaining("task_pr_ready"),
+        // task_pr_ready は残してある（冪等）。すでに Ready なので changed: false、監査も増えない
+        expect(bodyOf(await call("task_pr_ready"))).toMatchObject({
+          draft: false,
+          changed: false,
+          review_policy: "client_review",
+        });
+        expect((await auditRecords(t.taskId)).filter((r) => r.event === "pr_ready")).toHaveLength(
+          1,
+        );
+
+        // PR の head に付いた GitHub の check: 失敗は checks_failing、実行中は checks_pending で拒否する
+        await admin.app("setCheckRuns", "acme/widgets", t.head, [
+          { name: "ci", status: "completed", conclusion: "failure" },
+        ]);
+        const failing = await call("task_pr_merge");
+        expect(failing.isError).toBe(true);
+        expect(bodyOf(failing)).toMatchObject({
+          code: "merge_blocked",
+          message: expect.stringContaining("checks_failing"),
+        });
+        await admin.app("setCheckRuns", "acme/widgets", t.head, [
+          { name: "ci", status: "in_progress" },
+        ]);
+        const pending = await call("task_pr_merge");
+        expect(bodyOf(pending)).toMatchObject({
+          code: "merge_blocked",
+          message: expect.stringContaining("checks_pending"),
+        });
+        await admin.app("setCheckRuns", "acme/widgets", t.head, []);
+        await admin.app("setCommitStatuses", "acme/widgets", t.head, [
+          { context: "legacy", state: "failure" },
+        ]);
+        expect(bodyOf(await call("task_pr_merge"))).toMatchObject({
+          code: "merge_blocked",
+          message: expect.stringContaining("checks_failing"),
         });
         expect((await pullOf(t.branch))?.merged).toBe(false);
-
-        await call("task_pr_ready");
-        const readyResult = bodyOf(await call("task_result"));
-        expect(String(readyResult.next_steps)).toContain("task_pr_merge でマージ");
+        // check が成功すれば進める
+        await admin.app("setCommitStatuses", "acme/widgets", t.head, [
+          { context: "legacy", state: "success" },
+        ]);
+        await admin.app("setCheckRuns", "acme/widgets", t.head, [
+          { name: "ci", status: "completed", conclusion: "success" },
+        ]);
 
         // ブランチ保護（必須レビュー）の拒否: GitHub の理由がコード付きで返る
         await admin.app(
@@ -182,7 +166,7 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
         });
         await admin.app("setMergeBlock", "acme/widgets", null);
 
-        // 検証のあとにブランチが動いた: マージしない
+        // 検証のあとにブランチが動いた（クライアントが修正を積んだ）: task_pr_merge は使えない。直接マージする
         const moved = await admin.app<string>(
           "addCommit",
           "acme/widgets",
@@ -206,7 +190,7 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
           merge_method: "squash",
           merge_sha: t.head,
           branch_deleted: true,
-          merge_policy: "agent_merge",
+          review_policy: "client_review",
         });
         expect(await pullOf(t.branch)).toMatchObject({
           merged: true,
@@ -228,10 +212,15 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
         expect(merges[0]).toMatchObject({
           taskId: t.taskId,
           userId: t.user.id,
-          merge_policy: "agent_merge",
+          review_policy: "client_review",
         });
         expect(records.filter((r) => r.event === "pr_denied").map((r) => r.reason)).toEqual(
-          expect.arrayContaining(["pr_draft", "merge_blocked", "head_moved"]),
+          expect.arrayContaining([
+            "checks_failing",
+            "checks_pending",
+            "merge_blocked",
+            "head_moved",
+          ]),
         );
         // マージの PUT は 1 回だけ、検証済みの sha 付き
         const puts = (
@@ -246,9 +235,57 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
   );
 
   it(
-    "FAILED のタスクは task_pr_ready を拒否する（conflict）。PR は Draft のまま。他の利用者は not_found",
+    "自動の Ready が失敗しても COMPLETED のまま Draft: next_steps が task_pr_ready を促す → task_pr_ready は利用者のトークンで Ready にする → task_pr_merge で通る。check が無ければ通る",
     async () => {
-      const t = await setup("agent_merge");
+      // 完了時の 1 回目の GraphQL（Installation Token の自動の Ready）だけ失敗させる
+      await admin.app("setFault", { pattern: "^POST /graphql$", status: 502, count: 1 });
+      const t = await setup();
+      try {
+        const before = await complete(t, t.client);
+        expect(before).toMatchObject({ status: "COMPLETED", pr: { draft: true } });
+        expect(before.warnings).toEqual([]);
+        expect(String(before.next_steps)).toContain("task_pr_ready で Ready にする");
+        expect((await pullOf(t.branch))?.draft).toBe(true);
+        // Draft のままのマージは、先に task_pr_ready を促されて拒否される
+        const early = await t.client.callTool({
+          name: "task_pr_merge",
+          arguments: { task_id: t.taskId },
+        });
+        expect(early.isError).toBe(true);
+        expect(bodyOf(early)).toMatchObject({
+          code: "conflict",
+          message: expect.stringContaining("task_pr_ready"),
+        });
+
+        const ready = bodyOf(
+          await t.client.callTool({ name: "task_pr_ready", arguments: { task_id: t.taskId } }),
+        );
+        expect(ready).toMatchObject({ draft: false, changed: true });
+        expect((await pullOf(t.branch))?.draft).toBe(false);
+        // 手動の Ready は利用者のトークン
+        const gh = await admin.app<{ method: string; path: string; auth: string }[]>("requests");
+        const userCalls = gh.filter((r) => r.auth === "user").map((r) => `${r.method} ${r.path}`);
+        expect(userCalls).toContain("POST /graphql");
+        const pr = (await auditRecords(t.taskId)).filter((r) => r.event === "pr_ready");
+        expect(pr).toHaveLength(1);
+        expect(pr[0]).toMatchObject({ caller: "parent", userId: t.user.id });
+
+        // check は 1 つも付いていない: 通る
+        const merged = bodyOf(
+          await t.client.callTool({ name: "task_pr_merge", arguments: { task_id: t.taskId } }),
+        );
+        expect(merged).toMatchObject({ merged: true, merge_sha: t.head });
+      } finally {
+        await t.client.close();
+      }
+    },
+    LONG,
+  );
+
+  it(
+    "FAILED のタスクは task_pr_ready を拒否する（conflict）。rovo は Ready にしない（PR は Draft のまま）。他の利用者は not_found",
+    async () => {
+      const t = await setup();
       const other = newUser("other");
       await addMember(other);
       const otherClient = await login(other);
@@ -262,6 +299,10 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
         expect(r.isError).toBe(true);
         expect(bodyOf(r).code).toBe("conflict");
         expect((await pullOf(t.branch))?.draft).toBe(true);
+        // 自動の Ready も呼ばれていない（FAILED では Draft のまま）
+        expect(
+          (await admin.app<{ path: string }[]>("requests")).filter((x) => x.path === "/graphql"),
+        ).toEqual([]);
         const denied = (await auditRecords(t.taskId)).filter((x) => x.event === "pr_denied");
         expect(denied[0]).toMatchObject({ reason: "not_completed", kind: "ready" });
         const result = bodyOf(
@@ -286,7 +327,7 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
   it(
     "変更の無いまま COMPLETED: 空の Draft PR が閉じられ、作業ブランチが消え、task_result の pr.closed_empty が true。task_pr_ready / task_pr_merge は conflict",
     async () => {
-      const t = await setup("agent_merge", false);
+      const t = await setup(false);
       try {
         // Sandbox を起動せず終わる COMPLETED（子の commit も pushedSha も無い）
         await finishAgent(t.taskId, "completed", {
@@ -340,6 +381,35 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
     }
   });
 
+  it("task_start: worker_review は未対応（近日）、旧 merge_policy は廃止で、どちらも invalid_input", async () => {
+    const user = newUser("rp");
+    await addMember(user);
+    await installApp();
+    const client = await login(user);
+    try {
+      const worker = await client.callTool({
+        name: "task_start",
+        arguments: startArgs("rp-worker", { review_policy: "worker_review" }),
+      });
+      expect(worker.isError).toBe(true);
+      expect(bodyOf(worker)).toMatchObject({
+        code: "invalid_input",
+        message: expect.stringContaining("not supported yet"),
+      });
+      const old = await client.callTool({
+        name: "task_start",
+        arguments: startArgs("rp-old", { merge_policy: "agent_merge" }),
+      });
+      expect(old.isError).toBe(true);
+      expect(bodyOf(old)).toMatchObject({
+        code: "invalid_input",
+        message: expect.stringContaining("review_policy"),
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it("MCP の initialize の応答に instructions がある", async () => {
     const user = newUser("ins");
     await addMember(user);
@@ -348,7 +418,9 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
     try {
       const text = client.getInstructions() ?? "";
       expect(text).toContain("task_pr_ready");
-      expect(text).toContain("merge_policy");
+      expect(text).toContain("review_policy");
+      expect(text).toContain("自動で Ready for review");
+      expect(text).not.toContain("merge_policy");
     } finally {
       await client.close();
     }

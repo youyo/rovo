@@ -211,3 +211,145 @@ describe("deleteBranch", () => {
     expect((await errOf(f(500))).code).toBe("upstream_unavailable");
   });
 });
+
+describe("getCheckState（PR の head に付いた check と status）", () => {
+  const SHA = "a".repeat(40);
+  const RUNS = `GET /repos/acme/widgets/commits/${SHA}/check-runs`;
+  const STATUS = `GET /repos/acme/widgets/commits/${SHA}/status`;
+  const runs = (...rs: { status: string; conclusion?: string | null }[]) =>
+    json({
+      total_count: rs.length,
+      check_runs: rs.map((r, i) => ({
+        id: i,
+        name: `c${i}`,
+        status: r.status,
+        conclusion: r.conclusion ?? null,
+      })),
+    });
+  const statuses = (state: string, ...ss: string[]) =>
+    json({ state, sha: SHA, total_count: ss.length, statuses: ss.map((s) => ({ state: s })) });
+  const state = (routes: Parameters<typeof routerFetch>[0]) =>
+    make(routes).client.getCheckState("tok", "acme/widgets", SHA);
+
+  it("check run も status も 1 つも無ければ none（statuses が 0 件の pending は「無い」とみなす）", async () => {
+    expect(await state({ [RUNS]: () => runs(), [STATUS]: () => statuses("pending") })).toBe("none");
+  });
+
+  it("check run がすべて success / skipped / neutral なら passing", async () => {
+    expect(
+      await state({
+        [RUNS]: () =>
+          runs(
+            { status: "completed", conclusion: "success" },
+            { status: "completed", conclusion: "skipped" },
+            { status: "completed", conclusion: "neutral" },
+          ),
+        [STATUS]: () => statuses("pending"),
+      }),
+    ).toBe("passing");
+  });
+
+  it("commit status がすべて success なら passing（check run は無い）", async () => {
+    expect(
+      await state({ [RUNS]: () => runs(), [STATUS]: () => statuses("success", "success") }),
+    ).toBe("passing");
+  });
+
+  it("check run の conclusion が success / skipped / neutral 以外（failure・cancelled・timed_out・action_required・stale）なら failing", async () => {
+    for (const conclusion of ["failure", "cancelled", "timed_out", "action_required", "stale"]) {
+      expect(
+        await state({
+          [RUNS]: () =>
+            runs(
+              { status: "completed", conclusion: "success" },
+              { status: "completed", conclusion },
+            ),
+          [STATUS]: () => statuses("pending"),
+        }),
+        conclusion,
+      ).toBe("failing");
+    }
+  });
+
+  it("check run が completed でない（queued / in_progress）なら pending。failing があれば failing が先", async () => {
+    expect(
+      await state({
+        [RUNS]: () =>
+          runs({ status: "in_progress" }, { status: "completed", conclusion: "success" }),
+        [STATUS]: () => statuses("pending"),
+      }),
+    ).toBe("pending");
+    expect(
+      await state({
+        [RUNS]: () => runs({ status: "queued" }),
+        [STATUS]: () => statuses("pending"),
+      }),
+    ).toBe("pending");
+    expect(
+      await state({
+        [RUNS]: () => runs({ status: "queued" }, { status: "completed", conclusion: "failure" }),
+        [STATUS]: () => statuses("pending"),
+      }),
+    ).toBe("failing");
+  });
+
+  it("commit status の failure / error は failing、pending（1 件以上）は pending", async () => {
+    expect(
+      await state({
+        [RUNS]: () => runs(),
+        [STATUS]: () => statuses("failure", "failure", "success"),
+      }),
+    ).toBe("failing");
+    expect(
+      await state({ [RUNS]: () => runs(), [STATUS]: () => statuses("failure", "error") }),
+    ).toBe("failing");
+    expect(
+      await state({ [RUNS]: () => runs(), [STATUS]: () => statuses("pending", "pending") }),
+    ).toBe("pending");
+  });
+
+  it("check run が成功でも、commit status が失敗なら failing", async () => {
+    expect(
+      await state({
+        [RUNS]: () => runs({ status: "completed", conclusion: "success" }),
+        [STATUS]: () => statuses("failure", "failure"),
+      }),
+    ).toBe("failing");
+  });
+
+  it("check run は Link ヘッダの次のページも読む", async () => {
+    const page2 = `https://api.gh.test/repos/acme/widgets/commits/${SHA}/check-runs?per_page=100&page=2`;
+    const { client, calls } = make({
+      [RUNS]: (req) =>
+        new URL(req.url).searchParams.get("page") === "2"
+          ? runs({ status: "completed", conclusion: "failure" })
+          : jsonBase(
+              {
+                total_count: 2,
+                check_runs: [{ id: 1, name: "a", status: "completed", conclusion: "success" }],
+              },
+              { headers: { link: `<${page2}>; rel="next"` } },
+            ),
+      [STATUS]: () => statuses("pending"),
+    });
+    expect(await client.getCheckState("tok", "acme/widgets", SHA)).toBe("failing");
+    expect(calls.filter((c) => new URL(c.url).pathname.endsWith("/check-runs")).length).toBe(2);
+    expect(calls[0]?.headers.get("authorization")).toBe("Bearer tok");
+  });
+
+  it("読めない（403 = Checks の read 権限が無い・404・5xx）ときは GitHubError。通してしまわない", async () => {
+    const e403 = await errOf(
+      state({ [RUNS]: () => json({ message: "nope" }, 403), [STATUS]: () => statuses("pending") }),
+    );
+    expect(e403.code).toBe("forbidden");
+    const e500 = await errOf(
+      state({ [RUNS]: () => runs(), [STATUS]: () => json({ message: "x" }, 500) }),
+    );
+    expect(e500.code).toBe("upstream_unavailable");
+  });
+
+  it("不正な sha は問い合わせない", async () => {
+    const e = await errOf(make({}).client.getCheckState("tok", "acme/widgets", "../x"));
+    expect(e.code).toBe("forbidden");
+  });
+});

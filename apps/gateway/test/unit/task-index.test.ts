@@ -9,6 +9,7 @@ import {
   createTask,
   REPO,
   runToCompleted,
+  runToCompletedDraft,
   type TaskStub,
 } from "./pr-helpers";
 
@@ -106,7 +107,7 @@ describe("outbox: 各更新点で revision が上がる", () => {
   });
 
   it("recordPrAction（Ready / マージ）で上がる。終端後で alarm が消えていても、再設定されて配送される", async () => {
-    const t = await runToCompleted({ merge_policy: "agent_merge" }, OWNER);
+    const t = await runToCompletedDraft({}, OWNER);
     const dir = new FakeDirectory();
     await useDirectory(t.stub, dir);
     // 束縛していなかった間の更新が未配送で残っている。advance が alarm を戻し、alarm が配送する

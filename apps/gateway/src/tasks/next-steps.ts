@@ -1,10 +1,10 @@
 import type { TaskStatus } from "./state";
 import type { ResultView } from "./task-do";
-import type { MergePolicy } from "./validation";
+import type { ReviewPolicy } from "./validation";
 
 /**
  * task_result などの応答に添える next_steps（D9）。呼び出し元の AI が次にすべきことを、状態から決めて文にする。
- * 案内であって強制ではない: task_pr_ready / task_pr_merge の条件はサーバー側（TaskDO と GitHub）が必ず検査する。
+ * 案内であって強制ではない: task_pr_ready / task_pr_merge の条件はサーバー側（TaskDO・UserDO と GitHub）が必ず検査する。
  */
 
 export type NextStepsInput = {
@@ -14,7 +14,7 @@ export type NextStepsInput = {
   reason?: string;
   /** "setup" は準備の段階（runSetup）の失敗。reason はそのコード */
   failure_phase?: "setup";
-  merge_policy: MergePolicy;
+  review_policy: ReviewPolicy;
   verification: { verified: boolean };
   pr: Pick<
     NonNullable<ResultView["pr"]>,
@@ -25,7 +25,18 @@ export type NextStepsInput = {
 const REVIEW =
   "task_result の summary・warnings・verification と patch（大きいときは diffstat と PR の差分）を読んで、受け入れ条件を満たしているか、意図しない変更が無いかをレビューする。";
 
-const NO_MERGE_HUMAN = "task_pr_merge は使えない（人がレビューしてマージする）";
+const NO_MERGE_TOOL = "task_pr_merge は使えない（gh などで PR を直接マージする）";
+
+/** 全体のテストとレビューはクライアントが手元で行う（client_review）。Sandbox では動かないテスト（docker を使う e2e など）もここで流す。 */
+function localReview(taskId: string): string {
+  return `全体のテスト（docker を使う e2e など、Sandbox では動かないものを含む）とレビューは、クライアントの手元で行う: PR のブランチ ${branchOf(taskId)} を取り出し（gh pr checkout など）、全体のテストを流して差分を読む。`;
+}
+
+const MERGE_CONDITIONS =
+  "task_pr_merge は、PR が Ready で、head_matches_verified が true、PR の head に付いた GitHub の check（check run と commit status）がすべて成功しているときだけ使える（check が 1 つも無ければ通る。失敗していれば checks_failing、実行中なら checks_pending で拒否される。厳しくしたいときは GitHub のブランチ保護を使う）。merge_method と delete_branch を選べる。";
+
+const DIRECT_MERGE =
+  "手元で PR のブランチに修正を積むと head_matches_verified が false になり task_pr_merge は使えなくなるので、そのときは gh pr merge などで直接マージする。";
 
 function branchOf(taskId: string): string {
   return `agent/task-${taskId}`;
@@ -34,7 +45,7 @@ function branchOf(taskId: string): string {
 /** レビューで問題があったときの続け方（task_steer は実行中専用）。 */
 function fixAdvice(input: NextStepsInput): string {
   const sha = input.pr?.head_sha;
-  return `問題があれば Ready にせず、修正を新しいタスクで頼む（task_steer は実行中のタスク専用で、COMPLETED には使えない）。この PR のブランチに積むなら、task_start の base_ref に ${branchOf(input.task_id)}${sha ? `、base_sha に ${sha}` : ""} を指定する。`;
+  return `大きな問題があれば、マージせずに修正を新しいタスクで頼む（task_steer は実行中のタスク専用で、COMPLETED には使えない）。この PR のブランチに積むなら、task_start の base_ref に ${branchOf(input.task_id)}${sha ? `、base_sha に ${sha}` : ""} を指定する。`;
 }
 
 /** 準備の段階の失敗（FAILED）の案内。理由のコードに合わせる。 */
@@ -46,7 +57,7 @@ function setupFailureAdvice(reason: string | undefined): string {
 }
 
 export function nextSteps(input: NextStepsInput): string {
-  const { status, merge_policy: policy, pr } = input;
+  const { status, review_policy: policy, pr } = input;
   if (pr?.closed_empty === true && !(status === "FAILED" && input.failure_phase === "setup")) {
     return "このタスクは変更を作らずに終わったので、rovo が Draft PR を閉じた（作業ブランチも削除済み）。task_pr_ready / task_pr_merge は使えない。結果は task_result の summary を見る。";
   }
@@ -57,7 +68,7 @@ export function nextSteps(input: NextStepsInput): string {
     return setupFailureAdvice(input.reason);
   }
   if (status !== "COMPLETED") {
-    return `タスクは COMPLETED ではない（status: ${status}）ため、task_pr_ready / task_pr_merge は使えない。summary と warnings で原因を確かめ、作業を続けるなら新しいタスクを task_start で始める${pr ? `（ブランチ ${branchOf(input.task_id)} の続きから行うなら base_ref にそのブランチ名、base_sha に pr.head_sha を指定する）。不要な PR は GitHub 上で閉じる` : ""}。`;
+    return `タスクは COMPLETED ではない（status: ${status}）ため、task_pr_ready / task_pr_merge は使えない${pr ? "（rovo が PR を Ready にするのは COMPLETED のときだけなので、PR は Draft のまま）" : ""}。summary と warnings で原因を確かめ、作業を続けるなら新しいタスクを task_start で始める${pr ? `（ブランチ ${branchOf(input.task_id)} の続きから行うなら base_ref にそのブランチ名、base_sha に pr.head_sha を指定する）。不要な PR は GitHub 上で閉じる` : ""}。`;
   }
   if (pr === null) {
     return "PR が無い（作成前に失敗した、または Phase 2 のタスク）ため、task_pr_ready / task_pr_merge は使えない。patch を確かめ、必要なら新しいタスクを task_start で始める。";
@@ -87,43 +98,34 @@ export function nextSteps(input: NextStepsInput): string {
     );
   }
 
-  const canMerge = policy === "agent_merge" && pr.head_matches_verified === true;
-  const policyText = (afterReady: boolean): string => {
-    if (policy === "human_review") {
-      return `merge_policy が human_review なので、${afterReady ? "Ready にしたら" : ""}人のレビューを待つ。${NO_MERGE_HUMAN}。`;
-    }
-    if (headMismatch) {
-      return `merge_policy は agent_merge だが、head_matches_verified が false なので ${NO_MERGE_HUMAN}。`;
-    }
-    if (headUnknown) {
-      return "merge_policy は agent_merge。head を確認できたら task_pr_merge を使える。";
-    }
-    return `merge_policy が agent_merge なので、${afterReady ? "Ready にしたあと" : ""}task_pr_merge でマージできる（merge_method と delete_branch を選べる。ブランチ保護で拒否されたら、その理由がエラーで返る）。`;
-  };
-
   if (pr.draft === false) {
-    parts.push("PR はすでに Ready for review。");
-    parts.push(REVIEW);
     parts.push(
-      canMerge
-        ? `差分に問題が無ければ task_pr_merge でマージする。merge_policy が agent_merge。`
-        : policyText(false),
+      `review_policy が ${policy} なので、タスクの完了で rovo が PR を Ready for review にした。`,
     );
-    return parts.join(" ");
+  } else {
+    parts.push(
+      `review_policy が ${policy} なので、タスクの完了で rovo が PR を Ready for review にするはずだが、PR はまだ Draft（自動の Ready に失敗した、またはこの機能より前のタスク）。task_pr_ready で Ready にする（冪等）。`,
+    );
   }
-
   parts.push(REVIEW);
-  parts.push("問題が無ければ task_pr_ready で Ready にする。");
-  parts.push(policyText(true));
+  parts.push(localReview(input.task_id));
+  if (headMismatch) {
+    parts.push(`問題が無ければ ${NO_MERGE_TOOL}。`);
+  } else if (headUnknown) {
+    parts.push("head を確認できたら、問題が無ければ task_pr_merge でマージできる。");
+    parts.push(DIRECT_MERGE);
+  } else {
+    parts.push("問題が無ければ task_pr_merge でマージする。");
+    parts.push(MERGE_CONDITIONS);
+    parts.push(DIRECT_MERGE);
+  }
   parts.push(fixAdvice(input));
   return parts.join(" ");
 }
 
 /** task_pr_ready の成功後の案内。 */
-export function nextStepsAfterReady(policy: MergePolicy): string {
-  return policy === "agent_merge"
-    ? "PR を Ready for review にした。merge_policy が agent_merge なので、差分に問題が無ければ task_pr_merge でマージできる。"
-    : "PR を Ready for review にした。merge_policy が human_review なので、人のレビューを待つ。task_pr_merge は使えない（人がレビューしてマージする）。";
+export function nextStepsAfterReady(policy: ReviewPolicy): string {
+  return `PR を Ready for review にした。review_policy が ${policy} なので、全体のテスト（docker を使う e2e など、Sandbox では動かないものを含む）とレビューはクライアントの手元で行い、問題が無ければ task_pr_merge でマージする（head_matches_verified が true で、GitHub の check が無いか、すべて成功のとき）。手元で修正を積んだら task_pr_merge は使えないので、gh などで直接マージする。`;
 }
 
 /** task_pr_merge の成功後の案内。 */

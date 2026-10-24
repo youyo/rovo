@@ -1503,7 +1503,8 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * PR をマージする。Ready であること・head が検証済みの sha であることを確かめ、sha 付きで GitHub に渡す
+   * PR をマージする。Ready であること・head が検証済みの sha であること・head に付いた GitHub の check がすべて成功している
+   * （check が無ければ通す）ことを確かめ、sha 付きで GitHub に渡す
    * （確かめた後にブランチが動けば GitHub が 409 で拒否する）。ブランチ保護に拒否されたら merge_blocked。
    */
   async prMerge(target: PrTarget, opts: PrMergeOptions): Promise<PrMergeResult> {
@@ -1529,6 +1530,20 @@ export class UserDO extends DurableObject<Env> {
             };
           }
           if (pull.headSha !== opts.expectedSha) return this.headMoved(pull.headSha);
+          // head の commit に GitHub の check（check run / commit status）が付いていれば、すべて成功していること。
+          // 1 つも無ければ通す（厳しくしたいときは GitHub のブランチ保護を使う）。読めなければ throw（通さない）
+          const checks = await client.getCheckState(tok, target.repository, opts.expectedSha);
+          if (checks === "failing" || checks === "pending") {
+            return {
+              ok: false,
+              code: "merge_blocked",
+              reason: checks === "failing" ? "checks_failing" : "checks_pending",
+              message:
+                checks === "failing"
+                  ? "checks_failing: a GitHub check on the pull request head has failed; fix it and wait for the checks to pass, or merge by hand"
+                  : "checks_pending: GitHub checks on the pull request head are still running or pending; wait for them to finish and retry",
+            };
+          }
           const r = await client.mergePull(tok, target.repository, target.number, {
             sha: opts.expectedSha,
             method: opts.method,

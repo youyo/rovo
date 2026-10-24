@@ -7,8 +7,13 @@ import { app, audits, createTask, REPO, runToCompleted, type TaskStub } from "./
 
 // task_pr_ready / task_pr_merge のユースケース層（D9）。TaskDO（条件・対象）→ UserDO（利用者のトークンで GitHub）→ TaskDO（記録・監査）。
 
-async function world(overrides: Record<string, unknown> = {}) {
+/**
+ * 完了時に rovo が PR を自動で Ready にする（Installation Token の GraphQL）。task_pr_ready を試すテストは Draft のままにしたいので、
+ * autoReady: false（既定）のときは、その 1 回の GraphQL を失敗させる（fail-soft で Draft のまま COMPLETED になる）。
+ */
+async function world(overrides: Record<string, unknown> = {}, autoReady = false) {
   const uid = newUserId();
+  if (!autoReady) app().setFault({ pattern: "^POST /graphql$", status: 502, count: 1 });
   const gh = new FakeGitHubFetch();
   gh.user = { id: uid, login: "alice" };
   gh.app = app();
@@ -30,7 +35,7 @@ async function world(overrides: Record<string, unknown> = {}) {
 }
 
 describe("service.prReady", () => {
-  it("COMPLETED のタスクの Draft PR を Ready にする。応答に pr・draft・merge_policy・next_steps、pr_ready を監査", async () => {
+  it("COMPLETED のタスクの Draft PR を Ready にする。応答に pr・draft・review_policy・next_steps、pr_ready を監査", async () => {
     const w = await world();
     const r = await w.service.prReady(w.principal, { task_id: w.t.id });
     expect(r).toMatchObject({
@@ -41,8 +46,8 @@ describe("service.prReady", () => {
         pr_url: expect.stringMatching(/\/pull\/\d+$/),
         draft: false,
         changed: true,
-        merge_policy: "human_review",
-        next_steps: expect.stringContaining("人のレビューを待つ"),
+        review_policy: "client_review",
+        next_steps: expect.stringContaining("全体のテスト"),
       },
     });
     expect(w.pull()?.draft).toBe(false);
@@ -51,7 +56,7 @@ describe("service.prReady", () => {
         taskId: w.t.id,
         userId: w.uid,
         caller: "parent",
-        merge_policy: "human_review",
+        review_policy: "client_review",
       }),
     ]);
     // task_result にも反映される
@@ -161,14 +166,14 @@ describe("service.prReady", () => {
 });
 
 describe("service.prMerge", () => {
-  async function readyWorld(overrides: Record<string, unknown> = { merge_policy: "agent_merge" }) {
-    const w = await world(overrides);
-    const r = await w.service.prReady(w.principal, { task_id: w.t.id });
-    expect(r.ok).toBe(true);
+  // 完了時に自動で Ready になっている（checks は付いていない）
+  async function readyWorld(overrides: Record<string, unknown> = {}) {
+    const w = await world(overrides, true);
+    expect(w.pull()?.draft).toBe(false);
     return w;
   }
 
-  it("agent_merge・Ready・head が検証済み: 検証済みの sha でマージする（既定は squash）。pr_merged を監査", async () => {
+  it("Ready・head が検証済み・check が無い（review_policy は client_review）: 検証済みの sha でマージする（既定は squash）。pr_merged を監査", async () => {
     const w = await readyWorld();
     const head = app().branch(REPO, w.t.branch) as string;
     const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
@@ -182,7 +187,7 @@ describe("service.prMerge", () => {
         merge_sha: head,
         branch_deleted: null,
         warnings: [],
-        merge_policy: "agent_merge",
+        review_policy: "client_review",
         next_steps: expect.stringContaining("マージした"),
       },
     });
@@ -192,7 +197,7 @@ describe("service.prMerge", () => {
       expect.objectContaining({
         taskId: w.t.id,
         userId: w.uid,
-        merge_policy: "agent_merge",
+        review_policy: "client_review",
         kind: "merge",
       }),
     ]);
@@ -225,21 +230,8 @@ describe("service.prMerge", () => {
     );
   });
 
-  it("human_review のタスクは forbidden。GitHub を一切呼ばず、pr_denied（policy_human_review）を監査", async () => {
-    const w = await world({ merge_policy: "human_review" });
-    await w.service.prReady(w.principal, { task_id: w.t.id });
-    const before = w.githubCalls().length;
-    const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
-    expect(r).toMatchObject({ ok: false, error: { code: "forbidden" } });
-    expect(w.githubCalls()).toHaveLength(before);
-    expect(w.pull()?.merged).toBe(false);
-    expect(await w.auditOf(w.t.stub, "pr_denied")).toEqual([
-      expect.objectContaining({ kind: "merge", reason: "policy_human_review" }),
-    ]);
-  });
-
   it("Draft のままなら conflict で、task_pr_ready を先に呼ぶよう返す（マージしない）", async () => {
-    const w = await world({ merge_policy: "agent_merge" });
+    const w = await world();
     const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
     expect(r).toMatchObject({ ok: false, error: { code: "conflict" } });
     expect(!r.ok && r.error.message).toContain("task_pr_ready");
@@ -260,7 +252,7 @@ describe("service.prMerge", () => {
       expect.objectContaining({
         kind: "merge",
         reason: "merge_blocked",
-        merge_policy: "agent_merge",
+        review_policy: "client_review",
       }),
     ]);
     // 保護が外れれば同じ呼び出しで通る
@@ -331,5 +323,114 @@ describe("service.prMerge", () => {
         .find((p) => p.number === humanPr)?.merged,
     ).toBe(false);
     expect(w.pull()?.merged).toBe(true);
+  });
+});
+
+describe("service.prMerge: PR の head に付いた GitHub の check", () => {
+  async function checksWorld() {
+    const w = await world({}, true);
+    const head = app().branch(REPO, w.t.branch) as string;
+    return { ...w, head };
+  }
+  const blocked = async (
+    w: Awaited<ReturnType<typeof checksWorld>>,
+    reason: "checks_failing" | "checks_pending",
+  ) => {
+    const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
+    expect(r).toMatchObject({ ok: false, error: { code: "merge_blocked" } });
+    expect(!r.ok && r.error.message).toContain(reason);
+    expect(w.pull()?.merged).toBe(false);
+    expect(w.githubCalls().filter((c) => c.method === "PUT")).toHaveLength(0);
+    expect(await w.auditOf(w.t.stub, "pr_denied")).toEqual([
+      expect.objectContaining({ kind: "merge", reason }),
+    ]);
+  };
+
+  it("check が 1 つも無ければ通す（statuses が 0 件の pending は「無い」とみなす）", async () => {
+    const w = await checksWorld();
+    expect((await w.service.prMerge(w.principal, { task_id: w.t.id })).ok).toBe(true);
+    expect(w.pull()?.merged).toBe(true);
+  });
+
+  it("check run も commit status もすべて成功（success / skipped / neutral）なら通す", async () => {
+    const w = await checksWorld();
+    app().setCheckRuns(REPO, w.head, [
+      { name: "ci", status: "completed", conclusion: "success" },
+      { name: "lint", status: "completed", conclusion: "skipped" },
+      { name: "info", status: "completed", conclusion: "neutral" },
+    ]);
+    app().setCommitStatuses(REPO, w.head, [{ context: "legacy", state: "success" }]);
+    expect((await w.service.prMerge(w.principal, { task_id: w.t.id })).ok).toBe(true);
+    expect(w.pull()?.merged).toBe(true);
+  });
+
+  it("check run が失敗（failure）なら checks_failing で拒否する。直って再実行されれば同じ呼び出しで通る", async () => {
+    const w = await checksWorld();
+    app().setCheckRuns(REPO, w.head, [
+      { name: "ci", status: "completed", conclusion: "failure" },
+      { name: "lint", status: "completed", conclusion: "success" },
+    ]);
+    await blocked(w, "checks_failing");
+    app().setCheckRuns(REPO, w.head, [{ name: "ci", status: "completed", conclusion: "success" }]);
+    expect((await w.service.prMerge(w.principal, { task_id: w.t.id })).ok).toBe(true);
+  });
+
+  it("check run が実行中（in_progress / queued）なら checks_pending で拒否する", async () => {
+    const w = await checksWorld();
+    app().setCheckRuns(REPO, w.head, [{ name: "ci", status: "in_progress" }]);
+    await blocked(w, "checks_pending");
+  });
+
+  it("commit status が failure なら checks_failing で拒否する（check run は成功）", async () => {
+    const w = await checksWorld();
+    app().setCheckRuns(REPO, w.head, [{ name: "ci", status: "completed", conclusion: "success" }]);
+    app().setCommitStatuses(REPO, w.head, [{ context: "legacy-ci", state: "failure" }]);
+    await blocked(w, "checks_failing");
+  });
+
+  it("commit status が pending なら checks_pending で拒否する", async () => {
+    const w = await checksWorld();
+    app().setCommitStatuses(REPO, w.head, [{ context: "legacy-ci", state: "pending" }]);
+    await blocked(w, "checks_pending");
+  });
+
+  it("別の commit に付いた check は見ない（PR の head の SHA だけ）", async () => {
+    const w = await checksWorld();
+    app().setCheckRuns(REPO, "f".repeat(40), [
+      { name: "ci", status: "completed", conclusion: "failure" },
+    ]);
+    expect((await w.service.prMerge(w.principal, { task_id: w.t.id })).ok).toBe(true);
+  });
+
+  it("check を読めない（GitHub が 403・5xx）ときはマージしない（通してしまわない）", async () => {
+    const w = await checksWorld();
+    app().setFault({ pattern: "check-runs$", status: 403, count: 1 });
+    const denied = await w.service.prMerge(w.principal, { task_id: w.t.id });
+    expect(denied).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    app().setFault({ pattern: "check-runs$", status: 502, count: 1 });
+    const down = await w.service.prMerge(w.principal, { task_id: w.t.id });
+    expect(down).toMatchObject({ ok: false, error: { code: "upstream_unavailable" } });
+    expect(w.pull()?.merged).toBe(false);
+    expect(w.githubCalls().filter((c) => c.method === "PUT")).toHaveLength(0);
+  });
+
+  it("App に Checks / Commit statuses の read 権限が無い（check を読めない）ときは、通さずに forbidden。権限の案内を返す", async () => {
+    const w = await checksWorld();
+    app().setUserPermissions({ contents: "write", pull_requests: "write" });
+    const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
+    expect(r).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(!r.ok && r.error.message).toContain("Checks");
+    expect(w.pull()?.merged).toBe(false);
+    expect(w.githubCalls().filter((c) => c.method === "PUT")).toHaveLength(0);
+  });
+
+  it("マージ済みの冪等な再実行では check を見ない（すでに終わっている）", async () => {
+    const w = await checksWorld();
+    await w.service.prMerge(w.principal, { task_id: w.t.id });
+    app().setCheckRuns(REPO, w.head, [{ name: "ci", status: "completed", conclusion: "failure" }]);
+    expect(await w.service.prMerge(w.principal, { task_id: w.t.id })).toMatchObject({
+      ok: true,
+      value: { already_merged: true },
+    });
   });
 });

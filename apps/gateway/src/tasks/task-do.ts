@@ -69,15 +69,15 @@ import {
   type BudgetPolicy,
   computeFingerprint,
   DEFAULT_BUDGET_POLICY,
-  DEFAULT_MERGE_POLICY,
+  DEFAULT_REVIEW_POLICY,
   isValidIdempotencyKey,
   MAX_ANSWER_LENGTH,
   MAX_CONCURRENT_WAITERS,
   MAX_EVENTS_PER_WAIT,
   MAX_STEER_LENGTH,
-  type MergePolicy,
   parseCursor,
   parseTimeoutSeconds,
+  type ReviewPolicy,
   taskInputSchema,
   WAIT_RETRY_AFTER_SECONDS,
 } from "./validation";
@@ -167,8 +167,8 @@ export type TaskView = {
   repository: string;
   title: string;
   draft_pr_url: string | null;
-  /** PR のマージの方針（task_start で指定。既定 human_review） */
-  merge_policy: MergePolicy;
+  /** 全体のテストとレビューをどこで行うか（task_start で指定。既定 client_review） */
+  review_policy: ReviewPolicy;
   /** 予算に近づいたときの扱い（task_start で指定。既定 ask = 止めずに親へ延長を聞く / stop = 止める）。この変更より前のタスクは stop */
   budget_policy: BudgetPolicy;
   /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
@@ -249,8 +249,8 @@ export type ResultView = {
     commit_sha?: string;
   };
   warnings: string[];
-  /** タスクの merge_policy（task_start で指定。task_pr_merge が使えるかを決める） */
-  merge_policy: MergePolicy;
+  /** タスクの review_policy（task_start で指定。client_review のとき、完了で rovo が PR を Ready にする） */
+  review_policy: ReviewPolicy;
   /** 予算に近づいたときの扱い（task_start の budget_policy。ask | stop） */
   budget_policy: BudgetPolicy;
   /** 子のモデル（task_start の model。省略時は既定のモデル。D10） */
@@ -331,10 +331,10 @@ export type ResultView = {
   };
 };
 
-/** 結果の組み立て途中の形（merge_policy は GitHub 側の情報と一緒に足す）。 */
+/** 結果の組み立て途中の形（review_policy は GitHub 側の情報と一緒に足す）。 */
 type ResultCore = Omit<
   ResultView,
-  "merge_policy" | "budget_policy" | "model" | "effort" | "model_selection"
+  "review_policy" | "budget_policy" | "model" | "effort" | "model_selection"
 >;
 
 /** task_pr_ready / task_pr_merge の入口で TaskDO が返す、対象と判定の結果。 */
@@ -345,7 +345,7 @@ export type PrContextResult =
       number: number;
       pr_url: string;
       branch: string;
-      merge_policy: MergePolicy;
+      review_policy: ReviewPolicy;
       /** 検証済みの head の sha（終端で GitHub から読んだ値）。まだ読めていなければ null */
       head_sha: string | null;
     }
@@ -441,7 +441,7 @@ export type DashboardDetailResult =
   | {
       ok: true;
       view: TaskIndexSnapshot;
-      merge_policy: MergePolicy;
+      review_policy: ReviewPolicy;
       sandbox_instance: string | null;
       /** 予算の延長の承認待ち（INPUT_REQUIRED で、未回答の質問が budget_extension）か */
       awaiting_budget: boolean;
@@ -502,7 +502,7 @@ type TaskRow = {
   fingerprint: string;
   status: string;
   draft_pr_url: string | null;
-  merge_policy: string;
+  review_policy: string;
   /** 予算に近づいたときの扱い。この変更より前のタスクは NULL（stop として扱う） */
   budget_policy: string | null;
   /** D10 より前のタスクは NULL（既定のモデルとして扱う） */
@@ -562,9 +562,9 @@ class SetupFailure extends Error {
   }
 }
 
-/** 行の merge_policy（未知の値は、より慎重な human_review に倒す）。 */
-function policyOf(row: Pick<TaskRow, "merge_policy">): MergePolicy {
-  return row.merge_policy === "agent_merge" ? "agent_merge" : DEFAULT_MERGE_POLICY;
+/** 行の review_policy（未知の値は既定の client_review に倒す） */
+function policyOf(row: Pick<TaskRow, "review_policy">): ReviewPolicy {
+  return row.review_policy === "worker_review" ? "worker_review" : DEFAULT_REVIEW_POLICY;
 }
 
 /** 行の budget_policy（NULL = この変更より前のタスクは、止まる動きだったので stop） */
@@ -775,12 +775,12 @@ export class TaskDO extends DurableObject<Env> {
       "revoke_attempts",
       "INTEGER NOT NULL DEFAULT 0",
     );
-    // D9: PR のマージの方針（task_start の merge_policy）と、task_pr_merge でマージ済みか
+    // 全体のテストとレビューの方針（task_start の review_policy。旧 merge_policy の列は使わず残す）と、task_pr_merge でマージ済みか
     addColumnIfMissing(
       this.ctx.storage.sql,
       "task",
-      "merge_policy",
-      "TEXT NOT NULL DEFAULT 'human_review'",
+      "review_policy",
+      "TEXT NOT NULL DEFAULT 'client_review'",
     );
     addColumnIfMissing(
       this.ctx.storage.sql,
@@ -924,7 +924,7 @@ export class TaskDO extends DurableObject<Env> {
       repository: row.repository,
       title: row.title,
       draft_pr_url: row.draft_pr_url,
-      merge_policy: policyOf(row),
+      review_policy: policyOf(row),
       budget_policy: budgetPolicyOf(row),
       model: this.modelOf(row),
       effort: this.effortOfRow(row),
@@ -1204,7 +1204,7 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO task (singleton, id, owner_id, owner_login, repository, repository_id,
            installation_id, base_ref, base_sha, title, instructions, acceptance_criteria,
-           constraints, verification_commands, fingerprint, merge_policy, budget_policy, model, effort, model_selection, sandbox_instance, status, draft_pr_url, created_at, updated_at)
+           constraints, verification_commands, fingerprint, review_policy, budget_policy, model, effort, model_selection, sandbox_instance, status, draft_pr_url, created_at, updated_at)
          VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', NULL, ?, ?)`,
         input.task_id,
         input.owner_id,
@@ -1220,7 +1220,7 @@ export class TaskDO extends DurableObject<Env> {
         JSON.stringify(data.constraints),
         JSON.stringify(data.verification_commands),
         fingerprint,
-        data.merge_policy,
+        data.review_policy,
         data.budget_policy,
         model,
         effort,
@@ -1326,7 +1326,7 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /**
-   * 詳細の画面用（docs/specs/dashboard.md M5b）。dashboardRead の view に、設定（merge_policy・sandbox_instance）を足す。
+   * 詳細の画面用（docs/specs/dashboard.md M5b）。dashboardRead の view に、設定（review_policy・sandbox_instance）を足す。
    * 所有者を問わず返すので、**gateway が閲覧者の集合で照合するまで応答に出してはならない**（dashboard/api.ts の readAuthorizedTask だけが呼ぶ）。
    * repository_id が NULL・タスクが無いときは区別なく not_found。何も書かない。
    */
@@ -1337,7 +1337,7 @@ export class TaskDO extends DurableObject<Env> {
     return {
       ok: true,
       view: this.buildIndexSnapshot(row, link),
-      merge_policy: policyOf(row),
+      review_policy: policyOf(row),
       sandbox_instance: row.sandbox_instance ?? null,
       awaiting_budget: this.pendingQuestion(this.statusOf(row))?.kind === BUDGET_EXTENSION_KIND,
       ...this.selectionOf(row),
@@ -1830,7 +1830,7 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /**
-   * task_pr_ready / task_pr_merge の入口。所有者・状態・merge_policy・検証済みの head を確かめ、
+   * task_pr_ready / task_pr_merge の入口。所有者・状態・検証済みの head を確かめ、
    * 操作の対象（リポジトリ・PR 番号・ブランチ）を返す。対象はこの DO の記録だけから作る（呼び出し元の入力は使わない）。
    * 拒否は pr_denied として監査する（所有者でない場合は authz_denied のまま not_found）。
    */
@@ -1850,7 +1850,7 @@ export class TaskDO extends DurableObject<Env> {
         caller: "parent",
         kind: op,
         reason,
-        merge_policy: policy,
+        review_policy: policy,
       });
       return { ok: false, code, message };
     };
@@ -1877,13 +1877,6 @@ export class TaskDO extends DurableObject<Env> {
       );
     }
     if (op === "merge") {
-      if (policy !== "agent_merge") {
-        return deny(
-          "forbidden",
-          "policy_human_review",
-          "this task's merge_policy is human_review: a human reviews and merges the pull request (task_pr_ready is allowed)",
-        );
-      }
       if (gl.head_matches === null) {
         return deny(
           "not_ready",
@@ -1924,7 +1917,7 @@ export class TaskDO extends DurableObject<Env> {
       number: gl.pr_number,
       pr_url: gl.pr_url,
       branch: gl.branch,
-      merge_policy: policy,
+      review_policy: policy,
       head_sha: gl.head_sha,
     };
   }
@@ -1934,9 +1927,9 @@ export class TaskDO extends DurableObject<Env> {
     const row = this.getRow();
     if (!row || this.notOwner(row, ownerId)) return;
     const fields = { userId: ownerId, caller: "parent" as const, kind: action.kind };
-    const merge_policy = policyOf(row);
+    const review_policy = policyOf(row);
     if (action.outcome === "denied") {
-      this.emitAudit("pr_denied", { ...fields, reason: action.reason, merge_policy });
+      this.emitAudit("pr_denied", { ...fields, reason: action.reason, review_policy });
       return;
     }
     // PR の状態の更新と revision の上昇は同じトランザクション
@@ -1951,7 +1944,7 @@ export class TaskDO extends DurableObject<Env> {
     if (action.changed !== false) {
       this.emitAudit(action.kind === "ready" ? "pr_ready" : "pr_merged", {
         ...fields,
-        merge_policy,
+        review_policy,
       });
     }
     // 終端の後は alarm が消えている。未配送の索引を配送するために、alarm を戻す
@@ -1970,16 +1963,17 @@ export class TaskDO extends DurableObject<Env> {
   private withGithub(view: ResultCore): ResultView {
     const gl = this.getGithub();
     const row = this.getRow();
-    const merge_policy = row ? policyOf(row) : DEFAULT_MERGE_POLICY;
+    const review_policy = row ? policyOf(row) : DEFAULT_REVIEW_POLICY;
     const budget_policy = row ? budgetPolicyOf(row) : DEFAULT_BUDGET_POLICY;
     const model = row ? this.modelOf(row) : defaultModelOf(this.env);
     const effort = row ? this.effortOfRow(row) : effortOf(this.env, model);
     const selection = row ? this.selectionOf(row) : {};
-    if (!gl) return { ...view, merge_policy, budget_policy, model, effort, ...selection, pr: null };
+    if (!gl)
+      return { ...view, review_policy, budget_policy, model, effort, ...selection, pr: null };
     const extra = (JSON.parse(gl.warnings) as string[]).filter((w) => !view.warnings.includes(w));
     return {
       ...view,
-      merge_policy,
+      review_policy,
       budget_policy,
       model,
       effort,
@@ -3178,6 +3172,54 @@ export class TaskDO extends DurableObject<Env> {
     );
     this.notifyWaiters();
     await this.closeEmptyPull(row, gl, status, api, pull);
+    await this.autoReady(row, status, api, pull, pushed !== undefined);
+  }
+
+  /**
+   * client_review のタスクが COMPLETED になり、最終の push が済んだ（pushedSha がある）Draft PR を、rovo が Ready for review にする。
+   * Installation Token（finalize の他の操作と同じもの）で GraphQL を呼ぶ。FAILED / BUDGET_EXCEEDED / CANCELLED などは Draft のまま。
+   * fail-soft: 失敗してもタスクは COMPLETED のまま。warn と warning イベント（auto_ready_failed）を残し、
+   * task_result の next_steps が task_pr_ready を促す。task_pr_merge を止めないよう、結果の warnings には足さない。
+   * 冪等: 読んだ PR がすでに Ready・閉じている・空の Draft PR を閉じた場合は何もしない。
+   */
+  private async autoReady(
+    row: TaskRow,
+    status: TaskStatus,
+    api: GitHubRepoApi,
+    pull: { number: number; draft: boolean; state: string; nodeId: string | null },
+    pushed: boolean,
+  ): Promise<void> {
+    if (status !== "COMPLETED" || !pushed || policyOf(row) !== "client_review") return;
+    const gl = this.getGithub();
+    if (!gl || gl.closed_empty === 1 || gl.pr_merged === 1) return;
+    if (!pull.draft || pull.state !== "open") return;
+    let code = "mark_ready_failed";
+    try {
+      if (pull.nodeId === null) {
+        code = "pull_node_id_missing";
+        throw new Error(code);
+      }
+      await api.markReadyForReview(pull.nodeId);
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0");
+        this.bumpIndexRevision();
+      });
+      this.emitAudit("pr_ready", {
+        caller: "system",
+        kind: "ready",
+        reason: "auto_ready",
+        review_policy: policyOf(row),
+      });
+    } catch (e) {
+      const http = e instanceof GitHubApiError ? e.status : undefined;
+      console.warn(
+        "task_do_auto_ready_failed",
+        code,
+        http ?? (e instanceof Error ? e.name : typeof e),
+      );
+      this.appendEvent("warning", { code: "auto_ready_failed" }, this.now());
+    }
+    this.notifyWaiters();
   }
 
   /**

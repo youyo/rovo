@@ -717,7 +717,8 @@ describe("終端: PR の更新とトークンの失効", () => {
     const { stub, branch, head } = await runToCompleted();
     expect((await status(stub)).status).toBe("COMPLETED");
     const pr = pullOf(branch);
-    expect(pr?.draft).toBe(true);
+    // 完了で rovo が自動で Ready にする（client_review）
+    expect(pr?.draft).toBe(false);
     expect(pr?.state).toBe("open");
     expect(pr?.body).toContain("COMPLETED");
     expect(pr?.body).toContain("npm test");
@@ -741,8 +742,8 @@ describe("終端: PR の更新とトークンの失効", () => {
     expect(r.result.pr).toEqual({
       number: num,
       url: `https://github.test/${REPO}/pull/${num}`,
-      // 作成直後の Draft PR（task_pr_ready / task_pr_merge で変わる。D9）
-      draft: true,
+      // 完了で rovo が自動で Ready にした（client_review）
+      draft: false,
       merged: false,
       head_sha: head,
       head_matches_verified: true,

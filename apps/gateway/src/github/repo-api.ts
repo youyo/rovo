@@ -3,6 +3,8 @@ import { DEFAULT_GITHUB_API_BASE } from "./config";
 
 export interface PullInfo {
   number: number;
+  /** GraphQL の ID（Ready 化に要る）。読めなければ null */
+  nodeId: string | null;
   /** html_url */
   url: string;
   draft: boolean;
@@ -214,6 +216,7 @@ export class GitHubRepoApi {
   private toPull(raw: unknown, what: string): PullInfo {
     const p = raw as {
       number?: unknown;
+      node_id?: unknown;
       html_url?: unknown;
       draft?: unknown;
       state?: unknown;
@@ -231,6 +234,7 @@ export class GitHubRepoApi {
     }
     return {
       number: p.number,
+      nodeId: typeof p.node_id === "string" ? p.node_id : null,
       url: p.html_url,
       draft: p.draft === true,
       state: typeof p.state === "string" ? p.state : "open",
@@ -276,6 +280,30 @@ export class GitHubRepoApi {
 
   async updatePullBody(number: number, body: string): Promise<void> {
     await this.call("update pull", "PATCH", this.repoPath(`/pulls/${number}`), { body });
+  }
+
+  /**
+   * Draft の PR を Ready for review にする（GraphQL。REST には無い）。Installation Token で呼ぶ（pull_requests: write が要る）。
+   * GraphQL のエラーは HTTP 200 の errors で返るので、errors も失敗として扱う。
+   */
+  async markReadyForReview(pullRequestNodeId: string): Promise<void> {
+    const what = "mark ready for review";
+    const { json } = await this.call(what, "POST", `${this.apiBase}/graphql`, {
+      query:
+        "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { id isDraft } } }",
+      variables: { id: pullRequestNodeId },
+    });
+    const b = json as {
+      data?: { markPullRequestReadyForReview?: { pullRequest?: { isDraft?: unknown } } } | null;
+      errors?: { type?: unknown }[];
+    } | null;
+    if (Array.isArray(b?.errors) && b.errors.length > 0) {
+      const type = typeof b.errors[0]?.type === "string" ? b.errors[0].type : "unknown";
+      throw new GitHubApiError({ status: 200, what, detail: `graphql error: ${type}` });
+    }
+    if (b?.data?.markPullRequestReadyForReview?.pullRequest?.isDraft !== false) {
+      throw new GitHubApiError({ status: 200, what, detail: "the pull request is still a draft" });
+    }
   }
 
   /** PR を closed にする（マージはしない）。 */

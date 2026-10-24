@@ -400,6 +400,68 @@ export class GitHubClient {
     return { sha: typeof body.sha === "string" ? body.sha : null };
   }
 
+  /**
+   * PR の head の commit に付いた GitHub の check（check run と commit status）の状態を返す（task_pr_merge の前の確認）。
+   * - none: check run も commit status も 1 つも無い（statuses が 0 件の pending は「無い」とみなす）
+   * - failing: completed の check run の conclusion が success / skipped / neutral 以外、または commit status が failure / error
+   * - pending: failing は無いが、completed でない check run か、pending の commit status がある
+   * - passing: 1 つ以上あり、すべて成功
+   * 読めなかったとき（Checks の read 権限が無い 403 など）は GitHubError を投げる（通してしまわない）。
+   */
+  async getCheckState(
+    accessToken: string,
+    repository: string,
+    sha: string,
+  ): Promise<"none" | "passing" | "failing" | "pending"> {
+    if (!/^[0-9a-fA-F]{40}$/.test(sha)) throw new GitHubError("forbidden", "invalid commit sha");
+    try {
+      return await this.readCheckState(accessToken, repository, sha);
+    } catch (e) {
+      // 403 / 404 は、App に Checks / Commit statuses の read 権限が無い（利用者に原因の見当が付くよう、案内を添える）
+      if (e instanceof GitHubError && e.code === "forbidden") {
+        throw new GitHubError(
+          "forbidden",
+          "GitHub refused to read the checks of the pull request head; the GitHub App needs the Checks: Read-only and Commit statuses: Read-only permissions (see docs/deploy.md)",
+          e.status,
+        );
+      }
+      throw e;
+    }
+  }
+
+  private async readCheckState(
+    accessToken: string,
+    repository: string,
+    sha: string,
+  ): Promise<"none" | "passing" | "failing" | "pending"> {
+    const base = `${this.repoPath(repository)}/commits/${sha}`;
+    let runCount = 0;
+    let failing = false;
+    let pending = false;
+    for await (const raw of this.paginate(
+      accessToken,
+      `${base}/check-runs?per_page=100`,
+      "check_runs",
+    )) {
+      runCount++;
+      const run = raw as { status?: unknown; conclusion?: unknown } | null;
+      if (run?.status !== "completed") pending = true;
+      else if (!CHECK_OK_CONCLUSIONS.has(String(run.conclusion))) failing = true;
+    }
+    const res = await this.api(accessToken, `${base}/status?per_page=100`);
+    const body = (await this.json(res)) as { state?: unknown; statuses?: unknown } | null;
+    if (!Array.isArray(body?.statuses)) {
+      throw new GitHubError("upstream_unavailable", "unexpected response: missing statuses");
+    }
+    const statusCount = body.statuses.length;
+    if (statusCount > 0) {
+      if (body.state === "failure" || body.state === "error") failing = true;
+      else if (body.state !== "success") pending = true;
+    }
+    if (runCount === 0 && statusCount === 0) return "none";
+    return failing ? "failing" : pending ? "pending" : "passing";
+  }
+
   /** ブランチを消す。すでに無い（422）ときは成功。 */
   async deleteBranch(accessToken: string, repository: string, branch: string): Promise<void> {
     const res = await this.send(
@@ -607,6 +669,9 @@ export class GitHubClient {
     }
   }
 }
+
+/** 成功とみなす check run の conclusion（それ以外は失敗） */
+const CHECK_OK_CONCLUSIONS: ReadonlySet<string> = new Set(["success", "skipped", "neutral"]);
 
 /** GitHub のメッセージを返せる形にする: 制御文字を空白にし、前後の空白を落として 300 文字で切る。 */
 function cleanMessage(v: unknown): string {

@@ -71,12 +71,15 @@ export const verificationCommandSchema = z
 export type VerificationCommandInput = z.infer<typeof verificationCommandSchema>;
 
 /**
- * PR のマージの方針（D9）。human_review は人のレビューを待つ（task_pr_merge を使えない）、
- * agent_merge は呼び出し元の AI がレビューしてマージまでできる。強制は利用者の GitHub のブランチ保護に任せる。
+ * 全体のテストとレビューをどこで行うか（review_policy）。マージはどちらでもクライアントが行う（task_pr_merge か、gh などで直接）。
+ * client_review（既定）: ワーカーは関係するテストまでを担当し、完了で rovo が PR を Ready にする。全体のテストとレビューはクライアントが手元で行う。
+ * worker_review: ワーカーが全体のテストとレビューまで行う。今回は受け付けるだけで、task_start では未対応（近日）として拒否する。
  */
-export const MERGE_POLICIES = ["human_review", "agent_merge"] as const;
-export type MergePolicy = (typeof MERGE_POLICIES)[number];
-export const DEFAULT_MERGE_POLICY: MergePolicy = "human_review";
+export const REVIEW_POLICIES = ["client_review", "worker_review"] as const;
+export type ReviewPolicy = (typeof REVIEW_POLICIES)[number];
+export const DEFAULT_REVIEW_POLICY: ReviewPolicy = "client_review";
+/** 今は client_review だけが使える。worker_review は次の作業で実装する */
+const WORKER_REVIEW_UNSUPPORTED = "review_policy worker_review is not supported yet (coming soon)";
 
 /**
  * 予算に近づいたときの扱い。ask（既定）は止めずに親へ「あと task_budget_usd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
@@ -106,7 +109,14 @@ export const taskInputSchema = z.object({
     .array(verificationCommandSchema)
     .max(MAX_VERIFICATION_COMMANDS)
     .default([]),
-  merge_policy: z.enum(MERGE_POLICIES).default(DEFAULT_MERGE_POLICY),
+  review_policy: z
+    .enum(REVIEW_POLICIES)
+    .default(DEFAULT_REVIEW_POLICY)
+    .refine((v) => v !== "worker_review", WORKER_REVIEW_UNSUPPORTED),
+  /** 廃止。review_policy に置き換えた（渡されたら invalid_input にして、黙って無視しない） */
+  merge_policy: z
+    .never({ error: "merge_policy was removed; use review_policy (client_review | worker_review)" })
+    .optional(),
   budget_policy: z.enum(BUDGET_POLICIES).default(DEFAULT_BUDGET_POLICY),
   /** 子のモデル（D10）。省略は env の AGENT_MODEL。env の AGENT_MODELS の中だけ（照合は service と TaskDO が env で行う） */
   model: z.string().min(1).max(MAX_MODEL_LENGTH).optional(),
@@ -138,8 +148,9 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * 正規化: repository と base_sha は小文字化（GitHub 上は大文字小文字を区別しない）。
  * 配列の省略は空配列として扱う。base_ref などは区別するのでそのまま。
  * verification_commands は argv / cwd / timeout_seconds を順序込みで含める（検証の入力が違えば別のタスク）。
- * merge_policy は既定（human_review）なら含めない（保存済みの値と一致させる）。agent_merge のときだけ v3 として足す。
- * model は未指定なら含めない（従来の v1 / v2 / v3 のまま）。指定があれば v4 として merge_policy と一緒に末尾へ足す。
+ * review_policy は client_review だけが使えるので、v1 / v2 には含めない。model または sandbox_instance があるときの v4 / v5 には
+ * review_policy を一緒に足す（merge_policy の頃の形を引き継ぐ）。
+ * model は未指定なら含めない。指定があれば v4 として review_policy と一緒に末尾へ足す。
  * sandbox_instance も未指定なら含めない（v1〜v4 のまま）。指定があれば v5 として、model（無ければ null）の後ろへ足す。
  * budget_policy は既定（ask）なら含めない（これまでの値と一致させる）。stop のときだけ、上の全体を v6 で包んで足す。
  * effort は未指定なら含めない（これまでの値と一致させる）。指定があれば、上の全体を v7 で包んで末尾に足す（利用者の入力なので、
@@ -163,14 +174,19 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
   ]);
   const base =
     input.sandbox_instance !== undefined
-      ? ["v5", ...fields, commands, input.merge_policy, input.model ?? null, input.sandbox_instance]
+      ? [
+          "v5",
+          ...fields,
+          commands,
+          input.review_policy,
+          input.model ?? null,
+          input.sandbox_instance,
+        ]
       : input.model !== undefined
-        ? ["v4", ...fields, commands, input.merge_policy, input.model]
-        : input.merge_policy === "agent_merge"
-          ? ["v3", ...fields, commands, input.merge_policy]
-          : commands.length === 0
-            ? ["v1", ...fields]
-            : ["v2", ...fields, commands];
+        ? ["v4", ...fields, commands, input.review_policy, input.model]
+        : commands.length === 0
+          ? ["v1", ...fields]
+          : ["v2", ...fields, commands];
   const withBudget = input.budget_policy === "stop" ? ["v6", base] : base;
   const canonical = JSON.stringify(
     input.effort !== undefined ? ["v7", withBudget, input.effort] : withBudget,

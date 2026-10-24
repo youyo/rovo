@@ -41,6 +41,20 @@ export interface FakeAppOptions {
   botId?: number;
 }
 
+/** コミットに付く check run（GET /commits/:sha/check-runs）。 */
+export interface FakeCheckRun {
+  name: string;
+  status: "queued" | "in_progress" | "completed";
+  /** status が completed のときだけ */
+  conclusion?: string;
+}
+
+/** コミットに付く commit status（GET /commits/:sha/status）。 */
+export interface FakeCommitStatus {
+  context: string;
+  state: "success" | "failure" | "error" | "pending";
+}
+
 export interface FakeCommit {
   sha: string;
   tree: string;
@@ -92,6 +106,10 @@ interface FakeRepoRec {
   mergeBlock: string | undefined;
   /** このリポジトリで許可していないマージ方法（405） */
   disallowedMethods: Set<string>;
+  /** sha -> check run */
+  checkRuns: Map<string, FakeCheckRun[]>;
+  /** sha -> commit status */
+  statuses: Map<string, FakeCommitStatus[]>;
 }
 
 interface TokenRec {
@@ -191,7 +209,12 @@ export class FakeGitHubApp {
   /** PR の html_url の host。既定は github.test。ダッシュボードの契約は github.com の URL だけを通すので、E2E で切り替える */
   prHost = "github.test";
   /** 利用者のトークンで呼んだときの App の権限（Installation Token の permissions と同じ形）。 */
-  private userPermissions: Record<string, string> = { contents: "write", pull_requests: "write" };
+  private userPermissions: Record<string, string> = {
+    contents: "write",
+    pull_requests: "write",
+    checks: "read",
+    statuses: "read",
+  };
 
   constructor(opts: FakeAppOptions) {
     this.appId = String(opts.appId);
@@ -212,7 +235,12 @@ export class FakeGitHubApp {
     this.log = [];
     this.draftUnsupported = false;
     this.beforeHandle = undefined;
-    this.userPermissions = { contents: "write", pull_requests: "write" };
+    this.userPermissions = {
+      contents: "write",
+      pull_requests: "write",
+      checks: "read",
+      statuses: "read",
+    };
     this.prHost = "github.test";
   }
 
@@ -229,6 +257,16 @@ export class FakeGitHubApp {
   /** ブランチ保護の再現。message を渡すとそのリポジトリのマージを 405 で拒否する。null で解除。 */
   setMergeBlock(fullName: string, message: string | null): void {
     this.mustRepo(fullName).mergeBlock = message ?? undefined;
+  }
+
+  /** コミットに check run を付ける（置き直すと上書き。GitHub Actions などの再現）。 */
+  setCheckRuns(fullName: string, sha: string, runs: FakeCheckRun[]): void {
+    this.mustRepo(fullName).checkRuns.set(sha, runs);
+  }
+
+  /** コミットに commit status を付ける（置き直すと上書き）。 */
+  setCommitStatuses(fullName: string, sha: string, statuses: FakeCommitStatus[]): void {
+    this.mustRepo(fullName).statuses.set(sha, statuses);
   }
 
   /** そのマージ方法（squash / merge / rebase）を許可しない。 */
@@ -264,6 +302,8 @@ export class FakeGitHubApp {
       ...(store?.tree ? { readTree: store.tree.bind(store) } : {}),
       mergeBlock: undefined,
       disallowedMethods: new Set(),
+      checkRuns: new Map(),
+      statuses: new Map(),
     });
   }
 
@@ -539,6 +579,18 @@ export class FakeGitHubApp {
       rec.revoked = true;
       return new Response(null, { status: 204 });
     }
+    if (path === "/graphql") {
+      // Installation Token での GraphQL（完了時の自動の Ready）。対象は token のリポジトリだけ
+      return req.method === "POST"
+        ? this.graphql(body, {
+            canPush: (fullName) => {
+              const repo = this.repos.get(fullName.toLowerCase());
+              return repo !== undefined && rec.repoIds.includes(repo.id);
+            },
+            permissions: rec.permissions,
+          })
+        : fail(404, "Not Found");
+    }
     const m = /^\/repos\/([^/]+)\/([^/]+)(\/.*)$/.exec(path);
     if (!m) return fail(404, "Not Found");
     const owner = decodeURIComponent(m[1] as string);
@@ -629,7 +681,9 @@ export class FakeGitHubApp {
     user: FakeUser,
   ): Promise<Response> {
     if (path === "/graphql") {
-      return method === "POST" ? this.graphql(body, user) : fail(404, "Not Found");
+      return method === "POST"
+        ? this.graphql(body, { canPush: (f) => user.canPush(f), permissions: this.userPermissions })
+        : fail(404, "Not Found");
     }
     const m = /^\/repos\/([^/]+)\/([^/]+)(\/.*)$/.exec(path);
     if (!m) return fail(404, "Not Found");
@@ -637,6 +691,15 @@ export class FakeGitHubApp {
     const name = decodeURIComponent(m[2] as string);
     const repo = this.repos.get(`${owner}/${name}`.toLowerCase());
     if (!repo || !user.canPush(repo.fullName)) return fail(404, "Not Found");
+    // check run / commit status を読むには、App に Checks / Commit statuses の read 権限が要る
+    const checkKind =
+      method === "GET" ? /^\/commits\/[^/]+\/(check-runs|status)$/.exec(m[3] as string) : null;
+    if (checkKind) {
+      const perm = checkKind[1] === "check-runs" ? "checks" : "statuses";
+      if (!["read", "write"].includes(this.userPermissions[perm] ?? "")) {
+        return fail(403, "Resource not accessible by integration");
+      }
+    }
     const rec: TokenRec = {
       token: "user",
       installationId: repo.installationId,
@@ -649,7 +712,10 @@ export class FakeGitHubApp {
   }
 
   /** markPullRequestReadyForReview だけを扱う GraphQL。エラーは GitHub と同じく HTTP 200 の errors で返す。 */
-  private graphql(body: unknown, user: FakeUser): Response {
+  private graphql(
+    body: unknown,
+    user: { canPush(fullName: string): boolean; permissions: Record<string, string> },
+  ): Response {
     const b = (body ?? {}) as { query?: unknown; variables?: { id?: unknown } };
     if (typeof b.query !== "string") return fail(400, "Problems parsing JSON");
     const errors = (type: string, message: string) =>
@@ -668,7 +734,7 @@ export class FakeGitHubApp {
     for (const repo of this.repos.values()) {
       for (const p of repo.pulls) {
         if (this.nodeId(repo, p) !== id || !user.canPush(repo.fullName)) continue;
-        if (this.userPermissions.pull_requests !== "write") {
+        if (user.permissions.pull_requests !== "write") {
           return errors("FORBIDDEN", "Resource not accessible by integration");
         }
         if (!p.draft) return errors("UNPROCESSABLE", "Pull request is not a draft");
@@ -689,7 +755,11 @@ export class FakeGitHubApp {
    * ダッシュボードの PR の状態の照会: `rN: repository(owner: $oI, name: $nI) { pullRequest(number: $pI) { state merged } }` を並べた GraphQL。
    * 見えない・無いリポジトリは GitHub と同じく data の alias が null + errors に NOT_FOUND（HTTP は 200）。無い PR は pullRequest: null。
    */
-  private pullStates(query: string, variables: Record<string, unknown>, user: FakeUser): Response {
+  private pullStates(
+    query: string,
+    variables: Record<string, unknown>,
+    user: { canPush(fullName: string): boolean },
+  ): Response {
     const data: Record<string, unknown> = {};
     const errors: { type: string; path: string[]; message: string }[] = [];
     const re =
@@ -879,6 +949,42 @@ export class FakeGitHubApp {
       };
       repo.pulls.push(p);
       return res(201, this.pullJson(repo, p));
+    }
+
+    const checkRunsGet = method === "GET" ? match(/^\/commits\/([^/]+)\/check-runs$/) : null;
+    if (checkRunsGet) {
+      const sha = decodeURIComponent(checkRunsGet[1] as string);
+      const runs = repo.checkRuns.get(sha) ?? [];
+      return res(200, {
+        total_count: runs.length,
+        check_runs: runs.map((c, i) => ({
+          id: i + 1,
+          name: c.name,
+          status: c.status,
+          conclusion: c.conclusion ?? null,
+        })),
+      });
+    }
+
+    const statusGet = method === "GET" ? match(/^\/commits\/([^/]+)\/status$/) : null;
+    if (statusGet) {
+      const sha = decodeURIComponent(statusGet[1] as string);
+      const list = repo.statuses.get(sha) ?? [];
+      // GitHub と同じ: 1 件も無ければ pending。failure / error が 1 つでもあれば failure、pending があれば pending
+      const state =
+        list.length === 0
+          ? "pending"
+          : list.some((x) => x.state === "failure" || x.state === "error")
+            ? "failure"
+            : list.some((x) => x.state === "pending")
+              ? "pending"
+              : "success";
+      return res(200, {
+        state,
+        sha,
+        total_count: list.length,
+        statuses: list.map((x) => ({ context: x.context, state: x.state })),
+      });
     }
 
     const mergeOne = method === "PUT" ? match(/^\/pulls\/(\d+)\/merge$/) : null;

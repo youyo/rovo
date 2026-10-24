@@ -23,7 +23,7 @@ export type ModelSelectionDto = z.infer<typeof ModelSelectionDtoSchema>;
 
 /** 設定の欄。`sandbox_instance` は表にある名前だけ（standard-2 など） */
 export const SettingsDtoSchema = z.strictObject({
-  merge_policy: z.enum(["human_review", "agent_merge"]),
+  review_policy: z.enum(["client_review", "worker_review"]),
   deps_cache: z.enum(["hit", "miss", "built", "disabled"]).optional(),
   cache_build_ms: countSchema.optional(),
   sandbox_runtime_ms: countSchema.optional(),

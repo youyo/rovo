@@ -205,7 +205,7 @@ describe("コンソールの要約のカード（今の表の情報をここに�
     expect(more.open).toBe(false);
     expect(more.textContent).toContain("入力");
     expect(more.textContent).toContain("standard-2");
-    expect(more.textContent).toContain("人のレビューを待つ");
+    expect(more.textContent).toContain("全体のテストとレビューはクライアントが行う");
   });
 });
 

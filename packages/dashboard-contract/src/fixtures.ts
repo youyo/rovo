@@ -193,7 +193,7 @@ export const taskDetailRunningFixture: TaskDetailDto = {
   phase: "run",
   now: { kind: "command", text: "pnpm exec vitest run" },
   settings: {
-    merge_policy: "human_review",
+    review_policy: "client_review",
     deps_cache: "hit",
     cache_build_ms: 0,
     sandbox_runtime_ms: 1_080_000,
@@ -228,7 +228,7 @@ export const taskDetailFailedSetupFixture: TaskDetailDto = {
   },
   phase: "prepare",
   now: null,
-  settings: { merge_policy: "human_review" },
+  settings: { review_policy: "client_review" },
   output: { tail: null, redacted: true },
 };
 

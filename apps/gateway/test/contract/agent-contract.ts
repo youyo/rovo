@@ -23,6 +23,8 @@ export type Checks = [
   // task_review（kind: "review"）の指定と結果
   Assert<Equal<Gateway.ReviewSpec, Agent.ReviewSpec>>,
   Assert<Equal<Gateway.ReviewResultDto, Agent.ReviewResultDto>>,
+  // worker_review（task_start の review_policy: "worker_review"）の指定
+  Assert<Equal<Gateway.WorkerReviewSpec, Agent.WorkerReviewSpec>>,
   // Phase 4: 回答と steer の RPC。AgentDO 本体は import しない（apps/agent の Env 型が gateway の型検査に混ざるため）。
   // 戻り値は apps/agent の DeliveryResult と一致し、引数は (id: string, text: string) であること。
   Assert<Equal<Awaited<ReturnType<Gateway.AgentRpc["answer"]>>, Agent.DeliveryResult>>,

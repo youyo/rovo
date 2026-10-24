@@ -73,13 +73,18 @@ export type VerificationCommandInput = z.infer<typeof verificationCommandSchema>
 /**
  * 全体のテストとレビューをどこで行うか（review_policy）。マージはどちらでもクライアントが行う（task_pr_merge か、gh などで直接）。
  * client_review（既定）: ワーカーは関係するテストまでを担当し、完了で rovo が PR を Ready にする。全体のテストとレビューはクライアントが手元で行う。
- * worker_review: ワーカーが全体のテストとレビューまで行う。今回は受け付けるだけで、task_start では未対応（近日）として拒否する。
+ * worker_review: ワーカーの検証が通ったあと、完了にする前に、review_commands を流し、review_model が差分を読んで PR に COMMENT のレビューを書く
+ * （review_model が必須。review_fix_rounds は 0 だけ。修正の回は未実装）。
  */
 export const REVIEW_POLICIES = ["client_review", "worker_review"] as const;
 export type ReviewPolicy = (typeof REVIEW_POLICIES)[number];
 export const DEFAULT_REVIEW_POLICY: ReviewPolicy = "client_review";
-/** 今は client_review だけが使える。worker_review は次の作業で実装する */
-const WORKER_REVIEW_UNSUPPORTED = "review_policy worker_review is not supported yet (coming soon)";
+/**
+ * worker_review の review_fix_rounds。仕様では 0 か 1 だが、1（ワーカーが修正する回）はまだ実装していない。
+ * 省略は 0（コメントだけで Ready）。
+ */
+const FIX_ROUNDS_NOT_IMPLEMENTED =
+  "review_fix_rounds: 1 は指定できません（修正の回は未実装です。0 を指定するか省略してください）";
 
 /**
  * 予算に近づいたときの扱い。ask（既定）は止めずにクライアントへ「あと task_budget_usd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
@@ -90,7 +95,7 @@ export type BudgetPolicy = (typeof BUDGET_POLICIES)[number];
 export const DEFAULT_BUDGET_POLICY: BudgetPolicy = "ask";
 
 /** task_start の入力（design.md 4.3）。idempotency_key は含めない。 */
-export const taskInputSchema = z.object({
+export const taskInputObject = z.object({
   // GitHub の上限: owner は 39 文字、リポジトリ名は 100 文字
   repository: z.string().regex(/^[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name 形式"),
   base_ref: z.string().min(1).max(255),
@@ -109,10 +114,13 @@ export const taskInputSchema = z.object({
     .array(verificationCommandSchema)
     .max(MAX_VERIFICATION_COMMANDS)
     .default([]),
-  review_policy: z
-    .enum(REVIEW_POLICIES)
-    .default(DEFAULT_REVIEW_POLICY)
-    .refine((v) => v !== "worker_review", WORKER_REVIEW_UNSUPPORTED),
+  review_policy: z.enum(REVIEW_POLICIES).default(DEFAULT_REVIEW_POLICY),
+  /** worker_review のときだけ（必須）。レビューを書くモデル。作業の model とは独立で、黙って流用しない */
+  review_model: z.string().min(1).max(MAX_MODEL_LENGTH).optional(),
+  /** worker_review のときだけ。全体のテスト（verification_commands と同じ形）。省略・空なら差分と読み取りの道具だけのレビュー */
+  review_commands: z.array(verificationCommandSchema).max(MAX_VERIFICATION_COMMANDS).optional(),
+  /** worker_review のときだけ。この段階では 0（省略も 0）だけ。1 は「修正の回は未実装」 */
+  review_fix_rounds: z.number().optional(),
   /** 廃止。review_policy に置き換えた（渡されたら invalid_input にして、黙って無視しない） */
   merge_policy: z
     .never({ error: "merge_policy was removed; use review_policy (client_review | worker_review)" })
@@ -133,6 +141,54 @@ export const taskInputSchema = z.object({
   effort: z.enum(EFFORT_LEVELS).optional(),
 });
 
+/** review_* の組み合わせの検査（taskInputSchema と、idempotency_key を足した MCP の入力の両方で使う） */
+export function checkReviewFields(
+  v: Pick<
+    z.infer<typeof taskInputObject>,
+    "review_policy" | "review_model" | "review_commands" | "review_fix_rounds"
+  >,
+  ctx: z.core.$RefinementCtx,
+): void {
+  const given = (["review_model", "review_commands", "review_fix_rounds"] as const).filter(
+    (k) => v[k] !== undefined,
+  );
+  if (v.review_policy !== "worker_review") {
+    // client_review で review_* が渡されたら、黙って無視せず断る
+    for (const k of given) {
+      ctx.addIssue({
+        code: "custom",
+        path: [k],
+        message: `${k} is only for review_policy worker_review`,
+      });
+    }
+    return;
+  }
+  if (v.review_model === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["review_model"],
+      message: "review_model is required for review_policy worker_review",
+    });
+  }
+  if (v.review_fix_rounds !== undefined) {
+    if (v.review_fix_rounds === 1) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["review_fix_rounds"],
+        message: FIX_ROUNDS_NOT_IMPLEMENTED,
+      });
+    } else if (v.review_fix_rounds !== 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["review_fix_rounds"],
+        message: "review_fix_rounds must be 0 (or 1, which is not implemented yet)",
+      });
+    }
+  }
+}
+
+export const taskInputSchema = taskInputObject.superRefine(checkReviewFields);
+
 /** 入力全体（JSON）の上限。項目ごとの上限だけでは合計が大きくなりうるため。 */
 export const MAX_INPUT_BYTES = 256 * 1024;
 
@@ -152,6 +208,8 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * review_policy を一緒に足す（merge_policy の頃の形を引き継ぐ）。
  * model は未指定なら含めない。指定があれば v4 として review_policy と一緒に末尾へ足す。
  * sandbox_instance も未指定なら含めない（v1〜v4 のまま）。指定があれば v5 として、model（無ければ null）の後ろへ足す。
+ * worker_review のときは v6 として、review_policy・model・sandbox_instance（無ければ null）に続けて review_model・review_commands・
+ * review_fix_rounds（省略は 0）を足す（client_review の指紋は変えない。次の budget_policy の v6 の包みとは、2 番目の要素が文字列か配列かで区別できる）。
  * budget_policy は既定（ask）なら含めない（これまでの値と一致させる）。stop のときだけ、上の全体を v6 で包んで足す。
  * effort は未指定なら含めない（これまでの値と一致させる）。指定があれば、上の全体を v7 で包んで末尾に足す（利用者の入力なので、
  * model を rovo が選んだとき（mode: auto）も含める）。
@@ -173,20 +231,36 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
     c.timeout_seconds ?? null,
   ]);
   const base =
-    input.sandbox_instance !== undefined
+    input.review_policy === "worker_review"
       ? [
-          "v5",
+          "v6",
           ...fields,
           commands,
           input.review_policy,
           input.model ?? null,
-          input.sandbox_instance,
+          input.sandbox_instance ?? null,
+          input.review_model ?? null,
+          (input.review_commands ?? []).map((c) => [
+            c.argv,
+            c.cwd ?? null,
+            c.timeout_seconds ?? null,
+          ]),
+          input.review_fix_rounds ?? 0,
         ]
-      : input.model !== undefined
-        ? ["v4", ...fields, commands, input.review_policy, input.model]
-        : commands.length === 0
-          ? ["v1", ...fields]
-          : ["v2", ...fields, commands];
+      : input.sandbox_instance !== undefined
+        ? [
+            "v5",
+            ...fields,
+            commands,
+            input.review_policy,
+            input.model ?? null,
+            input.sandbox_instance,
+          ]
+        : input.model !== undefined
+          ? ["v4", ...fields, commands, input.review_policy, input.model]
+          : commands.length === 0
+            ? ["v1", ...fields]
+            : ["v2", ...fields, commands];
   const withBudget = input.budget_policy === "stop" ? ["v6", base] : base;
   const canonical = JSON.stringify(
     input.effort !== undefined ? ["v7", withBudget, input.effort] : withBudget,
@@ -202,7 +276,7 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
  */
 export const reviewInputSchema = z
   .object({
-    repository: taskInputSchema.shape.repository,
+    repository: taskInputObject.shape.repository,
     pull_number: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
     review_model: z.string().min(1).max(MAX_MODEL_LENGTH),
     review_commands: z.array(verificationCommandSchema).max(MAX_VERIFICATION_COMMANDS).default([]),

@@ -13,6 +13,7 @@ import {
   reviewWarnings,
   runReviewCommands,
   runReviewModel,
+  workerReviewWarnings,
 } from "../../src/review/stage";
 import type { ReviewToolRunner } from "../../src/review/tools";
 
@@ -419,5 +420,36 @@ describe("reviewWarnings: tool_rounds_exceeded", () => {
         failure: "tool_rounds_exceeded",
       }),
     ).toEqual(["review_failed: tool_rounds_exceeded"]);
+  });
+});
+
+describe("workerReviewWarnings（worker_review の結果の分類。修正の回が無い行）", () => {
+  it("must_fix が 0 件: suggestions があれば review_suggestions: <件数>、なければ警告なし", () => {
+    expect(
+      workerReviewWarnings({ failure: undefined, mustFixCount: 0, suggestionCount: 3 }),
+    ).toEqual(["review_suggestions: 3"]);
+    expect(
+      workerReviewWarnings({ failure: undefined, mustFixCount: 0, suggestionCount: 0 }),
+    ).toEqual([]);
+  });
+
+  it("must_fix が 1 件以上（review_fix_rounds: 0 なので直さない）: review_must_fix_unaddressed: <件数>。suggestions の件数では警告を足さない", () => {
+    expect(
+      workerReviewWarnings({ failure: undefined, mustFixCount: 2, suggestionCount: 5 }),
+    ).toEqual(["review_must_fix_unaddressed: 2"]);
+  });
+
+  it("レビューが得られなかったとき（失敗・予算）は、件数からは何も足さない（review_failed / review_skipped_budget は reviewWarnings が出す）", () => {
+    for (const failure of ["model_error", "budget", "diff_unavailable"] as const) {
+      expect(workerReviewWarnings({ failure, mustFixCount: 0, suggestionCount: 0 })).toEqual([]);
+    }
+    expect(
+      reviewWarnings({
+        unavailable: false,
+        timedOut: false,
+        redacted: false,
+        failure: "diff_unavailable",
+      }),
+    ).toEqual(["review_failed: diff_unavailable"]);
   });
 });

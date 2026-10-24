@@ -44,6 +44,7 @@ import type { ReviewPull, UserDO } from "./user-do";
 import {
   type AnswerInput,
   answerInputSchema,
+  checkReviewFields,
   computeFingerprint,
   computeReviewFingerprint,
   exceedsInputLimit,
@@ -57,7 +58,7 @@ import {
   type SteerInput,
   steerInputSchema,
   type TaskInput,
-  taskInputSchema,
+  taskInputObject,
 } from "./validation";
 
 /**
@@ -386,9 +387,11 @@ function invalidInput(error: z.ZodError): ServiceResult<never> {
   );
 }
 
-const startInputSchema = taskInputSchema.extend({
-  idempotency_key: z.unknown().optional(),
-});
+const startInputSchema = taskInputObject
+  .extend({
+    idempotency_key: z.unknown().optional(),
+  })
+  .superRefine(checkReviewFields);
 
 export type CheckedStartInput = { input: TaskInput; idempotency_key: string | undefined };
 
@@ -509,6 +512,8 @@ export function createTaskService(
         value: {
           task_id: taskId,
           ...r.result,
+          // worker_review: レビューの結果。コマンドの出力と本文は非信頼データとして囲む
+          ...(r.result.review !== undefined ? { review: wrapReviewResult(r.result.review) } : {}),
           // ワーカーが書いた summary は非信頼データとして囲む（question と同じ囲み）
           summary: r.result.summary === "" ? "" : wrapUntrustedQuestion(r.result.summary),
           // 検証コマンドの出力も、ワーカーが書いたコードの実行結果なので囲む（argv・exit_code などの固定値は囲まない）
@@ -529,6 +534,18 @@ export function createTaskService(
             review_policy: r.result.review_policy,
             verification: r.result.verification,
             pr: r.result.pr,
+            ...(r.result.review !== undefined
+              ? {
+                  review: {
+                    comment_url: r.result.review.comment_url,
+                    must_fix_count: r.result.review.must_fix_count,
+                    ...(r.result.review.stage === "skipped"
+                      ? { failure: r.result.review.failure ?? "skipped" }
+                      : {}),
+                    comment_failed: r.result.warnings.includes("review_comment_failed"),
+                  },
+                }
+              : {}),
           }),
           ...withDashboardUrl(taskId),
         },
@@ -562,6 +579,11 @@ export function createTaskService(
       // （env の AGENT_MODELS と、AI Gateway に登録されたキー。models_list で一覧を返す）
       const model = await resolveModel(env, input.model, providerKeys);
       if (!model.ok) return fail(model.code, model.message);
+      // worker_review のレビューのモデルも同じ検査（作業の model とは独立。省略した作業のモデルを黙って流用しない）
+      if (input.review_policy === "worker_review") {
+        const reviewModel = await resolveModel(env, input.review_model, providerKeys);
+        if (!reviewModel.ok) return fail(reviewModel.code, reviewModel.message);
+      }
       // 省略したときは Clef がタスクの内容から選ぶ（失敗・時間切れは既定のモデル。task_start は失敗させない）。TaskDO を作る前に決める
       const choice: ModelChoice =
         input.model !== undefined

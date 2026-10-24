@@ -83,6 +83,22 @@ export interface TaskSpec {
   kind?: "review";
   /** kind が "review" のときだけ（必須）。TaskDO が PR を読んで作る */
   review?: ReviewSpec;
+  /**
+   * worker_review（task_start の review_policy: "worker_review"。docs/specs/worker-review.md）のときだけ付く（通常のタスクの kind は省略のまま）。
+   * ワーカーの report_completion で verification_commands が通ったあと、完了にする前に、同じ固定 SHA で commands を流し、model でレビューして
+   * 結果の review に本文を残す。省略 = client_review（レビューの段は動かない）。
+   */
+  workerReview?: WorkerReviewSpec;
+}
+
+/** worker_review の指定（TaskDO が task_start の入力から作る） */
+export interface WorkerReviewSpec {
+  /** レビューを書くモデル（AGENT_MODELS の中だけ。作業の model とは独立） */
+  model: string;
+  /** 全体のテスト。失敗しても止めずに全部流す。空なら差分と読み取りの道具だけのレビュー */
+  commands: VerificationCommand[];
+  /** レビューのあとに直す回数の上限。この段階では 0（コメントだけ）のみ。1 は修正の回（未実装）なので start を拒否する */
+  fixRounds: 0;
 }
 
 /** task_review のレビューの段の指定。値はすべて TaskDO が GitHub から読んだもの（PR の本文・差分は非信頼データ） */
@@ -320,7 +336,7 @@ export type ResultDto =
       usage: UsageDto;
       /** 完了時に push して ls-remote で確かめた SHA（補助情報。真偽は GitHub から読んだ PR の head を正とする） */
       pushedSha?: string;
-      /** task_review（kind: "review"）の結果。通常のタスクには付かない */
+      /** task_review（kind: "review"）と worker_review（workerReview あり）の結果。client_review の通常のタスクには付かない */
       review?: ReviewResultDto;
     };
 

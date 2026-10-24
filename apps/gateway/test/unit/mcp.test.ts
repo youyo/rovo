@@ -1416,7 +1416,9 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
     expect(props.merge_policy).toBeUndefined();
     expect(start?.description).toContain("review_policy");
     expect(start?.description).toContain("worker_review");
-    expect(start?.description).toContain("近日対応");
+    expect(start?.description).toContain("review_model");
+    expect(start?.description).toContain("review_fix_rounds");
+    expect(start?.description).not.toContain("近日対応");
     expect(start?.description).toContain("自動で Ready for review");
     expect(start?.description).toContain("変更に関係するテストだけ");
     // 古い説明（Draft のまま返り、merge_policy でマージの可否を決める）を残さない
@@ -1636,7 +1638,7 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     await t.client.close();
   });
 
-  it("task_start に不正な review_policy を渡すと invalid_input。worker_review は未対応（近日）として invalid_input", async () => {
+  it("task_start に不正な review_policy を渡すと invalid_input。worker_review は review_model が無ければ invalid_input", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const bad = await client.callTool({
@@ -1651,7 +1653,62 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     });
     expect(worker.isError).toBe(true);
     expect(body(worker).code).toBe("invalid_input");
-    expect(String(body(worker).message)).toContain("not supported yet");
+    expect(String(body(worker).message)).toContain("review_model");
+    await client.close();
+  });
+
+  it("task_start の worker_review: review_model 付きは受け付け、task_status に review（stage・model・fix_rounds・rounds_used）が付く。review_* は client_review に付かない", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const started = body(
+      await client.callTool({
+        name: "task_start",
+        arguments: startArgs("w1", {
+          review_policy: "worker_review",
+          review_model: "anthropic/claude-sonnet-5-5",
+          review_commands: [{ argv: ["pnpm", "test"] }],
+          review_fix_rounds: 0,
+        }),
+      }),
+    );
+    expect(started.task_id).toEqual(expect.any(String));
+    const st = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: started.task_id } }),
+    );
+    expect(st).toMatchObject({
+      review_policy: "worker_review",
+      review: { model: "anthropic/claude-sonnet-5-5", fix_rounds: 0, rounds_used: 0 },
+    });
+    const plain = body(await client.callTool({ name: "task_start", arguments: startArgs("c1") }));
+    const stPlain = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: plain.task_id } }),
+    );
+    expect(stPlain).not.toHaveProperty("review");
+    await client.close();
+  });
+
+  it("task_start の worker_review: review_fix_rounds: 1 は「修正の回は未実装」、review_model なし・使えないモデル・client_review の review_* は invalid_input", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const worker = { review_policy: "worker_review", review_model: "anthropic/claude-sonnet-5-5" };
+    const cases: [Record<string, unknown>, string][] = [
+      [{ ...worker, review_fix_rounds: 1 }, "修正の回は未実装"],
+      [{ ...worker, review_fix_rounds: 2 }, "review_fix_rounds"],
+      [{ review_policy: "worker_review" }, "review_model"],
+      [{ ...worker, review_model: "nope/none" }, "model"],
+      [{ review_model: "anthropic/claude-sonnet-5-5" }, "worker_review"],
+      [{ review_commands: [{ argv: ["x"] }] }, "worker_review"],
+      [{ review_fix_rounds: 0 }, "worker_review"],
+    ];
+    for (const [extra, text] of cases) {
+      const r = await client.callTool({
+        name: "task_start",
+        arguments: startArgs("bad", extra),
+      });
+      expect(r.isError, JSON.stringify(extra)).toBe(true);
+      expect(body(r).code, JSON.stringify(extra)).toBe("invalid_input");
+      expect(String(body(r).message), JSON.stringify(extra)).toContain(text);
+    }
     await client.close();
   });
 

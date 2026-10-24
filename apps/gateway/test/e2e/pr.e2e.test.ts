@@ -381,7 +381,7 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
     }
   });
 
-  it("task_start: worker_review は未対応（近日）、旧 merge_policy は廃止で、どちらも invalid_input", async () => {
+  it("task_start: review_model の無い worker_review、旧 merge_policy は廃止で、どちらも invalid_input", async () => {
     const user = newUser("rp");
     await addMember(user);
     await installApp();
@@ -394,7 +394,7 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
       expect(worker.isError).toBe(true);
       expect(bodyOf(worker)).toMatchObject({
         code: "invalid_input",
-        message: expect.stringContaining("not supported yet"),
+        message: expect.stringContaining("review_model"),
       });
       const old = await client.callTool({
         name: "task_start",
@@ -425,4 +425,134 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
       await client.close();
     }
   });
+});
+
+// worker_review（review_fix_rounds: 0）: ワーカーの検証が通ったあとの偽のワーカーの結果（review）を、PR に COMMENT のレビューとして投稿してから Ready にする。
+// 本物のレビューの段（Sandbox で review_commands を流し、モデルを呼ぶ）は apps/agent の Unit と、Docker を使う通しの E2E が確かめる。
+const WORKER = {
+  review_policy: "worker_review",
+  review_model: "anthropic/claude-sonnet-5-5",
+  review_commands: [{ argv: ["pnpm", "test"] }],
+  review_fix_rounds: 0,
+};
+const reviewUsage = {
+  costUsd: 0.03,
+  inputTokens: 900,
+  outputTokens: 120,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  estimated: false,
+};
+const reviewed = (head: string, over: Record<string, unknown> = {}, warnings: string[] = []) => ({
+  ...completedResult(head),
+  warnings,
+  review: {
+    stage: "done",
+    model: "anthropic/claude-sonnet-5-5",
+    headSha: head,
+    body: "## rovo のレビュー（anthropic/claude-sonnet-5-5、aaaaaaa）\n\n### 直すべき点（1 件）",
+    mustFixCount: 1,
+    suggestionCount: 0,
+    commands: [{ argv: ["pnpm", "test"], exitCode: 0, timedOut: false, output: "ok" }],
+    commandsUnavailable: false,
+    usage: reviewUsage,
+    ...over,
+  },
+});
+
+describe("worker_review（偽 GitHub 経由の通し）", () => {
+  it(
+    "review_fix_rounds: 0: PR に COMMENT のレビューが付いて Ready になり、must_fix があれば warnings に review_must_fix_unaddressed が出て、task_pr_merge は warnings_present で拒否される",
+    async () => {
+      const t = await setup(true, WORKER);
+      try {
+        const running = bodyOf(
+          await t.client.callTool({ name: "task_status", arguments: { task_id: t.taskId } }),
+        );
+        expect(running).toMatchObject({
+          review_policy: "worker_review",
+          review: { stage: "waiting", model: "anthropic/claude-sonnet-5-5", fix_rounds: 0 },
+        });
+        await finishAgent(
+          t.taskId,
+          "completed",
+          reviewed(t.head, {}, ["review_must_fix_unaddressed: 1"]),
+        );
+        const result = await waitForResult(t.client, t.taskId);
+        expect(result).toMatchObject({
+          status: "COMPLETED",
+          review_policy: "worker_review",
+          warnings: ["review_must_fix_unaddressed: 1"],
+          pr: { draft: false, head_matches_verified: true },
+          review: {
+            stage: "done",
+            model: "anthropic/claude-sonnet-5-5",
+            comment_url: expect.stringMatching(/#pullrequestreview-\d+$/),
+            must_fix_count: 1,
+            suggestion_count: 0,
+            fix_applied: false,
+            final: null,
+            usage: { cost_usd: 0.03 },
+          },
+        });
+        expect(String(result.next_steps)).toContain("must_fix");
+        expect(String(result.next_steps)).toContain("コメントを読む");
+        const pull = await pullOf(t.branch);
+        expect(pull?.draft).toBe(false);
+        const reviews = await admin.app<{ event: string; commitId: string }[]>(
+          "reviews",
+          "acme/widgets",
+          pull?.number,
+        );
+        expect(reviews).toHaveLength(1);
+        expect(reviews[0]).toMatchObject({ event: "COMMENT", commitId: t.head });
+        const merge = await t.client.callTool({
+          name: "task_pr_merge",
+          arguments: { task_id: t.taskId },
+        });
+        expect(merge.isError).toBe(true);
+        expect(bodyOf(merge)).toMatchObject({ message: expect.stringContaining("warnings") });
+      } finally {
+        await t.client.close();
+      }
+    },
+    LONG,
+  );
+
+  it(
+    "レビューのモデルが失敗: COMPLETED・Ready のまま、何も投稿せず、warnings に review_failed",
+    async () => {
+      const t = await setup(true, WORKER);
+      try {
+        await finishAgent(
+          t.taskId,
+          "completed",
+          reviewed(
+            t.head,
+            {
+              stage: "skipped",
+              body: undefined,
+              mustFixCount: 0,
+              failure: "model_error",
+              commands: [],
+            },
+            ["review_failed: model_error"],
+          ),
+        );
+        const result = await waitForResult(t.client, t.taskId);
+        expect(result).toMatchObject({
+          status: "COMPLETED",
+          warnings: ["review_failed: model_error"],
+          pr: { draft: false },
+          review: { stage: "skipped", comment_url: null, failure: "model_error" },
+        });
+        const pull = await pullOf(t.branch);
+        expect(pull?.draft).toBe(false);
+        expect(await admin.app<unknown[]>("reviews", "acme/widgets", pull?.number)).toHaveLength(0);
+      } finally {
+        await t.client.close();
+      }
+    },
+    LONG,
+  );
 });

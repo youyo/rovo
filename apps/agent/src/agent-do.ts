@@ -102,6 +102,7 @@ import {
   reviewWarnings,
   runReviewCommands,
   runReviewModel,
+  workerReviewWarnings,
 } from "./review/stage";
 import { createReviewToolRunner, type ReviewToolDef, type ReviewToolRunner } from "./review/tools";
 import type {
@@ -146,6 +147,10 @@ const MAX_SETUP_ATTEMPTS = 3;
 /** Sandbox の起動を再試行するまでの待ち（ms）。呼び出したツールはこの間待つ */
 const SETUP_RETRY_DELAY_MS = 5_000;
 const PATCH_LIMIT = 1024 * 1024;
+/** worker_review のレビューの段が Sandbox から読む差分の上限（UTF-8 のバイト数。gateway が task_review で取る上限と同じ。超えたら切って「一部は未確認」にする） */
+const WORKER_REVIEW_DIFF_MAX_BYTES = 1024 * 1024;
+/** worker_review のレビューの入力に載せる、クライアントが書いた目的（instructions）の上限（文字数） */
+const WORKER_REVIEW_INSTRUCTIONS_MAX_CHARS = 8_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_000;
 /** 残額に収まる出力がこれを割るなら、モデルを呼ばずに budget_exceeded にする（応答が途中で切れるだけで費用が無駄になる） */
 const MIN_OUTPUT_TOKENS = 1_024;
@@ -433,6 +438,8 @@ function maskEventStrings(data: unknown): unknown {
 export class AgentDO extends DurableObject<Env> {
   private readonly store = new AgentStore(this.ctx, () => this.now());
   private launching: Promise<void> | undefined;
+  /** worker_review のレビューの段（単一実行） */
+  private workerReviewRun: Promise<void> | undefined;
   private watching: Promise<void> | undefined;
   private finalizing: Promise<void> | undefined;
   /** 予算超過の停止で進行中の WIP commit（確定はこれを待つ。失敗しても解決する） */
@@ -1050,18 +1057,25 @@ export class AgentDO extends DurableObject<Env> {
     };
   }
 
-  /** task_review の結果（getResult の review）。段の結果が無いまま終わった（cancel など）ときは、飛ばしたものとして返す */
+  /**
+   * task_review と worker_review の結果（getResult の review）。段の結果が無いまま終わった（cancel・検証の失敗など）ときは、
+   * 飛ばしたものとして返す。client_review の通常のタスクには付けない。
+   */
   private reviewResultPart(): { review?: ReviewResultDto } {
     const spec = this.spec();
-    if (spec?.kind !== "review" || !spec.review) return {};
+    const model = spec?.kind === "review" ? spec.review?.model : spec?.workerReview?.model;
+    if (!spec || model === undefined) return {};
     const stored = this.store.meta<StoredReview>("review_result");
     if (stored) return { review: stored.result };
     const cmds = this.store.meta<ReviewCommandsOutcome>("review_commands");
     return {
       review: {
         stage: "skipped",
-        model: spec.review.model,
-        headSha: spec.review.headSha,
+        model,
+        headSha:
+          spec.kind === "review"
+            ? (spec.review?.headSha ?? "")
+            : (this.store.meta<string>("worker_review_sha") ?? ""),
         mustFixCount: 0,
         suggestionCount: 0,
         commands: cmds?.results ?? [],
@@ -1333,9 +1347,13 @@ export class AgentDO extends DurableObject<Env> {
     }
     if (spec.kind !== undefined) {
       if (spec.kind !== "review") return "invalid_spec: kind";
+      // worker_review は通常のタスクだけ（task_review とは併用しない）
+      if (spec.workerReview !== undefined) return "invalid_spec: workerReview";
       return this.validateReview(spec);
     }
     if (spec.review !== undefined) return "invalid_spec: review";
+    const workerReviewError = this.validateWorkerReview(spec);
+    if (workerReviewError) return workerReviewError;
     // push は agent/task-<taskId> だけが許される（OutboundGateway が同じ名前で判定する）。ずれていれば始めない
     if (spec.branch !== `agent/task-${spec.taskId}`) return "invalid_spec: branch";
     if (
@@ -1374,6 +1392,40 @@ export class AgentDO extends DurableObject<Env> {
       ) {
         return "unknown_model: not in AGENT_MODELS";
       }
+    }
+    return undefined;
+  }
+
+  /**
+   * worker_review の指定の検査（fail-closed）。レビューのモデルは AGENT_MODELS の中で単価が分かるもの、コマンドは形が正しいもの。
+   * 修正の回（fixRounds: 1）はまだ実装していないので、0 以外は受け付けない（黙って「直さない」にしない）。
+   */
+  private validateWorkerReview(spec: TaskSpec): string | undefined {
+    const wr = spec.workerReview as unknown;
+    if (wr === undefined) return undefined;
+    if (typeof wr !== "object" || wr === null) return "invalid_spec: workerReview";
+    const { model, commands, fixRounds } = wr as Record<string, unknown>;
+    if (fixRounds !== 0) return "invalid_spec: workerReview fixRounds";
+    if (
+      !Array.isArray(commands) ||
+      commands.some(
+        (c) =>
+          typeof c !== "object" ||
+          c === null ||
+          !Array.isArray((c as { argv?: unknown }).argv) ||
+          (c as { argv: unknown[] }).argv.length === 0 ||
+          (c as { argv: unknown[] }).argv.some((a) => typeof a !== "string" || a === "") ||
+          ((c as { cwd?: unknown }).cwd !== undefined &&
+            typeof (c as { cwd?: unknown }).cwd !== "string"),
+      )
+    ) {
+      return "invalid_spec: workerReview commands";
+    }
+    if (typeof model !== "string" || !agentModels(this.env as AgentEnv).includes(model)) {
+      return "unknown_model: not in AGENT_MODELS";
+    }
+    if (!priceFor(this.modelId(model), (this.env as AgentEnv).ENVIRONMENT === "test")) {
+      return `unknown_model: ${model}`;
     }
     return undefined;
   }
@@ -1469,6 +1521,11 @@ export class AgentDO extends DurableObject<Env> {
     // task_review: Pi は起動しない。レビューの段（コマンド → モデル）を進める（何度呼んでも続きから進む）
     if (spec.kind === "review") {
       await this.runReview();
+      return;
+    }
+    // worker_review のレビューの段の途中（予算の質問の承認のあと）: Pi は動かさず、レビューの段の続きから進む
+    if (this.workerReviewActive()) {
+      await this.runWorkerReviewOnce(false);
       return;
     }
     if (!this.store.meta("launched")) {
@@ -1675,7 +1732,11 @@ export class AgentDO extends DurableObject<Env> {
     const pausedTotal = this.pausedTotal() + Math.max(0, this.now() - pausedAt);
     const deadlineAt = this.baseDeadline() + pausedTotal;
     // task_review の予算の延長: Pi に渡す run は無い。予算を 1 回分増やして、レビューの段の続き（モデルの呼び出し）に戻る
-    if (this.spec()?.kind === "review" && q.kind === "budget_extension") {
+    // worker_review のレビューの段の予算の延長（verification が通ったあと）も同じ: Pi の run は終わっているので、レビューの段の続きに戻る
+    if (
+      (this.spec()?.kind === "review" || this.workerReviewActive()) &&
+      q.kind === "budget_extension"
+    ) {
       // 質問の間に延ばした SandboxDO の期限を、待った分だけ延びた正確な値へ戻す（中断した Sandbox は次の道具の呼び出しで戻る）
       if (this.sandboxBooted()) {
         try {
@@ -1786,6 +1847,8 @@ export class AgentDO extends DurableObject<Env> {
     return (
       this.store.meta("launched") === true &&
       !isTerminal(phase) &&
+      // worker_review のレビューの段は AgentDO が進める（Pi の run の完了を待たない）
+      !this.workerReviewActive() &&
       // 回答待ちの間は run が無い。回答の submit が済む（pending_resume が消える）までは、回答の operation も無い
       phase !== "input_required" &&
       !this.store.meta("pending_resume")
@@ -1871,6 +1934,9 @@ export class AgentDO extends DurableObject<Env> {
     } else if (this.deadlineExceeded()) this.requestStop("deadline");
     else if (this.store.meta<string | null>("pending_resume")) {
       void this.resumeFromAnswer(String(this.store.meta("pending_resume"))).catch(() => undefined);
+    } else if (this.workerReviewActive()) {
+      // worker_review のレビューの段（DO の再起動のあとなどで途切れていれば、続きから進める。動いていれば何もしない）
+      void this.runWorkerReviewOnce(false).catch(() => undefined);
     } else if (this.store.meta("launched")) {
       this.watchRun();
       void this.flushSteers().catch(() => undefined);
@@ -2201,8 +2267,12 @@ export class AgentDO extends DurableObject<Env> {
       if (spec?.kind === "review") {
         // task_review: 検証コマンドの代わりに、レビューの段の warnings（固定コード）を返す
         if (review) warnings.push(...review.warnings);
-      } else if (decision.phase === "completed" && !verification?.verified) {
-        warnings.push("検証コマンドが指定されていないため未検証です（モデルの申告のみ）");
+      } else {
+        if (decision.phase === "completed" && !verification?.verified) {
+          warnings.push("検証コマンドが指定されていないため未検証です（モデルの申告のみ）");
+        }
+        // worker_review: レビューの段の warnings（固定コード）を足す（検証の warnings は今までどおり）
+        if (spec?.workerReview && review) warnings.push(...review.warnings);
       }
       if (keepPatch && patch !== undefined) this.store.savePatch(patch);
       // 作業ブランチの push の結果（チェックポイントの push または完了時の同期）。完了以外の終端でも pushedSha を返す
@@ -3042,16 +3112,31 @@ export class AgentDO extends DurableObject<Env> {
     cmds: ReviewCommandsOutcome,
     toolsAvailable: boolean,
   ): ReviewInput {
+    const worker = spec.kind !== "review";
     return buildReviewInput({
       toolsAvailable,
-      header: spec.instructions,
+      // worker_review: クライアントが書いた目的と受け入れ条件（信頼できる指示）を渡す。ワーカーの summary は渡さない
+      // （レビューが作者の主張に引きずられないように。差分と客観的なテスト結果だけを読ませる）
+      header: worker ? this.workerReviewHeader(spec, rv) : spec.instructions,
       title: rv.title,
       body: rv.body,
       diff: rv.diff,
       diffTruncatedUpstream: rv.diffTruncated,
       commands: cmds.results,
       commandsUnavailable: cmds.unavailable,
+      ...(worker && spec.acceptanceCriteria && spec.acceptanceCriteria.length > 0
+        ? { acceptanceCriteria: spec.acceptanceCriteria }
+        : {}),
     });
+  }
+
+  /** worker_review のレビューの最初のブロック（囲まない固定の文。目的はクライアントが書いたもので、秘密は伏せ字にして上限で切る） */
+  private workerReviewHeader(spec: StoredSpec, rv: ReviewSpec): string {
+    const goal = maskSecrets(spec.instructions.slice(0, WORKER_REVIEW_INSTRUCTIONS_MAX_CHARS));
+    return [
+      `Review the changes that a worker made for the task below (repository ${spec.repository}, work branch agent/task-${spec.taskId}, commit ${rv.headSha}). The diff is against the base commit ${spec.baseSha}.`,
+      `Task goal given by the client (trusted):\n${goal}`,
+    ].join("\n\n");
   }
 
   /** モデルに渡す入力の見積もり（トークン数の上限。UTF-8 のバイト数 + 枠の余裕） */
@@ -3065,6 +3150,15 @@ export class AgentDO extends DurableObject<Env> {
     if (!spec || !rv || this.refused()) return;
     if (this.store.phase() === "input_required") return;
     if (this.store.meta<StoredReview>("review_result")) return;
+    await this.driveReview(spec, rv);
+  }
+
+  /**
+   * レビューの段の本体（task_review と worker_review で共通）。コマンド → 入力と予算 → モデル（道具の往復）→ finishReview の順で、
+   * 途中で止まったときは meta に残した続きから進む。worker_review（spec.kind が review でない）では、Sandbox は verification のあとの
+   * 作業ツリー（固定した SHA）をそのまま使い、終わり方だけが違う（finishReview）。
+   */
+  private async driveReview(spec: StoredSpec, rv: ReviewSpec): Promise<void> {
     if (this.store.meta<number>("review_started_at") === undefined) {
       this.store.tx(() => {
         this.store.setMeta("review_started_at", this.now());
@@ -3399,7 +3493,11 @@ export class AgentDO extends DurableObject<Env> {
     }
   }
 
-  /** 段の結果を残して終端にする。budget は BUDGET_EXCEEDED、それ以外の失敗は FAILED（review_failed）、成功は COMPLETED */
+  /**
+   * 段の結果を残して終端にする。task_review: budget は BUDGET_EXCEEDED、それ以外の失敗は FAILED（review_failed）、成功は COMPLETED。
+   * worker_review: レビューが得られなくても（失敗・予算で飛ばした）作業は済んでいるので、どれも COMPLETED にして warnings で知らせる
+   * （review_failed: <理由> / review_skipped_budget）。得られたときは件数から review_must_fix_unaddressed / review_suggestions を足す。
+   */
   private async finishReview(
     rv: ReviewSpec,
     cmds: ReviewCommandsOutcome,
@@ -3420,6 +3518,7 @@ export class AgentDO extends DurableObject<Env> {
         })
       : undefined;
     const failure = outcome.ok ? undefined : outcome.code;
+    const worker = this.spec()?.kind !== "review";
     const stored: StoredReview = {
       result: {
         stage: outcome.ok ? "done" : "skipped",
@@ -3433,22 +3532,38 @@ export class AgentDO extends DurableObject<Env> {
         ...(failure !== undefined ? { failure } : {}),
         usage: this.reviewUsage(),
       },
-      warnings: reviewWarnings({
-        unavailable: cmds.unavailable,
-        timedOut: cmds.timedOut,
-        redacted:
-          input.redacted ||
-          built?.redacted === true ||
-          toolsRedactedBefore ||
-          tools?.redacted() === true,
-        failure,
-      }),
+      warnings: [
+        ...reviewWarnings({
+          unavailable: cmds.unavailable,
+          timedOut: cmds.timedOut,
+          redacted:
+            input.redacted ||
+            built?.redacted === true ||
+            toolsRedactedBefore ||
+            tools?.redacted() === true,
+          failure,
+        }),
+        ...(worker
+          ? workerReviewWarnings({
+              failure,
+              mustFixCount: outcome.ok ? outcome.verdict.mustFix.length : 0,
+              suggestionCount: outcome.ok ? outcome.verdict.suggestions.length : 0,
+            })
+          : []),
+      ],
     };
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
       this.store.setMeta("review_result", stored);
       this.store.setMeta("review_convo", null);
     });
+    if (worker) {
+      // 停止の意図（取消し・期限）があれば、その確定が勝つ。なければ、固定した SHA で完了にする
+      if (this.stopIntents().length > 0) return;
+      const sha = this.store.meta<string>("worker_review_sha");
+      await this.finalize({ phase: "completed", ...(sha ? { sha } : {}) });
+      return;
+    }
     if (failure === "budget") {
       this.requestStop("budget_exceeded");
       return;
@@ -3663,8 +3778,10 @@ export class AgentDO extends DurableObject<Env> {
 
     // Sandbox を一度も起動していない（ファイルにも git にも触れていない）うえ、検証コマンドも無ければ、確かめるものが無い。
     // 作業ブランチは出発点（initialSha）のままで、リモートも同じなので、Sandbox を起動せずに完了とする
+    // worker_review はレビューの段が Sandbox の作業ツリーを読むので、この近道は使わない（Sandbox を起動して進む）
     if (
       commands.length === 0 &&
+      !spec.workerReview &&
       !this.sandboxBooted() &&
       (this.store.meta<number>("setup_attempts") ?? 0) === 0
     ) {
@@ -3713,6 +3830,8 @@ export class AgentDO extends DurableObject<Env> {
         } satisfies VerificationSummary);
         await this.syncBranch(sha);
         if (this.stopIntents().length > 0) return ended;
+        const review = await this.reviewBeforeCompletion(spec, sha);
+        if (review) return review;
         return await settle(
           { phase: "completed", sha },
           {
@@ -3808,6 +3927,8 @@ export class AgentDO extends DurableObject<Env> {
       if (passed) {
         await this.syncBranch(sha);
         if (this.stopIntents().length > 0) return ended;
+        const review = await this.reviewBeforeCompletion(spec, sha);
+        if (review) return review;
         return await settle(
           { phase: "completed", sha },
           {
@@ -3840,6 +3961,153 @@ export class AgentDO extends DurableObject<Env> {
           `The sandbox failed while checking or verifying the work: ${tail(String(e), 500)}\nThis attempt counted toward the verification limit. Check the repository and call report_completion again.`,
         ),
       );
+    }
+  }
+
+  /**
+   * worker_review: verification_commands が通ったあと、完了にする前にレビューの段を進める（report_completion のツールの中から呼ぶ）。
+   * worker_review でなければ何もしない（undefined。呼び出し側が今までどおり完了にする）。
+   * レビューの段が完了まで確定したときは、ツールの結果（terminate）を返す。予算の延長の質問で止まったときも terminate を返し
+   * （phase は input_required。承認されたら answer からレビューの続きに戻る）、取消しなどの停止の意図があるときは終了済みの結果を返す。
+   */
+  private async reviewBeforeCompletion(
+    spec: StoredSpec,
+    sha: string,
+  ): Promise<{ text: string; isError: boolean; terminate: boolean } | undefined> {
+    if (!spec.workerReview) return undefined;
+    // この印があるあいだはレビューの段（Pi の run ではなく AgentDO が進める）。固定した SHA はここで決まる
+    this.store.setMeta("worker_review_sha", sha);
+    await this.runWorkerReviewOnce(true);
+    if (this.store.phase() === "input_required") {
+      return {
+        text: "The verification passed and the review needs the client's approval to continue (the budget). Stop now and wait; do not call any other tool.",
+        isError: false,
+        terminate: true,
+      };
+    }
+    if (this.stopIntents().length > 0 || this.store.phase() !== "completed") {
+      return { text: "The task has already ended.", isError: true, terminate: true };
+    }
+    return {
+      text: "Verification passed. The task is complete.",
+      isError: false,
+      terminate: true,
+    };
+  }
+
+  /** worker_review のレビューの段（単一実行。ツールの中・回答・tick のどこから呼ばれても 1 つを共有する） */
+  private runWorkerReviewOnce(inTool: boolean): Promise<void> {
+    this.workerReviewRun ??= this.runWorkerReview(inTool).finally(() => {
+      this.workerReviewRun = undefined;
+    });
+    return this.workerReviewRun;
+  }
+
+  /** レビューの段の途中か（verification が通って固定した SHA があり、まだ終端でない） */
+  private workerReviewActive(): boolean {
+    return (
+      this.spec()?.workerReview !== undefined &&
+      typeof this.store.meta<string>("worker_review_sha") === "string" &&
+      !isTerminal(this.store.phase())
+    );
+  }
+
+  /**
+   * worker_review のレビューの段。固定した SHA（meta の worker_review_sha）の作業ツリーで、task_review と同じ部品
+   * （review_commands の実行・モデルの呼び出しと道具の往復・予算の質問・本文の組み立て）を使う。差分は Sandbox の git から読む
+   * （base...固定した SHA。初回に meta へ残し、予算の質問のあとの続きでは Sandbox を起こさずに使う）。
+   * 終わりは finishReview（完了にする）。inTool が false（予算の質問の承認のあと・DO の再起動のあとの続き）のときは、
+   * Pi の run が無いので、終端になったら Sandbox の停止もここで行う。
+   */
+  private async runWorkerReview(inTool: boolean): Promise<void> {
+    const spec = this.spec();
+    const wr = spec?.workerReview;
+    const sha = this.store.meta<string>("worker_review_sha");
+    if (!spec || !wr || !sha || this.refused()) return;
+    if (this.store.phase() === "input_required") return;
+    try {
+      if (!this.store.meta<StoredReview>("review_result")) {
+        const diff = await this.workerReviewDiff(spec, sha);
+        const rv: ReviewSpec = {
+          pullNumber: 0,
+          headSha: sha,
+          baseSha: spec.baseSha,
+          model: wr.model,
+          commands: wr.commands,
+          title: "Changes made by the worker for the task above",
+          body: "",
+          diff: diff?.text ?? "",
+          diffTruncated: diff?.truncated ?? false,
+        };
+        if (diff === undefined) {
+          // 差分を読めない: レビューのモデルは呼ばず、review_failed: diff_unavailable で飛ばす（作業は完了のまま）
+          if (this.refused()) return;
+          this.markWorkerReviewStarted(wr);
+          await this.finishReview(
+            rv,
+            { results: [], unavailable: false, timedOut: false, stopped: false },
+            buildReviewInput({
+              header: this.workerReviewHeader(spec, rv),
+              title: rv.title,
+              body: "",
+              diff: "",
+              diffTruncatedUpstream: false,
+              commands: [],
+              commandsUnavailable: false,
+            }),
+            { ok: false, code: "diff_unavailable" },
+          );
+        } else {
+          await this.driveReview(spec, rv);
+        }
+      } else if (!isTerminal(this.store.phase()) && this.stopIntents().length === 0) {
+        // 結果は残したが完了の確定の前に止まった（DO の再起動など）: 確定だけをやり直す
+        await this.finalize({ phase: "completed", sha });
+      }
+    } finally {
+      if (!inTool && isTerminal(this.store.phase())) await this.terminalStop("finished");
+    }
+  }
+
+  private markWorkerReviewStarted(wr: NonNullable<TaskSpec["workerReview"]>): void {
+    if (this.store.meta<number>("review_started_at") !== undefined) return;
+    this.store.tx(() => {
+      this.store.setMeta("review_started_at", this.now());
+      this.store.setPhase("verifying");
+      this.store.appendEvent("review_started", { model: wr.model, commands: wr.commands.length });
+    });
+  }
+
+  /**
+   * 固定した SHA までの差分（base...SHA の unified diff）を Sandbox の git から読み、初回だけ meta に残す。
+   * 読めない（git の失敗・Sandbox の例外）ときは undefined。上限（WORKER_REVIEW_DIFF_MAX_BYTES）で切れたら truncated。
+   */
+  private async workerReviewDiff(
+    spec: StoredSpec,
+    sha: string,
+  ): Promise<{ text: string; truncated: boolean } | undefined> {
+    const saved = this.store.meta<{ text: string; truncated: boolean }>("worker_review_diff");
+    if (saved) return saved;
+    try {
+      const r = await this.lazySandbox().exec(
+        [
+          "git",
+          "-c",
+          "core.quotepath=false",
+          "diff",
+          "--no-color",
+          "--no-ext-diff",
+          "--no-renames",
+          `${spec.baseSha}..${sha}`,
+        ],
+        { cwd: WORKSPACE_ROOT, timeoutMs: 60_000, maxOutputBytes: WORKER_REVIEW_DIFF_MAX_BYTES },
+      );
+      if (r.exitCode !== 0 || r.timedOut) return undefined;
+      const value = { text: r.stdout, truncated: r.truncated === true };
+      this.store.setMeta("worker_review_diff", value);
+      return value;
+    } catch {
+      return undefined;
     }
   }
 

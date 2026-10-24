@@ -2,7 +2,7 @@ import type { BudgetMeDto, CloudflareSummaryDto, OverviewDto } from "@rovo/dashb
 import { useId, useState } from "react";
 import { cloudflareRows } from "./cloudflare";
 import { CloudflarePanel } from "./cloudflare-panel";
-import { formatClock, formatUsd, modelFamily, shortModel } from "./format";
+import { formatClock, formatCount, formatUsd, modelFamily, shortModel } from "./format";
 import type { T } from "./i18n";
 import { useT } from "./lang";
 import { budgetLimit } from "./rail";
@@ -19,7 +19,11 @@ function cloudflareData(state: CloudflareState | undefined): CloudflareSummaryDt
   return state.phase === "failed" ? state.stale : null;
 }
 
-/** バーに出す Cloudflare の要約（Workers とクレジット残高）。取れない項目は引き出しと同じ理由の言葉。 */
+/**
+ * バーに出す Cloudflare の要約。Workers の件数は出さず（ダッシュボード自身の自動更新が大半で判断に使えない。内訳の欄に残る）、
+ * エラーが 1 件以上のときだけ「Workers のエラー M 件」を出す。0 件・取れない項目は何も出さない（理由は内訳の欄）。
+ * 読み込み中・取得失敗のときは、その旨の言葉を出す。クレジット残高は取れていれば出す。
+ */
 function cloudflareBar(
   state: CloudflareState | undefined,
   t: T,
@@ -29,13 +33,13 @@ function cloudflareBar(
     const text = state?.phase === "failed" ? t("bar.cloudflareFailed") : t("common.loading");
     return { workers: t("bar.cloudflare", { text }), credit: "" };
   }
-  const rows = cloudflareRows(data, t);
-  const workers = rows.find((r) => r.key === "workers");
-  const credit = rows.find((r) => r.key === "credit_balance");
+  const workers = data.workers?.ok ? data.workers.value : null;
+  const credit = cloudflareRows(data, t).find((r) => r.key === "credit_balance");
   return {
-    workers: t("bar.workers", {
-      text: workers?.ok ? workers.text.replace(t("common.sep"), "  ") : (workers?.text ?? ""),
-    }),
+    workers:
+      workers !== null && workers.errors > 0
+        ? t("bar.workersErrors", { errors: formatCount(workers.errors, t) })
+        : "",
     credit: t("bar.credit", { text: credit?.text ?? "" }),
   };
 }
@@ -188,7 +192,7 @@ export function StatusBar(props: {
           <ModelLine models={data.models} />
         </Sb>
         <span className="sb-grow" />
-        <Sb k="cloudflare">{cf.workers}</Sb>
+        {cf.workers === "" ? null : <Sb k="cloudflare">{cf.workers}</Sb>}
         {cf.credit === "" ? null : (
           <Sb k="credit" alt>
             {cf.credit}
@@ -244,7 +248,7 @@ export function PendingStatusBar(props: {
           {t("bar.modelsLoading")}
         </Sb>
         <span className="sb-grow" />
-        <Sb k="cloudflare">{cf.workers}</Sb>
+        {cf.workers === "" ? null : <Sb k="cloudflare">{cf.workers}</Sb>}
         {cf.credit === "" ? null : (
           <Sb k="credit" alt>
             {cf.credit}

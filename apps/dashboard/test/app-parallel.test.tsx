@@ -136,8 +136,9 @@ describe("一覧・詳細・Cloudflare は互いに待たない", () => {
 
   it("一覧と /budget の両方が遅くても、Cloudflare の要約は先に出る", async () => {
     const { c } = await mount("/dashboard/", { overview: never, budget: never });
-    expect(text(c.querySelector("[data-sb='cloudflare']"))).not.toContain("読み込み中");
-    expect(text(c.querySelector("[data-sb='cloudflare']"))).toContain("Workers");
+    // 読み込み中の言葉は消え、届いた要約（クレジット残高の項目）が出る。Workers の件数はバーに出さない
+    expect(c.querySelector("[data-sb='cloudflare']")).toBeNull();
+    expect(c.querySelector("[data-sb='credit']")).not.toBeNull();
   });
 
   it("一覧が失敗したときは、これまでどおりエラーと再読み込みを出す（一覧の画面）", async () => {

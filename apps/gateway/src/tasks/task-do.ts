@@ -3561,8 +3561,13 @@ export class TaskDO extends DurableObject<Env> {
     try {
       dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
     } catch {
-      this.schedulePostRetry(rl, true);
-      return false;
+      // AgentDO が結果を返せない。有限回で諦める（終了処理とトークンの失効を止めない）
+      if (rl.post_attempts + 1 < FINALIZE_MAX_ATTEMPTS) {
+        this.schedulePostRetry(rl, true);
+        return false;
+      }
+      this.giveUpReviewPost(row, rl, "result_unavailable");
+      return true;
     }
     const review = dto.status === "not_ready" ? undefined : dto.review;
     const audit = {
@@ -3617,20 +3622,30 @@ export class TaskDO extends DurableObject<Env> {
         this.schedulePostRetry(rl, true, e instanceof GitHubApiError ? e.retryAfterMs : undefined);
         return false;
       }
-      this.ctx.storage.transactionSync(() => {
-        const gl = this.getGithub();
-        const own = gl ? (JSON.parse(gl.warnings) as string[]) : [];
-        if (!own.includes("review_comment_failed")) own.push("review_comment_failed");
-        this.ctx.storage.sql.exec("UPDATE github_link SET warnings = ?", JSON.stringify(own));
-        this.ctx.storage.sql.exec("UPDATE review_link SET posted = 2");
-        const at = this.now();
-        this.appendEvent("warning", { code: "review_comment_failed" }, at);
-        this.appendEvent("review_finished", { stage: "done" }, at);
-        this.emitAudit("review_failed", { ...audit, reason: "comment_failed" });
-      });
-      this.notifyWaiters();
+      this.giveUpReviewPost(row, rl, "comment_failed", audit.cost_usd);
       return true;
     }
+  }
+
+  /** レビューの投稿を諦める: warnings に review_comment_failed（本文は task_result の review.body で読める）、監査に review_failed */
+  private giveUpReviewPost(row: TaskRow, rl: ReviewRow, reason: string, costUsd?: number): void {
+    this.ctx.storage.transactionSync(() => {
+      const gl = this.getGithub();
+      const own = gl ? (JSON.parse(gl.warnings) as string[]) : [];
+      if (!own.includes("review_comment_failed")) own.push("review_comment_failed");
+      this.ctx.storage.sql.exec("UPDATE github_link SET warnings = ?", JSON.stringify(own));
+      this.ctx.storage.sql.exec("UPDATE review_link SET posted = 2");
+      const at = this.now();
+      this.appendEvent("warning", { code: "review_comment_failed" }, at);
+      this.appendEvent("review_finished", { stage: "done" }, at);
+      this.emitAudit("review_failed", {
+        userId: row.owner_id,
+        model: rl.review_model,
+        ...(costUsd !== undefined ? { cost_usd: costUsd } : {}),
+        reason,
+      });
+    });
+    this.notifyWaiters();
   }
 
   private schedulePostRetry(rl: ReviewRow, count: boolean, retryAfterMs?: number): void {

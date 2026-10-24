@@ -37,6 +37,8 @@ export type FakeProgram = {
   autoRun?: boolean;
   /** getEvents を先頭 n 回だけ失敗させる。 */
   getEventsFailures?: number;
+  /** getResult を先頭 n 回だけ失敗させる（AgentDO が結果を返せない状況の再現） */
+  getResultFailures?: number;
   /** getEvents を n 回成功させた後は、以降の呼び出しをすべて失敗させる。 */
   getEventsFailAfter?: number;
   /** getEvents が返るまでの遅延（ms）。同時取り込みの再現に使う。 */
@@ -481,6 +483,14 @@ export class FakeAgentDO extends DurableObject {
   async getResult(): Promise<ResultDto> {
     this.callCounts.getResult++;
     this.save();
+    if ((this.program.getResultFailures ?? 0) > 0) {
+      this.program = {
+        ...this.program,
+        getResultFailures: (this.program.getResultFailures ?? 0) - 1,
+      };
+      this.save();
+      throw new Error("fake agent: getResult failed");
+    }
     if (this.program.result) return this.program.result;
     const phase = this.phase;
     if (phase === undefined || !this.isTerminal()) return { status: "not_ready" };

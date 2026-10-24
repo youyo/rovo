@@ -264,6 +264,36 @@ describe("TaskDO: task_review（kind: review）", () => {
     expect(r.ok && r.result.warnings).not.toContain("review_comment_failed");
   });
 
+  it("AgentDO が結果を返せ続けなければ、有限回で投稿を諦めて終了処理を終える（トークンを失効し、alarm を回し続けない）", async () => {
+    const t = await createReview();
+    await t.stub.advance();
+    await t.agent.setProgram({
+      result: reviewResult("completed", review({ headSha: t.head })),
+      getResultFailures: 1_000,
+    });
+    await t.agent.setPhase("completed");
+    let at = Date.now();
+    for (let i = 0; i < 12; i++) {
+      at += 10 * 60_000;
+      const now = at;
+      await runInDurableObject(t.stub, (inst) => {
+        (inst as unknown as { now: () => number }).now = () => now;
+      });
+      await t.stub.advance();
+    }
+    const [g] = await rows<{ finalize_done: number; warnings: string }>(
+      t.stub,
+      "SELECT finalize_done, warnings FROM github_link",
+    );
+    expect(g?.finalize_done).toBe(1);
+    expect(JSON.parse(g?.warnings ?? "[]")).toContain("review_comment_failed");
+    expect(app().reviews(REPO, t.number)).toEqual([]);
+    // トークンの記録は閉じる（DO の時計を進めたので、期限切れとして失効扱いになる）
+    const tokens = await rows<{ revoked: number }>(t.stub, "SELECT revoked FROM git_token");
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(tokens.every((x) => x.revoked === 1)).toBe(true);
+  });
+
   it("レビューが得られなかった（FAILED）タスクは何も投稿しない", async () => {
     const t = await createReview();
     await t.stub.advance();

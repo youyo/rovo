@@ -6,3 +6,4 @@ export * from "./error";
 export * from "./events";
 export * from "./overview";
 export * from "./primitives";
+export * from "./waiting";

@@ -14,6 +14,8 @@ import {
   type TaskEventsPageDto,
   TaskEventsPageDtoSchema,
   type VisibleTaskDto,
+  type WaitingDto,
+  WaitingDtoSchema,
 } from "@rovo/dashboard-contract";
 import type { z } from "zod";
 import { DIRECTORY_NAME, type TaskIndexRow, type TaskIndexSnapshot } from "../directory/types";
@@ -435,6 +437,64 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
   return validated(OverviewDtoSchema, "OverviewDto", dto);
 }
 
+/** 「待ち」を 1 回に読む行数と、1 回の応答のために読む最大の行数（GitHub で閉じた PR を外しても、上限まで埋められるように重ねて読む） */
+const WAITING_PAGE = LIMITS.waitingTasks;
+const WAITING_MAX_SCAN = WAITING_PAGE * 3;
+
+/**
+ * 日をまたいだ「待ち」（期間を切らない。overview の 36 時間の上限とは別）。
+ * 索引（Directory）から INPUT_REQUIRED と、COMPLETED で PR が open かつ Draft でないものを新しい順に読む。
+ * 見えるリポジトリの集合で絞った行だけ個別に返し、権限の無い分は件数（hidden_count）だけ（D7）。
+ * 人が GitHub 上でマージ・クローズした PR は索引に反映されないので、見える行だけ GitHub の状態を取り（attachPrStates。fail-soft）、
+ * merged / closed のものは外す。取れなかった（unknown）ものは残す。
+ */
+async function handleWaiting(request: Request, env: Env, now: () => number): Promise<Response> {
+  const auth = await authenticate(request, env);
+  if (!auth.ok) return auth.response;
+  const { session } = auth;
+  const scopeRaw = new URL(request.url).searchParams.get("scope") ?? "all";
+  if (!(SCOPES as readonly string[]).includes(scopeRaw)) return errorJson(400, "bad_request");
+  const scope = scopeRaw as WaitingDto["scope"];
+
+  const visible = await loadVisible(env, session.uid, false);
+  if (!visible.ok) return visible.response;
+  const repoIds = [...visible.ids];
+
+  const directory = env.DIRECTORY_DO.getByName(DIRECTORY_NAME);
+  const ownerId = scope === "me" ? { ownerId: session.uid } : {};
+  const tasks: VisibleTaskDto[] = [];
+  let hidden = 0;
+  let truncated = false;
+  for (let offset = 0; offset < WAITING_MAX_SCAN; offset += WAITING_PAGE) {
+    const page = await directory.listWaiting({
+      repoIds,
+      ...ownerId,
+      limit: WAITING_PAGE,
+      offset,
+    });
+    if (!page.ok) return errorJson(503, "unavailable");
+    hidden = page.hidden;
+    const chunk = page.rows.map(snapshotToVisibleTask);
+    await attachPrStates(env, session.uid, chunk);
+    for (const task of chunk) {
+      // GitHub 上で閉じた・マージされた PR は待ちではない
+      if (task.pr?.state === "merged" || task.pr?.state === "closed") continue;
+      if (tasks.length < LIMITS.waitingTasks) tasks.push(task);
+      else truncated = true;
+    }
+    if (offset + page.rows.length >= page.total || page.rows.length === 0) break;
+    if (offset + WAITING_PAGE >= WAITING_MAX_SCAN) truncated = true;
+  }
+  const dto: WaitingDto = {
+    generated_at: iso(now()),
+    scope,
+    tasks,
+    truncated,
+    hidden_count: hidden,
+  };
+  return validated(WaitingDtoSchema, "WaitingDto", dto);
+}
+
 async function handleTaskDetail(request: Request, env: Env, taskId: string): Promise<Response> {
   const auth = await authenticate(request, env);
   if (!auth.ok) return auth.response;
@@ -568,7 +628,11 @@ export async function handleReadApi(
   const rest = pathname.slice(PREFIX.length);
   const task = /^\/tasks\/([^/]+)(\/events)?$/.exec(rest);
   const known =
-    rest === "/overview" || rest === "/budget" || rest === "/cloudflare" || task !== null;
+    rest === "/overview" ||
+    rest === "/waiting" ||
+    rest === "/budget" ||
+    rest === "/cloudflare" ||
+    task !== null;
   if (!known) return null;
   const method = request.method.toUpperCase();
   if (method !== "GET" && method !== "HEAD") {
@@ -576,6 +640,7 @@ export async function handleReadApi(
   }
   const now = deps.now ?? Date.now;
   if (rest === "/overview") return handleOverview(request, env, now);
+  if (rest === "/waiting") return handleWaiting(request, env, now);
   if (rest === "/budget") return handleBudget(request, env);
   if (rest === "/cloudflare") return handleCloudflare(request, env, deps);
   const taskId = task?.[1] ?? "";

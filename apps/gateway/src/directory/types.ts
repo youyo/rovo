@@ -69,6 +69,24 @@ export type ListTasksResult =
   | { ok: true; total: number; rows: TaskIndexRow[] }
   | { ok: false; code: "invalid_input" | "too_many_repo_ids" };
 
+export type ListWaitingQuery = {
+  /** 閲覧者に見える repository id の集合。絞った後でページを切る */
+  repoIds: number[];
+  /** 指定したら、その所有者のタスクだけ（「自分」への絞り込み） */
+  ownerId?: number;
+  limit: number;
+  offset: number;
+};
+
+/**
+ * 「待ち」のタスク（日付に関係なく）。total / rows は見えるタスク、hidden は権限の無い待ちの件数だけ（個別の値は返さない）。
+ * 待ち = 状態が INPUT_REQUIRED、または COMPLETED で PR があり Draft でなく rovo の記録で未マージ。
+ * 人が GitHub 上でマージ・クローズした PR は索引に反映されないので、呼び出し側が GitHub の状態で外す。
+ */
+export type ListWaitingResult =
+  | { ok: true; total: number; hidden: number; rows: TaskIndexRow[] }
+  | { ok: false; code: "invalid_input" | "too_many_repo_ids" };
+
 export type SummarizeQuery = {
   repoIds: number[];
   /** created_at が [from, to) のタスクを数える（月の集計用） */

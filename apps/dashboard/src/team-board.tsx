@@ -277,14 +277,17 @@ function FlowChart(props: { flow: Flow }) {
   const t = useT();
   const { days } = props.flow;
   const max = Math.max(1, ...days.map((d) => Math.max(d.completed, d.failed)));
+  // 横は割合（%）で配る: 1 日の幅 = 全体の 1/日数。棒の太さ・間隔は 1 日の幅に対する割合
   const pitch = GROUP_W + GROUP_GAP;
-  const w = days.length * pitch - GROUP_GAP;
+  const n = Math.max(1, days.length);
+  const pct = (units: number) => `${Math.round((units / (n * pitch)) * 1e4) / 1e2}%`;
   return (
     <div className="tb-flow-plot">
       {/* biome-ignore lint/a11y/useSemanticElements: SVG の図の集まり。fieldset は使えない */}
       <svg
         className="tb-flow-chart"
-        viewBox={`0 0 ${w} ${CHART_H + 1}`}
+        width="100%"
+        height={CHART_H + 1}
         role="group"
         aria-label={t("board.flowChart")}
       >
@@ -294,7 +297,7 @@ function FlowChart(props: { flow: Flow }) {
           </pattern>
         </defs>
         {days.map((d, i) => {
-          const x = i * pitch;
+          const x = i * pitch + GROUP_GAP / 2;
           const hDone = barH(d.completed, max);
           const hFail = barH(d.failed, max);
           const label = t("board.flowDay", { date: d.date, done: d.completed, failed: d.failed });
@@ -311,9 +314,9 @@ function FlowChart(props: { flow: Flow }) {
               <title>{label}</title>
               <rect
                 className="tb-flow-bar"
-                x={x}
+                x={pct(x)}
                 y={CHART_H - hDone}
-                width={BAR_W}
+                width={pct(BAR_W)}
                 height={hDone}
               />
               {d.failed > 0 ? (
@@ -321,16 +324,16 @@ function FlowChart(props: { flow: Flow }) {
                   className="tb-flow-fail"
                   data-fail-mark=""
                   fill={`url(#${HATCH_ID})`}
-                  x={x + BAR_W + BAR_PAIR_GAP + 0.5}
+                  x={pct(x + BAR_W + BAR_PAIR_GAP + 0.5)}
                   y={CHART_H - hFail}
-                  width={BAR_W - 1}
+                  width={pct(BAR_W - 1)}
                   height={hFail}
                 />
               ) : null}
             </g>
           );
         })}
-        <line className="tb-flow-base" x1="0" y1={CHART_H} x2={w} y2={CHART_H} />
+        <line className="tb-flow-base" x1="0" y1={CHART_H} x2="100%" y2={CHART_H} />
       </svg>
       <div className="tb-flow-axis" aria-hidden="true">
         {AXIS_TICKS.filter((i) => days[i] !== undefined).map((i) => {
@@ -343,7 +346,7 @@ function FlowChart(props: { flow: Flow }) {
               data-axis-label=""
               title={days[i]?.date}
               style={
-                first || last ? undefined : { left: `${((i * pitch + GROUP_W / 2) / w) * 100}%` }
+                first || last ? undefined : { left: pct(i * pitch + GROUP_GAP / 2 + GROUP_W / 2) }
               }
             >
               {shortDate(days[i]?.date ?? "", t)}

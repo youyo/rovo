@@ -70,7 +70,7 @@ test("(6) 権限の無い詳細は 404 の画面で、題名の断片も出な�
   ).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("権限が無いか、存在しません");
   const html = await page.content();
-  for (const piece of [s.marks.secretTitle, "SECRET-REPO", "SECRET-CMD", "acme/secret"]) {
+  for (const piece of [s.marks.secretTitle, "SECRET-REPO", "SECRET-CMD", "example-org/secret"]) {
     expect(html, piece).not.toContain(piece);
   }
   const detail = () => api.filter((a) => a.url.includes(`/dashboard/api/tasks/${id("secret")}`));

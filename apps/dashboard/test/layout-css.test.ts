@@ -155,6 +155,13 @@ describe("チームボード（幅 360px でも横にはみ出さない）", () 
     expect(css).toMatch(/\.tb-repos td\s*\{[^}]*overflow-wrap:\s*anywhere/);
   });
 
+  it("成果の推移のグラフは区画の幅いっぱいに広がる（幅の上限を置かない）。SVG は幅 100%・高さ固定", () => {
+    expect(body(".tb-flow-plot")).not.toMatch(/max-width/);
+    const chart = body(".tb-flow-chart");
+    expect(chart).toMatch(/width:\s*100%/);
+    expect(chart).not.toMatch(/height:\s*auto/);
+  });
+
   it("720px 以下では統計の文字を畳み（読み上げには残す）、記号と数字だけにする", () => {
     const narrow = css.slice(css.indexOf("@media (max-width: 720px) {\n  .tb-section"));
     expect(narrow).toMatch(/\.tb-stat-label\s*\{[^}]*clip-path:\s*inset\(50%\)/);

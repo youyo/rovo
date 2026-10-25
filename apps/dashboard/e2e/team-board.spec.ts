@@ -30,7 +30,7 @@ async function installOpenPr(page: Page) {
       if (t.task_id === id("review")) {
         t.pr = {
           number: PR_NUMBER,
-          url: `https://github.com/acme/widgets/pull/${PR_NUMBER}`,
+          url: `https://github.com/example-org/widgets/pull/${PR_NUMBER}`,
           draft: false,
           merged: false,
           state: "open",
@@ -189,7 +189,7 @@ test("(TB3) リポジトリ別: 今日の件数・走行・待ちの PR（レビ
   await waitForPrLink(page);
   const head = await page.locator(".tb-repos thead th").allTextContents();
   expect(head).toEqual(["リポジトリ", "今日の件数", "待ちの PR"]);
-  const widgets = page.locator('.tb-repos tr[data-repo="acme/widgets"]');
+  const widgets = page.locator('.tb-repos tr[data-repo="example-org/widgets"]');
   await expect(widgets).toBeVisible();
   await expect(widgets.locator(".tb-count")).not.toHaveText("0");
   await expect(widgets.locator(".tb-repo-run")).toContainText("走行");
@@ -199,7 +199,7 @@ test("(TB3) リポジトリ別: 今日の件数・走行・待ちの PR（レビ
   await expect(pr.first()).toHaveText(/^#\d+$/);
   await expect(pr.first()).toHaveAttribute(
     "href",
-    /^https:\/\/github\.com\/acme\/widgets\/pull\/\d+$/,
+    /^https:\/\/github\.com\/example-org\/widgets\/pull\/\d+$/,
   );
   await expect(pr.first()).toHaveAttribute("rel", /noopener/);
   await expect(pr.first()).toHaveAttribute("target", "_blank");
@@ -211,7 +211,7 @@ test("(TB4) 権限の無いリポジトリのタスクは、見えない人の�
   const board = page.locator("[data-teamboard]");
   await expect(person(page, s.users.bob.login)).toBeVisible();
   await expect(board).not.toContainText(s.marks.secretTitle);
-  await expect(board).not.toContainText("acme/secret");
+  await expect(board).not.toContainText("example-org/secret");
   // alice の行はあるが、見えるタスク（widgets）の分だけ
   await expect(person(page, s.users.alice.login)).toBeVisible();
 });
@@ -380,6 +380,53 @@ async function expectAxisInside(page: Page) {
   }
 }
 
+/** グラフ（SVG）が区画の幅の中に収まり、棒がすべて SVG の中にある */
+async function expectFlowChartInside(page: Page) {
+  const r = await flowSection(page).evaluate((el) => {
+    const svg = el.querySelector("svg.tb-flow-chart")?.getBoundingClientRect();
+    const sec = el.getBoundingClientRect();
+    const bars = [...el.querySelectorAll("[data-day] rect")].map((b) => b.getBoundingClientRect());
+    return {
+      svgL: svg?.left ?? 0,
+      svgR: svg?.right ?? 0,
+      secL: sec.left,
+      secR: sec.right,
+      barL: Math.min(...bars.map((b) => b.left)),
+      barR: Math.max(...bars.map((b) => b.right)),
+    };
+  });
+  expect(r.svgL).toBeGreaterThanOrEqual(r.secL - 1);
+  expect(r.svgR).toBeLessThanOrEqual(r.secR + 1);
+  expect(r.barL, "棒が左にはみ出している").toBeGreaterThanOrEqual(r.svgL - 1);
+  expect(r.barR, "棒が右にはみ出している").toBeLessThanOrEqual(r.svgR + 1);
+}
+
+test("(TB12d) 成果の推移: 1280px ではグラフが区画の幅の大部分（90% 以上）を使う", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  await expect(flowSection(page).locator("[data-day]")).toHaveCount(14);
+  const w = await flowSection(page).evaluate((el) => ({
+    svg: el.querySelector("svg.tb-flow-chart")?.getBoundingClientRect().width ?? 0,
+    body: el.querySelector(".tb-flow-body")?.getBoundingClientRect().width ?? 1,
+  }));
+  expect(w.svg / w.body, "グラフの幅 / 区画の幅").toBeGreaterThanOrEqual(0.9);
+  await expectFlowChartInside(page);
+  await expectAxisInside(page);
+});
+
+test("(TB12e) 成果の推移: 360px ではグラフも横軸もはみ出さない", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  await expect(flowSection(page).locator("[data-day]")).toHaveCount(14);
+  await expectFlowChartInside(page);
+  await expectAxisInside(page);
+  await expectNoHorizontalScroll(page);
+});
+
 test("(TB12) 成果の推移: 区画、14 日分の棒、横軸の日付、失敗の棒の形、失敗率の件数、脚注", async ({
   page,
 }) => {
@@ -508,6 +555,7 @@ for (const scheme of ["light", "dark"] as const) {
     expect(flowOver.sec, "成果の推移の区画").toBe(false);
     expect(flowOver.inner, "成果の推移の中").toBe(0);
     await expectAxisInside(page);
+    await expectFlowChartInside(page);
     // 狭い幅では文字を畳む（読み上げと title には残す）。記号（形）と数字は見える
     const stat = person(page, s.users.alice.login).locator('[data-stat="running"]');
     await expect(stat.locator("svg.mark-sym")).toBeVisible();

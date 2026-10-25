@@ -257,7 +257,7 @@ mise run lint         # Biome + type check
 | `mise run deploy:config` / `deploy:config:check` | Generates the wrangler config in `deploy/` from `rovo.config.json` and the non-secret Terraform outputs / checks that the generated files match what would be regenerated (no Terraform needed; for downstream CI) |
 | `mise run deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` / `deploy:secrets` | **Actually deploy** (using the downstream wrangler config in `ROVO_DEPLOY_DIR`; if it is unset they do nothing and fail). See [Deployment](#deployment) |
 | `mise run dev` | Local start (`http://localhost:8787`). Reads `apps/gateway/.dev.vars` |
-| `mise run docs:screenshots` | Retakes the README screenshots in `docs/assets/screenshots/` (Light and Dark, English UI, 1280 px wide). Playwright + Chromium start the dashboard with `wrangler dev`, a fake GitHub and a fake agent, as in the dashboard E2E, and photograph fictional data (acme/widgets). Docker is not needed. Not part of `test` |
+| `mise run docs:screenshots` | Retakes the README screenshots in `docs/assets/screenshots/` (Light and Dark, English UI, 1280 px wide). Playwright + Chromium start the dashboard with `wrangler dev`, a fake GitHub and a fake agent, as in the dashboard E2E, and photograph fictional data (example-org/widgets). Docker is not needed. Not part of `test` |
 
 If an E2E test fails, `E2E_DEBUG=1 mise run test:e2e` also shows the output of `wrangler dev`. The E2E tests do not connect to GitHub (they use a fake GitHub).
 

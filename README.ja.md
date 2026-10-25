@@ -257,7 +257,7 @@ mise run lint         # Biome + 型検査
 | `mise run deploy:config` / `deploy:config:check` | `rovo.config.json` と Terraform の非秘密の出力から `deploy/` の wrangler 設定を生成する / 生成物が作り直した結果と一致するかを確かめる（Terraform 不要。下流の CI 用） |
 | `mise run deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` / `deploy:secrets` | **実際にデプロイする**（`ROVO_DEPLOY_DIR` の下流の wrangler 設定を使う。未設定なら何もせずに失敗する）。[デプロイ](#デプロイ)を見る |
 | `mise run dev` | ローカル起動（`http://localhost:8787`）。`apps/gateway/.dev.vars` を読む |
-| `mise run docs:screenshots` | README のスクリーンショット（`docs/assets/screenshots/`。Light と Dark、英語の表示、幅 1280px）を撮り直す。ダッシュボードの E2E と同じ仕組み（`wrangler dev` + 偽 GitHub + 偽 agent）を Playwright + Chromium で動かし、架空のデータ（acme/widgets）を撮る。Docker は要らない。`test` には含まれない |
+| `mise run docs:screenshots` | README のスクリーンショット（`docs/assets/screenshots/`。Light と Dark、英語の表示、幅 1280px）を撮り直す。ダッシュボードの E2E と同じ仕組み（`wrangler dev` + 偽 GitHub + 偽 agent）を Playwright + Chromium で動かし、架空のデータ（example-org/widgets）を撮る。Docker は要らない。`test` には含まれない |
 
 E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` の出力も表示される。E2E は GitHub に接続しない（偽 GitHub を使う）。
 

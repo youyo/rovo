@@ -477,4 +477,18 @@ describe("worker_review: 取消し・spec の検査・client_review との違い
     const types = (await allEvents(fx)).map((e) => e.type);
     expect(types).not.toContain("review_started");
   });
+
+  it("model_calls: 作業とレビューの呼び出しを数え、usage イベントに累計で載せる", async () => {
+    const fx = await fixture(
+      "wr-calls",
+      [{ text: verdict({ must_fix: [MUST_FIX] }), usage: { input: 1000, output: 500 } }],
+      [report(WORKER_CLAIM)],
+    );
+    await fx.stub.start(workerSpec("wr-calls", {}, [{ argv: ["pnpm", "test"] }]));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.modelCalls.count).toBe(2);
+    const usage = (await allEvents(fx)).filter((e) => e.type === "usage");
+    const last = usage.at(-1)?.data as { modelCalls?: number };
+    expect(last.modelCalls).toBe(2);
+  });
 });

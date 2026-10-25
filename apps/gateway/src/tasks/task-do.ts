@@ -54,6 +54,7 @@ import {
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { BUDGET_EXTENSION_KIND, MAX_BUDGET_EXTENSIONS } from "./budget-question";
+import { fetchGatewayCost, type GatewayCostResult, gatewayCostConfigured } from "./gateway-cost";
 import { addColumnIfMissing } from "./sql-schema";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import {
@@ -89,6 +90,10 @@ import {
 export const AGENT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 /** alarm の間隔。start / cancel の再送、取り込み、精算の再試行に使う。 */
 export const ALARM_INTERVAL_MS = 10_000;
+/** 終端（finishTask）のあと、AI Gateway のログで費用を確定する試行の時刻（終了からの経過）。4 回で打ち切る */
+export const RECONCILE_DELAYS_MS = [2 * 60_000, 10 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+/** 確定額が見積もりからこの割合を超えてずれたら警告する */
+const RECONCILE_WARN_RATIO = 0.2;
 /** INPUT_REQUIRED の間で、配送すべきものが無いときの alarm の間隔（AgentDO の期限の監視と、トークンの更新の確認だけ）。 */
 export const INPUT_REQUIRED_ALARM_INTERVAL_MS = 60_000;
 /** 回答待ちの上限（AgentDO が数える。7.3）と、TaskDO がバックストップとして待つ猶予。 */
@@ -342,7 +347,12 @@ export type ResultView = {
   diffstat?: string;
   patch_too_large: boolean;
   usage: {
+    /** 費用。確定していれば AI Gateway のログの合計（cost_source: gateway）、それ以外は agent の見積もり */
     cost_usd: number;
+    /** cost_usd の出どころ。estimate: トークン数×単価表の見積もり / gateway: 終端後に AI Gateway のログで確定した額 */
+    cost_source: "estimate" | "gateway";
+    /** agent の見積もり（cost_source が gateway のときに、確定額との比較に使う） */
+    estimate_usd: number;
     input_tokens: number;
     output_tokens: number;
     cache_read_tokens: number;
@@ -512,6 +522,16 @@ type LinkRow = {
   usage_micro: number;
   settled_seq: number;
   finished: number;
+  /** agent が数えたモデル呼び出しの累計（AI Gateway のログの件数と照合する） */
+  model_calls: number;
+  /** AI Gateway のログで確定した額（マイクロドル）。確定前は NULL（= cost_source: estimate） */
+  gateway_micro: number | null;
+  /** finishTask を呼んだ時刻（epoch ms）。費用の確定を試す起点。NULL なら確定は動かない（設定が無い・過去のタスク） */
+  reconcile_base: number | null;
+  /** 確定の問い合わせをした回数（RECONCILE_DELAYS_MS の添字） */
+  reconcile_attempt: number;
+  /** 確定した、または打ち切った */
+  reconcile_done: number;
   /** AgentDO の cancel が stopped:true と共に返した最後のイベントの seq。無ければ NULL。 */
   final_seq: number | null;
   /** usage イベントから覚えた累計の数値（summary.ts の UsagePublic の JSON） */
@@ -881,6 +901,18 @@ export class TaskDO extends DurableObject<Env> {
       "archive_retry_at",
       "INTEGER NOT NULL DEFAULT 0",
     );
+    // 終端後の費用の確定（AI Gateway のログ）。過去のタスクは reconcile_base が NULL のままで、何もしない
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "agent_link",
+      "model_calls",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    addColumnIfMissing(this.ctx.storage.sql, "agent_link", "gateway_micro", "INTEGER");
+    addColumnIfMissing(this.ctx.storage.sql, "agent_link", "reconcile_base", "INTEGER");
+    for (const column of ["reconcile_attempt", "reconcile_done"]) {
+      addColumnIfMissing(this.ctx.storage.sql, "agent_link", column, "INTEGER NOT NULL DEFAULT 0");
+    }
     // ダッシュボードの索引の outbox（M3a）。既存のタスクは 0/0（= 配送するものが無い）で始まり、次に更新が来た時点で 1 になる。過去分の遡及はしない
     for (const column of [
       "index_revision",
@@ -2232,6 +2264,8 @@ export class TaskDO extends DurableObject<Env> {
   /** alarm は at-least-once で発火する。処理は冪等で、次の alarm は advance が明示的に設定し直す。 */
   override async alarm(): Promise<void> {
     await this.advance();
+    // 終端後の費用の確定（予定の時刻が来ていれば 1 回試す。失敗しても TaskDO を壊さない）
+    await this.reconcileCost().catch(() => undefined);
     // 索引の配送は alarm の経路だけで行う（advance は task_start / task_wait / task_cancel からも呼ばれ、Directory を待たせない）。
     // 配送が済むと dirty が消えるので、alarm を設定し直す（終端のタスクの alarm を消す）。
     await this.deliverIndex();
@@ -2485,7 +2519,21 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /** GitHub 側の情報（Draft PR・終端で読んだ head・警告）を結果に足す。 */
-  private withGithub(view: ResultCore): ResultView {
+  private withGithub(core: ResultCore): ResultView {
+    const link = this.getLink();
+    // 確定していれば cost_usd は確定額。見積もりは estimate_usd に残す
+    const view: ResultCore =
+      link && link.gateway_micro !== null
+        ? {
+            ...core,
+            usage: {
+              ...core.usage,
+              cost_usd: link.gateway_micro / 1_000_000,
+              cost_source: "gateway",
+              estimate_usd: link.usage_micro / 1_000_000,
+            },
+          }
+        : core;
     const gl = this.getGithub();
     const row = this.getRow();
     const review_policy = row ? policyOf(row) : DEFAULT_REVIEW_POLICY;
@@ -2545,7 +2593,7 @@ export class TaskDO extends DurableObject<Env> {
       pr: null,
       patch_too_large: false,
       usage: shapeUsage({
-        costUsd: (link?.usage_micro ?? 0) / 1_000_000,
+        costUsd: (link ? this.effectiveMicro(link) : 0) / 1_000_000,
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
@@ -2888,6 +2936,7 @@ export class TaskDO extends DurableObject<Env> {
       let cursor = link.ingest_cursor;
       let usageSeq = link.usage_seq;
       let usageMicro = link.usage_micro;
+      let modelCalls = link.model_calls;
       let usagePublic = parseUsagePublic(link.usage_public);
       for (const e of page.events) {
         if (e.seq <= cursor) continue;
@@ -2902,6 +2951,7 @@ export class TaskDO extends DurableObject<Env> {
             usageSeq = e.seq;
             usageMicro = m.costMicroUsd;
           }
+          modelCalls = Math.max(modelCalls, m.modelCalls ?? 0);
           if (open) this.appendAgentEvent("usage", m.payload, e.ts, link.operation_id, e.seq);
         } else if (m.kind === "question") {
           if (open) this.applyQuestion(m.payload, e.ts, link.operation_id, e.seq);
@@ -2919,11 +2969,12 @@ export class TaskDO extends DurableObject<Env> {
       }
       const usagePublicJson = JSON.stringify(usagePublic);
       this.ctx.storage.sql.exec(
-        "UPDATE agent_link SET ingest_cursor = ?, usage_seq = ?, usage_micro = ?, usage_public = ? WHERE singleton = 1",
+        "UPDATE agent_link SET ingest_cursor = ?, usage_seq = ?, usage_micro = ?, usage_public = ?, model_calls = ? WHERE singleton = 1",
         cursor,
         usageSeq,
         usageMicro,
         usagePublicJson,
+        modelCalls,
       );
       // 索引に出る usage の値が変わったときだけ上げる（何も変わらない取り込みで dirty にしない）
       if (usageMicro !== link.usage_micro || usagePublicJson !== link.usage_public) {
@@ -3046,7 +3097,86 @@ export class TaskDO extends DurableObject<Env> {
     ) {
       await this.userStub(row.owner_id).finishTask(row.id, link.usage_seq, link.usage_micro);
       this.ctx.storage.sql.exec("UPDATE agent_link SET finished = 1 WHERE singleton = 1");
+      // 設定が揃っている環境だけ、AI Gateway のログによる費用の確定を予約する（alarm で 2 分後から）
+      if (gatewayCostConfigured(this.env)) {
+        this.ctx.storage.sql.exec(
+          "UPDATE agent_link SET reconcile_base = ? WHERE singleton = 1 AND reconcile_base IS NULL",
+          this.now(),
+        );
+      }
     }
+  }
+
+  /** AI Gateway のログから費用を読む（テストで差し替える）。 */
+  protected gatewayCost(taskId: string, modelCalls: number): Promise<GatewayCostResult> {
+    return fetchGatewayCost(this.env, taskId, modelCalls);
+  }
+
+  /** 確定を試す時刻（epoch ms）。試すものが無ければ undefined。 */
+  private reconcileDueAt(link: LinkRow | undefined = this.getLink()): number | undefined {
+    if (!link || link.reconcile_base === null || link.reconcile_done === 1) return undefined;
+    const delay = RECONCILE_DELAYS_MS[link.reconcile_attempt];
+    return delay === undefined ? undefined : link.reconcile_base + delay;
+  }
+
+  /**
+   * 終端後の費用の確定を 1 回進める（alarm からだけ呼ぶ）。時刻が来ていなければ何もしない。
+   * 確定できたら UserDO に額を渡して終わり。「まだ」（件数不足・cost の欠け・API のエラー）は次の時刻へ。
+   * 4 回目でも確定できなければ見積もりのまま打ち切る。UserDO への呼び出しの失敗は回数に数えず、次の alarm で再試行する。
+   */
+  private async reconcileCost(): Promise<void> {
+    const link = this.getLink();
+    const row = this.getRow();
+    const due = this.reconcileDueAt(link);
+    if (!link || !row || due === undefined || this.now() < due) return;
+    let result: GatewayCostResult;
+    try {
+      result = await this.gatewayCost(row.id, link.model_calls);
+    } catch {
+      result = { state: "pending" };
+    }
+    if (result.state === "unconfigured") {
+      // 設定が外れた: 何もせず終わる
+      this.ctx.storage.sql.exec("UPDATE agent_link SET reconcile_done = 1 WHERE singleton = 1");
+      return;
+    }
+    if (result.state === "confirmed") {
+      try {
+        await this.userStub(row.owner_id).reconcileTaskCost(row.id, result.micro);
+      } catch {
+        return;
+      }
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "UPDATE agent_link SET gateway_micro = ?, reconcile_done = 1 WHERE singleton = 1",
+          result.micro,
+        );
+        this.bumpIndexRevision();
+      });
+      const estimate = link.usage_micro;
+      if (Math.abs(result.micro - estimate) > estimate * RECONCILE_WARN_RATIO) {
+        console.warn(
+          JSON.stringify({
+            event: "task_cost_drift",
+            taskId: row.id,
+            estimate_micro: estimate,
+            gateway_micro: result.micro,
+          }),
+        );
+      }
+      return;
+    }
+    const attempt = link.reconcile_attempt + 1;
+    this.ctx.storage.sql.exec(
+      "UPDATE agent_link SET reconcile_attempt = ?, reconcile_done = ? WHERE singleton = 1",
+      attempt,
+      attempt >= RECONCILE_DELAYS_MS.length ? 1 : 0,
+    );
+  }
+
+  /** 台帳と同じ「確定していれば確定額」の費用（マイクロドル）。 */
+  private effectiveMicro(link: LinkRow): number {
+    return link.gateway_micro ?? link.usage_micro;
   }
 
   // ---- GitHub: 初期コミット・ブランチ・Draft PR・Installation Token ----
@@ -4093,7 +4223,7 @@ export class TaskDO extends DurableObject<Env> {
       createdAt: row.created_at,
       transitions: changes.map((c) => ({ status: String(c.p.status), at: c.at })),
       usage: {
-        costMicroUsd: link.usage_micro,
+        costMicroUsd: this.effectiveMicro(link),
         inputTokens: up.input_tokens ?? 0,
         outputTokens: up.output_tokens ?? 0,
         cacheReadTokens: up.cache_read_tokens ?? 0,
@@ -4412,7 +4542,7 @@ export class TaskDO extends DurableObject<Env> {
       started_at: startedAt,
       // updated_at は状態が変わったときにしか動かない（changeStatus / cancel）ので、終端の updated_at が終了の時刻
       ended_at: terminal ? row.updated_at : null,
-      cost_micro: link.usage_micro,
+      cost_micro: this.effectiveMicro(link),
       input_tokens: Math.floor(up.input_tokens ?? 0),
       output_tokens: Math.floor(up.output_tokens ?? 0),
       cache_read_tokens: Math.floor(up.cache_read_tokens ?? 0),
@@ -4516,6 +4646,7 @@ export class TaskDO extends DurableObject<Env> {
     return (
       link.usage_seq > link.settled_seq ||
       link.finished === 0 ||
+      this.reconcileDueAt(link) !== undefined ||
       (gl !== undefined && gl.finalize_done === 0) ||
       link.archive_done === 0
     );
@@ -4529,6 +4660,11 @@ export class TaskDO extends DurableObject<Env> {
     const row = this.getRow();
     const link = this.getLink();
     if (!row || !link) return ALARM_INTERVAL_MS;
+    // 費用の確定だけが残っているときは、予定の時刻まで眠る（失敗の再試行は ALARM_INTERVAL_MS 以上あける）
+    const reconcileAt = this.reconcileDueAt(link);
+    if (reconcileAt !== undefined && this.onlyReconcilePending(link, row)) {
+      return Math.max(ALARM_INTERVAL_MS, reconcileAt - this.now());
+    }
     // 索引だけが残っているときは、配送の再試行の間隔（バックオフ）に合わせる
     if (this.indexDirty() && !this.needsTaskAlarm()) {
       return Math.max(ALARM_INTERVAL_MS, link.index_retry_at - this.now());
@@ -4541,6 +4677,21 @@ export class TaskDO extends DurableObject<Env> {
       !this.hasPendingDelivery() &&
       !this.credentialWorkPending();
     return idle ? INPUT_REQUIRED_ALARM_INTERVAL_MS : ALARM_INTERVAL_MS;
+  }
+
+  /** 仕事が費用の確定の待ちだけか（索引の配送・取り込み・終了処理などが残っていない）。 */
+  private onlyReconcilePending(link: LinkRow, row: TaskRow): boolean {
+    const gl = this.getGithub();
+    return (
+      !this.indexDirty() &&
+      isTerminal(this.statusOf(row)) &&
+      link.start_state !== "pending" &&
+      link.cancel_state !== "pending" &&
+      link.usage_seq <= link.settled_seq &&
+      link.finished === 1 &&
+      (gl === undefined || gl.finalize_done === 1) &&
+      link.archive_done === 1
+    );
   }
 
   /** 新しいトークンを渡せていない、または期限が近く更新が要る。 */
@@ -4611,6 +4762,8 @@ function shapeCommand(c: { argv: string[]; cwd?: string; timeoutSeconds?: number
 function shapeUsage(u: UsageDto): ResultView["usage"] {
   return {
     cost_usd: u.costUsd,
+    cost_source: "estimate",
+    estimate_usd: u.costUsd,
     input_tokens: u.inputTokens,
     output_tokens: u.outputTokens,
     cache_read_tokens: u.cacheReadTokens,

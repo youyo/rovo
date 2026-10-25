@@ -2459,6 +2459,8 @@ export class AgentDO extends DurableObject<Env> {
     const total: UsageDto = { ...ZERO_USAGE, web: prev.web };
     const sandbox = await this.sandboxUsage(prev.sandbox, final);
     if (sandbox) total.sandbox = sandbox;
+    const modelCalls = this.store.meta<number>("model_calls") ?? 0;
+    if (modelCalls > 0) total.modelCalls = modelCalls;
     for (const bucket of [state.models, state.tools]) {
       for (const u of Object.values(bucket)) {
         total.costUsd += u.cost.total;
@@ -2579,6 +2581,11 @@ export class AgentDO extends DurableObject<Env> {
     return final || counters ? next : prev;
   }
 
+  /** AI Gateway に送るモデル呼び出し（作業とレビュー）を 1 回数える。usage の modelCalls（累計）になる。 */
+  private countModelCall(): void {
+    this.store.setMeta("model_calls", (this.store.meta<number>("model_calls") ?? 0) + 1);
+  }
+
   /** モデル呼び出しの直前。期限と予算を確かめ、払えなければ呼ばせない。 */
   private async preModelCall(context: unknown): Promise<CallVerdict> {
     const spec = this.spec();
@@ -2647,6 +2654,7 @@ export class AgentDO extends DurableObject<Env> {
       spec.model ?? defaultModel(this.env as AgentEnv),
       spec.effort,
     );
+    this.countModelCall();
     return {
       maxTokens: allowed,
       metadata: { userId: spec.userId, taskId: spec.taskId },
@@ -3373,11 +3381,14 @@ export class AgentDO extends DurableObject<Env> {
           }),
         });
         const reasoning = this.reasoningOf(rovoModel);
-        const guarded = guardProvider(access.provider, async () => ({
-          maxTokens,
-          metadata: { userId: spec.userId, taskId: spec.taskId, caller: "review" },
-          ...(reasoning !== undefined ? { reasoning } : {}),
-        }));
+        const guarded = guardProvider(access.provider, async () => {
+          this.countModelCall();
+          return {
+            maxTokens,
+            metadata: { userId: spec.userId, taskId: spec.taskId, caller: "review" },
+            ...(reasoning !== undefined ? { reasoning } : {}),
+          };
+        });
         let timer: ReturnType<typeof setTimeout> | undefined;
         let message: AssistantMessage;
         try {

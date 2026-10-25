@@ -271,6 +271,8 @@ export interface UsageDto {
   cacheWriteTokens: number;
   /** ワーカーが使った web の回数（タスクごとの累計）。web 自体の費用は costUsd に含めない */
   web: WebUsage;
+  /** AI Gateway に送ったモデル呼び出し（作業とワーカーレビュー）の累計回数。gateway が費用の確定（ログの件数との照合）に使う。0 回なら付かない */
+  modelCalls?: number;
   /** SandboxDO のカウンタ。読めなかったとき・読めない実装（fake）では無い。gateway が公開用の形に写す（M3） */
   sandbox?: SandboxMetrics;
 }

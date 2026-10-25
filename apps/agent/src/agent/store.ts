@@ -24,6 +24,7 @@ export const ZERO_USAGE: UsageDto = {
 export function sameUsage(a: UsageDto, b: UsageDto): boolean {
   return (
     a.costUsd === b.costUsd &&
+    (a.modelCalls ?? 0) === (b.modelCalls ?? 0) &&
     a.inputTokens === b.inputTokens &&
     a.outputTokens === b.outputTokens &&
     a.cacheReadTokens === b.cacheReadTokens &&

@@ -435,3 +435,39 @@ describe("チームで何も選んでいないときはチームボード", () =
     expect(text(c.querySelector("#tb-people-h"))).toBe("この日");
   });
 });
+
+describe("「チーム」をもう一度押すとボードに戻る", () => {
+  const team = (c: HTMLElement) =>
+    [...c.querySelectorAll("fieldset.seg button")].find(
+      (x) => x.textContent === "チーム",
+    ) as HTMLButtonElement;
+  const press = async (el: HTMLElement) => {
+    await act(async () => {
+      el.click();
+      await settle();
+    });
+  };
+
+  it("タスクを選んでいるときだけ選択を外す（履歴を積む）。ボードのときは何もしない。マイタスクのタスクは外さない", async () => {
+    const { c } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
+    // マイタスク（既定）でタスクを選んでいるときに「マイタスク」を押しても外さない
+    const me = [...c.querySelectorAll("fieldset.seg button")].find(
+      (x) => x.textContent === "マイタスク",
+    ) as HTMLButtonElement;
+    await press(me);
+    expect(location.pathname).toBe(`/dashboard/tasks/${RUNNING_ID}`);
+    await press(team(c));
+    // 切り替えただけ（選択はそのまま）
+    expect(location.pathname).toBe(`/dashboard/tasks/${RUNNING_ID}`);
+    expect(c.querySelector("[data-teamboard]")).toBeNull();
+    const length = history.length;
+    await press(team(c));
+    expect(location.pathname).toBe("/dashboard/");
+    expect(history.length).toBe(length + 1);
+    expect(c.querySelector("[data-teamboard]")).not.toBeNull();
+    expect(c.querySelector(".console h1")).toBeNull();
+    await press(team(c));
+    expect(history.length).toBe(length + 1);
+    expect(c.querySelector("[data-teamboard]")).not.toBeNull();
+  });
+});

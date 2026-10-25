@@ -92,7 +92,6 @@ function PersonRow(props: {
         </span>
         {isToday ? (
           <span className="tb-group" data-group="now">
-            <span className="tb-cap">{t("board.capNow")}</span>
             <Stat kind="running" label={t("board.running")} value={p.running} />
             <Stat kind="asking" label={t("board.asking")} value={p.asking} />
           </span>

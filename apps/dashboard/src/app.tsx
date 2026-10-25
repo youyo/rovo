@@ -118,6 +118,20 @@ function Dashboard() {
     [route, day],
   );
 
+  // 「チーム」をもう一度押す: タスクを選んでいるなら選択を外してチームボードに戻る（見ている日は残す）
+  const onScopeChange = useCallback(
+    (next: Scope) => {
+      if (next === scope && next === "all" && route.kind === "task") {
+        history.pushState(null, "", dayHref("/dashboard/", day ?? null));
+        setFreshTaskId(null);
+        setRoute({ kind: "overview" });
+        return;
+      }
+      setScope(next);
+    },
+    [scope, route.kind, day],
+  );
+
   const onLogout = useCallback(() => {
     void logout().then((ok) => {
       // 失敗したときは、ログイン済みの表示のままにする（サーバー側で失効したと誤解させない）
@@ -142,7 +156,7 @@ function Dashboard() {
         <Workspace
           route={route}
           scope={scope}
-          onScopeChange={setScope}
+          onScopeChange={onScopeChange}
           day={day}
           onDayChange={onDayChange}
           onTaskSettled={onTaskSettled}

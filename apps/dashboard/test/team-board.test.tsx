@@ -72,7 +72,8 @@ describe("チームボード: いま（人ごと）", () => {
     expect(statN(alice, "asking")).toBe("1");
     expect(statN(alice, "done")).toBe("2");
     expect(text(alice.querySelector(".tb-cost"))).toContain("$4.19");
-    expect(text(alice.querySelector('[data-group="now"] .tb-cap'))).toBe("いま");
+    // 「いま」は区画の見出しにあるので、行の中には小見出しを置かない
+    expect(alice.querySelector('[data-group="now"] .tb-cap')).toBeNull();
     expect(text(alice.querySelector('[data-group="day"] .tb-cap'))).toBe("今日");
   });
 

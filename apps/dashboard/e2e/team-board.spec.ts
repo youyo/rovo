@@ -162,6 +162,24 @@ test("(TB2) いま: 閲覧者が先頭で人ごとに 1 行。走行の数はレ
   await expect(page.locator(".console h1")).toHaveCount(0);
 });
 
+test("(TB2b) タスクを選んでいるとき、タブの「チーム」をもう一度押すとボードに戻る", async ({
+  page,
+}) => {
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  await rail(page, id("done")).click();
+  await expect(page.getByRole("heading", { level: 1, name: "完了したタスク" })).toBeVisible();
+  await page.getByRole("button", { name: "チーム" }).click();
+  await expect(page.locator("[data-teamboard]")).toBeVisible();
+  await expect(page).toHaveURL(/\/dashboard\/$/);
+  await expect(page.locator(".console h1")).toHaveCount(0);
+  await expect(rail(page, id("done"))).not.toHaveAttribute("aria-current", "true");
+  // 「いま」の小見出しは行の中に無い（区画の見出しだけ）。「今日」は残る
+  await expect(page.locator("#tb-people-h")).toHaveText("いま");
+  await expect(page.locator('[data-group="now"] .tb-cap')).toHaveCount(0);
+  await expect(page.locator('[data-group="day"] .tb-cap').first()).toHaveText("今日");
+});
+
 test("(TB3) リポジトリ別: 今日の件数・走行・待ちの PR（レビュー待ちの PR のリンク）", async ({
   page,
 }) => {

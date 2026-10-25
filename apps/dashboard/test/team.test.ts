@@ -1,7 +1,7 @@
 import type { OverviewDto, VisibleTaskDto, WaitingDto } from "@rovo/dashboard-contract";
 import { overviewFixture, waitingFixture } from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it } from "vitest";
-import { BOARD_ACTIVE_MAX, buildMonthCosts, buildTeamBoard } from "../src/team";
+import { BOARD_ACTIVE_MAX, buildFlow, buildMonthCosts, buildTeamBoard } from "../src/team";
 
 const base = overviewFixture.tasks[0] as VisibleTaskDto;
 let seq = 0;
@@ -319,5 +319,66 @@ describe("buildMonthCosts（人ごとの今月の費用）", () => {
     const r = buildMonthCosts(noLimit);
     expect(r?.rows[1]).toMatchObject({ spentUsd: 2, limitUsd: null, ratio: null, pace: null });
     expect(r?.hidden).toBeNull();
+  });
+});
+
+describe("buildFlow（成果の推移の整形）", () => {
+  const flowOf = (flow: Partial<NonNullable<OverviewDto["flow"]>>): OverviewDto => ({
+    ...overviewFixture,
+    flow: {
+      period: { start: "2026-10-08T00:00:00.000Z", end: "2026-10-22T00:00:00.000Z" },
+      days: [],
+      median_duration_ms: null,
+      pr_merged: 0,
+      hidden: { count: 0, failed: 0 },
+      ...flow,
+    },
+  });
+
+  it("flow が無い古い応答は null", () => {
+    expect(buildFlow(overviewFixture)).toBeNull();
+  });
+
+  it("14 日ぶんを古い順に並べ、欠けた日を 0 で埋める", () => {
+    const f = buildFlow(
+      flowOf({
+        days: [
+          { date: "2026-10-21", completed: 3, failed: 1, budget_exceeded: 2, cancelled: 4 },
+          { date: "2026-10-08", completed: 1, failed: 0, budget_exceeded: 0, cancelled: 0 },
+        ],
+      }),
+    );
+    expect(f?.days).toHaveLength(14);
+    expect(f?.days[0]).toMatchObject({ date: "2026-10-08", completed: 1, failed: 0 });
+    expect(f?.days[13]).toMatchObject({ date: "2026-10-21", completed: 3, failed: 1 });
+    expect(f?.days[5]).toMatchObject({ date: "2026-10-13", completed: 0, failed: 0 });
+  });
+
+  it("失敗率は 失敗 /（完了 + 失敗）。BUDGET_EXCEEDED・CANCELLED は入れず、件数を併記できる", () => {
+    const f = buildFlow(
+      flowOf({
+        days: [
+          { date: "2026-10-20", completed: 10, failed: 1, budget_exceeded: 9, cancelled: 9 },
+          { date: "2026-10-21", completed: 6, failed: 1, budget_exceeded: 0, cancelled: 0 },
+        ],
+      }),
+    );
+    expect(f).toMatchObject({ completed: 16, failed: 2, rate: 2 / 18 });
+  });
+
+  it("完了も失敗も 0 件なら失敗率は null、少数でも件数をそのまま持つ", () => {
+    expect(buildFlow(flowOf({}))).toMatchObject({ completed: 0, failed: 0, rate: null });
+    expect(
+      buildFlow(flowOf({ days: [{ date: "2026-10-21", completed: 0, failed: 1, budget_exceeded: 0, cancelled: 0 }] })),
+    ).toMatchObject({ completed: 0, failed: 1, rate: 1 });
+  });
+
+  it("中央値・マージ数・hidden を渡す（中央値が無ければ null、hidden が 0 件なら null）", () => {
+    expect(buildFlow(flowOf({}))).toMatchObject({ medianMs: null, prMerged: 0, hidden: null });
+    expect(
+      buildFlow(
+        flowOf({ median_duration_ms: 90_000, pr_merged: 4, hidden: { count: 5, failed: 2 } }),
+      ),
+    ).toMatchObject({ medianMs: 90_000, prMerged: 4, hidden: { count: 5, failed: 2 } });
   });
 });

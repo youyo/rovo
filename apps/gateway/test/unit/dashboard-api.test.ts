@@ -1876,3 +1876,90 @@ describe("overview: 人ごとの今月の費用（month.by_owner / month.hidden�
     expect(second.whole).not.toContain(ghost);
   });
 });
+
+describe("overview: 成果の推移（flow）", () => {
+  const dir = () => workerEnv.DIRECTORY_DO.getByName(DIRECTORY_NAME);
+  const parse = async (v: Viewer) => OverviewDtoSchema.parse((await api(v, overviewPath())).json());
+  const endedAt = Date.now() - 1000;
+  const flowIdx = (over: Partial<TaskIndexSnapshot>): Partial<TaskIndexSnapshot> => ({
+    status: "COMPLETED",
+    started_at: endedAt - 60_000,
+    ended_at: endedAt,
+    ...over,
+  });
+
+  it("見える分の日ごとの数・中央値・マージ数を出し、見えない分は hidden だけ。持ち主は応答に出ない", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const ghost = `flow-ghost-${v.uid}`;
+    await seedTask({ repository_id: repo }, { index: flowIdx({ pr_merged: true }) });
+    await seedTask({ repository_id: repo }, { index: flowIdx({ status: "FAILED" }) });
+    await seedTask(
+      { repository_id: newRepoId() },
+      { index: flowIdx({ status: "FAILED", owner_login: ghost }) },
+    );
+    const r = await api(v, overviewPath());
+    const dto = OverviewDtoSchema.parse(r.json());
+    const flow = dto.flow;
+    expect(flow).toBeDefined();
+    const today = new Date(endedAt).toISOString().slice(0, 10);
+    expect(flow?.days.find((x) => x.date === today)).toMatchObject({ completed: 1, failed: 1 });
+    expect(flow?.median_duration_ms).toBe(60_000);
+    expect(flow?.pr_merged).toBe(1);
+    expect(flow?.hidden.count).toBeGreaterThanOrEqual(1);
+    expect(flow?.hidden.failed).toBeGreaterThanOrEqual(1);
+    expect(JSON.stringify(r.json())).not.toContain(ghost);
+  });
+
+  it("漏れ: 見えないリポジトリだけを持つ利用者の login は flow にも出ない", async () => {
+    const v = newViewer([newRepoId()]);
+    const ghost = `flow-leak-${v.uid}`;
+    await seedTask({ repository_id: newRepoId() }, { index: flowIdx({ owner_login: ghost }) });
+    const r = await api(v, overviewPath());
+    expect(r.status).toBe(200);
+    expect(JSON.stringify(r.json())).not.toContain(ghost);
+    expect(r.whole).not.toContain(ghost);
+  });
+
+  it("60 秒キャッシュされ、見えるリポジトリが違う閲覧者の間で使い回されない", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    await seedTask({ repository_id: repo }, { index: flowIdx({}) });
+    const first = await parse(v);
+    await seedTask({ repository_id: repo }, { index: flowIdx({}) });
+    const second = await parse(v);
+    expect(second.flow).toEqual(first.flow);
+    const blind = await parse(newViewer([newRepoId()]));
+    expect(blind.flow?.days.every((x) => x.completed === 0)).toBe(true);
+    resetLedgerCache();
+    const third = await parse(v);
+    expect(third.flow?.days.reduce((a, x) => a + x.completed, 0)).toBe(2);
+  });
+
+  it("DO が失敗したら flow を省き、console.warn で理由を出す（画面は落とさない）", async () => {
+    const v = newViewer([newRepoId()]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const e = envFor(v);
+    const real = e.DIRECTORY_DO;
+    (e as { DIRECTORY_DO: unknown }).DIRECTORY_DO = {
+      getByName: (n: string) =>
+        new Proxy(real.getByName(n), {
+          get(t, p) {
+            if (p === "summarizeFlow") return async () => ({ ok: false, code: "invalid_input" });
+            const x = Reflect.get(t, p) as unknown;
+            return typeof x === "function" ? x.bind(t) : x;
+          },
+        }),
+    };
+    const res = await handleDashboard(
+      new Request(`${BASE}/dashboard/api${overviewPath()}`, {
+        headers: { ...SAME, cookie: await cookieFor(v) },
+      }),
+      e,
+    );
+    expect(res.status).toBe(200);
+    expect(OverviewDtoSchema.parse(await res.json()).flow).toBeUndefined();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});

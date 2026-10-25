@@ -263,3 +263,68 @@ describe("チームボード: 今月の費用（UTC・人ごと）", () => {
     expect(text(c.querySelector("#tb-month-h")?.parentElement)).not.toMatch(/remaining|reserved/i);
   });
 });
+
+describe("チームボード: 成果の推移（直近 14 日）", () => {
+  const withFlow = (flow: Partial<NonNullable<OverviewDto["flow"]>> = {}): OverviewDto => ({
+    ...overviewFixture,
+    flow: {
+      period: { start: "2026-10-08T00:00:00.000Z", end: "2026-10-22T00:00:00.000Z" },
+      days: [
+        { date: "2026-10-20", completed: 10, failed: 0, budget_exceeded: 0, cancelled: 0 },
+        { date: "2026-10-21", completed: 6, failed: 2, budget_exceeded: 0, cancelled: 0 },
+      ],
+      median_duration_ms: 12 * 60_000,
+      pr_merged: 5,
+      hidden: { count: 3, failed: 1 },
+      ...flow,
+    },
+  });
+
+  it("4 つ目の区画。並びは いま → リポジトリ別 → 今月 → 成果の推移", () => {
+    const c = mount({ data: withFlow() });
+    const ids = [...c.querySelectorAll("section.tb-section h2")].map((h) => h.id);
+    expect(ids).toEqual(["tb-people-h", "tb-repos-h", "tb-month-h", "tb-flow-h"]);
+    expect(text(c.querySelector("#tb-flow-h"))).toContain("14");
+  });
+
+  it("棒は 14 本。失敗のある日だけ、色でなく形の印がある", () => {
+    const c = mount({ data: withFlow() });
+    const days = c.querySelectorAll("[data-flow] [data-day]");
+    expect(days).toHaveLength(14);
+    expect(c.querySelectorAll("[data-flow] [data-fail-mark]")).toHaveLength(1);
+    expect(c.querySelector("[data-day='2026-10-21'] [data-fail-mark]")).not.toBeNull();
+  });
+
+  it("失敗率は % と件数の併記、中央値、マージ数、脚注", () => {
+    const c = mount({ data: withFlow() }, inEn);
+    expect(text(c.querySelector("[data-flow-rate]"))).toContain("11%");
+    expect(text(c.querySelector("[data-flow-rate]"))).toContain("2 / 18");
+    expect(text(c.querySelector("[data-flow-median]"))).toContain("12");
+    expect(text(c.querySelector("[data-flow-merged]"))).toContain("5");
+    expect(text(c.querySelector("[data-flow-note]"))).toContain("merged directly on GitHub");
+    expect(text(c.querySelector("[data-flow-hidden]"))).toContain("3");
+  });
+
+  it("日本語の脚注", () => {
+    const c = mount({ data: withFlow() });
+    expect(text(c.querySelector("[data-flow-note]"))).toBe(
+      "rovo でマージした分だけ。GitHub で直接マージした分は入らない",
+    );
+  });
+
+  it("完了・失敗が 0 件なら失敗率は「–」、中央値が無ければ「–」", () => {
+    const c = mount({ data: withFlow({ days: [], median_duration_ms: null, pr_merged: 0 }) });
+    expect(text(c.querySelector("[data-flow-rate]"))).not.toContain("%");
+    expect(text(c.querySelector("[data-flow-median]"))).toContain("–");
+  });
+
+  it("過去の日を見ていても直近 14 日のまま", () => {
+    const c = mount({ data: withFlow(), isToday: false });
+    expect(c.querySelectorAll("[data-flow] [data-day]")).toHaveLength(14);
+    expect(c.querySelector("[data-flow-rate]")).not.toBeNull();
+  });
+
+  it("flow が無い古い応答では区画を出さない", () => {
+    expect(mount().querySelector("[data-flow]")).toBeNull();
+  });
+});

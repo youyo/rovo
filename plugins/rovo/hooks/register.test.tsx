@@ -1577,12 +1577,12 @@ test("the selected row mark, lane marks, links and frame are colored; body text 
   expect(await colorOf(ui, /^●$/)).toBe("success");
   expect(await colorOf(ui, /^[◐◓◑◒]$/)).toBe("suggestion");
   expect(await colorOf(ui, /^○$/)).toBe("subtle");
-  expect(await colorOf(ui, /^ダッシュボード$/)).toBe("suggestion");
+  expect(await colorOf(ui, /ダッシュボード$/)).toBe("suggestion");
   expect(await colorOf(ui, /^line1/)).toBeUndefined();
   expect(await colorOf(ui, /^\$ pnpm test$/)).toBeUndefined();
   expect(await colorOf(ui, /^editing src/)).toBeUndefined();
   // 作業中の枠は控えめ（光るのは列車だけ）。
-  expect(await colorOf(ui, /^╭/)).toBe("subtle");
+  expect(await colorOf(ui, /^╭─ $/)).toBe("subtle");
   expect(await colorOf(ui, /^╰/)).toBe("subtle");
   await ui.unmount();
 });
@@ -1595,7 +1595,7 @@ test("the frame turns to the state color when the task ends", async ($, on) => {
   await $.tool.call({ tool: START, title: "First", repository: "o/r" });
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
-  expect(await colorOf(ui, /^╭/)).toBe("error");
+  expect(await colorOf(ui, /^╭─ $/)).toBe("error");
   expect(await colorOf(ui, /^╰/)).toBe("error");
   await ui.unmount();
 });
@@ -2871,14 +2871,12 @@ test("the top edge carries the title (bold) and the links; wide titles are cut s
   expect(await ui.find({ type: "Box", key: "titlebar" })).toBeUndefined();
   expect(await ui.find({ type: "Box", key: "frame-top" })).toBeDefined();
   expect(await ui.findAll({ type: "Link" })).toHaveLength(2);
-  const edge = (await ui.find({ type: "Text", text: /^╭/ })) as TextNode;
+  const edge = (await ui.find({ type: "Text", text: /^╭─ $/ })) as TextNode;
   expect(edge.props?.color).toBe("subtle");
   const topBox = (await ui.find({ type: "Box", key: "frame-top" })) as Node;
-  const title = (topBox.children ?? [])
-    .flatMap((c) => (c as Node).children ?? [])
-    .find((c) => (c as Node).type === "Text" && (c as Node).props?.weight === "bold") as
-    | Node
-    | undefined;
+  const title = (((topBox.children ?? [])[0] as Node).children ?? []).find(
+    (c) => (c as Node).type === "Text" && (c as Node).props?.weight === "bold",
+  ) as Node | undefined;
   expect(title).toBeDefined();
   // the whole top edge is exactly the frame's width: bodyColumns 80 - 1, minus the 2-column indent
   expect(displayWidth(flatText(topBox))).toBe(77);
@@ -2910,23 +2908,29 @@ const edgeRig = async ($: Engine, on: Parameters<typeof rig>[0], columns: number
   });
 };
 
-test("the top edge never wraps: one row, every child unshrinkable, exactly the frame's width, links in a box of their own width", async ($, on) => {
+test("the top edge never wraps: one Text of one row holds every piece inline, exactly the frame's width, no Box inside", async ($, on) => {
   // 118 columns: frame = 118 - 1 - 2 = 115
   const ui = await edgeRig($, on, 118);
   const topBox = (await ui.find({ type: "Box", key: "frame-top" })) as Node;
   expect(topBox.props?.width).toBe(115);
   expect(topBox.props?.flexShrink).toBe(0);
   const kids = (topBox.children ?? []) as Node[];
-  expect(kids.length).toBeGreaterThan(0);
-  for (const k of kids) {
-    expect(k.type).toBe("Box");
-    expect(k.props?.flexShrink).toBe(0);
-  }
-  expect(displayWidth(flatText(topBox))).toBe(115);
+  expect(kids).toHaveLength(1);
+  const line = kids[0] as Node;
+  expect(line.type).toBe("Text");
+  expect(line.props?.wrap).toBe("truncate-end");
+  // nothing inside is a block: the links are inline Link spans, so the engine cannot stack them
+  const types: string[] = [];
+  const walk = (n: unknown) => {
+    if (typeof n === "string") return;
+    types.push((n as Node).type as string);
+    for (const c of (n as Node).children ?? []) walk(c);
+  };
+  walk(line);
+  expect(types).not.toContain("Box");
+  expect(types.filter((t) => t === "Link")).toHaveLength(2);
+  expect(displayWidth(flatText(line))).toBe(115);
   expect(flatText(topBox)).toMatch(/^╭─ .+ ─+ PR #93 · ダッシュボード ─╮$/);
-  // the links box is as wide as the links' text, so a wider measure cannot push the edge
-  const linksBox = kids.find((k) => flatText(k).includes("PR #93")) as Node;
-  expect(linksBox.props?.width).toBe(displayWidth("PR #93 · ダッシュボード"));
   await ui.unmount();
 });
 
@@ -2971,7 +2975,7 @@ test("a completed worker's frame takes the success color; a working one stays su
   await $.tool.call({ tool: START, title: "Done", repository: "o/r" });
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
-  expect(await colorOf(ui, /^╭/)).toBe("success");
+  expect(await colorOf(ui, /^╭─ $/)).toBe("success");
   await ui.unmount();
 });
 

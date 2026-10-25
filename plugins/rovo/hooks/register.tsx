@@ -1089,21 +1089,24 @@ export const register: Register = (on) => {
       const showDash = withDash && link !== undefined;
       return {
         text: [showPr ? prText : "", showDash ? dashText : ""].filter((x) => x !== "").join(" · "),
-        node: (
-          <>
-            {showPr && prLink !== undefined && (
-              <Link href={prLink.url}>
-                <Text color="suggestion">{prText}</Text>
-              </Link>
-            )}
-            {showPr && showDash && <Text dimColor>{" · "}</Text>}
-            {showDash && link !== undefined && (
-              <Link href={link}>
-                <Text color="suggestion">{dashText}</Text>
-              </Link>
-            )}
-          </>
-        ),
+        // Fragment は Box になって inline に入れられないので、配列で返す
+        node: [
+          showPr && prLink !== undefined && (
+            <Text key="pr" color="suggestion">
+              <Link href={prLink.url}>{prText}</Link>
+            </Text>
+          ),
+          showPr && showDash && (
+            <Text key="sep" dimColor>
+              {" · "}
+            </Text>
+          ),
+          showDash && link !== undefined && (
+            <Text key="dash" color="suggestion">
+              <Link href={link}>{dashText}</Link>
+            </Text>
+          ),
+        ],
       };
     };
     const { text: linkText, node: links } = linksOf(true, true);
@@ -1193,29 +1196,17 @@ export const register: Register = (on) => {
                 marginLeft={2}
                 height={m.frameRows + m.windowRows}
               >
-                {/* 上辺は必ず 1 行・枠の幅ちょうど。どの子も縮めず、リンクは表示幅の箱に入れる */}
+                {/* 上辺は必ず 1 行・枠の幅ちょうど。全部を 1 つの Text の inline に並べ、Box で分けない（リンクは Link の inline） */}
                 <Box key="frame-top" width={FW} flexShrink={0}>
-                  <Box flexShrink={0}>
+                  <Text wrap="truncate-end">
                     <Text color={frameColor}>{"╭─ "}</Text>
-                  </Box>
-                  <Box flexShrink={0}>
                     <Text weight="bold">{top.title}</Text>
-                  </Box>
-                  <Box flexShrink={0}>
                     <Text color={frameColor}>
                       {` ${"─".repeat(top.dashes)}${top.showLinks ? " " : "╮"}`}
                     </Text>
-                  </Box>
-                  {top.showLinks && (
-                    <Box flexShrink={0} width={displayWidth(chosen.text)}>
-                      {chosen.node}
-                    </Box>
-                  )}
-                  {top.showLinks && (
-                    <Box flexShrink={0}>
-                      <Text color={frameColor}>{" ─╮"}</Text>
-                    </Box>
-                  )}
+                    {top.showLinks && chosen.node}
+                    {top.showLinks && <Text color={frameColor}>{" ─╮"}</Text>}
+                  </Text>
                 </Box>
                 {!m.stacked &&
                   view.command !== null &&

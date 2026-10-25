@@ -303,6 +303,13 @@ interface StoredReviewFix {
    * DO の再起動のあと）なら、新しい run の user メッセージとして submit する（渡し終えるまで、Pi の run の監視はしない）
    */
   delivered: boolean;
+  /** 修正の回に入った時点の warnings（レビューの段のもの）。修正の結果の warnings はこれに足す（やり直しても二重にしない） */
+  baseWarnings: string[];
+  /**
+   * 修正のあとの確定（再実行と完了）に入った SHA。これがあるのに終端でなければ、確定の途中で止まった（DO の再起動など）ので、
+   * onStart / tick / run の終わりから続き（再実行のやり直しと完了）を進める
+   */
+  recheckSha?: string;
 }
 /** 修正の指示を渡す Pi の run の operation（ツールの外から渡すとき） */
 const REVIEW_FIX_OPERATION = "review_fix";
@@ -477,6 +484,8 @@ export class AgentDO extends DurableObject<Env> {
   private reviewInTool = false;
   /** 修正の指示の submit（ツールの外から渡すとき。単一実行） */
   private fixDelivery: Promise<void> | undefined;
+  /** 修正のあとの確定（再実行と完了。単一実行） */
+  private recheckRun: Promise<{ text: string; isError: boolean; terminate: boolean }> | undefined;
   private watching: Promise<void> | undefined;
   private finalizing: Promise<void> | undefined;
   /** 予算超過の停止で進行中の WIP commit（確定はこれを待つ。失敗しても解決する） */
@@ -1942,6 +1951,14 @@ export class AgentDO extends DurableObject<Env> {
   private async onRunSettled(status: string, reason: string | undefined): Promise<void> {
     // 質問で run を終えただけ。回答を待つので、失敗にも片付けにもしない
     if (this.store.phase() === "input_required") return;
+    // 修正のあとの確定の途中で止まった run が終わった: 「完了の申告なし」にせず、確定の続きを進める
+    if (this.recheckPending() && this.stopIntents().length === 0) {
+      const spec = this.spec();
+      const fix = this.recheckPending();
+      if (spec && fix?.recheckSha !== undefined) {
+        await this.finishFixRoundOnce(spec, fix.recheckSha, fix).catch(() => undefined);
+      }
+    }
     if (!isTerminal(this.store.phase())) {
       // 停止の意図があれば、確定のトランザクションがそれを優先する
       if (this.stopIntents().length === 0 && status === "unanswered") {
@@ -1966,6 +1983,7 @@ export class AgentDO extends DurableObject<Env> {
       const pending = this.store.meta<string | null>("pending_resume");
       if (pending) void this.resumeFromAnswer(pending).catch(() => undefined);
       else if (this.fixUndelivered()) void this.deliverFixOnce().catch(() => undefined);
+      else if (this.recheckPending()) void this.resumeRecheck().catch(() => undefined);
       else {
         this.watchRun();
         void this.flushSteers().catch(() => undefined);
@@ -2002,6 +2020,9 @@ export class AgentDO extends DurableObject<Env> {
     } else if (this.fixUndelivered()) {
       // worker_review の修正の指示を、まだ新しい run で渡せていない（submit の失敗・DO の再起動のあと）
       void this.deliverFixOnce().catch(() => undefined);
+    } else if (this.recheckPending()) {
+      // worker_review の修正のあとの確定の途中で止まった（DO の再起動のあと）: 再実行をやり直して完了にする
+      void this.resumeRecheck().catch(() => undefined);
     } else if (this.workerReviewActive()) {
       // worker_review のレビューの段（DO の再起動のあとなどで途切れていれば、続きから進める。動いていれば何もしない）
       void this.runWorkerReviewOnce(false).catch(() => undefined);
@@ -2321,6 +2342,11 @@ export class AgentDO extends DurableObject<Env> {
     }
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
+      // worker_review の修正の回は、確定と同じ区間で終える（確定の前に止まったら、続きから進められるように fixing のまま残す）
+      const fixRound = this.store.meta<StoredReviewFix>("review_fix");
+      if (fixRound?.stage === "fixing") {
+        this.store.setMeta("review_fix", { ...fixRound, stage: "done" } satisfies StoredReviewFix);
+      }
       // 古い指示をそのまま採用せず、確定の時点の意図と要求から決める
       const decided = decideTerminal(this.stopIntents(), this.requests);
       // reason には上流のエラー文などが入りうる（phase イベントは emit() を通らない）ので、積む前にマスクする
@@ -3656,6 +3682,7 @@ export class AgentDO extends DurableObject<Env> {
           mustFix: outcome.verdict.mustFix,
           failedCommands: cmds.results.filter((r) => !commandPassed(r)),
           delivered: false,
+          baseWarnings: stored.warnings,
         } satisfies StoredReviewFix);
         this.store.setMeta("worker_review_sha", null);
         this.store.appendEvent("review_fix_started", {
@@ -3931,7 +3958,7 @@ export class AgentDO extends DurableObject<Env> {
       // 再実行はせずに完了にする（warnings: review_must_fix_unaddressed）
       const fix = spec.workerReview ? this.store.meta<StoredReviewFix>("review_fix") : undefined;
       if (fix?.stage === "fixing" && sha === fix.reviewedSha) {
-        return await this.finishFixRound(spec, sha, fix);
+        return await this.finishFixRoundOnce(spec, sha, fix);
       }
 
       if (commands.length === 0) {
@@ -4091,7 +4118,7 @@ export class AgentDO extends DurableObject<Env> {
     if (!spec.workerReview) return undefined;
     // 修正の回のあとの report_completion: レビューはせず、review_commands を再実行して完了にする（2 回目のレビューはしない）
     const fix = this.store.meta<StoredReviewFix>("review_fix");
-    if (fix?.stage === "fixing") return this.finishFixRound(spec, sha, fix);
+    if (fix?.stage === "fixing") return this.finishFixRoundOnce(spec, sha, fix);
     // この印があるあいだはレビューの段（Pi の run ではなく AgentDO が進める）。固定した SHA はここで決まる
     this.store.setMeta("worker_review_sha", sha);
     // ツールの結果を待っている（修正の指示は、このツールの結果で渡す。runWorkerReview は submit しない）
@@ -4201,6 +4228,41 @@ export class AgentDO extends DurableObject<Env> {
     void this.flushSteers().catch(() => undefined);
   }
 
+  /** 修正のあとの確定（単一実行。ツールの中・tick・run の終わりのどこから呼ばれても 1 つを共有する） */
+  private finishFixRoundOnce(
+    spec: StoredSpec,
+    sha: string,
+    fix: StoredReviewFix,
+  ): Promise<{ text: string; isError: boolean; terminate: boolean }> {
+    this.recheckRun ??= this.finishFixRound(spec, sha, fix).finally(() => {
+      this.recheckRun = undefined;
+    });
+    return this.recheckRun;
+  }
+
+  /** 修正のあとの確定の途中で止まった（recheckSha があるのに終端でない）。再起動のあとに続きから進める対象 */
+  private recheckPending(): StoredReviewFix | undefined {
+    const fix = this.store.meta<StoredReviewFix>("review_fix");
+    if (fix?.stage !== "fixing" || fix.recheckSha === undefined) return undefined;
+    if (isTerminal(this.store.phase())) return undefined;
+    return fix;
+  }
+
+  /**
+   * 確定の途中で止まった修正の回の続き（onStart / tick / run の終わりから）。再実行をやり直して完了にする。
+   * ツールの外から確定したので、残った Pi の run は止め、Sandbox を終端として止める。
+   */
+  private async resumeRecheck(): Promise<void> {
+    const fix = this.recheckPending();
+    const spec = this.spec();
+    if (!fix || !spec || fix.recheckSha === undefined || this.refused()) return;
+    const live = this.recheckRun !== undefined;
+    await this.finishFixRoundOnce(spec, fix.recheckSha, fix);
+    if (live || !isTerminal(this.store.phase())) return;
+    await this.abortRun();
+    await this.terminalStop("finished");
+  }
+
   /**
    * 修正の回のあとの report_completion（verification_commands が通ったあと、または修正の commit が無いとき）。
    * 修正の commit があれば、review_commands を新しい SHA で再実行し（失敗しても完了。warnings と final で知らせる）、
@@ -4214,6 +4276,16 @@ export class AgentDO extends DurableObject<Env> {
     const ended = { text: "The task has already ended.", isError: true, terminate: true };
     const commands = spec.workerReview?.commands ?? [];
     const fixApplied = sha !== fix.reviewedSha;
+    // 確定に入った印を先に残す（途中で DO が落ちても、再起動のあとに続きから進める）
+    if (fix.recheckSha !== sha) {
+      this.store.tx(() => {
+        if (isTerminal(this.store.phase())) return;
+        const cur = this.store.meta<StoredReviewFix>("review_fix");
+        if (cur?.stage === "fixing") {
+          this.store.setMeta("review_fix", { ...cur, recheckSha: sha } satisfies StoredReviewFix);
+        }
+      });
+    }
     let final: ReviewFinalDto | undefined;
     if (fixApplied) {
       const outcome = await runReviewCommands(
@@ -4250,7 +4322,7 @@ export class AgentDO extends DurableObject<Env> {
             ...(final ? { final } : {}),
           },
           warnings: [
-            ...stored.warnings,
+            ...(fix.baseWarnings ?? stored.warnings),
             ...workerReviewFixWarnings({
               mustFixCount: fix.mustFix.length,
               fixApplied,
@@ -4259,7 +4331,8 @@ export class AgentDO extends DurableObject<Env> {
           ],
         } satisfies StoredReview);
       }
-      this.store.setMeta("review_fix", { ...fix, stage: "done" } satisfies StoredReviewFix);
+      // review_fix の stage は、確定（doFinalize）のトランザクションで done にする。ここで先に done にすると、確定の前に止まったとき
+      // 次の report_completion が修正の回を見失い、2 回目のレビューに進んでしまう
     });
     if (this.stopIntents().length > 0) return ended;
     await this.finalize({ phase: "completed", sha });

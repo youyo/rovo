@@ -26,10 +26,29 @@ test("(3) 詳細に、帯・進み具合・出力の枠・Draft PR の枠が出�
     );
   }).toPass({ timeout: 60_000 });
   await expect(steps.first()).toHaveAttribute("data-seq", /^\d+$/);
-  // 出力の枠（暗い枠。末尾と、秘密を伏せている注記）
-  await expect(page.locator(".output-box pre.output")).toContainText("PASS all");
-  await expect(page.locator(".output-note")).toContainText("秘密は伏せて表示しています");
+  // 出力は各コマンドの行の中（▸ を開くと出る）。完了後は手順の外に出力の枠は出ない
+  const testStep = steps.filter({ hasText: "pnpm test" });
+  await testStep.locator("summary").click();
+  await expect(testStep.locator("pre.output")).toContainText("PASS all");
+  await expect(page.locator(".output-box")).toHaveCount(0);
   await expect(page.locator("[data-pr]")).toBeVisible();
+});
+
+test("(3b) 失敗したコマンドの行は自動で開いて出力が見える。成功の行は閉じている", async ({
+  page,
+}) => {
+  await loginAs(page, s.users.alice, taskPath(id("done")));
+  const failed = page.locator("ol.steps li.step").filter({ hasText: "pnpm lint" });
+  await expect(async () => {
+    await page.reload();
+    await expect(failed).toBeVisible({ timeout: 3_000 });
+  }).toPass({ timeout: 60_000 });
+  await expect(failed.locator("details.step-details")).toHaveAttribute("open", "");
+  await expect(failed.locator("pre.output")).toBeVisible();
+  await expect(failed.locator("pre.output")).toContainText("FAIL-LINT-LINE");
+  const ok = page.locator("ol.steps li.step").filter({ hasText: "pnpm test" });
+  await expect(ok.locator("pre.output")).toBeHidden();
+  await expect(page.locator(".output-box")).toHaveCount(0);
 });
 
 test("(4) 実行中のタスクの詳細で、手順が自動更新で増える", async ({ page }) => {

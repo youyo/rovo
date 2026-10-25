@@ -75,6 +75,13 @@ export default async function globalSetup() {
       durationMs: 1200,
       outputTail: "PASS all\n3 passed",
     });
+    // 失敗した行（出力は自動で開く）
+    await emit(baseUrl, id("done"), "command", {
+      command: "pnpm lint",
+      exitCode: 1,
+      durationMs: 300,
+      outputTail: "FAIL-LINT-LINE\n1 error",
+    });
     await emit(baseUrl, id("done"), "edit", {
       path: "src/a.ts",
       op: "modify",

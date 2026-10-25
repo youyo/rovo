@@ -12,16 +12,7 @@ import { createDetailCache } from "../src/detail-cache";
 import { formatUsd } from "../src/format";
 import { TaskScreen } from "../src/task-screen";
 import { inJa, tJa } from "./lang";
-
-/** output_tail を持たない古い履歴（出力は手順の外の枠に出る） */
-const legacyTailEvents = {
-  ...taskEventsFixture,
-  events: taskEventsFixture.events.map((e) => {
-    if (e.type !== "command") return e;
-    const { output_tail: _omit, ...rest } = e;
-    return rest;
-  }),
-};
+import { legacyTailEvents } from "./legacy-events";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 

@@ -1,9 +1,5 @@
 import type { TaskDetailDto, VisibleTaskDto } from "@rovo/dashboard-contract";
-import {
-  overviewFixture,
-  taskDetailRunningFixture,
-  taskEventsFixture,
-} from "@rovo/dashboard-contract/fixtures";
+import { overviewFixture, taskDetailRunningFixture } from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,16 +9,7 @@ import { LANG_KEY } from "../src/prefs";
 import { markKindOf, markLabel } from "../src/status";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
 import { tJa } from "./lang";
-
-/** output_tail を持たない古い履歴（出力は手順の外の枠に出る） */
-const legacyTailEvents = {
-  ...taskEventsFixture,
-  events: taskEventsFixture.events.map((e) => {
-    if (e.type !== "command") return e;
-    const { output_tail: _omit, ...rest } = e;
-    return rest;
-  }),
-};
+import { legacyTailEvents } from "./legacy-events";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 

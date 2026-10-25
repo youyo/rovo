@@ -11,11 +11,14 @@ import {
   detailText,
   displayWidth,
   entryLines,
+  expandTabs,
   formatElapsed,
+  frameTop,
   glyph,
   httpsOnly,
   isTerminal,
   MAX_LOG_LINES,
+  MIN_WINDOW,
   matchTaskStart,
   moveTarget,
   orderTasks,
@@ -30,6 +33,7 @@ import {
   reviewHeader,
   shortModel,
   slideShift,
+  spacerRows,
   splitCommand,
   statusColor,
   statusLabel,
@@ -615,10 +619,11 @@ test("paneColumns gives the title the rest, and drops the model column when narr
   expect(paneColumns(10).title).toBeGreaterThanOrEqual(1);
 });
 
-test("columnHeader puts the station names once, over the track, and uses タイトル / モデル / 経過", () => {
+test("columnHeader puts the station names once, over the track, and uses モデル / 経過 (the title column has no label)", () => {
   const w = paneColumns(74);
   const h = columnHeader(w, "task");
-  expect(h).toContain("タイトル");
+  expect(h).not.toContain("タイトル");
+  expect(h.startsWith(" ".repeat(2 + w.title + 1))).toBe(true);
   expect(h).toContain("準備 実行 検証 PR");
   expect(h).toContain("モデル");
   expect(h).toMatch(/PR {2,}モデル/); // at least 2 columns between the last station and モデル
@@ -628,13 +633,41 @@ test("columnHeader puts the station names once, over the track, and uses タイ�
   expect(displayWidth(h)).toBe(74);
 });
 
-test("reviewHeader labels the review group and its own stations, nothing else", () => {
+test("reviewHeader has its own stations and, like the column header, no label for the title column", () => {
   const w = paneColumns(74);
   const h = reviewHeader(w);
-  expect(h).toContain("レビュー");
+  expect(h).not.toContain("レビュー");
   expect(h).toContain("取出 調査 投稿");
   expect(h).not.toContain("モデル");
   expect(displayWidth(h.slice(0, h.indexOf("取出")))).toBe(2 + w.title + 1);
+});
+
+test("frameTop fits the width exactly, cuts a wide title, and drops the links when there is no room", () => {
+  const a = frameTop(40, "short", 10);
+  expect(a.showLinks).toBe(true);
+  expect(displayWidth(`╭─ ${a.title} ${"─".repeat(a.dashes)} ${" ".repeat(10)} ─╮`)).toBe(40);
+  expect(a.dashes).toBeGreaterThanOrEqual(3);
+  const b = frameTop(30, "全角のとても長いタイトルがここに入ります", 10);
+  expect(displayWidth(b.title)).toBeLessThan(
+    displayWidth("全角のとても長いタイトルがここに入ります"),
+  );
+  expect(
+    displayWidth(`╭─ ${b.title} ${"─".repeat(b.dashes)} ${" ".repeat(10)} ─╮`),
+  ).toBeLessThanOrEqual(30);
+  const c = frameTop(40, "only title", 0);
+  expect(c.showLinks).toBe(false);
+  expect(displayWidth(`╭─ ${c.title} ${"─".repeat(c.dashes)}╮`)).toBe(40);
+  expect(frameTop(12, "title", 14).showLinks).toBe(false);
+  const w = frameTop(5, "x", 0);
+  expect(w.title.length).toBeGreaterThanOrEqual(0);
+});
+
+test("spacerRows takes blank rows only from what the output window keeps above MIN_WINDOW, at most 2", () => {
+  expect(spacerRows(MIN_WINDOW - 3)).toBe(0);
+  expect(spacerRows(MIN_WINDOW)).toBe(0);
+  expect(spacerRows(MIN_WINDOW + 1)).toBe(1);
+  expect(spacerRows(MIN_WINDOW + 2)).toBe(2);
+  expect(spacerRows(MIN_WINDOW + 30)).toBe(2);
 });
 
 test("terminalCell: PR number, 完了 without a PR, 失敗 and friends, with colors", () => {
@@ -724,4 +757,11 @@ test("planWorkers drops ended rows first, then working ones, to leave 6 rows for
 test("planWorkers counts the review header as a row when a review worker is shown", () => {
   const r = planWorkers(mkMany(1, 0, { kind: "review" }), null, 30);
   expect(r.rows).toBe(2 + 1);
+});
+
+test("expandTabs pads to the next multiple of 4 columns", () => {
+  expect(expandTabs("a\tb")).toBe("a   b");
+  expect(expandTabs("\tx")).toBe("    x");
+  expect(expandTabs("abcd\te")).toBe("abcd    e");
+  expect(expandTabs("no tabs")).toBe("no tabs");
 });

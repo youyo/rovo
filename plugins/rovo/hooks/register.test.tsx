@@ -3,6 +3,7 @@ import type { Engine } from "claude-code/testing";
 import { expect, mock, test } from "claude-code/testing";
 
 import type { RovoTask } from "../types";
+import { displayWidth, MIN_WINDOW } from "./lib";
 
 const START = "mcp__rovo-direct__task_start";
 const START_HUB = "mcp__claude_ai_mcp_hubs_run__my-rovo_task_start";
@@ -965,7 +966,8 @@ test("the pane shows the list, the selected task, phases, command and tail on ev
     expect(text).toContain("tail-t1");
     expect(text).not.toContain("tail-t2");
     expect(text).toContain("pnpm test");
-    expect(text).toContain("line1\nline2");
+    expect(text).toMatch(/^line1$/m);
+    expect(text.indexOf("line1")).toBeLessThan(text.indexOf("line2"));
     expect(text).not.toContain("<<<");
     expect(text).toContain("準備 実行 検証 PR");
 
@@ -1204,7 +1206,7 @@ test("the header (heading, column header, worker rows, title line) is drawn what
     const ui = await $.ui.mount({ ...small(12), surface });
     const text = await allText(ui);
     expect(text).toContain("Header task");
-    expect(text).toContain("作業中 1 · 質問待ち 0 · 完了 0");
+    expect(text).toContain("作業中");
     expect(text).toContain("準備 実行 検証 PR");
     expect(text).toContain("editing src/a.ts");
     expect(await ui.findAll({ type: "Link" })).toHaveLength(1);
@@ -1212,10 +1214,10 @@ test("the header (heading, column header, worker rows, title line) is drawn what
       /^row\d+$/.test(t.text ?? ""),
     );
     expect(outputRows.length).toBeGreaterThan(0);
-    // heading + column header + the worker's 2 buttons + title line (links on its right) + frame (2) + command + the output window
+    // heading + column header + the worker's 2 buttons + frame (top edge carries the title and links, bottom edge) + command + the output window
     const buttonCount = (await ui.findAll({ type: "Button" })).length;
     expect(buttonCount).toBe(2);
-    const rowsDrawn = 1 + 1 + buttonCount + 1 + 2 + 1 + outputRows.length;
+    const rowsDrawn = 1 + 1 + buttonCount + 2 + 1 + outputRows.length;
     expect(rowsDrawn).toBeLessThanOrEqual(12);
     await ui.unmount();
   }
@@ -1323,12 +1325,9 @@ test("the output is framed; the command sits inside the frame; the whole tree fi
   await startScrollRig($, on, manyRows(0, 99));
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...small(14), surface });
-    const boxes = await ui.findAll({ type: "Box" });
-    const framed = boxes.filter(
-      (b) => (b as { props?: { borderStyle?: string } }).props?.borderStyle !== undefined,
-    );
+    const framed = await framedBoxes(ui);
     expect(framed).toHaveLength(1);
-    // heading + column header + 2 worker rows + title line = 5; frame 2 + command 1; window = 14 - 8
+    // heading + column header + 2 worker rows = 4; frame 2 + command 1; 14 - 7 = 7 left, one of them a blank row under the heading; window = 6
     expect(await outputRowsOf(ui)).toEqual(["row94", "row95", "row96", "row97", "row98", "row99"]);
     expect(await ui.find({ type: "Text", text: /^\$ make$/ })).toBeDefined();
     await ui.unmount();
@@ -1349,7 +1348,8 @@ test("with no command the frame costs only its two border rows", async ($, on) =
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...small(14), surface: "terminal" });
-  expect(await outputRowsOf(ui)).toHaveLength(7);
+  // heading + column header + 2 worker rows = 4; frame 2; 14 - 6 = 8 left, 2 of them blank rows; window = 6
+  expect(await outputRowsOf(ui)).toHaveLength(6);
   await ui.unmount();
 });
 
@@ -1581,10 +1581,9 @@ test("the selected row mark, lane marks, links and frame are colored; body text 
   expect(await colorOf(ui, /^line1/)).toBeUndefined();
   expect(await colorOf(ui, /^\$ pnpm test$/)).toBeUndefined();
   expect(await colorOf(ui, /^editing src/)).toBeUndefined();
-  const framed = (await ui.findAll({ type: "Box" })).filter(
-    (b) => (b as { props?: { borderStyle?: string } }).props?.borderStyle !== undefined,
-  );
-  expect((framed[0] as { props?: { borderColor?: string } }).props?.borderColor).toBe("suggestion");
+  // 作業中の枠は控えめ（光るのは列車だけ）。
+  expect(await colorOf(ui, /^╭/)).toBe("subtle");
+  expect(await colorOf(ui, /^╰/)).toBe("subtle");
   await ui.unmount();
 });
 
@@ -1596,10 +1595,8 @@ test("the frame turns to the state color when the task ends", async ($, on) => {
   await $.tool.call({ tool: START, title: "First", repository: "o/r" });
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
-  const framed = (await ui.findAll({ type: "Box" })).filter(
-    (b) => (b as { props?: { borderStyle?: string } }).props?.borderStyle !== undefined,
-  );
-  expect((framed[0] as { props?: { borderColor?: string } }).props?.borderColor).toBe("error");
+  expect(await colorOf(ui, /^╭/)).toBe("error");
+  expect(await colorOf(ui, /^╰/)).toBe("error");
   await ui.unmount();
 });
 
@@ -1776,8 +1773,11 @@ test("with task_list, workers from other sessions are listed: 2 rows working, 1 
   });
   const ui = await mountPane($);
   const text = await allText(ui);
-  expect(text).toContain("rovo");
-  expect(text).toContain("作業中 1 · 質問待ち 1 · 完了 1");
+  expect(text).not.toContain("·");
+  expect(await ui.find({ type: "Text", text: /^rovo$/ })).toBeUndefined();
+  expect(text).toContain("作業中");
+  expect(text).toContain("質問待ち");
+  expect(text).toContain("完了");
   expect(text).not.toMatch(/USD|費用|\$\d/);
 
   const [a1, a2] = await rowsOf(ui, "L1");
@@ -2170,11 +2170,9 @@ const startLogRig = async (
 
 const occurrences = (text: string, needle: string) => text.split(needle).length - 1;
 
-type Framed = { props?: { borderStyle?: string; height?: number } };
+type Framed = { key?: string; props?: { height?: number } };
 const framedBoxes = async (ui: { findAll: (q: { type: string }) => Promise<unknown[]> }) =>
-  ((await ui.findAll({ type: "Box" })) as Framed[]).filter(
-    (b) => b.props?.borderStyle !== undefined,
-  );
+  ((await ui.findAll({ type: "Box" })) as Framed[]).filter((b) => b.key === "frame");
 
 test("with a log, earlier commands stay: the console stacks instead of showing only the latest", async ($, on) => {
   const events: unknown[] = [
@@ -2278,7 +2276,8 @@ test("a server without log keeps today's behavior: only the latest command, pinn
   const ui = await mountPane($);
   const text = await allText(ui);
   expect(occurrences(text, "$ pnpm test")).toBe(1);
-  expect(text).toContain("line1\nline2");
+  expect(text).toMatch(/^line1$/m);
+  expect(text.indexOf("line1")).toBeLessThan(text.indexOf("line2"));
   expect(r.calls.every((c) => c.tool === "task_console")).toBe(true);
   await ui.unmount();
 });
@@ -2380,15 +2379,15 @@ test("the buffer keeps the last 500 lines per worker, and a held window does not
 test("the frame fills the rest of the pane, with or without a log, and keeps a minimum when rows are short", async ($, on) => {
   const events: unknown[] = [cmdEv(1, "ls"), cmdEv(2, "pwd")];
   await startLogRig($, on, events);
-  // heading + column header + the worker's 2 rows + title line = 5 rows above the frame
+  // heading + column header + the worker's 2 rows = 4 rows above the frame, and 2 blank rows once the window is past MIN_WINDOW
   let ui = await mountPane($, 20);
   let boxes = await framedBoxes(ui);
   expect(boxes).toHaveLength(1);
-  expect(boxes[0]?.props?.height).toBe(20 - 5);
+  expect(boxes[0]?.props?.height).toBe(20 - 4 - 2);
   await ui.unmount();
   ui = await mountPane($, 40);
   boxes = await framedBoxes(ui);
-  expect(boxes[0]?.props?.height).toBe(40 - 5);
+  expect(boxes[0]?.props?.height).toBe(40 - 4 - 2);
   await ui.unmount();
   ui = await mountPane($, 3);
   boxes = await framedBoxes(ui);
@@ -2401,7 +2400,7 @@ test("without a log the frame also fills the rest, command row included", async 
   const ui = await mountPane($, 20);
   const boxes = await framedBoxes(ui);
   expect(boxes).toHaveLength(1);
-  expect(boxes[0]?.props?.height).toBe(20 - 5);
+  expect(boxes[0]?.props?.height).toBe(20 - 4 - 2);
   await ui.unmount();
 });
 
@@ -2519,7 +2518,7 @@ test("the station names appear once, in the column header; workers have no stati
   const ui = await mountPane($);
   const text = await allText(ui);
   expect(text.split("準備 実行 検証 PR").length - 1).toBe(1);
-  expect(text).toContain("タイトル");
+  expect(text).not.toContain("タイトル");
   expect(text).toContain("モデル");
   expect(text).toContain("経過");
   expect(text).not.toContain("題名");
@@ -2532,7 +2531,7 @@ test("review workers are grouped under their own header with their own stations"
   await listRig($, on, [item(1), item(2, { kind: "review", stage: "investigate" })]);
   const ui = await mountPane($);
   const text = await allText(ui);
-  expect(text.split("レビュー").length - 1).toBe(1);
+  expect(text).not.toContain("レビュー"); // the review header names no title column either
   expect(text.split("取出 調査 投稿").length - 1).toBe(1);
   expect(text.indexOf("準備 実行 検証 PR")).toBeLessThan(text.indexOf("取出 調査 投稿"));
   await ui.unmount();
@@ -2643,15 +2642,16 @@ test("the links sit at the right end of the shown worker's full-title line; no s
   ]);
   const ui = await mountPane($, 30);
   const text = await allText(ui);
-  expect(text).toContain("─ ");
+  expect(text).toContain("╭─ ");
   expect(text).toContain("A fairly long full title of the worker");
   expect(await ui.findAll({ type: "Link" })).toHaveLength(2);
   expect(text.indexOf("A fairly long full title")).toBeLessThan(text.indexOf("PR #9"));
-  const bar = await ui.find({ type: "Box", key: "titlebar" });
-  expect(bar).toBeDefined();
-  // heading + column header + (2 worker rows) + title line + frame (+ window) fit the rows
+  // the title and the links ride on the frame's top edge: no line of their own
+  expect(await ui.find({ type: "Box", key: "titlebar" })).toBeUndefined();
+  expect(await ui.find({ type: "Box", key: "frame-top" })).toBeDefined();
+  // heading + column header + (2 worker rows) + 2 blank rows + frame (+ window) fit the rows
   const frameHeight = (await framedBoxes(ui))[0]?.props?.height ?? 0;
-  const rowsDrawn = 1 + 1 + 2 + 1 + frameHeight;
+  const rowsDrawn = 1 + 1 + 2 + 2 + frameHeight;
   expect(rowsDrawn).toBeLessThanOrEqual(30);
   await ui.unmount();
 });
@@ -2765,4 +2765,170 @@ test("the pane does not jump while rendering: the shown worker is the same acros
     expect(await allText(ui)).toContain("tail-L2");
     await ui.unmount();
   }
+});
+
+// --- spacing: heading parts, blank rows, the frame's top edge ----------------
+
+type Node = {
+  key?: string;
+  type?: string;
+  props?: Record<string, unknown>;
+  children?: unknown[];
+};
+type TextNode = Node & { text?: string };
+const lastText = (box: Node): Node | undefined =>
+  [...(box.children ?? [])].reverse().find((c) => (c as Node).type === "Text") as Node | undefined;
+/** ノードの下にある文字を全部つなぐ。 */
+const flatText = (n: unknown): string =>
+  typeof n === "string" ? n : ((n as Node).children ?? []).map(flatText).join("");
+
+test("the heading has no rovo and no dots; counts are colored numbers, a zero is dim, 質問待ち comes first only when there is one", async ($, on) => {
+  await listRig($, on, [
+    item(1),
+    item(2, { stage: "investigate", status: "INPUT_REQUIRED", waiting_for_answer: true }),
+  ]);
+  const ui = await mountPane($, 30);
+  const partOf = async (label: string) => {
+    const box = (await ui.find({ type: "Box", key: `heading:${label}` })) as Node | undefined;
+    return box === undefined ? undefined : lastText(box);
+  };
+  const run = await partOf("作業中");
+  const wait = await partOf("質問待ち");
+  const done = await partOf("完了");
+  expect(run?.children).toEqual(["1"]);
+  expect(run?.props?.color).toBe("suggestion");
+  expect(run?.props?.dimColor).toBeFalsy();
+  expect(wait?.children).toEqual(["1"]);
+  expect(wait?.props?.color).toBe("warning");
+  expect(wait?.props?.weight).toBe("bold");
+  expect(done?.children).toEqual(["0"]);
+  expect(done?.props?.color).toBe("success");
+  expect(done?.props?.dimColor).toBe(true);
+  const keys = ((await ui.findAll({ type: "Box" })) as Node[])
+    .map((t) => t.key ?? "")
+    .filter((k) => k.startsWith("heading:"));
+  expect(keys).toEqual(["heading:質問待ち", "heading:作業中", "heading:完了"]);
+  const text = await allText(ui);
+  expect(text).not.toContain("·");
+  expect(await ui.find({ type: "Text", text: /^rovo$/ })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("with nothing waiting the heading shows 作業中 and 完了 only", async ($, on) => {
+  await listRig($, on, [item(1)]);
+  const ui = await mountPane($, 30);
+  expect(await ui.find({ type: "Box", key: "heading:質問待ち" })).toBeUndefined();
+  expect(await ui.find({ type: "Box", key: "heading:作業中" })).toBeDefined();
+  await ui.unmount();
+});
+
+test("blank rows come only from rows the output window keeps above MIN_WINDOW: 2 when roomy, 1 when nearly, 0 at 12 rows", async ($, on) => {
+  await startScrollRig($, on, manyRows(0, 99));
+  const cases = [
+    { rows: 24, spacers: 2 },
+    { rows: 15, spacers: 2 },
+    { rows: 14, spacers: 1 },
+    { rows: 13, spacers: 0 },
+    { rows: 12, spacers: 0 },
+  ];
+  for (const c of cases) {
+    const ui = await $.ui.mount({ ...small(c.rows), surface: "terminal" });
+    const spacerBoxes = ((await ui.findAll({ type: "Box" })) as { key?: string }[]).filter((b) =>
+      b.key?.startsWith("spacer:"),
+    );
+    expect(spacerBoxes).toHaveLength(c.spacers);
+    const keys = spacerBoxes.map((b) => b.key);
+    if (c.spacers >= 1) expect(keys).toContain("spacer:heading");
+    if (c.spacers === 2) expect(keys).toContain("spacer:frame");
+    const frameHeight = (await framedBoxes(ui))[0]?.props?.height ?? 0;
+    const buttonCount = (await ui.findAll({ type: "Button" })).length;
+    // heading + column header + worker buttons + blank rows + frame
+    expect(2 + buttonCount + c.spacers + frameHeight).toBeLessThanOrEqual(c.rows);
+    // frame = top + bottom + the pinned command + the window
+    if (c.rows >= 14) expect(frameHeight - 3).toBeGreaterThanOrEqual(MIN_WINDOW);
+    await ui.unmount();
+  }
+});
+
+test("the top edge carries the title (bold) and the links; wide titles are cut so the edge never passes the width", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler((call) =>
+    ok(
+      consoleBody(String(call.args.task_id), {
+        pr: { number: 7, url: "https://github.com/o/r/pull/7" },
+      }),
+    ),
+  );
+  await startSession($);
+  await $.tool.call({
+    tool: START,
+    title: "とても長い全角のタイトルがここに入りますとても長い全角のタイトルがここに入ります",
+    repository: "o/r",
+  });
+  await r.clock.advance(4_000);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  expect(await ui.find({ type: "Box", key: "titlebar" })).toBeUndefined();
+  expect(await ui.find({ type: "Box", key: "frame-top" })).toBeDefined();
+  expect(await ui.findAll({ type: "Link" })).toHaveLength(2);
+  const edge = (await ui.find({ type: "Text", text: /^╭/ })) as TextNode;
+  expect(edge.props?.color).toBe("subtle");
+  const topBox = (await ui.find({ type: "Box", key: "frame-top" })) as Node;
+  const title = (topBox.children ?? []).find(
+    (c) => (c as Node).type === "Text" && (c as Node).props?.weight === "bold",
+  ) as Node | undefined;
+  expect(title).toBeDefined();
+  // the whole top edge is exactly the frame's width: bodyColumns 80 - 1, minus the 2-column indent
+  expect(displayWidth(flatText(topBox))).toBe(77);
+  expect(flatText(topBox)).toMatch(/^╭─ .+… ─+ PR #7 · ダッシュボード ─╮$/);
+  await ui.unmount();
+});
+
+test("the frame is indented 2 columns, under the ▎ column", async ($, on) => {
+  await startScrollRig($, on, "a\nb");
+  const ui = await mountPane($, 20);
+  const frame = (await ui.find({ type: "Box", key: "frame" })) as {
+    props?: Record<string, unknown>;
+  };
+  expect(frame.props?.marginLeft).toBe(2);
+  await ui.unmount();
+});
+
+test("a completed worker's frame takes the success color; a working one stays subtle", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler((call) => ok(consoleBody(String(call.args.task_id), { status: "COMPLETED" })));
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Done", repository: "o/r" });
+  await r.clock.advance(4_000);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  expect(await colorOf(ui, /^╭/)).toBe("success");
+  await ui.unmount();
+});
+
+test("tabs in the output and the command are drawn as spaces, so the right edge stays put", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler(() =>
+    ok(
+      consoleBody("t1", {
+        output: {
+          command: wrap("echo\ta"),
+          tail: wrap("a\tb\n\tindented"),
+          running: true,
+          redacted: true,
+        },
+      }),
+    ),
+  );
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Tabs", repository: "o/r" });
+  await r.clock.advance(4_000);
+  const ui = await mountPane($, 20);
+  const text = await allText(ui);
+  expect(text).not.toContain("\t");
+  expect(text).toMatch(/^a {3}b$/m);
+  expect(text).toMatch(/^ {4}indented$/m);
+  expect(text).toMatch(/^\$ echo {2}a$/m);
+  await ui.unmount();
 });

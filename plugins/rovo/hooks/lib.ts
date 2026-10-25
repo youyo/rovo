@@ -53,6 +53,24 @@ export const httpsOnly = (url: unknown): string | undefined =>
     ? url
     : undefined;
 
+/** タブを、タブ幅 4 の次の位置まで空白に置き換える（枠の右辺がずれないように）。 */
+export const expandTabs = (s: string): string => {
+  if (!s.includes("\t")) return s;
+  let out = "";
+  let col = 0;
+  for (const ch of s) {
+    if (ch === "\t") {
+      const n = 4 - (col % 4);
+      out += " ".repeat(n);
+      col += n;
+    } else {
+      out += ch;
+      col += displayWidth(ch);
+    }
+  }
+  return out;
+};
+
 /**
  * ワーカーが書いた文字列の表示用の整え方。囲み（UNTRUSTED_CHILD_QUESTION）を外し、
  * 端末を動かす制御列（ANSI・OSC）と、向きを偽装する文字を落とす。Markdown には触らない
@@ -795,8 +813,14 @@ export const laneCells = (opts: {
   return cells;
 };
 
-/** ペインの見出しの数え方。作業中（質問待ちでない実行中）・質問待ち・完了。費用は出さない。 */
-export const headingText = (tasks: readonly RovoTask[]): string => {
+export type HeadingTone = "warning" | "suggestion" | "success";
+export type HeadingPart = { label: string; n: number; tone: HeadingTone };
+
+/**
+ * ペインの見出しの部品。質問待ちが 1 件以上のときだけ先頭に出し、そのあと作業中（質問待ちでない実行中）・完了。
+ * 0 の項目は残す（位置を動かさない）。費用は出さない。
+ */
+export const headingText = (tasks: readonly RovoTask[]): HeadingPart[] => {
   let run = 0;
   let wait = 0;
   let done = 0;
@@ -806,7 +830,11 @@ export const headingText = (tasks: readonly RovoTask[]): string => {
     else if (isWaiting(t)) wait++;
     else run++;
   }
-  return `作業中 ${run} · 質問待ち ${wait} · 完了 ${done}`;
+  return [
+    ...(wait > 0 ? [{ label: "質問待ち", n: wait, tone: "warning" as const }] : []),
+    { label: "作業中", n: run, tone: "suggestion" as const },
+    { label: "完了", n: done, tone: "success" as const },
+  ];
 };
 
 const MAX_RIGHT = 40;
@@ -1036,7 +1064,7 @@ const stationNames = (kind: TaskKind): string =>
 
 /** 列見出しの 1 行（駅の名前はここに 1 回だけ）。 */
 export const columnHeader = (cols: PaneCols, kind: TaskKind): string => {
-  const title = padWidth(`${" ".repeat(MARK_COL)}タイトル`, MARK_COL + cols.title);
+  const title = " ".repeat(MARK_COL + cols.title);
   const track = padWidth(stationNames(kind), TRACK_COL);
   const model = cols.model > 0 ? padWidth("モデル", cols.model) + " " : "";
   const elapsed = " ".repeat(Math.max(0, cols.elapsed - displayWidth("経過"))) + "経過";
@@ -1045,7 +1073,7 @@ export const columnHeader = (cols: PaneCols, kind: TaskKind): string => {
 
 /** review のワーカーをまとめた直前の見出し（そのグループ専用の駅の名前）。 */
 export const reviewHeader = (cols: PaneCols): string =>
-  `${padWidth(`${" ".repeat(MARK_COL)}レビュー`, MARK_COL + cols.title)} ${stationNames("review")}`;
+  `${" ".repeat(MARK_COL + cols.title)} ${stationNames("review")}`;
 
 /** 終了からの時間。1 分未満は「たった今」。 */
 export const agoText = (ms: number): string => {
@@ -1138,8 +1166,30 @@ export const detailText = (
 export const MIN_WINDOW = 6;
 const MAX_WORKING = 4;
 const MAX_ENDED = 5;
-/** 一覧以外の行: 見出し 1 + 列見出し 1 + タイトル/リンク 1 + 枠 2。 */
+/** 一覧以外の行: 見出し 1 + 列見出し 1 + 枠 2 + 余り 1（タイトルは枠の上辺に載る）。 */
 const LIST_OVERHEAD = 5;
+
+/** 見出しの下・一覧と枠の間に入れる空行。窓が MIN_WINDOW を超えて余った行からだけ取る（最大 2）。 */
+export const spacerRows = (leftover: number): number =>
+  Math.min(2, Math.max(0, leftover - MIN_WINDOW));
+
+/**
+ * 枠の上辺 `╭─ タイトル ─── リンク ─╮` の部品。幅は width ちょうど:
+ * 3（`╭─ `）+ タイトル + 1 + dashes + （リンクあり: 1 + linksWidth + 3 / なし: 1 `╮`）。
+ * タイトルは入る幅で切る。リンクの分の余地（ダッシュ 3 本以上 + タイトル 1 桁）がなければリンクは出さない。
+ */
+export const frameTop = (
+  width: number,
+  title: string,
+  linksWidth: number,
+): { title: string; dashes: number; showLinks: boolean } => {
+  const withLinks = width - (3 + 1 + 3 + 1 + linksWidth + 3);
+  const showLinks = linksWidth > 0 && withLinks >= 1;
+  const cap = showLinks ? withLinks : width - 6;
+  const cut = cap < 1 ? "" : truncateWidth(title, cap);
+  const tail = showLinks ? 1 + linksWidth + 3 : 1;
+  return { title: cut, dashes: Math.max(1, width - (3 + displayWidth(cut) + 1 + tail)), showLinks };
+};
 
 export type WorkerPlan = {
   shown: RovoTask[];

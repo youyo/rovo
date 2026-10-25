@@ -115,7 +115,7 @@ describe("ヘッダ（一覧と詳細で同じ骨格）", () => {
       "表示範囲（チーム / マイタスク）",
     );
     expect(text(head.querySelector(".day-summary"))).toMatch(
-      /^\d+月\d+日 +5 件 +マージ 2 +走行中 1$/,
+      /^\d+月\d+日 +5 件 +マージ済み 2 +実行中 1$/,
     );
     expect(text(head.querySelector(".user"))).toContain("alice-example");
     expect([...head.querySelectorAll("button")].some((b) => b.textContent === "ログアウト")).toBe(
@@ -199,7 +199,7 @@ describe("/dashboard/tasks/:id は一覧でそのタスクを選んだ状態（�
   it("タイムライン帯・レール・コンソール・ステータスバーが出る。選んだタスクが選択中。「詳細を開く」は出さない", async () => {
     const { c, f } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
     expect(paths(f)).toContain("/dashboard/api/overview");
-    expect(c.querySelector(".tlband")).not.toBeNull();
+    expect(c.querySelector(".tlband")).toBeNull();
     expect(c.querySelector("nav.rail")).not.toBeNull();
     expect(text(c.querySelector(".console h1"))).toBe(taskDetailRunningFixture.task.title);
     expect(c.querySelector(".statusbar")).not.toBeNull();
@@ -306,7 +306,7 @@ describe("日をまたいだ「待ち」（レールの切り替え）", () => {
     const { c, f } = await mount("/dashboard/");
     expect(tabBtn(c, 0).getAttribute("aria-pressed")).toBe("true");
     // 初期の scope は「マイタスク」(me)
-    expect(tabBtn(c, 1).textContent).toBe(`待ち ${waitingMeFixture.tasks.length}`);
+    expect(tabBtn(c, 1).textContent).toBe(`要対応 ${waitingMeFixture.tasks.length}`);
     const waitingCalls = f.mock.calls
       .map((x) => new URL(String(x[0]), "http://localhost"))
       .filter((u) => u.pathname === "/dashboard/api/waiting");
@@ -327,7 +327,7 @@ describe("日をまたいだ「待ち」（レールの切り替え）", () => {
       (b) => b.textContent === "チーム",
     ) as HTMLElement;
     await clickBtn(team);
-    expect(tabBtn(c, 1).textContent).toBe(`待ち ${waitingFixture.tasks.length}`);
+    expect(tabBtn(c, 1).textContent).toBe(`要対応 ${waitingFixture.tasks.length}`);
     expect(
       [...c.querySelectorAll("a.rail-row")].map((a) => (a as HTMLElement).dataset.taskId),
     ).toEqual(waitingFixture.tasks.map((t) => t.task_id));
@@ -366,6 +366,6 @@ describe("日をまたいだ「待ち」（レールの切り替え）", () => {
     });
     expect(tabBtn(c, 0).getAttribute("aria-pressed")).toBe("true");
     expect(c.querySelectorAll("a.rail-row").length).toBe(overviewFixture.tasks.length);
-    expect(tabBtn(c, 1).textContent).toBe("待ち");
+    expect(tabBtn(c, 1).textContent).toBe("要対応");
   });
 });

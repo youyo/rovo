@@ -53,6 +53,8 @@ type Script = {
   /** タスクの詳細の応答（タスクごとの何回目か付き）。既定は detailOf(id) */
   detail?: (call: DetailCall) => Response | Promise<Response>;
   events?: (id: string) => Response;
+  /** 「チーム」に切り替えてから返す。タイムライン（チームのみ）の棒を使うテスト用 */
+  team?: boolean;
 };
 
 const roots: { unmount: () => void }[] = [];
@@ -85,7 +87,10 @@ async function mount(path: string, script: Script = {}) {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/dashboard/api/me") return json(200, { login: "alice-example" });
     if (url.pathname === "/dashboard/api/overview")
-      return json(200, { ...overviewFixture, scope: "me" });
+      return json(200, {
+        ...overviewFixture,
+        scope: url.searchParams.get("scope") === "all" ? "all" : "me",
+      });
     const m = /^\/dashboard\/api\/tasks\/([^/]+)(\/events)?$/.exec(url.pathname);
     if (m) {
       const id = m[1] as string;
@@ -114,6 +119,13 @@ async function mount(path: string, script: Script = {}) {
     root.render(createElement(App));
     await settle();
   });
+  if (script.team) {
+    const team = [...container.querySelectorAll("button")].find((b) => b.textContent === "チーム");
+    await act(async () => {
+      team?.click();
+      await settle();
+    });
+  }
   return { c: container, f, detailCalls };
 }
 
@@ -183,7 +195,7 @@ describe("レール・タイムラインでの切り替え: ページを読み�
   });
 
   it("タイムラインの棒を左クリックしても同じ", async () => {
-    const { c } = await mount("/dashboard/");
+    const { c } = await mount("/dashboard/", { team: true });
     const push = vi.spyOn(history, "pushState");
     expect(await leftClick(barOf(c, C))).toBe(true);
     expect(push).toHaveBeenCalledWith(null, "", `/dashboard/tasks/${C}`);
@@ -213,7 +225,7 @@ describe("レール・タイムラインでの切り替え: ページを読み�
   });
 
   it("修飾キー（Ctrl・Cmd・Shift・Alt）付きと中クリックは、ブラウザに任せる（preventDefault しない・URL も画面も変えない）", async () => {
-    const { c } = await mount("/dashboard/");
+    const { c } = await mount("/dashboard/", { team: true });
     const push = vi.spyOn(history, "pushState");
     for (const { name, init } of BROWSER_CLICKS) {
       expect(await leftClick(railRow(c, B), init), `レール ${name}`).toBe(false);
@@ -272,7 +284,7 @@ describe("?fresh=1 は、URL を直接開いたときの最初の取得だけ", 
     calls.filter((x) => x.id === id).map((x) => x.search);
 
   it("タスクの URL を直接開く: そのタスクの最初の取得に付く。レールでの切り替え（初めてのタスク）には付かない", async () => {
-    const { c, detailCalls } = await mount(`/dashboard/tasks/${A}`);
+    const { c, detailCalls } = await mount(`/dashboard/tasks/${A}`, { team: true });
     expect(detailSearches(detailCalls, A)).toEqual(["?fresh=1"]);
     await leftClick(railRow(c, B));
     expect(detailSearches(detailCalls, B)).toEqual([""]);

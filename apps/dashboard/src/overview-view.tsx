@@ -51,6 +51,9 @@ export function OverviewView(props: {
   let band: ReactNode = null;
   let nowMs = 0; // 更新時刻（引き出しの表示）。タイムラインの「いま」は今日のときだけ使う
   if (data) {
+    nowMs = Date.parse(data.generated_at);
+  }
+  if (data && data.scope === "all") {
     const dayStart = Date.parse(data.range.from);
     nowMs = Date.parse(data.generated_at);
     const domain = timelineDomain({

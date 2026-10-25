@@ -6,9 +6,9 @@ import type {
 } from "@rovo/dashboard-contract";
 import type { ReactNode } from "react";
 import {
-  formatClock,
   formatClockSeconds,
   formatCount,
+  formatDateTime,
   formatDuration,
   formatUsd,
   isAllowedPrUrl,
@@ -525,7 +525,7 @@ export function TaskView(props: {
               {settings.sandbox_instance === undefined ? null : (
                 <Fact k={t("fact.sandboxSize")} v={singleLine(settings.sandbox_instance)} />
               )}
-              <Fact k={t("fact.created")} v={formatClock(Date.parse(task.created_at), t)} />
+              <Fact k={t("fact.created")} v={formatDateTime(Date.parse(task.created_at), t)} />
             </dl>
             {task.pr !== null && active ? <p className="soft">{t("log.readyNote")}</p> : null}
           </details>

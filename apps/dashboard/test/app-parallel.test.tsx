@@ -100,7 +100,7 @@ describe("一覧・詳細・Cloudflare は互いに待たない", () => {
   it("詳細が返らなくても、一覧（レール・帯・ステータスバー）が先に出る。詳細の場所だけ読み込み中", async () => {
     const { c } = await mount("/dashboard/", { detail: never });
     expect(c.querySelectorAll("a.rail-row").length).toBeGreaterThan(0);
-    expect(c.querySelector(".tlband")).not.toBeNull();
+    expect(c.querySelector(".tlband")).toBeNull();
     expect(c.querySelector(".statusbar")).not.toBeNull();
     expect(text(c.querySelector(".console-col"))).toContain("読み込み中");
     expect(text(c.querySelector("nav.rail"))).not.toContain("読み込み中");

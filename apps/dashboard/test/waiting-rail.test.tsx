@@ -71,10 +71,10 @@ describe("レールの「この日 / 待ち」の切り替え", () => {
     const c = mount({ waiting: ready(waitingFixture), railTab: "day", onRailTabChange: () => {} });
     const fs = c.querySelector("fieldset.rail-tabs");
     expect(fs).not.toBeNull();
-    expect(fs?.getAttribute("aria-label")).toBe("レールの表示（この日 / 待ち）");
+    expect(fs?.getAttribute("aria-label")).toBe("レールの表示（日付別 / 要対応）");
     expect(tabs(c).map((b) => b.textContent)).toEqual([
-      "この日",
-      `待ち ${waitingFixture.tasks.length}`,
+      "日付別",
+      `要対応 ${waitingFixture.tasks.length}`,
     ]);
     expect(tabs(c).map((b) => b.getAttribute("aria-pressed"))).toEqual(["true", "false"]);
     // タブはレールの上（同じ列の中）にある
@@ -176,8 +176,8 @@ describe("レールの「この日 / 待ち」の切り替え", () => {
       onRailTabChange: () => {},
     });
     expect(rows(c)).toHaveLength(0);
-    expect(c.querySelector(".rail-empty")?.textContent).toBe("待っているタスクはありません。");
-    expect(tabs(c)[1]?.textContent).toBe("待ち 0");
+    expect(c.querySelector(".rail-empty")?.textContent).toBe("対応が要るタスクはありません。");
+    expect(tabs(c)[1]?.textContent).toBe("要対応 0");
   });
 
   it("英語の文言", () => {
@@ -187,8 +187,8 @@ describe("レールの「この日 / 待ち」の切り替え", () => {
       railTab: "waiting",
       onRailTabChange: () => {},
     });
-    expect(tabs(c).map((b) => b.textContent)).toEqual(["This day", "Waiting 0"]);
-    expect(c.querySelector(".rail-empty")?.textContent).toBe("No tasks are waiting.");
+    expect(tabs(c).map((b) => b.textContent)).toEqual(["By day", "Needs you 0"]);
+    expect(c.querySelector(".rail-empty")?.textContent).toBe("Nothing needs you right now.");
   });
 
   it("権限の無い待ちは件数だけ（個別の情報は無い）。0 件なら出さない", () => {
@@ -198,7 +198,7 @@ describe("レールの「この日 / 待ち」の切り替え", () => {
       onRailTabChange: () => {},
     });
     expect(c.querySelector("[data-waiting-hidden]")?.textContent).toBe(
-      "権限の無いリポジトリの待ちが 2 件あります。",
+      "権限の無いリポジトリの要対応が 2 件あります。",
     );
     document.body.innerHTML = "";
     const none = mount({
@@ -215,7 +215,7 @@ describe("レールの「この日 / 待ち」の切り替え", () => {
       railTab: "day",
       onRailTabChange: () => {},
     });
-    expect(tabs(c)[1]?.textContent).toBe(`待ち ${waitingFixture.tasks.length}+`);
+    expect(tabs(c)[1]?.textContent).toBe(`要対応 ${waitingFixture.tasks.length}+`);
   });
 
   it("まだ取れていない・失敗したときは件数を出さず、「待ち」を開くと状態を案内する", () => {
@@ -224,7 +224,7 @@ describe("レールの「この日 / 待ち」の切り替え", () => {
       railTab: "waiting",
       onRailTabChange: () => {},
     });
-    expect(tabs(loading)[1]?.textContent).toBe("待ち");
+    expect(tabs(loading)[1]?.textContent).toBe("要対応");
     expect(loading.querySelector(".rail-empty")?.textContent).toBe("読み込み中…");
     document.body.innerHTML = "";
     const err = mount({

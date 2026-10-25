@@ -172,7 +172,7 @@ describe("App のルーティング（個別ページは無い。/dashboard/task
       const { c, f } = await mount(p);
       expect(paths(f), p).toContain("/dashboard/api/overview");
       // 一覧のコンソールは走行中のタスク。URL の ID が不正でも一覧になる
-      expect(c.querySelector("[data-lane]"), p).not.toBeNull();
+      expect(c.querySelector("[data-lane]"), p).toBeNull();
       expect(c.querySelector("a.rail-row"), p).not.toBeNull();
       act(() => roots.pop()?.unmount());
       document.body.innerHTML = "";

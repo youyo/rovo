@@ -87,7 +87,7 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
       "carol-example",
     ]);
     document.body.innerHTML = "";
-    expect(lanesOf(mount(overviewMeFixture))).toEqual(["alice-example"]);
+    expect(lanesOf(mount(overviewMeFixture))).toEqual([]);
   });
 
   it("タイムラインは細い帯（行ごとの高さ + 軸が 48px 前後に収まる）", () => {
@@ -103,7 +103,7 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
     expect(three.lanes.reduce((a, b) => a + b, 0) + three.axis).toBeLessThanOrEqual(TL_BAND_H);
     expect(three.lanes.every((h) => h >= TL_MIN_LANE_H)).toBe(true);
     document.body.innerHTML = "";
-    const one = heights(mount(overviewMeFixture));
+    const one = heights(mount({ ...overviewMeFixture, scope: "all" }));
     expect(one.lanes.reduce((a, b) => a + b, 0) + one.axis).toBeLessThanOrEqual(TL_BAND_H);
     expect(TL_BAND_H).toBeGreaterThanOrEqual(44);
     expect(TL_BAND_H).toBeLessThanOrEqual(56);
@@ -131,7 +131,7 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
   });
 
   it("今日のタスクが無いときは、帯の代わりに空の表示。レールにも空の表示", () => {
-    const empty: OverviewDto = { ...overviewMeFixture, tasks: [], consults: [] };
+    const empty: OverviewDto = { ...overviewMeFixture, scope: "all", tasks: [], consults: [] };
     const c = mount(empty);
     expect(c.textContent).toContain("今日のタスクはまだありません");
     expect(c.querySelector("a.rail-row")).toBeNull();
@@ -139,7 +139,7 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
   });
 
   it("過去の日: 文言はその日向け", () => {
-    const empty: OverviewDto = { ...overviewMeFixture, tasks: [], consults: [] };
+    const empty: OverviewDto = { ...overviewMeFixture, scope: "all", tasks: [], consults: [] };
     const c = mount(empty, { isToday: false });
     expect(c.textContent).toContain("この日のタスクはありません");
     expect(c.textContent).not.toContain("今日のタスク");

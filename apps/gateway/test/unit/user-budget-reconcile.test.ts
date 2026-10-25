@@ -55,16 +55,28 @@ describe("UserDO.reconcileTaskCost", () => {
     const { stub, id } = await reserved();
     await stub.finishTask(id, 1, 3 * MICRO);
     await stub.reconcileTaskCost(id, 2 * MICRO);
-    expect(await stub.reconcileTaskCost(id, 9 * MICRO)).toEqual({ ok: true, applied: false });
+    expect(await stub.reconcileTaskCost(id, 9 * MICRO)).toEqual({
+      ok: true,
+      applied: false,
+      reason: "already",
+    });
     expect(await row(stub, id)).toMatchObject({ settled_micro: 2 * MICRO });
   });
 
   it("閉じていない行・存在しない行・不正な額は無視する", async () => {
     const { stub, id } = await reserved();
-    expect(await stub.reconcileTaskCost(id, 2 * MICRO)).toEqual({ ok: true, applied: false });
+    expect(await stub.reconcileTaskCost(id, 2 * MICRO)).toEqual({
+      ok: true,
+      applied: false,
+      reason: "not_closed",
+    });
     expect(await row(stub, id)).toMatchObject({ cost_source: "estimate", settled_micro: 0 });
     await stub.finishTask(id, 1, MICRO);
-    expect(await stub.reconcileTaskCost(id, -1)).toEqual({ ok: true, applied: false });
+    expect(await stub.reconcileTaskCost(id, -1)).toEqual({
+      ok: true,
+      applied: false,
+      reason: "invalid",
+    });
     expect(await stub.reconcileTaskCost("01JNOSUCHTASK00000000000000", MICRO)).toEqual({
       ok: false,
     });

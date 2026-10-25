@@ -4,6 +4,22 @@ import { FP, fakeAgent, newUserId, sampleInput, taskStub, userStub } from "./hel
 
 const MIN = 60_000;
 type Result = { state: "confirmed"; micro: number } | { state: "pending" };
+const userSql = (user: ReturnType<typeof userStub>, q: string, ...b: unknown[]) =>
+  runInDurableObject(user, (_i, s) => {
+    s.storage.sql.exec(q, ...b);
+  });
+const linkRow = (stub: ReturnType<typeof taskStub>) =>
+  runInDurableObject(
+    stub,
+    (_i, s) =>
+      s.storage.sql
+        .exec("SELECT gateway_micro, reconcile_attempt, reconcile_done FROM agent_link")
+        .one() as {
+        gateway_micro: number | null;
+        reconcile_attempt: number;
+        reconcile_done: number;
+      },
+  );
 
 const ENV_KEYS = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "AI_GATEWAY_ID"] as const;
 const saved = new Map<string, string | undefined>();
@@ -157,6 +173,115 @@ describe("TaskDO: 終端後の費用の確定（AI Gateway のログ）", () => 
       result: { usage: { cost_usd: 2.5, cost_source: "gateway", estimate_usd: 3 } },
     });
     expect(id).toBeTruthy();
+  });
+});
+
+describe("TaskDO: 確定の結果が UserDO に反映されないとき", () => {
+  it("台帳がまだ閉じていない（not_closed）: gateway_micro を書かず、回数を進めて待つ", async () => {
+    const { user, id, stub, results, clock } = await finished(true);
+    await userSql(user, "UPDATE task_budget SET closed = 0 WHERE task_id = ?", id);
+    clock.t += 2 * MIN;
+    results.push({ state: "confirmed", micro: 2_500_000 });
+    await runDurableObjectAlarm(stub);
+    expect(await linkRow(stub)).toEqual({
+      gateway_micro: null,
+      reconcile_attempt: 1,
+      reconcile_done: 0,
+    });
+    // 台帳が閉じたあとの次の回で確定する
+    await userSql(user, "UPDATE task_budget SET closed = 1 WHERE task_id = ?", id);
+    clock.t += 10 * MIN;
+    results.push({ state: "confirmed", micro: 2_500_000 });
+    await runDurableObjectAlarm(stub);
+    expect(await linkRow(stub)).toEqual({
+      gateway_micro: 2_500_000,
+      reconcile_attempt: 1,
+      reconcile_done: 1,
+    });
+    expect(await budget(user, id)).toEqual({ settled_micro: 2_500_000, cost_source: "gateway" });
+  });
+
+  it("行が無い（ok: false）: pending と同じ扱いで、最後の回なら見積もりのまま done", async () => {
+    const { user, id, stub, calls, results, clock } = await finished(true);
+    await userSql(user, "DELETE FROM task_budget WHERE task_id = ?", id);
+    for (const at of [2 * MIN, 10 * MIN, 60 * MIN, 360 * MIN]) {
+      const base = (await baseOf(stub)) ?? 0;
+      clock.t = base + at;
+      results.push({ state: "confirmed", micro: 2_500_000 });
+      await runDurableObjectAlarm(stub);
+    }
+    expect(calls).toHaveLength(4);
+    expect(await linkRow(stub)).toEqual({
+      gateway_micro: null,
+      reconcile_attempt: 4,
+      reconcile_done: 1,
+    });
+  });
+
+  it("UserDO の呼び出しが例外: 回数を進め、次の時刻まで再試行しない", async () => {
+    const { stub, calls, results, clock } = await finished(true);
+    await runInDurableObject(stub, (i) => {
+      (i as unknown as { userStub: () => unknown }).userStub = () => ({
+        reconcileTaskCost: async () => {
+          throw new Error("boom");
+        },
+      });
+    });
+    clock.t += 2 * MIN;
+    results.push({ state: "confirmed", micro: 2_500_000 });
+    await runDurableObjectAlarm(stub);
+    expect(await linkRow(stub)).toEqual({
+      gateway_micro: null,
+      reconcile_attempt: 1,
+      reconcile_done: 0,
+    });
+    // 10 秒後の alarm では問い合わせない
+    clock.t += 10_000;
+    await runDurableObjectAlarm(stub);
+    expect(calls).toHaveLength(1);
+    // 4 回目も例外なら、見積もりのまま打ち切る
+    for (const at of [10 * MIN, 60 * MIN, 360 * MIN]) {
+      const base = (await baseOf(stub)) ?? 0;
+      clock.t = base + at;
+      results.push({ state: "confirmed", micro: 2_500_000 });
+      await runDurableObjectAlarm(stub);
+    }
+    expect(await linkRow(stub)).toEqual({
+      gateway_micro: null,
+      reconcile_attempt: 4,
+      reconcile_done: 1,
+    });
+  });
+
+  it("すでに gateway で確定済み（already）: gateway_micro を書いて完了", async () => {
+    const { user, id, stub, results, clock } = await finished(true);
+    await userSql(
+      user,
+      "UPDATE task_budget SET cost_source = 'gateway', settled_micro = ? WHERE task_id = ?",
+      2_500_000,
+      id,
+    );
+    clock.t += 2 * MIN;
+    results.push({ state: "confirmed", micro: 2_500_000 });
+    await runDurableObjectAlarm(stub);
+    expect(await linkRow(stub)).toEqual({
+      gateway_micro: 2_500_000,
+      reconcile_attempt: 0,
+      reconcile_done: 1,
+    });
+  });
+
+  it("額が不正（invalid）: gateway_micro を書かずに done", async () => {
+    const { user, id, stub, results, clock } = await finished(true);
+    clock.t += 2 * MIN;
+    results.push({ state: "confirmed", micro: -1 });
+    await runDurableObjectAlarm(stub);
+    expect(await linkRow(stub)).toEqual({
+      gateway_micro: null,
+      reconcile_attempt: 0,
+      reconcile_done: 1,
+    });
+    expect(await budget(user, id)).toEqual({ settled_micro: 3_000_000, cost_source: "estimate" });
   });
 });
 

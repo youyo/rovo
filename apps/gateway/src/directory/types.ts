@@ -179,6 +179,20 @@ export type SummarizeConsultsResult =
     }
   | { ok: false; code: "invalid_input" };
 
+export type SummarizeByOwnerResult =
+  | {
+      ok: true;
+      /** repoIds に repository_id があるタスクだけの、owner_login ごとの集計（login 順） */
+      visible: { owner_login: string; task_cost_micro: number; task_count: number }[];
+      /** 権限の無い（NULL を含む）タスク。件数と合計だけで、持ち主は返さない */
+      hidden: { count: number; cost_micro: number };
+    }
+  | { ok: false; code: "invalid_input" | "too_many_repo_ids" };
+
+export type SummarizeConsultsByOwnerResult =
+  | { ok: true; owners: { owner_login: string; cost_micro: number }[] }
+  | { ok: false; code: "invalid_input" };
+
 export type VisibleModelsResult =
   | { ok: true; models: string[] }
   | { ok: false; code: "invalid_input" | "too_many_repo_ids" };

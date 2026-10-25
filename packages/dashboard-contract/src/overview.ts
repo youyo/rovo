@@ -165,6 +165,22 @@ export const OverviewDtoSchema = z.strictObject({
     budget_actual: BudgetActualDtoSchema,
     /** 上の合計に含まれる、権限の無いタスクの件数と合計（個別の情報は無い） */
     hidden_tasks: HiddenTasksDtoSchema,
+    /**
+     * 人ごとの今月の費用（見えるリポジトリのタスク + その人の consult）。login 順。古い gateway では無い。
+     * 見えないタスクは人に割り振らず hidden にまとめる。
+     */
+    by_owner: z
+      .array(
+        z.strictObject({
+          login: loginSchema,
+          task_cost_usd: usdSchema,
+          consult_cost_usd: usdSchema,
+        }),
+      )
+      .max(1000)
+      .optional(),
+    /** 権限の無いタスクの件数と合計（by_owner に含まれない分） */
+    hidden: HiddenTasksDtoSchema.optional(),
   }),
   models: z.array(ModelCostDtoSchema).max(LIMITS.models),
 });

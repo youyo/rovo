@@ -154,3 +154,66 @@ function buildRepos(
     (a, b) => b.count - a.count || a.repository.localeCompare(b.repository),
   );
 }
+
+export type MonthPace = "fast" | "slow";
+
+export type MonthCostRow = {
+  login: string;
+  isViewer: boolean;
+  /** 今月使った額（タスク + 相談。USD）。残り・予約・あと何件は持たない（本人の予算の欄だけ） */
+  spentUsd: number;
+  /** 全員共通の 1 人あたりの月の上限（無ければ null） */
+  limitUsd: number | null;
+  /** spentUsd / limitUsd（上限が無ければ null。1 を超えうる） */
+  ratio: number | null;
+  /** 月の経過に対する速さ。上限が無い・月の初日（経過 1 日未満）は null */
+  pace: MonthPace | null;
+};
+
+export type MonthCosts = {
+  rows: MonthCostRow[];
+  /** 権限の無いタスク（人に割り振らない）。0 件なら null */
+  hidden: { count: number; costUsd: number } | null;
+};
+
+/** 今月の費用（UTC・人ごと）。並びは帯と同じ（閲覧者が先頭、ほかは login 順）。by_owner が無い古い応答は null */
+export function buildMonthCosts(data: OverviewDto): MonthCosts | null {
+  const { by_owner: owners, hidden } = data.month;
+  if (owners === undefined) return null;
+  const viewer = data.viewer.login;
+  const limitRaw = data.budget.monthly_budget_usd;
+  const limitUsd =
+    limitRaw !== undefined && Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null;
+  const start = Date.parse(data.month.period.start);
+  const end = Date.parse(data.month.period.end);
+  const now = Date.parse(data.generated_at);
+  const elapsed = Math.min(now - start, end - start);
+  const frac =
+    Number.isFinite(elapsed) && end > start && elapsed >= 86_400_000
+      ? elapsed / (end - start)
+      : null;
+  const byLogin = new Map<string, number>([[viewer, 0]]);
+  for (const o of owners) {
+    byLogin.set(o.login, (byLogin.get(o.login) ?? 0) + o.task_cost_usd + o.consult_cost_usd);
+  }
+  const logins = [viewer, ...[...byLogin.keys()].filter((l) => l !== viewer).sort()];
+  const rows = logins.map((login): MonthCostRow => {
+    const spentUsd = byLogin.get(login) ?? 0;
+    const ratio = limitUsd === null ? null : spentUsd / limitUsd;
+    return {
+      login,
+      isViewer: login === viewer,
+      spentUsd,
+      limitUsd,
+      ratio,
+      pace: ratio === null || frac === null ? null : ratio > frac ? "fast" : "slow",
+    };
+  });
+  return {
+    rows,
+    hidden:
+      hidden !== undefined && hidden.count > 0
+        ? { count: hidden.count, costUsd: hidden.cost_usd }
+        : null,
+  };
+}

@@ -1,7 +1,7 @@
 import type { OverviewDto, VisibleTaskDto, WaitingDto } from "@rovo/dashboard-contract";
 import { overviewFixture, waitingFixture } from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it } from "vitest";
-import { BOARD_ACTIVE_MAX, buildTeamBoard } from "../src/team";
+import { BOARD_ACTIVE_MAX, buildMonthCosts, buildTeamBoard } from "../src/team";
 
 const base = overviewFixture.tasks[0] as VisibleTaskDto;
 let seq = 0;
@@ -275,5 +275,49 @@ describe("権限の無いタスクの情報を使わない", () => {
     const text = JSON.stringify(b);
     expect(text).not.toContain("dave-hidden-example");
     expect(text).not.toContain("hidden-repo");
+  });
+});
+
+describe("buildMonthCosts（人ごとの今月の費用）", () => {
+  const month = (over: Partial<OverviewDto["month"]>): OverviewDto => ({
+    ...overviewFixture,
+    generated_at: "2026-10-16T00:00:00.000Z",
+    budget: { ...overviewFixture.budget, monthly_budget_usd: 100 },
+    month: { ...overviewFixture.month, ...over },
+  });
+
+  it("by_owner が無い（古い gateway）なら null", () => {
+    const m = { ...overviewFixture.month } as OverviewDto["month"];
+    delete m.by_owner;
+    expect(buildMonthCosts({ ...overviewFixture, month: m })).toBeNull();
+  });
+
+  it("閲覧者が先頭・ほかは login 順。額はタスク + 相談、割合は共通の上限に対して。ペースは月の経過に対して速い・遅い", () => {
+    const r = buildMonthCosts(
+      month({
+        by_owner: [
+          { login: "zed-example", task_cost_usd: 10, consult_cost_usd: 5 },
+          { login: "bob-example", task_cost_usd: 60, consult_cost_usd: 0 },
+        ],
+        hidden: { count: 2, cost_usd: 3 },
+      }),
+    );
+    expect(r?.rows.map((x) => x.login)).toEqual(["alice-example", "bob-example", "zed-example"]);
+    expect(r?.rows[0]).toMatchObject({ isViewer: true, spentUsd: 0, ratio: 0 });
+    expect(r?.rows[1]).toMatchObject({ spentUsd: 60, limitUsd: 100, ratio: 0.6, pace: "fast" });
+    expect(r?.rows[2]).toMatchObject({ spentUsd: 15, ratio: 0.15, pace: "slow" });
+    expect(r?.hidden).toEqual({ count: 2, costUsd: 3 });
+  });
+
+  it("上限が無ければ割合とペースは null。hidden が 0 件なら null", () => {
+    const d = month({
+      by_owner: [{ login: "bob-example", task_cost_usd: 1, consult_cost_usd: 1 }],
+      hidden: { count: 0, cost_usd: 0 },
+    });
+    const noLimit = { ...d, budget: { ...d.budget } };
+    delete noLimit.budget.monthly_budget_usd;
+    const r = buildMonthCosts(noLimit);
+    expect(r?.rows[1]).toMatchObject({ spentUsd: 2, limitUsd: null, ratio: null, pace: null });
+    expect(r?.hidden).toBeNull();
   });
 });

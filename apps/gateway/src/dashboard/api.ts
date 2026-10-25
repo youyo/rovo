@@ -421,6 +421,7 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
     spent_micro: totalMicro + consultSummary.cost_micro,
     estimated_micro: consultSummary.estimated_micro,
   };
+  const byOwner = await monthByOwner(directory, repoIds, monthStart, monthEnd, at);
   const actual =
     (await sumLedgers(env, session.uid, budgetRaw, owners, at, monthStart)) ?? indexActual;
 
@@ -448,6 +449,16 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
         estimated_usd: usd(actual.estimated_micro),
       },
       hidden_tasks: { count: summary.hidden.count, cost_usd: usd(summary.hidden.cost_micro) },
+      ...(byOwner
+        ? {
+            by_owner: byOwner.owners.map((o) => ({
+              login: o.login,
+              task_cost_usd: usd(o.task_micro),
+              consult_cost_usd: usd(o.consult_micro),
+            })),
+            hidden: { count: byOwner.hidden.count, cost_usd: usd(byOwner.hidden.cost_micro) },
+          }
+        : {}),
     },
     models,
   };
@@ -461,8 +472,57 @@ const ledgerCache = new Map<
   number,
   { month: number; expires: number; spent_micro: number; estimated_micro: number }
 >();
+/** 人ごとの月の集計（キーは見えるリポジトリの集合 + 月。この isolate のメモリだけ） */
+type ByOwnerValue = {
+  owners: { login: string; task_micro: number; consult_micro: number }[];
+  hidden: { count: number; cost_micro: number };
+};
+const byOwnerCache = new Map<string, { expires: number; value: ByOwnerValue }>();
 export function resetLedgerCache(): void {
   ledgerCache.clear();
+  byOwnerCache.clear();
+}
+
+/** 人ごとの月の集計を LEDGER_CACHE_TTL_MS だけ使い回す。取れないときは null（フィールドを省く。画面を落とさない） */
+async function monthByOwner(
+  directory: Env["DIRECTORY_DO"] extends DurableObjectNamespace<infer D>
+    ? DurableObjectStub<D>
+    : never,
+  repoIds: number[],
+  from: number,
+  to: number,
+  at: number,
+): Promise<ByOwnerValue | null> {
+  for (const [k, e] of byOwnerCache) if (e.expires <= at) byOwnerCache.delete(k);
+  const key = `${from}:${[...repoIds].sort((a, b) => a - b).join(",")}`;
+  const hit = byOwnerCache.get(key);
+  if (hit) return hit.value;
+  try {
+    const [tasks, consults] = await Promise.all([
+      directory.summarizeByOwner({ repoIds, from, to }),
+      directory.summarizeConsultsByOwner({ from, to }),
+    ]);
+    if (!tasks.ok || !consults.ok) return null;
+    const m = new Map<string, { login: string; task_micro: number; consult_micro: number }>();
+    const row = (login: string) => {
+      let r = m.get(login);
+      if (!r) {
+        r = { login, task_micro: 0, consult_micro: 0 };
+        m.set(login, r);
+      }
+      return r;
+    };
+    for (const t of tasks.visible) row(t.owner_login).task_micro += t.task_cost_micro;
+    for (const c of consults.owners) row(c.owner_login).consult_micro += c.cost_micro;
+    const value: ByOwnerValue = {
+      owners: [...m.values()].sort((a, b) => a.login.localeCompare(b.login)),
+      hidden: tasks.hidden,
+    };
+    byOwnerCache.set(key, { expires: at + LEDGER_CACHE_TTL_MS, value });
+    return value;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -288,7 +288,12 @@ describe("DirectoryDO.summarizeByOwner（人ごとの月の集計）", () => {
     await d.upsertTask(snap("D", { owner_login: "ghost", repository_id: 200, cost_micro: 700 }), 1);
     await d.upsertTask(snap("E", { owner_login: "ghost", repository_id: null, cost_micro: 5 }), 1);
     await d.upsertTask(
-      snap("F", { owner_login: "alice", repository_id: 100, cost_micro: 9999, created_at: T0 + 1e9 }),
+      snap("F", {
+        owner_login: "alice",
+        repository_id: 100,
+        cost_micro: 9999,
+        created_at: T0 + 1e9,
+      }),
       1,
     );
     const r = await d.summarizeByOwner({ repoIds: [100], from: T0 - 1000, to: T0 + 1000 });

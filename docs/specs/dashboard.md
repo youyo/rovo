@@ -250,6 +250,8 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 - 「自分」: 閲覧者本人の `budgetStatus()`（`monthly_budget_usd`（月の上限。画面の「今月 $x / $上限」はこれを使う。無い古い応答では 使った額 + 予約 + 残り に戻る）・`remaining_usd`・`max_concurrent_tasks`・`concurrency_limit`・実行中の枠）をそのまま。**あと何件 = `min(max_concurrent_tasks, concurrency_limit - 実行中の件数)`**。
 - 「全員」: 全員の実費の合計（Directory の月合計。タスクの費用）と、consult の実績の合計。**「あと何件」は閲覧者本人の値だけ**を表示する（他人の枠は出さない。ラベルを「あなたの残り」にする）。
+
+**改定（2026-10-25）**: チームボードに区画「今月の費用（UTC・人ごと）」を足す。人ごとに「今月使った額（タスク + 相談）」「共通の上限（閲覧者の `monthly_budget_usd`。無ければ出さない）に対する割合」「月のペース（経過に対して速い・遅い）」を出してよい。**残り・予約・あと何件始められるかは本人だけ**（予算の欄。今までどおり）。D7 との関係: 人ごとのタスク費用は閲覧者が見られるリポジトリの行だけを `repository_id IN (repoIds)` で絞ってから `owner_login` で集計し、見えないタスクは人に割り振らず「権限の無いタスク N 件 $X」の 1 行にまとめる。consult はリポジトリを持たないので owner ごとに割ってよい。応答は `month.by_owner` と `month.hidden`（どちらも任意）。月の集計は gateway で 60 秒キャッシュする（キーは見えるリポジトリの集合と月）。
 - 費用の 2 つの DTO: (1) `TaskCostDto`（タスク 1 件の `cost_usd` と内訳。TaskDO の `usage_micro`）、(2) `BudgetActualDto`（consult を含む月の実績。`spent` と `estimated` を分ける。`settled_estimated`）。画面で足し合わせない。
 - 月の区切りは **UTC**（`budgetStatus` の `period` と同じ）。画面に「UTC の月」と明記する（矛盾の節）。
 

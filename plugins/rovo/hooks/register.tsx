@@ -24,6 +24,7 @@ import {
   detailText,
   displayWidth,
   formatElapsed,
+  frameTop,
   glyph,
   headingText,
   httpsOnly,
@@ -52,6 +53,7 @@ import {
   shortModel,
   shortText,
   slideShift,
+  spacerRows,
   stageIndex,
   statusColor,
   TRACK_COL,
@@ -705,8 +707,10 @@ type PaneModel = {
   plan: WorkerPlan;
   link: string | undefined;
   prLink: RovoConsole["pr"];
-  /** ヘッダーの行数（枠の外）。 */
+  /** ヘッダーの行数（枠の外。空行を含む）。 */
   headerRows: number;
+  /** 空行の数（0〜2）。1 以上で見出しの下、2 で一覧と枠の間にも入れる。 */
+  spacers: number;
   /** 出力の全行（ログがあればログ + いま流れている出力、無ければ末尾 TAIL_LINES まで）と、窓の高さ（枠の行を除く）・先頭行の範囲。 */
   lines: LogLine[];
   /** ログ（積み上がる表示）か。false なら最新のコマンドだけ（`$ コマンド` を枠の先頭に固定）。 */
@@ -734,6 +738,7 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
       link: undefined,
       prLink: undefined,
       headerRows: CREATING_ROWS,
+      spacers: 0,
       lines: [],
       stacked: false,
       frameRows: 0,
@@ -759,12 +764,10 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
     bodyRows,
   );
 
-  // 数える行: 見出し + 列見出し + 一覧（plan.rows）+ タイトルとリンクの 1 行 + (取得前・非対応の一言)
+  // 数える行: 見出し + 列見出し + 一覧（plan.rows）。出力の枠が無いときだけ、タイトルとリンクの 1 行 + 取得前・非対応の一言。
+  // 枠があるときのタイトルとリンクは枠の上辺に載る（frameRows に含まれる）。
   let headerRows = 2 + plan.rows;
-  if (selected !== undefined) {
-    headerRows += 1;
-    if (view === undefined || !view.hasOutput) headerRows += 1;
-  }
+  if (selected !== undefined && (view === undefined || !view.hasOutput)) headerRows += 2;
   const worker = selected === undefined ? undefined : (await read($, logsAtom))[taskKey(selected)];
   const stacked = view !== undefined && view.hasOutput && worker?.supported === true;
   const tailOf = (): LogLine[] =>
@@ -794,6 +797,9 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
   // 出力は枠で囲む: 上下の辺で 2 行。ログでなければ `$ コマンド` を枠の中の 1 行目に固定して 1 行。
   const frameRows =
     view !== undefined && view.hasOutput ? 2 + (!stacked && view.command !== null ? 1 : 0) : 0;
+  // 空行は、窓が MIN_WINDOW を超えて余った行からだけ取る。
+  const spacers = frameRows > 0 ? spacerRows(bodyRows - headerRows - frameRows) : 0;
+  headerRows += spacers;
   const windowRows = Math.max(1, bodyRows - headerRows - frameRows);
   return {
     tasks,
@@ -804,6 +810,7 @@ const buildModel = async ($: Dollar, bodyRows: number): Promise<PaneModel> => {
     link,
     prLink,
     headerRows,
+    spacers,
     lines,
     stacked,
     frameRows,
@@ -1071,16 +1078,69 @@ export const register: Register = (on) => {
           : `他 ${m.plan.hidden} 件`
         : "";
 
-    // 上から: 見出し・列見出し・ワーカーの行・選んだワーカーのタイトル行（右端にリンク。出力の量に関わらず常に出す）、
-    // 残りの行が出力の窓。ツリー全体を bodyRows に収めるので、エンジンはスクロールしない。
+    const heading = headingText(m.tasks);
+    const linkText = [
+      prLink === undefined ? "" : prLink.number === null ? "PR" : `PR #${prLink.number}`,
+      link === undefined ? "" : "ダッシュボード",
+    ]
+      .filter((x) => x !== "")
+      .join(" · ");
+    const links = (
+      <>
+        {prLink !== undefined && (
+          <Link href={prLink.url}>
+            <Text color="suggestion">{prLink.number === null ? "PR" : `PR #${prLink.number}`}</Text>
+          </Link>
+        )}
+        {prLink !== undefined && link !== undefined && <Text dimColor>{" · "}</Text>}
+        {link !== undefined && (
+          <Link href={link}>
+            <Text color="suggestion">ダッシュボード</Text>
+          </Link>
+        )}
+      </>
+    );
+    // 枠の色: 作業中は控えめ（光るのは列車だけ）。終端になったら状態の色。
+    const frameColor =
+      selected !== undefined && isTerminal(selected.status)
+        ? (statusColor(selected.status) ?? "subtle")
+        : "subtle";
+    const FW = Math.max(4, W - 2); // 枠の幅（左に 2 桁ずらす）
+    const innerW = FW - 2;
+    const top = frameTop(FW, selected?.title ?? "", displayWidth(linkText));
+    const isEmptyNote = m.lines.length === 0 && (m.stacked || view?.command === null);
+    // 窓が満ちないときは空の行で枠の下辺を一番下に保つ。
+    const padRows = Math.max(0, m.windowRows - shown.length - (isEmptyNote ? 1 : 0));
+    const side = (key: string, body: React.ReactNode) => (
+      <Box key={key}>
+        <Text color={frameColor}>│</Text>
+        <Box width={innerW} flexShrink={0}>
+          {body}
+        </Box>
+        <Text color={frameColor}>│</Text>
+      </Box>
+    );
+
+    // 上から: 見出し・列見出し・ワーカーの行・出力の枠（上辺にタイトルとリンク）。
+    // 空行は余った行からだけ。ツリー全体を bodyRows に収めるので、エンジンはスクロールしない。
     return (
       <Box flexDirection="column">
-        <Box>
-          <Text color="claude" weight="bold">
-            rovo
-          </Text>
-          <Text dimColor>{`  ${headingText(m.tasks)}`}</Text>
+        <Box key="heading">
+          {heading.map((part, i) => (
+            <Box key={`heading:${part.label}`}>
+              <Text>{i === 0 ? "  " : "    "}</Text>
+              <Text dimColor={part.n === 0}>{`${part.label} `}</Text>
+              <Text
+                color={part.tone}
+                weight={part.tone === "warning" ? "bold" : undefined}
+                dimColor={part.n === 0}
+              >
+                {String(part.n)}
+              </Text>
+            </Box>
+          ))}
         </Box>
+        {m.spacers >= 1 && <Box key="spacer:heading" height={1} />}
         <Text dimColor wrap="truncate-end">
           {columnHeader(cols, taskKind.length === 0 && reviewKind.length > 0 ? "review" : "task")}
         </Text>
@@ -1092,58 +1152,60 @@ export const register: Register = (on) => {
         )}
         {reviewKind.map(workerRows)}
         {hiddenNote !== "" && <Text dimColor>{hiddenNote}</Text>}
+        {m.spacers >= 2 && <Box key="spacer:frame" height={1} />}
         {selected !== undefined && (
           <Box flexDirection="column">
-            <Box key="titlebar" justifyContent="space-between">
-              <Box flexShrink={1}>
-                <Text wrap="truncate-end">
-                  <Text dimColor>{"─ "}</Text>
-                  <Text weight="bold">{selected.title}</Text>
-                </Text>
-              </Box>
-              {(link !== undefined || prLink !== undefined) && (
-                <Box flexShrink={0} marginLeft={2}>
-                  {prLink !== undefined && (
-                    <Link href={prLink.url}>
-                      <Text color="suggestion">
-                        {prLink.number === null ? "PR" : `PR #${prLink.number}`}
-                      </Text>
-                    </Link>
-                  )}
-                  {prLink !== undefined && link !== undefined && <Text dimColor>{" · "}</Text>}
-                  {link !== undefined && (
-                    <Link href={link}>
-                      <Text color="suggestion">ダッシュボード</Text>
-                    </Link>
-                  )}
+            {(view === undefined || !view.hasOutput) && (
+              <Box key="titlebar" justifyContent="space-between">
+                <Box flexShrink={1}>
+                  <Text wrap="truncate-end">
+                    <Text dimColor>{"─ "}</Text>
+                    <Text weight="bold">{selected.title}</Text>
+                  </Text>
                 </Box>
-              )}
-            </Box>
+                {linkText !== "" && (
+                  <Box flexShrink={0} marginLeft={2}>
+                    {links}
+                  </Box>
+                )}
+              </Box>
+            )}
             {view === undefined && <Text dimColor>まだ取得していません。</Text>}
             {view !== undefined && !view.hasOutput && (
               <Text dimColor>このサーバーは出力に対応していません。</Text>
             )}
             {view !== undefined && view.hasOutput && (
               <Box
+                key="frame"
                 flexDirection="column"
-                borderStyle="round"
-                borderColor={
-                  isTerminal(selected.status) ? statusColor(selected.status) : "suggestion"
-                }
+                marginLeft={2}
                 height={m.frameRows + m.windowRows}
               >
-                {!m.stacked && view.command !== null && (
-                  <Box>
-                    <Text mono wrap="truncate-end">{`$ ${view.command}`}</Text>
-                    {view.commandWhere !== undefined && (
-                      <Text dimColor wrap="truncate-end">{`  ${view.commandWhere} で`}</Text>
-                    )}
-                  </Box>
-                )}
+                <Box key="frame-top">
+                  <Text color={frameColor}>{"╭─ "}</Text>
+                  <Text weight="bold">{top.title}</Text>
+                  <Text color={frameColor}>
+                    {` ${"─".repeat(top.dashes)}${top.showLinks ? " " : "╮"}`}
+                  </Text>
+                  {top.showLinks && links}
+                  {top.showLinks && <Text color={frameColor}>{" ─╮"}</Text>}
+                </Box>
+                {!m.stacked &&
+                  view.command !== null &&
+                  side(
+                    "frame:cmd",
+                    <>
+                      <Text mono wrap="truncate-end">{`$ ${view.command}`}</Text>
+                      {view.commandWhere !== undefined && (
+                        <Text dimColor wrap="truncate-end">{`  ${view.commandWhere} で`}</Text>
+                      )}
+                    </>,
+                  )}
                 {shown.map((line, i) => {
                   const style = logStyle(line.kind);
-                  return (
-                    <Box key={`out:${start + i}`}>
+                  return side(
+                    `out:${start + i}`,
+                    <>
                       <Text
                         mono
                         wrap="truncate-end"
@@ -1156,12 +1218,14 @@ export const register: Register = (on) => {
                       {line.where !== undefined && (
                         <Text dimColor wrap="truncate-end">{`  ${line.where} で`}</Text>
                       )}
-                    </Box>
+                    </>,
                   );
                 })}
-                {m.lines.length === 0 && (m.stacked || view.command === null) && (
-                  <Text dimColor>まだ出力はありません。</Text>
-                )}
+                {isEmptyNote && side("frame:empty", <Text dimColor>まだ出力はありません。</Text>)}
+                {Array.from({ length: padRows }, (_, i) => side(`pad:${i}`, <Text> </Text>))}
+                <Text key="frame-bottom" color={frameColor}>
+                  {`╰${"─".repeat(innerW)}╯`}
+                </Text>
               </Box>
             )}
           </Box>

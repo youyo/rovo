@@ -138,7 +138,7 @@ test("isWaiting is true for INPUT_REQUIRED, or the waiting flag while not termin
   expect(isWaiting({ status: "COMPLETED", waiting: true })).toBe(false);
 });
 
-test("headingText counts working, waiting and completed workers; no cost", () => {
+test("headingText gives parts: working, completed, and waiting first only when there is one; no cost", () => {
   const list = [
     task(1),
     task(2),
@@ -146,9 +146,18 @@ test("headingText counts working, waiting and completed workers; no cost", () =>
     task(4, { status: "COMPLETED" }),
     task(5, { status: "FAILED" }),
   ];
-  expect(headingText(list)).toBe("作業中 2 · 質問待ち 1 · 完了 1");
-  expect(headingText([])).toBe("作業中 0 · 質問待ち 0 · 完了 0");
-  expect(headingText(list)).not.toMatch(/\$|USD|費用/);
+  expect(headingText(list)).toEqual([
+    { label: "質問待ち", n: 1, tone: "warning" },
+    { label: "作業中", n: 2, tone: "suggestion" },
+    { label: "完了", n: 1, tone: "success" },
+  ]);
+  // 質問待ちが 0 のときは出さない（位置も取らない）。0 の項目は残す。
+  expect(headingText([])).toEqual([
+    { label: "作業中", n: 0, tone: "suggestion" },
+    { label: "完了", n: 0, tone: "success" },
+  ]);
+  const flat = JSON.stringify(headingText(list));
+  expect(flat).not.toMatch(/\$|USD|費用|·|rovo/);
 });
 
 test("rightText: tool and target while running, a result when done, a label when waiting", () => {

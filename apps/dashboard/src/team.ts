@@ -217,3 +217,48 @@ export function buildMonthCosts(data: OverviewDto): MonthCosts | null {
         : null,
   };
 }
+
+export type FlowDay = { date: string; completed: number; failed: number };
+
+export type Flow = {
+  /** 古い順に 14 日（欠けた日は 0） */
+  days: FlowDay[];
+  completed: number;
+  failed: number;
+  /** 失敗 /（完了 + 失敗）。BUDGET_EXCEEDED・CANCELLED は入れない。分母が 0 なら null */
+  rate: number | null;
+  /** 完了したタスクの所要の中央値（ミリ秒）。無ければ null */
+  medianMs: number | null;
+  /** rovo でマージした数（GitHub で直接マージした分は入らない） */
+  prMerged: number;
+  /** 権限の無いタスク（持ち主は無い）。0 件なら null */
+  hidden: { count: number; failed: number } | null;
+};
+
+export const FLOW_DAYS = 14;
+
+/** 成果の推移（直近 14 日・UTC）。日送りに関係なく flow.period の終わりまで。flow が無い古い応答は null */
+export function buildFlow(data: OverviewDto): Flow | null {
+  const flow = data.flow;
+  if (flow === undefined) return null;
+  const end = Date.parse(flow.period.end);
+  if (!Number.isFinite(end)) return null;
+  const byDate = new Map(flow.days.map((d) => [d.date, d]));
+  const days: FlowDay[] = [];
+  for (let i = FLOW_DAYS; i >= 1; i--) {
+    const date = new Date(end - i * 86_400_000).toISOString().slice(0, 10);
+    const d = byDate.get(date);
+    days.push({ date, completed: d?.completed ?? 0, failed: d?.failed ?? 0 });
+  }
+  const completed = days.reduce((a, d) => a + d.completed, 0);
+  const failed = days.reduce((a, d) => a + d.failed, 0);
+  return {
+    days,
+    completed,
+    failed,
+    rate: completed + failed === 0 ? null : failed / (completed + failed),
+    medianMs: flow.median_duration_ms,
+    prMerged: flow.pr_merged,
+    hidden: flow.hidden.count > 0 ? flow.hidden : null,
+  };
+}

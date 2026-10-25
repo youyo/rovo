@@ -363,10 +363,7 @@ describe("DirectoryDO.summarizeFlow（日ごとの成果の推移）", () => {
     );
     await d.upsertTask(ended("D", "FAILED", D(3), { started_at: D(3) - m(500) }), 1);
     await d.upsertTask(ended("E", "COMPLETED", D(3), { started_at: null }), 1);
-    await d.upsertTask(
-      ended("F", "COMPLETED", D(3), { pr_merged: true, kind: "review" }),
-      1,
-    );
+    await d.upsertTask(ended("F", "COMPLETED", D(3), { pr_merged: true, kind: "review" }), 1);
     const r = await d.summarizeFlow({ repoIds: [100], ...q });
     expect(r).toMatchObject({ ok: true, median_duration_ms: m(20), pr_merged: 1 });
     const none = await dir().summarizeFlow({ repoIds: [100], ...q });
@@ -380,7 +377,10 @@ describe("DirectoryDO.summarizeFlow（日ごとの成果の推移）", () => {
       ended("B", "FAILED", D(4), { owner_login: "ghost", repository_id: 200, pr_merged: true }),
       1,
     );
-    await d.upsertTask(ended("C", "COMPLETED", D(4), { owner_login: "ghost", repository_id: null }), 1);
+    await d.upsertTask(
+      ended("C", "COMPLETED", D(4), { owner_login: "ghost", repository_id: null }),
+      1,
+    );
     await d.upsertTask(ended("D", "COMPLETED", D(4), { repository_id: 200, kind: "review" }), 1);
     const r = await d.summarizeFlow({ repoIds: [100], ...q });
     expect(r).toMatchObject({

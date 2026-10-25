@@ -6,8 +6,10 @@ import { taskPath } from "./route";
 import { markKindOf, markLabel } from "./status";
 import { MarkSymbol, ShapeSymbol } from "./status-mark";
 import {
+  buildFlow,
   buildMonthCosts,
   buildTeamBoard,
+  type Flow,
   type MonthCostRow,
   type MonthCosts,
   type TeamPerson,
@@ -250,6 +252,91 @@ function MonthSection(props: { month: MonthCosts }) {
   );
 }
 
+const BAR_W = 14;
+const BAR_GAP = 6;
+const CHART_H = 60;
+const FAIL_H = 10;
+
+function FlowChart(props: { flow: Flow }) {
+  const t = useT();
+  const { days } = props.flow;
+  const max = Math.max(1, ...days.map((d) => d.completed));
+  const w = days.length * (BAR_W + BAR_GAP) - BAR_GAP;
+  return (
+    <svg
+      className="tb-flow-chart"
+      viewBox={`0 0 ${w} ${CHART_H + FAIL_H + 2}`}
+      role="img"
+      aria-label={t("board.flowChart")}
+    >
+      {days.map((d, i) => {
+        const x = i * (BAR_W + BAR_GAP);
+        const h = (d.completed / max) * CHART_H;
+        return (
+          <g key={d.date} data-day={d.date} data-completed={d.completed} data-failed={d.failed}>
+            <title>
+              {t("board.flowDay", { date: d.date, done: d.completed, failed: d.failed })}
+            </title>
+            <rect className="tb-flow-bar" x={x} y={CHART_H - h} width={BAR_W} height={h} />
+            {d.failed > 0 ? (
+              <path
+                className="tb-flow-fail"
+                data-fail-mark=""
+                d={`M${x + 2} ${CHART_H + 2} L${x + BAR_W - 2} ${CHART_H + FAIL_H} M${x + BAR_W - 2} ${CHART_H + 2} L${x + 2} ${CHART_H + FAIL_H}`}
+              />
+            ) : null}
+          </g>
+        );
+      })}
+      <line className="tb-flow-base" x1="0" y1={CHART_H} x2={w} y2={CHART_H} />
+    </svg>
+  );
+}
+
+function FlowSection(props: { flow: Flow }) {
+  const t = useT();
+  const f = props.flow;
+  const none = "–";
+  return (
+    <section className="tb-section" aria-labelledby="tb-flow-h" data-flow="">
+      <h2 id="tb-flow-h">{t("board.titleFlow")}</h2>
+      <div className="tb-flow-body">
+        <FlowChart flow={f} />
+        <p className="soft tb-flow-legend">
+          <ShapeSymbol shape="check" tone="ok" /> {t("board.flowDone")}{" "}
+          <ShapeSymbol shape="cross" tone="bad" /> {t("board.flowFailed")}
+        </p>
+        <dl className="tb-flow-stats">
+          <div data-flow-rate="">
+            <dt>{t("board.flowRate")}</dt>
+            <dd>
+              {f.rate === null
+                ? none
+                : `${Math.round(f.rate * 100)}% (${f.failed} / ${f.completed + f.failed})`}
+            </dd>
+          </div>
+          <div data-flow-median="">
+            <dt>{t("board.flowMedian")}</dt>
+            <dd>{f.medianMs === null ? none : formatDuration(f.medianMs, t)}</dd>
+          </div>
+          <div data-flow-merged="">
+            <dt>{t("board.flowMerged")}</dt>
+            <dd>{formatCount(f.prMerged, t)}</dd>
+          </div>
+        </dl>
+      </div>
+      {f.hidden === null ? null : (
+        <p className="soft tb-flow-hidden" data-flow-hidden="">
+          {t("board.flowHidden", { n: f.hidden.count, failed: f.hidden.failed })}
+        </p>
+      )}
+      <p className="soft tb-flow-note" data-flow-note="">
+        {t("board.flowNote")}
+      </p>
+    </section>
+  );
+}
+
 /**
  * チームボード（チームで何も選んでいないときの中央）。読み取り専用。
  * 「いま」: 1 行 1 人（並びは帯と同じ）。走行・質問待ちのタスクを行の下に最大 3 件。タスクを押すとコンソールになる。
@@ -267,6 +354,7 @@ export function TeamBoard(props: {
   const t = useT();
   const board = buildTeamBoard(props.data, props.waiting, props.isToday);
   const month = buildMonthCosts(props.data);
+  const flow = buildFlow(props.data);
   const generated = Date.parse(props.data.generated_at);
   const at = Number.isFinite(generated) ? generated : Date.now();
   return (
@@ -299,6 +387,7 @@ export function TeamBoard(props: {
         )}
       </section>
       {month === null ? null : <MonthSection month={month} />}
+      {flow === null ? null : <FlowSection flow={flow} />}
     </section>
   );
 }

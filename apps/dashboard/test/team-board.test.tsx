@@ -267,6 +267,7 @@ describe("チームボード: 今月の費用（UTC・人ごと）", () => {
 describe("チームボード: 成果の推移（直近 14 日）", () => {
   const withFlow = (flow: Partial<NonNullable<OverviewDto["flow"]>> = {}): OverviewDto => ({
     ...overviewFixture,
+    month: { ...overviewFixture.month, by_owner: [] },
     flow: {
       period: { start: "2026-10-08T00:00:00.000Z", end: "2026-10-22T00:00:00.000Z" },
       days: [

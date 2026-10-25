@@ -369,7 +369,11 @@ describe("buildFlow（成果の推移の整形）", () => {
   it("完了も失敗も 0 件なら失敗率は null、少数でも件数をそのまま持つ", () => {
     expect(buildFlow(flowOf({}))).toMatchObject({ completed: 0, failed: 0, rate: null });
     expect(
-      buildFlow(flowOf({ days: [{ date: "2026-10-21", completed: 0, failed: 1, budget_exceeded: 0, cancelled: 0 }] })),
+      buildFlow(
+        flowOf({
+          days: [{ date: "2026-10-21", completed: 0, failed: 1, budget_exceeded: 0, cancelled: 0 }],
+        }),
+      ),
     ).toMatchObject({ completed: 0, failed: 1, rate: 1 });
   });
 

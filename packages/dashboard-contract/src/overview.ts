@@ -183,5 +183,32 @@ export const OverviewDtoSchema = z.strictObject({
     hidden: HiddenTasksDtoSchema.optional(),
   }),
   models: z.array(ModelCostDtoSchema).max(LIMITS.models),
+  /**
+   * 成果の推移（直近 14 日・UTC。日送りに関係なく今日まで）。見えるリポジトリの分だけで、見えない分は hidden にまとめる。
+   * 古い gateway・集計が取れないときは無い。
+   */
+  flow: z
+    .strictObject({
+      period: periodSchema,
+      /** データのある日だけ（欠けた日は 0 として扱う） */
+      days: z
+        .array(
+          z.strictObject({
+            date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+            completed: countSchema,
+            failed: countSchema,
+            budget_exceeded: countSchema,
+            cancelled: countSchema,
+          }),
+        )
+        .max(31),
+      /** 完了したタスクの所要の中央値（ミリ秒）。完了が無ければ null */
+      median_duration_ms: countSchema.nullable(),
+      /** rovo でマージした数（GitHub で直接マージした分は入らない） */
+      pr_merged: countSchema,
+      /** 権限の無いタスクの終了件数と失敗の数（個別の情報は無い） */
+      hidden: z.strictObject({ count: countSchema, failed: countSchema }),
+    })
+    .optional(),
 });
 export type OverviewDto = z.infer<typeof OverviewDtoSchema>;

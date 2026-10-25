@@ -1878,7 +1878,6 @@ describe("overview: 人ごとの今月の費用（month.by_owner / month.hidden�
 });
 
 describe("overview: 成果の推移（flow）", () => {
-  const dir = () => workerEnv.DIRECTORY_DO.getByName(DIRECTORY_NAME);
   const parse = async (v: Viewer) => OverviewDtoSchema.parse((await api(v, overviewPath())).json());
   const endedAt = Date.now() - 1000;
   const flowIdx = (over: Partial<TaskIndexSnapshot>): Partial<TaskIndexSnapshot> => ({
@@ -1946,8 +1945,11 @@ describe("overview: 成果の推移（flow）", () => {
         new Proxy(real.getByName(n), {
           get(t, p) {
             if (p === "summarizeFlow") return async () => ({ ok: false, code: "invalid_input" });
-            const x = Reflect.get(t, p) as unknown;
-            return typeof x === "function" ? x.bind(t) : x;
+            if (p === "then") return undefined;
+            return (...args: unknown[]) =>
+              (t as unknown as Record<string, (...a: unknown[]) => unknown>)[p as string]?.(
+                ...args,
+              );
           },
         }),
     };

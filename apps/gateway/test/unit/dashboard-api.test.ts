@@ -9,8 +9,13 @@ import {
   TaskEventsPageDtoSchema,
   WaitingDtoSchema,
 } from "@rovo/dashboard-contract";
-import { describe, expect, it, vi } from "vitest";
-import { readApiTuning, snapshotToVisibleTask } from "../../src/dashboard/api";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  LEDGER_CACHE_TTL_MS,
+  readApiTuning,
+  resetLedgerCache,
+  snapshotToVisibleTask,
+} from "../../src/dashboard/api";
 import { handleDashboard } from "../../src/dashboard/serve";
 import { SESSION_COOKIE, sealSession } from "../../src/dashboard/session";
 import { DIRECTORY_NAME, type TaskIndexSnapshot } from "../../src/directory/types";
@@ -20,6 +25,9 @@ import { createTask, runToCompleted } from "./pr-helpers";
 // ダッシュボードの読み取り API（docs/specs/dashboard.md M5b）。認可の最後の関門なので、
 // 「見えないタスクが応答のどこにも出ない」「失敗は fail closed」を、実 TaskDO・実 DirectoryDO で確かめる。
 // UserDO だけは偽物（視聴者の見えるリポジトリの集合・予算・許可ルールを、テストが自由に差し込む）。
+
+// 他の利用者の台帳のキャッシュ（モジュールの状態）がテスト間で残らないようにする
+beforeEach(() => resetLedgerCache());
 
 const BASE = workerEnv.PUBLIC_BASE_URL;
 const ENC_KEY = (workerEnv as unknown as { TOKEN_ENC_KEY: string }).TOKEN_ENC_KEY;
@@ -46,6 +54,8 @@ interface Viewer {
     | ((refs: { repository: string; number: number }[]) => unknown | Promise<unknown>);
   /** 他の利用者の台帳（キーは uid）。無い利用者は 0。"throw" なら dashboardMonthSpent が例外になる */
   ledgers: Record<number, { spent_usd: number; estimated_usd: number } | "throw">;
+  /** 他の利用者の dashboardMonthSpent の呼び出し（uid）。閲覧者本人の分は数えない */
+  ledgerCalls: number[];
 }
 
 let nextUid = 70_000_000 + Math.floor(Math.random() * 1_000_000);
@@ -76,6 +86,7 @@ function newViewer(visibleIds: number[] = []): Viewer {
     pullCalls: [],
     pullStates: {},
     ledgers: {},
+    ledgerCalls: [],
   };
 }
 
@@ -86,6 +97,7 @@ function envFor(viewer: Viewer): Env {
         // 閲覧者以外の UserDO に許すのは、全員分の台帳の集計（dashboardMonthSpent）だけ
         return {
           async dashboardMonthSpent() {
+            viewer.ledgerCalls.push(Number(name));
             const l = viewer.ledgers[Number(name)];
             if (l === "throw") throw new Error("ledger down");
             return {
@@ -435,6 +447,7 @@ describe("overview の consult（D9。M3b の索引）", () => {
     await seedConsult({ model, cost_micro: 1_000_000, estimated: true });
     // seedConsult の所有者（owner_id: 1）の台帳に、consult の確定分（実費 3 + 見積もり 1）が載る
     v.ledgers[1] = { spent_usd: 4, estimated_usd: 1 };
+    resetLedgerCache(); // 台帳の値は 60 秒キャッシュされるので、変えたあとは捨てる
     const after = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
     const m = after.models.find((x) => x.model === model);
     expect(m).toEqual({ model, task_cost_usd: 0, consult_cost_usd: 4 });
@@ -467,6 +480,74 @@ describe("overview の consult（D9。M3b の索引）", () => {
     expect(soloDto.month.budget_actual.spent_usd).toBeGreaterThanOrEqual(
       solo.budget.spent_usd as number,
     );
+  });
+
+  describe("全員の台帳の合計のキャッシュ（他の利用者の分だけ。閲覧者本人は毎回）", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      resetLedgerCache();
+    });
+    const monthEnd = () => {
+      const d = new Date();
+      return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+    };
+    const spentOf = async (v: Viewer) =>
+      OverviewDtoSchema.parse((await api(v, overviewPath())).json()).month.budget_actual.spent_usd;
+
+    it("ポーリングのたびに他の利用者の UserDO を呼ばない（TTL 内は 1 回）。閲覧者本人の分は毎回の budget を使う", async () => {
+      resetLedgerCache();
+      const base = monthEnd() - 10 * 24 * HOUR;
+      vi.spyOn(Date, "now").mockReturnValue(base);
+      const v = newViewer([newRepoId()]);
+      const other = v.uid + 7000;
+      v.ledgers[other] = { spent_usd: 7, estimated_usd: 2 };
+      await seedConsult({ owner_id: other, at: base });
+      expect(await spentOf(v)).toBeCloseTo(19.5);
+      expect(v.ledgerCalls.filter((u) => u === other)).toHaveLength(1);
+      // 5 秒後: キャッシュ。他の利用者の台帳が変わっても見えない。本人の budget の変化は即座に出る
+      v.ledgers[other] = { spent_usd: 100, estimated_usd: 0 };
+      v.budget.spent_usd = 20;
+      vi.spyOn(Date, "now").mockReturnValue(base + 5_000);
+      expect(await spentOf(v)).toBeCloseTo(27);
+      expect(v.ledgerCalls.filter((u) => u === other)).toHaveLength(1);
+      // TTL を過ぎたら取り直す
+      vi.spyOn(Date, "now").mockReturnValue(base + LEDGER_CACHE_TTL_MS + 1);
+      expect(await spentOf(v)).toBeCloseTo(120);
+      expect(v.ledgerCalls.filter((u) => u === other)).toHaveLength(2);
+    });
+
+    it("TTL は 60 秒", () => {
+      expect(LEDGER_CACHE_TTL_MS).toBe(60_000);
+    });
+
+    it("月が変わったらキャッシュを捨てる（TTL 内でも）", async () => {
+      resetLedgerCache();
+      const end = monthEnd();
+      vi.spyOn(Date, "now").mockReturnValue(end - 10_000);
+      const v = newViewer([newRepoId()]);
+      const other = v.uid + 7100;
+      v.ledgers[other] = { spent_usd: 5, estimated_usd: 0 };
+      await seedConsult({ owner_id: other, at: end - 10_000 });
+      await spentOf(v);
+      expect(v.ledgerCalls.filter((u) => u === other)).toHaveLength(1);
+      // 20 秒後 = 翌月。TTL（60 秒）内だが取り直す。翌月の索引にはまだ所有者がいないので、呼ばれなくなってもよい
+      v.ledgers[other] = { spent_usd: 6, estimated_usd: 0 };
+      await seedConsult({ owner_id: other, at: end + 5_000 });
+      vi.spyOn(Date, "now").mockReturnValue(end + 10_000);
+      await spentOf(v);
+      expect(v.ledgerCalls.filter((u) => u === other)).toHaveLength(2);
+    });
+
+    it("読み出しに失敗した結果はキャッシュしない（次のポーリングで取り直す）", async () => {
+      resetLedgerCache();
+      const v = newViewer([newRepoId()]);
+      const other = v.uid + 7200;
+      v.ledgers[other] = "throw";
+      await seedConsult({ owner_id: other });
+      await spentOf(v);
+      v.ledgers[other] = { spent_usd: 4, estimated_usd: 0 };
+      expect(await spentOf(v)).toBeCloseTo(16.5);
+    });
   });
 
   it("台帳を読めない利用者がいても overview は落ちず、索引の費用（タスク + consult）に戻る", async () => {

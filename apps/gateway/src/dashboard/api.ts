@@ -419,7 +419,8 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
     spent_micro: totalMicro + consultSummary.cost_micro,
     estimated_micro: consultSummary.estimated_micro,
   };
-  const actual = (await sumLedgers(env, session.uid, budgetRaw, owners)) ?? indexActual;
+  const actual =
+    (await sumLedgers(env, session.uid, budgetRaw, owners, at, monthStart)) ?? indexActual;
 
   const dto: OverviewDto = {
     generated_at: iso(at),
@@ -451,8 +452,20 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
   return validated(OverviewDtoSchema, "OverviewDto", dto);
 }
 
+/** 他の利用者の台帳の値を使い回す時間。overview は 5 秒ごとにポーリングされるので、毎回 UserDO を呼ばない */
+export const LEDGER_CACHE_TTL_MS = 60_000;
+/** 利用者ごとの台帳の今月の値（この isolate のメモリだけ。月が変わったら捨てる）。閲覧者本人の分は入れない */
+const ledgerCache = new Map<
+  number,
+  { month: number; expires: number; spent_micro: number; estimated_micro: number }
+>();
+export function resetLedgerCache(): void {
+  ledgerCache.clear();
+}
+
 /**
- * 全員の実績: 今月に動きのあった利用者それぞれの台帳（UserDO）の使用済みを合計する。閲覧者本人の分は取得済みの budgetRaw を使う。
+ * 全員の実績: 今月に動きのあった利用者それぞれの台帳（UserDO）の使用済みを合計する。閲覧者本人の分は取得済みの budgetRaw を
+ * 毎回使う（キャッシュしない）。他の利用者の分は LEDGER_CACHE_TTL_MS だけ使い回す（月が変わったら捨てる。失敗はキャッシュしない）。
  * 利用者が上限を超える・索引が読めない・どれかの台帳が読めないときは null（呼び出し側が索引の費用に戻す。画面を落とさない）。
  */
 async function sumLedgers(
@@ -460,12 +473,23 @@ async function sumLedgers(
   viewerUid: number,
   viewerBudget: { spent_usd: number; estimated_usd: number },
   owners: ListOwnerIdsResult,
+  at: number,
+  month: number,
 ): Promise<{ spent_micro: number; estimated_micro: number } | null> {
   if (!owners.ok || owners.truncated) return null;
+  for (const [uid, e] of ledgerCache)
+    if (e.month !== month || e.expires <= at) ledgerCache.delete(uid);
   const others = owners.ids.filter((id) => id !== viewerUid);
   try {
     const ledgers = await Promise.all(
-      others.map((id) => env.USER_DO.getByName(String(id)).dashboardMonthSpent()),
+      others.map(async (id) => {
+        const hit = ledgerCache.get(id);
+        if (hit) return hit;
+        const l = await env.USER_DO.getByName(String(id)).dashboardMonthSpent();
+        const entry = { month, expires: at + LEDGER_CACHE_TTL_MS, ...l };
+        ledgerCache.set(id, entry);
+        return entry;
+      }),
     );
     let spent = Math.round(viewerBudget.spent_usd * 1_000_000);
     let estimated = Math.round(viewerBudget.estimated_usd * 1_000_000);

@@ -1217,12 +1217,11 @@ export class UserDO extends DurableObject<Env> {
   /**
    * ダッシュボードの「全員の実績」用。今月の台帳の使用済み（spent）と、そのうち見積もりで確定した分（estimated）をマイクロドルで返す。
    * budgetStatus と同じ集計（タスク + consult。予約中の分は含めない）なので、「あなたの使った額」と同じ定義でそろう。
+   * 他の利用者の閲覧者のポーリングから呼ばれるので、**読み取りだけ**（期限切れの consult を閉じず、alarm も立てない）。
+   * 期限切れで閉じていない consult の予約は spent に入らない（本人が次に budgetStatus を呼んだときに閉じて入る）。
    */
   dashboardMonthSpent(): { spent_micro: number; estimated_micro: number } {
-    const at = this.now();
-    this.ctx.storage.transactionSync(() => this.closeStaleConsults(at));
-    this.requestConsultAlarm();
-    const { spent, estimated } = this.spentAndReservedMicro(monthOf(at));
+    const { spent, estimated } = this.spentAndReservedMicro(monthOf(this.now()));
     return { spent_micro: spent, estimated_micro: estimated };
   }
 

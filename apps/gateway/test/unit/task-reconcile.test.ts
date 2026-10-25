@@ -5,6 +5,10 @@ import { FP, fakeAgent, newUserId, sampleInput, taskStub, userStub } from "./hel
 const MIN = 60_000;
 type Result = { state: "confirmed"; micro: number } | { state: "pending" };
 
+const ENV_KEYS = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "AI_GATEWAY_ID"] as const;
+const saved = new Map<string, string | undefined>();
+let restore: (() => void) | undefined;
+
 async function finished(configured: boolean) {
   const uid = newUserId();
   const user = userStub(uid);
@@ -26,13 +30,14 @@ async function finished(configured: boolean) {
       gatewayCost: (id: string, n: number) => Promise<Result>;
     };
     t.now = () => clock.t;
-    if (configured) {
-      t.env.CLOUDFLARE_API_TOKEN = "token-example";
-      t.env.CLOUDFLARE_ACCOUNT_ID = "acct-example";
-      t.env.AI_GATEWAY_ID = "gw-example";
-    } else {
-      t.env.CLOUDFLARE_API_TOKEN = undefined;
-    }
+    // env は他のテストと共有されるので、元の値を覚えて afterEach で必ず戻す
+    for (const k of ENV_KEYS) saved.set(k, t.env[k]);
+    t.env.CLOUDFLARE_API_TOKEN = configured ? "token-example" : undefined;
+    t.env.CLOUDFLARE_ACCOUNT_ID = configured ? "acct-example" : undefined;
+    t.env.AI_GATEWAY_ID = configured ? "gw-example" : undefined;
+    restore = () => {
+      for (const [k, v] of saved) t.env[k] = v;
+    };
     t.gatewayCost = async (id, n) => {
       calls.push([id, n]);
       return results.shift() ?? { state: "pending" };
@@ -54,7 +59,12 @@ const budget = (user: ReturnType<typeof userStub>, id: string) =>
 const alarm = (stub: ReturnType<typeof taskStub>) =>
   runInDurableObject(stub, (_i, s) => s.storage.getAlarm());
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(async () => {
+  vi.restoreAllMocks();
+  restore?.();
+  restore = undefined;
+  saved.clear();
+});
 
 describe("TaskDO: 終端後の費用の確定（AI Gateway のログ）", () => {
   it("2 分後に確定できれば UserDO を gateway の額で 1 回だけ上書きして終わる", async () => {

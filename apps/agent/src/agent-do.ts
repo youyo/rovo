@@ -3598,7 +3598,8 @@ export class AgentDO extends DurableObject<Env> {
       outcome.ok &&
       outcome.verdict.mustFix.length > 0 &&
       spec?.workerReview?.fixRounds === 1 &&
-      this.store.meta<StoredReviewFix>("review_fix") === undefined;
+      this.store.meta<StoredReviewFix>("review_fix") === undefined &&
+      this.stopIntents().length === 0;
     const stored: StoredReview = {
       result: {
         stage: outcome.ok ? "done" : "skipped",
@@ -4222,8 +4223,9 @@ export class AgentDO extends DurableObject<Env> {
           }))
         : outcome.results.map((r) => ({ ...r, output: clampCommandOutput(r.output) }));
       final = {
-        // ここに来るのは verification_commands が通った（または無い）ときだけ
-        verificationCommandsPassed: true,
+        // ここに来るのは verification_commands が通ったか、無いときだけ。無いときは結果の verification.verified と同じく false
+        verificationCommandsPassed:
+          this.store.meta<VerificationSummary>("verification")?.verified === true,
         reviewCommandsPassed: results.every(commandPassed),
         commands: results,
         commandsUnavailable: outcome.unavailable,

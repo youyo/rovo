@@ -169,7 +169,7 @@ export interface ReviewResultDto {
 
 /** worker_review の修正のあとの再実行の結果（ReviewResultDto の final） */
 export interface ReviewFinalDto {
-  /** 修正の commit で verification_commands が通った（通らなければ完了にならないので、ここに来るときは常に true） */
+  /** 修正の commit で verification_commands が通った（通らなければ完了にならない。verification_commands が無いときは、結果の verification.verified と同じく false） */
   verificationCommandsPassed: boolean;
   /** 修正の commit で review_commands が全部通った（空なら true） */
   reviewCommandsPassed: boolean;

@@ -628,6 +628,22 @@ describe("worker_review: 修正の回（review_fix_rounds: 1）", () => {
     expect(result.verification).toMatchObject({ verified: false, attempts: 4 });
   });
 
+  it("verification_commands が無いときの final.verificationCommandsPassed は false（結果の verification.verified と同じ）", async () => {
+    const fx = await fixFixture("wrf-no-verify", [{ text: fixVerdict() }], [report(), report()]);
+    // 検証コマンドが無いと、HEAD は report_completion ごとに 1 回だけ読む
+    fx.revParse.length = 0;
+    fx.revParse.push(C, ...Array.from({ length: 30 }, () => D));
+    await fx.stub.start(fixSpec("wrf-no-verify", { verificationCommands: [] }));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const { result, review } = await resultOf(fx);
+    expect(result.verification.verified).toBe(false);
+    expect(review?.fixApplied).toBe(D);
+    expect(review?.final).toMatchObject({
+      verificationCommandsPassed: false,
+      reviewCommandsPassed: true,
+    });
+  });
+
   it("修正の commit が無いまま完了を申告したら COMPLETED で review_must_fix_unaddressed。再実行はしない", async () => {
     const fx = await fixFixture("wrf-noop", [{ text: fixVerdict() }], [report(), report()], C);
     await fx.stub.start(fixSpec("wrf-noop"));

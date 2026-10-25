@@ -1215,6 +1215,18 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
+   * ダッシュボードの「全員の実績」用。今月の台帳の使用済み（spent）と、そのうち見積もりで確定した分（estimated）をマイクロドルで返す。
+   * budgetStatus と同じ集計（タスク + consult。予約中の分は含めない）なので、「あなたの使った額」と同じ定義でそろう。
+   */
+  dashboardMonthSpent(): { spent_micro: number; estimated_micro: number } {
+    const at = this.now();
+    this.ctx.storage.transactionSync(() => this.closeStaleConsults(at));
+    this.requestConsultAlarm();
+    const { spent, estimated } = this.spentAndReservedMicro(monthOf(at));
+    return { spent_micro: spent, estimated_micro: estimated };
+  }
+
+  /**
    * consult の予約。同時実行の枠は使わず、月の枠から CONSULT_BUDGET_USD を予約する（task_budget に consult の行を足す）。
    * 足りなければ budget_exceeded。同じ consultId の再送は冪等。
    * 精算されないまま CONSULT_STALE_AFTER_MS を過ぎた consult の予約は、予約額で閉じる（実費が分からないので、

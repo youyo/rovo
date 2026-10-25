@@ -55,8 +55,8 @@ export type CloudflareResult =
   | { kind: "not_found" }
   | { kind: "error" };
 
-/** 期間は 24 時間で固定（切り替えは作らない）。 */
-export const CLOUDFLARE_URL = "/dashboard/api/cloudflare?range=24h";
+/** 期間は今月（UTC の月初から今まで）で固定（切り替えは作らない）。 */
+export const CLOUDFLARE_URL = "/dashboard/api/cloudflare?range=month";
 
 function looksLikeCloudflare(b: unknown): b is CloudflareSummaryDto {
   if (typeof b !== "object" || b === null) return false;

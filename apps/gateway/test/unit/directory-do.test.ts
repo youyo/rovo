@@ -245,3 +245,36 @@ describe("DirectoryDO.visibleModels（見えるタスクが使ったモデルの
     });
   });
 });
+
+describe("DirectoryDO.listOwnerIds（月に動きのあった利用者。全員分の台帳を集める宛先）", () => {
+  it("期間内のタスク・consult の所有者を重複なく返す。期間外だけの所有者は含めない", async () => {
+    const d = dir();
+    await d.upsertTask(snap("A", { owner_id: 11 }), 1);
+    await d.upsertTask(snap("B", { owner_id: 11 }), 1);
+    await d.upsertTask(snap("C", { owner_id: 12 }), 1);
+    await d.upsertTask(snap("D", { owner_id: 13, created_at: T0 - 40 * 24 * HOUR }), 1);
+    await d.upsertConsult(
+      {
+        consult_id: `consult-${"E".padStart(26, "0")}`,
+        owner_id: 14,
+        owner_login: "dave",
+        at: T0,
+        model: "m",
+        cost_micro: 1,
+        estimated: false,
+      },
+      1,
+    );
+    const r = await d.listOwnerIds({ from: T0 - HOUR, to: T0 + 31 * 24 * HOUR });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect([...r.ids].sort((a, b) => a - b)).toEqual([11, 12, 14]);
+  });
+
+  it("不正な期間は invalid_input", async () => {
+    expect(await dir().listOwnerIds({ from: Number.NaN, to: 1 })).toEqual({
+      ok: false,
+      code: "invalid_input",
+    });
+  });
+});

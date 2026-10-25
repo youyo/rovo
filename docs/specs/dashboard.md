@@ -55,7 +55,7 @@
 - 文字: 本文は IBM Plex Sans JP、ログ・コマンド・数字は JetBrains Mono（2026-10-23 の「A: Actions 型」の改装。run → job → step の CI コンソールの形に、見た目と並びだけを変えた。表示する項目・API・契約は変えない）。ライトは背景 #f6f8fa・カード #fff、ダークは GitHub のダーク（#0d1117 / #161b22）。ログの箱はライトでも暗い面。
 - 凡例・予算の欄・状態の印（画面の言葉と形の見直し。新しい機能・API・契約の変更は無い）:
   - 凡例と用語（初めて見た人にも分かる言葉）: 凡例・タイムラインの点の `title` と `aria-label` では、閉じた PR を「閉じた（マージせず）」、consult を「consult（モデルに意見を聞いた）」と書く。レーンの見出し（読み上げ）は「N 件、consult（モデルに意見を聞いた） M 回」。レール・コンソールの見出し・バッジなど狭い場所の label は短いまま（「閉じた」など）で、長い説明は `title` に出す（`MARKS` の `description`。無ければ label がそのまま説明）。モデル別の費用の「相談」は変えない。
-  - 予算の欄は 1 つ: 「あなたの今月の予算」と「全員の今月の実績」を、見出し「今月の予算と実績」（UTC の月）の 1 つの欄にまとめ、定義リスト（`dl`）の行を「あなたの使った額・あなたの残り・あなたの上限・全員の実績」の順に並べる。上限は契約の `monthly_budget_usd`。無い古い応答だけ、使った額 + 予約 + 残りの逆算（残りが 0 で求められないときは「不明」）。「あと N 件始められます」と、権限の無いリポジトリのタスクの件数の注記は残す。自分と全員は足し合わせず、1 タスクの予約額も出さない（D8）。幅 360px でも崩れないよう、行の名前は折り返し、値（金額）は折り返さず右にそろえる。色・余白・書体は既存のトークンだけ。モデル別の費用と Cloudflare の欄は変えない。
+  - 予算の欄は 1 つ: 「あなたの今月の予算」と「全員の今月の実績」を、見出し「今月の予算と実績」（UTC の月）の 1 つの欄にまとめ、定義リスト（`dl`）の行を「あなたの使った額・あなたの残り・あなたの上限・全員の実績」の順に並べる。上限は契約の `monthly_budget_usd`。無い古い応答だけ、使った額 + 予約 + 残りの逆算（残りが 0 で求められないときは「不明」）。「あと N 件始められます」と、権限の無いリポジトリのタスクの件数の注記は残す。自分と全員は足し合わせず、1 タスクの予約額も出さない（D8）。「全員の実績」は「あなたの使った額」と同じ定義（各利用者の台帳の今月の使用済み = タスク + consult、見積もり確定分を含む）の全員分の合計で、今月に動きのあった利用者（索引から引く）の台帳を gateway が集める（読めないときは索引の費用に戻す）。幅 360px でも崩れないよう、行の名前は折り返し、値（金額）は折り返さず右にそろえる。色・余白・書体は既存のトークンだけ。モデル別の費用と Cloudflare の欄は変えない。
   - 状態の印は形でも見分ける（GitHub Actions の印。2026-10-23）: レール・コンソールの見出し・バッジ・凡例・段階の箱・ステップの行の印は SVG の記号で、意味が同じ状態は同じ形にする。成功（マージ済み・完了）=緑の丸に ✓、失敗（失敗・予算超過）=赤の丸に ✕、動いている（実行中・検証中・復旧中）=黄の回る輪、レビュー待ち・PR あり=青の丸に ●、閉じた・キャンセル=灰の丸に –、準備中・未着手=点線の輪、入力待ち=黄の丸に ！。色だけに頼らず、形と隣の文字（label）で区別する。回る輪は `prefers-reduced-motion` では止めて破線の輪にする。タイムラインの棒は従来どおり色・塗り・縁の形（棒は (色, 塗り, 縁) が全ての状態で違う）。
 - 避けるもの: SaaS カード・影・グラデーション、クリーム＋テラコッタ、黒＋ネオン、全部大文字のラベル、「·」区切り、矢印付きリンク、**色だけの区別**（状態は形・文字でも区別する。アクセシビリティの受入条件にする）。
 
@@ -319,7 +319,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 | C | 別の専用トークン（Analytics Read）と別の secret を足す | 権限が分かれる | secret と手順が増える。**要件に反する**。却下 |
 
 - **推奨: B**（fail-soft つき）。トークンに権限が無い・API が失敗した項目は、画面に「取得できない（権限を確認）」と出し、**画面全体は壊さない**。権限が不足でも A の範囲が動くので、既存の環境は apply までの間 A と同じ表示になる。
-- サーバー側の固定: Worker 名（`rovo.config.json` の `workerNames` から来る値を `vars` に足す）・container application・gateway id を**サーバー側に固定した集計 DTO**だけを返す（クライアントから GraphQL・ID・期間の式を受け取らない。期間は `1h / 24h / 7d` の列挙だけ）。AI Gateway の logs の prompt / body は取らない。credit balance は残高の数値だけ。
+- サーバー側の固定: Worker 名（`rovo.config.json` の `workerNames` から来る値を `vars` に足す）・container application・gateway id を**サーバー側に固定した集計 DTO**だけを返す（クライアントから GraphQL・ID・期間の式を受け取らない。期間は `1h / 24h / 7d / month`（month = UTC の月初から今まで。既定）の列挙だけ）。AI Gateway の logs の prompt / body は取らない。credit balance は残高の数値だけ。
 - 偽 Cloudflare: `CLOUDFLARE_API_BASE`（`env.d.ts`。ENVIRONMENT=test のときだけ有効）を GraphQL にも使う。`FAKE_CLOUDFLARE_TOKEN` を持つ偽サーバーが既にある（`apps/gateway/test/fake-github/server.ts`）。GraphQL のエンドポイントと、残高の API を足す。
 - 「Cloudflare（開くリンク）」は、アカウント ID を含む URL をクライアントに渡すことになる（`CLOUDFLARE_ACCOUNT_ID` は公開しない値）。**閲覧者に見せてよい値か**を確かめる（未決事項。推奨: ダッシュボードにログインできる人はデプロイ側と同じ組織なので許容。ただし公開リポジトリのコード・ログには出さない）。
 
@@ -327,7 +327,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 **追加（2026-10-22）: 推定の金額（`cost_estimate`）。** 金額が出るのが AI Gateway の費用とクレジット残高だけだったので、ほかの使用量にも推定の金額を付ける（gateway と契約。画面の表示は別のタスク）。
 - 出し方: 項目ごとに **公開の単価 × 使用量**（`apps/gateway/src/dashboard/cloudflare-pricing.ts`。単価・出典 URL・確認日はこのファイルの定数だけ）。対象は Workers のリクエスト、コンテナの vCPU 秒とメモリ GiB 秒、Workers AI の Neuron。コンテナのディスク（GB 秒）は使用量を GraphQL で取っていないので、いまは推定が常に null。
-- **無料枠を引く前**（`basis: "before_free_tier"`、金額の項目名は `estimated_usd_before_free_tier`）: プランに含まれる分（Workers の月 1,000 万リクエスト、Containers の月 25 GiB 時間 / 375 vCPU 分 / 200 GB 時間、Workers AI の 1 日 1 万 Neurons）は引かず、月額（$5）も足さず、期間（`1h` / `24h` / `7d`）を月や日に按分もしない。請求額ではなく上限側の推定。ただし Workers の CPU 時間・Durable Objects・KV・D1・R2・ログ・コンテナの egress は対象外で、vCPU は割り当ての秒数（課金は実使用）なので上限側にずれる。
+- **無料枠を引く前**（`basis: "before_free_tier"`、金額の項目名は `estimated_usd_before_free_tier`）: プランに含まれる分（Workers の月 1,000 万リクエスト、Containers の月 25 GiB 時間 / 375 vCPU 分 / 200 GB 時間、Workers AI の 1 日 1 万 Neurons）は引かず、月額（$5）も足さず、期間（`1h` / `24h` / `7d` / `month`）を月や日に按分もしない。請求額ではなく上限側の推定。ただし Workers の CPU 時間・Durable Objects・KV・D1・R2・ログ・コンテナの egress は対象外で、vCPU は割り当ての秒数（課金は実使用）なので上限側にずれる。
 - **合計**（`total_estimated_usd_before_free_tier`）は **Cloudflare の請求の推定**: Workers のリクエスト・コンテナの vCPU・メモリ・ディスク・Workers AI の取れた項目の和。**AI Gateway の費用は含めない**（下の注）。クレジット残高も含めない。取れない項目（forbidden / unavailable / not_configured / empty、ディスク）は推定を null にして合計に含めず、`excluded_items` に項目名を出し、1 つでもあれば `partial: true`。`excluded_items` と `partial` は Cloudflare の項目だけで判定する（AI Gateway が取れなくても partial にはならない）。1 つも取れなければ合計も null（0 USD と見せない）。
 - **AI Gateway の費用**（`items.ai_gateway.cost_usd`）は**別の項目**で、合計に含めない。AI Gateway の rovo の経路は **BYOK 専用**（`byok_only: true`）なので、ここに出るのは **モデルの費用**（Anthropic などに請求され、rovo の月の予算の「使った額」と同じお金）で、Cloudflare の請求ではない。ゲートウェイの Unified Billing のクレジットは、Web 検索などクレジットで払う分にだけ使われ、BYOK のモデル費用は含まない。
 - **クレジット残高**（`credit_balance`）は Unified Billing のクレジットの残高で、Web 検索などクレジットで払う分の範囲（BYOK のモデル費用は含まない）。合計には含めない。

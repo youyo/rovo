@@ -18,7 +18,12 @@ import {
   WaitingDtoSchema,
 } from "@rovo/dashboard-contract";
 import type { z } from "zod";
-import { DIRECTORY_NAME, type TaskIndexRow, type TaskIndexSnapshot } from "../directory/types";
+import {
+  DIRECTORY_NAME,
+  type ListOwnerIdsResult,
+  type TaskIndexRow,
+  type TaskIndexSnapshot,
+} from "../directory/types";
 import { errorMessageForLog } from "../log-error";
 import type { DashboardDetailResult } from "../tasks/task-do";
 import { isTaskId } from "../tasks/ulid";
@@ -353,16 +358,18 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
   // 以降は互いに依存しないので並行に読む（認可の集合 visible を取ったあと）。PR の状態は見える行（rows）が決まってから
   const tasks = rows.map(snapshotToVisibleTask);
   const consultOwner = scope === "me" ? { ownerId: session.uid } : {};
-  const [summary, visibleModels, budgetRaw, consultList, consultSummary] = await Promise.all([
-    directory.summarize({ repoIds, from: monthStart, to: monthEnd }),
-    directory.visibleModels({ repoIds, from: monthStart, to: monthEnd }),
-    env.USER_DO.getByName(String(session.uid)).dashboardBudget(),
-    // consult（D9）: 対象のリポジトリが無いので、見えるリポジトリの集合では絞らない（全員分。「自分」では所有者で絞る）
-    directory.listConsults({ from, to, ...consultOwner, limit: LIMITS.overviewConsults }),
-    directory.summarizeConsults({ from: monthStart, to: monthEnd }),
-    // PR の状態: 見えるタスク（見える集合で絞った行）の分だけ、閲覧者のトークンで GitHub から取る（fail-soft）
-    attachPrStates(env, session.uid, tasks),
-  ]);
+  const [summary, visibleModels, budgetRaw, consultList, consultSummary, owners] =
+    await Promise.all([
+      directory.summarize({ repoIds, from: monthStart, to: monthEnd }),
+      directory.visibleModels({ repoIds, from: monthStart, to: monthEnd }),
+      env.USER_DO.getByName(String(session.uid)).dashboardBudget(),
+      // consult（D9）: 対象のリポジトリが無いので、見えるリポジトリの集合では絞らない（全員分。「自分」では所有者で絞る）
+      directory.listConsults({ from, to, ...consultOwner, limit: LIMITS.overviewConsults }),
+      directory.summarizeConsults({ from: monthStart, to: monthEnd }),
+      directory.listOwnerIds({ from: monthStart, to: monthEnd }),
+      // PR の状態: 見えるタスク（見える集合で絞った行）の分だけ、閲覧者のトークンで GitHub から取る（fail-soft）
+      attachPrStates(env, session.uid, tasks),
+    ]);
   if (!summary.ok || !visibleModels.ok) return errorJson(503, "unavailable");
   const budget = toBudgetMe(budgetRaw);
   if (!consultList.ok || !consultSummary.ok) return errorJson(503, "unavailable");
@@ -406,6 +413,13 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
     });
   }
   const totalMicro = summary.visible.cost_micro + summary.hidden.cost_micro;
+  // 予算の実績（全員分）= 各利用者の台帳の今月の使用済みの合計（「あなたの使った額」と同じ定義。タスク + consult、見積もり確定分を含む）。
+  // 台帳を集められないとき（利用者が多すぎる・読み出しの失敗）は、索引の費用（タスク + consult）に戻す
+  const indexActual = {
+    spent_micro: totalMicro + consultSummary.cost_micro,
+    estimated_micro: consultSummary.estimated_micro,
+  };
+  const actual = (await sumLedgers(env, session.uid, budgetRaw, owners)) ?? indexActual;
 
   const dto: OverviewDto = {
     generated_at: iso(at),
@@ -425,16 +439,44 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
     month: {
       period: { start: iso(monthStart), end: iso(monthEnd) },
       task_cost_usd: usd(totalMicro),
-      // 予算の実績 = タスクの費用 + consult の費用。estimated は consult の見積もりで閉じた分だけ（タスク側の見積もりは索引に無い）
+      // 予算の実績（全員分）。台帳の合計。estimated は見積もりで確定した分
       budget_actual: {
-        spent_usd: usd(totalMicro + consultSummary.cost_micro),
-        estimated_usd: usd(consultSummary.estimated_micro),
+        spent_usd: usd(actual.spent_micro),
+        estimated_usd: usd(actual.estimated_micro),
       },
       hidden_tasks: { count: summary.hidden.count, cost_usd: usd(summary.hidden.cost_micro) },
     },
     models,
   };
   return validated(OverviewDtoSchema, "OverviewDto", dto);
+}
+
+/**
+ * 全員の実績: 今月に動きのあった利用者それぞれの台帳（UserDO）の使用済みを合計する。閲覧者本人の分は取得済みの budgetRaw を使う。
+ * 利用者が上限を超える・索引が読めない・どれかの台帳が読めないときは null（呼び出し側が索引の費用に戻す。画面を落とさない）。
+ */
+async function sumLedgers(
+  env: Env,
+  viewerUid: number,
+  viewerBudget: { spent_usd: number; estimated_usd: number },
+  owners: ListOwnerIdsResult,
+): Promise<{ spent_micro: number; estimated_micro: number } | null> {
+  if (!owners.ok || owners.truncated) return null;
+  const others = owners.ids.filter((id) => id !== viewerUid);
+  try {
+    const ledgers = await Promise.all(
+      others.map((id) => env.USER_DO.getByName(String(id)).dashboardMonthSpent()),
+    );
+    let spent = Math.round(viewerBudget.spent_usd * 1_000_000);
+    let estimated = Math.round(viewerBudget.estimated_usd * 1_000_000);
+    for (const l of ledgers) {
+      spent += l.spent_micro;
+      estimated += l.estimated_micro;
+    }
+    return { spent_micro: spent, estimated_micro: estimated };
+  } catch {
+    return null;
+  }
 }
 
 /** 「待ち」を 1 回に読む行数と、1 回の応答のために読む最大の行数（GitHub で閉じた PR を外しても、上限まで埋められるように重ねて読む） */

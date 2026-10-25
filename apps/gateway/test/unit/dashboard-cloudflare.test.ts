@@ -106,12 +106,25 @@ beforeEach(() => resetCloudflareSummaryCache());
 afterEach(() => vi.restoreAllMocks());
 
 describe("range の検査", () => {
-  it("1h / 24h / 7d だけ。省略は 24h。それ以外（式・大文字・空）は null", () => {
-    expect(parseCloudflareRange(null)).toBe("24h");
+  it("1h / 24h / 7d / month だけ。省略は month（今月・UTC）。それ以外（式・大文字・空）は null", () => {
+    expect(parseCloudflareRange(null)).toBe("month");
+    expect(parseCloudflareRange("month")).toBe("month");
     expect(parseCloudflareRange("1h")).toBe("1h");
     expect(parseCloudflareRange("24h")).toBe("24h");
     expect(parseCloudflareRange("7d")).toBe("7d");
-    for (const bad of ["", "2h", "30d", "24H", "now-1d", "1h,7d", "1h ", "__proto__"]) {
+    for (const bad of [
+      "",
+      "2h",
+      "30d",
+      "24H",
+      "Month",
+      "month ",
+      "months",
+      "now-1d",
+      "1h,7d",
+      "1h ",
+      "__proto__",
+    ]) {
       expect(parseCloudflareRange(bad), bad).toBeNull();
     }
   });
@@ -378,6 +391,29 @@ describe("キャッシュ（共有・メモリ）", () => {
     t += 2_000; // 合計 46 秒
     await loadCloudflareSummary(env(), "24h", deps);
     expect(up.calls).toHaveLength(10);
+  });
+
+  it("month は UTC の月初から今まで。GraphQL の最大の範囲（32 日）に収まる（月末でも 31 日）", async () => {
+    const GQL_MAX_MS = 2_764_800_000; // 各データセットの maxDuration（2764800 秒）
+    for (const now of [
+      NOW, // 月の途中
+      Date.parse("2026-10-01T00:00:00.000Z"), // 月初ちょうど（期間 0）
+      Date.parse("2026-10-31T23:59:59.000Z"), // 31 日の月の末
+      Date.parse("2026-12-31T23:59:59.000Z"), // 年末
+    ]) {
+      resetCloudflareSummaryCache();
+      const up = upstream();
+      const dto = await loadCloudflareSummary(env(), "month", { fetch: up.fetch, now: () => now });
+      const d = new Date(now);
+      const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+      expect(dto.range).toBe("month");
+      for (const c of up.calls.filter((x) => x.body)) {
+        expect(c.body?.variables.start).toBe(new Date(start).toISOString());
+        expect(c.body?.variables.end).toBe(new Date(now).toISOString());
+        expect(now - start).toBeLessThanOrEqual(GQL_MAX_MS);
+      }
+      CloudflareSummaryDtoSchema.parse(dto);
+    }
   });
 
   it("range ごとに別のキャッシュ", async () => {
@@ -718,6 +754,22 @@ describe("推定の金額を DTO で返す（loadCloudflareSummary）", () => {
     expect(a.cost_estimate?.total_estimated_usd_before_free_tier).toBe(
       b.cost_estimate?.total_estimated_usd_before_free_tier,
     );
+  });
+
+  it("今月（month）でも使用量 × 単価。期間の長さに依存しない", async () => {
+    const a = await loadCloudflareSummary(env(), "24h", {
+      fetch: upstream().fetch,
+      now: () => NOW,
+    });
+    resetCloudflareSummaryCache();
+    const b = await loadCloudflareSummary(env(), "month", {
+      fetch: upstream().fetch,
+      now: () => NOW,
+    });
+    expect(b.cost_estimate?.total_estimated_usd_before_free_tier).toBe(
+      a.cost_estimate?.total_estimated_usd_before_free_tier,
+    );
+    expect(b.cost_estimate?.total_estimated_usd_before_free_tier).toBeGreaterThan(0);
   });
 
   it("Workers が forbidden なら Workers の推定だけ null。合計は残りの項目の和で、workers_requests が含まれない旨が出る", async () => {

@@ -182,3 +182,10 @@ export type SummarizeConsultsResult =
 export type VisibleModelsResult =
   | { ok: true; models: string[] }
   | { ok: false; code: "invalid_input" | "too_many_repo_ids" };
+
+/** listOwnerIds が返す利用者 ID の上限（超えたら truncated: true。呼び出し側は台帳の合計を諦める） */
+export const MAX_OWNER_IDS = 50;
+
+export type ListOwnerIdsResult =
+  | { ok: true; ids: number[]; truncated: boolean }
+  | { ok: false; code: "invalid_input" };

@@ -44,6 +44,8 @@ interface Viewer {
   pullStates:
     | Record<string, string>
     | ((refs: { repository: string; number: number }[]) => unknown | Promise<unknown>);
+  /** 他の利用者の台帳（キーは uid）。無い利用者は 0。"throw" なら dashboardMonthSpent が例外になる */
+  ledgers: Record<number, { spent_usd: number; estimated_usd: number } | "throw">;
 }
 
 let nextUid = 70_000_000 + Math.floor(Math.random() * 1_000_000);
@@ -73,14 +75,33 @@ function newViewer(visibleIds: number[] = []): Viewer {
     visibleCalls: [],
     pullCalls: [],
     pullStates: {},
+    ledgers: {},
   };
 }
 
 function envFor(viewer: Viewer): Env {
   const userDo = {
     getByName(name: string) {
-      if (name !== String(viewer.uid)) throw new Error(`想定外の UserDO: ${name}`);
+      if (name !== String(viewer.uid)) {
+        // 閲覧者以外の UserDO に許すのは、全員分の台帳の集計（dashboardMonthSpent）だけ
+        return {
+          async dashboardMonthSpent() {
+            const l = viewer.ledgers[Number(name)];
+            if (l === "throw") throw new Error("ledger down");
+            return {
+              spent_micro: Math.round((l?.spent_usd ?? 0) * 1e6),
+              estimated_micro: Math.round((l?.estimated_usd ?? 0) * 1e6),
+            };
+          },
+        };
+      }
       return {
+        async dashboardMonthSpent() {
+          return {
+            spent_micro: Math.round((viewer.budget.spent_usd as number) * 1e6),
+            estimated_micro: Math.round((viewer.budget.estimated_usd as number) * 1e6),
+          };
+        },
         async authorizeDashboardSession() {
           return viewer.session.ok
             ? { ok: true, login: viewer.login }
@@ -406,12 +427,14 @@ describe("overview の consult（D9。M3b の索引）", () => {
     expect(me).not.toContain(other.consult_id);
   });
 
-  it("モデル別の費用と budget_actual に consult 分が足される（estimated は consult の見積もり分）。consult のモデルは名前で出る", async () => {
+  it("モデル別の費用に consult 分が足される。consult のモデルは名前で出る。budget_actual は consult の所有者の台帳（consult の確定分）から足される", async () => {
     const v = newViewer([newRepoId()]);
     const before = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
     const model = `consult-only/m-${v.uid}`;
     await seedConsult({ model, cost_micro: 3_000_000 });
     await seedConsult({ model, cost_micro: 1_000_000, estimated: true });
+    // seedConsult の所有者（owner_id: 1）の台帳に、consult の確定分（実費 3 + 見積もり 1）が載る
+    v.ledgers[1] = { spent_usd: 4, estimated_usd: 1 };
     const after = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
     const m = after.models.find((x) => x.model === model);
     expect(m).toEqual({ model, task_cost_usd: 0, consult_cost_usd: 4 });
@@ -423,6 +446,40 @@ describe("overview の consult（D9。M3b の索引）", () => {
     ).toBeCloseTo(1);
     // タスクの費用の合計は consult で変わらない
     expect(after.month.task_cost_usd).toBeCloseTo(before.month.task_cost_usd);
+  });
+
+  it("budget_actual（全員の実績）は各利用者の台帳の今月の spent の合計。タスクの索引の費用には依らない（あなたの使った額と同じ定義）", async () => {
+    const v = newViewer([newRepoId()]);
+    const other = v.uid + 5000;
+    const other2 = v.uid + 5001;
+    v.ledgers[other] = { spent_usd: 7, estimated_usd: 2 };
+    v.ledgers[other2] = { spent_usd: 3, estimated_usd: 0 };
+    // 索引の費用は台帳と食い違う値にしておく（索引を足していないことの確認）
+    await seedTask({}, { index: { owner_id: other, cost_micro: 1_000_000 } });
+    await seedConsult({ owner_id: other2, cost_micro: 500_000 });
+    const dto = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
+    // 閲覧者の台帳 12.5 + 7 + 3。estimated は 0.5 + 2 + 0
+    expect(dto.month.budget_actual.spent_usd).toBeCloseTo(22.5);
+    expect(dto.month.budget_actual.estimated_usd).toBeCloseTo(2.5);
+    // 利用者が 1 人なら、全員の実績 = あなたの使った額
+    const solo = newViewer([newRepoId()]);
+    const soloDto = OverviewDtoSchema.parse((await api(solo, overviewPath())).json());
+    expect(soloDto.month.budget_actual.spent_usd).toBeGreaterThanOrEqual(
+      solo.budget.spent_usd as number,
+    );
+  });
+
+  it("台帳を読めない利用者がいても overview は落ちず、索引の費用（タスク + consult）に戻る", async () => {
+    const v = newViewer([newRepoId()]);
+    const other = v.uid + 6000;
+    v.ledgers[other] = "throw";
+    await seedConsult({ owner_id: other, cost_micro: 1_000_000 });
+    const r = await api(v, overviewPath());
+    expect(r.status).toBe(200);
+    const dto = OverviewDtoSchema.parse(r.json());
+    expect(dto.month.budget_actual.spent_usd).toBeCloseTo(
+      dto.month.task_cost_usd + dto.models.reduce((a, m) => a + m.consult_cost_usd, 0),
+    );
   });
 
   it("consult の本文に当たる値は索引に無く、応答にも出ない。consult があっても見えないタスクの値は出ない", async () => {
@@ -1619,13 +1676,13 @@ describe("cloudflare（M9）", () => {
     }
   });
 
-  it("range の省略は 24h。トークン・アカウント ID が未設定なら全項目 not_configured の 200（閲覧者の集合は取らない）", async () => {
+  it("range の省略は month（今月）。トークン・アカウント ID が未設定なら全項目 not_configured の 200（閲覧者の集合は取らない）", async () => {
     const v = newViewer([newRepoId()]);
     const r = await api(v, "/cloudflare");
     expect(r.status).toBe(200);
     expect(r.res.headers.get("cache-control")).toBe("no-store");
     const dto = CloudflareSummaryDtoSchema.parse(r.json());
-    expect(dto.range).toBe("24h");
+    expect(dto.range).toBe("month");
     expect(dto.open_url).toBeNull();
     for (const k of [
       "containers",
@@ -1637,7 +1694,7 @@ describe("cloudflare（M9）", () => {
       expect(dto[k]).toEqual({ ok: false, reason: "not_configured" });
     }
     expect(v.visibleCalls).toHaveLength(0);
-    for (const range of ["1h", "7d"]) {
+    for (const range of ["1h", "24h", "7d", "month"]) {
       const ok = await api(v, `/cloudflare?range=${range}`);
       expect(ok.status, range).toBe(200);
       expect(CloudflareSummaryDtoSchema.parse(ok.json()).range).toBe(range);

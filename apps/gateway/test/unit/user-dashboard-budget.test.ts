@@ -26,3 +26,23 @@ describe("UserDO.dashboardBudget", () => {
     expect(await stub.budgetStatus()).not.toHaveProperty("running_slots");
   });
 });
+
+describe("UserDO.dashboardMonthSpent", () => {
+  it("今月の台帳の spent / estimated をマイクロドルで返す（budget_status の spent_usd と同じ定義。予約中の分は含めない）", async () => {
+    const stub = userStub(newUserId());
+    await runInDurableObject(stub, (i) => {
+      const u = i as unknown as { now: () => number };
+      u.now = () => Date.UTC(2026, 9, 15);
+    });
+    expect(await stub.dashboardMonthSpent()).toEqual({ spent_micro: 0, estimated_micro: 0 });
+
+    const r = await stub.reserve("req-spent", FP);
+    if (!r.ok) throw new Error("reserve failed");
+    await stub.settleUsage(r.task_id, 1, 2_500_000);
+    const status = await stub.budgetStatus();
+    const spent = await stub.dashboardMonthSpent();
+    expect(spent.spent_micro).toBe(2_500_000);
+    expect(spent.spent_micro / 1_000_000).toBe(status.spent_usd);
+    expect(spent.estimated_micro).toBe(0);
+  });
+});

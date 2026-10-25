@@ -100,7 +100,7 @@ describe("worker_review: TaskDO の作成", () => {
     for (const over of [
       { review_model: "nope/none" },
       { review_model: undefined },
-      { review_fix_rounds: 1 },
+      { review_fix_rounds: 2 },
     ]) {
       const id = newTaskId();
       const r = await taskStub(id).ensureCreated(sampleInput(id, OWNER, workerOver(over)));
@@ -317,5 +317,126 @@ describe("worker_review: 投稿と Ready（COMPLETED のあと）", () => {
     const r = await resultOf(t.stub);
     expect(r).not.toHaveProperty("review");
     expect(r.pr?.draft).toBe(false);
+  });
+});
+
+// worker_review の修正の回（review_fix_rounds: 1）。AgentDO が must_fix をワーカーに渡して直させ（review_fix_started、RUNNING）、
+// 再実行（VERIFYING）のあとに完了にする。TaskDO は段階（fixing / rechecking）と rounds_used を出し、結果に fix_applied と final を返す。
+// レビューのコメントは、修正の回に入ったなら（FAILED でも）PR に残す。
+describe("worker_review: 修正の回（review_fix_rounds: 1）", () => {
+  it("AgentDO への spec に fixRounds: 1 を載せ、task_status の fix_rounds は 1", async () => {
+    const t = await createTask(workerOver({ review_fix_rounds: 1 }));
+    await t.stub.advance();
+    expect((await t.agent.calls()).specs[0]).toMatchObject({
+      workerReview: { model: MODEL, fixRounds: 1 },
+    });
+    const st = await t.stub.getStatus(OWNER);
+    expect(st.ok && st.task.review).toMatchObject({ fix_rounds: 1, rounds_used: 0 });
+  });
+
+  it("review.stage: 修正の回に入ったら、RUNNING のあいだは fixing、VERIFYING（再実行）は rechecking。rounds_used は 1", async () => {
+    const t = await createTask(workerOver({ review_fix_rounds: 1 }));
+    await t.stub.advance();
+    const review = async () => {
+      const s = await t.stub.getStatus(OWNER);
+      return s.ok ? s.task.review : undefined;
+    };
+    await t.agent.setPhase("verifying");
+    await t.agent.emit("review_started", { model: MODEL, commands: 1 });
+    await t.agent.emit("review_commands_finished", { passed: 1, failed: 0, timed_out: 0 });
+    await t.stub.advance();
+    expect(await review()).toMatchObject({ stage: "reviewing", rounds_used: 0 });
+    await t.agent.emit("review_fix_started", { must_fix_count: 2 });
+    await t.agent.setPhase("running");
+    await t.stub.advance();
+    expect(await review()).toMatchObject({ stage: "fixing", rounds_used: 1 });
+    await t.agent.setPhase("verifying");
+    await t.stub.advance();
+    expect(await review()).toMatchObject({ stage: "rechecking", rounds_used: 1 });
+    // 再実行の検証が通らずワーカーに返ったら、また fixing
+    await t.agent.setPhase("running");
+    await t.stub.advance();
+    expect(await review()).toMatchObject({ stage: "fixing" });
+  });
+
+  it("修正して再実行が通った: COMMENT（commit_id はレビューした commit）を投稿して Ready。task_result に fix_applied・fix_commit_sha・final", async () => {
+    const t = await createTask(workerOver({ review_fix_rounds: 1 }));
+    await t.stub.advance();
+    const reviewed = await pushChildCommit(t.branch);
+    const fixed = await pushChildCommit(t.branch);
+    await t.agent.setProgram({
+      result: completedResult(fixed, {
+        review: reviewDto({
+          headSha: reviewed,
+          fixRequested: true,
+          fixApplied: fixed,
+          final: {
+            verificationCommandsPassed: true,
+            reviewCommandsPassed: true,
+            commands: [{ argv: ["pnpm", "test"], exitCode: 0, timedOut: false, output: "ok" }],
+            commandsUnavailable: false,
+          },
+        }),
+      }),
+    });
+    await t.agent.setPhase("completed");
+    await t.stub.advance();
+    const number = app()
+      .pulls(REPO)
+      .find((p) => p.head === t.branch)?.number as number;
+    expect(app().reviews(REPO, number)).toEqual([
+      expect.objectContaining({ event: "COMMENT", commitId: reviewed }),
+    ]);
+    const r = await resultOf(t.stub);
+    expect(r).toMatchObject({
+      status: "COMPLETED",
+      pr: { draft: false, head_matches_verified: true },
+      review: {
+        stage: "done",
+        fix_applied: true,
+        fix_commit_sha: fixed,
+        final: {
+          verification_commands_passed: true,
+          review_commands_passed: true,
+          commands: [{ argv: ["pnpm", "test"], exit_code: 0, timed_out: false, output: "ok" }],
+          commands_unavailable: false,
+        },
+      },
+    });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it("直さなかったときは fix_applied: false、fix_commit_sha: null、final: null", async () => {
+    const t = await runWorker({ review_fix_rounds: 1 }, { fixRequested: true }, [
+      "review_must_fix_unaddressed: 1",
+    ]);
+    const r = await resultOf(t.stub);
+    expect(r.review).toMatchObject({ fix_applied: false, fix_commit_sha: null, final: null });
+    expect(r.warnings).toContain("review_must_fix_unaddressed: 1");
+  });
+
+  it("修正の回に入ったあと検証を使い切って FAILED: レビューのコメントは PR に残す（投稿する）が、Draft のまま", async () => {
+    const t = await createTask(workerOver({ review_fix_rounds: 1 }));
+    await t.stub.advance();
+    const reviewed = await pushChildCommit(t.branch);
+    await t.agent.setProgram({
+      result: {
+        ...completedResult("a".repeat(40)),
+        status: "failed",
+        reason: "verification_failed",
+        review: reviewDto({ headSha: reviewed, fixRequested: true }),
+      } as ResultDto,
+    });
+    await t.agent.setPhase("failed");
+    await t.stub.advance();
+    const number = app()
+      .pulls(REPO)
+      .find((p) => p.head === t.branch)?.number as number;
+    expect(app().reviews(REPO, number)).toEqual([
+      expect.objectContaining({ event: "COMMENT", commitId: reviewed }),
+    ]);
+    const r = await resultOf(t.stub);
+    expect(r).toMatchObject({ status: "FAILED", pr: { draft: true } });
+    expect(r.review?.comment_url).toEqual(expect.stringMatching(/#pullrequestreview-\d+$/));
   });
 });

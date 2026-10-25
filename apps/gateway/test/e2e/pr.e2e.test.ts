@@ -520,6 +520,72 @@ describe("worker_review（偽 GitHub 経由の通し）", () => {
   );
 
   it(
+    "review_fix_rounds: 1: 修正の commit のあと review_commands が失敗しても COMPLETED・Ready。コメントはレビューした commit に付き、task_result に fix_applied・final（出力は非信頼の囲み）、warnings に review_commands_failed_after_fix",
+    async () => {
+      const t = await setup(true, { ...WORKER, review_fix_rounds: 1 });
+      try {
+        const running = bodyOf(
+          await t.client.callTool({ name: "task_status", arguments: { task_id: t.taskId } }),
+        );
+        expect(running).toMatchObject({ review: { fix_rounds: 1, rounds_used: 0 } });
+        // ワーカーが must_fix を直した commit（PR の head はこちら。検証もこの commit で通った）
+        const fixed = await admin.app<string>("addCommit", "acme/widgets", t.head, "fix");
+        await admin.app("setBranch", "acme/widgets", t.branch, fixed);
+        await finishAgent(t.taskId, "completed", {
+          ...reviewed(
+            t.head,
+            {
+              fixRequested: true,
+              fixApplied: fixed,
+              final: {
+                verificationCommandsPassed: true,
+                reviewCommandsPassed: false,
+                commands: [
+                  { argv: ["pnpm", "test"], exitCode: 1, timedOut: false, output: "1 failed" },
+                ],
+                commandsUnavailable: false,
+              },
+            },
+            ["review_commands_failed_after_fix: pnpm test"],
+          ),
+          verification: { ...completedResult(fixed).verification },
+          pushedSha: fixed,
+        });
+        const result = await waitForResult(t.client, t.taskId);
+        expect(result).toMatchObject({
+          status: "COMPLETED",
+          warnings: ["review_commands_failed_after_fix: pnpm test"],
+          pr: { draft: false, head_matches_verified: true },
+          review: {
+            stage: "done",
+            fix_applied: true,
+            fix_commit_sha: fixed,
+            final: { verification_commands_passed: true, review_commands_passed: false },
+          },
+        });
+        const final = (result.review as { final: { commands: { output: string }[] } }).final;
+        expect(final.commands[0]?.output).toContain("UNTRUSTED");
+        expect(final.commands[0]?.output).toContain("1 failed");
+        expect(String(result.next_steps)).toContain("review_commands_failed_after_fix");
+        const status = bodyOf(
+          await t.client.callTool({ name: "task_status", arguments: { task_id: t.taskId } }),
+        );
+        expect(status).toMatchObject({ review: { stage: "done", fix_rounds: 1 } });
+        const pull = await pullOf(t.branch);
+        const reviews = await admin.app<{ event: string; commitId: string }[]>(
+          "reviews",
+          "acme/widgets",
+          pull?.number,
+        );
+        expect(reviews).toEqual([expect.objectContaining({ event: "COMMENT", commitId: t.head })]);
+      } finally {
+        await t.client.close();
+      }
+    },
+    LONG,
+  );
+
+  it(
     "レビューのモデルが失敗: COMPLETED・Ready のまま、何も投稿せず、warnings に review_failed",
     async () => {
       const t = await setup(true, WORKER);

@@ -432,12 +432,16 @@ export function checkReviewInput(rawInput: unknown): ServiceResult<CheckedReview
 
 /** task_review の結果の、非信頼の文字列（コマンドの出力・本文）を囲む */
 function wrapReviewResult(review: ReviewResultView): ReviewResultView {
-  return {
-    ...review,
-    commands: review.commands.map((c) => ({
+  const wrapCommands = (commands: ReviewResultView["commands"]) =>
+    commands.map((c) => ({
       ...c,
       output: c.output === "" ? "" : wrapUntrustedQuestion(c.output),
-    })),
+    }));
+  return {
+    ...review,
+    commands: wrapCommands(review.commands),
+    // worker_review の修正のあとの再実行の出力も、リポジトリのコードが出した文字列なので同じく囲む
+    final: review.final ? { ...review.final, commands: wrapCommands(review.final.commands) } : null,
     ...(review.body !== undefined ? { body: wrapUntrustedQuestion(review.body) } : {}),
   };
 }
@@ -543,6 +547,10 @@ export function createTaskService(
                       ? { failure: r.result.review.failure ?? "skipped" }
                       : {}),
                     comment_failed: r.result.warnings.includes("review_comment_failed"),
+                    fix_applied: r.result.review.fix_applied,
+                    failed_after_fix: r.result.warnings.filter((w) =>
+                      w.startsWith("review_commands_failed_after_fix"),
+                    ),
                   },
                 }
               : {}),

@@ -13,6 +13,7 @@ import {
   reviewWarnings,
   runReviewCommands,
   runReviewModel,
+  workerReviewFixWarnings,
   workerReviewWarnings,
 } from "../../src/review/stage";
 import type { ReviewToolRunner } from "../../src/review/tools";
@@ -451,5 +452,50 @@ describe("workerReviewWarnings（worker_review の結果の分類。修正の回
         failure: "diff_unavailable",
       }),
     ).toEqual(["review_failed: diff_unavailable"]);
+  });
+});
+
+describe("workerReviewFixWarnings（worker_review の結果の分類。修正の回がある行）", () => {
+  const cmd = (argv: string[], exitCode = 0, over: Record<string, unknown> = {}) => ({
+    argv,
+    exitCode,
+    timedOut: false,
+    output: "",
+    ...over,
+  });
+
+  it("修正した・review_commands が通った: 警告なし", () => {
+    expect(
+      workerReviewFixWarnings({
+        mustFixCount: 2,
+        fixApplied: true,
+        recheck: [cmd(["pnpm", "test"]), cmd(["pnpm", "lint"])],
+      }),
+    ).toEqual([]);
+  });
+
+  it("修正した・review_commands が失敗した: 失敗したコマンドごとに review_commands_failed_after_fix: <コマンド>（タイムアウト・飛ばしたものも失敗）", () => {
+    expect(
+      workerReviewFixWarnings({
+        mustFixCount: 1,
+        fixApplied: true,
+        recheck: [
+          cmd(["pnpm", "test"], 1),
+          cmd(["pnpm", "lint"]),
+          cmd(["pnpm", "e2e"], -1, { timedOut: true }),
+          cmd(["pnpm", "build"], -1, { skipped: true }),
+        ],
+      }),
+    ).toEqual([
+      "review_commands_failed_after_fix: pnpm test",
+      "review_commands_failed_after_fix: pnpm e2e",
+      "review_commands_failed_after_fix: pnpm build",
+    ]);
+  });
+
+  it("修正の commit が無いまま完了を申告した: review_must_fix_unaddressed: <件数>", () => {
+    expect(workerReviewFixWarnings({ mustFixCount: 3, fixApplied: false, recheck: [] })).toEqual([
+      "review_must_fix_unaddressed: 3",
+    ]);
   });
 });

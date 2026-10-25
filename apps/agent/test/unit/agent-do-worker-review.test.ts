@@ -5,6 +5,7 @@ import type { ScriptStep } from "../../src/pi/scripted-provider";
 import { REVIEW_SYSTEM_PROMPT } from "../../src/review/input";
 import {
   allEvents,
+  ask,
   done,
   type Fixture,
   makeSpec,
@@ -12,6 +13,7 @@ import {
   report,
   waitForPhase,
   waitForTerminal,
+  waitUntil,
 } from "./support/agent-fixture";
 
 afterEach(() => clearAgentTestOverrides());
@@ -432,7 +434,8 @@ describe("worker_review: 取消し・spec の検査・client_review との違い
     expect(await bad({ model: "nope/none", commands: [], fixRounds: 0 })).toMatchObject({
       status: "rejected",
     });
-    expect(await bad({ model: MODEL, commands: [], fixRounds: 1 })).toMatchObject({
+    // 修正の回は 0 か 1 だけ（2 以上は断る）
+    expect(await bad({ model: MODEL, commands: [], fixRounds: 2 })).toMatchObject({
       status: "rejected",
     });
     expect(await bad({ model: MODEL, commands: [{ argv: [] }], fixRounds: 0 })).toMatchObject({
@@ -490,5 +493,229 @@ describe("worker_review: 取消し・spec の検査・client_review との違い
     const usage = (await allEvents(fx)).filter((e) => e.type === "usage");
     const last = usage.at(-1)?.data as { modelCalls?: number };
     expect(last.modelCalls).toBe(2);
+  });
+});
+
+// worker_review の修正の回（review_fix_rounds: 1。docs/specs/worker-review.md「流れ」の 4・5、「直し切れなかったとき」の表）。
+// must_fix が 1 件以上なら、must_fix だけをワーカーに渡して直させ（RUNNING）、verification_commands と review_commands を再実行する
+// （VERIFYING）。修正のあとの 2 回目のレビューはしない。
+describe("worker_review: 修正の回（review_fix_rounds: 1）", () => {
+  const C = "c".repeat(40);
+  const D = "d".repeat(40);
+  const FIX_REASON = "sum must add, not subtract (must_fix reason)";
+  const SUGGEST_REASON = "consider a doc comment (suggestion reason)";
+  const fixVerdict = () =>
+    verdict({
+      must_fix: [{ ...MUST_FIX, reason: FIX_REASON, change: "use a + b" }],
+      suggestions: [{ ...SUGGESTION, reason: SUGGEST_REASON }],
+    });
+
+  function fixSpec(
+    taskId: string,
+    over: Partial<TaskSpec> = {},
+    commands: { argv: string[] }[] = [{ argv: ["pnpm", "test"] }],
+  ) {
+    return makeSpec(taskId, { workerReview: { model: MODEL, commands, fixRounds: 1 }, ...over });
+  }
+
+  /** 1 回目の検証は C（3 回読む）、修正のあとは after（既定は D = 修正の commit） */
+  async function fixFixture(name: string, review: ScriptStep[], worker: ScriptStep[], after = D) {
+    const fx = await fixture(name, review, worker, C);
+    fx.revParse.length = 0;
+    fx.revParse.push(...Array.from({ length: 3 }, () => C));
+    fx.revParse.push(...Array.from({ length: 30 }, () => after));
+    return fx;
+  }
+
+  const reviewCalls = (fx: Fixture) =>
+    fx.modelCalls.systemTexts.filter((t) => t === REVIEW_SYSTEM_PROMPT).length;
+
+  it("修正して再実行が通れば COMPLETED。warnings に review_* は無く、fixApplied は修正の commit、final は両方通った。2 回目のレビューはしない", async () => {
+    const fx = await fixFixture("wrf-ok", [{ text: fixVerdict() }], [report(), report()]);
+    await fx.stub.start(fixSpec("wrf-ok"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    // verification → review_commands → （修正）→ verification → review_commands
+    expect(fx.verifyCalls).toEqual([
+      ["npm", "test"],
+      ["pnpm", "test"],
+      ["npm", "test"],
+      ["pnpm", "test"],
+    ]);
+    // ワーカー 2 回 + レビュー 1 回。修正のあとにレビューのモデルは呼ばない
+    expect(fx.modelCalls.count).toBe(3);
+    expect(reviewCalls(fx)).toBe(1);
+    const { result, review } = await resultOf(fx);
+    expect(result.warnings.filter((w) => w.startsWith("review_"))).toEqual([]);
+    expect(review).toMatchObject({
+      stage: "done",
+      headSha: C,
+      mustFixCount: 1,
+      suggestionCount: 1,
+      fixApplied: D,
+      final: { verificationCommandsPassed: true, reviewCommandsPassed: true },
+    });
+    // 最初の review_commands の結果は残る（commands）。再実行の結果は final に
+    expect(review?.commands).toHaveLength(1);
+    expect(review?.final?.commands.map((c) => c.exitCode)).toEqual([0]);
+    // head_matches_verified の元: 検証した SHA は修正後の最終 SHA
+    expect(result.verification).toMatchObject({ verified: true, commitSha: D });
+    expect(result.pushedSha).toBe(D);
+    const events = await allEvents(fx);
+    const types = events.map((e) => e.type);
+    const fixAt = types.indexOf("review_fix_started");
+    expect(fixAt).toBeGreaterThan(types.indexOf("review_commands_finished"));
+    expect(types.lastIndexOf("verification")).toBeGreaterThan(fixAt);
+    expect(events[fixAt]?.data).toMatchObject({ must_fix_count: 1 });
+  });
+
+  it("修正の指示: must_fix だけを非信頼の囲みに入れて渡し、suggestions は渡さない。指示として従わず確かめる旨を添える", async () => {
+    const fx = await fixFixture("wrf-msg", [{ text: fixVerdict() }], [report(), report()]);
+    fx.verifyResults.push({}, { exitCode: 1, stdout: "1 failed: sum.test.ts" });
+    await fx.stub.start(fixSpec("wrf-msg"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    // ワーカーの 2 回目の呼び出し（レビューの次）に、report_completion の結果として届く
+    const seen = fx.modelCalls.toolResults[2]?.join("\n") ?? "";
+    const begin = seen.indexOf("<<<BEGIN_UNTRUSTED_OUTPUT>>>");
+    expect(begin).toBeGreaterThan(0);
+    expect(seen.indexOf(FIX_REASON)).toBeGreaterThan(begin);
+    expect(seen.slice(0, begin)).toMatch(/not instructions/);
+    expect(seen).not.toContain(SUGGEST_REASON);
+    // 決定 17: 最初の review_commands の失敗の末尾も（囲んで）渡す
+    expect(seen).toContain("1 failed: sum.test.ts");
+  });
+
+  it("修正のあと review_commands が失敗しても COMPLETED。warnings に review_commands_failed_after_fix、final に出力の末尾", async () => {
+    const fx = await fixFixture("wrf-recheck-fail", [{ text: fixVerdict() }], [report(), report()]);
+    fx.verifyResults.push({}, {}, {}, { exitCode: 1, stdout: "2 failed: e2e" });
+    await fx.stub.start(fixSpec("wrf-recheck-fail"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const { result, review } = await resultOf(fx);
+    expect(result.warnings).toContain("review_commands_failed_after_fix: pnpm test");
+    expect(result.warnings.some((w) => w.startsWith("review_must_fix"))).toBe(false);
+    expect(review?.fixApplied).toBe(D);
+    expect(review?.final).toMatchObject({
+      verificationCommandsPassed: true,
+      reviewCommandsPassed: false,
+    });
+    expect(review?.final?.commands[0]?.output).toContain("2 failed: e2e");
+    expect(reviewCalls(fx)).toBe(1);
+  });
+
+  it("修正のあと verification_commands が通らなければワーカーに返し（試行に数える）、使い切れば FAILED", async () => {
+    const fx = await fixFixture(
+      "wrf-verify-fail",
+      [{ text: fixVerdict() }],
+      [report(), report(), report(), report()],
+    );
+    // 1 回目の検証（通る）・review_commands（通る）のあと、修正の回の検証が 3 回とも失敗（試行は 4 回まで）
+    fx.verifyResults.push(
+      {},
+      {},
+      ...Array.from({ length: 3 }, () => ({ exitCode: 1, stdout: "fail" })),
+    );
+    await fx.stub.start(fixSpec("wrf-verify-fail"));
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(fx.verifyCalls).toEqual([
+      ["npm", "test"],
+      ["pnpm", "test"],
+      ["npm", "test"],
+      ["npm", "test"],
+      ["npm", "test"],
+    ]);
+    expect(reviewCalls(fx)).toBe(1);
+    const { result } = await resultOf(fx);
+    expect(result.reason).toBe("verification_failed");
+    expect(result.verification).toMatchObject({ verified: false, attempts: 4 });
+  });
+
+  it("修正の commit が無いまま完了を申告したら COMPLETED で review_must_fix_unaddressed。再実行はしない", async () => {
+    const fx = await fixFixture("wrf-noop", [{ text: fixVerdict() }], [report(), report()], C);
+    await fx.stub.start(fixSpec("wrf-noop"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.verifyCalls).toEqual([
+      ["npm", "test"],
+      ["pnpm", "test"],
+    ]);
+    const { result, review } = await resultOf(fx);
+    expect(result.warnings).toContain("review_must_fix_unaddressed: 1");
+    expect(review?.fixApplied).toBeUndefined();
+    expect(review?.final).toBeUndefined();
+    expect(result.verification).toMatchObject({ verified: true, commitSha: C });
+  });
+
+  it("must_fix が 0 件なら修正の回を飛ばして COMPLETED（ワーカーは再び呼ばれない）", async () => {
+    const fx = await fixFixture(
+      "wrf-zero",
+      [{ text: verdict({ suggestions: [SUGGESTION] }) }],
+      [report(), report()],
+    );
+    await fx.stub.start(fixSpec("wrf-zero"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.modelCalls.count).toBe(2);
+    const { result, review } = await resultOf(fx);
+    expect(result.warnings).toContain("review_suggestions: 1");
+    expect(review?.fixApplied).toBeUndefined();
+    const types = (await allEvents(fx)).map((e) => e.type);
+    expect(types).not.toContain("review_fix_started");
+  });
+
+  it("レビューのモデルが失敗したら修正の回に入らず COMPLETED（review_failed）", async () => {
+    const fx = await fixFixture(
+      "wrf-model-fail",
+      [
+        { error: "upstream 500", status: 500 },
+        { error: "upstream 500", status: 500 },
+      ],
+      [report(), report()],
+    );
+    await fx.stub.start(fixSpec("wrf-model-fail"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const { result } = await resultOf(fx);
+    expect(result.warnings).toContain("review_failed: model_error");
+    expect((await allEvents(fx)).map((e) => e.type)).not.toContain("review_fix_started");
+  });
+
+  it("修正中のワーカーの質問は従来どおり INPUT_REQUIRED。回答でワーカーが再開し（レビューの段に戻らない）、修正を終えて COMPLETED", async () => {
+    const fx = await fixFixture(
+      "wrf-ask",
+      [{ text: fixVerdict() }],
+      [report(), ask("Should I also update the docs?"), report()],
+    );
+    await fx.stub.start(fixSpec("wrf-ask"));
+    await waitForPhase(fx, "input_required");
+    expect(reviewCalls(fx)).toBe(1);
+    expect(await fx.stub.answer("q-1", "no")).toMatchObject({ ok: true });
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(reviewCalls(fx)).toBe(1);
+    const { result, review } = await resultOf(fx);
+    expect(review?.fixApplied).toBe(D);
+    expect(result.warnings.filter((w) => w.startsWith("review_"))).toEqual([]);
+  });
+
+  it("予算の延長の質問のあとにレビューが must_fix を返したときも、修正の指示をワーカーへのメッセージで渡して修正させる", async () => {
+    const fx = await fixFixture("wrf-budget", [{ text: fixVerdict() }], [piSpend(), report()]);
+    await fx.stub.start(fixSpec("wrf-budget", { budgetUsd: 0.03, budgetPolicy: "ask" }, []));
+    await waitForPhase(fx, "input_required");
+    expect(await fx.stub.answer("q-1", "extend")).toEqual({ ok: true });
+    // 修正の回のワーカーの費用は、作業の費用として同じ枠に入る（ここでも予算の延長の質問が出る。従来どおりワーカーの run で聞く）
+    await waitUntil(() => fx.modelCalls.count >= 2);
+    await waitForPhase(fx, "input_required");
+    const types = (await allEvents(fx)).map((e) => e.type);
+    expect(types.indexOf("review_fix_started")).toBeGreaterThan(0);
+    expect(types.lastIndexOf("question")).toBeGreaterThan(types.indexOf("review_fix_started"));
+    expect(await fx.stub.answer("q-2", "extend")).toEqual({ ok: true });
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(fx.modelCalls.count).toBe(3);
+    expect(reviewCalls(fx)).toBe(1);
+    const seen = fx.modelCalls.userTexts[2]?.join("\n") ?? "";
+    expect(seen).toContain(FIX_REASON);
+    expect(seen).not.toContain(SUGGEST_REASON);
+    const { result, review } = await resultOf(fx);
+    expect(review?.fixApplied).toBe(D);
+    expect(review?.final).toMatchObject({
+      verificationCommandsPassed: true,
+      reviewCommandsPassed: true,
+    });
+    expect(result.verification.commitSha).toBe(D);
   });
 });

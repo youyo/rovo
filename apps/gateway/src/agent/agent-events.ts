@@ -360,6 +360,13 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
         type: "review_commands_finished",
         payload: { passed: num(d.passed), failed: num(d.failed), timed_out: num(d.timed_out) },
       };
+    // worker_review の修正の回に入った（件数だけ。must_fix の文はレビューのモデルが書いた非信頼データなので載せない）
+    case "review_fix_started":
+      return {
+        kind: "event",
+        type: "review_fix_started",
+        payload: { must_fix_count: num(d.must_fix_count) },
+      };
     case "pushed":
       return {
         kind: "event",

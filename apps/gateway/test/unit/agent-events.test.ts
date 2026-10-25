@@ -35,6 +35,14 @@ describe("push のイベント", () => {
   });
 });
 
+describe("worker_review の修正の回のイベント", () => {
+  it("review_fix_started は must_fix の件数だけを公開する（must_fix の文は載せない）", () => {
+    expect(
+      mapAgentEvent(ev("review_fix_started", { must_fix_count: 2, reason: "secret text" })),
+    ).toEqual({ kind: "event", type: "review_fix_started", payload: { must_fix_count: 2 } });
+  });
+});
+
 describe("Phase 4 の対話イベント", () => {
   it("phase input_required は INPUT_REQUIRED に写る", () => {
     expect(mapAgentEvent(ev("phase", { phase: "input_required" }))).toEqual({

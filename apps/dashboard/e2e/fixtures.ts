@@ -64,7 +64,14 @@ export async function loginAs(page: Page, user: E2eUser, path = "/dashboard/"): 
   await setGitHubUser(user);
   await page.goto(path);
   await page.getByRole("link", { name: /^(GitHub でログイン|Sign in with GitHub)$/ }).click();
-  await expect(page.locator("header .user").getByText(user.login, { exact: true })).toBeVisible();
+  // 広い幅は利用者名の文字、狭い幅（720px 以下）はアバター（summary の aria-label が利用者名）で確かめる
+  const menu = page.locator("header .user");
+  await expect(
+    menu
+      .getByText(user.login, { exact: true })
+      .or(menu.locator(`summary[aria-label="${user.login}"]`))
+      .first(),
+  ).toBeVisible();
 }
 
 export function taskPath(taskId: string): string {

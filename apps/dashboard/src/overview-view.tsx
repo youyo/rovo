@@ -109,7 +109,10 @@ export function OverviewView(props: {
         ? `${waiting.data.tasks.length}${waiting.data.truncated ? "+" : ""}`
         : null;
     const tabs: { value: RailTab; label: string }[] = [
-      { value: "day", label: t("rail.tabDay") },
+      {
+        value: "day",
+        label: data ? t("rail.tabDayN", { n: data.tasks.length }) : t("rail.tabDay"),
+      },
       {
         value: "waiting",
         label: count === null ? t("rail.tabWaiting") : t("rail.tabWaitingN", { n: count }),

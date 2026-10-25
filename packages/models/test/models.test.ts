@@ -1,3 +1,4 @@
+import { CLOUDFLARE_AI_GATEWAY_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-ai-gateway.models";
 import { describe, expect, it } from "vitest";
 import {
   ALLOWED_MODEL_IDS,
@@ -16,9 +17,11 @@ import {
   listSandboxInstances,
   MODEL_CATALOG_IDS,
   modelInfo,
+  PRICE_OVERRIDES,
   parseAgentModels,
   pickDefaultModel,
   piModelId,
+  priceOverrideFor,
   providerOf,
   resolveEfforts,
   resolveMaxSandboxInstance,
@@ -87,11 +90,11 @@ describe("許可リストとカタログ", () => {
     expect(modelInfo("__proto__")).toBeUndefined();
   });
 
-  it("単価はカタログの値（sonnet 2/10/0.2/2.5）", () => {
+  it("単価は公式の価格ページの値（sonnet 2/10/0.1/2.5。cache read は上書き表で 0.1）", () => {
     expect(modelInfo("anthropic/claude-sonnet-5-5")?.price).toMatchObject({
       inputPerMTok: 2,
       outputPerMTok: 10,
-      cacheReadPerMTok: 0.2,
+      cacheReadPerMTok: 0.1,
       cacheWritePerMTok: 2.5,
       tiers: [],
     });
@@ -124,7 +127,7 @@ describe("computeCostUsd", () => {
         cacheRead: 1_000_000,
         cacheWrite: 1_000_000,
       }),
-    ).toBeCloseTo(14.7, 9);
+    ).toBeCloseTo(14.6, 9);
   });
 
   it("tier の境目は「入力側の合計（input + cacheRead + cacheWrite）が inputTokensAbove を超えたら」", () => {
@@ -592,5 +595,48 @@ describe("Sandbox の昇格の引き金", () => {
     expect(isSandboxPromotionTrigger("verification")).toBe(true);
     expect(isSandboxPromotionTrigger("npm test")).toBe(false);
     expect(isSandboxPromotionTrigger(undefined)).toBe(false);
+  });
+});
+
+describe("単価の上書き（カタログの誤りの補正）", () => {
+  it("sonnet-5-5 の 1 回の呼び出し（100 万トークンずつ）が公式の単価（2 / 10 / 0.1 / 2.5）で計算される", () => {
+    const sonnet = modelInfo("anthropic/claude-sonnet-5-5")?.price;
+    if (!sonnet) throw new Error("sonnet missing");
+    expect(
+      computeCostUsd(sonnet, { input: 1e6, output: 0, cacheRead: 0, cacheWrite: 0 }),
+    ).toBeCloseTo(2, 9);
+    expect(
+      computeCostUsd(sonnet, { input: 0, output: 1e6, cacheRead: 0, cacheWrite: 0 }),
+    ).toBeCloseTo(10, 9);
+    expect(
+      computeCostUsd(sonnet, { input: 0, output: 0, cacheRead: 1e6, cacheWrite: 0 }),
+    ).toBeCloseTo(0.1, 9);
+    expect(
+      computeCostUsd(sonnet, { input: 0, output: 0, cacheRead: 0, cacheWrite: 1e6 }),
+    ).toBeCloseTo(2.5, 9);
+  });
+
+  it("priceOverrideFor は上書きがあるモデルだけ cost（Pi の Model.cost と同じ形）を返す。他は undefined", () => {
+    expect(priceOverrideFor("anthropic/claude-sonnet-5-5")).toEqual({ cacheRead: 0.1 });
+    expect(priceOverrideFor("anthropic/claude-haiku-5-5")).toBeUndefined();
+    expect(priceOverrideFor("toString")).toBeUndefined();
+  });
+
+  it("上書きの対象は許可リストのモデルだけで、カタログの値と食い違うものだけ（直ったら外す合図）", () => {
+    const catalog = CLOUDFLARE_AI_GATEWAY_MODELS as unknown as Record<
+      string,
+      { cost: Record<string, number> }
+    >;
+    for (const [id, override] of Object.entries(PRICE_OVERRIDES)) {
+      const catalogId = MODEL_CATALOG_IDS[id];
+      expect(catalogId, `${id} は許可リストに無い`).toBeDefined();
+      const cost = catalog[catalogId as string]?.cost;
+      for (const [key, value] of Object.entries(override)) {
+        expect(
+          cost?.[key],
+          `${id}.${key}: pi-ai のカタログが上書きと同じ値(${value})になった。PRICE_OVERRIDES から外す`,
+        ).not.toBe(value);
+      }
+    }
   });
 });

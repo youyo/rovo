@@ -323,3 +323,48 @@ describe("capOutputTokens: budget 方式の thinking", () => {
     expect(capOutputTokens(b, 6_000)).toEqual({ max_tokens: 6_000 });
   });
 });
+
+describe("guardProvider の単価の上書き", () => {
+  /** 上流が受け取った model.cost と、返した usage.cost を記録する fake */
+  async function seenCost(model: Model<Api>) {
+    let seen: Model<Api>["cost"] | undefined;
+    const call = (m: Model<Api>) => {
+      seen = m.cost;
+      const out = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        const msg = message(m);
+        out.push({ type: "done", reason: "stop", message: msg });
+        out.end(msg);
+      });
+      return out;
+    };
+    const inner = { stream: call, streamSimple: call } as unknown as Provider;
+    const guarded = guardProvider(inner, async () => ({ maxTokens: 100, metadata: {} }));
+    await guarded.streamSimple(model, context, {}).result();
+    return seen;
+  }
+
+  const catalogCost = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
+
+  it("sonnet-5-5 は、カタログの cacheRead 0.2 ではなく公式の 0.1 を上流（= Pi の cost.total の計算）に渡す", async () => {
+    const model = {
+      id: "anthropic/claude-sonnet-5-5",
+      api: "anthropic-messages",
+      provider: "cloudflare",
+      cost: catalogCost,
+    } as unknown as Model<Api>;
+    expect(await seenCost(model)).toEqual({ ...catalogCost, cacheRead: 0.1 });
+    // 呼び出し側のオブジェクトは書き換えない
+    expect(model.cost.cacheRead).toBe(0.2);
+  });
+
+  it("上書きの無いモデルの cost はそのまま渡す", async () => {
+    const model = {
+      id: "anthropic/claude-haiku-5-5",
+      api: "anthropic-messages",
+      provider: "cloudflare",
+      cost: { ...catalogCost, cacheRead: 0.1 },
+    } as unknown as Model<Api>;
+    expect(await seenCost(model)).toEqual({ ...catalogCost, cacheRead: 0.1 });
+  });
+});

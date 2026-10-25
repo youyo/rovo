@@ -10,6 +10,9 @@ const s = readState();
 
 async function settle(page: Page) {
   await expect(page.locator(".console h1, [data-teamboard]").first()).toBeVisible();
+  // 狭い形への切り替えは matchMedia の通知で描き直してから。描き直しの前に測ると広い形の高さになる
+  const width = page.viewportSize()?.width ?? 0;
+  if (width <= 720) await expect(page.locator("header button.lang-one")).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
 }
 
@@ -22,8 +25,12 @@ for (const width of [360, 390]) {
     await settle(page);
 
     const header = page.locator("header.top");
-    const box = await header.boundingBox();
-    expect(box?.height, "ヘッダーの高さ").toBeLessThanOrEqual(120);
+    // 幅を変えた直後は組み替えの途中を測ることがあるので、落ち着くまで測り直す（折り返したままなら待っても落ちる）
+    await expect
+      .poll(async () => (await header.boundingBox())?.height ?? Number.POSITIVE_INFINITY, {
+        message: "ヘッダーの高さ",
+      })
+      .toBeLessThanOrEqual(120);
     const overflow = await page.evaluate(() => ({
       doc: document.documentElement.scrollWidth,
       view: document.documentElement.clientWidth,

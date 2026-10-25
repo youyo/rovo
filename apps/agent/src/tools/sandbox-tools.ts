@@ -18,6 +18,7 @@ import {
 } from "../secret-scan";
 import { stripAnsi } from "../text-util";
 import { resolveWorkspacePath } from "../workspace-path";
+import { splitLeadingCd } from "./leading-cd";
 import type { PushResult, ToolContext } from "./types";
 import { wrapUntrusted } from "./untrusted";
 
@@ -412,7 +413,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
 
   const bash = defineTool({
     name: "bash",
-    description: `Run a shell command with bash -lc in the sandbox container (default timeout ${BASH_DEFAULT_TIMEOUT_S}s, max ${BASH_MAX_TIMEOUT_S}s). Output keeps the last ${BASH_MAX_OUTPUT_BYTES} bytes of stdout and of stderr. Every process you start is killed when the call ends: background processes (&, nohup, setsid) do not survive. Each call starts at the workspace root; a cd does not carry over to the next call, so do not put cd at the start of the command. To run in a subdirectory, pass it as cwd (e.g. apps/agent). ${UNTRUSTED_NOTE}`,
+    description: `Run a shell command with bash -lc in the sandbox container (default timeout ${BASH_DEFAULT_TIMEOUT_S}s, max ${BASH_MAX_TIMEOUT_S}s). Output keeps the last ${BASH_MAX_OUTPUT_BYTES} bytes of stdout and of stderr. Every process you start is killed when the call ends: background processes (&, nohup, setsid) do not survive. Each call starts at the workspace root; a cd does not carry over to the next call, so do not put cd at the start of the command. To run in a subdirectory, pass it as cwd (e.g. apps/agent; a leading cd is moved into cwd automatically). ${UNTRUSTED_NOTE}`,
     parameters: Type.Object({
       command: Type.String({ minLength: 1 }),
       timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: BASH_MAX_TIMEOUT_S })),
@@ -433,17 +434,15 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         if (!Number.isFinite(seconds) || seconds < 1 || seconds > BASH_MAX_TIMEOUT_S) {
           throw new Error(`timeout_seconds must be between 1 and ${BASH_MAX_TIMEOUT_S}`);
         }
-        const cwd = resolveWorkspacePath(root, args.cwd ?? ".");
+        const split = splitLeadingCd(args.command, args.cwd, root);
+        const command = split.command;
+        const cwd = resolveWorkspacePath(root, split.cwd ?? ".");
         const remaining = Math.max(context.deadlineAt - Date.now(), 1);
         const startedAt = Date.now();
-        const progress = startProgress(
-          args.command,
-          workspaceRelativePath(root, cwd) ?? ".",
-          startedAt,
-        );
+        const progress = startProgress(command, workspaceRelativePath(root, cwd) ?? ".", startedAt);
         let r: ExecResult;
         try {
-          r = await port.exec(["bash", "-lc", args.command], {
+          r = await port.exec(["bash", "-lc", command], {
             cwd,
             timeoutMs: Math.min(seconds * 1000, remaining),
             maxOutputBytes: BASH_MAX_OUTPUT_BYTES,
@@ -472,7 +471,7 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
         if (r.stderr) parts.push(`--- stderr ---\n${stripAnsi(r.stderr)}`);
         const text = parts.join("\n");
         emitEvent("command", {
-          command: args.command,
+          command,
           cwd: workspaceRelativePath(root, cwd),
           exitCode: r.timedOut ? null : r.exitCode,
           durationMs: Date.now() - startedAt,

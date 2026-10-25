@@ -11,6 +11,7 @@ import {
   detailText,
   displayWidth,
   entryLines,
+  expandTabs,
   formatElapsed,
   frameTop,
   glyph,
@@ -756,4 +757,11 @@ test("planWorkers drops ended rows first, then working ones, to leave 6 rows for
 test("planWorkers counts the review header as a row when a review worker is shown", () => {
   const r = planWorkers(mkMany(1, 0, { kind: "review" }), null, 30);
   expect(r.rows).toBe(2 + 1);
+});
+
+test("expandTabs pads to the next multiple of 4 columns", () => {
+  expect(expandTabs("a\tb")).toBe("a   b");
+  expect(expandTabs("\tx")).toBe("    x");
+  expect(expandTabs("abcd\te")).toBe("abcd    e");
+  expect(expandTabs("no tabs")).toBe("no tabs");
 });

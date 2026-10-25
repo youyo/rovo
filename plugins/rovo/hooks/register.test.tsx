@@ -2905,3 +2905,30 @@ test("a completed worker's frame takes the success color; a working one stays su
   expect(await colorOf(ui, /^╭/)).toBe("success");
   await ui.unmount();
 });
+
+test("tabs in the output and the command are drawn as spaces, so the right edge stays put", async ($, on) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler(() =>
+    ok(
+      consoleBody("t1", {
+        output: {
+          command: wrap("echo\ta"),
+          tail: wrap("a\tb\n\tindented"),
+          running: true,
+          redacted: true,
+        },
+      }),
+    ),
+  );
+  await startSession($);
+  await $.tool.call({ tool: START, title: "Tabs", repository: "o/r" });
+  await r.clock.advance(4_000);
+  const ui = await mountPane($, 20);
+  const text = await allText(ui);
+  expect(text).not.toContain("\t");
+  expect(text).toMatch(/^a {3}b$/m);
+  expect(text).toMatch(/^ {4}indented$/m);
+  expect(text).toMatch(/^\$ echo {2}a$/m);
+  await ui.unmount();
+});

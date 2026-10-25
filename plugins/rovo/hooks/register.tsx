@@ -23,6 +23,7 @@ import {
   columnHeader,
   detailText,
   displayWidth,
+  expandTabs,
   formatElapsed,
   frameTop,
   glyph,
@@ -1195,7 +1196,9 @@ export const register: Register = (on) => {
                   side(
                     "frame:cmd",
                     <>
-                      <Text mono wrap="truncate-end">{`$ ${view.command}`}</Text>
+                      <Text mono wrap="truncate-end">
+                        {expandTabs(`$ ${view.command}`)}
+                      </Text>
                       {view.commandWhere !== undefined && (
                         <Text dimColor wrap="truncate-end">{`  ${view.commandWhere} で`}</Text>
                       )}
@@ -1213,7 +1216,7 @@ export const register: Register = (on) => {
                         dimColor={style.dim === true}
                         weight={style.bold === true ? "bold" : undefined}
                       >
-                        {line.text}
+                        {expandTabs(line.text)}
                       </Text>
                       {line.where !== undefined && (
                         <Text dimColor wrap="truncate-end">{`  ${line.where} で`}</Text>

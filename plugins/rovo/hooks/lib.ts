@@ -53,6 +53,24 @@ export const httpsOnly = (url: unknown): string | undefined =>
     ? url
     : undefined;
 
+/** タブを、タブ幅 4 の次の位置まで空白に置き換える（枠の右辺がずれないように）。 */
+export const expandTabs = (s: string): string => {
+  if (!s.includes("\t")) return s;
+  let out = "";
+  let col = 0;
+  for (const ch of s) {
+    if (ch === "\t") {
+      const n = 4 - (col % 4);
+      out += " ".repeat(n);
+      col += n;
+    } else {
+      out += ch;
+      col += displayWidth(ch);
+    }
+  }
+  return out;
+};
+
 /**
  * ワーカーが書いた文字列の表示用の整え方。囲み（UNTRUSTED_CHILD_QUESTION）を外し、
  * 端末を動かす制御列（ANSI・OSC）と、向きを偽装する文字を落とす。Markdown には触らない

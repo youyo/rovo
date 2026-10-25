@@ -599,12 +599,44 @@ describe("実行中のコマンド（流れるコンソール）", () => {
       expect(t).toContain("<img src=x onerror=alert(1)>");
     });
 
-    it("出力が終わったコマンドの末尾（running でない）は、手順の外の出力の枠に出す（どの行のものか決めつけない）", () => {
-      const finished: TaskDetailDto = {
-        ...taskDetailRunningFixture,
-        output: { tail: "ok\n", command: "pnpm test", redacted: true },
-      };
+    const finished: TaskDetailDto = {
+      ...taskDetailRunningFixture,
+      output: { tail: "ok\n", command: "pnpm test", redacted: true },
+    };
+
+    it("終わったコマンドの末尾（running でない）は、手順の外に枠を出さず、各コマンドの行の中に出す", () => {
       const c = mount(finished);
+      expect(c.querySelector(".output-box")).toBeNull();
+      const row = c.querySelector("li.step[data-seq='6']") as HTMLElement;
+      expect(row.querySelector("details pre.output")?.textContent).toBe("Test Files  3 passed (3)\n");
+    });
+
+    it("失敗したコマンドの行は自動で開き、出力がその行の下に見える", () => {
+      const failed: TaskEventDto[] = [
+        ...taskEventsFixture.events,
+        {
+          seq: 20,
+          at: "2026-10-22T01:00:00Z",
+          type: "command",
+          command: "tsc",
+          exit_code: 1,
+          output_tail: 'Command "tsc" not found\n',
+        },
+      ];
+      const c = mount(finished, failed);
+      const d = c.querySelector("li.step[data-seq='20'] details") as HTMLDetailsElement;
+      expect(d.open).toBe(true);
+      expect(d.querySelector("pre.output")?.textContent).toBe('Command "tsc" not found\n');
+      expect(c.querySelector(".output-box")).toBeNull();
+    });
+
+    it("output_tail を持つコマンドが無い古いタスクは、従来どおり手順の外の枠に出す", () => {
+      const legacy = taskEventsFixture.events.map((e) => {
+        if (e.type !== "command") return e;
+        const { output_tail: _omit, ...rest } = e;
+        return rest;
+      });
+      const c = mount(finished, legacy);
       expect(c.querySelector("ol.steps .output-box")).toBeNull();
       expect(c.querySelector(".screen > .output-box pre.output")?.textContent).toBe("ok\n");
     });

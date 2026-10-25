@@ -11,7 +11,7 @@ const row = (stub: UserStub, id: string) =>
     (_i, s) =>
       s.storage.sql
         .exec(
-          "SELECT month, settled_micro, closed, cost_source FROM task_budget WHERE task_id = ?",
+          "SELECT month, settled_micro, settled_estimated, closed, cost_source FROM task_budget WHERE task_id = ?",
           id,
         )
         .toArray()[0],
@@ -38,6 +38,17 @@ describe("UserDO.reconcileTaskCost", () => {
       settled_micro: 2 * MICRO,
       closed: 1,
     });
+  });
+
+  it("上書きすると settled_estimated は 0 になる（実費で確定したので見積もりではない）", async () => {
+    const { stub, id } = await reserved();
+    await stub.finishTask(id, 1, 3 * MICRO);
+    await runInDurableObject(stub, (_i, st) => {
+      st.storage.sql.exec("UPDATE task_budget SET settled_estimated = 1 WHERE task_id = ?", id);
+    });
+    expect(await row(stub, id)).toMatchObject({ settled_estimated: 1 });
+    await stub.reconcileTaskCost(id, 2 * MICRO);
+    expect(await row(stub, id)).toMatchObject({ settled_estimated: 0, cost_source: "gateway" });
   });
 
   it("2 回目以降は無視する（冪等）", async () => {

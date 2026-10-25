@@ -10,7 +10,7 @@ const ENV = {
   CLOUDFLARE_API_BASE: "http://cf.example/client/v4",
 };
 
-type Log = { success?: boolean; cost?: number | null; metadata?: string };
+type Log = { success?: boolean; cost?: number | null; metadata?: string | Record<string, unknown> };
 const log = (cost: number | null | undefined, over: Log = {}): Log => ({
   success: true,
   ...(cost === undefined ? {} : { cost }),
@@ -85,6 +85,53 @@ describe("fetchGatewayCost", () => {
     const api = fakeApi([log(0.25), other, broken, none, log(0.25)]);
     const r = await fetchGatewayCost(ENV, TASK, 2, { fetch: api.f });
     expect(r).toEqual({ state: "confirmed", micro: 500_000 });
+  });
+
+  it("metadata がオブジェクトで返っても読める（本番の形）", async () => {
+    const o = (cost: number) => log(cost, { metadata: { userId: "1", taskId: TASK } });
+    const other = log(9, { metadata: { taskId: "other" } });
+    const r = await fetchGatewayCost(ENV, TASK, 2, { fetch: fakeApi([o(0.25), other, o(0.25)]).f });
+    expect(r).toEqual({ state: "confirmed", micro: 500_000 });
+  });
+
+  it("metadata が文字列でもオブジェクトでも混在して読める", async () => {
+    const obj = log(0.1, { metadata: { taskId: TASK } });
+    const str = log(0.2, { metadata: JSON.stringify({ taskId: TASK }) });
+    const r = await fetchGatewayCost(ENV, TASK, 2, { fetch: fakeApi([obj, str]).f });
+    expect(r).toEqual({ state: "confirmed", micro: 300_000 });
+  });
+
+  it("caller が sandbox_scale のログは合計にも件数にも数えない", async () => {
+    const work = log(0.5, { metadata: { taskId: TASK } });
+    const scale = log(9, { metadata: { caller: "sandbox_scale", taskId: TASK } });
+    const scaleStr = log(9, {
+      metadata: JSON.stringify({ caller: "sandbox_scale", taskId: TASK }),
+    });
+    expect(
+      await fetchGatewayCost(ENV, TASK, 1, { fetch: fakeApi([work, scale, scaleStr]).f }),
+    ).toEqual({
+      state: "confirmed",
+      micro: 500_000,
+    });
+    // 件数にも数えない: 作業が 1 件しかなければ model_calls 2 には足りない
+    expect(await fetchGatewayCost(ENV, TASK, 2, { fetch: fakeApi([work, scale]).f })).toEqual({
+      state: "pending",
+    });
+    // sandbox_scale の cost 欠けで pending にならない
+    const scaleNoCost = log(undefined, { metadata: { caller: "sandbox_scale", taskId: TASK } });
+    expect(await fetchGatewayCost(ENV, TASK, 1, { fetch: fakeApi([work, scaleNoCost]).f })).toEqual(
+      {
+        state: "confirmed",
+        micro: 500_000,
+      },
+    );
+  });
+
+  it("caller が review のログ（ワーカーレビュー）は数える", async () => {
+    const work = log(0.5, { metadata: { taskId: TASK } });
+    const review = log(0.25, { metadata: { caller: "review", taskId: TASK } });
+    const r = await fetchGatewayCost(ENV, TASK, 2, { fetch: fakeApi([work, review]).f });
+    expect(r).toEqual({ state: "confirmed", micro: 750_000 });
   });
 
   it("件数が model_calls に足りなければ pending", async () => {

@@ -1148,7 +1148,7 @@ export class UserDO extends DurableObject<Env> {
         return { ok: true, applied: false } as const;
       }
       sql.exec(
-        "UPDATE task_budget SET settled_micro = ?, cost_source = 'gateway' WHERE task_id = ?",
+        "UPDATE task_budget SET settled_micro = ?, settled_estimated = 0, cost_source = 'gateway' WHERE task_id = ?",
         Math.round(micro),
         taskId,
       );

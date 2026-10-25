@@ -3,7 +3,8 @@
  *
  * - GET {base}/accounts/{account}/ai-gateway/gateways/{gateway}/logs
  *   クエリ: filters（JSON 文字列の配列 [{key:"metadata.value", operator:"eq", value:[taskId]}]）・per_page=50・page・order_by=created_at
- * - metadata（JSON 文字列）を読み、taskId が一致するログだけを数える（value の一致が別のキーで起きても混ざらない）
+ * - metadata（JSON 文字列またはオブジェクト）を読み、taskId が一致し、caller が無い（作業）か "review" のログだけを数える
+ *   （value の一致が別のキーで起きても混ざらない。sandbox_scale など他の caller は予算の外なので件数にも合計にも入れない）
  * - 確定できる条件: 一致したログの件数 >= max(1, model_calls) で、success のログすべてに数値の cost がある
  * - 環境の設定（CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID / AI_GATEWAY_ID）が揃っていなければ何もしない
  * - API のエラー・例外・壊れた応答は「まだ」。例外は投げない。トークンは Authorization ヘッダだけに載せる
@@ -45,16 +46,25 @@ interface LogRow {
   metadata?: unknown;
 }
 
-function taskIdOf(metadata: unknown): string | undefined {
-  if (typeof metadata !== "string") return undefined;
-  try {
-    const v: unknown = JSON.parse(metadata);
-    if (typeof v !== "object" || v === null) return undefined;
-    const id = (v as Record<string, unknown>).taskId;
-    return typeof id === "string" ? id : undefined;
-  } catch {
-    return undefined;
+/** metadata は文字列（JSON）でもオブジェクトでも返る。読めなければ undefined。 */
+function metadataOf(metadata: unknown): Record<string, unknown> | undefined {
+  let v: unknown = metadata;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return undefined;
+    }
   }
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return undefined;
+  return v as Record<string, unknown>;
+}
+
+/** タスクの予算に数えるログか: taskId が一致し、caller が無い（作業）か "review"（ワーカーレビュー）。 */
+function countsForTask(metadata: unknown, taskId: string): boolean {
+  const m = metadataOf(metadata);
+  if (!m || m.taskId !== taskId) return false;
+  return m.caller === undefined || m.caller === "review";
 }
 
 export async function fetchGatewayCost(
@@ -101,7 +111,7 @@ export async function fetchGatewayCost(
       if (rows.length === 0) break;
       seen += rows.length;
       for (const r of rows) {
-        if (taskIdOf(r?.metadata) !== taskId) continue;
+        if (!countsForTask(r?.metadata, taskId)) continue;
         matched++;
         if (typeof r.cost === "number" && Number.isFinite(r.cost) && r.cost >= 0) sum += r.cost;
         else if (r.success === true) complete = false;

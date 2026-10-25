@@ -27,6 +27,7 @@ export const MODEL_CATALOG_IDS: Readonly<Record<string, string>> = {
   "anthropic/claude-fable-5-1": "claude-fable-5-1",
   "openai/gpt-6-luna": "gpt-6-luna",
   "openai/gpt-6-sol": "gpt-6-sol",
+  "openai/gpt-6.1-sol": "gpt-6.1-sol",
   "openai/gpt-6-astra": "gpt-6-astra",
   // Workers AI（D10b）。Workers の無料プランでも使えるものだけ（kimi-k2.7-code・glm-5.x・deepseek-v4 は有料プラン専用なので入れない）。
   // カタログのキーは `workers-ai/@cf/...`（gateway カタログの "openai-completions"）。Pi（createAI）に渡す id は `@cf/...`（piModelId）。
@@ -76,6 +77,7 @@ export const DEFAULT_MODEL_ORDER: readonly string[] = [
   "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
   "workers-ai/@cf/zai-org/glm-4.7-flash",
   "workers-ai/@cf/google/gemma-4-26b-a4b-it",
+  "openai/gpt-6.1-sol",
   "openai/gpt-6-sol",
   "openai/gpt-6-luna",
   "openai/gpt-6-astra",
@@ -382,6 +384,7 @@ export const EFFORTS: Readonly<Record<string, Effort>> = {
   "anthropic/claude-fable-5-1": "low",
   "openai/gpt-6-luna": "low",
   "openai/gpt-6-sol": "medium",
+  "openai/gpt-6.1-sol": "medium",
   "openai/gpt-6-astra": "low",
   // Workers AI: 6 つとも low から。gemma は low を受け付けない（Workers AI のレジストリでは off / high だけ）ので high
   "workers-ai/@cf/openai/gpt-oss-120b": "low",

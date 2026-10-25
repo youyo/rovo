@@ -502,7 +502,13 @@ async function monthByOwner(
       directory.summarizeByOwner({ repoIds, from, to }),
       directory.summarizeConsultsByOwner({ from, to }),
     ]);
-    if (!tasks.ok || !consults.ok) return null;
+    if (!tasks.ok || !consults.ok) {
+      console.warn("dashboard: month by owner unavailable", {
+        tasks: tasks.ok ? "ok" : tasks.code,
+        consults: consults.ok ? "ok" : consults.code,
+      });
+      return null;
+    }
     const m = new Map<string, { login: string; task_micro: number; consult_micro: number }>();
     const row = (login: string) => {
       let r = m.get(login);
@@ -520,7 +526,8 @@ async function monthByOwner(
     };
     byOwnerCache.set(key, { expires: at + LEDGER_CACHE_TTL_MS, value });
     return value;
-  } catch {
+  } catch (e) {
+    console.warn("dashboard: month by owner failed", { error: String(e).slice(0, 200) });
     return null;
   }
 }

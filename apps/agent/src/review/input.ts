@@ -140,7 +140,9 @@ export function buildReviewInput(args: ReviewInputArgs): ReviewInput {
   const maskedDiff = maskSecrets(args.diff);
   const fitted = fitDiff(parseDiff(maskedDiff), args.diffMaxBytes ?? REVIEW_DIFF_MAX_BYTES);
   const commands = fitCommandOutputs(args.commands);
+  const maskedCriteria = (args.acceptanceCriteria ?? []).map((c) => maskSecrets(c));
   const redacted =
+    maskedCriteria.some((c, i) => c !== args.acceptanceCriteria?.[i]) ||
     maskedTitle !== title ||
     maskedBody !== body ||
     maskedDiff !== args.diff ||
@@ -151,7 +153,7 @@ export function buildReviewInput(args: ReviewInputArgs): ReviewInput {
   const blocks: string[] = [args.header];
   if (args.acceptanceCriteria && args.acceptanceCriteria.length > 0) {
     blocks.push(
-      `Acceptance criteria given by the client (trusted):\n${args.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`,
+      `Acceptance criteria given by the client (trusted):\n${maskedCriteria.map((c) => `- ${c}`).join("\n")}`,
     );
   }
   blocks.push(`Pull request title:\n${wrapReviewUntrusted("PR_TITLE", maskedTitle)}`);
@@ -172,7 +174,7 @@ export function buildReviewInput(args: ReviewInputArgs): ReviewInput {
   }
   if (diffPartial) notes.push("Do not assume that the part of the diff you cannot see is correct.");
   blocks.push(
-    `Diff (base...head):${notes.length > 0 ? `\n${notes.join("\n")}` : ""}\n${wrapReviewUntrusted("DIFF", fitted.text)}`,
+    `Diff (base..head):${notes.length > 0 ? `\n${notes.join("\n")}` : ""}\n${wrapReviewUntrusted("DIFF", fitted.text)}`,
   );
   if (args.commandsUnavailable) {
     blocks.push(

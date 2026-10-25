@@ -55,7 +55,12 @@ import {
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { BUDGET_EXTENSION_KIND, MAX_BUDGET_EXTENSIONS } from "./budget-question";
-import { fetchGatewayCost, type GatewayCostResult, gatewayCostConfigured } from "./gateway-cost";
+import {
+  fetchGatewayCost,
+  type GatewayCostResult,
+  gatewayCostConfigured,
+  RECONCILE_DELAYS_MS,
+} from "./gateway-cost";
 import { addColumnIfMissing } from "./sql-schema";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import {
@@ -91,8 +96,8 @@ import {
 export const AGENT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 /** alarm の間隔。start / cancel の再送、取り込み、精算の再試行に使う。 */
 export const ALARM_INTERVAL_MS = 10_000;
-/** 終端（finishTask）のあと、AI Gateway のログで費用を確定する試行の時刻（終了からの経過）。4 回で打ち切る */
-export const RECONCILE_DELAYS_MS = [2 * 60_000, 10 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+export { RECONCILE_DELAYS_MS };
+
 /** 確定額が見積もりからこの割合を超えてずれたら警告する */
 const RECONCILE_WARN_RATIO = 0.2;
 /** INPUT_REQUIRED の間で、配送すべきものが無いときの alarm の間隔（AgentDO の期限の監視と、トークンの更新の確認だけ）。 */
@@ -3176,7 +3181,9 @@ export class TaskDO extends DurableObject<Env> {
   /**
    * 終端後の費用の確定を 1 回進める（alarm からだけ呼ぶ）。時刻が来ていなければ何もしない。
    * 確定できたら UserDO に額を渡して終わり。「まだ」（件数不足・cost の欠け・API のエラー）は次の時刻へ。
-   * 4 回目でも確定できなければ見積もりのまま打ち切る。UserDO への呼び出しの失敗は回数に数えず、次の alarm で再試行する。
+   * 4 回目でも確定できなければ見積もりのまま打ち切る。
+   * UserDO が反映しなかったとき（台帳がまだ閉じていない・行が無い・呼び出しの例外）も「まだ」と同じに数える。
+   * 額が不正（invalid）なら書かずに終える。すでに確定済み（already）は台帳の額と揃うので書いて終える。
    */
   private async reconcileCost(): Promise<void> {
     const link = this.getLink();
@@ -3195,9 +3202,19 @@ export class TaskDO extends DurableObject<Env> {
       return;
     }
     if (result.state === "confirmed") {
+      let applied: Awaited<ReturnType<UserDO["reconcileTaskCost"]>> | undefined;
       try {
-        await this.userStub(row.owner_id).reconcileTaskCost(row.id, result.micro);
+        applied = await this.userStub(row.owner_id).reconcileTaskCost(row.id, result.micro);
       } catch {
+        applied = undefined;
+      }
+      if (applied?.ok && !applied.applied && applied.reason === "invalid") {
+        this.ctx.storage.sql.exec("UPDATE agent_link SET reconcile_done = 1 WHERE singleton = 1");
+        return;
+      }
+      const reflected = applied?.ok === true && (applied.applied || applied.reason === "already");
+      if (!reflected) {
+        this.advanceReconcileAttempt(link);
         return;
       }
       this.ctx.storage.transactionSync(() => {
@@ -3220,6 +3237,11 @@ export class TaskDO extends DurableObject<Env> {
       }
       return;
     }
+    this.advanceReconcileAttempt(link);
+  }
+
+  /** 確定の回数を 1 進める。最後の回なら見積もりのまま打ち切る。 */
+  private advanceReconcileAttempt(link: LinkRow): void {
     const attempt = link.reconcile_attempt + 1;
     this.ctx.storage.sql.exec(
       "UPDATE agent_link SET reconcile_attempt = ?, reconcile_done = ? WHERE singleton = 1",

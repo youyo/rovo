@@ -29,6 +29,12 @@ import { createTask, runToCompleted } from "./pr-helpers";
 // 他の利用者の台帳のキャッシュ（モジュールの状態）がテスト間で残らないようにする
 beforeEach(() => resetLedgerCache());
 
+// 「今月」を見るテストは、UTC の月の境目をまたいで揺れないよう、月の途中（3 月: 実行時の月と違う月）に Date を固定する。
+const freezeMidMonth = () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.parse("2026-03-15T12:00:00.000Z"));
+};
+
 const BASE = workerEnv.PUBLIC_BASE_URL;
 const ENC_KEY = (workerEnv as unknown as { TOKEN_ENC_KEY: string }).TOKEN_ENC_KEY;
 const SAME = { "sec-fetch-site": "same-origin" };
@@ -342,24 +348,29 @@ describe("overview", () => {
   });
 
   it("budget は視聴者本人の値。startable = min(max_concurrent_tasks, concurrency_limit - running_slots)", async () => {
-    const v = newViewer([newRepoId()]);
-    const dto = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
-    expect(dto.budget).toEqual({
-      monthly_budget_usd: 100,
-      remaining_usd: 77.5,
-      spent_usd: 12.5,
-      estimated_usd: 0.5,
-      reserved_usd: 10,
-      max_concurrent_tasks: 7,
-      concurrency_limit: 3,
-      running_slots: 1,
-      startable: 2,
-    });
-    const d = new Date();
-    expect(dto.month.period).toEqual({
-      start: new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString(),
-      end: new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString(),
-    });
+    freezeMidMonth();
+    try {
+      const v = newViewer([newRepoId()]);
+      const dto = OverviewDtoSchema.parse((await api(v, overviewPath())).json());
+      expect(dto.budget).toEqual({
+        monthly_budget_usd: 100,
+        remaining_usd: 77.5,
+        spent_usd: 12.5,
+        estimated_usd: 0.5,
+        reserved_usd: 10,
+        max_concurrent_tasks: 7,
+        concurrency_limit: 3,
+        running_slots: 1,
+        startable: 2,
+      });
+      // 固定した 3 月の期間。Gateway 側（DO を含む）の Date にも固定が効いている
+      expect(dto.month.period).toEqual({
+        start: "2026-03-01T00:00:00.000Z",
+        end: "2026-04-01T00:00:00.000Z",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("モデル別の費用: 見えないタスクだけが使うモデルの名前は出さず 'other' にまとめる。見えるタスクと共通のモデルは全員分の合計", async () => {
@@ -483,7 +494,9 @@ describe("overview の consult（D9。M3b の索引）", () => {
   });
 
   describe("全員の台帳の合計のキャッシュ（他の利用者の分だけ。閲覧者本人は毎回）", () => {
+    beforeEach(freezeMidMonth);
     afterEach(() => {
+      vi.useRealTimers();
       vi.restoreAllMocks();
       resetLedgerCache();
     });

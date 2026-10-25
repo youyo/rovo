@@ -454,6 +454,9 @@ export class UserDO extends DurableObject<Env> {
     );
     // settled が実費ではなく見積もり（予約額など）で確定した行は 1。列の追加前の行は 0（見積もりではない扱い）。
     addColumnIfMissing(sql, "task_budget", "settled_estimated", "INTEGER NOT NULL DEFAULT 0");
+    // settled_micro の出どころ。既定の estimate は agent の見積もり、gateway は終端後に AI Gateway のログで確定した額（1 回だけ上書き）。
+    // 既存の行は DEFAULT で estimate になる（過去のタスクはさかのぼって補正しない）
+    addColumnIfMissing(sql, "task_budget", "cost_source", "TEXT NOT NULL DEFAULT 'estimate'");
     // 予算の延長（budget_policy: ask）で承認された回数。延長のたびに reserved_micro へタスク予算と同じ額を足す
     addColumnIfMissing(sql, "task_budget", "extensions", "INTEGER NOT NULL DEFAULT 0");
     // クライアント（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
@@ -1122,6 +1125,35 @@ export class UserDO extends DurableObject<Env> {
       return this.clearSlot(taskId);
     });
     return { ok: true, released };
+  }
+
+  /**
+   * 終端後の費用の確定。AI Gateway のログの cost の合計（マイクロドル）で settled_micro を 1 回だけ上書きし、
+   * cost_source を gateway にする。閉じた（closed = 1）行で、まだ estimate のものだけ。2 回目以降は無視する（冪等）。
+   * 月は予約した行の月のまま（月の集計は closed の行の settled_micro を数えるので、そのまま反映される）。
+   */
+  reconcileTaskCost(taskId: string, micro: number): { ok: true; applied: boolean } | { ok: false } {
+    if (!isTaskId(taskId)) return { ok: false };
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const row = sql
+        .exec<{ closed: number; cost_source: string }>(
+          "SELECT closed, cost_source FROM task_budget WHERE task_id = ?",
+          taskId,
+        )
+        .toArray()[0];
+      if (!row) return { ok: false } as const;
+      if (!Number.isFinite(micro) || micro < 0) return { ok: true, applied: false } as const;
+      if (row.closed !== 1 || row.cost_source !== "estimate") {
+        return { ok: true, applied: false } as const;
+      }
+      sql.exec(
+        "UPDATE task_budget SET settled_micro = ?, cost_source = 'gateway' WHERE task_id = ?",
+        Math.round(micro),
+        taskId,
+      );
+      return { ok: true, applied: true } as const;
+    });
   }
 
   /**

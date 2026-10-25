@@ -96,9 +96,9 @@ describe("fetchGatewayCost", () => {
     expect(
       await fetchGatewayCost(ENV, TASK, 2, { fetch: fakeApi([log(0.1), log(undefined)]).f }),
     ).toEqual({ state: "pending" });
-    expect(
-      await fetchGatewayCost(ENV, TASK, 2, { fetch: fakeApi([log(null)]).f }),
-    ).toEqual({ state: "pending" });
+    expect(await fetchGatewayCost(ENV, TASK, 2, { fetch: fakeApi([log(null)]).f })).toEqual({
+      state: "pending",
+    });
     expect(
       await fetchGatewayCost(ENV, TASK, 2, {
         fetch: fakeApi([log(0.1), log(undefined, { success: false })]).f,

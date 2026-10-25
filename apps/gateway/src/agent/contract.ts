@@ -206,6 +206,8 @@ export interface UsageDto {
   cacheWriteTokens: number;
   /** ワーカーが使った web の回数（タスクごとの累計。Phase 5）。web 自体の費用は costUsd に含めない */
   web: WebUsageDto;
+  /** AI Gateway に送ったモデル呼び出しの累計回数（費用の確定でログの件数と照合する）。古い agent・0 回なら無い */
+  modelCalls?: number;
   /**
    * Sandbox のカウンタ（Phase 6 M2。agent が読めたときだけ付く）。公開用の形への写しは M3（agent-events.ts）。
    * runtimeMs: コンテナを動かした累計 ms / restarts: コンテナの作り直しの回数 / bootRetries: 起動の確認点で止まった・破棄された試行の回数

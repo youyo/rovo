@@ -28,7 +28,10 @@ describe("UserDO.reconcileTaskCost", () => {
   it("既定の cost_source は estimate。閉じた行だけ settled_micro を確定額で上書きし、gateway にする", async () => {
     const { stub, id } = await reserved();
     await stub.finishTask(id, 1, 3 * MICRO);
-    expect(await row(stub, id)).toMatchObject({ cost_source: "estimate", settled_micro: 3 * MICRO });
+    expect(await row(stub, id)).toMatchObject({
+      cost_source: "estimate",
+      settled_micro: 3 * MICRO,
+    });
     expect(await stub.reconcileTaskCost(id, 2 * MICRO)).toEqual({ ok: true, applied: true });
     expect(await row(stub, id)).toMatchObject({
       cost_source: "gateway",

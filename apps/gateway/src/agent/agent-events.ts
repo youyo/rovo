@@ -33,7 +33,7 @@ export const MAX_QUESTION_OPTION_LENGTH = 500;
 
 export type MappedAgentEvent =
   | { kind: "phase"; status: TaskStatus | null; reason?: string }
-  | { kind: "usage"; costMicroUsd: number; payload: PublicPayload }
+  | { kind: "usage"; costMicroUsd: number; modelCalls?: number; payload: PublicPayload }
   /** ワーカーの質問。TaskDO は questions テーブルにも保存する。options は JSON 配列の文字列 */
   | { kind: "question"; payload: PublicPayload }
   | { kind: "event"; type: string; payload: PublicPayload }
@@ -251,6 +251,7 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
       return {
         kind: "usage",
         costMicroUsd,
+        ...(num(d.modelCalls) > 0 ? { modelCalls: Math.floor(num(d.modelCalls)) } : {}),
         payload: {
           cost_usd: costMicroUsd / 1_000_000,
           input_tokens: num(d.inputTokens),

@@ -80,7 +80,6 @@ describe("TaskDO: 終端後の費用の確定（AI Gateway のログ）", () => 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     for (const at of [2 * MIN, 10 * MIN, 60 * MIN, 360 * MIN]) {
       // 予定の 1 分前には問い合わせない
-      clock.t = clock.t - (clock.t % 1) + 0;
       const base = (await baseOf(stub)) ?? 0;
       clock.t = base + at - MIN;
       await runDurableObjectAlarm(stub);

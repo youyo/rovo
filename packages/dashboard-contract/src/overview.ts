@@ -23,6 +23,8 @@ import {
  */
 export const TaskCostDtoSchema = z.strictObject({
   cost_usd: usdSchema,
+  /** cost_usd の出どころ。gateway は終端後に AI Gateway のログで確定した額、estimate は agent の見積もり。無ければ estimate 扱い */
+  cost_source: z.enum(["estimate", "gateway"]).optional(),
   input_tokens: countSchema,
   output_tokens: countSchema,
   cache_read_tokens: countSchema,

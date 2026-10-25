@@ -778,6 +778,8 @@ describe("TaskDO.result", () => {
         patch_too_large: false,
         usage: {
           cost_usd: 1.5,
+          cost_source: "estimate",
+          estimate_usd: 1.5,
           input_tokens: 10,
           output_tokens: 5,
           cache_read_tokens: 1,

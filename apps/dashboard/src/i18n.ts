@@ -242,7 +242,10 @@ const en = {
 
   // --- Cloudflare
   "cf.title": "Cloudflare",
-  "cf.window": "Last 24 hours",
+  "cf.window.1h": "Last hour",
+  "cf.window.24h": "Last 24 hours",
+  "cf.window.7d": "Last 7 days",
+  "cf.window.month": "This month (UTC)",
   "cf.partial": "Some items not included",
   "cf.failed": "Couldn't load. Will retry automatically.",
   "cf.stale": "Couldn't refresh. Showing the previous content.",
@@ -562,7 +565,10 @@ const ja: Record<Key, string> = {
   "models.cost": "タスク {task}、相談 {consult}",
 
   "cf.title": "Cloudflare",
-  "cf.window": "直近 24 時間",
+  "cf.window.1h": "直近 1 時間",
+  "cf.window.24h": "直近 24 時間",
+  "cf.window.7d": "直近 7 日",
+  "cf.window.month": "今月（UTC）",
   "cf.partial": "一部の項目は含まない",
   "cf.failed": "取得できませんでした。自動で再試行します。",
   "cf.stale": "更新できませんでした。前の内容を表示しています。",

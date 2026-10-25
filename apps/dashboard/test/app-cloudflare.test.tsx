@@ -17,7 +17,7 @@ const period = { start: "2026-10-21T00:00:00Z", end: "2026-10-22T00:00:00Z" };
 const cfBody = {
   generated_at: "2026-10-22T00:00:00Z",
   open_url: null,
-  range: "24h",
+  range: "month",
   workers: { ok: false, reason: "forbidden" },
   containers: { ok: false, reason: "forbidden" },
   ai_gateway: {
@@ -72,16 +72,16 @@ async function mount(f: ReturnType<typeof router>) {
 const panel = (c: HTMLElement) => c.querySelector("[data-cloudflare]") as HTMLElement;
 
 describe("Cloudflare の枠", () => {
-  it("見出しに直近 24 時間、項目と値、理由ごとの言葉、開くリンクを出す", async () => {
+  it("見出しに今月（UTC）、項目と値、理由ごとの言葉、開くリンクを出す", async () => {
     const f = router(() => json(200, cfBody));
     const { container } = await mount(f);
     const p = panel(container);
     expect(p.querySelector("h2")?.textContent).toBe("Cloudflare");
-    expect(p.textContent).toContain("直近 24 時間");
+    expect(p.textContent).toContain("今月（UTC）");
     expect(p.textContent).toContain("316 件、エラー 18 件、費用 $3.00");
     expect(p.textContent).toContain("$954.63");
     expect(p.textContent).toContain("取得できない（トークンの権限を確認）");
-    expect(cfCalls(f)[0]?.searchParams.get("range")).toBe("24h");
+    expect(cfCalls(f)[0]?.searchParams.get("range")).toBe("month");
     const links = [...p.querySelectorAll("a")];
     expect(links).toHaveLength(5);
     expect(links.map((a) => a.getAttribute("href"))).toEqual([

@@ -363,3 +363,26 @@ export function workerReviewWarnings(s: {
   if (s.suggestionCount > 0) return [`review_suggestions: ${s.suggestionCount}`];
   return [];
 }
+
+/** 再実行の 1 本が通ったか（終了コード 0・タイムアウトなし・飛ばしていない） */
+export function commandPassed(r: ReviewCommandResult): boolean {
+  return r.exitCode === 0 && !r.timedOut && r.skipped !== true;
+}
+
+/**
+ * worker_review の結果の分類のうち、修正の回がある行（docs/specs/worker-review.md「直し切れなかったとき」の表）。
+ * verification_commands が通って完了にするときだけ呼ぶ（通らずに試行を使い切ったときは従来どおり FAILED で、ここは通らない）。
+ * - 修正の commit が無いまま完了を申告した: review_must_fix_unaddressed: <件数>
+ * - 修正した・review_commands の再実行が通った: なし（修正したことは review の fixApplied で分かる）
+ * - 修正した・review_commands の再実行が失敗した: 失敗したコマンドごとに review_commands_failed_after_fix: <コマンド>
+ */
+export function workerReviewFixWarnings(s: {
+  mustFixCount: number;
+  fixApplied: boolean;
+  recheck: readonly ReviewCommandResult[];
+}): string[] {
+  if (!s.fixApplied) return [`review_must_fix_unaddressed: ${s.mustFixCount}`];
+  return s.recheck
+    .filter((r) => !commandPassed(r))
+    .map((r) => `review_commands_failed_after_fix: ${r.argv.join(" ").slice(0, 200)}`);
+}

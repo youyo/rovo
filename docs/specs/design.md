@@ -25,7 +25,7 @@ Web 検索・Web ページ取得は Coding Sandbox から分離した専用環�
 - ワーカーは非同期で実行する。
 - クライアントはワーカーの実行中もユーザーとの会話や調査を継続できる構成を目指す。
 - ワーカーは必要な場合のみクライアントへ質問する。
-- GitHub Draft PR はタスク開始時に作成する。タスクが `COMPLETED` になると、rovo が GitHub App の Installation Token で PR を Ready for review にする（`FAILED` / `BUDGET_EXCEEDED` / `CANCELLED` は Draft のまま。失敗してもタスクは `COMPLETED` のまま、`task_pr_ready` で Ready にできる）。rovo はマージしない。全体のテストとレビューをどこで行うかは `review_policy`（`task_start` の入力。`client_review`（既定）| `worker_review`）で選ぶ。`client_review` はクライアント（AI や人）が PR のブランチを手元に取り出して全体のテストとレビューを行い、`task_pr_merge` か `gh` などで直接マージする。`worker_review` は、ワーカーの検証が通ったあと完了にする前に、`review_commands` を流して `review_model` が差分を読み、PR に COMMENT のレビューを投稿してから Ready にする（`review_fix_rounds` は 0 だけ。修正の回は未実装。`docs/specs/worker-review.md` の段階 3。15.8 の D9）。
+- GitHub Draft PR はタスク開始時に作成する。タスクが `COMPLETED` になると、rovo が GitHub App の Installation Token で PR を Ready for review にする（`FAILED` / `BUDGET_EXCEEDED` / `CANCELLED` は Draft のまま。失敗してもタスクは `COMPLETED` のまま、`task_pr_ready` で Ready にできる）。rovo はマージしない。全体のテストとレビューをどこで行うかは `review_policy`（`task_start` の入力。`client_review`（既定）| `worker_review`）で選ぶ。`client_review` はクライアント（AI や人）が PR のブランチを手元に取り出して全体のテストとレビューを行い、`task_pr_merge` か `gh` などで直接マージする。`worker_review` は、ワーカーの検証が通ったあと完了にする前に、`review_commands` を流して `review_model` が差分を読み、PR に COMMENT のレビューを投稿してから Ready にする（`review_fix_rounds` が 1 なら、`must_fix` があればワーカーが 1 回直し、`verification_commands` と `review_commands` を再実行してから。`docs/specs/worker-review.md` の段階 4 まで。15.8 の D9）。
 - 障害発生時は可能な範囲で途中状態から自動復旧する。
 - クライアントのセッションが終了してもクラウド側の処理は継続する。
 - Web 調査は独立した Web Research Service に集約する。

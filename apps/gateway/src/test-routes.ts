@@ -333,6 +333,7 @@ export function withTestScripts(env: Env, agent: AgentRpc): AgentRpc {
     cancel: () => agent.cancel(),
     getEvents: (afterSeq, limit) => agent.getEvents(afterSeq, limit),
     getResult: () => agent.getResult(),
+    getReview: () => agent.getReview(),
     setGitCredential: (c) => agent.setGitCredential(c),
     answer: async (questionId, answer) =>
       (await held()) ? { ok: false } : agent.answer(questionId, answer),

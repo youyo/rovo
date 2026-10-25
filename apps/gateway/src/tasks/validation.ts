@@ -74,17 +74,12 @@ export type VerificationCommandInput = z.infer<typeof verificationCommandSchema>
  * 全体のテストとレビューをどこで行うか（review_policy）。マージはどちらでもクライアントが行う（task_pr_merge か、gh などで直接）。
  * client_review（既定）: ワーカーは関係するテストまでを担当し、完了で rovo が PR を Ready にする。全体のテストとレビューはクライアントが手元で行う。
  * worker_review: ワーカーの検証が通ったあと、完了にする前に、review_commands を流し、review_model が差分を読んで PR に COMMENT のレビューを書く
- * （review_model が必須。review_fix_rounds は 0 だけ。修正の回は未実装）。
+ * （review_model が必須）。review_fix_rounds が 1 なら、must_fix があればワーカーが 1 回直し、verification_commands と review_commands を再実行する
+ * （修正のあとの 2 回目のレビューはしない）。
  */
 export const REVIEW_POLICIES = ["client_review", "worker_review"] as const;
 export type ReviewPolicy = (typeof REVIEW_POLICIES)[number];
 export const DEFAULT_REVIEW_POLICY: ReviewPolicy = "client_review";
-/**
- * worker_review の review_fix_rounds。仕様では 0 か 1 だが、1（ワーカーが修正する回）はまだ実装していない。
- * 省略は 0（コメントだけで Ready）。
- */
-const FIX_ROUNDS_NOT_IMPLEMENTED =
-  "review_fix_rounds: 1 は指定できません（修正の回は未実装です。0 を指定するか省略してください）";
 
 /**
  * 予算に近づいたときの扱い。ask（既定）は止めずにクライアントへ「あと task_budget_usd 使って続けるか」を聞く（延長は 1 タスク 2 回まで。
@@ -119,7 +114,10 @@ export const taskInputObject = z.object({
   review_model: z.string().min(1).max(MAX_MODEL_LENGTH).optional(),
   /** worker_review のときだけ。全体のテスト（verification_commands と同じ形）。省略・空なら差分と読み取りの道具だけのレビュー */
   review_commands: z.array(verificationCommandSchema).max(MAX_VERIFICATION_COMMANDS).optional(),
-  /** worker_review のときだけ。この段階では 0（省略も 0）だけ。1 は「修正の回は未実装」 */
+  /**
+   * worker_review のときだけ。0（省略も 0）はコメントだけで Ready、1 は must_fix があればワーカーが 1 回直す（修正の回）。
+   * 2 以上は断る（修正のあとに 2 回目のレビューはしないので、増やす意味が薄い）
+   */
   review_fix_rounds: z.number().optional(),
   /** 廃止。review_policy に置き換えた（渡されたら invalid_input にして、黙って無視しない） */
   merge_policy: z
@@ -170,20 +168,13 @@ export function checkReviewFields(
       message: "review_model is required for review_policy worker_review",
     });
   }
-  if (v.review_fix_rounds !== undefined) {
-    if (v.review_fix_rounds === 1) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["review_fix_rounds"],
-        message: FIX_ROUNDS_NOT_IMPLEMENTED,
-      });
-    } else if (v.review_fix_rounds !== 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["review_fix_rounds"],
-        message: "review_fix_rounds must be 0 (or 1, which is not implemented yet)",
-      });
-    }
+  if (v.review_fix_rounds !== undefined && v.review_fix_rounds !== 0 && v.review_fix_rounds !== 1) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["review_fix_rounds"],
+      message:
+        "review_fix_rounds must be 0 or 1 (there is no second review after the fix, so more rounds are not supported)",
+    });
   }
 }
 

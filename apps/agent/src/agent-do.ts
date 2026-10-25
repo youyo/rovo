@@ -55,6 +55,7 @@ import {
   type GitCredential,
   isTerminal,
   type ResultDto,
+  type ReviewFinalDto,
   type ReviewResultDto,
   type ReviewSpec,
   type ReviewUsageDto,
@@ -89,9 +90,17 @@ import {
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
 import { buildReviewBody } from "./review/body";
-import { buildReviewInput, clampCommandOutput, type ReviewInput } from "./review/input";
+import { buildFixInstruction } from "./review/fix";
+import {
+  buildReviewInput,
+  clampCommandOutput,
+  type ReviewCommandResult,
+  type ReviewInput,
+} from "./review/input";
+import type { ReviewFinding } from "./review/output";
 import {
   type CommandRunner,
+  commandPassed,
   type ModelCaller,
   REVIEW_MAX_OUTPUT_TOKENS,
   REVIEW_MODEL_TIMEOUT_MS,
@@ -103,6 +112,7 @@ import {
   reviewWarnings,
   runReviewCommands,
   runReviewModel,
+  workerReviewFixWarnings,
   workerReviewWarnings,
 } from "./review/stage";
 import { createReviewToolRunner, type ReviewToolDef, type ReviewToolRunner } from "./review/tools";
@@ -275,6 +285,34 @@ interface StoredReview {
   result: ReviewResultDto;
   warnings: string[];
 }
+/**
+ * worker_review の修正の回（meta の review_fix。docs/specs/worker-review.md「流れ」の 4・5）。レビューが must_fix を返し、
+ * review_fix_rounds が 1 のときに作る。fixing のあいだはワーカー（Pi の run）が直していて、レビューの段（workerReviewActive）ではない。
+ * 次の report_completion で、修正の commit があれば verification_commands と review_commands を再実行して done にする。
+ */
+interface StoredReviewFix {
+  stage: "fixing" | "done";
+  /** レビューした commit（修正の commit が無いかの判定に使う） */
+  reviewedSha: string;
+  /** ワーカーに渡す must_fix（レビューのモデルが書いた非信頼データ。渡すときに囲む） */
+  mustFix: ReviewFinding[];
+  /** 最初の review_commands で通らなかったもの（決定 17。渡すときに囲む） */
+  failedCommands: ReviewCommandResult[];
+  /**
+   * 修正の指示をワーカーに渡し終えたか。report_completion のツールの中なら、その結果で渡す。ツールの外（予算の延長の承認のあと・
+   * DO の再起動のあと）なら、新しい run の user メッセージとして submit する（渡し終えるまで、Pi の run の監視はしない）
+   */
+  delivered: boolean;
+  /** 修正の回に入った時点の warnings（レビューの段のもの）。修正の結果の warnings はこれに足す（やり直しても二重にしない） */
+  baseWarnings: string[];
+  /**
+   * 修正のあとの確定（再実行と完了）に入った SHA。これがあるのに終端でなければ、確定の途中で止まった（DO の再起動など）ので、
+   * onStart / tick / run の終わりから続き（再実行のやり直しと完了）を進める
+   */
+  recheckSha?: string;
+}
+/** 修正の指示を渡す Pi の run の operation（ツールの外から渡すとき） */
+const REVIEW_FIX_OPERATION = "review_fix";
 /** 予算の延長の質問で止まっている間の、往復の途中の会話（meta の review_convo。承認されたらここから続ける） */
 interface StoredReviewConvo {
   transcript: ReviewTranscript;
@@ -442,6 +480,12 @@ export class AgentDO extends DurableObject<Env> {
   private launching: Promise<void> | undefined;
   /** worker_review のレビューの段（単一実行） */
   private workerReviewRun: Promise<void> | undefined;
+  /** worker_review のレビューの段を、report_completion のツールの中から待っている（修正の指示はそのツールの結果で渡す） */
+  private reviewInTool = false;
+  /** 修正の指示の submit（ツールの外から渡すとき。単一実行） */
+  private fixDelivery: Promise<void> | undefined;
+  /** 修正のあとの確定（再実行と完了。単一実行） */
+  private recheckRun: Promise<{ text: string; isError: boolean; terminate: boolean }> | undefined;
   private watching: Promise<void> | undefined;
   private finalizing: Promise<void> | undefined;
   /** 予算超過の停止で進行中の WIP commit（確定はこれを待つ。失敗しても解決する） */
@@ -1060,6 +1104,14 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /**
+   * レビューの段の結果（終端の前でも読める）。worker_review の修正の回に入ったとき、TaskDO が修正の前に PR へ投稿するために読む
+   * （fixRequested と本文）。結果がまだ無ければ null。
+   */
+  async getReview(): Promise<ReviewResultDto | null> {
+    return this.store.meta<StoredReview>("review_result")?.result ?? null;
+  }
+
+  /**
    * task_review と worker_review の結果（getResult の review）。段の結果が無いまま終わった（cancel・検証の失敗など）ときは、
    * 飛ばしたものとして返す。client_review の通常のタスクには付けない。
    */
@@ -1415,14 +1467,14 @@ export class AgentDO extends DurableObject<Env> {
 
   /**
    * worker_review の指定の検査（fail-closed）。レビューのモデルは AGENT_MODELS の中で単価が分かるもの、コマンドは形が正しいもの。
-   * 修正の回（fixRounds: 1）はまだ実装していないので、0 以外は受け付けない（黙って「直さない」にしない）。
+   * 修正の回（fixRounds）は 0 か 1 だけ（2 回目のレビューはしないので、2 以上は受け付けない。省略も受け付けない）。
    */
   private validateWorkerReview(spec: TaskSpec): string | undefined {
     const wr = spec.workerReview as unknown;
     if (wr === undefined) return undefined;
     if (typeof wr !== "object" || wr === null) return "invalid_spec: workerReview";
     const { model, commands, fixRounds } = wr as Record<string, unknown>;
-    if (fixRounds !== 0) return "invalid_spec: workerReview fixRounds";
+    if (fixRounds !== 0 && fixRounds !== 1) return "invalid_spec: workerReview fixRounds";
     if (
       !Array.isArray(commands) ||
       commands.some(
@@ -1618,6 +1670,8 @@ export class AgentDO extends DurableObject<Env> {
     return (
       this.store.meta("launched") === true &&
       !this.store.meta("pending_resume") &&
+      // 修正の指示を新しい run で渡す前は、steer をその指示に添える（先に submit すると指示の無い run が始まる）
+      !this.fixUndelivered() &&
       // 終端を確定している最中は、idle の session への submit で新しい run が始まってしまう
       !this.finalizing &&
       !this.refused() &&
@@ -1868,7 +1922,9 @@ export class AgentDO extends DurableObject<Env> {
       !this.workerReviewActive() &&
       // 回答待ちの間は run が無い。回答の submit が済む（pending_resume が消える）までは、回答の operation も無い
       phase !== "input_required" &&
-      !this.store.meta("pending_resume")
+      !this.store.meta("pending_resume") &&
+      // 修正の指示を新しい run で渡す前は、待つ run が無い（古い run の完了を「完了の申告なし」と取り違えない）
+      !this.fixUndelivered()
     );
   }
 
@@ -1895,6 +1951,14 @@ export class AgentDO extends DurableObject<Env> {
   private async onRunSettled(status: string, reason: string | undefined): Promise<void> {
     // 質問で run を終えただけ。回答を待つので、失敗にも片付けにもしない
     if (this.store.phase() === "input_required") return;
+    // 修正のあとの確定の途中で止まった run が終わった: 「完了の申告なし」にせず、確定の続きを進める
+    if (this.recheckPending() && this.stopIntents().length === 0) {
+      const spec = this.spec();
+      const fix = this.recheckPending();
+      if (spec && fix?.recheckSha !== undefined) {
+        await this.finishFixRoundOnce(spec, fix.recheckSha, fix).catch(() => undefined);
+      }
+    }
     if (!isTerminal(this.store.phase())) {
       // 停止の意図があれば、確定のトランザクションがそれを優先する
       if (this.stopIntents().length === 0 && status === "unanswered") {
@@ -1918,6 +1982,8 @@ export class AgentDO extends DurableObject<Env> {
     if (this.store.meta("launched") && !isTerminal(this.store.phase())) {
       const pending = this.store.meta<string | null>("pending_resume");
       if (pending) void this.resumeFromAnswer(pending).catch(() => undefined);
+      else if (this.fixUndelivered()) void this.deliverFixOnce().catch(() => undefined);
+      else if (this.recheckPending()) void this.resumeRecheck().catch(() => undefined);
       else {
         this.watchRun();
         void this.flushSteers().catch(() => undefined);
@@ -1951,6 +2017,12 @@ export class AgentDO extends DurableObject<Env> {
     } else if (this.deadlineExceeded()) this.requestStop("deadline");
     else if (this.store.meta<string | null>("pending_resume")) {
       void this.resumeFromAnswer(String(this.store.meta("pending_resume"))).catch(() => undefined);
+    } else if (this.fixUndelivered()) {
+      // worker_review の修正の指示を、まだ新しい run で渡せていない（submit の失敗・DO の再起動のあと）
+      void this.deliverFixOnce().catch(() => undefined);
+    } else if (this.recheckPending()) {
+      // worker_review の修正のあとの確定の途中で止まった（DO の再起動のあと）: 再実行をやり直して完了にする
+      void this.resumeRecheck().catch(() => undefined);
     } else if (this.workerReviewActive()) {
       // worker_review のレビューの段（DO の再起動のあとなどで途切れていれば、続きから進める。動いていれば何もしない）
       void this.runWorkerReviewOnce(false).catch(() => undefined);
@@ -2270,6 +2342,11 @@ export class AgentDO extends DurableObject<Env> {
     }
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
+      // worker_review の修正の回は、確定と同じ区間で終える（確定の前に止まったら、続きから進められるように fixing のまま残す）
+      const fixRound = this.store.meta<StoredReviewFix>("review_fix");
+      if (fixRound?.stage === "fixing") {
+        this.store.setMeta("review_fix", { ...fixRound, stage: "done" } satisfies StoredReviewFix);
+      }
       // 古い指示をそのまま採用せず、確定の時点の意図と要求から決める
       const decided = decideTerminal(this.stopIntents(), this.requests);
       // reason には上流のエラー文などが入りうる（phase イベントは emit() を通らない）ので、積む前にマスクする
@@ -3546,7 +3623,17 @@ export class AgentDO extends DurableObject<Env> {
         })
       : undefined;
     const failure = outcome.ok ? undefined : outcome.code;
-    const worker = this.spec()?.kind !== "review";
+    const spec = this.spec();
+    const worker = spec?.kind !== "review";
+    // worker_review の修正の回に入るか（must_fix が 1 件以上・review_fix_rounds が 1・まだ修正の回を使っていない）。
+    // 入るときは、件数からの warnings（review_must_fix_unaddressed）は修正の結果で決める（finishFixRound）
+    const fixing =
+      worker &&
+      outcome.ok &&
+      outcome.verdict.mustFix.length > 0 &&
+      spec?.workerReview?.fixRounds === 1 &&
+      this.store.meta<StoredReviewFix>("review_fix") === undefined &&
+      this.stopIntents().length === 0;
     const stored: StoredReview = {
       result: {
         stage: outcome.ok ? "done" : "skipped",
@@ -3559,6 +3646,7 @@ export class AgentDO extends DurableObject<Env> {
         commandsUnavailable: cmds.unavailable,
         ...(failure !== undefined ? { failure } : {}),
         usage: this.reviewUsage(),
+        ...(fixing ? { fixRequested: true } : {}),
       },
       warnings: [
         ...reviewWarnings({
@@ -3571,7 +3659,7 @@ export class AgentDO extends DurableObject<Env> {
             tools?.redacted() === true,
           failure,
         }),
-        ...(worker
+        ...(worker && !fixing
           ? workerReviewWarnings({
               failure,
               mustFixCount: outcome.ok ? outcome.verdict.mustFix.length : 0,
@@ -3580,16 +3668,35 @@ export class AgentDO extends DurableObject<Env> {
           : []),
       ],
     };
+    const reviewedSha = this.store.meta<string>("worker_review_sha");
     this.store.tx(() => {
       if (isTerminal(this.store.phase())) return;
       this.store.setMeta("review_result", stored);
       this.store.setMeta("review_convo", null);
+      // 修正の回に入る（結果と同じトランザクションで。途中で落ちても「結果はあるが修正の回が無い」状態にしない）。
+      // レビューの段を抜け（worker_review_sha を消す）、ワーカーが直す RUNNING に戻る
+      if (fixing && outcome.ok && reviewedSha && this.stopIntents().length === 0) {
+        this.store.setMeta("review_fix", {
+          stage: "fixing",
+          reviewedSha,
+          mustFix: outcome.verdict.mustFix,
+          failedCommands: cmds.results.filter((r) => !commandPassed(r)),
+          delivered: false,
+          baseWarnings: stored.warnings,
+        } satisfies StoredReviewFix);
+        this.store.setMeta("worker_review_sha", null);
+        this.store.appendEvent("review_fix_started", {
+          must_fix_count: outcome.verdict.mustFix.length,
+        });
+        this.store.setPhase("running");
+      }
     });
     if (worker) {
       // 停止の意図（取消し・期限）があれば、その確定が勝つ。なければ、固定した SHA で完了にする
       if (this.stopIntents().length > 0) return;
-      const sha = this.store.meta<string>("worker_review_sha");
-      await this.finalize({ phase: "completed", ...(sha ? { sha } : {}) });
+      // 修正の回に入った: 指示は呼び出し側（ツールの結果か、新しい run）が渡す
+      if (this.store.meta<StoredReviewFix>("review_fix")?.stage === "fixing") return;
+      await this.finalize({ phase: "completed", ...(reviewedSha ? { sha: reviewedSha } : {}) });
       return;
     }
     if (failure === "budget") {
@@ -3847,6 +3954,12 @@ export class AgentDO extends DurableObject<Env> {
           `There are uncommitted changes:\n${tail(status.stdout, 1000)}\nCommit them with git_commit, then call report_completion again.`,
         );
       }
+      // worker_review の修正の回: 修正の commit が無いまま完了を申告した（レビューした SHA のまま）。検証は通っているので、
+      // 再実行はせずに完了にする（warnings: review_must_fix_unaddressed）
+      const fix = spec.workerReview ? this.store.meta<StoredReviewFix>("review_fix") : undefined;
+      if (fix?.stage === "fixing" && sha === fix.reviewedSha) {
+        return await this.finishFixRoundOnce(spec, sha, fix);
+      }
 
       if (commands.length === 0) {
         this.store.setMeta("verification", {
@@ -4003,9 +4116,28 @@ export class AgentDO extends DurableObject<Env> {
     sha: string,
   ): Promise<{ text: string; isError: boolean; terminate: boolean } | undefined> {
     if (!spec.workerReview) return undefined;
+    // 修正の回のあとの report_completion: レビューはせず、review_commands を再実行して完了にする（2 回目のレビューはしない）
+    const fix = this.store.meta<StoredReviewFix>("review_fix");
+    if (fix?.stage === "fixing") return this.finishFixRoundOnce(spec, sha, fix);
     // この印があるあいだはレビューの段（Pi の run ではなく AgentDO が進める）。固定した SHA はここで決まる
     this.store.setMeta("worker_review_sha", sha);
-    await this.runWorkerReviewOnce(true);
+    // ツールの結果を待っている（修正の指示は、このツールの結果で渡す。runWorkerReview は submit しない）
+    this.reviewInTool = true;
+    try {
+      await this.runWorkerReviewOnce(true);
+    } finally {
+      this.reviewInTool = false;
+    }
+    const started = this.store.meta<StoredReviewFix>("review_fix");
+    if (
+      started?.stage === "fixing" &&
+      !started.delivered &&
+      this.store.phase() === "running" &&
+      this.stopIntents().length === 0
+    ) {
+      this.store.setMeta("review_fix", { ...started, delivered: true } satisfies StoredReviewFix);
+      return { text: this.fixInstructionOf(started), isError: false, terminate: false };
+    }
     if (this.store.phase() === "input_required") {
       return {
         text: "The verification passed and the review needs the client's approval to continue (the budget). Stop now and wait; do not call any other tool.",
@@ -4038,6 +4170,180 @@ export class AgentDO extends DurableObject<Env> {
       typeof this.store.meta<string>("worker_review_sha") === "string" &&
       !isTerminal(this.store.phase())
     );
+  }
+
+  // ---- worker_review の修正の回（review_fix_rounds: 1。docs/specs/worker-review.md「流れ」の 4・5）----
+  //
+  // レビューが must_fix を返すと、finishReview が review_fix（fixing）を作って RUNNING に戻す。指示（must_fix だけ。suggestions は渡さない）は、
+  // report_completion のツールの中ならその結果で、ツールの外なら新しい run の user メッセージで渡す（deliverFix）。
+  // ワーカーが直して report_completion を呼ぶと、修正の commit が無ければそのまま完了（review_must_fix_unaddressed）、
+  // あれば verification_commands（従来どおり。失敗はワーカーに返し、試行を使い切れば FAILED）のあと review_commands を再実行して完了にする
+  // （finishFixRound）。修正のあとの 2 回目のレビューはしない。
+
+  /** 修正の指示を、まだワーカーに渡せていない（ツールの外から渡すときの、submit の前） */
+  private fixUndelivered(): boolean {
+    const fix = this.store.meta<StoredReviewFix>("review_fix");
+    return fix?.stage === "fixing" && !fix.delivered && !isTerminal(this.store.phase());
+  }
+
+  private fixInstructionOf(fix: StoredReviewFix): string {
+    return buildFixInstruction({ mustFix: fix.mustFix, failedCommands: fix.failedCommands });
+  }
+
+  private deliverFixOnce(): Promise<void> {
+    this.fixDelivery ??= this.deliverFix().finally(() => {
+      this.fixDelivery = undefined;
+    });
+    return this.fixDelivery;
+  }
+
+  /**
+   * 修正の指示を新しい run の user メッセージとして Pi に submit する（ツールの外から渡すとき。失敗したら tick・再起動のあとで再送する）。
+   * 回答の再開（resumeFromAnswer）と同じく、submit の前に operation を切り替え、渡し終えたら監視を張る。
+   */
+  private async deliverFix(): Promise<void> {
+    if (!this.fixUndelivered() || this.reviewInTool || this.refused()) return;
+    const fix = this.store.meta<StoredReviewFix>("review_fix");
+    if (!fix) return;
+    const operationId = REVIEW_FIX_OPERATION;
+    this.store.setMeta("operation_id", operationId);
+    const carried = this.carrySteers(operationId);
+    try {
+      await this.harness.submit(this.userInput(this.fixInstructionOf(fix), carried), {
+        operationId,
+      });
+    } catch {
+      return;
+    }
+    if (this.refused()) {
+      await this.abortRun();
+      return;
+    }
+    this.store.tx(() => {
+      const cur = this.store.meta<StoredReviewFix>("review_fix");
+      if (cur) this.store.setMeta("review_fix", { ...cur, delivered: true });
+      this.acceptSteers(carried);
+    });
+    this.watchRun();
+    void this.flushSteers().catch(() => undefined);
+  }
+
+  /** 修正のあとの確定（単一実行。ツールの中・tick・run の終わりのどこから呼ばれても 1 つを共有する） */
+  private finishFixRoundOnce(
+    spec: StoredSpec,
+    sha: string,
+    fix: StoredReviewFix,
+  ): Promise<{ text: string; isError: boolean; terminate: boolean }> {
+    this.recheckRun ??= this.finishFixRound(spec, sha, fix).finally(() => {
+      this.recheckRun = undefined;
+    });
+    return this.recheckRun;
+  }
+
+  /** 修正のあとの確定の途中で止まった（recheckSha があるのに終端でない）。再起動のあとに続きから進める対象 */
+  private recheckPending(): StoredReviewFix | undefined {
+    const fix = this.store.meta<StoredReviewFix>("review_fix");
+    if (fix?.stage !== "fixing" || fix.recheckSha === undefined) return undefined;
+    if (isTerminal(this.store.phase())) return undefined;
+    return fix;
+  }
+
+  /**
+   * 確定の途中で止まった修正の回の続き（onStart / tick / run の終わりから）。再実行をやり直して完了にする。
+   * ツールの外から確定したので、残った Pi の run は止め、Sandbox を終端として止める。
+   */
+  private async resumeRecheck(): Promise<void> {
+    const fix = this.recheckPending();
+    const spec = this.spec();
+    if (!fix || !spec || fix.recheckSha === undefined || this.refused()) return;
+    const live = this.recheckRun !== undefined;
+    await this.finishFixRoundOnce(spec, fix.recheckSha, fix);
+    if (live || !isTerminal(this.store.phase())) return;
+    await this.abortRun();
+    await this.terminalStop("finished");
+  }
+
+  /**
+   * 修正の回のあとの report_completion（verification_commands が通ったあと、または修正の commit が無いとき）。
+   * 修正の commit があれば、review_commands を新しい SHA で再実行し（失敗しても完了。warnings と final で知らせる）、
+   * 結果の分類（workerReviewFixWarnings）を review_result に書いてから、新しい SHA で完了にする（head_matches_verified はこの SHA）。
+   */
+  private async finishFixRound(
+    spec: StoredSpec,
+    sha: string,
+    fix: StoredReviewFix,
+  ): Promise<{ text: string; isError: boolean; terminate: boolean }> {
+    const ended = { text: "The task has already ended.", isError: true, terminate: true };
+    const commands = spec.workerReview?.commands ?? [];
+    const fixApplied = sha !== fix.reviewedSha;
+    // 確定に入った印を先に残す（途中で DO が落ちても、再起動のあとに続きから進める）
+    if (fix.recheckSha !== sha) {
+      this.store.tx(() => {
+        if (isTerminal(this.store.phase())) return;
+        const cur = this.store.meta<StoredReviewFix>("review_fix");
+        if (cur?.stage === "fixing") {
+          this.store.setMeta("review_fix", { ...cur, recheckSha: sha } satisfies StoredReviewFix);
+        }
+      });
+    }
+    let final: ReviewFinalDto | undefined;
+    if (fixApplied) {
+      const outcome = await runReviewCommands(
+        this.reviewRunner(),
+        commands,
+        this.now() + REVIEW_STAGE_LIMIT_MS,
+      );
+      if (outcome.stopped || this.refused()) return ended;
+      const results: ReviewCommandResult[] = outcome.unavailable
+        ? commands.map((c) => ({
+            argv: c.argv,
+            exitCode: -1,
+            timedOut: false,
+            output: "rovo could not run this command in the sandbox",
+          }))
+        : outcome.results.map((r) => ({ ...r, output: clampCommandOutput(r.output) }));
+      final = {
+        // ここに来るのは verification_commands が通ったか、無いときだけ。無いときは結果の verification.verified と同じく false
+        verificationCommandsPassed:
+          this.store.meta<VerificationSummary>("verification")?.verified === true,
+        reviewCommandsPassed: results.every(commandPassed),
+        commands: results,
+        commandsUnavailable: outcome.unavailable,
+      };
+    }
+    this.store.tx(() => {
+      if (isTerminal(this.store.phase())) return;
+      const stored = this.store.meta<StoredReview>("review_result");
+      if (stored) {
+        this.store.setMeta("review_result", {
+          result: {
+            ...stored.result,
+            ...(fixApplied ? { fixApplied: sha } : {}),
+            ...(final ? { final } : {}),
+          },
+          warnings: [
+            ...(fix.baseWarnings ?? stored.warnings),
+            ...workerReviewFixWarnings({
+              mustFixCount: fix.mustFix.length,
+              fixApplied,
+              recheck: final?.commands ?? [],
+            }),
+          ],
+        } satisfies StoredReview);
+      }
+      // review_fix の stage は、確定（doFinalize）のトランザクションで done にする。ここで先に done にすると、確定の前に止まったとき
+      // 次の report_completion が修正の回を見失い、2 回目のレビューに進んでしまう
+    });
+    if (this.stopIntents().length > 0) return ended;
+    await this.finalize({ phase: "completed", sha });
+    if (this.stopIntents().length > 0 || this.store.phase() !== "completed") return ended;
+    return {
+      text: fixApplied
+        ? "Verification passed after your fix. The task is complete."
+        : "No new commit was made for the review findings. The task is complete; the client will be told that the findings were not addressed.",
+      isError: false,
+      terminate: true,
+    };
   }
 
   /**
@@ -4088,10 +4394,16 @@ export class AgentDO extends DurableObject<Env> {
         } else {
           await this.driveReview(spec, rv);
         }
-      } else if (!isTerminal(this.store.phase()) && this.stopIntents().length === 0) {
+      } else if (
+        this.store.meta<StoredReviewFix>("review_fix") === undefined &&
+        !isTerminal(this.store.phase()) &&
+        this.stopIntents().length === 0
+      ) {
         // 結果は残したが完了の確定の前に止まった（DO の再起動など）: 確定だけをやり直す
         await this.finalize({ phase: "completed", sha });
       }
+      // 修正の回に入った: ツールの結果を待っていなければ（予算の承認のあと・DO の再起動のあと）、新しい run で修正の指示を渡す
+      if (!this.reviewInTool) await this.deliverFixOnce();
     } finally {
       if (!inTool && isTerminal(this.store.phase())) await this.terminalStop("finished");
     }

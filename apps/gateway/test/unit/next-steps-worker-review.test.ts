@@ -51,6 +51,56 @@ describe("nextSteps（worker_review）", () => {
     expect(s).toContain("先に対応");
   });
 
+  it("修正の回で直して再実行が通った: 直したことと、2 回目のレビューはしていないので修正の commit を読むよう書く（残っているとは書かない）", () => {
+    const s = nextSteps(
+      input({
+        review: {
+          comment_url: "https://github.com/acme/widgets/pull/5#pullrequestreview-1",
+          must_fix_count: 2,
+          comment_failed: false,
+          fix_applied: true,
+          failed_after_fix: [],
+        },
+      }),
+    );
+    expect(s).toContain("review.fix_applied");
+    expect(s).toContain("2 回目のレビュー");
+    expect(s).not.toContain("件残っている");
+    expect(s).not.toContain("review_commands_failed_after_fix");
+  });
+
+  it("修正の回で直したが review_commands の再実行が失敗した: review_commands_failed_after_fix と review.final を先に確かめるよう書く", () => {
+    const s = nextSteps(
+      input({
+        review: {
+          comment_url: "https://github.com/acme/widgets/pull/5#pullrequestreview-1",
+          must_fix_count: 1,
+          comment_failed: false,
+          fix_applied: true,
+          failed_after_fix: ["review_commands_failed_after_fix: pnpm test"],
+        },
+      }),
+    );
+    expect(s).toContain("review_commands_failed_after_fix");
+    expect(s).toContain("review.final");
+    expect(s).toContain("pnpm test");
+  });
+
+  it("must_fix が残ったときの案内は、修正の回でワーカーが直さなかった場合も含めて書く", () => {
+    const s = nextSteps(
+      input({
+        review: {
+          comment_url: "https://github.com/acme/widgets/pull/5#pullrequestreview-1",
+          must_fix_count: 1,
+          comment_failed: false,
+          fix_applied: false,
+        },
+      }),
+    );
+    expect(s).toContain("must_fix（直すべき点）が 1 件残っている");
+    expect(s).toContain("修正の commit");
+  });
+
   it("投稿に失敗したら review.body を、レビューを飛ばしたら自分でレビューするよう書く", () => {
     const failedPost = nextSteps(
       input({ review: { comment_url: null, must_fix_count: 1, comment_failed: true } }),

@@ -452,7 +452,7 @@ describe("budget_policy", () => {
   });
 });
 
-describe("worker_review（段階 3: review_fix_rounds: 0）", () => {
+describe("worker_review（review_fix_rounds: 0 / 1）", () => {
   const worker = {
     ...base,
     review_policy: "worker_review",
@@ -489,8 +489,10 @@ describe("worker_review（段階 3: review_fix_rounds: 0）", () => {
     expect(issues({ ...without, model: "anthropic/claude-haiku-5-5" })).toContain("review_model");
   });
 
-  it("review_fix_rounds: 1 は「修正の回は未実装」として拒否する。2 以上・負・小数・文字列も拒否する", () => {
-    expect(issues({ ...worker, review_fix_rounds: 1 })).toContain("修正の回は未実装");
+  it("review_fix_rounds は 0 か 1 だけ（1 は修正の回）。2 以上・負・小数・文字列は拒否する", () => {
+    expect(issues({ ...worker, review_fix_rounds: 1 })).toBeUndefined();
+    expect(taskInputSchema.parse({ ...worker, review_fix_rounds: 1 }).review_fix_rounds).toBe(1);
+    expect(issues({ ...worker, review_fix_rounds: 2 })).toContain("0 or 1");
     for (const bad of [2, 3, -1, 0.5, "0", null]) {
       expect(issues({ ...worker, review_fix_rounds: bad }), String(bad)).toBeDefined();
     }
@@ -545,8 +547,9 @@ describe("worker_review（段階 3: review_fix_rounds: 0）", () => {
       ]),
     );
     const a = await fp(worker);
-    // review_fix_rounds の省略は 0 と同じタスク
+    // review_fix_rounds の省略は 0 と同じタスク。1 は別のタスク
     expect(await fp({ ...worker, review_fix_rounds: 0 })).toBe(a);
+    expect(await fp({ ...worker, review_fix_rounds: 1 })).not.toBe(a);
     // review_model・review_commands が違えば別のタスク
     expect(await fp({ ...worker, review_model: "openai/gpt-6-sol" })).not.toBe(a);
     const withCmd = await fp({ ...worker, review_commands: [{ argv: ["pnpm", "test"] }] });

@@ -1688,12 +1688,22 @@ describe("task_pr_ready / task_pr_merge / task_result.next_steps（MCP 経由）
     await client.close();
   });
 
-  it("task_start の worker_review: review_fix_rounds: 1 は「修正の回は未実装」、review_model なし・使えないモデル・client_review の review_* は invalid_input", async () => {
+  it("task_start の worker_review: review_fix_rounds: 1 は受け付け（task_status の fix_rounds が 1）、2 以上・review_model なし・使えないモデル・client_review の review_* は invalid_input", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const worker = { review_policy: "worker_review", review_model: "anthropic/claude-sonnet-5-5" };
+    const one = body(
+      await client.callTool({
+        name: "task_start",
+        arguments: startArgs("w-fix", { ...worker, review_fix_rounds: 1 }),
+      }),
+    );
+    expect(one.task_id).toEqual(expect.any(String));
+    const st = body(
+      await client.callTool({ name: "task_status", arguments: { task_id: one.task_id } }),
+    );
+    expect(st).toMatchObject({ review: { fix_rounds: 1, rounds_used: 0 } });
     const cases: [Record<string, unknown>, string][] = [
-      [{ ...worker, review_fix_rounds: 1 }, "修正の回は未実装"],
       [{ ...worker, review_fix_rounds: 2 }, "review_fix_rounds"],
       [{ review_policy: "worker_review" }, "review_model"],
       [{ ...worker, review_model: "nope/none" }, "model"],

@@ -14,6 +14,7 @@ import type {
   AgentRpc,
   EventsPage,
   ResultDto,
+  ReviewCommandResultDto,
   ReviewResultDto,
   StartResult,
   TaskSpec,
@@ -179,9 +180,27 @@ export type TargetPr = { repository: string; number: number; head_sha: string; u
 /**
  * レビューの段の段階（docs/specs/worker-review.md「状態の遷移」）。task_review で使うのは
  * waiting（AgentDO がまだ段に入っていない）/ commands（review_commands を流している）/ reviewing（モデルを待っている・投稿の前）/
- * done（レビューが得られた）/ skipped（予算・失敗・取消しで飛ばした）。
+ * done（レビューが得られた）/ skipped（予算・失敗・取消しで飛ばした）。worker_review の修正の回（review_fix_rounds: 1）では、
+ * fixing（ワーカーが must_fix を直している）/ rechecking（修正のあとの verification_commands と review_commands の再実行）も使う。
  */
-export type ReviewStage = "waiting" | "commands" | "reviewing" | "done" | "skipped";
+export type ReviewStage =
+  | "waiting"
+  | "commands"
+  | "reviewing"
+  | "fixing"
+  | "rechecking"
+  | "done"
+  | "skipped";
+
+/** review_commands の 1 本の結果（公開用。snake_case） */
+export type ReviewCommandView = {
+  argv: string[];
+  exit_code: number;
+  timed_out: boolean;
+  output: string;
+  duration_ms?: number;
+  skipped?: true;
+};
 
 /** task_result の review（公開用。snake_case）。commands の output と body は、service が非信頼の囲みで包む */
 export type ReviewResultView = {
@@ -191,21 +210,21 @@ export type ReviewResultView = {
   comment_url: string | null;
   must_fix_count: number;
   suggestion_count: number;
-  /** 修正の回は未実装（task_review は修正しない）ので常に false */
-  fix_applied: false;
-  commands: {
-    argv: string[];
-    exit_code: number;
-    timed_out: boolean;
-    output: string;
-    duration_ms?: number;
-    skipped?: true;
-  }[];
+  /** worker_review の修正の回で直したか（task_review は修正しないので常に false） */
+  fix_applied: boolean;
+  /** 修正の commit の SHA（直していなければ null） */
+  fix_commit_sha: string | null;
+  commands: ReviewCommandView[];
   commands_unavailable: boolean;
   /** 飛ばした理由の固定コード（model_error / model_rejected / timeout / budget / invalid_response / tool_rounds_exceeded） */
   failure?: string;
-  /** 修正のあとの再実行の結果（修正の回は未実装・task_review は修正しないので常に null） */
-  final: null;
+  /** 修正のあとの再実行の結果（修正しなかった・task_review は null）。commands の output は、service が非信頼の囲みで包む */
+  final: {
+    verification_commands_passed: boolean;
+    review_commands_passed: boolean;
+    commands: ReviewCommandView[];
+    commands_unavailable: boolean;
+  } | null;
   /** レビューに使った費用（作業の費用と分けて見せる） */
   usage: {
     cost_usd: number;
@@ -219,6 +238,20 @@ export type ReviewResultView = {
   body?: string;
 };
 
+/** review_commands の 1 本の結果を公開用の形にする（出力は末尾だけ。非信頼の囲みは service が付ける） */
+function commandView(c: ReviewCommandResultDto): ReviewCommandView {
+  return {
+    argv: c.argv,
+    exit_code: c.exitCode,
+    timed_out: c.timedOut,
+    output: tailUtf8(c.output, MAX_RESULT_OUTPUT),
+    ...(typeof c.durationMs === "number" && Number.isFinite(c.durationMs) && c.durationMs >= 0
+      ? { duration_ms: c.durationMs }
+      : {}),
+    ...(c.skipped === true ? { skipped: true as const } : {}),
+  };
+}
+
 export type TaskView = {
   task_id: string;
   owner_id: number;
@@ -227,7 +260,7 @@ export type TaskView = {
   kind?: "review";
   /**
    * レビューの段の段階とモデル。task_review のタスクと、worker_review のタスク（fix_rounds・rounds_used も付く。
-   * 修正の回は未実装なので rounds_used は 0）に付く。client_review のタスクには付かない
+   * rounds_used は修正の回を使った数で 0 か 1）に付く。client_review のタスクには付かない
    */
   review?: { stage: ReviewStage; model: string; fix_rounds?: number; rounds_used?: number };
   /** task_review のタスクだけ: 対象の PR */
@@ -1172,21 +1205,27 @@ export class TaskDO extends DurableObject<Env> {
     return "waiting";
   }
 
-  /**
-   * worker_review のレビューの段の段階。実行中は取り込んだイベント（review_started / review_commands_finished）から決める
-   * （verification が通るまでは waiting）。終端では、TaskDO が投稿の終わりに積む review_finished の stage（done / skipped）。
-   * まだ投稿が済んでいない COMPLETED は reviewing（投稿の前）、レビューの段に入らず終わったものは skipped。
-   */
-  private workerReviewStage(row: TaskRow, wr: WorkerReviewRow): ReviewStage {
-    const sql = this.ctx.storage.sql;
-    const seen = new Set(
-      sql
+  /** worker_review のレビューの段のイベントのうち、取り込んだもの（段階と rounds_used の判定に使う） */
+  private workerReviewEventsSeen(): Set<string> {
+    return new Set(
+      this.ctx.storage.sql
         .exec<{ type: string }>(
-          "SELECT DISTINCT type FROM events WHERE type IN ('review_started', 'review_commands_finished')",
+          "SELECT DISTINCT type FROM events WHERE type IN ('review_started', 'review_commands_finished', 'review_fix_started')",
         )
         .toArray()
         .map((r) => r.type),
     );
+  }
+
+  /**
+   * worker_review のレビューの段の段階。実行中は取り込んだイベント（review_started / review_commands_finished / review_fix_started）から決める
+   * （verification が通るまでは waiting）。修正の回に入ったあと（review_fix_started）は、VERIFYING なら rechecking（再実行）、
+   * それ以外（RUNNING・質問の待ち）は fixing（ワーカーが直している）。終端では、TaskDO が投稿の終わりに積む review_finished の stage
+   * （done / skipped）。まだ投稿が済んでいない COMPLETED は reviewing（投稿の前）、レビューの段に入らず終わったものは skipped。
+   */
+  private workerReviewStage(row: TaskRow, wr: WorkerReviewRow): ReviewStage {
+    const sql = this.ctx.storage.sql;
+    const seen = this.workerReviewEventsSeen();
     if (isTerminal(this.statusOf(row))) {
       const fin = sql
         .exec<{
@@ -1200,6 +1239,9 @@ export class TaskDO extends DurableObject<Env> {
       return this.statusOf(row) === "COMPLETED" && seen.has("review_started")
         ? "reviewing"
         : "skipped";
+    }
+    if (seen.has("review_fix_started")) {
+      return this.statusOf(row) === "VERIFYING" ? "rechecking" : "fixing";
     }
     if (seen.has("review_commands_finished")) return "reviewing";
     if (seen.has("review_started")) {
@@ -1218,7 +1260,7 @@ export class TaskDO extends DurableObject<Env> {
           stage: this.workerReviewStage(row, wr),
           model: wr.review_model,
           fix_rounds: wr.review_fix_rounds,
-          rounds_used: 0,
+          rounds_used: this.workerReviewEventsSeen().has("review_fix_started") ? 1 : 0,
         },
       };
     }
@@ -1590,16 +1632,17 @@ export class TaskDO extends DurableObject<Env> {
                   ...(c.cwd !== undefined ? { cwd: c.cwd } : {}),
                   ...(c.timeout_seconds !== undefined ? { timeoutSeconds: c.timeout_seconds } : {}),
                 })),
-                fixRounds: 0 as const,
+                fixRounds: data.review_fix_rounds === 1 ? (1 as const) : (0 as const),
               },
             }
           : {}),
       };
       if (data.review_policy === "worker_review" && data.review_model !== undefined) {
         this.ctx.storage.sql.exec(
-          "INSERT INTO worker_review (singleton, review_model, review_commands, review_fix_rounds) VALUES (1, ?, ?, 0)",
+          "INSERT INTO worker_review (singleton, review_model, review_commands, review_fix_rounds) VALUES (1, ?, ?, ?)",
           data.review_model,
           JSON.stringify(data.review_commands ?? []),
+          data.review_fix_rounds === 1 ? 1 : 0,
         );
       }
       this.ctx.storage.sql.exec(
@@ -2488,26 +2531,32 @@ export class TaskDO extends DurableObject<Env> {
     dto: ReviewResultDto | undefined,
   ): ReviewResultView {
     const usage = dto?.usage;
+    const fixSha =
+      typeof dto?.fixApplied === "string" && FULL_SHA_RE.test(dto.fixApplied)
+        ? dto.fixApplied
+        : null;
+    const final = dto?.final;
     return {
       stage: dto?.stage === "done" ? "done" : "skipped",
       model,
       comment_url: commentUrl,
       must_fix_count: count(dto?.mustFixCount),
       suggestion_count: count(dto?.suggestionCount),
-      fix_applied: false,
-      commands: (dto?.commands ?? []).map((c) => ({
-        argv: c.argv,
-        exit_code: c.exitCode,
-        timed_out: c.timedOut,
-        output: tailUtf8(c.output, MAX_RESULT_OUTPUT),
-        ...(typeof c.durationMs === "number" && Number.isFinite(c.durationMs) && c.durationMs >= 0
-          ? { duration_ms: c.durationMs }
-          : {}),
-        ...(c.skipped === true ? { skipped: true as const } : {}),
-      })),
+      fix_applied: fixSha !== null,
+      fix_commit_sha: fixSha,
+      commands: (dto?.commands ?? []).map(commandView),
       commands_unavailable: dto?.commandsUnavailable === true,
       ...(typeof dto?.failure === "string" ? { failure: dto.failure.slice(0, 100) } : {}),
-      final: null,
+      // 再実行の結果は、修正の commit があるときだけ（AgentDO は修正しなければ final を付けない）
+      final:
+        fixSha !== null && final
+          ? {
+              verification_commands_passed: final.verificationCommandsPassed === true,
+              review_commands_passed: final.reviewCommandsPassed === true,
+              commands: (final.commands ?? []).map(commandView),
+              commands_unavailable: final.commandsUnavailable === true,
+            }
+          : null,
       usage: {
         cost_usd:
           typeof usage?.costUsd === "number" && Number.isFinite(usage.costUsd) && usage.costUsd >= 0
@@ -2613,6 +2662,9 @@ export class TaskDO extends DurableObject<Env> {
     return link ? link.cancel_state === "stopped" : true;
   }
 
+  /** レビューの投稿の最中（修正の前の投稿と終了処理の投稿を重ねない） */
+  private postingReview = false;
+
   /** 実行中の GitHub 手順（setup / credentials / finalize）。同じ手順を並行して走らせない（冪等だが無駄な呼び出しを避ける）。 */
   private running = new Set<string>();
 
@@ -2656,6 +2708,8 @@ export class TaskDO extends DurableObject<Env> {
       await this.guard("sync", () => this.syncFromAgent());
     }
     await this.guard("credentials", () => this.deliverCredentials());
+    // worker_review の修正の回: 修正の前にレビューを投稿する（終端の前。終了処理では二重に投稿しない）
+    await this.guard("review_post", () => this.postReviewBeforeFix());
     await this.guard("finalize", () => this.finalizeGithub());
   }
 
@@ -3869,13 +3923,53 @@ export class TaskDO extends DurableObject<Env> {
    * warnings に review_comment_failed を足す（本文は task_result の review.body で読める）。
    * 戻り値: 終わった（投稿した・諦めた・投稿しない）なら true、再試行を待つなら false。
    */
-  private async postReview(row: TaskRow, status: TaskStatus): Promise<boolean> {
+  private async postReview(row: TaskRow, status: TaskStatus, beforeFix = false): Promise<boolean> {
+    // 修正の前の投稿と終了処理の投稿を同時に走らせない（二重に投稿しない）。走っていれば、あとで確かめ直す
+    if (this.postingReview) return false;
+    this.postingReview = true;
+    try {
+      return await this.postReviewOnce(row, status, beforeFix);
+    } finally {
+      this.postingReview = false;
+    }
+  }
+
+  /**
+   * worker_review の修正の回に入った（review_fix_started を取り込んだ）とき、終端を待たずに、修正の前にレビューを投稿する
+   * （仕様の「流れ」の 3。commit_id はレビューした commit）。投稿したか・諦めたかは worker_review の行（posted）に残るので、
+   * DO の再起動をまたいでも終了処理で二重に投稿しない。投稿の失敗は従来どおり review_comment_failed で、修正の回は止めない。
+   */
+  private async postReviewBeforeFix(): Promise<void> {
+    const row = this.getRow();
+    const wr = this.getWorkerReview();
+    if (!row || !wr || wr.posted !== 0) return;
+    const status = this.statusOf(row);
+    if (isTerminal(status)) return;
+    if (this.getGithub()?.pr_number == null) return;
+    if (!this.workerReviewEventsSeen().has("review_fix_started")) return;
+    await this.postReview(row, status, true);
+  }
+
+  private async postReviewOnce(
+    row: TaskRow,
+    status: TaskStatus,
+    beforeFix: boolean,
+  ): Promise<boolean> {
     const target = this.reviewPostTarget();
     if (target?.posted !== 0) return true;
     if (this.now() < target.post_retry_at) return false;
-    let dto: ResultDto;
+    let review: ReviewResultDto | undefined;
     try {
-      dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
+      if (beforeFix) {
+        // 終端の前なので getResult は not_ready。レビューの段の結果だけを読む
+        const early = await this.withTimeout(this.agentStub().getReview(), this.resultTimeoutMs);
+        // 修正の回の結果でなければ、ここでは何もしない（終了処理が従来どおり投稿する）
+        if (early?.fixRequested !== true || !early.body) return true;
+        review = early;
+      } else {
+        const dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
+        review = dto.status === "not_ready" ? undefined : dto.review;
+      }
     } catch {
       // AgentDO が結果を返せない。有限回で諦める（終了処理とトークンの失効を止めない）
       if (target.post_attempts + 1 < FINALIZE_MAX_ATTEMPTS) {
@@ -3885,7 +3979,6 @@ export class TaskDO extends DurableObject<Env> {
       this.giveUpReviewPost(row, target, "result_unavailable");
       return true;
     }
-    const review = dto.status === "not_ready" ? undefined : dto.review;
     const audit = {
       userId: row.owner_id,
       model: target.model,
@@ -3894,7 +3987,11 @@ export class TaskDO extends DurableObject<Env> {
     // 投稿先の PR。task_review はクライアントの PR（固定した head）、worker_review はタスクの PR（検証した commit）
     const pullNumber = target.pull_number;
     const headSha = target.table === "review_link" ? target.head_sha : review?.headSha;
-    if (status !== "COMPLETED" || !review?.body || pullNumber === null || !headSha) {
+    // 投稿するのは COMPLETED のときだけ。ただし worker_review で修正の回に入った（must_fix をワーカーに渡した）なら、そのあと
+    // FAILED・取消しで終わっても、レビューのコメントは PR に残す（修正の指示の元になった指摘を、クライアントが読めるように）
+    const postable =
+      status === "COMPLETED" || (target.table === "worker_review" && review?.fixRequested === true);
+    if (!postable || !review?.body || pullNumber === null || !headSha) {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(`UPDATE ${target.table} SET posted = 3`);
         this.appendEvent("review_finished", { stage: "skipped" }, this.now());

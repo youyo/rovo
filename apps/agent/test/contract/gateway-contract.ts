@@ -25,6 +25,8 @@ export type Checks = [
   Assert<Returns<"getEvents">>,
   Assert<Params<"getResult">>,
   Assert<Returns<"getResult">>,
+  Assert<Params<"getReview">>,
+  Assert<Returns<"getReview">>,
   Assert<Params<"setGitCredential">>,
   Assert<Returns<"setGitCredential">>,
   Assert<Params<"answer">>,

@@ -8,6 +8,7 @@ import type {
   EventsPage,
   GitCredential,
   ResultDto,
+  ReviewResultDto,
   StartResult,
   TaskSpec,
   UsageDto,
@@ -52,6 +53,8 @@ export type FakeProgram = {
   rejectReason?: string;
   /** getResult の戻り値。未設定なら phase が終端のとき合成する。 */
   result?: ResultDto;
+  /** getReview の戻り値（worker_review の修正の回に入ったときの、終端の前のレビューの結果）。未設定なら result の review */
+  review?: ReviewResultDto;
 };
 
 export type FakeCalls = {
@@ -481,6 +484,12 @@ export class FakeAgentDO extends DurableObject {
       usage,
       costUsd,
     };
+  }
+
+  async getReview(): Promise<ReviewResultDto | null> {
+    if (this.program.review) return this.program.review;
+    const r = this.program.result;
+    return r && r.status !== "not_ready" ? (r.review ?? null) : null;
   }
 
   async getResult(): Promise<ResultDto> {

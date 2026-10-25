@@ -126,8 +126,11 @@ export interface WorkerReviewSpec {
   model: string;
   /** 全体のテスト。失敗しても止めずに全部流す。空なら差分と読み取りの道具だけのレビュー */
   commands: VerificationCommand[];
-  /** レビューのあとに直す回数の上限。この段階では 0（コメントだけ）のみ。1 は修正の回（未実装）なので start を拒否する */
-  fixRounds: 0;
+  /**
+   * レビューのあとに直す回数の上限。0 はコメントだけ、1 は must_fix があればワーカーが 1 回直す（修正の回）。
+   * 2 以上は受け付けない（修正のあとに 2 回目のレビューはしない）
+   */
+  fixRounds: 0 | 1;
 }
 
 /** task_review のレビューの段の指定。値はすべて TaskDO が GitHub から読んだもの（PR の本文・差分は非信頼データ） */
@@ -185,6 +188,24 @@ export interface ReviewResultDto {
   /** 飛ばした理由の固定コード（model_error / model_rejected / timeout / budget / invalid_response / tool_rounds_exceeded） */
   failure?: string;
   usage: ReviewUsageDto;
+  /** worker_review の修正の回に入った（must_fix をワーカーに渡した）。直したかどうかは fixApplied */
+  fixRequested?: boolean;
+  /** 修正の回で直した commit の SHA（修正の commit が無かった・修正の回に入らなかったときは無い） */
+  fixApplied?: string;
+  /** 修正のあとの再実行の結果（修正しなかったときは無い） */
+  final?: ReviewFinalDto;
+}
+
+/** worker_review の修正のあとの再実行の結果（ReviewResultDto の final） */
+export interface ReviewFinalDto {
+  /** 修正の commit で verification_commands が通った（通らなければ完了にならない。verification_commands が無いときは、結果の verification.verified と同じく false） */
+  verificationCommandsPassed: boolean;
+  /** 修正の commit で review_commands が全部通った（空なら true） */
+  reviewCommandsPassed: boolean;
+  /** 再実行した review_commands の結果（出力は伏せ字・切り詰め済み） */
+  commands: ReviewCommandResultDto[];
+  /** Sandbox を用意できず、review_commands を流せなかった */
+  commandsUnavailable: boolean;
 }
 
 export type StartResult =

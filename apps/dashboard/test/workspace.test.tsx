@@ -369,3 +369,105 @@ describe("日をまたいだ「待ち」（レールの切り替え）", () => {
     expect(tabBtn(c, 1).textContent).toBe("要対応");
   });
 });
+
+describe("チームで何も選んでいないときはチームボード", () => {
+  const clickScope = async (c: HTMLElement, label: string) => {
+    const b = [...c.querySelectorAll("fieldset.seg button")].find(
+      (x) => x.textContent === label,
+    ) as HTMLButtonElement;
+    await act(async () => {
+      b.click();
+      await settle();
+    });
+  };
+
+  it("マイタスクは今までどおり既定のタスクのコンソール（ボードは出ない）", async () => {
+    const { c } = await mount("/dashboard/");
+    expect(c.querySelector("[data-teamboard]")).toBeNull();
+    expect(text(c.querySelector(".console h1"))).toBe(taskDetailRunningFixture.task.title);
+  });
+
+  it("チームに切り替えるとボードが出る。レール・帯・ステータスバーはそのまま", async () => {
+    const { c } = await mount("/dashboard/");
+    await clickScope(c, "チーム");
+    expect(c.querySelector("[data-teamboard]")).not.toBeNull();
+    expect(c.querySelector(".console h1")).toBeNull();
+    expect(c.querySelector(".tlband")).not.toBeNull();
+    expect(c.querySelector("nav.rail")).not.toBeNull();
+    expect(c.querySelector(".statusbar")).not.toBeNull();
+    expect(c.querySelector("a.rail-row[aria-current='true']")).toBeNull();
+    // 質問待ちは /waiting の分も数える（alice の前日からの質問待ち）
+    const alice = c.querySelector("li.tb-person[data-login='alice-example']") as HTMLElement;
+    expect(text(alice.querySelector('[data-stat="asking"] .tb-stat-n'))).toBe("1");
+    // 自動更新の操作は引き出しに出す（コンソールが無いので 1 つだけ）
+    expect(c.querySelectorAll("input[type='checkbox']")).toHaveLength(1);
+  });
+
+  it("ボードのタスクを押すとコンソールになる。URL はそのタスクのもの", async () => {
+    const { c } = await mount("/dashboard/");
+    await clickScope(c, "チーム");
+    const link = c.querySelector(
+      `a.tb-task[data-task-id="${RUNNING_ID}"]`,
+    ) as HTMLAnchorElement | null;
+    expect(link).not.toBeNull();
+    await act(async () => {
+      link?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      await settle();
+    });
+    expect(location.pathname).toBe(`/dashboard/tasks/${RUNNING_ID}`);
+    expect(c.querySelector("[data-teamboard]")).toBeNull();
+    expect(text(c.querySelector(".console h1"))).toBe(taskDetailRunningFixture.task.title);
+  });
+
+  it("タスクの URL をチームで開くとコンソール。日を送ると何も選んでいない状態に戻りボードが出る（過去の日は走行中の欄なし）", async () => {
+    const { c } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
+    await clickScope(c, "チーム");
+    expect(c.querySelector("[data-teamboard]")).toBeNull();
+    expect(text(c.querySelector(".console h1"))).toBe(taskDetailRunningFixture.task.title);
+    const prev = c.querySelector("button[aria-label='前の日']") as HTMLButtonElement;
+    await act(async () => {
+      prev.click();
+      await settle();
+    });
+    expect(location.pathname).toBe("/dashboard/");
+    expect(c.querySelector("[data-teamboard]")).not.toBeNull();
+    expect(c.querySelector('[data-stat="running"]')).toBeNull();
+    expect(text(c.querySelector("#tb-people-h"))).toBe("この日");
+  });
+});
+
+describe("「チーム」をもう一度押すとボードに戻る", () => {
+  const team = (c: HTMLElement) =>
+    [...c.querySelectorAll("fieldset.seg button")].find(
+      (x) => x.textContent === "チーム",
+    ) as HTMLButtonElement;
+  const press = async (el: HTMLElement) => {
+    await act(async () => {
+      el.click();
+      await settle();
+    });
+  };
+
+  it("タスクを選んでいるときだけ選択を外す（履歴を積む）。ボードのときは何もしない。マイタスクのタスクは外さない", async () => {
+    const { c } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
+    // マイタスク（既定）でタスクを選んでいるときに「マイタスク」を押しても外さない
+    const me = [...c.querySelectorAll("fieldset.seg button")].find(
+      (x) => x.textContent === "マイタスク",
+    ) as HTMLButtonElement;
+    await press(me);
+    expect(location.pathname).toBe(`/dashboard/tasks/${RUNNING_ID}`);
+    await press(team(c));
+    // 切り替えただけ（選択はそのまま）
+    expect(location.pathname).toBe(`/dashboard/tasks/${RUNNING_ID}`);
+    expect(c.querySelector("[data-teamboard]")).toBeNull();
+    const length = history.length;
+    await press(team(c));
+    expect(location.pathname).toBe("/dashboard/");
+    expect(history.length).toBe(length + 1);
+    expect(c.querySelector("[data-teamboard]")).not.toBeNull();
+    expect(c.querySelector(".console h1")).toBeNull();
+    await press(team(c));
+    expect(history.length).toBe(length + 1);
+    expect(c.querySelector("[data-teamboard]")).not.toBeNull();
+  });
+});

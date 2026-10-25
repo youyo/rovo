@@ -72,6 +72,11 @@ export const VisibleTaskDtoSchema = z.strictObject({
   reason: reasonCodeSchema.optional(),
   /** "setup" は準備（ブランチ・Draft PR の作成など）で失敗したこと */
   failure_phase: z.literal("setup").optional(),
+  /**
+   * タスクの種類。"review" は worker_review のレビュー（コード変更のタスクではない）。
+   * 古い gateway の応答・索引に無い行では省く（省いた行は "task" として扱う）。
+   */
+  kind: z.enum(["task", "review"]).optional(),
 });
 export type VisibleTaskDto = z.infer<typeof VisibleTaskDtoSchema>;
 

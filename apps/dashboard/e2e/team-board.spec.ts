@@ -236,6 +236,109 @@ test("(TB5) 過去の日: 走行中の欄を出さず、その日の完了・失
   await expect(page.locator(".tb-repos thead th").nth(1)).toHaveText("この日の件数");
 });
 
+const monthSection = (page: Page) => page.locator("[data-month]");
+
+test("(TB9) 今月の費用: 見出しに今月、閲覧者が先頭で人ごとに 1 行、割合とペースが文字でも分かる", async ({
+  page,
+}) => {
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  const sec = monthSection(page);
+  await expect(sec).toBeVisible();
+  await expect(sec.locator("h2")).toContainText("今月");
+  const logins = await sec
+    .locator("li.tb-month-row")
+    .evaluateAll((els) => els.map((e) => e.getAttribute("data-login")));
+  expect(logins[0]).toBe(s.users.alice.login);
+  expect(logins).toContain(s.users.bob.login);
+  expect(logins.slice(1)).toEqual([...logins.slice(1)].sort());
+  await expect(sec.locator("li.tb-month-row[data-viewer='true']")).toHaveAttribute(
+    "data-login",
+    s.users.alice.login,
+  );
+  // alice は完了したタスクの費用がある。共通の上限に対する割合とペースは文字で出る（色や棒だけに頼らない）
+  const alice = sec.locator(`li.tb-month-row[data-login="${s.users.alice.login}"]`);
+  await expect(alice.locator(".tb-month-amount")).toContainText("$");
+  await expect(alice.locator(".tb-month-amount")).toContainText("/");
+  await expect(alice.locator(".tb-month-ratio")).toHaveText(/^\d+%$/);
+  await expect(alice.locator(".tb-month-pace")).toHaveText(/^[▲▼] ペース(速め|遅め)$/);
+  // 本人の予算の欄だけにある情報（残り・予約・あと何件）は、ここには無い
+  await expect(sec).not.toContainText(/残り|予約|あと\s*\d+\s*件/);
+});
+
+test("(TB9b) ペース速め: 上限に対して月の経過より多く使っていると ▲ と文字で出る", async ({
+  page,
+}) => {
+  // 表示のロジックを確かめるため、応答の人ごとの費用だけを大きくする（上限は gateway の値のまま）
+  await page.route(/\/dashboard\/api\/overview/, async (route) => {
+    const res = await route.fetch({
+      headers: { ...route.request().headers(), "sec-fetch-site": "same-origin" },
+    });
+    const body = (await res.json()) as {
+      month: { by_owner?: { login: string; task_cost_usd: number; consult_cost_usd: number }[] };
+    };
+    for (const o of body.month.by_owner ?? []) {
+      if (o.login === s.users.alice.login) o.task_cost_usd = 99;
+    }
+    await route.fulfill({
+      status: res.status(),
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  const alice = monthSection(page).locator(`li.tb-month-row[data-login="${s.users.alice.login}"]`);
+  await expect(alice.locator(".tb-month-pace")).toHaveText("▲ ペース速め");
+  await expect(alice.locator(".tb-month-pace")).toHaveAttribute("data-pace", "fast");
+});
+
+test("(TB10) 権限の無いタスクは 1 行にまとまり、持ち主の login は画面にも応答にも出ない", async ({
+  page,
+}) => {
+  const bodies: string[] = [];
+  page.on("response", async (res) => {
+    if (/\/dashboard\/api\//.test(res.url())) bodies.push(await res.text().catch(() => ""));
+  });
+  await loginAs(page, s.users.bob);
+  await openTeam(page);
+  const sec = monthSection(page);
+  await expect(sec.locator(`li.tb-month-row[data-login="${s.users.bob.login}"]`)).toBeVisible();
+  // secret の持ち主（carol）は見えるタスクが無いので、行にも出ない。権限の無い分は件数と額だけ
+  await expect(sec.locator("[data-month-hidden]")).toHaveText(/^権限の無いタスク \d+ 件 \$/);
+  await expect(sec.locator(`li.tb-month-row[data-login="${s.users.carol.login}"]`)).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText(s.users.carol.login);
+  await expect(page.locator("body")).not.toContainText(s.marks.secretTitle);
+  // API の応答にも出ない（画面に描かない場所も含む）
+  await expect.poll(() => bodies.some((b) => b.includes('"by_owner"'))).toBe(true);
+  expect(bodies.some((b) => b.includes(s.users.carol.login))).toBe(false);
+});
+
+test("(TB10b) 権限のある人（alice）には、持ち主の行があり、権限の無い行は出ない", async ({
+  page,
+}) => {
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  await expect(
+    monthSection(page).locator(`li.tb-month-row[data-login="${s.users.carol.login}"]`),
+  ).toBeVisible();
+  await expect(monthSection(page).locator("[data-month-hidden]")).toHaveCount(0);
+});
+
+test("(TB11) 過去の日に送っても、今月の費用は今月のまま", async ({ page }) => {
+  await page.clock.setFixedTime(Date.now() + DAY_MS);
+  await loginAs(page, s.users.alice);
+  await page.getByRole("button", { name: "チーム" }).click();
+  await page.getByRole("button", { name: "前の日" }).click();
+  await expect(page.locator("#tb-people-h")).toHaveText("この日");
+  const sec = monthSection(page);
+  await expect(sec).toBeVisible();
+  await expect(sec.locator("h2")).toContainText("今月");
+  const alice = sec.locator(`li.tb-month-row[data-login="${s.users.alice.login}"]`);
+  await expect(alice.locator(".tb-month-amount")).toContainText("$");
+  await expect(alice.locator(".tb-month-ratio")).toHaveText(/^\d+%$/);
+});
+
 for (const scheme of ["light", "dark"] as const) {
   test(`(TB6) 幅 360px で横スクロールが出ない（${scheme}）。数字は記号の列に畳む`, async ({
     page,
@@ -248,6 +351,16 @@ for (const scheme of ["light", "dark"] as const) {
     await waitForPrLink(page);
     await expect(person(page, s.users.bob.login)).toBeVisible();
     await expectNoHorizontalScroll(page);
+    // 今月の費用の区画も幅の中（行は折り返す）
+    await expect(monthSection(page).locator("li.tb-month-row").first()).toBeVisible();
+    const monthOver = await monthSection(page).evaluate((el) => ({
+      sec: el.scrollWidth > el.clientWidth + 1,
+      rows: [...el.querySelectorAll("li.tb-month-row")].filter(
+        (r) => r.scrollWidth > r.clientWidth + 1,
+      ).length,
+    }));
+    expect(monthOver.sec, "今月の費用の区画").toBe(false);
+    expect(monthOver.rows, "今月の費用の行").toBe(0);
     // 狭い幅では文字を畳む（読み上げと title には残す）。記号（形）と数字は見える
     const stat = person(page, s.users.alice.login).locator('[data-stat="running"]');
     await expect(stat.locator("svg.mark-sym")).toBeVisible();
@@ -284,6 +397,7 @@ for (const scheme of ["light", "dark"] as const) {
       await loginAs(page, s.users.alice);
       await openTeam(page);
       await expect(person(page, s.users.bob.login)).toBeVisible();
+      await expect(monthSection(page)).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
       await page.screenshot({
         path: join(dir, `team-board-${scheme}-${width}.png`),

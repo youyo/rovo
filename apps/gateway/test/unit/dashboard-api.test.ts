@@ -1859,4 +1859,20 @@ describe("overview: 人ごとの今月の費用（month.by_owner / month.hidden�
     const third = await parse(v);
     expect(third.month.by_owner?.find((o) => o.login === pal)?.task_cost_usd).toBe(5);
   });
+
+  it("漏れ: 月の集計のキャッシュは、見えるリポジトリが違う閲覧者の間で使い回されない", async () => {
+    const repo = newRepoId();
+    const seer = newViewer([repo]);
+    const blind = newViewer([newRepoId()]);
+    const ghost = `cache-leak-${seer.uid}`;
+    await seedTask(
+      { repository_id: repo },
+      { index: { owner_login: ghost, cost_micro: 1_000_000 } },
+    );
+    const first = await api(seer, overviewPath());
+    expect(first.whole).toContain(ghost);
+    const second = await api(blind, overviewPath());
+    expect(second.status).toBe(200);
+    expect(second.whole).not.toContain(ghost);
+  });
 });

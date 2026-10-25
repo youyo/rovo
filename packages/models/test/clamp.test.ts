@@ -12,4 +12,13 @@ describe("clampInt", () => {
     expect(clampInt(5, 0, 10)).toBe(5);
     expect(clampInt(7, 2, 10)).toBe(7);
   });
+
+  it("returns max when n is above max", () => {
+    expect(clampInt(15, 0, 10)).toBe(10);
+    expect(clampInt(11, 0, 10)).toBe(10);
+  });
+
+  it("returns max when n equals max", () => {
+    expect(clampInt(10, 0, 10)).toBe(10);
+  });
 });

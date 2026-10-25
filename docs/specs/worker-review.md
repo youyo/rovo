@@ -328,7 +328,7 @@ E2E（実際のタスクの経路を通す。外部のモデルと GitHub は、
 - **warnings**: 再実行で通らなかった `review_commands` ごとに `review_commands_failed_after_fix: <argv を空白でつないだもの（200 文字まで）>`。タイムアウト・時間の上限で飛ばしたもの・Sandbox で流せなかったものも「通らなかった」に数える。最初のレビューの段の warnings（`review_redacted` など）はそのまま残る。
 - **結果**: `task_result` の `review` に `fix_applied`（真偽）と `fix_commit_sha`（修正の commit。直していなければ null）、`final`（`verification_commands_passed`・`review_commands_passed`・`commands`（再実行の結果。出力は非信頼の囲み）・`commands_unavailable`。直していなければ null。`verification_commands` が無いタスクの `verification_commands_passed` は、結果の `verification.verified` と同じく false）。`commands` は最初の `review_commands` の結果のまま。`task_status` の `review.rounds_used` は、修正の回に入ったら 1。
 - **段階**: `review_fix_started` のあと、`VERIFYING` なら `rechecking`、それ以外（`RUNNING`・質問の待ち）なら `fixing`。
-- **投稿**: レビューの投稿は既存の終了処理で行う（「流れ」の 3 の時点ではなく、終端のあと。`commit_id` は修正の前のレビューした commit）。修正の回に入ったタスクは、`FAILED`・取消しで終わってもコメントを投稿する（「レビューのコメントは PR に残る」）。Ready にするのは従来どおり `COMPLETED` だけ。
+- **投稿の時点**: 修正の回に入るタスクは、修正の前に投稿する（「流れ」の 3）。`TaskDO` が `review_fix_started` を取り込んだら、終端を待たずに `AgentDO` の `getReview`（終端の前でも読めるレビューの結果）から本文を読み、`commit_id` をレビューした commit にして投稿する（修正中に PR を見た人が理由を分かるように。amend などでレビューした commit が消えても投稿が失敗しないように）。投稿したか・諦めたかは `worker_review` の行（`posted`）に残るので、DO の再起動をまたいでも終了処理で二重に投稿しない。投稿の失敗は従来どおり `review_comment_failed` の `warnings` で、修正の回は止めない。ワーカーとの順序は、取り込みの間隔の分だけずれうる（ワーカーが先に修正の commit を push することはある）が、`commit_id` はレビューした commit に固定する。修正の回に入らない経路（`must_fix` が 0 件・`review_fix_rounds` が 0・レビューの失敗）は、従来どおり終端のあとの終了処理で投稿する。修正の回に入ったタスクは、`FAILED`・取消しで終わってもコメントは PR に残る。Ready にするのは従来どおり `COMPLETED` だけ。
 - **費用**: 修正の回のワーカーの呼び出しは作業の費用（`task_start` の `model`）で、`review.usage` には入らない。予算に近づけば、従来どおりワーカーの run の中で `budget_extension` の質問になる。
 
 ## 未決定の事項（決定の記録）

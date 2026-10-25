@@ -427,6 +427,11 @@ export interface AgentRpc {
   cancel(): Promise<CancelResult>;
   getEvents(afterSeq: number, limit: number): Promise<EventsPage>;
   getResult(): Promise<ResultDto>;
+  /**
+   * レビューの段の結果（終端の前でも読める。無ければ null）。worker_review の修正の回に入ったとき（review_fix_started）、
+   * TaskDO が修正の前に PR へ投稿するために読む
+   */
+  getReview(): Promise<ReviewResultDto | null>;
   /** Installation Token の更新。冪等で、成功（ok:true）するまで TaskDO が再送する */
   setGitCredential(c: GitCredential): Promise<{ ok: boolean }>;
   /**

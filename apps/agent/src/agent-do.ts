@@ -1095,6 +1095,14 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /**
+   * レビューの段の結果（終端の前でも読める）。worker_review の修正の回に入ったとき、TaskDO が修正の前に PR へ投稿するために読む
+   * （fixRequested と本文）。結果がまだ無ければ null。
+   */
+  async getReview(): Promise<ReviewResultDto | null> {
+    return this.store.meta<StoredReview>("review_result")?.result ?? null;
+  }
+
+  /**
    * task_review と worker_review の結果（getResult の review）。段の結果が無いまま終わった（cancel・検証の失敗など）ときは、
    * 飛ばしたものとして返す。client_review の通常のタスクには付けない。
    */

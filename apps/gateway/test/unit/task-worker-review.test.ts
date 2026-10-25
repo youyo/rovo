@@ -415,6 +415,99 @@ describe("worker_review: 修正の回（review_fix_rounds: 1）", () => {
     expect(r.warnings).toContain("review_must_fix_unaddressed: 1");
   });
 
+  /** 修正の回に入ったところまで進める（AgentDO が review_fix_started を積み、RUNNING に戻った）。PR はまだレビューした commit */
+  async function enterFixRound() {
+    const t = await createTask(workerOver({ review_fix_rounds: 1 }));
+    await t.stub.advance();
+    const reviewed = await pushChildCommit(t.branch);
+    await t.agent.setProgram({ review: reviewDto({ headSha: reviewed, fixRequested: true }) });
+    await t.agent.setPhase("verifying");
+    await t.agent.emit("review_started", { model: MODEL, commands: 1 });
+    await t.agent.emit("review_commands_finished", { passed: 1, failed: 0, timed_out: 0 });
+    await t.agent.emit("review_fix_started", { must_fix_count: 1 });
+    await t.agent.setPhase("running");
+    await t.stub.advance();
+    const number = app()
+      .pulls(REPO)
+      .find((p) => p.head === t.branch)?.number as number;
+    return { ...t, reviewed, number };
+  }
+
+  it("修正の回に入ったら、終端を待たずに（修正の commit より前に）レビューした commit へ COMMENT を投稿する。終端では二度投稿しない", async () => {
+    const t = await enterFixRound();
+    // まだ RUNNING（ワーカーが直している）のうちに投稿済み
+    const st = await t.stub.getStatus(OWNER);
+    expect(st.ok && st.task.status).toBe("RUNNING");
+    expect(st.ok && st.task.review).toMatchObject({ stage: "fixing", rounds_used: 1 });
+    expect(app().reviews(REPO, t.number)).toEqual([
+      expect.objectContaining({ event: "COMMENT", commitId: t.reviewed, body: reviewDto().body }),
+    ]);
+    expect(await eventsOf(t.stub, "review_posted")).toHaveLength(1);
+    // もう一度進めても二重に投稿しない
+    await t.stub.advance();
+    expect(app().reviews(REPO, t.number)).toHaveLength(1);
+
+    // ワーカーが修正の commit を積み、再実行が通って完了。終端でも二度投稿しない
+    const fixed = await pushChildCommit(t.branch);
+    await t.agent.setProgram({
+      result: completedResult(fixed, {
+        review: reviewDto({ headSha: t.reviewed, fixRequested: true, fixApplied: fixed }),
+      }),
+    });
+    await t.agent.setPhase("completed");
+    await t.stub.advance();
+    expect(app().reviews(REPO, t.number)).toHaveLength(1);
+    expect(await eventsOf(t.stub, "review_posted")).toHaveLength(1);
+    const r = await resultOf(t.stub);
+    expect(r).toMatchObject({
+      status: "COMPLETED",
+      pr: { draft: false },
+      review: {
+        stage: "done",
+        comment_url: expect.stringMatching(/#pullrequestreview-\d+$/),
+        fix_applied: true,
+      },
+    });
+    expect(r.warnings).not.toContain("review_comment_failed");
+  });
+
+  it("修正の回に入った時点の投稿が恒久的に失敗しても、修正の回は止めない。warnings に review_comment_failed、終端で投稿し直さない", async () => {
+    const t0 = await createTask(workerOver({ review_fix_rounds: 1 }));
+    await t0.stub.advance();
+    const number = app()
+      .pulls(REPO)
+      .find((p) => p.head === t0.branch)?.number as number;
+    // 1 回だけ 403（恒久的な失敗なので、その場で諦める）
+    app().setFault({
+      pattern: `POST /repos/acme/widgets/pulls/${number}/reviews`,
+      status: 403,
+      count: 1,
+    });
+    const reviewed = await pushChildCommit(t0.branch);
+    await t0.agent.setProgram({ review: reviewDto({ headSha: reviewed, fixRequested: true }) });
+    await t0.agent.emit("review_fix_started", { must_fix_count: 1 });
+    await t0.stub.advance();
+    expect(app().reviews(REPO, number)).toEqual([]);
+    // 修正の回の途中（RUNNING）で諦めて、review_comment_failed を記録している
+    const st = await t0.stub.getStatus(OWNER);
+    expect(st.ok && st.task.status).toBe("RUNNING");
+    expect(await eventsOf(t0.stub, "warning")).toContainEqual({ code: "review_comment_failed" });
+    const fixed = await pushChildCommit(t0.branch);
+    await t0.agent.setProgram({
+      result: completedResult(fixed, {
+        review: reviewDto({ headSha: reviewed, fixRequested: true, fixApplied: fixed }),
+      }),
+    });
+    await t0.agent.setPhase("completed");
+    await t0.stub.advance();
+    // 終端では投稿し直さない（fault はもう消えているので、投稿すれば 1 件になる）
+    expect(app().reviews(REPO, number)).toEqual([]);
+    const r = await resultOf(t0.stub);
+    expect(r.warnings).toContain("review_comment_failed");
+    expect(r.review).toMatchObject({ comment_url: null, body: reviewDto().body });
+    expect(r.pr?.draft).toBe(false);
+  });
+
   it("修正の回に入ったあと検証を使い切って FAILED: レビューのコメントは PR に残す（投稿する）が、Draft のまま", async () => {
     const t = await createTask(workerOver({ review_fix_rounds: 1 }));
     await t.stub.advance();

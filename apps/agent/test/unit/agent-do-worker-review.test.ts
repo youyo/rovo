@@ -468,6 +468,11 @@ describe("worker_review: 取消し・spec の検査・client_review との違い
     expect(both).toMatchObject({ status: "rejected", reason: "invalid_spec: workerReview" });
   });
 
+  it("getReview: レビューの結果が無いあいだは null", async () => {
+    const fx = newFixture("wr-get-none", []);
+    expect(await fx.stub.getReview()).toBeNull();
+  });
+
   it("workerReview が無ければ今までどおり（レビューの段は動かず、review は付かない）", async () => {
     const fx = newFixture("wr-none", [report()]);
     fx.reviewDiff.value = DIFF;
@@ -582,6 +587,8 @@ describe("worker_review: 修正の回（review_fix_rounds: 1）", () => {
     expect(seen).not.toContain(SUGGEST_REASON);
     // 決定 17: 最初の review_commands の失敗の末尾も（囲んで）渡す
     expect(seen).toContain("1 failed: sum.test.ts");
+    // レビューは PR にコメントとして投稿される（修正の前に）
+    expect(seen.slice(0, begin)).toContain("posted on the pull request as a comment");
   });
 
   it("修正のあと review_commands が失敗しても COMPLETED。warnings に review_commands_failed_after_fix、final に出力の末尾", async () => {
@@ -700,6 +707,10 @@ describe("worker_review: 修正の回（review_fix_rounds: 1）", () => {
     await fx.stub.start(fixSpec("wrf-ask"));
     await waitForPhase(fx, "input_required");
     expect(reviewCalls(fx)).toBe(1);
+    // 修正中（終端の前）でも、TaskDO が修正の前に投稿できるよう、レビューの結果（本文つき）を返す
+    const early = await fx.stub.getReview();
+    expect(early).toMatchObject({ fixRequested: true, headSha: C, mustFixCount: 1 });
+    expect(early?.body).toContain("rovo のレビュー");
     expect(await fx.stub.answer("q-1", "no")).toMatchObject({ ok: true });
     expect(await waitForTerminal(fx)).toBe("completed");
     expect(reviewCalls(fx)).toBe(1);

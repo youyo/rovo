@@ -2657,6 +2657,9 @@ export class TaskDO extends DurableObject<Env> {
     return link ? link.cancel_state === "stopped" : true;
   }
 
+  /** レビューの投稿の最中（修正の前の投稿と終了処理の投稿を重ねない） */
+  private postingReview = false;
+
   /** 実行中の GitHub 手順（setup / credentials / finalize）。同じ手順を並行して走らせない（冪等だが無駄な呼び出しを避ける）。 */
   private running = new Set<string>();
 
@@ -2700,6 +2703,8 @@ export class TaskDO extends DurableObject<Env> {
       await this.guard("sync", () => this.syncFromAgent());
     }
     await this.guard("credentials", () => this.deliverCredentials());
+    // worker_review の修正の回: 修正の前にレビューを投稿する（終端の前。終了処理では二重に投稿しない）
+    await this.guard("review_post", () => this.postReviewBeforeFix());
     await this.guard("finalize", () => this.finalizeGithub());
   }
 
@@ -3896,13 +3901,53 @@ export class TaskDO extends DurableObject<Env> {
    * warnings に review_comment_failed を足す（本文は task_result の review.body で読める）。
    * 戻り値: 終わった（投稿した・諦めた・投稿しない）なら true、再試行を待つなら false。
    */
-  private async postReview(row: TaskRow, status: TaskStatus): Promise<boolean> {
+  private async postReview(row: TaskRow, status: TaskStatus, beforeFix = false): Promise<boolean> {
+    // 修正の前の投稿と終了処理の投稿を同時に走らせない（二重に投稿しない）。走っていれば、あとで確かめ直す
+    if (this.postingReview) return false;
+    this.postingReview = true;
+    try {
+      return await this.postReviewOnce(row, status, beforeFix);
+    } finally {
+      this.postingReview = false;
+    }
+  }
+
+  /**
+   * worker_review の修正の回に入った（review_fix_started を取り込んだ）とき、終端を待たずに、修正の前にレビューを投稿する
+   * （仕様の「流れ」の 3。commit_id はレビューした commit）。投稿したか・諦めたかは worker_review の行（posted）に残るので、
+   * DO の再起動をまたいでも終了処理で二重に投稿しない。投稿の失敗は従来どおり review_comment_failed で、修正の回は止めない。
+   */
+  private async postReviewBeforeFix(): Promise<void> {
+    const row = this.getRow();
+    const wr = this.getWorkerReview();
+    if (!row || !wr || wr.posted !== 0) return;
+    const status = this.statusOf(row);
+    if (isTerminal(status)) return;
+    if (this.getGithub()?.pr_number == null) return;
+    if (!this.workerReviewEventsSeen().has("review_fix_started")) return;
+    await this.postReview(row, status, true);
+  }
+
+  private async postReviewOnce(
+    row: TaskRow,
+    status: TaskStatus,
+    beforeFix: boolean,
+  ): Promise<boolean> {
     const target = this.reviewPostTarget();
     if (target?.posted !== 0) return true;
     if (this.now() < target.post_retry_at) return false;
-    let dto: ResultDto;
+    let review: ReviewResultDto | undefined;
     try {
-      dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
+      if (beforeFix) {
+        // 終端の前なので getResult は not_ready。レビューの段の結果だけを読む
+        const early = await this.withTimeout(this.agentStub().getReview(), this.resultTimeoutMs);
+        // 修正の回の結果でなければ、ここでは何もしない（終了処理が従来どおり投稿する）
+        if (early?.fixRequested !== true || !early.body) return true;
+        review = early;
+      } else {
+        const dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
+        review = dto.status === "not_ready" ? undefined : dto.review;
+      }
     } catch {
       // AgentDO が結果を返せない。有限回で諦める（終了処理とトークンの失効を止めない）
       if (target.post_attempts + 1 < FINALIZE_MAX_ATTEMPTS) {
@@ -3912,7 +3957,6 @@ export class TaskDO extends DurableObject<Env> {
       this.giveUpReviewPost(row, target, "result_unavailable");
       return true;
     }
-    const review = dto.status === "not_ready" ? undefined : dto.review;
     const audit = {
       userId: row.owner_id,
       model: target.model,

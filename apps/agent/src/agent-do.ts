@@ -4107,7 +4107,7 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   /**
-   * 固定した SHA までの差分（base...SHA の unified diff）を Sandbox の git から読み、初回だけ meta に残す。
+   * 固定した SHA までの差分（base..SHA の unified diff）を Sandbox の git から読み、初回だけ meta に残す。
    * 読めない（git の失敗・Sandbox の例外）ときは undefined。上限（WORKER_REVIEW_DIFF_MAX_BYTES）で切れたら truncated。
    */
   private async workerReviewDiff(

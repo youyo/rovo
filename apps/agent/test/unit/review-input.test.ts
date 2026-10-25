@@ -217,6 +217,22 @@ describe("buildReviewInput", () => {
     expect(buildReviewInput(base).redacted).toBe(false);
   });
 
+  it("受け入れ条件の秘密も伏せ字にし、伏せ字にしたことを返す", () => {
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    const r = buildReviewInput({ ...base, acceptanceCriteria: [`use token ${secret}`, "plain"] });
+    const joined = r.blocks.join("\n");
+    expect(joined).not.toContain(secret);
+    expect(joined).toContain("plain");
+    expect(joined).toContain("(trusted)");
+    expect(r.redacted).toBe(true);
+  });
+
+  it("差分の見出しは実際の比較（2 点）に合わせて base..head と書く", () => {
+    const joined = buildReviewInput(base).blocks.join("\n");
+    expect(joined).toContain("Diff (base..head):");
+    expect(joined).not.toContain("base...head");
+  });
+
   it("差分を切り詰めたら、そのことを入力に明記して返す", () => {
     const r = buildReviewInput({
       ...base,

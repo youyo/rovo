@@ -35,14 +35,16 @@ export default async function globalSetup() {
     const alice = { id: 7_000_000 + stamp, login: `dash-alice-${stamp}` };
     const bob = { id: 8_000_000 + stamp, login: `dash-bob-${stamp}` };
     await github.reset();
-    for (const u of [alice, bob]) {
+    // carol は権限の無いリポジトリ（secret）のタスクだけを持つ。bob には、持ち主の login がどこにも出ないことの確認に使う
+    const carol = { id: 9_000_000 + stamp, login: `dash-carol-${stamp}` };
+    for (const u of [alice, bob, carol]) {
       await github.addUser(u);
       await github.setTeam("acme", "core", u.login, "active");
     }
     // widgets は 2 人に見える。secret は alice にだけ見える
     await github.setInstallation(INSTALLATION_ID, [
       WIDGETS,
-      { ...SECRET, visibleTo: [alice.login] },
+      { ...SECRET, visibleTo: [alice.login, carol.login] },
     ]);
 
     const secretTitle = `SECRET-REPO-TITLE-${stamp}`;
@@ -54,6 +56,7 @@ export default async function globalSetup() {
       { key: "paused", user: alice, repo: WIDGETS.fullName, title: "自動更新を切るタスク" },
       { key: "xss", user: alice, repo: WIDGETS.fullName, title: XSS_PAYLOAD },
       { key: "secret", user: alice, repo: SECRET.fullName, title: secretTitle },
+      { key: "carol", user: carol, repo: SECRET.fullName, title: `SECRET-CAROL-${stamp}` },
       { key: "bob", user: bob, repo: WIDGETS.fullName, title: "bob のタスク" },
       // 完了して PR が Ready（open・Draft でない）になる。レール「待ち」のレビュー待ち
       { key: "review", user: alice, repo: WIDGETS.fullName, title: "レビュー待ちのタスク" },
@@ -130,7 +133,7 @@ export default async function globalSetup() {
     const state: E2eState = {
       baseUrl,
       githubUrl,
-      users: { alice, bob },
+      users: { alice, bob, carol },
       tasks,
       marks: { secretTitle, xssTitle: XSS_PAYLOAD },
     };

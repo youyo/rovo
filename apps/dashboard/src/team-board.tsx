@@ -5,7 +5,14 @@ import { useT } from "./lang";
 import { taskPath } from "./route";
 import { markKindOf, markLabel } from "./status";
 import { MarkSymbol, ShapeSymbol } from "./status-mark";
-import { buildTeamBoard, type TeamPerson, type TeamRepo } from "./team";
+import {
+  buildMonthCosts,
+  buildTeamBoard,
+  type MonthCostRow,
+  type MonthCosts,
+  type TeamPerson,
+  type TeamRepo,
+} from "./team";
 
 /** 依頼者の頭文字（丸に入れる 1 文字） */
 function initialOf(login: string): string {
@@ -177,6 +184,68 @@ function RepoTable(props: { repos: TeamRepo[]; isToday: boolean }) {
   );
 }
 
+function MonthRow(props: { row: MonthCostRow }) {
+  const t = useT();
+  const r = props.row;
+  const login = singleLine(r.login);
+  const w = r.ratio === null ? 0 : Math.min(1, Math.max(0, r.ratio)) * 100;
+  return (
+    <li
+      className="tb-month-row"
+      data-login={r.login}
+      {...(r.isViewer ? { "data-viewer": "true" } : {})}
+    >
+      <span className="tb-login">
+        <span className="rail-avatar" aria-hidden="true">
+          {initialOf(login)}
+        </span>
+        <span className="tb-login-text">{login}</span>
+      </span>
+      <svg
+        className="tb-month-bar"
+        viewBox="0 0 100 4"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <rect className="model-bar-bg" x="0" y="0" width="100" height="4" />
+        <rect className="model-bar-fill" x="0" y="0" width={w} height="4" />
+      </svg>
+      <span className="tb-month-amount">
+        {formatUsd(r.spentUsd, t)}
+        {r.limitUsd === null ? null : ` / ${formatUsd(r.limitUsd, t)}`}
+      </span>
+      {r.ratio === null ? null : (
+        <span className="tb-month-ratio">{`${Math.round(r.ratio * 100)}%`}</span>
+      )}
+      {r.pace === null ? null : (
+        <span className="tb-month-pace" data-pace={r.pace}>
+          {r.pace === "fast" ? `▲ ${t("board.paceFast")}` : `▼ ${t("board.paceSlow")}`}
+        </span>
+      )}
+    </li>
+  );
+}
+
+function MonthSection(props: { month: MonthCosts }) {
+  const t = useT();
+  const { rows, hidden } = props.month;
+  return (
+    <section className="tb-section" aria-labelledby="tb-month-h" data-month="">
+      <h2 id="tb-month-h">{t("board.titleMonth")}</h2>
+      <ul className="tb-month">
+        {rows.map((r) => (
+          <MonthRow key={r.login} row={r} />
+        ))}
+      </ul>
+      {hidden === null ? null : (
+        <p className="soft tb-month-hidden" data-month-hidden="">
+          {t("board.monthHidden", { n: hidden.count, cost: formatUsd(hidden.costUsd, t) })}
+        </p>
+      )}
+    </section>
+  );
+}
+
 /**
  * チームボード（チームで何も選んでいないときの中央）。読み取り専用。
  * 「いま」: 1 行 1 人（並びは帯と同じ）。走行・質問待ちのタスクを行の下に最大 3 件。タスクを押すとコンソールになる。
@@ -193,6 +262,7 @@ export function TeamBoard(props: {
 }) {
   const t = useT();
   const board = buildTeamBoard(props.data, props.waiting, props.isToday);
+  const month = buildMonthCosts(props.data);
   const generated = Date.parse(props.data.generated_at);
   const at = Number.isFinite(generated) ? generated : Date.now();
   return (
@@ -224,6 +294,7 @@ export function TeamBoard(props: {
           <RepoTable repos={board.repos} isToday={props.isToday} />
         )}
       </section>
+      {month === null ? null : <MonthSection month={month} />}
     </section>
   );
 }

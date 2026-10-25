@@ -206,3 +206,53 @@ describe("チームボード: 英語・漏れ", () => {
     expect(c.textContent).not.toContain("hidden-repo");
   });
 });
+
+describe("チームボード: 今月の費用（UTC・人ごと）", () => {
+  const data: OverviewDto = {
+    ...overviewFixture,
+    generated_at: "2026-10-16T00:00:00.000Z",
+    budget: { ...overviewFixture.budget, monthly_budget_usd: 100 },
+    month: {
+      ...overviewFixture.month,
+      by_owner: [
+        { login: "bob-example", task_cost_usd: 60, consult_cost_usd: 0 },
+        { login: "alice-example", task_cost_usd: 1, consult_cost_usd: 1 },
+      ],
+      hidden: { count: 3, cost_usd: 4.5 },
+    },
+  };
+
+  it("リポジトリ別の下に出る。1 行 1 人・バー・額 / 上限・割合・ペース（文字と記号）", () => {
+    const c = mount({ data }, inEn);
+    const sections = [...c.querySelectorAll("section.tb-section h2")].map((h) => text(h));
+    expect(sections[2]).toContain("This month (UTC)");
+    const bob = c.querySelector('li.tb-month-row[data-login="bob-example"]') as HTMLElement;
+    expect(bob.querySelector(".tb-month-bar")).not.toBeNull();
+    expect(text(bob)).toContain("$60.00");
+    expect(text(bob)).toContain("$100.00");
+    expect(text(bob)).toContain("60%");
+    expect(text(bob.querySelector("[data-pace]"))).toMatch(/▲/);
+    const first = c.querySelector("li.tb-month-row");
+    expect(first?.getAttribute("data-login")).toBe("alice-example");
+    expect(text(c.querySelector("[data-month-hidden]"))).toContain("3");
+    expect(text(c.querySelector("[data-month-hidden]"))).toContain("$4.50");
+  });
+
+  it("過去の日でも今月のまま。hidden が 0 件なら行を出さない。ja の見出し", () => {
+    const c = mount(
+      {
+        data: { ...data, month: { ...data.month, hidden: { count: 0, cost_usd: 0 } } },
+        isToday: false,
+      },
+      inJa,
+    );
+    expect(text(c.querySelector("#tb-month-h"))).toContain("今月");
+    expect(c.querySelector("li.tb-month-row")).not.toBeNull();
+    expect(c.querySelector("[data-month-hidden]")).toBeNull();
+  });
+
+  it("残り・予約・あと何件は出さない", () => {
+    const c = mount({ data }, inEn);
+    expect(text(c.querySelector("#tb-month-h")?.parentElement)).not.toMatch(/remaining|reserved/i);
+  });
+});

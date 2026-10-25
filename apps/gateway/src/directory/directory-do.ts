@@ -16,6 +16,8 @@ import {
   MAX_LIST_LIMIT,
   MAX_OWNER_IDS,
   MAX_REPO_IDS,
+  type SummarizeByOwnerResult,
+  type SummarizeConsultsByOwnerResult,
   type SummarizeConsultsResult,
   type SummarizeQuery,
   type SummarizeResult,
@@ -257,6 +259,23 @@ export class DirectoryDO extends DurableObject<Env> {
       estimated_micro: total.e,
       models,
     };
+  }
+
+  /** consult の owner_login ごとの費用（at が [from, to)）。consult は権限の対象外 */
+  summarizeConsultsByOwner(query: { from: number; to: number }): SummarizeConsultsByOwnerResult {
+    if (!Number.isSafeInteger(query?.from) || !Number.isSafeInteger(query.to)) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const owners = this.ctx.storage.sql
+      .exec<{ l: string; c: number }>(
+        `SELECT owner_login AS l, SUM(cost_micro) AS c FROM consult_index
+         WHERE at >= ? AND at < ? GROUP BY owner_login ORDER BY owner_login`,
+        query.from,
+        query.to,
+      )
+      .toArray()
+      .map((r) => ({ owner_login: r.l, cost_micro: r.c }));
+    return { ok: true, owners };
   }
 
   /**
@@ -527,6 +546,44 @@ export class DirectoryDO extends DurableObject<Env> {
       visible: { count: visible.n, cost_micro: visible.c },
       hidden: { count: all.n - visible.n, cost_micro: all.c - visible.c },
       models,
+    };
+  }
+
+  /**
+   * 月などの人ごとの集計（created_at が [from, to)）。owner_login は repoIds で絞った行だけを GROUP BY する
+   * （絞らずに GROUP BY すると見えないタスクの持ち主が漏れる）。見えない分は人に割り振らず、件数と合計だけ。
+   */
+  summarizeByOwner(query: SummarizeQuery): SummarizeByOwnerResult {
+    const bad = this.checkIds(query?.repoIds);
+    if (bad) return bad;
+    if (!Number.isSafeInteger(query.from) || !Number.isSafeInteger(query.to)) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const sql = this.ctx.storage.sql;
+    const ids = JSON.stringify(query.repoIds);
+    const visible = sql
+      .exec<{ l: string; n: number; c: number }>(
+        `SELECT owner_login AS l, COUNT(*) AS n, COALESCE(SUM(cost_micro), 0) AS c FROM task_index
+         WHERE created_at >= ? AND created_at < ? AND repository_id IN (SELECT value FROM json_each(?))
+         GROUP BY owner_login ORDER BY owner_login`,
+        query.from,
+        query.to,
+        ids,
+      )
+      .toArray();
+    const all = sql
+      .exec<{ n: number; c: number }>(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(cost_micro), 0) AS c FROM task_index WHERE created_at >= ? AND created_at < ?",
+        query.from,
+        query.to,
+      )
+      .one();
+    const vn = visible.reduce((a, r) => a + r.n, 0);
+    const vc = visible.reduce((a, r) => a + r.c, 0);
+    return {
+      ok: true,
+      visible: visible.map((r) => ({ owner_login: r.l, task_cost_micro: r.c, task_count: r.n })),
+      hidden: { count: all.n - vn, cost_micro: all.c - vc },
     };
   }
 

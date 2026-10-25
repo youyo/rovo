@@ -125,7 +125,7 @@ export default async function docsGlobalSetup() {
     const state: E2eState = {
       baseUrl,
       githubUrl,
-      users: { alice, bob },
+      users: { alice, bob, carol: bob },
       tasks,
       marks: { secretTitle: "", xssTitle: "" },
     };

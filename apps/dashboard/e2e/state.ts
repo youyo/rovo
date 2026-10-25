@@ -8,7 +8,7 @@ export interface E2eUser {
 export interface E2eState {
   baseUrl: string;
   githubUrl: string;
-  users: { alice: E2eUser; bob: E2eUser };
+  users: { alice: E2eUser; bob: E2eUser; carol: E2eUser };
   /** タスク ID。キーは役割（seed.ts の SEEDED） */
   tasks: Record<string, string>;
   /** テストごとに本文に仕込む目印（権限の無いタスクの題名の断片など） */

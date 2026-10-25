@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { fetchGatewayCost, gatewayCostConfigured } from "../../src/tasks/gateway-cost";
+import {
+  fetchConsultGatewayCost,
+  fetchGatewayCost,
+  gatewayCostConfigured,
+} from "../../src/tasks/gateway-cost";
 
 const TASK = "01JTESTTASK0000000000000000";
 const ENV = {
@@ -168,5 +172,68 @@ describe("fetchGatewayCost", () => {
     expect(await fetchGatewayCost(ENV, TASK, 0, { fetch: fakeApi([]).f })).toEqual({
       state: "pending",
     });
+  });
+});
+
+const CONSULT = "consult-01JTESTCONSULT0000000000000";
+const clog = (cost: number | null | undefined, over: Log = {}): Log => ({
+  success: true,
+  ...(cost === undefined ? {} : { cost }),
+  metadata: { userId: "1", consultId: CONSULT, caller: "consult" },
+  ...over,
+});
+
+describe("fetchConsultGatewayCost", () => {
+  it("設定が無ければ API を呼ばず unconfigured", async () => {
+    const api = fakeApi([]);
+    const r = await fetchConsultGatewayCost({ ...ENV, AI_GATEWAY_ID: undefined }, CONSULT, 1, {
+      fetch: api.f,
+    });
+    expect(r).toEqual({ state: "unconfigured" });
+    expect(api.urls).toHaveLength(0);
+  });
+
+  it("consultId で絞り、caller が consult で consultId が一致するログの cost を合計する", async () => {
+    const api = fakeApi([clog(0.25)]);
+    const r = await fetchConsultGatewayCost(ENV, CONSULT, 1, { fetch: api.f });
+    expect(JSON.parse(api.urls[0]?.searchParams.get("filters") ?? "null")).toEqual([
+      { key: "metadata.value", operator: "eq", value: [CONSULT] },
+    ]);
+    expect(r).toEqual({ state: "confirmed", micro: 250_000 });
+  });
+
+  it("文字列の metadata も読める。別の consultId・caller 違い・caller 無しは数えない", async () => {
+    const str = clog(0.1, {
+      metadata: JSON.stringify({ consultId: CONSULT, caller: "consult" }),
+    });
+    const otherId = clog(9, { metadata: { consultId: "consult-other", caller: "consult" } });
+    const otherCaller = clog(9, { metadata: { consultId: CONSULT, caller: "review" } });
+    const noCaller = clog(9, { metadata: { consultId: CONSULT } });
+    const taskLike = clog(9, { metadata: { taskId: CONSULT } });
+    const r = await fetchConsultGatewayCost(ENV, CONSULT, 1, {
+      fetch: fakeApi([str, otherId, otherCaller, noCaller, taskLike]).f,
+    });
+    expect(r).toEqual({ state: "confirmed", micro: 100_000 });
+  });
+
+  it("件数が足りない・成功したログの cost が欠けるときは pending", async () => {
+    expect(await fetchConsultGatewayCost(ENV, CONSULT, 1, { fetch: fakeApi([]).f })).toEqual({
+      state: "pending",
+    });
+    expect(
+      await fetchConsultGatewayCost(ENV, CONSULT, 1, { fetch: fakeApi([clog(undefined)]).f }),
+    ).toEqual({ state: "pending" });
+  });
+
+  it("API のエラーは pending（例外にしない）", async () => {
+    const f = (async () => new Response("x", { status: 500 })) as typeof fetch;
+    expect(await fetchConsultGatewayCost(ENV, CONSULT, 1, { fetch: f })).toEqual({
+      state: "pending",
+    });
+  });
+
+  it("タスクの判定は変わらない: consult のログは taskId の照合に混ざらない", async () => {
+    const r = await fetchGatewayCost(ENV, TASK, 1, { fetch: fakeApi([clog(9), log(0.5)]).f });
+    expect(r).toEqual({ state: "confirmed", micro: 500_000 });
   });
 });

@@ -41,6 +41,12 @@ import { errorMessageForLog } from "../log-error";
 import { testConsultTiming, withTestScripts } from "../test-routes";
 import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
 import { MAX_BUDGET_EXTENSIONS } from "./budget-question";
+import {
+  fetchConsultGatewayCost,
+  type GatewayCostResult,
+  gatewayCostConfigured,
+  RECONCILE_DELAYS_MS,
+} from "./gateway-cost";
 import { addColumnIfMissing } from "./sql-schema";
 import type { TaskDO } from "./task-do";
 import { isConsultId, isTaskId, ulid, ulidTime } from "./ulid";
@@ -123,6 +129,8 @@ export const CONSULT_INDEX_ALARM_INTERVAL_MS = 10_000;
 const CONSULT_INDEX_TIMEOUT_MS = 10_000;
 /** 1 回の alarm で送る件数の上限（残りは次の alarm で） */
 const CONSULT_INDEX_BATCH = 50;
+/** 1 回の alarm で確定を試す consult の件数の上限（残りは次の alarm で） */
+const CONSULT_RECONCILE_BATCH = 5;
 /** 配送済みの consult_log の行を残す期間。過ぎたら消す（Directory が正本。UserDO を太らせない） */
 const CONSULT_LOG_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
@@ -443,6 +451,17 @@ export class UserDO extends DurableObject<Env> {
       finished_at INTEGER,
       expires_at INTEGER
     )`);
+    // consult の費用の確定の予定（AI Gateway のログ。docs/specs/consult-pending.md）。精算（markConsultSettled）と同じ同期区間で作り、
+    // alarm が RECONCILE_DELAYS_MS の時刻に 1 件ずつ進める。attempt は問い合わせた回数、done=1 は確定または打ち切りで終わり
+    sql.exec(`CREATE TABLE IF NOT EXISTS consult_reconcile (
+      consult_id TEXT PRIMARY KEY,
+      base INTEGER NOT NULL,
+      attempt INTEGER NOT NULL DEFAULT 0,
+      done INTEGER NOT NULL DEFAULT 0
+    )`);
+    sql.exec(
+      "CREATE INDEX IF NOT EXISTS consult_reconcile_open ON consult_reconcile (done) WHERE done = 0",
+    );
     // 配送の失敗の記録（バックオフ）。1 行だけ
     sql.exec(`CREATE TABLE IF NOT EXISTS consult_outbox (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -1340,9 +1359,11 @@ export class UserDO extends DurableObject<Env> {
         "SELECT task_id FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
       )
       .toArray();
+    let closed = 0;
     for (const { task_id } of open) {
       const t = ulidTime(task_id.slice("consult-".length));
       if (t === undefined || at - t < CONSULT_STALE_AFTER_MS) continue;
+      closed++;
       sql.exec(
         "UPDATE task_budget SET settled_micro = MAX(settled_micro, reserved_micro), settled_estimated = 1, closed = 1 WHERE task_id = ?",
         task_id,
@@ -1358,6 +1379,9 @@ export class UserDO extends DurableObject<Env> {
       this.wakeConsultSoon(task_id);
     }
     sql.exec("DELETE FROM consult_answer WHERE expires_at IS NOT NULL AND expires_at <= ?", at);
+    // 閉じた分の確定の予定（consult_reconcile）の alarm を、どの経路（reserve 系・alarm）で閉じても立てる。
+    // alarm は waitUntil で非同期に置くので、同期区間の中から呼んでよい（既に早い alarm があれば動かさない）
+    if (closed > 0) this.scheduleConsultDeadlineAlarm();
   }
 
   /** 同期区間内で呼ぶ。pending の答えを failed にする（pending でなければ何もしない）。 */
@@ -1397,6 +1421,7 @@ export class UserDO extends DurableObject<Env> {
       this.settleConsultInSection(consultId, costUsd, estimated),
     );
     this.requestConsultAlarm();
+    this.scheduleConsultDeadlineAlarm();
     if (!result.ok) return { ok: false };
     return { ok: true, applied: result.applied };
   }
@@ -1701,7 +1726,112 @@ export class UserDO extends DurableObject<Env> {
       )
       .one().t;
     if (expiry !== null) consider(expiry);
+    consider(this.nextConsultReconcileDue());
     return next;
+  }
+
+  // ---- consult の費用の確定（AI Gateway のログ。docs/specs/consult-pending.md）----
+
+  /** AI Gateway のログから consult の費用を読む（テストで差し替える）。 */
+  protected gatewayConsultCost(consultId: string, modelCalls: number): Promise<GatewayCostResult> {
+    return fetchConsultGatewayCost(this.env, consultId, modelCalls);
+  }
+
+  /** 同期区間の中で呼ぶ。精算された consult の確定の予定を作る（設定が無い環境では作らない。再精算で作り直さない）。 */
+  private scheduleConsultReconcile(consultId: string): void {
+    if (!gatewayCostConfigured(this.env)) return;
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO consult_reconcile (consult_id, base) VALUES (?, ?)",
+      consultId,
+      this.now(),
+    );
+  }
+
+  /** 次に確定を試す時刻（this.now() の時刻系）。試すものが無ければ undefined。 */
+  private nextConsultReconcileDue(): number | undefined {
+    const t = this.ctx.storage.sql
+      .exec<{ t: number | null }>(
+        `SELECT MIN(base + CASE attempt WHEN 0 THEN ? WHEN 1 THEN ? WHEN 2 THEN ? ELSE ? END) AS t
+         FROM consult_reconcile WHERE done = 0`,
+        ...RECONCILE_DELAYS_MS,
+      )
+      .one().t;
+    return t ?? undefined;
+  }
+
+  /**
+   * alarm から呼ぶ。時刻が来た確定の予定を 1 回ずつ進める（1 回の alarm で RECONCILE_BATCH 件まで）。例外は出さない。
+   * 確定したら task_budget を gateway の額で 1 回だけ上書きし、consult_log に写して dirty にする（索引は後の配送に載る）。
+   * 「まだ」（件数不足・cost の欠け・API のエラー・例外）は回数を進め、4 回目でも確定できなければ見積もりのまま打ち切る。
+   */
+  private async reconcileConsults(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const at = this.now();
+    sql.exec(
+      "DELETE FROM consult_reconcile WHERE done = 1 AND base < ?",
+      at - CONSULT_LOG_RETENTION_MS,
+    );
+    const due = sql
+      .exec<{ consult_id: string; base: number; attempt: number }>(
+        "SELECT consult_id, base, attempt FROM consult_reconcile WHERE done = 0 ORDER BY base, consult_id",
+      )
+      .toArray()
+      .filter((r) => {
+        const delay = RECONCILE_DELAYS_MS[r.attempt];
+        return delay !== undefined && r.base + delay <= at;
+      })
+      .slice(0, CONSULT_RECONCILE_BATCH);
+    for (const r of due) {
+      let result: GatewayCostResult;
+      try {
+        // 1 回の consult が AI Gateway を呼ぶのは 1 回（AgentDO.consult は streamSimple を 1 回だけ呼ぶ）
+        result = await this.gatewayConsultCost(r.consult_id, 1);
+      } catch {
+        result = { state: "pending" };
+      }
+      if (result.state === "unconfigured") {
+        sql.exec("UPDATE consult_reconcile SET done = 1 WHERE consult_id = ?", r.consult_id);
+      } else if (
+        result.state === "confirmed" &&
+        Number.isFinite(result.micro) &&
+        result.micro >= 0
+      ) {
+        this.ctx.storage.transactionSync(() => {
+          this.applyConsultGatewayCost(r.consult_id, Math.round(result.micro));
+          sql.exec("UPDATE consult_reconcile SET done = 1 WHERE consult_id = ?", r.consult_id);
+        });
+      } else {
+        const attempt = r.attempt + 1;
+        sql.exec(
+          "UPDATE consult_reconcile SET attempt = ?, done = ? WHERE consult_id = ?",
+          attempt,
+          attempt >= RECONCILE_DELAYS_MS.length ? 1 : 0,
+          r.consult_id,
+        );
+      }
+    }
+  }
+
+  /**
+   * 同期区間の中で呼ぶ。閉じた consult のうち、まだ estimate のものだけ settled_micro を確定額で上書きして gateway にする
+   * （予約額・見積もりで精算したものも置き換える）。consult_log にも写して dirty にする。すでに gateway なら何もしない（冪等）。
+   */
+  private applyConsultGatewayCost(consultId: string, micro: number): void {
+    const sql = this.ctx.storage.sql;
+    const cursor = sql.exec(
+      `UPDATE task_budget SET settled_micro = ?, settled_estimated = 0, cost_source = 'gateway'
+       WHERE task_id = ? AND closed = 1 AND cost_source = 'estimate'`,
+      micro,
+      consultId,
+    );
+    if (cursor.rowsWritten === 0) return;
+    const log = sql.exec(
+      `UPDATE consult_log SET cost_micro = ?, estimated = 0, revision = revision + 1, index_dirty = 1
+       WHERE consult_id = ? AND settled = 1`,
+      micro,
+      consultId,
+    );
+    if (log.rowsWritten > 0) this.consultAlarmWanted = true;
   }
 
   // ---- consult の索引（outbox と alarm。D9 / M3b）----
@@ -1711,6 +1841,7 @@ export class UserDO extends DurableObject<Env> {
    * consult_log に行が無い consult（デプロイ前の予約など）は何もしない。
    */
   private markConsultSettled(consultId: string): void {
+    this.scheduleConsultReconcile(consultId);
     const cursor = this.ctx.storage.sql.exec(
       `UPDATE consult_log SET
          cost_micro = (SELECT settled_micro FROM task_budget WHERE task_id = consult_log.consult_id),
@@ -1759,6 +1890,11 @@ export class UserDO extends DurableObject<Env> {
       this.consultAlarmWanted = false;
     } catch (e) {
       console.error("consult_sweep_error", e instanceof Error ? e.name : typeof e);
+    }
+    try {
+      await this.reconcileConsults();
+    } catch (e) {
+      console.error("consult_reconcile_error", e instanceof Error ? e.name : typeof e);
     }
     try {
       await this.deliverConsultIndex();

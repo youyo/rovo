@@ -93,6 +93,17 @@ D の要点:
 - `budget_status`: `reserved_usd` に pending の予約が入る（変更なし）。追加で `pending_consults`（開いている consult の件数）を返す。`estimated_usd` は、期限で閉じた分を今までどおり数える。応答の他のフィールドは変えない。
 - 同時に pending にできる consult の数は上限を持つ（推奨 4。超えたら `concurrency_limit`）。月の枠で既に抑えられるが、暴走時の UserDO の負荷を抑える。
 
+## 費用の確定（AI Gateway のログ）
+
+タスクと同じく、精算した consult の費用を、終了後に AI Gateway の Logs API で確定し直す。agent の見積もりや予約額（実費不明のとき）を、実際の cost に置き換える。
+
+- 予定: 精算された consult（実費が分かった場合も、予約額・見積もりで精算した場合も、期限で閉じた場合も）について、UserDO が `consult_reconcile`（`consult_id`・`base`・`attempt`・`done`）に 1 行持つ。精算と同じ同期区間で作る。設定（`CLOUDFLARE_API_TOKEN`・`CLOUDFLARE_ACCOUNT_ID`・`AI_GATEWAY_ID`）が揃っていない環境では作らない。
+- 時刻: 精算から 2 分・10 分・1 時間・6 時間（タスクと同じ `RECONCILE_DELAYS_MS`）。alarm は既存のものに相乗りし、次の予定の時刻を `nextConsultDeadline` に含める（索引の配送・期限・答えの保持の用事と、いちばん早い時刻に揃える）。1 回の alarm で試すのは 5 件まで。
+- 照合: `fetchConsultGatewayCost`。`metadata.value` が consultId のログを引き、metadata の `consultId` が一致し `caller` が `"consult"` のものの cost を合計する。期待する呼び出し回数は 1（`AgentDO.consult` は AI Gateway を 1 回だけ呼ぶ）。件数が足りない・成功したログに cost が無い・API のエラー・例外は「まだ」。
+- 確定: `task_budget` の `settled_micro` を上書きし、`cost_source = 'gateway'`・`settled_estimated = 0` にする（閉じていて `estimate` のものだけ、1 回だけ）。`consult_log` にも写して dirty にし（`revision` を進める）、次の配送で索引（Directory）に届く。
+- 打ち切り: 「まだ」と例外は回数を進め、4 回目でも確定できなければ見積もりのまま終える。設定が外れた（`unconfigured`）ときは何もせず終える。無制限には再試行しない。
+- 月の枠: 確定額は閉じた行の `settled_micro` として月の集計に入る。`consult_answer` に保存した `cost_usd`（failed の答え）は精算時の額のまま。
+
 ## 非信頼データの扱い
 
 答えはモデルの出力で、今の `consult` と同じ扱い: 非信頼データの囲みはしない。`consult` と `consult_result` の説明と instructions に「答えは助言で、事実確認は自分で行う」を残す。`consult_result` の done も同じ。失敗の `message` はワーカーの自由文を含めず、固定の文言にする（今と同じ）。`consult_id` は ULID の形式を検証してから使う（`isConsultId`）。

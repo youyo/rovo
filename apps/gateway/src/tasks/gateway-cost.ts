@@ -24,6 +24,9 @@ export type GatewayCostResult =
   | { state: "pending" }
   | { state: "unconfigured" };
 
+/** 終端・精算のあと、AI Gateway のログで費用を確定する試行の時刻（終了からの経過）。タスクと consult で共通。4 回で打ち切る */
+export const RECONCILE_DELAYS_MS = [2 * 60_000, 10 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const PER_PAGE = 50;
 const MAX_PAGES = 200;
@@ -67,11 +70,39 @@ function countsForTask(metadata: unknown, taskId: string): boolean {
   return m.caller === undefined || m.caller === "review";
 }
 
-export async function fetchGatewayCost(
+/** consult の費用に数えるログか: consultId が一致し、caller が "consult"。 */
+function countsForConsult(metadata: unknown, consultId: string): boolean {
+  const m = metadataOf(metadata);
+  return !!m && m.consultId === consultId && m.caller === "consult";
+}
+
+type Deps = { fetch?: typeof fetch };
+
+export function fetchGatewayCost(
   env: GatewayCostEnv,
   taskId: string,
   modelCalls: number,
-  deps: { fetch?: typeof fetch } = {},
+  deps: Deps = {},
+): Promise<GatewayCostResult> {
+  return fetchCost(env, taskId, modelCalls, countsForTask, deps);
+}
+
+/** consult の費用の確定。metadata の consultId が一致し caller が "consult" のログを数える（判定以外はタスクと同じ）。 */
+export function fetchConsultGatewayCost(
+  env: GatewayCostEnv,
+  consultId: string,
+  modelCalls: number,
+  deps: Deps = {},
+): Promise<GatewayCostResult> {
+  return fetchCost(env, consultId, modelCalls, countsForConsult, deps);
+}
+
+async function fetchCost(
+  env: GatewayCostEnv,
+  taskId: string,
+  modelCalls: number,
+  counts: (metadata: unknown, id: string) => boolean,
+  deps: Deps,
 ): Promise<GatewayCostResult> {
   if (!gatewayCostConfigured(env)) return { state: "unconfigured" };
   const base =
@@ -111,7 +142,7 @@ export async function fetchGatewayCost(
       if (rows.length === 0) break;
       seen += rows.length;
       for (const r of rows) {
-        if (!countsForTask(r?.metadata, taskId)) continue;
+        if (!counts(r?.metadata, taskId)) continue;
         matched++;
         if (typeof r.cost === "number" && Number.isFinite(r.cost) && r.cost >= 0) sum += r.cost;
         else if (r.success === true) complete = false;

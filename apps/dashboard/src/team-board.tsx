@@ -1,13 +1,16 @@
 import type { OverviewDto, VisibleTaskDto, WaitingDto } from "@rovo/dashboard-contract";
 import { isPlainLeftClick } from "./click";
-import { formatCount, formatDuration, formatUsd, singleLine } from "./format";
+import { formatCount, formatDuration, formatShortDate, formatUsd, singleLine } from "./format";
+import type { T } from "./i18n";
 import { useT } from "./lang";
 import { taskPath } from "./route";
 import { markKindOf, markLabel } from "./status";
 import { MarkSymbol, ShapeSymbol } from "./status-mark";
 import {
+  buildFlow,
   buildMonthCosts,
   buildTeamBoard,
+  type Flow,
   type MonthCostRow,
   type MonthCosts,
   type TeamPerson,
@@ -250,6 +253,165 @@ function MonthSection(props: { month: MonthCosts }) {
   );
 }
 
+const BAR_W = 9;
+const BAR_PAIR_GAP = 1;
+const GROUP_W = BAR_W * 2 + BAR_PAIR_GAP;
+const GROUP_GAP = 7;
+const CHART_H = 60;
+/** 0 件でない棒が潰れて見えなくならない最小の高さ（件数の比例は保つ） */
+const MIN_BAR_H = 2;
+const HATCH_ID = "tb-flow-hatch";
+
+const barH = (n: number, max: number) => (n <= 0 ? 0 : Math.max(MIN_BAR_H, (n / max) * CHART_H));
+
+/** 横軸に日付を出す日（古い順の添字）: 14 日前・1 週間前・今日。狭い幅でも重ならない数に間引く */
+const AXIS_TICKS = [0, 7, 13];
+
+/** YYYY-MM-DD（UTC の日付）を、ロケールの短い月日（ja は 10/25、en も 10/25）にする */
+function shortDate(date: string, t: T): string {
+  const ms = Date.parse(date);
+  return Number.isFinite(ms) ? formatShortDate(ms, t) : date;
+}
+
+function FlowChart(props: { flow: Flow }) {
+  const t = useT();
+  const { days } = props.flow;
+  const max = Math.max(1, ...days.map((d) => Math.max(d.completed, d.failed)));
+  const pitch = GROUP_W + GROUP_GAP;
+  const w = days.length * pitch - GROUP_GAP;
+  return (
+    <div className="tb-flow-plot">
+      {/* biome-ignore lint/a11y/useSemanticElements: SVG の図の集まり。fieldset は使えない */}
+      <svg
+        className="tb-flow-chart"
+        viewBox={`0 0 ${w} ${CHART_H + 1}`}
+        role="group"
+        aria-label={t("board.flowChart")}
+      >
+        <defs>
+          <pattern id={HATCH_ID} width="4" height="4" patternUnits="userSpaceOnUse">
+            <path className="tb-flow-hatch-line" d="M-1 5 L5 -1 M-1 1 L1 -1 M3 5 L5 3" />
+          </pattern>
+        </defs>
+        {days.map((d, i) => {
+          const x = i * pitch;
+          const hDone = barH(d.completed, max);
+          const hFail = barH(d.failed, max);
+          const label = t("board.flowDay", { date: d.date, done: d.completed, failed: d.failed });
+          return (
+            // biome-ignore lint/a11y/noInteractiveElementToNoninteractiveRole: SVG の g は操作の要素ではない。日ごとに読み上げさせる
+            <g
+              key={d.date}
+              data-day={d.date}
+              data-completed={d.completed}
+              data-failed={d.failed}
+              role="img"
+              aria-label={label}
+            >
+              <title>{label}</title>
+              <rect
+                className="tb-flow-bar"
+                x={x}
+                y={CHART_H - hDone}
+                width={BAR_W}
+                height={hDone}
+              />
+              {d.failed > 0 ? (
+                <rect
+                  className="tb-flow-fail"
+                  data-fail-mark=""
+                  fill={`url(#${HATCH_ID})`}
+                  x={x + BAR_W + BAR_PAIR_GAP + 0.5}
+                  y={CHART_H - hFail}
+                  width={BAR_W - 1}
+                  height={hFail}
+                />
+              ) : null}
+            </g>
+          );
+        })}
+        <line className="tb-flow-base" x1="0" y1={CHART_H} x2={w} y2={CHART_H} />
+      </svg>
+      <div className="tb-flow-axis" aria-hidden="true">
+        {AXIS_TICKS.filter((i) => days[i] !== undefined).map((i) => {
+          const last = i === days.length - 1;
+          const first = i === 0;
+          return (
+            <span
+              key={i}
+              className={`tb-flow-tick${first ? " tb-flow-tick--start" : last ? " tb-flow-tick--end" : ""}`}
+              data-axis-label=""
+              title={days[i]?.date}
+              style={
+                first || last ? undefined : { left: `${((i * pitch + GROUP_W / 2) / w) * 100}%` }
+              }
+            >
+              {shortDate(days[i]?.date ?? "", t)}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function FlowSection(props: { flow: Flow }) {
+  const t = useT();
+  const f = props.flow;
+  const none = "–";
+  return (
+    <section className="tb-section" aria-labelledby="tb-flow-h" data-flow="">
+      <h2 id="tb-flow-h">{t("board.titleFlow")}</h2>
+      <div className="tb-flow-body">
+        <FlowChart flow={f} />
+        <p className="soft tb-flow-legend">
+          <svg className="tb-flow-key" viewBox="0 0 9 9" aria-hidden="true">
+            <rect className="tb-flow-bar" x="0" y="0" width="9" height="9" />
+          </svg>{" "}
+          {t("board.flowDone")}{" "}
+          <svg className="tb-flow-key" viewBox="0 0 9 9" aria-hidden="true">
+            <rect
+              className="tb-flow-fail"
+              fill={`url(#${HATCH_ID})`}
+              x="0.5"
+              y="0.5"
+              width="8"
+              height="8"
+            />
+          </svg>{" "}
+          {t("board.flowFailed")}
+        </p>
+        <dl className="tb-flow-stats">
+          <div data-flow-rate="">
+            <dt>{t("board.flowRate")}</dt>
+            <dd>
+              {f.rate === null
+                ? none
+                : `${Math.round(f.rate * 100)}% (${f.failed} / ${f.completed + f.failed})`}
+            </dd>
+          </div>
+          <div data-flow-median="">
+            <dt>{t("board.flowMedian")}</dt>
+            <dd>{f.medianMs === null ? none : formatDuration(f.medianMs, t)}</dd>
+          </div>
+          <div data-flow-merged="">
+            <dt>{t("board.flowMerged")}</dt>
+            <dd>{formatCount(f.prMerged, t)}</dd>
+          </div>
+        </dl>
+      </div>
+      {f.hidden === null ? null : (
+        <p className="soft tb-flow-hidden" data-flow-hidden="">
+          {t("board.flowHidden", { n: f.hidden.count, failed: f.hidden.failed })}
+        </p>
+      )}
+      <p className="soft tb-flow-note" data-flow-note="">
+        {t("board.flowNote")}
+      </p>
+    </section>
+  );
+}
+
 /**
  * チームボード（チームで何も選んでいないときの中央）。読み取り専用。
  * 「いま」: 1 行 1 人（並びは帯と同じ）。走行・質問待ちのタスクを行の下に最大 3 件。タスクを押すとコンソールになる。
@@ -267,6 +429,7 @@ export function TeamBoard(props: {
   const t = useT();
   const board = buildTeamBoard(props.data, props.waiting, props.isToday);
   const month = buildMonthCosts(props.data);
+  const flow = buildFlow(props.data);
   const generated = Date.parse(props.data.generated_at);
   const at = Number.isFinite(generated) ? generated : Date.now();
   return (
@@ -299,6 +462,7 @@ export function TeamBoard(props: {
         )}
       </section>
       {month === null ? null : <MonthSection month={month} />}
+      {flow === null ? null : <FlowSection flow={flow} />}
     </section>
   );
 }

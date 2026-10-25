@@ -132,6 +132,15 @@ export function formatDayHeading(ms: number, t: T): string {
   return new Intl.DateTimeFormat(locale(t), { month: "long", day: "numeric" }).format(ms);
 }
 
+/** UTC の日付の短い月日（ja は 10/25、en も 10/25）。成果の推移の横軸用。 */
+export function formatShortDate(ms: number, t: T): string {
+  return new Intl.DateTimeFormat(locale(t), {
+    month: "numeric",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(ms);
+}
+
 /** モデル名の表示用。最後の / より後ろ（プロバイダなどの接頭辞を省く）を名前にし、全体は title 用に残す。 */
 export function shortModel(id: string): { name: string; full: string } {
   const full = singleLine(id);

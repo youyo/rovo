@@ -339,6 +339,141 @@ test("(TB11) 過去の日に送っても、今月の費用は今月のまま", a
   await expect(alice.locator(".tb-month-ratio")).toHaveText(/^\d+%$/);
 });
 
+const flowSection = (page: Page) => page.locator("[data-flow]");
+
+/** 今日の分（完了 2 件・失敗 1 件以上）が索引に入るまで開き直す（完了 → 索引への反映は非同期） */
+async function waitForFlowToday(page: Page) {
+  await expect(async () => {
+    const last = flowSection(page).locator("[data-day]").last();
+    await expect(last).toBeVisible({ timeout: 3_000 });
+    const done = Number(await last.getAttribute("data-completed"));
+    const failed = Number(await last.getAttribute("data-failed"));
+    if (done < 2 || failed < 1) {
+      await page.reload();
+      await page.getByRole("button", { name: "チーム" }).click();
+    }
+    expect(done).toBeGreaterThanOrEqual(2);
+    expect(failed).toBeGreaterThanOrEqual(1);
+  }).toPass({ timeout: 60_000 });
+}
+
+/** 横軸のラベルが重ならず、区画の幅の中に収まっている */
+async function expectAxisInside(page: Page) {
+  const boxes = await flowSection(page)
+    .locator("[data-axis-label]")
+    .evaluateAll((els) =>
+      els.map((e) => {
+        const r = e.getBoundingClientRect();
+        return { l: r.left, r: r.right };
+      }),
+    );
+  const sec = await flowSection(page).boundingBox();
+  if (!sec) throw new Error("区画の位置が取れない");
+  for (const b of boxes) {
+    expect(b.l).toBeGreaterThanOrEqual(sec.x - 1);
+    expect(b.r).toBeLessThanOrEqual(sec.x + sec.width + 1);
+  }
+  for (let i = 1; i < boxes.length; i++) {
+    expect((boxes[i] as { l: number }).l, "ラベルが重なっている").toBeGreaterThan(
+      (boxes[i - 1] as { r: number }).r,
+    );
+  }
+}
+
+test("(TB12) 成果の推移: 区画、14 日分の棒、横軸の日付、失敗の棒の形、失敗率の件数、脚注", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  const sec = flowSection(page);
+  await expect(sec).toBeVisible();
+  await expect(sec.locator("h2")).toContainText("成果の推移");
+  await expect(sec.locator("h2")).toContainText("14");
+  await waitForFlowToday(page);
+  const days = sec.locator("[data-day]");
+  await expect(days).toHaveCount(14);
+  const dates = await days.evaluateAll((els) => els.map((e) => e.getAttribute("data-day")));
+  expect(dates).toEqual([...dates].sort());
+  // 今日（UTC）が最後の日
+  expect(dates[13]).toBe(new Date().toISOString().slice(0, 10));
+  // 横軸: 14 日前・1 週間前・今日のラベルが見え、棒の日付と一致する（ja は 10/25 の形）
+  const short = (d: string | null) => {
+    const [, m, dd] = (d ?? "").split("-");
+    return `${Number(m)}/${Number(dd)}`;
+  };
+  const labels = sec.locator("[data-axis-label]");
+  await expect(labels).toHaveCount(3);
+  await expect(labels.nth(0)).toBeVisible();
+  await expect(labels.nth(0)).toHaveText(short(dates[0] ?? null));
+  await expect(labels.nth(1)).toHaveText(short(dates[7] ?? null));
+  await expect(labels.nth(2)).toHaveText(short(dates[13] ?? null));
+  // 間引いた日も読み上げの名前に日付と件数がある
+  await expect(days.nth(3)).toHaveAttribute(
+    "aria-label",
+    /^\d{4}-\d{2}-\d{2}: 完了 0 件、失敗 0 件$/,
+  );
+  // 失敗のある日（今日）: 失敗の棒が完了の棒と形（斜線の塗り）で区別でき、見える大きさがある
+  const today = days.last();
+  const fail = today.locator("[data-fail-mark]");
+  await expect(fail).toHaveCount(1);
+  await expect(fail).toHaveAttribute("fill", /^url\(#/);
+  const done = today.locator(".tb-flow-bar");
+  expect(await done.evaluate((e) => getComputedStyle(e).fill)).not.toMatch(/^url/);
+  const fb = await fail.boundingBox();
+  const db = await done.boundingBox();
+  expect(fb && fb.width > 2 && fb.height > 2).toBe(true);
+  // 件数に比例: 完了が多い分、完了の棒の方が高く、同じ基線に立つ
+  expect(fb && db && db.height > fb.height).toBe(true);
+  expect(fb && db && Math.abs(fb.y + fb.height - (db.y + db.height)) < 1).toBe(true);
+  // 凡例に、完了と失敗の見本（形）
+  await expect(sec.locator(".tb-flow-legend")).toContainText("完了");
+  await expect(sec.locator(".tb-flow-legend")).toContainText("失敗");
+  await expect(sec.locator(".tb-flow-legend svg.tb-flow-key")).toHaveCount(2);
+  // 失敗率は % と件数の併記
+  await expect(sec.locator("[data-flow-rate] dd")).toHaveText(/^\d+% \(\d+ \/ \d+\)$/);
+  await expect(sec.locator("[data-flow-median]")).toBeVisible();
+  await expect(sec.locator("[data-flow-merged]")).toBeVisible();
+  await expect(sec.locator("[data-flow-note]")).toHaveText(
+    "rovo でマージした分だけ。GitHub で直接マージした分は入らない",
+  );
+  await expectAxisInside(page);
+});
+
+test("(TB12b) 過去の日に送っても、成果の推移は直近 14 日のまま", async ({ page }) => {
+  await page.clock.setFixedTime(Date.now() + DAY_MS);
+  await loginAs(page, s.users.alice);
+  await page.getByRole("button", { name: "チーム" }).click();
+  await page.getByRole("button", { name: "前の日" }).click();
+  await expect(page.locator("#tb-people-h")).toHaveText("この日");
+  await waitForFlowToday(page);
+  const sec = flowSection(page);
+  await expect(sec.locator("h2")).toContainText("成果の推移");
+  await expect(sec.locator("[data-day]")).toHaveCount(14);
+  await expect(sec.locator("[data-axis-label]")).toHaveCount(3);
+  await expect(sec.locator("[data-day]").last()).toHaveAttribute(
+    "data-day",
+    new Date().toISOString().slice(0, 10),
+  );
+});
+
+test("(TB12c) 権限の無いタスクの持ち主の login は、成果の推移にも画面にも応答にも出ない", async ({
+  page,
+}) => {
+  const bodies: string[] = [];
+  page.on("response", async (res) => {
+    if (/\/dashboard\/api\//.test(res.url())) bodies.push(await res.text().catch(() => ""));
+  });
+  await loginAs(page, s.users.bob);
+  await openTeam(page);
+  await expect(flowSection(page)).toBeVisible();
+  await expect.poll(() => bodies.some((b) => b.includes('"flow"'))).toBe(true);
+  await expect(page.locator("body")).not.toContainText(s.users.carol.login);
+  await expect(page.locator("body")).not.toContainText(s.marks.secretTitle);
+  expect(bodies.some((b) => b.includes(s.users.carol.login))).toBe(false);
+  expect(bodies.some((b) => b.includes(s.marks.secretTitle))).toBe(false);
+});
+
 for (const scheme of ["light", "dark"] as const) {
   test(`(TB6) 幅 360px で横スクロールが出ない（${scheme}）。数字は記号の列に畳む`, async ({
     page,
@@ -361,6 +496,18 @@ for (const scheme of ["light", "dark"] as const) {
     }));
     expect(monthOver.sec, "今月の費用の区画").toBe(false);
     expect(monthOver.rows, "今月の費用の行").toBe(0);
+    // 成果の推移の区画も幅の中。横軸のラベルは重ならずはみ出さない
+    await expect(flowSection(page).locator("[data-day]")).toHaveCount(14);
+    await expect(flowSection(page).locator("[data-axis-label]").first()).toBeVisible();
+    const flowOver = await flowSection(page).evaluate((el) => ({
+      sec: el.scrollWidth > el.clientWidth + 1,
+      inner: [...el.querySelectorAll(".tb-flow-plot, .tb-flow-stats, .tb-flow-legend")].filter(
+        (r) => r.scrollWidth > r.clientWidth + 1,
+      ).length,
+    }));
+    expect(flowOver.sec, "成果の推移の区画").toBe(false);
+    expect(flowOver.inner, "成果の推移の中").toBe(0);
+    await expectAxisInside(page);
     // 狭い幅では文字を畳む（読み上げと title には残す）。記号（形）と数字は見える
     const stat = person(page, s.users.alice.login).locator('[data-stat="running"]');
     await expect(stat.locator("svg.mark-sym")).toBeVisible();
@@ -398,6 +545,8 @@ for (const scheme of ["light", "dark"] as const) {
       await openTeam(page);
       await expect(person(page, s.users.bob.login)).toBeVisible();
       await expect(monthSection(page)).toBeVisible();
+      await waitForFlowToday(page);
+      await flowSection(page).scrollIntoViewIfNeeded();
       await page.evaluate(() => document.fonts.ready);
       await page.screenshot({
         path: join(dir, `team-board-${scheme}-${width}.png`),

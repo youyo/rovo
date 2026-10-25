@@ -316,3 +316,86 @@ describe("DirectoryDO.summarizeByOwner（人ごとの月の集計）", () => {
     });
   });
 });
+
+describe("DirectoryDO.summarizeFlow（日ごとの成果の推移）", () => {
+  const D = (day: number, h = 0) => Date.UTC(2026, 9, day, h);
+  const q = { from: D(1), to: D(15) };
+  const ended = (id: string, status: string, end: number, over: Partial<TaskIndexSnapshot> = {}) =>
+    snap(id, {
+      status: status as TaskIndexSnapshot["status"],
+      started_at: end - 10 * 60_000,
+      ended_at: end,
+      ...over,
+    });
+
+  it("UTC の日付ごとに完了・失敗を数える。境界・範囲外・BUDGET_EXCEEDED・CANCELLED・review を正しく扱う", async () => {
+    const d = dir();
+    await d.upsertTask(ended("A", "COMPLETED", D(1, 0)), 1);
+    await d.upsertTask(ended("B", "COMPLETED", D(1, 23) + 59 * 60_000), 1);
+    await d.upsertTask(ended("C", "COMPLETED", D(2, 0)), 1);
+    await d.upsertTask(ended("D", "FAILED", D(2, 5)), 1);
+    await d.upsertTask(ended("E", "BUDGET_EXCEEDED", D(2, 6)), 1);
+    await d.upsertTask(ended("F", "CANCELLED", D(2, 7)), 1);
+    await d.upsertTask(ended("G", "COMPLETED", D(2, 8), { kind: "review" }), 1);
+    await d.upsertTask(ended("H", "FAILED", D(2, 9), { kind: "review" }), 1);
+    await d.upsertTask(ended("I", "COMPLETED", D(15, 0)), 1); // to は含まない
+    await d.upsertTask(ended("J", "COMPLETED", D(1, 0) - 1), 1); // from の前
+    await d.upsertTask(snap("K", { status: "RUNNING" }), 1);
+    const r = await d.summarizeFlow({ repoIds: [100], ...q });
+    expect(r).toMatchObject({
+      ok: true,
+      days: [
+        { day: "2026-10-01", completed: 2, failed: 0, budget_exceeded: 0, cancelled: 0 },
+        { day: "2026-10-02", completed: 1, failed: 1, budget_exceeded: 1, cancelled: 1 },
+      ],
+      hidden: { count: 0, failed: 0 },
+    });
+  });
+
+  it("所要の中央値（完了のみ）と、rovo でマージした数", async () => {
+    const d = dir();
+    const m = (n: number) => n * 60_000;
+    await d.upsertTask(ended("A", "COMPLETED", D(3), { started_at: D(3) - m(10) }), 1);
+    await d.upsertTask(ended("B", "COMPLETED", D(3), { started_at: D(3) - m(20) }), 1);
+    await d.upsertTask(
+      ended("C", "COMPLETED", D(3), { started_at: D(3) - m(90), pr_merged: true }),
+      1,
+    );
+    await d.upsertTask(ended("D", "FAILED", D(3), { started_at: D(3) - m(500) }), 1);
+    await d.upsertTask(ended("E", "COMPLETED", D(3), { started_at: null }), 1);
+    await d.upsertTask(ended("F", "COMPLETED", D(3), { pr_merged: true, kind: "review" }), 1);
+    const r = await d.summarizeFlow({ repoIds: [100], ...q });
+    expect(r).toMatchObject({ ok: true, median_duration_ms: m(20), pr_merged: 1 });
+    const none = await dir().summarizeFlow({ repoIds: [100], ...q });
+    expect(none).toMatchObject({ ok: true, days: [], median_duration_ms: null, pr_merged: 0 });
+  });
+
+  it("repoIds で絞り、見えない分（NULL を含む）は件数と失敗だけ hidden。持ち主は出ない", async () => {
+    const d = dir();
+    await d.upsertTask(ended("A", "COMPLETED", D(4)), 1);
+    await d.upsertTask(
+      ended("B", "FAILED", D(4), { owner_login: "ghost", repository_id: 200, pr_merged: true }),
+      1,
+    );
+    await d.upsertTask(
+      ended("C", "COMPLETED", D(4), { owner_login: "ghost", repository_id: null }),
+      1,
+    );
+    await d.upsertTask(ended("D", "COMPLETED", D(4), { repository_id: 200, kind: "review" }), 1);
+    const r = await d.summarizeFlow({ repoIds: [100], ...q });
+    expect(r).toMatchObject({
+      ok: true,
+      days: [{ day: "2026-10-04", completed: 1, failed: 0 }],
+      pr_merged: 0,
+      hidden: { count: 2, failed: 1 },
+    });
+    expect(JSON.stringify(r)).not.toContain("ghost");
+  });
+
+  it("不正な入力は invalid_input", async () => {
+    expect(await dir().summarizeFlow({ repoIds: ["x"] as never, ...q })).toEqual({
+      ok: false,
+      code: "invalid_input",
+    });
+  });
+});

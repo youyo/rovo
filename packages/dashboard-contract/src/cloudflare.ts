@@ -41,8 +41,8 @@ export const WorkersAiValueSchema = z.strictObject({
   neurons: z.number().min(0).max(1e15),
 });
 
-/** 集計の期間（クライアントが選べるのはこの 3 つだけ） */
-export const CLOUDFLARE_RANGES = ["1h", "24h", "7d"] as const;
+/** 集計の期間（クライアントが選べるのはこの 4 つだけ）。month は UTC の月初から今まで（予算の欄の月と同じ） */
+export const CLOUDFLARE_RANGES = ["1h", "24h", "7d", "month"] as const;
 export const cloudflareRangeSchema = z.enum(CLOUDFLARE_RANGES);
 
 /** クレジット残高は残高だけ */

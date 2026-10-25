@@ -5,7 +5,7 @@ import { buildCostEstimate } from "./cloudflare-pricing";
  * ダッシュボードの Cloudflare の概要（docs/specs/dashboard.md M9 / D13）。
  *
  * - GraphQL Analytics API（POST /client/v4/graphql）に、**このファイルの定数のクエリ**だけを送る。アカウント ID・Worker 名・
- *   gateway id・期間は variables で渡し、クエリの文字列には入れない。クライアントは range（1h / 24h / 7d）しか選べない
+ *   gateway id・期間は variables で渡し、クエリの文字列には入れない。クライアントは range（1h / 24h / 7d / month）しか選べない
  * - データセット（Cloudflare の GraphQL スキーマで確認）:
  *   containersMetricsAdaptiveGroups（sum.allocatedCpu = vCPU 秒 / sum.allocatedMemory = バイト秒 / dimensions.instanceId）、
  *   workersInvocationsAdaptive（sum.requests / sum.errors。filter.scriptName_in）、
@@ -51,15 +51,27 @@ const WORKER_NAME_RE = /^[A-Za-z0-9_-]{1,63}$/;
 const MAX_WORKERS = 10;
 const GIB = 2 ** 30;
 
-const SPAN_MS: Record<CloudflareRange, number> = {
+const SPAN_MS = {
   "1h": 3_600_000,
   "24h": 86_400_000,
   "7d": 604_800_000,
-};
+} as const;
 
-/** range の検査。省略は 24h、列挙以外は null（400）。 */
+/**
+ * 期間の始まり。month は UTC の月初（予算の欄の月と同じ）。最長でも 31 日で、GraphQL の各データセットの
+ * 最大の範囲（maxDuration。4 つとも 32 日）に収まる。
+ */
+function periodStart(range: CloudflareRange, now: number): number {
+  if (range === "month") {
+    const d = new Date(now);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+  }
+  return now - SPAN_MS[range];
+}
+
+/** range の検査。省略は month（今月・UTC）、列挙以外は null（400）。 */
 export function parseCloudflareRange(raw: string | null): CloudflareRange | null {
-  if (raw === null) return "24h";
+  if (raw === null) return "month";
   return (CLOUDFLARE_RANGES as readonly string[]).includes(raw) ? (raw as CloudflareRange) : null;
 }
 
@@ -68,7 +80,7 @@ export const CLOUDFLARE_QUERIES = {
   containers: `query ContainersSummary($accountTag: string!, $start: Time!, $end: Time!) {
   viewer {
     accounts(filter: { accountTag: $accountTag }) {
-      containers: containersMetricsAdaptiveGroups(limit: 1000, filter: { datetime_geq: $start, datetime_leq: $end }) {
+      containers: containersMetricsAdaptiveGroups(limit: 10000, filter: { datetime_geq: $start, datetime_leq: $end }) {
         dimensions { instanceId }
         sum { allocatedCpu allocatedMemory }
       }
@@ -343,7 +355,7 @@ export async function loadCloudflareSummary(
   if (hit && hit.expires > now) return hit.dto;
 
   const period: Period = {
-    start: new Date(now - SPAN_MS[range]).toISOString(),
+    start: new Date(periodStart(range, now)).toISOString(),
     end: new Date(now).toISOString(),
   };
   const ctx: Ctx | null = accountOk

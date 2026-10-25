@@ -542,7 +542,7 @@ describe("実行中のコマンド（流れるコンソール）", () => {
     expect(mark.textContent).toContain("1 分 5 秒");
     const cursor = mark.querySelector(".cursor") as HTMLElement;
     expect(cursor.getAttribute("aria-hidden")).toBe("true");
-    expect(c.querySelector("pre.output")?.textContent).toBe("step 1\nstep 2\n");
+    expect(c.querySelector(".output-box pre.output")?.textContent).toBe("step 1\nstep 2\n");
     // 実行中のコマンドがある間は、末尾のプロンプトのカーソルは出さない（カーソルは 1 つ）
     expect(c.querySelectorAll(".cursor")).toHaveLength(1);
   });
@@ -569,12 +569,12 @@ describe("実行中のコマンド（流れるコンソール）", () => {
       expect(details.querySelector(".output-running")?.textContent).toContain("1 分 5 秒");
       // 出力の枠は 1 つだけ（行の外に重ねて出さない）
       expect(c.querySelectorAll(".output-box")).toHaveLength(1);
-      expect(c.querySelectorAll("pre.output")).toHaveLength(1);
+      expect(c.querySelectorAll(".output-box pre.output")).toHaveLength(1);
     });
 
     it("出力は 1 行 1 要素（.out-line）。行番号は CSS の counter で付け、文字列にしない。元の文字列はそのまま", () => {
       const c = mount(running, commandRunning);
-      const pre = c.querySelector("pre.output") as HTMLElement;
+      const pre = c.querySelector(".output-box pre.output") as HTMLElement;
       const lines = [...pre.querySelectorAll(".out-line")];
       expect(lines.map((l) => l.textContent)).toEqual(["step 1\n", "step 2\n"]);
       expect(pre.textContent).toBe("step 1\nstep 2\n");
@@ -583,28 +583,61 @@ describe("実行中のコマンド（流れるコンソール）", () => {
         { ...running, output: { ...running.output, tail: "a\nb" } },
         commandRunning,
       );
-      expect([...noNl.querySelectorAll("pre.output .out-line")].map((l) => l.textContent)).toEqual([
-        "a\n",
-        "b",
-      ]);
+      expect(
+        [...noNl.querySelectorAll(".output-box pre.output .out-line")].map((l) => l.textContent),
+      ).toEqual(["a\n", "b"]);
     });
 
     it("出力は sanitize を通す（制御文字・双方向の制御文字を除き、HTML は文字として出る）", () => {
       const evil = "\u0007‮gpj<img src=x onerror=alert(1)>\nok\n";
       const c = mount({ ...running, output: { ...running.output, tail: evil } }, commandRunning);
       expect(c.querySelector("img")).toBeNull();
-      const t = c.querySelector("pre.output")?.textContent ?? "";
+      const t = c.querySelector(".output-box pre.output")?.textContent ?? "";
       expect(t.includes("\u0007")).toBe(false);
       expect(/[‪-‮⁦-⁩]/.test(t)).toBe(false);
       expect(t).toContain("<img src=x onerror=alert(1)>");
     });
 
-    it("出力が終わったコマンドの末尾（running でない）は、手順の外の出力の枠に出す（どの行のものか決めつけない）", () => {
-      const finished: TaskDetailDto = {
-        ...taskDetailRunningFixture,
-        output: { tail: "ok\n", command: "pnpm test", redacted: true },
-      };
+    const finished: TaskDetailDto = {
+      ...taskDetailRunningFixture,
+      output: { tail: "ok\n", command: "pnpm test", redacted: true },
+    };
+
+    it("終わったコマンドの末尾（running でない）は、手順の外に枠を出さず、各コマンドの行の中に出す", () => {
       const c = mount(finished);
+      expect(c.querySelector(".output-box")).toBeNull();
+      const row = c.querySelector("li.step[data-seq='6']") as HTMLElement;
+      expect(row.querySelector("details pre.output")?.textContent).toBe(
+        "Test Files  3 passed (3)\n",
+      );
+    });
+
+    it("失敗したコマンドの行は自動で開き、出力がその行の下に見える", () => {
+      const failed: TaskEventDto[] = [
+        ...taskEventsFixture.events,
+        {
+          seq: 20,
+          at: "2026-10-22T01:00:00Z",
+          type: "command",
+          command: "tsc",
+          exit_code: 1,
+          output_tail: 'Command "tsc" not found\n',
+        },
+      ];
+      const c = mount(finished, failed);
+      const d = c.querySelector("li.step[data-seq='20'] details") as HTMLDetailsElement;
+      expect(d.open).toBe(true);
+      expect(d.querySelector("pre.output")?.textContent).toBe('Command "tsc" not found\n');
+      expect(c.querySelector(".output-box")).toBeNull();
+    });
+
+    it("output_tail を持つコマンドが無い古いタスクは、従来どおり手順の外の枠に出す", () => {
+      const legacy = taskEventsFixture.events.map((e) => {
+        if (e.type !== "command") return e;
+        const { output_tail: _omit, ...rest } = e;
+        return rest;
+      });
+      const c = mount(finished, legacy);
       expect(c.querySelector("ol.steps .output-box")).toBeNull();
       expect(c.querySelector(".screen > .output-box pre.output")?.textContent).toBe("ok\n");
     });

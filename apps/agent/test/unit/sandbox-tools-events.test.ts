@@ -27,6 +27,16 @@ function setup(handler?: ExecHandler, over: Partial<ToolContext> = {}) {
   return { sandbox, events, run };
 }
 
+describe("bash の先頭 cd の変換", () => {
+  it("変換後の cwd と command で exec し、command イベントと進み具合にも載る", async () => {
+    const { sandbox, events, run } = setup();
+    await run("bash", { command: "cd apps/agent && grep x", cwd: "." });
+    expect(sandbox.calls[0]?.argv).toEqual(["bash", "-lc", "grep x"]);
+    expect(sandbox.calls[0]?.options.cwd).toBe("/workspace/apps/agent");
+    expect(events[0]?.data).toMatchObject({ command: "grep x", cwd: "apps/agent" });
+  });
+});
+
 describe("bash の command イベント", () => {
   it("command・cwd（相対）・exit_code・所要時間・出力の末尾が出る。秘密は伏せ、ANSI は除く", async () => {
     const { events, run } = setup(() => ({

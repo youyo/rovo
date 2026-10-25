@@ -57,7 +57,11 @@ test("(11) 書体は同梱のものが同一オリジンから読まれ、外部
   const firstPaintFonts = fonts.map((f) => ({ ...f }));
   // 詳細（画面の出力）
   await page.goto(taskPath(s.tasks.done as string));
-  await expect(page.locator("pre.output")).toBeVisible();
+  // 出力は行の中（▸ を開くと出る）
+  const stepOut = page.locator("ol.steps li.step").filter({ hasText: "pnpm test" });
+  await expect(stepOut.locator("summary")).toBeVisible();
+  await stepOut.locator("summary").click();
+  await expect(stepOut.locator("pre.output")).toBeVisible();
   await waitFontsLoaded(page);
 
   const loaded = await page.evaluate(() =>

@@ -32,7 +32,7 @@ describe("GET /dashboard/api/cloudflare", () => {
     const cookie = await viewer();
     const { r, dto } = await summary(cookie);
     expect(r.status).toBe(200);
-    expect(dto?.range).toBe("24h");
+    expect(dto?.range).toBe("month");
     expect(dto?.open_url).toBeNull();
     expect(dto?.containers).toMatchObject({
       ok: true,

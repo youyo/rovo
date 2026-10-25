@@ -32,6 +32,8 @@ export type Step = StepText & {
   current: boolean;
   /** コマンドの手順か（画面では `$ コマンド` の行にする。古い履歴の bash の tool_start も含む） */
   command: boolean;
+  /** コマンドごとの出力の末尾（command イベントの output_tail） */
+  outputTail?: string;
 };
 
 /** 状態の変化の手順の色（文言は辞書の status.<状態>） */
@@ -389,7 +391,17 @@ export function buildSteps(events: readonly TaskEventDto[], active: boolean, t: 
     const current = active && e.seq === lastSeq;
     const d = describeEvent(e, { current }, t);
     const command = e.type === "command" || (e.type === "tool_start" && e.name === "bash");
-    if (d) steps.push({ ...d, seq: e.seq, at: Date.parse(e.at), current, command });
+    const outputTail = e.type === "command" ? e.output_tail : undefined;
+    if (d) {
+      steps.push({
+        ...d,
+        seq: e.seq,
+        at: Date.parse(e.at),
+        current,
+        command,
+        ...(outputTail === undefined || outputTail === "" ? {} : { outputTail }),
+      });
+    }
   }
   return steps;
 }

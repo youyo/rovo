@@ -146,7 +146,7 @@ test("(14) レールの選択: 選んだ行の左に青い線。行を押すと�
   // 行にはツールチップ（title）を付けない。印の <title> と、モデル名の title だけが持つ
   await expect(selected).not.toHaveAttribute("title", /.+/);
   const head = page.locator(".con-head");
-  await expect(head).toContainText("acme/widgets");
+  await expect(head).toContainText("example-org/widgets");
   await expect(head).toContainText("$");
   await expect(head.locator("[data-model]")).toBeVisible();
   await expect(head.locator("[data-pr]")).toBeVisible();

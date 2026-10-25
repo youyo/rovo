@@ -304,7 +304,7 @@ describe("チームボード: 成果の推移（直近 14 日）", () => {
 
   it("失敗の棒も件数に比例した高さ（完了の棒と同じ縦軸・同じ基線）", () => {
     const c = mount({ data: withFlow() });
-    const num = (el: Element | null, a: string) => Number(el?.getAttribute(a));
+    const num = (el: Element | null, a: string) => Number.parseFloat(el?.getAttribute(a) ?? "NaN");
     const done = c.querySelector("[data-day='2026-10-21'] .tb-flow-bar");
     const fail = c.querySelector("[data-day='2026-10-21'] [data-fail-mark]");
     const peak = c.querySelector("[data-day='2026-10-20'] .tb-flow-bar");
@@ -315,6 +315,30 @@ describe("チームボード: 成果の推移（直近 14 日）", () => {
     expect(num(fail, "y") + num(fail, "height")).toBe(num(done, "y") + num(done, "height"));
     // 同じ日の 2 本は重ならず隣り合う（積み上げない）
     expect(num(fail, "x")).toBeGreaterThanOrEqual(num(done, "x") + num(done, "width"));
+  });
+
+  it("グラフは区画の幅いっぱい: 幅は 100%・高さは固定、棒の位置と幅は割合（% ）で、14 日が幅の中に並ぶ", () => {
+    const c = mount({ data: withFlow() });
+    const svg = c.querySelector("svg.tb-flow-chart");
+    expect(svg?.getAttribute("width")).toBe("100%");
+    expect(svg?.getAttribute("height")).toBe("61");
+    expect(svg?.getAttribute("viewBox")).toBeNull();
+    const rects = [...c.querySelectorAll("[data-flow] [data-day] rect")];
+    for (const r of rects) {
+      expect(r.getAttribute("x")).toMatch(/^\d+(\.\d+)?%$/);
+      expect(r.getAttribute("width")).toMatch(/^\d+(\.\d+)?%$/);
+      const right =
+        Number.parseFloat(r.getAttribute("x") ?? "") +
+        Number.parseFloat(r.getAttribute("width") ?? "");
+      expect(right).toBeLessThanOrEqual(100);
+    }
+    // 日は左から右へ、幅を等分して並ぶ（最初の日は左端の近く、最後の日は右端の近く）
+    const xs = [...c.querySelectorAll("[data-flow] [data-day] .tb-flow-bar")].map((r) =>
+      Number.parseFloat(r.getAttribute("x") ?? ""),
+    );
+    expect(xs).toHaveLength(14);
+    expect(xs[0]).toBeLessThan(5);
+    expect(xs[13]).toBeGreaterThan(90);
   });
 
   it("失敗が完了より多い日は、縦軸の最大が失敗の件数になる", () => {

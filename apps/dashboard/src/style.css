@@ -1803,7 +1803,7 @@ summary.step-row:hover {
 .tb-flow-chart {
   display: block;
   width: 100%;
-  height: auto;
+  height: 61px;
 }
 .tb-flow-bar {
   fill: var(--ok, currentColor);
@@ -1819,7 +1819,6 @@ summary.step-row:hover {
 }
 .tb-flow-plot {
   position: relative;
-  max-width: 480px;
 }
 .tb-flow-axis {
   position: relative;

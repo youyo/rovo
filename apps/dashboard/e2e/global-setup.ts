@@ -26,7 +26,7 @@ export default async function globalSetup() {
   const server = await startGatewayServer({
     logs: true,
     // 一覧に複数のタスクを同時に走らせる（gateway の E2E の既定は 1）
-    vars: { MAX_CONCURRENT_TASKS: "50" },
+    vars: { MAX_CONCURRENT_TASKS: "50", ALLOWED_ORG: "example-org" },
   });
   try {
     const { baseUrl, githubUrl } = server;
@@ -39,7 +39,7 @@ export default async function globalSetup() {
     const carol = { id: 9_000_000 + stamp, login: `dash-carol-${stamp}` };
     for (const u of [alice, bob, carol]) {
       await github.addUser(u);
-      await github.setTeam("acme", "core", u.login, "active");
+      await github.setTeam("example-org", "core", u.login, "active");
     }
     // widgets は 2 人に見える。secret は alice にだけ見える
     await github.setInstallation(INSTALLATION_ID, [

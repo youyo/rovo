@@ -6,8 +6,8 @@ import { readState } from "./state";
 // vitest の helpers.ts は inject() に依存してブラウザ側から使えないので、同じことをここに持つ。
 // タスクは実際の MCP 経路（task_start）で作り、偽の agent に台本（構造化イベント・終端）を流す。
 
-export const WIDGETS = { id: 4242, fullName: "acme/widgets", push: true };
-export const SECRET = { id: 4343, fullName: "acme/secret", push: true };
+export const WIDGETS = { id: 4242, fullName: "example-org/widgets", push: true };
+export const SECRET = { id: 4343, fullName: "example-org/secret", push: true };
 export const INSTALLATION_ID = 77;
 export const SHA = "0123456789abcdef0123456789abcdef01234567";
 

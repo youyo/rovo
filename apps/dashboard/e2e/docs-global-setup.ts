@@ -13,14 +13,14 @@ import {
 import { type E2eState, STATE_ENV } from "./state";
 
 /**
- * README 用のスクリーンショットのための、撮影専用の架空のデータ（acme/widgets）。
+ * README 用のスクリーンショットのための、撮影専用の架空のデータ（example-org/widgets）。
  * 通常の E2E の globalSetup（global-setup.ts）と同じ仕組みで立てるが、題名・コマンドは英語の自然な内容にする。
  * 安全性のテスト用のデータ（<script> など）は入れない。
  */
 export default async function docsGlobalSetup() {
   const server = await startGatewayServer({
     logs: true,
-    vars: { MAX_CONCURRENT_TASKS: "50" },
+    vars: { MAX_CONCURRENT_TASKS: "50", ALLOWED_ORG: "example-org" },
   });
   try {
     const { baseUrl, githubUrl } = server;
@@ -30,7 +30,7 @@ export default async function docsGlobalSetup() {
     await github.reset();
     for (const u of [alice, bob]) {
       await github.addUser(u);
-      await github.setTeam("acme", "core", u.login, "active");
+      await github.setTeam("example-org", "core", u.login, "active");
     }
     await github.setInstallation(INSTALLATION_ID, [WIDGETS]);
 

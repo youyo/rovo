@@ -251,6 +251,13 @@ describe("チームボード: 今月の費用（UTC・人ごと）", () => {
     expect(c.querySelector("[data-month-hidden]")).toBeNull();
   });
 
+  it("額の定義の注記を出す（予算の欄の額と一致しないことがある）", () => {
+    const ja = mount({ data }, inJa);
+    expect(text(ja.querySelector("[data-month-note]"))).toContain("予算の欄");
+    const en = mount({ data }, inEn);
+    expect(text(en.querySelector("[data-month-note]"))).toContain("budget panel");
+  });
+
   it("残り・予約・あと何件は出さない", () => {
     const c = mount({ data }, inEn);
     expect(text(c.querySelector("#tb-month-h")?.parentElement)).not.toMatch(/remaining|reserved/i);

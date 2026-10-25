@@ -1,3 +1,4 @@
+import { abortAllDurableObjects, env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAgentTestOverrides } from "../../src/agent/deps";
 import type { TaskSpec } from "../../src/agent/types";
@@ -17,6 +18,31 @@ import {
 } from "./support/agent-fixture";
 
 afterEach(() => clearAgentTestOverrides());
+
+// biome-ignore lint/suspicious/noExplicitAny: private メンバーの観測
+type Inst = any;
+const runInDO = runInDurableObject as unknown as <T>(
+  stub: unknown,
+  fn: (inst: Inst) => Promise<T> | T,
+) => Promise<T>;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** argv[0] が name のコマンドの exec を止める（n 回目から。既定は最初から） */
+function holdCommand(fx: Fixture, name: string, from = 1) {
+  const gate = { held: true, entered: false, seen: 0 };
+  const exec = fx.sandbox.exec.bind(fx.sandbox);
+  fx.sandbox.exec = async (argv, options) => {
+    if (argv[0] === name) {
+      gate.seen += 1;
+      if (gate.seen >= from) {
+        gate.entered = true;
+        while (gate.held) await new Promise((r) => setTimeout(r, 10));
+      }
+    }
+    return exec(argv, options);
+  };
+  return gate;
+}
 
 // worker_review（review_fix_rounds: 0）: ワーカーの report_completion で verification_commands が通ったあと、完了にする前に、
 // 同じ固定 SHA で review_commands を流し、レビューのモデルを（読み取りの道具つきで）呼び、結果に本文を残して COMPLETED にする。
@@ -425,7 +451,7 @@ describe("worker_review: 取消し・spec の検査・client_review との違い
     expect(fx.modelCalls.count).toBe(1);
   });
 
-  it("workerReview の形が違えば受け付けない（未知のモデル・修正の回 1・コマンドの形・task_review の spec との併用）", async () => {
+  it("workerReview の形が違えば受け付けない（未知のモデル・修正の回 2 以上・コマンドの形・task_review の spec との併用）", async () => {
     const fx = newFixture("wr-badspec", []);
     const bad = (workerReview: unknown, over: Partial<TaskSpec> = {}) =>
       fx.stub.start(
@@ -717,6 +743,155 @@ describe("worker_review: 修正の回（review_fix_rounds: 1）", () => {
     const { result, review } = await resultOf(fx);
     expect(review?.fixApplied).toBe(D);
     expect(result.warnings.filter((w) => w.startsWith("review_"))).toEqual([]);
+  });
+
+  it("再実行（rechecking）の最中に DO が作り直されても、続きから再実行をやり直して完了にする（2 回目のレビューはしない・warnings は二重にならない）", async () => {
+    const fx = await fixFixture(
+      "wrf-restart",
+      [{ text: fixVerdict() }],
+      [report(), report(), report(), report()],
+    );
+    // 2 本目の pnpm（修正のあとの再実行）で止める
+    const gate = holdCommand(fx, "pnpm", 2);
+    await fx.stub.start(fixSpec("wrf-restart"));
+    await waitUntil(() => gate.entered);
+    await abortAllDurableObjects();
+    fx.stub = env.AGENT_DO.getByName(fx.name);
+    gate.held = false;
+    // 再起動のあとの tick で続きを拾う
+    await runInDO(fx.stub, async (inst) => {
+      await inst.onStart();
+      await inst.onJob({ job: { fn: "tick" }, attempt: 1 });
+    });
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(reviewCalls(fx)).toBe(1);
+    const { result, review } = await resultOf(fx);
+    expect(review?.fixApplied).toBe(D);
+    expect(review?.final).toMatchObject({ reviewCommandsPassed: true });
+    expect(result.verification).toMatchObject({ verified: true, commitSha: D });
+    expect(result.warnings.filter((w) => w.startsWith("review_"))).toEqual([]);
+  });
+
+  it("再実行が終わって確定（finalize）の途中で DO が作り直されても、2 回目のレビューをせずに完了にする", async () => {
+    const fx = await fixFixture(
+      "wrf-restart-finalize",
+      [{ text: fixVerdict() }, { text: fixVerdict() }],
+      [report(), report(), report(), report()],
+    );
+    // 確定の patch の取得（git format-patch）で止める。最初の確定は修正の回のあと（レビューの段は確定しない）
+    fx.patchGate.hold();
+    await fx.stub.start(fixSpec("wrf-restart-finalize"));
+    await fx.patchGate.waitEntered();
+    expect(fx.verifyCalls).toHaveLength(4);
+    await abortAllDurableObjects();
+    fx.stub = env.AGENT_DO.getByName(fx.name);
+    fx.patchGate.release();
+    await runInDO(fx.stub, async (inst) => {
+      await inst.onStart();
+      await inst.onJob({ job: { fn: "tick" }, attempt: 1 });
+    });
+    expect(await waitForTerminal(fx)).toBe("completed");
+    expect(reviewCalls(fx)).toBe(1);
+    const { result, review } = await resultOf(fx);
+    expect(review?.fixApplied).toBe(D);
+    expect(result.verification.commitSha).toBe(D);
+    expect(result.warnings.filter((w) => w.startsWith("review_"))).toEqual([]);
+  });
+
+  it("修正の指示の submit が失敗したら delivered のまま残さず、tick で再送して修正を続ける", async () => {
+    const fx = await fixFixture("wrf-resend", [{ text: fixVerdict() }], [piSpend(), report()]);
+    await fx.stub.start(fixSpec("wrf-resend", { budgetUsd: 0.03, budgetPolicy: "ask" }, []));
+    await waitForPhase(fx, "input_required");
+    // 修正の指示の submit（ツールの外から渡す経路）を 1 回だけ失敗させる
+    await runInDO(fx.stub, (inst) => {
+      const submit = inst.harness.submit.bind(inst.harness);
+      let failed = false;
+      inst.harness.submit = async (input: unknown, opts: { operationId?: string }) => {
+        if (opts?.operationId === "review_fix" && !failed) {
+          failed = true;
+          throw new Error("submit failed once");
+        }
+        return submit(input, opts);
+      };
+    });
+    expect(await fx.stub.answer("q-1", "extend")).toEqual({ ok: true });
+    await waitUntil(() => reviewCalls(fx) === 1);
+    await sleep(200);
+    const pending = await runInDO(fx.stub, (inst) => inst.store.meta("review_fix"));
+    expect(pending).toMatchObject({ stage: "fixing", delivered: false });
+    await runInDO(fx.stub, async (inst) => {
+      await inst.onJob({ job: { fn: "tick" }, attempt: 1 });
+    });
+    // 再送した run は、修正の回のワーカーの費用で予算の延長の質問になる（wrf-budget と同じ）。答えると修正が進む
+    await waitForPhase(fx, "input_required");
+    const types = (await allEvents(fx)).map((e) => e.type);
+    expect(types.lastIndexOf("question")).toBeGreaterThan(types.indexOf("review_fix_started"));
+    expect(await fx.stub.answer("q-2", "extend")).toEqual({ ok: true });
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const { review } = await resultOf(fx);
+    expect(review?.fixApplied).toBe(D);
+    // 再送した指示がワーカーに届いている
+    expect(fx.modelCalls.userTexts.at(-1)?.join("\n")).toContain("sum must add, not subtract");
+  });
+
+  it("修正中に取り消されたら CANCELLED。再実行もしない", async () => {
+    const fx = await fixFixture(
+      "wrf-cancel-fixing",
+      [{ text: fixVerdict() }],
+      [report(), ask("wait"), report()],
+    );
+    await fx.stub.start(fixSpec("wrf-cancel-fixing"));
+    await waitForPhase(fx, "input_required");
+    await fx.stub.cancel();
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+    expect(fx.verifyCalls).toEqual([
+      ["npm", "test"],
+      ["pnpm", "test"],
+    ]);
+    const { review } = await resultOf(fx);
+    expect(review?.fixRequested).toBe(true);
+    expect(review?.fixApplied).toBeUndefined();
+  });
+
+  it("修正中に期限が切れたら従来どおり FAILED（reason: deadline）。2 回目のレビューはしない", async () => {
+    const fx = await fixFixture(
+      "wrf-deadline",
+      [{ text: fixVerdict() }],
+      [report(), ask("wait"), report()],
+    );
+    await fx.stub.start(fixSpec("wrf-deadline"));
+    await waitForPhase(fx, "input_required");
+    await fx.stub.answer("q-1", "go on");
+    // 期限を過ぎた時計で tick を回す
+    fx.clock.now += 3 * 60 * 60 * 1000;
+    await runInDO(fx.stub, async (inst) => {
+      await inst.onJob({ job: { fn: "deadline" }, attempt: 1 });
+    });
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(done(await fx.stub.getResult()).reason).toBe("deadline");
+    expect(reviewCalls(fx)).toBe(1);
+  });
+
+  it("再実行（rechecking）の最中に取り消されたら CANCELLED", async () => {
+    const fx = await fixFixture(
+      "wrf-cancel-recheck",
+      [{ text: fixVerdict() }],
+      [report(), report()],
+    );
+    const gate = holdCommand(fx, "pnpm", 2);
+    const terminate = fx.sandbox.terminate.bind(fx.sandbox);
+    fx.sandbox.terminate = async () => {
+      gate.held = false;
+      return terminate();
+    };
+    await fx.stub.start(fixSpec("wrf-cancel-recheck"));
+    await waitUntil(() => gate.entered);
+    await fx.stub.cancel();
+    gate.held = false;
+    expect(await waitForTerminal(fx)).toBe("cancelled");
+    expect(reviewCalls(fx)).toBe(1);
+    const { review } = await resultOf(fx);
+    expect(review?.final).toBeUndefined();
   });
 
   it("予算の延長の質問のあとにレビューが must_fix を返したときも、修正の指示をワーカーへのメッセージで渡して修正させる", async () => {

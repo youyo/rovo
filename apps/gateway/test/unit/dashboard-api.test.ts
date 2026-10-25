@@ -1578,6 +1578,12 @@ describe("snapshotToVisibleTask（索引・TaskDO の値を契約の形に整え
     );
     expect(snapshotToVisibleTask({ ...base(), title: "あ".repeat(1_000) }).title).toHaveLength(300);
   });
+
+  it("kind（task / review）は索引にあれば付け、無い古い行では付けない", () => {
+    expect(snapshotToVisibleTask(base())).not.toHaveProperty("kind");
+    expect(snapshotToVisibleTask({ ...base(), kind: "review" }).kind).toBe("review");
+    expect(snapshotToVisibleTask({ ...base(), kind: "task" }).kind).toBe("task");
+  });
 });
 
 describe("TaskDO.dashboardDetail", () => {

@@ -233,7 +233,9 @@ describe("レール・タイムラインでの切り替え: ページを読み�
     }
     expect(push).not.toHaveBeenCalled();
     expect(location.pathname).toBe("/dashboard/");
-    expect(consoleTitle(c)).toBe(RUNNING.title);
+    // チームで何も選んでいないので、中央はチームボードのまま（コンソールにならない）
+    expect(c.querySelector("[data-teamboard]")).not.toBeNull();
+    expect(consoleTitle(c)).toBeUndefined();
   });
 
   it("過去の日を見ているときは、日付の前後送りと同じ dayHref の流儀で ?day= を残す（ほかのクエリは引き継がない）。戻ると元の URL・進むと同じ日の表示", async () => {

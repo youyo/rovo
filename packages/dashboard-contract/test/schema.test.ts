@@ -135,6 +135,12 @@ describe("文字列の上限と形式", () => {
       expect(ok(VisibleTaskDtoSchema, { ...row, created_at: bad }), String(bad)).toBe(false);
     }
   });
+  it("kind は task / review だけ。無くてもよい（古い応答）", () => {
+    expect(ok(VisibleTaskDtoSchema, row)).toBe(true);
+    expect(ok(VisibleTaskDtoSchema, { ...row, kind: "task" })).toBe(true);
+    expect(ok(VisibleTaskDtoSchema, { ...row, kind: "review" })).toBe(true);
+    expect(ok(VisibleTaskDtoSchema, { ...row, kind: "other" })).toBe(false);
+  });
   it("title・repository・owner_login・model の上限", () => {
     expect(ok(VisibleTaskDtoSchema, { ...row, title: "あ".repeat(LIMITS.title) })).toBe(true);
     expect(ok(VisibleTaskDtoSchema, { ...row, title: "あ".repeat(LIMITS.title + 1) })).toBe(false);

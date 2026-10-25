@@ -11,6 +11,7 @@ import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
 import { daySummary, pickConsoleTask } from "./rail";
 import type { Route } from "./route";
 import { TaskScreen } from "./task-screen";
+import { TeamBoard } from "./team-board";
 import { useBudget } from "./use-budget";
 import { type CloudflareDeps, useCloudflare } from "./use-cloudflare";
 import { type OverviewDeps, useOverview } from "./use-overview";
@@ -20,6 +21,7 @@ import { useWaiting } from "./use-waiting";
  * ログイン後の画面（個別ページは無い）:
  * ヘッダ → 細いタイムライン帯 → 左のレール + 中央のコンソール → 下のステータスバー。
  * コンソールは、/dashboard/tasks/:id ならその URL のタスク。/dashboard は実行中のタスクがあれば最新の実行中、なければ最新のタスク。
+ * ただしチーム（scope = all）で何も選んでいない（/dashboard）ときは、コンソールの代わりにチームボード（人ごとの「いま」とリポジトリ別）。
  * 自動更新の入切は一覧・Cloudflare・コンソールで共有する（読み取り専用）。
  */
 export function Workspace(props: {
@@ -78,8 +80,14 @@ export function Workspace(props: {
   }, [refresh, refreshWaiting]);
 
   const data = state.phase === "ready" ? state.data : null;
+  // チームで何も選んでいないとき（一覧の URL）は、コンソールではなくチームボードを出す。マイタスクは今までどおり既定のタスク
+  const showBoard = route.kind === "overview" && scope === "all";
   const consoleId =
-    route.kind === "task" ? route.id : data ? (pickConsoleTask(data.tasks)?.task_id ?? null) : null;
+    route.kind === "task"
+      ? route.id
+      : data && !showBoard
+        ? (pickConsoleTask(data.tasks)?.task_id ?? null)
+        : null;
 
   const header = (
     <Header
@@ -117,31 +125,45 @@ export function Workspace(props: {
         }
       : null;
 
-  const consoleNode =
-    consoleId === null ? (
-      <section className="console console--empty" aria-label={t("console.label")}>
-        {data === null ? (
-          <p className="soft" role="status">
-            {t("common.loading")}
-          </p>
-        ) : (
-          <p className="soft">{t("console.selectHint")}</p>
-        )}
+  const consoleNode = showBoard ? (
+    data === null ? (
+      <section className="console console--empty" aria-label={t("board.label")}>
+        <p className="soft" role="status">
+          {t("common.loading")}
+        </p>
       </section>
     ) : (
-      <TaskScreen
-        key={consoleId}
-        id={consoleId}
-        cache={props.detailCache}
-        fresh={props.freshTaskId === undefined ? undefined : consoleId === props.freshTaskId}
-        preview={preview}
-        onUnauthorized={onUnauthorized}
-        autoRefresh={autoRefresh}
-        onAutoRefreshChange={onAutoRefreshChange}
-        onRefreshAlso={refresh}
-        onSettled={props.onTaskSettled}
+      <TeamBoard
+        data={data}
+        waiting={waiting.state.phase === "ready" ? waiting.state.data : null}
+        isToday={day === null}
+        onSelectTask={props.onSelectTask}
       />
-    );
+    )
+  ) : consoleId === null ? (
+    <section className="console console--empty" aria-label={t("console.label")}>
+      {data === null ? (
+        <p className="soft" role="status">
+          {t("common.loading")}
+        </p>
+      ) : (
+        <p className="soft">{t("console.selectHint")}</p>
+      )}
+    </section>
+  ) : (
+    <TaskScreen
+      key={consoleId}
+      id={consoleId}
+      cache={props.detailCache}
+      fresh={props.freshTaskId === undefined ? undefined : consoleId === props.freshTaskId}
+      preview={preview}
+      onUnauthorized={onUnauthorized}
+      autoRefresh={autoRefresh}
+      onAutoRefreshChange={onAutoRefreshChange}
+      onRefreshAlso={refresh}
+      onSettled={props.onTaskSettled}
+    />
+  );
 
   return (
     <>

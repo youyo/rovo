@@ -138,3 +138,25 @@ describe("段階の図・ログの箱", () => {
     expect(css).toMatch(/\n\.screen\s*\{[^}]*font-family:\s*var\(--mono\)/);
   });
 });
+
+describe("チームボード（幅 360px でも横にはみ出さない）", () => {
+  it("人の行は折り返せて、名前は縮めて省略する。数字は桁をそろえる", () => {
+    expect(body(".tb-row")).toMatch(/flex-wrap:\s*wrap/);
+    const login = body(".tb-login-text");
+    expect(login).toMatch(/min-width:\s*0/);
+    expect(login).toMatch(/text-overflow:\s*ellipsis/);
+    expect(body(".tb-task-title")).toMatch(/text-overflow:\s*ellipsis/);
+    expect(css).toMatch(/\.tb-stat-n,[^{]*\{[^}]*font-variant-numeric:\s*tabular-nums/);
+  });
+
+  it("リポジトリの表は幅を固定し、長い名前は折り返す", () => {
+    expect(body(".tb-repos")).toMatch(/table-layout:\s*fixed/);
+    expect(body(".tb-repos")).toMatch(/width:\s*100%/);
+    expect(css).toMatch(/\.tb-repos td\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  });
+
+  it("720px 以下では統計の文字を畳み（読み上げには残す）、記号と数字だけにする", () => {
+    const narrow = css.slice(css.indexOf("@media (max-width: 720px) {\n  .tb-section"));
+    expect(narrow).toMatch(/\.tb-stat-label\s*\{[^}]*clip-path:\s*inset\(50%\)/);
+  });
+});

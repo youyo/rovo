@@ -142,6 +142,8 @@ export function snapshotToVisibleTask(s: TaskIndexSnapshot | TaskIndexRow): Visi
       ? { reason: s.reason }
       : {}),
     ...(s.failure_phase === "setup" ? { failure_phase: "setup" as const } : {}),
+    // 索引に kind が無い古い行では付けない（画面は task として扱う）
+    ...(s.kind === "task" || s.kind === "review" ? { kind: s.kind } : {}),
   };
 }
 

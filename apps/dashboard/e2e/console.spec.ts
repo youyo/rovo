@@ -40,7 +40,7 @@ const metrics = (page: Page) =>
 const atBottom = (m: { top: number; height: number; client: number }) =>
   m.height - m.top - m.client <= 24;
 
-test("(12) 一覧の骨格: ヘッダ → 細いタイムライン帯 → レールとコンソール → ステータスバー。コンソールは最新の走行中", async ({
+test("(12) 一覧の骨格: ヘッダ → 細いタイムライン帯 → レールとコンソール → ステータスバー。マイタスクのコンソールは最新の走行中、チームで何も選ばないときの中央はチームボード", async ({
   page,
 }) => {
   await loginAs(page, s.users.alice);
@@ -49,11 +49,21 @@ test("(12) 一覧の骨格: ヘッダ → 細いタイムライン帯 → レー
   );
   // 時刻の帯はチームのときだけ出る（マイタスクでは出さない）
   await expect(page.locator(".tlband")).toHaveCount(0);
+  // マイタスクは今までどおり: コンソールは最新の走行中。レールで選択中。個別ページへの「詳細を開く」リンクは無い（一覧がそのまま詳細）
+  await expect(page.getByRole("heading", { level: 1, name: "手順が長いタスク" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "詳細を開く" })).toHaveCount(0);
+  await expect(rail(page, id("long"))).toHaveAttribute("aria-current", "true");
+  await expect(page.locator("[data-teamboard]")).toHaveCount(0);
+
+  // チームで何も選んでいないときは、中央がコンソールではなくチームボード（レール・帯・ステータスバーはそのまま）
   await page.getByRole("button", { name: "チーム" }).click();
+  await expect(page.locator("[data-teamboard]")).toBeVisible();
+  await expect(page.locator(".console h1")).toHaveCount(0);
+  await expect(rail(page, id("long"))).not.toHaveAttribute("aria-current", "true");
   const header = await box(page, "header.top");
   const band = await box(page, ".tlband");
   const railBox = await box(page, "nav.rail");
-  // コンソールの領域（.console-col）。中身が高いときはこの領域の中でスクロールする
+  // 中央の領域（.console-col）。中身が高いときはこの領域の中でスクロールする
   const consoleBox = await box(page, ".console-col");
   const bar = await box(page, ".statusbar");
 
@@ -62,22 +72,25 @@ test("(12) 一覧の骨格: ヘッダ → 細いタイムライン帯 → レー
   expect(railBox.y).toBeGreaterThanOrEqual(band.y + band.height - 1);
   expect(consoleBox.y).toBeGreaterThanOrEqual(band.y + band.height - 1);
   expect(bar.y).toBeGreaterThanOrEqual(consoleBox.y + consoleBox.height - 1);
-  // 横の並び: レールが左、コンソールが右
+  // 横の並び: レールが左、中央が右
   expect(railBox.x + railBox.width).toBeLessThanOrEqual(consoleBox.x + 1);
   // タイムラインは細い帯（48px 前後）
   expect(band.height).toBeGreaterThan(30);
   expect(band.height).toBeLessThanOrEqual(64);
 
-  // 一覧のコンソールは最新の走行中。レールで選択中。個別ページへの「詳細を開く」リンクは無い（一覧がそのまま詳細）
-  await expect(page.getByRole("heading", { level: 1, name: "手順が長いタスク" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "詳細を開く" })).toHaveCount(0);
-  await expect(rail(page, id("long"))).toHaveAttribute("aria-current", "true");
+  // レールの行を選べば、今までどおりコンソール（最新の走行中が既定ではなく、選んだタスク）
+  await rail(page, id("done")).click();
+  await expect(page.getByRole("heading", { level: 1, name: "完了したタスク" })).toBeVisible();
+  await expect(page.locator("[data-teamboard]")).toHaveCount(0);
+  await expect(rail(page, id("done"))).toHaveAttribute("aria-current", "true");
+
   // タスクの URL（MCP の dashboard_url）を開いても、同じ骨格
   await page.goto(taskPath(id("long")));
   await page.getByRole("button", { name: "チーム" }).click();
   for (const sel of ["header.top", ".tlband", "nav.rail", ".console", ".statusbar"]) {
     await expect(page.locator(sel).first(), sel).toBeVisible();
   }
+  await expect(page.locator("[data-teamboard]")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "詳細を開く" })).toHaveCount(0);
 });
 

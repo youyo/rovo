@@ -20,19 +20,27 @@ async function hold(page: import("@playwright/test").Page, match: RegExp) {
   return release;
 }
 
-test("(L1) 詳細の応答が遅くても、一覧（レール・帯・ステータスバー）が先に出て、コンソールの場所だけ読み込み中", async ({
+test("(L1) 詳細の応答が遅くても、一覧（レール・帯・ステータスバー）が先に出て、コンソールの場所だけ読み込み中。チームのボードは詳細を待たない", async ({
   page,
 }) => {
   const release = await hold(page, DETAIL);
   await loginAs(page, s.users.alice);
   await expect(rail(page, s.tasks.done as string)).toBeVisible();
-  // マイタスクでは時刻の帯を出さない。チームに切り替えると、詳細が遅いままでも帯が先に出る
+  // マイタスク: 詳細が遅いと、コンソールの場所だけ読み込み中（詳細が届くまでは、一覧の行の情報だけの見出し = preview）
+  await expect(page.locator(".console-col")).toContainText("読み込み中");
+  await expect(page.locator(".console[data-preview]")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator(".console[data-preview] h1")).toBeVisible();
+  await expect(page.locator(".console .now-line")).toHaveCount(0);
+  // マイタスクでは時刻の帯を出さない。チームに切り替えると、詳細が遅いままでも帯とボードが先に出る
   await expect(page.locator(".tlband")).toHaveCount(0);
   await page.getByRole("button", { name: "チーム" }).click();
   await expect(page.locator(".tlband .tl-scroll").first()).toBeVisible();
   await expect(page.locator(".statusbar [data-sb='budget-me']")).toContainText("今月");
+  await expect(page.locator("[data-teamboard]")).toBeVisible();
+  await expect(page.locator(".console-col")).not.toContainText("読み込み中");
+  // レールで選ぶと、その詳細が届くまでコンソールの場所だけ読み込み中（preview の見出し）
+  await rail(page, s.tasks.running as string).click();
   await expect(page.locator(".console-col")).toContainText("読み込み中");
-  // 詳細が届くまでは、一覧の行の情報だけの見出し（preview）。詳細の中身（今の行）はまだ無い
   await expect(page.locator(".console[data-preview]")).toHaveAttribute("aria-busy", "true");
   await expect(page.locator(".console[data-preview] h1")).toBeVisible();
   await expect(page.locator(".console .now-line")).toHaveCount(0);

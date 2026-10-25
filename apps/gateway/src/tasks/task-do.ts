@@ -54,7 +54,12 @@ import {
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { BUDGET_EXTENSION_KIND, MAX_BUDGET_EXTENSIONS } from "./budget-question";
-import { fetchGatewayCost, type GatewayCostResult, gatewayCostConfigured } from "./gateway-cost";
+import {
+  fetchGatewayCost,
+  type GatewayCostResult,
+  gatewayCostConfigured,
+  RECONCILE_DELAYS_MS,
+} from "./gateway-cost";
 import { addColumnIfMissing } from "./sql-schema";
 import { canTransition, isTaskStatus, isTerminal, type TaskStatus } from "./state";
 import {
@@ -90,8 +95,8 @@ import {
 export const AGENT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 /** alarm の間隔。start / cancel の再送、取り込み、精算の再試行に使う。 */
 export const ALARM_INTERVAL_MS = 10_000;
-/** 終端（finishTask）のあと、AI Gateway のログで費用を確定する試行の時刻（終了からの経過）。4 回で打ち切る */
-export const RECONCILE_DELAYS_MS = [2 * 60_000, 10 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+export { RECONCILE_DELAYS_MS };
+
 /** 確定額が見積もりからこの割合を超えてずれたら警告する */
 const RECONCILE_WARN_RATIO = 0.2;
 /** INPUT_REQUIRED の間で、配送すべきものが無いときの alarm の間隔（AgentDO の期限の監視と、トークンの更新の確認だけ）。 */

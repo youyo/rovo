@@ -1,7 +1,7 @@
 import type { OverviewDto, VisibleTaskDto, WaitingDto } from "@rovo/dashboard-contract";
 import { overviewFixture, waitingFixture } from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it } from "vitest";
-import { BOARD_ACTIVE_MAX, buildMonthCosts, buildTeamBoard } from "../src/team";
+import { BOARD_ACTIVE_MAX, buildFlow, buildMonthCosts, buildTeamBoard } from "../src/team";
 
 const base = overviewFixture.tasks[0] as VisibleTaskDto;
 let seq = 0;
@@ -319,5 +319,109 @@ describe("buildMonthCosts（人ごとの今月の費用）", () => {
     const r = buildMonthCosts(noLimit);
     expect(r?.rows[1]).toMatchObject({ spentUsd: 2, limitUsd: null, ratio: null, pace: null });
     expect(r?.hidden).toBeNull();
+  });
+});
+
+describe("buildFlow（成果の推移の整形）", () => {
+  const flowOf = (flow: Partial<NonNullable<OverviewDto["flow"]>>): OverviewDto => ({
+    ...overviewFixture,
+    flow: {
+      period: { start: "2026-10-08T00:00:00.000Z", end: "2026-10-22T00:00:00.000Z" },
+      days: [],
+      median_duration_ms: null,
+      pr_merged: 0,
+      hidden: { count: 0, failed: 0 },
+      ...flow,
+    },
+  });
+
+  it("flow が無い古い応答は null", () => {
+    expect(buildFlow(overviewFixture)).toBeNull();
+  });
+
+  it("14 日ぶんを古い順に並べ、欠けた日を 0 で埋める", () => {
+    const f = buildFlow(
+      flowOf({
+        days: [
+          { date: "2026-10-21", completed: 3, failed: 1, budget_exceeded: 2, cancelled: 4 },
+          { date: "2026-10-08", completed: 1, failed: 0, budget_exceeded: 0, cancelled: 0 },
+        ],
+      }),
+    );
+    expect(f?.days).toHaveLength(14);
+    expect(f?.days[0]).toMatchObject({ date: "2026-10-08", completed: 1, failed: 0 });
+    expect(f?.days[13]).toMatchObject({ date: "2026-10-21", completed: 3, failed: 1 });
+    expect(f?.days[5]).toMatchObject({ date: "2026-10-13", completed: 0, failed: 0 });
+  });
+
+  it("失敗率は 失敗 /（完了 + 失敗）。BUDGET_EXCEEDED・CANCELLED は入れず、件数を併記できる", () => {
+    const f = buildFlow(
+      flowOf({
+        days: [
+          { date: "2026-10-20", completed: 10, failed: 1, budget_exceeded: 9, cancelled: 9 },
+          { date: "2026-10-21", completed: 6, failed: 1, budget_exceeded: 0, cancelled: 0 },
+        ],
+      }),
+    );
+    expect(f).toMatchObject({ completed: 16, failed: 2, rate: 2 / 18 });
+  });
+
+  it("完了も失敗も 0 件なら失敗率は null、少数でも件数をそのまま持つ", () => {
+    expect(buildFlow(flowOf({}))).toMatchObject({ completed: 0, failed: 0, rate: null });
+    expect(
+      buildFlow(
+        flowOf({
+          days: [{ date: "2026-10-21", completed: 0, failed: 1, budget_exceeded: 0, cancelled: 0 }],
+        }),
+      ),
+    ).toMatchObject({ completed: 0, failed: 1, rate: 1 });
+  });
+
+  it("中央値・マージ数・hidden を渡す（中央値が無ければ null、hidden が 0 件なら null）", () => {
+    expect(buildFlow(flowOf({}))).toMatchObject({ medianMs: null, prMerged: 0, hidden: null });
+    expect(
+      buildFlow(
+        flowOf({ median_duration_ms: 90_000, pr_merged: 4, hidden: { count: 5, failed: 2 } }),
+      ),
+    ).toMatchObject({ medianMs: 90_000, prMerged: 4, hidden: { count: 5, failed: 2 } });
+  });
+
+  it("UTC の日付の境界: 期間の終わり（明日 0 時 UTC）の前日 = 今日までの 14 日", () => {
+    // 2026-10-25 23:59:59 UTC に集計した応答（end は 10-26 00:00 UTC）。今日（10-25）が最後の日
+    const f = buildFlow(
+      flowOf({
+        period: { start: "2026-10-12T00:00:00.000Z", end: "2026-10-26T00:00:00.000Z" },
+        days: [
+          { date: "2026-10-25", completed: 2, failed: 0, budget_exceeded: 0, cancelled: 0 },
+          { date: "2026-10-11", completed: 9, failed: 9, budget_exceeded: 0, cancelled: 0 },
+        ],
+      }),
+    );
+    expect(f?.days[0]?.date).toBe("2026-10-12");
+    expect(f?.days[13]).toMatchObject({ date: "2026-10-25", completed: 2 });
+    // 期間より前の日は入らない
+    expect(f).toMatchObject({ completed: 2, failed: 0 });
+  });
+
+  it("月またぎ・年またぎでも日付が連続する", () => {
+    const f = buildFlow(
+      flowOf({ period: { start: "2025-12-24T00:00:00.000Z", end: "2026-01-07T00:00:00.000Z" } }),
+    );
+    expect(f?.days.map((d) => d.date)).toEqual([
+      "2025-12-24",
+      "2025-12-25",
+      "2025-12-26",
+      "2025-12-27",
+      "2025-12-28",
+      "2025-12-29",
+      "2025-12-30",
+      "2025-12-31",
+      "2026-01-01",
+      "2026-01-02",
+      "2026-01-03",
+      "2026-01-04",
+      "2026-01-05",
+      "2026-01-06",
+    ]);
   });
 });

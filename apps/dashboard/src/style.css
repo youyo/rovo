@@ -1796,3 +1796,84 @@ summary.step-row:hover {
     grid-column: auto;
   }
 }
+.tb-flow-body {
+  padding: 8px 16px;
+  min-width: 0;
+}
+.tb-flow-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.tb-flow-bar {
+  fill: var(--ok, currentColor);
+}
+.tb-flow-fail {
+  stroke: var(--bad, currentColor);
+  stroke-width: 1;
+}
+.tb-flow-hatch-line {
+  stroke: var(--bad, currentColor);
+  stroke-width: 1;
+  fill: none;
+}
+.tb-flow-plot {
+  position: relative;
+  max-width: 480px;
+}
+.tb-flow-axis {
+  position: relative;
+  height: 1.4em;
+  margin-top: 2px;
+  font-size: var(--fs-small);
+  color: var(--soft, inherit);
+  font-variant-numeric: tabular-nums;
+}
+.tb-flow-tick {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+.tb-flow-tick--start {
+  left: 0;
+  transform: none;
+}
+.tb-flow-tick--end {
+  right: 0;
+  transform: none;
+}
+.tb-flow-key {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  vertical-align: -0.05em;
+}
+.tb-flow-base {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.tb-flow-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin: 8px 0 0;
+}
+.tb-flow-stats dt {
+  font-size: var(--fs-small);
+  color: var(--soft, inherit);
+}
+.tb-flow-stats dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.tb-flow-legend,
+.tb-flow-hidden,
+.tb-flow-note {
+  padding: 4px 16px;
+  overflow-wrap: anywhere;
+}
+.tb-flow-legend {
+  padding-left: 0;
+}

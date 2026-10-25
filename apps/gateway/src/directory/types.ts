@@ -189,6 +189,26 @@ export type SummarizeByOwnerResult =
     }
   | { ok: false; code: "invalid_input" | "too_many_repo_ids" };
 
+export type SummarizeFlowResult =
+  | {
+      ok: true;
+      /** ended_at の UTC の日付ごと（データのある日だけ。日付順）。repoIds に見えるタスクだけで、review は含まない */
+      days: {
+        day: string;
+        completed: number;
+        failed: number;
+        budget_exceeded: number;
+        cancelled: number;
+      }[];
+      /** 完了したタスクの所要（ended_at - started_at）の中央値。無ければ null */
+      median_duration_ms: number | null;
+      /** rovo でマージした（pr_merged = 1）見えるタスクの数 */
+      pr_merged: number;
+      /** 権限の無いタスク。終了した件数と失敗の数だけで、持ち主は返さない */
+      hidden: { count: number; failed: number };
+    }
+  | { ok: false; code: "invalid_input" | "too_many_repo_ids" };
+
 export type SummarizeConsultsByOwnerResult =
   | { ok: true; owners: { owner_login: string; cost_micro: number }[] }
   | { ok: false; code: "invalid_input" };

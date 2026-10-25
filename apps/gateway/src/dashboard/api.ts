@@ -422,6 +422,7 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
     estimated_micro: consultSummary.estimated_micro,
   };
   const byOwner = await monthByOwner(directory, repoIds, monthStart, monthEnd, at);
+  const flow = await flowSummary(directory, repoIds, at);
   const actual =
     (await sumLedgers(env, session.uid, budgetRaw, owners, at, monthStart)) ?? indexActual;
 
@@ -461,6 +462,7 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
         : {}),
     },
     models,
+    ...(flow ? { flow } : {}),
   };
   return validated(OverviewDtoSchema, "OverviewDto", dto);
 }
@@ -478,9 +480,55 @@ type ByOwnerValue = {
   hidden: { count: number; cost_micro: number };
 };
 const byOwnerCache = new Map<string, { expires: number; value: ByOwnerValue }>();
+const flowCache = new Map<string, { expires: number; value: NonNullable<OverviewDto["flow"]> }>();
 export function resetLedgerCache(): void {
+  flowCache.clear();
   ledgerCache.clear();
   byOwnerCache.clear();
+}
+
+const FLOW_DAYS = 14;
+
+/** 直近 14 日（UTC・今日まで）の成果の推移を LEDGER_CACHE_TTL_MS だけ使い回す。取れないときは null（フィールドを省く） */
+async function flowSummary(
+  directory: Env["DIRECTORY_DO"] extends DurableObjectNamespace<infer D>
+    ? DurableObjectStub<D>
+    : never,
+  repoIds: number[],
+  at: number,
+): Promise<NonNullable<OverviewDto["flow"]> | null> {
+  for (const [k, e] of flowCache) if (e.expires <= at) flowCache.delete(k);
+  const d = new Date(at);
+  const to = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+  const from = to - FLOW_DAYS * 86_400_000;
+  const key = `${from}:${[...repoIds].sort((a, b) => a - b).join(",")}`;
+  const hit = flowCache.get(key);
+  if (hit) return hit.value;
+  try {
+    const r = await directory.summarizeFlow({ repoIds, from, to });
+    if (!r.ok) {
+      console.warn("dashboard: flow unavailable", { code: r.code });
+      return null;
+    }
+    const value = {
+      period: { start: iso(from), end: iso(to) },
+      days: r.days.map((x) => ({
+        date: x.day,
+        completed: x.completed,
+        failed: x.failed,
+        budget_exceeded: x.budget_exceeded,
+        cancelled: x.cancelled,
+      })),
+      median_duration_ms: r.median_duration_ms,
+      pr_merged: r.pr_merged,
+      hidden: r.hidden,
+    };
+    flowCache.set(key, { expires: at + LEDGER_CACHE_TTL_MS, value });
+    return value;
+  } catch (e) {
+    console.warn("dashboard: flow failed", { error: String(e).slice(0, 200) });
+    return null;
+  }
 }
 
 /** 人ごとの月の集計を LEDGER_CACHE_TTL_MS だけ使い回す。取れないときは null（フィールドを省く。画面を落とさない） */

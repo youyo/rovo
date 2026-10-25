@@ -19,6 +19,7 @@ import {
   type SummarizeByOwnerResult,
   type SummarizeConsultsByOwnerResult,
   type SummarizeConsultsResult,
+  type SummarizeFlowResult,
   type SummarizeQuery,
   type SummarizeResult,
   type TaskIndexRow,
@@ -584,6 +585,78 @@ export class DirectoryDO extends DurableObject<Env> {
       ok: true,
       visible: visible.map((r) => ({ owner_login: r.l, task_cost_micro: r.c, task_count: r.n })),
       hidden: { count: all.n - vn, cost_micro: all.c - vc },
+    };
+  }
+
+  /**
+   * 成果の推移（ended_at が [from, to)）。見える分（repoIds）だけ UTC の日付ごとに数え、
+   * 見えない分（NULL を含む）は件数と失敗の合計だけ。review（kind が review。kind が無い行は task）は数えない。
+   */
+  summarizeFlow(query: SummarizeQuery): SummarizeFlowResult {
+    const bad = this.checkIds(query?.repoIds);
+    if (bad) return bad;
+    if (!Number.isSafeInteger(query.from) || !Number.isSafeInteger(query.to)) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const sql = this.ctx.storage.sql;
+    const ids = JSON.stringify(query.repoIds);
+    const base = `ended_at >= ? AND ended_at < ? AND (kind IS NULL OR kind != 'review')`;
+    const days = sql
+      .exec<{ day: string; c: number; f: number; b: number; x: number; m: number }>(
+        `SELECT strftime('%Y-%m-%d', ended_at / 1000, 'unixepoch') AS day,
+           SUM(status = 'COMPLETED') AS c, SUM(status = 'FAILED') AS f,
+           SUM(status = 'BUDGET_EXCEEDED') AS b, SUM(status = 'CANCELLED') AS x,
+           SUM(pr_merged = 1) AS m
+         FROM task_index
+         WHERE ${base} AND repository_id IN (SELECT value FROM json_each(?))
+         GROUP BY day ORDER BY day`,
+        query.from,
+        query.to,
+        ids,
+      )
+      .toArray();
+    const durations = sql
+      .exec<{ d: number }>(
+        `SELECT ended_at - started_at AS d FROM task_index
+         WHERE ${base} AND status = 'COMPLETED' AND started_at IS NOT NULL
+           AND repository_id IN (SELECT value FROM json_each(?))
+         ORDER BY d`,
+        query.from,
+        query.to,
+        ids,
+      )
+      .toArray()
+      .map((r) => r.d);
+    let median: number | null = null;
+    if (durations.length > 0) {
+      const mid = Math.floor(durations.length / 2);
+      median =
+        durations.length % 2 === 1
+          ? (durations[mid] as number)
+          : Math.round(((durations[mid - 1] as number) + (durations[mid] as number)) / 2);
+    }
+    const hidden = sql
+      .exec<{ n: number; f: number }>(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(status = 'FAILED'), 0) AS f FROM task_index
+         WHERE ${base} AND status IN ('COMPLETED', 'FAILED', 'BUDGET_EXCEEDED', 'CANCELLED')
+           AND (repository_id IS NULL OR repository_id NOT IN (SELECT value FROM json_each(?)))`,
+        query.from,
+        query.to,
+        ids,
+      )
+      .one();
+    return {
+      ok: true,
+      days: days.map((r) => ({
+        day: r.day,
+        completed: r.c,
+        failed: r.f,
+        budget_exceeded: r.b,
+        cancelled: r.x,
+      })),
+      median_duration_ms: median,
+      pr_merged: days.reduce((a, r) => a + r.m, 0),
+      hidden: { count: hidden.n, failed: hidden.f },
     };
   }
 

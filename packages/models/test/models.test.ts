@@ -38,7 +38,7 @@ import {
 } from "../src";
 
 describe("許可リストとカタログ", () => {
-  it("許可リストは仕様どおりの 13 件（Anthropic 4 + OpenAI 3 + Workers AI の無料プラン 6）で、rovo の id → カタログの id の対応が 1 か所にある", () => {
+  it("許可リストは仕様どおりの 14 件（Anthropic 4 + OpenAI 4 + Workers AI の無料プラン 6）で、rovo の id → カタログの id の対応が 1 か所にある", () => {
     expect(Object.keys(MODEL_CATALOG_IDS).sort()).toEqual(
       [
         "anthropic/claude-fable-5-1",
@@ -48,6 +48,7 @@ describe("許可リストとカタログ", () => {
         "openai/gpt-6-astra",
         "openai/gpt-6-luna",
         "openai/gpt-6-sol",
+        "openai/gpt-6.1-sol",
         "workers-ai/@cf/google/gemma-4-26b-a4b-it",
         "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
         "workers-ai/@cf/openai/gpt-oss-120b",
@@ -57,6 +58,7 @@ describe("許可リストとカタログ", () => {
       ].sort(),
     );
     expect(MODEL_CATALOG_IDS["openai/gpt-6-sol"]).toBe("gpt-6-sol");
+    expect(MODEL_CATALOG_IDS["openai/gpt-6.1-sol"]).toBe("gpt-6.1-sol");
     expect(DEFAULT_MODEL).toBe("anthropic/claude-sonnet-5-5");
   });
 
@@ -213,6 +215,7 @@ describe("EFFORTS（モデルごとに固定した思考レベル）", () => {
       "anthropic/claude-fable-5-1": "low",
       "openai/gpt-6-luna": "low",
       "openai/gpt-6-sol": "medium",
+      "openai/gpt-6.1-sol": "medium",
       "openai/gpt-6-astra": "low",
       // Workers AI: 6 つとも low から。gemma は low を受け付けない（off / high だけ）ので、受け付ける最小の思考レベル high
       "workers-ai/@cf/openai/gpt-oss-120b": "low",
@@ -418,6 +421,7 @@ describe("既定のモデルの順序（D10b）", () => {
       "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
       "workers-ai/@cf/zai-org/glm-4.7-flash",
       "workers-ai/@cf/google/gemma-4-26b-a4b-it",
+      "openai/gpt-6.1-sol",
       "openai/gpt-6-sol",
       "openai/gpt-6-luna",
       "openai/gpt-6-astra",

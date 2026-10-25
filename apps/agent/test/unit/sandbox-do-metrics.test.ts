@@ -1,10 +1,19 @@
 import { abortAllDurableObjects, env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // SandboxDO の実行時間・起動世代のカウンタ（runtimeMs / restarts / bootRetries）の永続化と、
 // 特権操作・起動の破棄の監査（@rovo/audit 経由）を確かめる。ctx.container は vitest 上に無いので fake に差し替える。
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+// 時間が経つ前提のテストは、実時間の sleep ではなく Date だけを偽の時計にして進める（CI の遅れで揺れない）。
+// setTimeout は実物のまま（起動待ちなどの Promise は実際に進む）。
+const startClock = () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(1_800_000_000_000);
+};
+const advance = (ms: number) => vi.setSystemTime(Date.now() + ms);
+afterEach(() => vi.useRealTimers());
+
 const SHA = "a".repeat(40);
 
 class FakeContainer {
@@ -65,57 +74,59 @@ describe("SandboxDO.metrics: runtimeMs / restarts / bootRetries", () => {
   });
 
   it("起動から停止までの時間を runtimeMs に累計する。実行中の分は現在までを足して返し、停止で閉じる", async () => {
+    startClock();
     await runInDO(sandbox("m-runtime"), async (inst: Inst) => {
       const fake = new FakeContainer();
       inst.maybeContainer = () => fake;
       await inst.ensureReady(spec());
-      await sleep(80);
+      advance(80);
       const running = (await inst.metrics()).runtimeMs;
-      expect(running).toBeGreaterThanOrEqual(70);
-      await sleep(60);
-      expect((await inst.metrics()).runtimeMs).toBeGreaterThan(running); // 実行中は増え続ける
+      expect(running).toBe(80);
+      advance(60);
+      expect((await inst.metrics()).runtimeMs).toBe(140); // 実行中は増え続ける
       await inst.terminate();
       const closed = (await inst.metrics()).runtimeMs;
-      expect(closed).toBeGreaterThanOrEqual(130);
-      await sleep(60);
+      expect(closed).toBe(140);
+      advance(60);
       expect((await inst.metrics()).runtimeMs).toBe(closed); // 停止後は増えない
     });
   });
 
   it("再起動（作り直し）をまたいで累計する: 停止していた時間は数えない", async () => {
+    startClock();
     await runInDO(sandbox("m-two-runs"), async (inst: Inst) => {
       const fake = new FakeContainer();
       inst.maybeContainer = () => fake;
       await inst.ensureReady(spec());
-      await sleep(50);
+      advance(50);
       await inst.stop(); // reaper が失敗すればコンテナごと破棄する。ここでは破棄させる
       await inst.destroyContainer();
       const first = (await inst.metrics()).runtimeMs;
-      expect(first).toBeGreaterThanOrEqual(40);
-      await sleep(100); // 停止中
+      expect(first).toBe(50);
+      advance(100); // 停止中
       expect((await inst.metrics()).runtimeMs).toBe(first);
       await inst.ensureReady(spec());
-      await sleep(50);
+      advance(50);
       const second = (await inst.metrics()).runtimeMs;
-      expect(second).toBeGreaterThanOrEqual(first + 40);
-      expect(second).toBeLessThan(first + 90); // 停止中の 100ms は入らない
+      expect(second).toBe(first + 50); // 停止中の 100ms は入らない
       await inst.terminate();
     });
   });
 
   it("DO が退避されても値が残る（メモリ上の値に依存しない）", async () => {
+    startClock();
     await runInDO(sandbox("m-persist"), async (inst: Inst) => {
       const fake = new FakeContainer();
       inst.maybeContainer = () => fake;
       await inst.ensureReady(spec());
-      await sleep(50);
+      advance(50);
       await inst.destroyContainer();
       await inst.ensureReady(spec()); // restarts = 1
       await inst.terminate();
     });
     const before = await runInDO(sandbox("m-persist"), (inst: Inst) => inst.metrics());
     expect(before.restarts).toBe(1);
-    expect(before.runtimeMs).toBeGreaterThanOrEqual(40);
+    expect(before.runtimeMs).toBe(50);
     await abortAllDurableObjects(); // DO を作り直す（メモリ上の gen などは 0 に戻る）
     const after = await runInDO(sandbox("m-persist"), (inst: Inst) => inst.metrics());
     expect(after).toEqual(before);
@@ -169,20 +180,20 @@ describe("SandboxDO.metrics: runtimeMs / restarts / bootRetries", () => {
   });
 
   it("alarm は動いているコンテナの最後に観測した時刻を更新し、落ちていたらそこまでで区間を閉じる", async () => {
+    startClock();
     await runInDO(sandbox("m-alarm"), async (inst: Inst) => {
       const fake = new FakeContainer();
       inst.maybeContainer = () => fake;
       await inst.ensureReady(spec());
-      await sleep(60);
+      advance(60);
       await inst.alarm(); // 動いている: 観測時刻を更新
-      await sleep(80);
+      advance(80);
       fake.running = false; // DO が見ていない間にコンテナが落ちた
       await inst.alarm();
       const closed = (await inst.metrics()).runtimeMs;
       // 落ちた時刻は分からないので、最後に観測した時刻までを数える（過大に数えない）
-      expect(closed).toBeGreaterThanOrEqual(55);
-      expect(closed).toBeLessThan(60 + 80 - 15); // 落ちていた 80ms は数えない
-      await sleep(60);
+      expect(closed).toBe(60); // 落ちていた 80ms は数えない
+      advance(60);
       expect((await inst.metrics()).runtimeMs).toBe(closed);
     });
   });

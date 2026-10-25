@@ -1,6 +1,6 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getFakeApp, type UnitGitHubEnv } from "../support/unit-github";
 import { fakeAgent, newTaskId, sampleInput, taskStub, userStub } from "./helpers";
 
@@ -9,6 +9,16 @@ const OWNER = 911;
 const MICRO = 1_000_000;
 const app = () => getFakeApp(env as unknown as UnitGitHubEnv);
 type TaskStub = ReturnType<typeof taskStub>;
+
+// 月の枠は UTC の月で数える。テストの途中で月が替わって予約の月と DO の月がずれないよう、Date を開始時点で止める。
+// （固定の過去日にすると、実時間基準の fixture と食い違うので、開始時点の時刻のまま止める。）
+let FIXED_MONTH = "";
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now());
+  FIXED_MONTH = new Date().toISOString().slice(0, 7);
+});
+afterEach(() => vi.useRealTimers());
 
 const NUMS = { spent: 9.97, total: 10, extension: 10, left: 2 };
 const CONTINUE = "あと $10.00 使って続ける";
@@ -23,7 +33,7 @@ function rows<T>(stub: TaskStub, sql: string, ...b: unknown[]): Promise<T[]> {
 
 /** UserDO に、このタスクの予約（reserve が作る行と同じ）を用意する */
 async function seedReservation(taskId: string, reservedUsd = 10) {
-  const month = new Date().toISOString().slice(0, 7);
+  const month = FIXED_MONTH;
   await runInDurableObject(userStub(OWNER), (_i, state) => {
     state.storage.sql.exec(
       "INSERT OR REPLACE INTO task_budget (task_id, month, reserved_micro) VALUES (?, ?, ?)",

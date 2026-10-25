@@ -242,6 +242,10 @@ function MonthSection(props: { month: MonthCosts }) {
           {t("board.monthHidden", { n: hidden.count, cost: formatUsd(hidden.costUsd, t) })}
         </p>
       )}
+      {/* 人ごとの額は索引の「見えるタスク + 相談」。予算の欄は台帳（索引より前のタスク・見積もりの確定分も入る）なので一致しないことがある */}
+      <p className="soft tb-month-note" data-month-note="">
+        {t("board.monthNote")}
+      </p>
     </section>
   );
 }

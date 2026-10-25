@@ -305,6 +305,8 @@ const en = {
   "board.paceFast": "Ahead of pace",
   "board.paceSlow": "Behind pace",
   "board.monthHidden": "{n} tasks without access: {cost}",
+  "board.monthNote":
+    "Tasks in repositories you can see, plus consults. This may not match your spend in the budget panel.",
   "console.stale": "Couldn't refresh. Showing the previous content (will retry automatically).",
   "detail.title": "Task details",
   "dashboard.title": "Dashboard",
@@ -650,6 +652,8 @@ const ja: Record<Key, string> = {
   "board.paceFast": "ペース速め",
   "board.paceSlow": "ペース遅め",
   "board.monthHidden": "権限の無いタスク {n} 件 {cost}",
+  "board.monthNote":
+    "見えるリポジトリのタスクと相談の合計です。予算の欄の額とは一致しないことがあります。",
   "console.stale": "更新できませんでした。前の内容を表示しています（自動で再試行します）。",
   "detail.title": "タスクの詳細",
   "dashboard.title": "ダッシュボード",

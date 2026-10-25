@@ -1783,7 +1783,8 @@ summary.step-row:hover {
   overflow-wrap: anywhere;
   min-width: 0;
 }
-.tb-month-hidden {
+.tb-month-hidden,
+.tb-month-note {
   padding: 8px 16px;
   overflow-wrap: anywhere;
 }

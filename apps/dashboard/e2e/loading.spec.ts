@@ -26,6 +26,9 @@ test("(L1) 詳細の応答が遅くても、一覧（レール・帯・ステー
   const release = await hold(page, DETAIL);
   await loginAs(page, s.users.alice);
   await expect(rail(page, s.tasks.done as string)).toBeVisible();
+  // マイタスクでは時刻の帯を出さない。チームに切り替えると、詳細が遅いままでも帯が先に出る
+  await expect(page.locator(".tlband")).toHaveCount(0);
+  await page.getByRole("button", { name: "チーム" }).click();
   await expect(page.locator(".tlband .tl-scroll").first()).toBeVisible();
   await expect(page.locator(".statusbar [data-sb='budget-me']")).toContainText("今月");
   await expect(page.locator(".console-col")).toContainText("読み込み中");

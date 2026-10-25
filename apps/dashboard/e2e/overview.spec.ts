@@ -18,6 +18,9 @@ test("(1) 偽 GitHub でログインすると一覧が出る（127.0.0.1 の __H
   expect(session?.secure).toBe(true);
   // 見本の構成: ヘッダの要約・今日のタイムライン（細い帯）・レール・コンソール・ステータスバー
   await expect(page.locator(".day-summary")).toBeVisible();
+  // マイタスク（既定）では時刻の帯を出さず、チームでは出す
+  await expect(page.locator(".tlband")).toHaveCount(0);
+  await page.getByRole("button", { name: "チーム" }).click();
   await expect(page.locator(".tlband .tl-scroll").first()).toBeVisible();
   await expect(page.locator(".statusbar")).toBeVisible();
   // 予算の内訳（自分・全員を 1 つの欄に）は「内訳」の引き出しの中
@@ -69,6 +72,8 @@ test("(3) レールの行のリンクで詳細へ行ける", async ({ page }) =>
 
 test("(9) 状態が DOM の属性とアクセシブルな名前で判別できる（色に頼らない）", async ({ page }) => {
   await loginAs(page, s.users.alice);
+  // 時刻の帯の棒（a[data-task]）はチームのときだけ出る
+  await page.getByRole("button", { name: "チーム" }).click();
   const done = page.locator(`a[data-task="${s.tasks.done}"]`);
   const failed = page.locator(`a[data-task="${s.tasks.failed}"]`);
   await expect(done).toHaveAttribute("data-status", "COMPLETED");

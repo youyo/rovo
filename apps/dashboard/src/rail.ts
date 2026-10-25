@@ -7,7 +7,7 @@ import { taskTime } from "./timeline";
 /** レール・ヘッダ・ステータスバーの純関数（React に依存しない）。状態の印の形は status.ts の MARKS と status-mark.tsx。 */
 
 /**
- * 一覧のコンソールに出すタスク。走行中（終端でない）があれば開始が最新のもの、無ければ開始が最新のタスク。
+ * 一覧のコンソールに出すタスク。実行中（終端でない）があれば開始が最新のもの、無ければ開始が最新のタスク。
  */
 export function pickConsoleTask(tasks: readonly VisibleTaskDto[]): VisibleTaskDto | null {
   const latest = (list: readonly VisibleTaskDto[]) =>
@@ -20,7 +20,7 @@ export function pickConsoleTask(tasks: readonly VisibleTaskDto[]): VisibleTaskDt
 
 export type DaySummary = { day: string; total: number; merged: number; running: number };
 
-/** ヘッダの要約。「10月22日  12 件  マージ 0  走行中 0」（en は「October 22  12 tasks  Merged 0  Running 0」） */
+/** ヘッダの要約。「10月22日  12 件  マージ済み 0  実行中 0」（en は「October 22  12 tasks  Merged 0  Running 0」） */
 export function daySummary(data: OverviewDto, t: T): DaySummary {
   return {
     day: formatDayHeading(Date.parse(data.range.from), t),

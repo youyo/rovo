@@ -19,7 +19,7 @@ import { useWaiting } from "./use-waiting";
 /**
  * ログイン後の画面（個別ページは無い）:
  * ヘッダ → 細いタイムライン帯 → 左のレール + 中央のコンソール → 下のステータスバー。
- * コンソールは、/dashboard/tasks/:id ならその URL のタスク。/dashboard は走行中のタスクがあれば最新の走行中、なければ最新のタスク。
+ * コンソールは、/dashboard/tasks/:id ならその URL のタスク。/dashboard は実行中のタスクがあれば最新の実行中、なければ最新のタスク。
  * 自動更新の入切は一覧・Cloudflare・コンソールで共有する（読み取り専用）。
  */
 export function Workspace(props: {

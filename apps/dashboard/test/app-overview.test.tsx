@@ -85,7 +85,7 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
     expect(c.querySelector(".day-summary")?.textContent).toMatch(
       new RegExp(`^\\d+月\\d+日 +${overviewMeFixture.tasks.length} 件`),
     );
-    expect(lanesOf(c)).toEqual(["alice-example"]);
+    expect(lanesOf(c)).toEqual([]);
     const u = overviewCalls(f)[0] as URL;
     expect(u.searchParams.get("scope")).toBe("me");
     const from = Number(u.searchParams.get("from"));
@@ -104,7 +104,7 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
     const btn = (label: string) =>
       [...c.querySelectorAll("button")].find((b) => b.textContent === label) as HTMLButtonElement;
     expect(btn("マイタスク").getAttribute("aria-pressed")).toBe("true");
-    expect(lanesOf(c)).toEqual(["alice-example"]);
+    expect(lanesOf(c)).toEqual([]);
     await act(async () => {
       btn("チーム").click();
     });
@@ -114,7 +114,7 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
     await act(async () => {
       btn("マイタスク").click();
     });
-    expect(lanesOf(c)).toEqual(["alice-example"]);
+    expect(lanesOf(c)).toEqual([]);
   });
 
   it("切り替えた直後は、新しい応答が来るまで前のスコープのデータを出さない（読み込み中に戻る）", async () => {
@@ -122,7 +122,7 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
       url.searchParams.get("scope") === "all" ? new Promise<Response>(() => {}) : scoped(url),
     );
     const c = await mount(f);
-    expect(lanesOf(c)).toEqual(["alice-example"]);
+    expect(lanesOf(c)).toEqual([]);
     const all = [...c.querySelectorAll("button")].find((b) => b.textContent === "チーム");
     await act(async () => {
       all?.click();
@@ -313,7 +313,7 @@ describe("App: 自動更新（D15）", () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(c.textContent).toContain("更新できませんでした");
-    expect(lanesOf(c)).toEqual(["alice-example"]);
+    expect(lanesOf(c)).toEqual([]);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(9_000);
     });

@@ -54,7 +54,7 @@ describe("t", () => {
 
   it("パラメータを差し込む。足りないものは {name} のまま残す", () => {
     expect(makeT("en")("header.merged", { n: 3 })).toBe("Merged 3");
-    expect(makeT("ja")("header.merged", { n: 3 })).toBe("マージ 3");
+    expect(makeT("ja")("header.merged", { n: 3 })).toBe("マージ済み 3");
     expect(makeT("en")("header.merged")).toBe("Merged {n}");
   });
 

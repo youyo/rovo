@@ -98,6 +98,21 @@ export function formatClockSeconds(ms: number, t: T): string {
   }).format(ms);
 }
 
+/** ローカル時刻の年月日 時:分:秒 とタイムゾーンの略称（例: 2026/10/25 10:04:12 JST）。timeZone はテスト用（既定は閲覧者の地域）。 */
+export function formatDateTime(ms: number, t: T, timeZone?: string): string {
+  return new Intl.DateTimeFormat(locale(t), {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+    timeZone,
+  }).format(ms);
+}
+
 /** 経過時間。1 秒未満 / N 秒 / M 分 S 秒 / H 時間 M 分。負と NaN は 0 として扱う。 */
 export function formatDuration(ms: number, t: T): string {
   const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;

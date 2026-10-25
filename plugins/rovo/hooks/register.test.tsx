@@ -2874,14 +2874,83 @@ test("the top edge carries the title (bold) and the links; wide titles are cut s
   const edge = (await ui.find({ type: "Text", text: /^╭/ })) as TextNode;
   expect(edge.props?.color).toBe("subtle");
   const topBox = (await ui.find({ type: "Box", key: "frame-top" })) as Node;
-  const title = (topBox.children ?? []).find(
-    (c) => (c as Node).type === "Text" && (c as Node).props?.weight === "bold",
-  ) as Node | undefined;
+  const title = (topBox.children ?? [])
+    .flatMap((c) => (c as Node).children ?? [])
+    .find((c) => (c as Node).type === "Text" && (c as Node).props?.weight === "bold") as
+    | Node
+    | undefined;
   expect(title).toBeDefined();
   // the whole top edge is exactly the frame's width: bodyColumns 80 - 1, minus the 2-column indent
   expect(displayWidth(flatText(topBox))).toBe(77);
   expect(flatText(topBox)).toMatch(/^╭─ .+… ─+ PR #7 · ダッシュボード ─╮$/);
   await ui.unmount();
+});
+
+const edgeRig = async ($: Engine, on: Parameters<typeof rig>[0], columns: number) => {
+  const r = rig(on);
+  r.answers.set(START, startAnswer("t1"));
+  r.setHandler((call) =>
+    ok(
+      consoleBody(String(call.args.task_id), {
+        pr: { number: 93, url: "https://github.com/o/r/pull/93" },
+      }),
+    ),
+  );
+  await startSession($);
+  await $.tool.call({
+    tool: START,
+    title: "ダッシュボードの文言と表示の直し（タブ名・実行中の表示・リンクの並びをそろえる）",
+    repository: "o/r",
+  });
+  await r.clock.advance(4_000);
+  return $.ui.mount({
+    ...PANE,
+    props: { ...PANE.props, bodyColumns: columns },
+    surface: "terminal",
+  });
+};
+
+test("the top edge never wraps: one row, every child unshrinkable, exactly the frame's width, links in a box of their own width", async ($, on) => {
+  // 118 columns: frame = 118 - 1 - 2 = 115
+  const ui = await edgeRig($, on, 118);
+  const topBox = (await ui.find({ type: "Box", key: "frame-top" })) as Node;
+  expect(topBox.props?.width).toBe(115);
+  expect(topBox.props?.flexShrink).toBe(0);
+  const kids = (topBox.children ?? []) as Node[];
+  expect(kids.length).toBeGreaterThan(0);
+  for (const k of kids) {
+    expect(k.type).toBe("Box");
+    expect(k.props?.flexShrink).toBe(0);
+  }
+  expect(displayWidth(flatText(topBox))).toBe(115);
+  expect(flatText(topBox)).toMatch(/^╭─ .+ ─+ PR #93 · ダッシュボード ─╮$/);
+  // the links box is as wide as the links' text, so a wider measure cannot push the edge
+  const linksBox = kids.find((k) => flatText(k).includes("PR #93")) as Node;
+  expect(linksBox.props?.width).toBe(displayWidth("PR #93 · ダッシュボード"));
+  await ui.unmount();
+});
+
+const edgeAt = async ($: Engine, on: Parameters<typeof rig>[0], columns: number) => {
+  const ui = await edgeRig($, on, columns);
+  const topBox = (await ui.find({ type: "Box", key: "frame-top" })) as Node;
+  const text = flatText(topBox);
+  expect(displayWidth(text)).toBe(Math.max(4, columns - 1 - 2));
+  await ui.unmount();
+  return text;
+};
+
+test("a narrower top edge drops the dashboard link first and keeps the PR", async ($, on) => {
+  const text = await edgeAt($, on, 30);
+  expect(text).toContain("PR #93");
+  expect(text).not.toContain("ダッシュボード");
+  expect(text).not.toContain("·");
+});
+
+test("a very narrow top edge drops the PR too: only the title, still exactly the width", async ($, on) => {
+  const text = await edgeAt($, on, 16);
+  expect(text).not.toContain("PR");
+  expect(text).not.toContain("ダッシュボード");
+  expect(text.endsWith("╮")).toBe(true);
 });
 
 test("the frame is indented 2 columns, under the ▎ column", async ($, on) => {

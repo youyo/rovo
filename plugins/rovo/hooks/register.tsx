@@ -1080,27 +1080,33 @@ export const register: Register = (on) => {
         : "";
 
     const heading = headingText(m.tasks);
-    const linkText = [
-      prLink === undefined ? "" : prLink.number === null ? "PR" : `PR #${prLink.number}`,
-      link === undefined ? "" : "ダッシュボード",
-    ]
-      .filter((x) => x !== "")
-      .join(" · ");
-    const links = (
-      <>
-        {prLink !== undefined && (
-          <Link href={prLink.url}>
-            <Text color="suggestion">{prLink.number === null ? "PR" : `PR #${prLink.number}`}</Text>
-          </Link>
-        )}
-        {prLink !== undefined && link !== undefined && <Text dimColor>{" · "}</Text>}
-        {link !== undefined && (
-          <Link href={link}>
-            <Text color="suggestion">ダッシュボード</Text>
-          </Link>
-        )}
-      </>
-    );
+    const prText =
+      prLink === undefined ? "" : prLink.number === null ? "PR" : `PR #${prLink.number}`;
+    const dashText = link === undefined ? "" : "ダッシュボード";
+    // リンクの束。上辺は幅が足りないとき、ダッシュボード → PR の順に落とす。
+    const linksOf = (withPr: boolean, withDash: boolean) => {
+      const showPr = withPr && prLink !== undefined;
+      const showDash = withDash && link !== undefined;
+      return {
+        text: [showPr ? prText : "", showDash ? dashText : ""].filter((x) => x !== "").join(" · "),
+        node: (
+          <>
+            {showPr && prLink !== undefined && (
+              <Link href={prLink.url}>
+                <Text color="suggestion">{prText}</Text>
+              </Link>
+            )}
+            {showPr && showDash && <Text dimColor>{" · "}</Text>}
+            {showDash && link !== undefined && (
+              <Link href={link}>
+                <Text color="suggestion">{dashText}</Text>
+              </Link>
+            )}
+          </>
+        ),
+      };
+    };
+    const { text: linkText, node: links } = linksOf(true, true);
     // 枠の色: 作業中は控えめ（光るのは列車だけ）。終端になったら状態の色。
     const frameColor =
       selected !== undefined && isTerminal(selected.status)
@@ -1108,7 +1114,12 @@ export const register: Register = (on) => {
         : "subtle";
     const FW = Math.max(4, W - 2); // 枠の幅（左に 2 桁ずらす）
     const innerW = FW - 2;
-    const top = frameTop(FW, selected?.title ?? "", displayWidth(linkText));
+    const title = selected?.title ?? "";
+    const variants = [linksOf(true, true), linksOf(true, false)].filter((v) => v.text !== "");
+    const chosen =
+      variants.find((v) => frameTop(FW, title, displayWidth(v.text)).showLinks) ??
+      linksOf(false, false);
+    const top = frameTop(FW, title, displayWidth(chosen.text));
     const isEmptyNote = m.lines.length === 0 && (m.stacked || view?.command === null);
     // 窓が満ちないときは空の行で枠の下辺を一番下に保つ。
     const padRows = Math.max(0, m.windowRows - shown.length - (isEmptyNote ? 1 : 0));
@@ -1182,14 +1193,29 @@ export const register: Register = (on) => {
                 marginLeft={2}
                 height={m.frameRows + m.windowRows}
               >
-                <Box key="frame-top">
-                  <Text color={frameColor}>{"╭─ "}</Text>
-                  <Text weight="bold">{top.title}</Text>
-                  <Text color={frameColor}>
-                    {` ${"─".repeat(top.dashes)}${top.showLinks ? " " : "╮"}`}
-                  </Text>
-                  {top.showLinks && links}
-                  {top.showLinks && <Text color={frameColor}>{" ─╮"}</Text>}
+                {/* 上辺は必ず 1 行・枠の幅ちょうど。どの子も縮めず、リンクは表示幅の箱に入れる */}
+                <Box key="frame-top" width={FW} flexShrink={0}>
+                  <Box flexShrink={0}>
+                    <Text color={frameColor}>{"╭─ "}</Text>
+                  </Box>
+                  <Box flexShrink={0}>
+                    <Text weight="bold">{top.title}</Text>
+                  </Box>
+                  <Box flexShrink={0}>
+                    <Text color={frameColor}>
+                      {` ${"─".repeat(top.dashes)}${top.showLinks ? " " : "╮"}`}
+                    </Text>
+                  </Box>
+                  {top.showLinks && (
+                    <Box flexShrink={0} width={displayWidth(chosen.text)}>
+                      {chosen.node}
+                    </Box>
+                  )}
+                  {top.showLinks && (
+                    <Box flexShrink={0}>
+                      <Text color={frameColor}>{" ─╮"}</Text>
+                    </Box>
+                  )}
                 </Box>
                 {!m.stacked &&
                   view.command !== null &&

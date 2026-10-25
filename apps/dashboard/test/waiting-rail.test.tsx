@@ -73,7 +73,7 @@ describe("レールの「この日 / 待ち」の切り替え", () => {
     expect(fs).not.toBeNull();
     expect(fs?.getAttribute("aria-label")).toBe("レールの表示（日付別 / 要対応）");
     expect(tabs(c).map((b) => b.textContent)).toEqual([
-      "日付別",
+      `日付別 ${overviewFixture.tasks.length}`,
       `要対応 ${waitingFixture.tasks.length}`,
     ]);
     expect(tabs(c).map((b) => b.getAttribute("aria-pressed"))).toEqual(["true", "false"]);
@@ -187,7 +187,10 @@ describe("レールの「この日 / 待ち」の切り替え", () => {
       railTab: "waiting",
       onRailTabChange: () => {},
     });
-    expect(tabs(c).map((b) => b.textContent)).toEqual(["By day", "Needs you 0"]);
+    expect(tabs(c).map((b) => b.textContent)).toEqual([
+      `By day ${overviewFixture.tasks.length}`,
+      "Needs you 0",
+    ]);
     expect(c.querySelector(".rail-empty")?.textContent).toBe("Nothing needs you right now.");
   });
 

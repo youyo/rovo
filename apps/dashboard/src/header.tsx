@@ -4,6 +4,7 @@ import type { DayKey } from "./day";
 import type { Key, Lang } from "./i18n";
 import { useLang } from "./lang";
 import type { DaySummary } from "./rail";
+import { useNarrow } from "./use-narrow";
 
 /** 表示範囲の切り替え。並びは「マイタスク」が先。API の scope の値（me / all）は変えない（表示は辞書で引く） */
 const SCOPES: { value: Scope; label: Key }[] = [
@@ -32,6 +33,8 @@ export function Header(props: {
 }) {
   const { summary } = props;
   const { t, lang, setLang } = useLang();
+  const narrow = useNarrow();
+  const other = LANG_BUTTONS.find((b) => b.value !== lang) ?? LANG_BUTTONS[0];
   const summaryEl = summary ? (
     <p className="day-summary">
       <span>{summary.day}</span> <span>{t("header.total", { n: summary.total })}</span>{" "}
@@ -49,7 +52,7 @@ export function Header(props: {
           width={24}
           height={24}
         />
-        Rovo
+        <span className="brand-name">Rovo</span>
       </div>
       {props.scope !== undefined && props.onScopeChange ? (
         <fieldset className="seg" aria-label={t("scope.label")}>
@@ -100,19 +103,30 @@ export function Header(props: {
         summaryEl
       )}
       <div className="grow" />
-      <fieldset className="seg lang" aria-label={t("lang.label")}>
-        {LANG_BUTTONS.map((b) => (
-          <button
-            key={b.value}
-            type="button"
-            lang={b.value}
-            aria-pressed={lang === b.value}
-            onClick={() => setLang(b.value)}
-          >
-            {b.label}
-          </button>
-        ))}
-      </fieldset>
+      {narrow && other ? (
+        <button
+          type="button"
+          className="lang-one"
+          lang={other.value}
+          onClick={() => setLang(other.value)}
+        >
+          {other.label}
+        </button>
+      ) : (
+        <fieldset className="seg lang" aria-label={t("lang.label")}>
+          {LANG_BUTTONS.map((b) => (
+            <button
+              key={b.value}
+              type="button"
+              lang={b.value}
+              aria-pressed={lang === b.value}
+              onClick={() => setLang(b.value)}
+            >
+              {b.label}
+            </button>
+          ))}
+        </fieldset>
+      )}
       <div className="user">{props.children}</div>
     </header>
   );

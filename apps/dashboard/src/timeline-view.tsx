@@ -156,7 +156,14 @@ export function TimelineView(props: {
             {ticks.map((t) => (
               <g key={t.t} data-tick={t.label}>
                 {nowFrac === null || Math.abs(t.frac - nowFrac) > 0.04 ? (
-                  <text className="lbl lbl--axis" x={pct(t.frac)} y={10} textAnchor="middle">
+                  <text
+                    className="lbl lbl--axis"
+                    x={pct(t.frac)}
+                    y={10}
+                    textAnchor="middle"
+                    {...(t.by3 ? { "data-h3": "" } : {})}
+                    {...(t.by6 ? { "data-h6": "" } : {})}
+                  >
                     {t.label}
                   </text>
                 ) : null}

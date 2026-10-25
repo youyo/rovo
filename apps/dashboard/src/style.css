@@ -1664,8 +1664,76 @@ summary.step-row:hover {
 
 /* スマホ幅（390px）: レールはコンソールの上に積む。ステータスバーは折り返す。横スクロールは段階の図とログの中だけ */
 @media (max-width: 720px) {
+  /* ヘッダーは 2 行: 1 行目は「ロゴ・マイタスク/チーム … 言語・アバター」、2 行目は日付 */
   .top {
-    padding: 10px 16px;
+    padding: 8px 16px;
+    gap: 8px 12px;
+  }
+  .brand-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .top > .day-nav {
+    order: 10;
+    flex: 1 1 100%;
+  }
+  /* 要約の「N 件」「マージ済み」「実行中」は隠す（日付は残す） */
+  .day-summary > span:not(:first-child) {
+    display: none;
+  }
+  .lang-one {
+    min-height: 32px;
+    padding: 3px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--dim);
+    font: inherit;
+    font-size: var(--fs-small);
+    cursor: pointer;
+  }
+  .user-menu {
+    position: relative;
+  }
+  .user-menu > summary {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--mute);
+    color: var(--panel);
+    font-weight: 700;
+    line-height: 1;
+    list-style: none;
+    cursor: pointer;
+  }
+  .user-menu > summary::-webkit-details-marker {
+    display: none;
+  }
+  .user-menu[open] > summary {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .user-menu > p {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 20;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    white-space: nowrap;
+  }
+  /* 時刻の目盛りは 3 時間ごとだけ文字を出す（グリッドの線は毎時のまま） */
+  .lbl--axis:not([data-h3]) {
+    display: none;
   }
   .tlband {
     padding: 4px 16px;
@@ -1689,7 +1757,7 @@ summary.step-row:hover {
     padding: 14px 16px;
   }
   .lane {
-    grid-template-columns: 5em minmax(0, 1fr);
+    grid-template-columns: 4em minmax(0, 1fr);
     column-gap: 8px;
   }
   .con-head {
@@ -1875,4 +1943,24 @@ summary.step-row:hover {
 }
 .tb-flow-legend {
   padding-left: 0;
+}
+
+@media (max-width: 520px) {
+  /* さらに狭い画面では 6 時間ごと */
+  .lbl--axis:not([data-h6]) {
+    display: none;
+  }
+}
+@media (max-width: 720px) and (pointer: coarse) {
+  .lang-one {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .user-menu > summary {
+    width: 44px;
+    height: 44px;
+  }
+  .user-menu > p button {
+    min-height: 44px;
+  }
 }

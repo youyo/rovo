@@ -61,14 +61,29 @@ export function stemHeight(cost: number, maxCost: number, min = 12, max = 92): n
   return Math.round(min + ratio * (max - min));
 }
 
-export type Tick = { t: number; frac: number; label: string };
+export type Tick = {
+  t: number;
+  frac: number;
+  label: string;
+  /** ローカルの時が 3 の倍数（狭い画面で文字を出す目盛り） */
+  by3: boolean;
+  /** ローカルの時が 6 の倍数（さらに狭い画面で文字を出す目盛り） */
+  by6: boolean;
+};
 
 /** 範囲内の毎時（ローカル）の目盛り。ラベルは言語の時刻の書式（ja は 14:00、en は 2:00 PM）。 */
 export function hourTicks(d: Domain, tr: T): Tick[] {
   const fmt = new Intl.DateTimeFormat(localeOf(tr.lang), { hour: "numeric", minute: "2-digit" });
   const ticks: Tick[] = [];
   for (let t = ceilHour(d.start); t <= d.end; t += HOUR) {
-    ticks.push({ t, frac: xFraction(t, d), label: fmt.format(t) });
+    const hour = new Date(t).getHours();
+    ticks.push({
+      t,
+      frac: xFraction(t, d),
+      label: fmt.format(t),
+      by3: hour % 3 === 0,
+      by6: hour % 6 === 0,
+    });
   }
   return ticks;
 }

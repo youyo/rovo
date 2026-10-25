@@ -203,9 +203,6 @@ function StepItem(props: {
         {step.command ? (
           <>
             <span className="sr-only">{step.what} </span>
-            {step.where === undefined ? null : (
-              <span className="step-where">{t("step.in", { where: step.where })}</span>
-            )}
             <span className="prompt">$ </span>
             <span className="step-target">{step.target}</span>
           </>
@@ -411,6 +408,7 @@ export function TaskView(props: {
   ) as ReadonlySet<TaskStatusDto>;
   const band = phaseBand(task, detail.phase, t, reached, detail.stopped_phase);
   const steps = buildSteps(events, active, t);
+  let lastPlace: string | undefined;
   const timings = stepTimings(steps, generatedAt);
   const phases = phaseTimings(events, band, generatedAt);
   const now = nowSentence(detail.now, task.status, t);
@@ -560,15 +558,31 @@ export function TaskView(props: {
             <p className="screen-empty">{t("screen.empty")}</p>
           ) : (
             <ol className="steps">
-              {steps.map((s, i) => (
-                <StepItem
-                  key={s.seq}
-                  step={s}
-                  timing={timings[i]}
-                  waiting={waiting}
-                  {...(s.seq === attachSeq ? { below: outputBox } : {})}
-                />
-              ))}
+              {steps.flatMap((s, i) => {
+                const items: ReactNode[] = [];
+                if (s.command) {
+                  const place = s.where ?? "";
+                  const prev = lastPlace;
+                  lastPlace = place;
+                  if (prev === undefined ? place !== "" : prev !== place) {
+                    items.push(
+                      <li key={`h${s.seq}`} className="step-head">
+                        {place === "" ? t("step.root") : place}
+                      </li>,
+                    );
+                  }
+                }
+                items.push(
+                  <StepItem
+                    key={s.seq}
+                    step={s}
+                    timing={timings[i]}
+                    waiting={waiting}
+                    {...(s.seq === attachSeq ? { below: outputBox } : {})}
+                  />,
+                );
+                return items;
+              })}
             </ol>
           )}
 

@@ -324,16 +324,39 @@ describe("画面（screen）", () => {
     const c = mount(taskDetailRunningFixture, events);
     const rows = [...c.querySelectorAll("ol.steps > li.step")] as HTMLElement[];
     const text = (r: HTMLElement | undefined, sel: string) => r?.querySelector(sel)?.textContent;
-    expect(text(rows[0], ".step-where")).toBe("apps/agent で ");
+    const heads = [...c.querySelectorAll("ol.steps > li.step-head")].map((h) => h.textContent);
+    expect(heads).toEqual(["apps/agent", "ルート", "apps/gateway"]);
+    expect(c.querySelector(".step-where")).toBeNull();
     expect(text(rows[0], ".step-target")).toBe("pnpm test");
-    expect(rows[1]?.querySelector(".step-where")).toBeNull();
     expect(text(rows[1], ".step-target")).toBe("git status");
     // 切れた JSON の実行中の行（「いま」）も、生の JSON ではなく同じ見せ方
-    expect(text(rows[2], ".step-where")).toBe("apps/gateway で ");
     expect(text(rows[2], ".step-target")).toBe("pnpm exec vitest ru…");
     expect(rows[2]?.getAttribute("data-current")).toBe("true");
     expect(c.textContent).not.toContain("cd /workspace");
     expect(c.textContent).not.toContain('{"command"');
+  });
+
+  it("同じ場所の連続は見出し 1 本、編集を挟んでも増えず、cwd は cd より優先", () => {
+    const at = "2026-10-21T05:50:00Z";
+    const cmd = (seq: number, command: string, cwd?: string): TaskEventDto => ({
+      seq,
+      at,
+      type: "command",
+      command,
+      ...(cwd === undefined ? {} : { cwd }),
+      exit_code: 0,
+    });
+    const c = mount(taskDetailRunningFixture, [
+      cmd(1, "ls", "apps/a"),
+      { seq: 2, at, type: "edit", op: "modify", path: "x.ts" } as TaskEventDto,
+      cmd(3, "cd apps/zzz && pwd", "apps/a"),
+      cmd(4, "cd apps/b && ls"),
+      cmd(5, "ls", "apps/a"),
+    ]);
+    const heads = [...c.querySelectorAll("ol.steps > li.step-head")].map((h) => h.textContent);
+    expect(heads).toEqual(["apps/a", "apps/b", "apps/a"]);
+    expect(c.textContent).not.toContain("apps/zzz");
+    expect(c.textContent).not.toContain(" で ");
   });
 
   it("コマンドが失敗した行は失敗の印（fail の行）と終了コード", () => {

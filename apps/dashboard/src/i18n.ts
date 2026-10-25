@@ -144,7 +144,7 @@ const en = {
   "step.draftPr": "Created a draft PR",
   "step.toolFailed": "Failed",
   "step.other": "Other activity",
-  "step.in": "in {where} ",
+  "step.root": "root",
   "step.now": "Now",
 
   // --- 「いまは X」の文（{target} の前後を分けて返す）
@@ -472,7 +472,7 @@ const ja: Record<Key, string> = {
   "step.draftPr": "Draft PR を作った",
   "step.toolFailed": "失敗した",
   "step.other": "その他の処理",
-  "step.in": "{where} で ",
+  "step.root": "ルート",
   "step.now": "いま",
 
   "now.command": "いまは {target} を実行しています。",

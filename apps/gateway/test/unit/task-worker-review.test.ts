@@ -12,7 +12,7 @@ import {
   type TaskStub,
 } from "./pr-helpers";
 
-// TaskDO の worker_review（review_fix_rounds: 0）。ワーカーの検証が通ったあとの AgentDO のレビューの結果を、PR に COMMENT のレビューとして
+// TaskDO の worker_review。ワーカーの検証が通ったあとの AgentDO のレビューの結果を、PR に COMMENT のレビューとして
 // 投稿してから、自動の Ready にする。結果と task_status に review が付き、client_review のタスクには付かない。
 
 const OWNER = 801;
@@ -131,7 +131,7 @@ describe("worker_review: TaskDO の作成", () => {
 });
 
 describe("worker_review: task_status の review.stage の遷移", () => {
-  it("waiting → commands → reviewing → done。fix_rounds と rounds_used（修正の回は未実装なので 0）が付く。client_review には review が付かない", async () => {
+  it("waiting → commands → reviewing → done。fix_rounds と rounds_used（修正の回に入るまでは 0）が付く。client_review には review が付かない", async () => {
     const t = await createTask(workerOver());
     const st0 = await t.stub.getStatus(OWNER);
     expect(st0.ok && st0.task.review).toEqual({

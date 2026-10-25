@@ -115,6 +115,53 @@ describe("consult: 入力", () => {
   });
 });
 
+describe("consult: effort", () => {
+  it("不正な値・モデルが対応しない値は invalid_input（使えるレベルを案内）。予約もしない", async () => {
+    const fx = fakeAgent();
+    const svc = consultServiceWith(env, fx.agent);
+    const p = principal();
+    expect(await svc.consult(p, input({ effort: "turbo" }))).toMatchObject({
+      ok: false,
+      error: { code: "invalid_input" },
+    });
+    const r = await svc.consult(p, input({ model: "openai/gpt-6-sol", effort: "minimal" }));
+    expect(r).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+    if (!r.ok) expect(r.error.message).toContain("supported efforts:");
+    expect(fx.requests).toHaveLength(0);
+    expect((await userStub(p.githubUserId).budgetStatus()).reserved_usd).toBe(0);
+  });
+
+  it("指定した effort が agent に渡り、応答に effort が付く", async () => {
+    const fx = fakeAgent();
+    const svc = consultServiceWith(env, fx.agent);
+    const r = await svc.consult(principal(), input({ effort: "high" }));
+    expect(fx.requests[0]?.effort).toBe("high");
+    expect(r).toMatchObject({ ok: true, value: { effort: "high" } });
+  });
+
+  it("省略時は CONSULT_EFFORT（未設定は medium）。不正な値は medium", async () => {
+    const run = async (consultEffort: string | undefined) => {
+      const fx = fakeAgent();
+      const svc = consultServiceWith({ ...env, CONSULT_EFFORT: consultEffort }, fx.agent);
+      const r = await svc.consult(principal(), input());
+      return { sent: fx.requests[0]?.effort, r };
+    };
+    expect((await run(undefined)).sent).toBe("medium");
+    const high = await run("high");
+    expect(high.sent).toBe("high");
+    expect(high.r).toMatchObject({ ok: true, value: { effort: "high" } });
+    expect((await run("bogus")).sent).toBe("medium");
+  });
+
+  it("既定のレベルをモデルが受け付けないときは、モデルごとの既定（agent に effort を渡さない）", async () => {
+    const fx = fakeAgent();
+    // gpt-6-sol は minimal を受け付けない
+    const svc = consultServiceWith({ ...env, CONSULT_EFFORT: "minimal" }, fx.agent);
+    await svc.consult(principal(), input({ model: "openai/gpt-6-sol" }));
+    expect(fx.requests[0]).not.toHaveProperty("effort");
+  });
+});
+
 describe("consult: 予約と精算", () => {
   it("予約 → AgentDO（consult-<ULID> のインスタンス）→ 実費で精算。応答は {text, model, usage, cost_usd}", async () => {
     const fx = fakeAgent([

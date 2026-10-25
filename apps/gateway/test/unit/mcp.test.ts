@@ -1776,7 +1776,7 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       api: "anthropic-messages",
       input_per_mtok: 2,
       output_per_mtok: 10,
-      cache_read_per_mtok: 0.2,
+      cache_read_per_mtok: 0.1,
       cache_write_per_mtok: 2.5,
       tiers: [],
       context_window: 1_000_000,

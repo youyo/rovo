@@ -257,13 +257,52 @@ function readEntry(id: string, raw: unknown): ModelInfo | undefined {
   };
 }
 
+/**
+ * 単価の上書き（rovo の id → 上書きする項目。USD / 100 万トークン）。カタログより優先する。
+ *
+ * 理由: pi-ai 1.3.0 の cloudflare-ai-gateway.json は claude-sonnet-5-5 の cacheRead を 0.2 としているが、これは誤り。
+ * Claude API の公式の価格ページでは Sonnet 5.5 の cache read は $0.10（基本の入力 $2 の 0.05 倍）で、
+ * 同じ pi-ai の anthropic.json も 0.1。AI Gateway のログとも 1 トークン単位で照合済み（差は cache read の単価だけ）。
+ * ここで直さないと、models_list の単価も、タスク・consult・review の費用（Pi の cost.total）も 2 倍で計上される。
+ *
+ * カタログが正しい値になったら、この表から外す（unit テストが、上書きとカタログが同じ値になったら失敗して知らせる）。
+ */
+export const PRICE_OVERRIDES: Readonly<
+  Record<
+    string,
+    Readonly<Partial<{ input: number; output: number; cacheRead: number; cacheWrite: number }>>
+  >
+> = {
+  "anthropic/claude-sonnet-5-5": { cacheRead: 0.1 },
+};
+
+/**
+ * そのモデルの単価の上書き（Pi の Model.cost に重ねる項目）。上書きが無ければ undefined。
+ * agent が Pi のモデル呼び出しの直前に model.cost へ重ね、Pi が計算する cost.total も上書き後の単価にする。
+ */
+export function priceOverrideFor(
+  modelId: string,
+):
+  | Readonly<Partial<{ input: number; output: number; cacheRead: number; cacheWrite: number }>>
+  | undefined {
+  return Object.hasOwn(PRICE_OVERRIDES, modelId) ? PRICE_OVERRIDES[modelId] : undefined;
+}
+
 const INFOS: ReadonlyMap<string, ModelInfo> = (() => {
   const catalog = CLOUDFLARE_AI_GATEWAY_MODELS as unknown as Record<string, unknown>;
   const map = new Map<string, ModelInfo>();
   for (const [id, catalogId] of Object.entries(MODEL_CATALOG_IDS)) {
     if (!Object.hasOwn(catalog, catalogId)) continue;
     const info = readEntry(id, catalog[catalogId]);
-    if (info) map.set(id, info);
+    if (!info) continue;
+    const o = priceOverrideFor(id);
+    if (o) {
+      info.price.inputPerMTok = o.input ?? info.price.inputPerMTok;
+      info.price.outputPerMTok = o.output ?? info.price.outputPerMTok;
+      info.price.cacheReadPerMTok = o.cacheRead ?? info.price.cacheReadPerMTok;
+      info.price.cacheWritePerMTok = o.cacheWrite ?? info.price.cacheWritePerMTok;
+    }
+    map.set(id, info);
   }
   return map;
 })();

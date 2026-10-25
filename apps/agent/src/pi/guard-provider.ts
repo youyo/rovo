@@ -9,7 +9,7 @@ import {
   type ThinkingLevel,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { thinkingOffFor } from "@rovo/models";
+import { priceOverrideFor, thinkingOffFor } from "@rovo/models";
 
 /**
  * 失敗したモデル呼び出しの上流の HTTP ステータス。agents の pi-ai 経路は、非 2xx の応答を CloudflareAIError にして、
@@ -137,6 +137,18 @@ function withPayloadFixes<O extends StreamOptions>(options: O | undefined, maxTo
   } as O;
 }
 
+/**
+ * カタログの単価の誤り（@rovo/models の PRICE_OVERRIDES）を直した Model を返す。Pi が usage.cost を計算するとき
+ * （calculateCost(model, usage)）に使う model.cost に重ねるので、Pi の cost.total（タスク・review・consult の費用）も
+ * 上書き後の単価になる。上書きが無ければ元の model をそのまま返す。呼び出し側のオブジェクトは書き換えない。
+ */
+export function withPriceOverride(model: Model<Api>): Model<Api> {
+  const override = priceOverrideFor(model.id);
+  if (!override) return model;
+  // スプレッドで、agents が付けたルーティング用の（列挙可能な）タグも引き継ぐ
+  return { ...model, cost: { ...model.cost, ...override } };
+}
+
 /** 「モデル呼び出し前」のフック。provider を包み、guard が拒否したら上流を呼ばない。 */
 export function guardProvider(
   inner: Provider,
@@ -152,7 +164,8 @@ export function guardProvider(
       ) => ReturnType<Provider["stream"]>,
       simple: boolean,
     ) =>
-    (model: Model<Api>, context: TranscriptContext, options?: O) => {
+    (rawModel: Model<Api>, context: TranscriptContext, options?: O) => {
+      const model = withPriceOverride(rawModel);
       const out = createAssistantMessageEventStream();
       void (async () => {
         try {

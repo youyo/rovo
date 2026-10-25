@@ -49,13 +49,10 @@ export function OverviewView(props: {
   const { data } = props;
   const t = useT();
   let band: ReactNode = null;
-  let nowMs = 0; // 更新時刻（引き出しの表示）。タイムラインの「いま」は今日のときだけ使う
-  if (data) {
-    nowMs = Date.parse(data.generated_at);
-  }
+  // 更新時刻（引き出しの表示）。タイムラインの「いま」は今日のときだけ使う
+  const nowMs = data ? Date.parse(data.generated_at) : 0;
   if (data && data.scope === "all") {
     const dayStart = Date.parse(data.range.from);
-    nowMs = Date.parse(data.generated_at);
     const domain = timelineDomain({
       starts: [...data.tasks.map(taskTime), ...data.consults.map((c) => Date.parse(c.at))],
       nowMs: props.isToday ? nowMs : null,

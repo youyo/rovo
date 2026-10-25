@@ -45,8 +45,11 @@ test("(12) 一覧の骨格: ヘッダ → 細いタイムライン帯 → レー
 }) => {
   await loginAs(page, s.users.alice);
   await expect(page.locator(".day-summary")).toHaveText(
-    /\d+月\d+日\s+\d+ 件\s+マージ \d+\s+走行中 \d+/,
+    /\d+月\d+日\s+\d+ 件\s+マージ済み \d+\s+実行中 \d+/,
   );
+  // 時刻の帯はチームのときだけ出る（マイタスクでは出さない）
+  await expect(page.locator(".tlband")).toHaveCount(0);
+  await page.getByRole("button", { name: "チーム" }).click();
   const header = await box(page, "header.top");
   const band = await box(page, ".tlband");
   const railBox = await box(page, "nav.rail");
@@ -71,6 +74,7 @@ test("(12) 一覧の骨格: ヘッダ → 細いタイムライン帯 → レー
   await expect(rail(page, id("long"))).toHaveAttribute("aria-current", "true");
   // タスクの URL（MCP の dashboard_url）を開いても、同じ骨格
   await page.goto(taskPath(id("long")));
+  await page.getByRole("button", { name: "チーム" }).click();
   for (const sel of ["header.top", ".tlband", "nav.rail", ".console", ".statusbar"]) {
     await expect(page.locator(sel).first(), sel).toBeVisible();
   }

@@ -411,3 +411,11 @@ describe("OverviewView: レールとタイムラインの行のクリック（�
     expect(clickLink(c.querySelector(`a.rail-row[data-task-id="${id}"]`) as Element)).toBe(false);
   });
 });
+
+describe("OverviewView: 時刻の横軸のグラフ", () => {
+  it("マイタスクでは出さず、チームでは出す", () => {
+    expect(mount(overviewMeFixture).querySelector(".tlband")).toBeNull();
+    document.body.innerHTML = "";
+    expect(mount(overviewFixture).querySelector(".tlband")).not.toBeNull();
+  });
+});

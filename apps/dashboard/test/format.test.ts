@@ -3,6 +3,7 @@ import {
   formatClock,
   formatClockSeconds,
   formatCount,
+  formatDateTime,
   formatDayHeading,
   formatDuration,
   formatUsd,
@@ -12,7 +13,7 @@ import {
   shortModel,
   singleLine,
 } from "../src/format";
-import { tJa } from "./lang";
+import { tEn, tJa } from "./lang";
 
 describe("sanitizeText（D14: 表示前に制御文字を除く）", () => {
   it("改行・タブ以外の C0・DEL・C1 を除く", () => {
@@ -162,5 +163,15 @@ describe("modelFamily（レールなど狭い場所のモデル名。sonnet / ha
   it("制御文字は除く（sanitize 済みの名前から決める）", () => {
     expect(modelFamily("claude-so\u0007nnet-5")).toBe("sonnet");
     expect(modelFamily("my\u0007-model")).toBe("my-model");
+  });
+});
+
+describe("formatDateTime", () => {
+  const ms = Date.UTC(2026, 9, 25, 1, 4, 12);
+  it("ja: 年月日 時:分:秒 とタイムゾーンの略称", () => {
+    expect(formatDateTime(ms, tJa, "Asia/Tokyo")).toBe("2026/10/25 10:04:12 JST");
+  });
+  it("en: 年月日・秒・タイムゾーンの略称つき", () => {
+    expect(formatDateTime(ms, tEn, "UTC")).toMatch(/10\/25\/2026.*01:04:12.*UTC/);
   });
 });

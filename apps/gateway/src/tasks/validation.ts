@@ -372,6 +372,8 @@ export const consultInputSchema = z
       .min(1)
       .max(MAX_CONSULT_MESSAGES),
     max_output_tokens: z.number().int().min(1).max(MAX_CONSULT_OUTPUT_TOKENS).optional(),
+    /** 思考レベル（その呼び出しだけ）。省略は CONSULT_EFFORT。モデルが受け付けるかは consult サービスが確かめる */
+    effort: z.enum(EFFORT_LEVELS).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.messages[0]?.role !== "user") {

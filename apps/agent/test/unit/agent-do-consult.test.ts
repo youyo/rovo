@@ -324,6 +324,26 @@ describe("AgentDO.consult", () => {
       expect(t.seen.reasoning[0]).toBe("low");
     });
 
+    it("依頼の effort が Pi の reasoning になる。off なら渡さない", async () => {
+      const t = setup({ effort: "xhigh" });
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      const r = asOk(await t.stub.consult(t.request));
+      expect(t.seen.reasoning[0]).toBe("xhigh");
+      expect(r.effort).toBe("xhigh");
+      const off = setup({ effort: "off" });
+      await off.stub.setScript(off.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      asOk(await off.stub.consult(off.request));
+      expect(off.seen.reasoning[0]).toBeUndefined();
+    });
+
+    it("モデルが受け付けない effort はモデルごとの既定に戻る（gpt-6-sol は minimal 不可 → medium）", async () => {
+      const t = setup({ model: "openai/gpt-6-sol", effort: "minimal" });
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);
+      const r = asOk(await t.stub.consult(t.request));
+      expect(t.seen.reasoning[0]).toBe("medium");
+      expect(r.effort).toBe("medium");
+    });
+
     it("MODEL_EFFORTS の上書きが効く。off なら reasoning を渡さない", async () => {
       const t = setup({}, "anthropic/claude-sonnet-5-5=medium");
       await t.stub.setScript(t.request.messages[0]?.content ?? "", [{ text: "x" }]);

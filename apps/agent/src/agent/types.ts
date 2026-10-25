@@ -210,6 +210,8 @@ export interface ConsultRequest {
   messages: ConsultMessage[];
   /** 出力の上限の希望。予約額から計算した上限でさらに絞る */
   maxOutputTokens?: number;
+  /** 思考レベル。モデルが受け付けない・無いときはモデルごとの既定。思考のトークンは maxOutputTokens の中に収まる */
+  effort?: Effort;
   /** この consult に使える上限（USD）。UserDO で月の枠から予約した額 */
   budgetUsd: number;
 }
@@ -236,6 +238,8 @@ export type ConsultResult =
       model: string;
       usage: ConsultUsage;
       costUsd: number;
+      /** 実際に使った思考レベル */
+      effort?: Effort;
       /** 成功なのにプロバイダーが usage を返さなかった（トークンが 0）。costUsd は呼ぶ前の最悪の場合の見積り */
       usageMissing?: true;
       /** costUsd が実費ではなく見積もり（最悪の場合の見積り）。budget_status の estimated_usd に数える */

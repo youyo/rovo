@@ -1865,7 +1865,13 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
     const client = await connect(createApiApp(), u.props);
     const tool = (await list(client)).find((t) => t.name === "consult");
     const props = tool?.inputSchema.properties as Record<string, unknown>;
-    expect(Object.keys(props).sort()).toEqual(["max_output_tokens", "messages", "model", "system"]);
+    expect(Object.keys(props).sort()).toEqual([
+      "effort",
+      "max_output_tokens",
+      "messages",
+      "model",
+      "system",
+    ]);
     expect(tool?.inputSchema.required).toEqual(["messages"]);
     for (const word of [
       "セカンドオピニオン",

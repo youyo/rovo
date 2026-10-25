@@ -87,6 +87,8 @@ export type ModelEnv = Partial<ProviderKeysEnv> & {
   AGENT_MODEL?: string;
   AGENT_MODELS?: string;
   MODEL_EFFORTS?: string;
+  /** consult の既定の思考レベル。未設定・不正は medium */
+  CONSULT_EFFORT?: string;
   /** model を省略したときに Clef が選ぶ候補（カンマ区切り）。未設定は既定の 3 つ、空は自動選択をしない */
   AUTO_MODEL_CANDIDATES?: string;
 };

@@ -1,9 +1,11 @@
 import type { AuditFields } from "@rovo/audit";
+import type { Effort } from "@rovo/models";
+import { parseConsultEffort, supportedEfforts } from "@rovo/models";
 import { z } from "zod";
 import type { ConsultRequest } from "./agent/contract";
 import { auditFromWorker } from "./audit-sink";
 import type { ConsultValue } from "./consult-answer";
-import { type ModelEnv, resolveModel } from "./models";
+import { effortRejection, type ModelEnv, resolveModel } from "./models";
 import type { ProviderKeysDeps } from "./provider-keys";
 import type { ErrorCode, Principal, ServiceResult } from "./tasks/service";
 import { isConsultId, newConsultId } from "./tasks/ulid";
@@ -113,6 +115,18 @@ export function createConsultService(
       if (!resolved.ok) return fail(resolved.code, resolved.message);
       const model = resolved.model;
 
+      // 思考レベル: 指定があればモデルで検査（対応外は invalid_input）。省略は CONSULT_EFFORT（未設定・不正は medium）。
+      // 既定をモデルが受け付けないときは、モデルごとの既定に戻す（agent に effort を渡さない）
+      let effort: Effort | undefined = input.effort;
+      if (effort !== undefined) {
+        const rejection = effortRejection(model, effort);
+        if (rejection !== undefined) return fail("invalid_input", rejection);
+      } else {
+        const def = parseConsultEffort(env.CONSULT_EFFORT);
+        if (def.invalid) console.error("consult_effort_ignored");
+        if (supportedEfforts(model).includes(def.effort)) effort = def.effort;
+      }
+
       const users = deps.users(principal.githubUserId);
       const consultId = newConsultId();
       const reserved = await users.reserveConsult(consultId, model, {
@@ -149,6 +163,7 @@ export function createConsultService(
         ...(input.max_output_tokens !== undefined
           ? { maxOutputTokens: input.max_output_tokens }
           : {}),
+        ...(effort !== undefined ? { effort } : {}),
         // 予約した額と同じ値を渡す（食い違えば、予約より多く使えてしまう / 予約が余る）
         budgetUsd: reserved.reserved_usd,
       };

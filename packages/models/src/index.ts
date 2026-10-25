@@ -450,6 +450,17 @@ export function effortFor(modelId: string, raw: string | undefined): Effort | un
   return resolveEfforts(raw).efforts[modelId];
 }
 
+/**
+ * env CONSULT_EFFORT（consult の既定の思考レベル）。未設定・空は medium。不正な値は medium にして invalid: true を返す
+ * （起動はエラーにしない。呼び出し側が警告のログを出す）。
+ */
+export function parseConsultEffort(raw: string | undefined): { effort: Effort; invalid: boolean } {
+  const v = raw?.trim();
+  if (v === undefined || v === "") return { effort: "medium", invalid: false };
+  if (isEffort(v)) return { effort: v, invalid: false };
+  return { effort: "medium", invalid: true };
+}
+
 const finite = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0);
 
 /**

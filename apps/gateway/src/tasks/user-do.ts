@@ -1498,7 +1498,7 @@ export class UserDO extends DurableObject<Env> {
     result: ConsultResult | undefined,
   ): Promise<void> {
     const consultId = request.consultId;
-    let outcome = interpretConsult(result);
+    let outcome = interpretConsult(result, request.effort);
     if (
       outcome.status === "done" &&
       new TextEncoder().encode(JSON.stringify(outcome.value)).length > CONSULT_ANSWER_MAX_BYTES

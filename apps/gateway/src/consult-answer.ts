@@ -1,3 +1,4 @@
+import type { Effort } from "@rovo/models";
 import type { ConsultResult } from "./agent/contract";
 import type { ErrorCode } from "./tasks/service";
 
@@ -12,6 +13,8 @@ export type ConsultValue = {
   model: string;
   usage: { input: number; output: number; cache_read: number; cache_write: number };
   cost_usd: number;
+  /** 使った思考レベル */
+  effort?: Effort;
 };
 
 /** 失敗の中身（50 秒以内の失敗のエラーと、consult_result の failed の error で共通） */
@@ -68,7 +71,11 @@ export function unavailableFailure(): ConsultFailure {
 }
 
 /** result が undefined のときは例外・時間切れ（実費不明）。壊れた応答は internal（これも実費不明）。 */
-export function interpretConsult(result: ConsultResult | undefined): ConsultOutcome {
+export function interpretConsult(
+  result: ConsultResult | undefined,
+  /** 依頼で渡した（または gateway が解決した）思考レベル。agent が effort を返さないときの値 */
+  requestedEffort?: Effort,
+): ConsultOutcome {
   if (result === undefined) {
     return { status: "failed", error: unavailableFailure(), settleUsd: null, estimated: true };
   }
@@ -94,6 +101,9 @@ export function interpretConsult(result: ConsultResult | undefined): ConsultOutc
           cache_write: result.usage.cacheWrite,
         },
         cost_usd: result.costUsd,
+        ...((result.effort ?? requestedEffort) !== undefined
+          ? { effort: (result.effort ?? requestedEffort) as Effort }
+          : {}),
       },
       settleUsd: result.costUsd,
       estimated,

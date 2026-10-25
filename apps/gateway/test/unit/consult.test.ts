@@ -186,6 +186,7 @@ describe("consult: 予約と精算", () => {
         model: "anthropic/claude-sonnet-5-5",
         usage: { input: 1000, output: 200, cache_read: 5000, cache_write: 300 },
         cost_usd: 0.00555,
+        effort: "medium",
       },
     });
     // AgentDO への依頼: 既定のモデル、予約額（CONSULT_BUDGET_USD の既定 0.5）、consult ごとのインスタンス名
@@ -456,6 +457,7 @@ describe("consult: 50 秒以内に終わる（今と同じ応答の形。本文�
         model: "anthropic/claude-sonnet-5-5",
         usage: { input: 1000, output: 200, cache_read: 0, cache_write: 0 },
         cost_usd: 0.0012,
+        effort: "medium",
       },
     });
     const rows = await runInDurableObject(userStub(p.githubUserId), (_i, s) =>
@@ -521,6 +523,7 @@ describe("consult: 50 秒を超える（pending）", () => {
         model: "anthropic/claude-sonnet-5-5",
         usage: { input: 1000, output: 200, cache_read: 0, cache_write: 0 },
         cost_usd: 0.25,
+        effort: "medium",
       },
     });
     expect(await userStub(p.githubUserId).budgetStatus()).toMatchObject({

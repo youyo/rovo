@@ -23,6 +23,7 @@ import {
   resolveMaxSandboxInstance,
   SANDBOX_INSTANCES,
   type SandboxInstance,
+  supportedEfforts,
 } from "@rovo/models";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext } from "agents/lifecycle";
@@ -1276,7 +1277,14 @@ export class AgentDO extends DurableObject<Env> {
     // guardProvider が thinking の補正と、maxTokens の上限・metadata の付与を行う
     // consult の思考レベルはモデルごとの既定のまま（req.model の effort。タスクごとの上書きは無い。off なら渡さない）。思考のトークンは出力として課金され、
     // maxTokens（予約額から計算した上限）の中に収まる
-    const reasoning = this.reasoningOf(req.model);
+    // 依頼の effort（gateway が検査・解決済み）をそのモデルが受け付けるときだけ使う。無い・受け付けないときはモデルごとの既定
+    const usable =
+      req.effort !== undefined &&
+      isEffort(req.effort) &&
+      supportedEfforts(req.model).includes(req.effort);
+    const modelDefault = this.effortOf(req.model);
+    const usedEffort: Effort | undefined = usable ? req.effort : modelDefault;
+    const reasoning = this.reasoningOf(req.model, usable ? req.effort : undefined);
     const guarded = guardProvider(access.provider, async () => ({
       maxTokens,
       metadata: { userId: req.userId, consultId: req.consultId, caller: "consult" },
@@ -1332,12 +1340,20 @@ export class AgentDO extends DurableObject<Env> {
         text,
         model: req.model,
         usage,
+        ...(usedEffort !== undefined ? { effort: usedEffort } : {}),
         costUsd: Math.max(costUsd, worst),
         usageMissing: true,
         costEstimated: true,
       };
     }
-    return { ok: true, text, model: req.model, usage, costUsd };
+    return {
+      ok: true,
+      text,
+      model: req.model,
+      usage,
+      costUsd,
+      ...(usedEffort !== undefined ? { effort: usedEffort } : {}),
+    };
   }
 
   // ---- 起動・監視 ----

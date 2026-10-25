@@ -93,6 +93,9 @@
     "WORKER_NAMES": "<WORKER_NAMES>",
     // モデルごとの思考レベルの上書き（`<モデルの id>=<レベル>` のカンマ区切り。models_list の effort と task_status / task_result に出る）。空なら upstream の既定。agent の同名の var と同じ値にする。
     "MODEL_EFFORTS": "<MODEL_EFFORTS>",
+    // consult の既定の思考レベル（off / minimal / low / medium / high / xhigh / max。省略した呼び出しだけ。未設定・不正は medium）。値は書かず既定に任せてもよい。
+    // consult の effort で呼び出しごとに上書きできる。そのモデルが受け付けないときはモデルごとの既定（MODEL_EFFORTS）に戻る。
+    // "CONSULT_EFFORT": "medium",
     "WEB_SEARCH_DAILY_LIMIT": "200",
     "WEB_FETCH_DAILY_LIMIT": "500",
     "WEB_BROWSE_DAILY_LIMIT": "50",

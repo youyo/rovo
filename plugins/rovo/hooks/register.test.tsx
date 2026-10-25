@@ -2874,7 +2874,7 @@ test("the top edge carries the title (bold) and the links; wide titles are cut s
   const edge = (await ui.find({ type: "Text", text: /^╭─ $/ })) as TextNode;
   expect(edge.props?.color).toBe("subtle");
   const topBox = (await ui.find({ type: "Box", key: "frame-top" })) as Node;
-  const title = ((topBox.children?.[0] as Node).children ?? []).find(
+  const title = (((topBox.children ?? [])[0] as Node).children ?? []).find(
     (c) => (c as Node).type === "Text" && (c as Node).props?.weight === "bold",
   ) as Node | undefined;
   expect(title).toBeDefined();

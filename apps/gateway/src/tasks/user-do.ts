@@ -1130,9 +1130,16 @@ export class UserDO extends DurableObject<Env> {
   /**
    * 終端後の費用の確定。AI Gateway のログの cost の合計（マイクロドル）で settled_micro を 1 回だけ上書きし、
    * cost_source を gateway にする。閉じた（closed = 1）行で、まだ estimate のものだけ。2 回目以降は無視する（冪等）。
+   * applied: false には理由を付ける（invalid: 額が不正 / not_closed: まだ閉じていない / already: すでに確定済み）。
    * 月は予約した行の月のまま（月の集計は closed の行の settled_micro を数えるので、そのまま反映される）。
    */
-  reconcileTaskCost(taskId: string, micro: number): { ok: true; applied: boolean } | { ok: false } {
+  reconcileTaskCost(
+    taskId: string,
+    micro: number,
+  ):
+    | { ok: true; applied: true }
+    | { ok: true; applied: false; reason: "not_closed" | "already" | "invalid" }
+    | { ok: false } {
     if (!isTaskId(taskId)) return { ok: false };
     const sql = this.ctx.storage.sql;
     return this.ctx.storage.transactionSync(() => {
@@ -1143,9 +1150,12 @@ export class UserDO extends DurableObject<Env> {
         )
         .toArray()[0];
       if (!row) return { ok: false } as const;
-      if (!Number.isFinite(micro) || micro < 0) return { ok: true, applied: false } as const;
-      if (row.closed !== 1 || row.cost_source !== "estimate") {
-        return { ok: true, applied: false } as const;
+      if (!Number.isFinite(micro) || micro < 0) {
+        return { ok: true, applied: false, reason: "invalid" } as const;
+      }
+      if (row.closed !== 1) return { ok: true, applied: false, reason: "not_closed" } as const;
+      if (row.cost_source !== "estimate") {
+        return { ok: true, applied: false, reason: "already" } as const;
       }
       sql.exec(
         "UPDATE task_budget SET settled_micro = ?, settled_estimated = 0, cost_source = 'gateway' WHERE task_id = ?",

@@ -1041,8 +1041,15 @@ summary.step-row:hover {
 .prompt {
   color: var(--prompt);
 }
-.step-where {
+.step-head {
+  list-style: none;
   color: var(--log-dim);
+  font-size: 0.85em;
+  padding: 2px 0 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .step--fail .step-what {
   color: var(--log-bad);

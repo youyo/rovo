@@ -18,7 +18,7 @@ export type Tone = "normal" | "fail";
 export type StepText = {
   what: string;
   target: string;
-  /** コマンドを実行した場所（`cd /workspace/<相対パス> && ` や `cd <相対パス> && ` の前置きの <相対パス>）。画面では「<相対パス> で」と添える */
+  /** コマンドを実行した場所（`cd /workspace/<相対パス> && ` や `cd <相対パス> && ` の前置きの <相対パス>）。画面では場所が変わったときの見出しにする（cwd があればそれを優先） */
   where?: string;
   note: string;
   tone: Tone;
@@ -218,8 +218,14 @@ function splitCommand(text: string): { command: string; where?: string } {
 }
 
 /** コマンドの手順の文。前置きを外し、場所があれば添える（タイムライン・「いま」・gateway で同じ見せ方） */
-function commandText(text: string, base: { what: string; note: string; tone: Tone }): StepText {
-  const c = splitCommand(text);
+function commandText(
+  text: string,
+  base: { what: string; note: string; tone: Tone },
+  cwd?: string,
+): StepText {
+  const c: { command: string; where?: string | undefined } = splitCommand(text);
+  const dir = cwd === undefined ? undefined : relativeDir(singleLine(cwd));
+  if (dir !== undefined) c.where = dir === "" ? undefined : dir;
   return {
     what: base.what,
     target: c.command,
@@ -256,19 +262,23 @@ export function describeEvent(ev: TaskEventDto, opts: { current: boolean }, t: T
     case "command": {
       const failed = ev.exit_code !== null && ev.exit_code !== 0;
       const running = ev.exit_code === null && opts.current;
-      return commandText(singleLine(ev.command), {
-        what: failed
-          ? t("step.commandFailed")
-          : running
-            ? t("tool.bash.running")
-            : t("tool.bash.done"),
-        note: join(t, [
-          failed && t("step.exitCode", { code: String(ev.exit_code) }),
-          ev.exit_code === null && !opts.current && t("step.exitUnknown"),
-          ev.duration_ms !== undefined && formatDuration(ev.duration_ms, t),
-        ]),
-        tone: failed ? "fail" : "normal",
-      });
+      return commandText(
+        singleLine(ev.command),
+        {
+          what: failed
+            ? t("step.commandFailed")
+            : running
+              ? t("tool.bash.running")
+              : t("tool.bash.done"),
+          note: join(t, [
+            failed && t("step.exitCode", { code: String(ev.exit_code) }),
+            ev.exit_code === null && !opts.current && t("step.exitUnknown"),
+            ev.duration_ms !== undefined && formatDuration(ev.duration_ms, t),
+          ]),
+          tone: failed ? "fail" : "normal",
+        },
+        ev.cwd,
+      );
     }
     case "edit": {
       const what = t(`step.edit.${ev.op}`);

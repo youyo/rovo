@@ -278,3 +278,36 @@ describe("DirectoryDO.listOwnerIds（月に動きのあった利用者。全員�
     });
   });
 });
+
+describe("DirectoryDO.summarizeByOwner（人ごとの月の集計）", () => {
+  it("repoIds で絞った行だけを owner_login ごとに集計し、見えない分は hidden にまとめる", async () => {
+    const d = env.DIRECTORY_DO.getByName(`unit-by-owner-${Date.now()}`);
+    await d.upsertTask(snap("A", { owner_login: "alice", repository_id: 100, cost_micro: 300 }), 1);
+    await d.upsertTask(snap("B", { owner_login: "alice", repository_id: 100, cost_micro: 200 }), 1);
+    await d.upsertTask(snap("C", { owner_login: "bob", repository_id: 100, cost_micro: 50 }), 1);
+    await d.upsertTask(snap("D", { owner_login: "ghost", repository_id: 200, cost_micro: 700 }), 1);
+    await d.upsertTask(snap("E", { owner_login: "ghost", repository_id: null, cost_micro: 5 }), 1);
+    await d.upsertTask(
+      snap("F", { owner_login: "alice", repository_id: 100, cost_micro: 9999, created_at: T0 + 1e9 }),
+      1,
+    );
+    const r = await d.summarizeByOwner({ repoIds: [100], from: T0 - 1000, to: T0 + 1000 });
+    expect(r).toEqual({
+      ok: true,
+      visible: [
+        { owner_login: "alice", task_cost_micro: 500, task_count: 2 },
+        { owner_login: "bob", task_cost_micro: 50, task_count: 1 },
+      ],
+      hidden: { count: 2, cost_micro: 705 },
+    });
+    expect(JSON.stringify(r)).not.toContain("ghost");
+  });
+
+  it("不正な入力は invalid_input", async () => {
+    const d = env.DIRECTORY_DO.getByName(`unit-by-owner-bad-${Date.now()}`);
+    expect(await d.summarizeByOwner({ repoIds: ["x"] as never, from: 0, to: 1 })).toEqual({
+      ok: false,
+      code: "invalid_input",
+    });
+  });
+});

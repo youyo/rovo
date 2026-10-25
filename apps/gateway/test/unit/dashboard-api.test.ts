@@ -1788,3 +1788,75 @@ describe("cloudflare（M9）", () => {
     }
   });
 });
+
+describe("overview: 人ごとの今月の費用（month.by_owner / month.hidden）", () => {
+  const dir = () => workerEnv.DIRECTORY_DO.getByName(DIRECTORY_NAME);
+  async function seedConsultFor(login: string, cost_micro: number) {
+    const r = await dir().upsertConsult(
+      {
+        consult_id: `consult-${ulid()}`,
+        owner_id: 2,
+        owner_login: login,
+        at: Date.now(),
+        model: "consult-vendor/model-x",
+        cost_micro,
+        estimated: false,
+      },
+      1,
+    );
+    if (!r.ok) throw new Error("upsertConsult failed");
+  }
+  const parse = async (v: Viewer) => OverviewDtoSchema.parse((await api(v, overviewPath())).json());
+
+  it("見えるリポジトリのタスク + 相談を人ごとに出し、見えない分は人に割り振らず hidden にまとめる。持ち主は応答に出ない", async () => {
+    const repo = newRepoId();
+    const hiddenRepo = newRepoId();
+    const v = newViewer([repo]);
+    const tag = `${v.uid}`;
+    const ghost = `ghost-${tag}`;
+    const pal = `pal-${tag}`;
+    await seedTask({ repository_id: repo }, { index: { owner_login: pal, cost_micro: 2_000_000 } });
+    await seedTask(
+      { repository_id: hiddenRepo },
+      { index: { owner_login: ghost, cost_micro: 3_000_000 } },
+    );
+    await seedConsultFor(pal, 500_000);
+    const r = await api(v, overviewPath());
+    const dto = OverviewDtoSchema.parse(r.json());
+    expect(dto.month.by_owner?.find((o) => o.login === pal)).toEqual({
+      login: pal,
+      task_cost_usd: 2,
+      consult_cost_usd: 0.5,
+    });
+    expect(dto.month.hidden?.count).toBeGreaterThanOrEqual(1);
+    expect(dto.month.hidden?.cost_usd).toBeGreaterThanOrEqual(3);
+    expect(r.whole).not.toContain(ghost);
+  });
+
+  it("漏れ: 見えないリポジトリだけを持つ利用者の owner_login は応答のどこにも出ない", async () => {
+    const v = newViewer([newRepoId()]);
+    const ghost = `leak-owner-${v.uid}`;
+    await seedTask(
+      { repository_id: newRepoId() },
+      { index: { owner_login: ghost, cost_micro: 1_000_000 } },
+    );
+    const r = await api(v, overviewPath());
+    expect(r.status).toBe(200);
+    expect(r.whole).not.toContain(ghost);
+    expect(JSON.stringify(r.json())).not.toContain(ghost);
+  });
+
+  it("月の集計は 60 秒キャッシュされる（捨てると最新になる）", async () => {
+    const repo = newRepoId();
+    const v = newViewer([repo]);
+    const pal = `cache-${v.uid}`;
+    await seedTask({ repository_id: repo }, { index: { owner_login: pal, cost_micro: 1_000_000 } });
+    const first = await parse(v);
+    await seedTask({ repository_id: repo }, { index: { owner_login: pal, cost_micro: 4_000_000 } });
+    const second = await parse(v);
+    expect(second.month.by_owner).toEqual(first.month.by_owner);
+    resetLedgerCache();
+    const third = await parse(v);
+    expect(third.month.by_owner?.find((o) => o.login === pal)?.task_cost_usd).toBe(5);
+  });
+});

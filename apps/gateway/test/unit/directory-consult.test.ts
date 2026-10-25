@@ -135,3 +135,20 @@ describe("DirectoryDO.summarizeConsults（モデル別の費用）", () => {
     expect(s).toMatchObject({ ok: true, count: 1, cost_micro: 300 });
   });
 });
+
+describe("DirectoryDO.summarizeConsultsByOwner", () => {
+  it("owner_login ごとの費用（範囲内だけ）", async () => {
+    const d = dir();
+    await d.upsertConsult(snap("A", { owner_login: "alice", cost_micro: 300 }), 1);
+    await d.upsertConsult(snap("B", { owner_login: "alice", cost_micro: 100 }), 1);
+    await d.upsertConsult(snap("C", { owner_login: "bob", cost_micro: 50, owner_id: 2 }), 1);
+    await d.upsertConsult(snap("D", { owner_login: "bob", cost_micro: 9, at: T0 + 100 * HOUR }), 1);
+    expect(await d.summarizeConsultsByOwner({ from: T0, to: T0 + 24 * HOUR })).toEqual({
+      ok: true,
+      owners: [
+        { owner_login: "alice", cost_micro: 400 },
+        { owner_login: "bob", cost_micro: 50 },
+      ],
+    });
+  });
+});

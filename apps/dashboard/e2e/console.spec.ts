@@ -103,6 +103,8 @@ test("(13) ステータスバーに今月の自分・全員・モデル別・Clo
   await expect(drawer.locator('[data-budget="month"]')).toContainText("全員の実績");
   await expect(drawer.locator("[data-models]")).toBeVisible();
   await expect(drawer.locator("[data-cloudflare]")).toBeVisible();
+  // Cloudflare の欄の期間は既定で今月（UTC）。gateway の応答の range から出る
+  await expect(drawer.locator("[data-cloudflare] .caption")).toHaveText("今月（UTC）");
   await button.click();
   await expect(drawer).toBeHidden();
 });

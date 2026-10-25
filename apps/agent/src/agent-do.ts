@@ -121,6 +121,7 @@ import {
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createReadOnlySandboxTools, createSandboxTools } from "./tools";
 import { commitAuthorOf, createToolContext } from "./tools/context";
+import { normalizeBashArgs } from "./tools/leading-cd";
 import type { PushResult, SandboxToolsFactory } from "./tools/types";
 import { stripUntrustedMarkers, wrapUntrusted } from "./tools/untrusted";
 import {
@@ -2680,7 +2681,7 @@ export class AgentDO extends DurableObject<Env> {
         this.emit("tool_start", {
           callId: call.id,
           name: call.name,
-          summary: summarizeArgs(call.arguments),
+          summary: summarizeArgs(normalizeBashArgs(call.name, call.arguments, WORKSPACE_ROOT)),
         });
         return undefined;
       },

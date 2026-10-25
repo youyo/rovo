@@ -5,7 +5,7 @@ import { useT } from "./lang";
 import type { CloudflareState } from "./use-cloudflare";
 
 /**
- * 右の列の Cloudflare の枠（直近 24 時間）。取れない項目は理由の言葉で出し、
+ * 右の列の Cloudflare の枠（既定は今月・UTC。見出しは応答の range に従う）。取れない項目は理由の言葉で出し、
  * 枠全体が取れなくても他の部分は出す。リンクは行ごとの ?to=/:account/ 形（アカウント ID を含めない）。
  */
 export function CloudflarePanel(props: { state: CloudflareState }) {
@@ -16,7 +16,7 @@ export function CloudflarePanel(props: { state: CloudflareState }) {
   return (
     <section className="panel" data-cloudflare="" aria-labelledby="cf-h">
       <h2 id="cf-h">{t("cf.title")}</h2>
-      <p className="caption">{t("cf.window")}</p>
+      <p className="caption">{t(`cf.window.${data?.range ?? "month"}`)}</p>
       {data !== null && head(data) !== null ? (
         <p className="cf-total" data-cf-total="">
           <span>{head(data)?.text}</span>

@@ -5,6 +5,7 @@ import {
   ConsultIndexSnapshotSchema,
   type ListConsultsQuery,
   type ListConsultsResult,
+  type ListOwnerIdsResult,
   type ListOwnTasksQuery,
   type ListOwnTasksResult,
   type ListTasksQuery,
@@ -13,6 +14,7 @@ import {
   type ListWaitingResult,
   MAX_CONSULT_LIMIT,
   MAX_LIST_LIMIT,
+  MAX_OWNER_IDS,
   MAX_REPO_IDS,
   type SummarizeConsultsResult,
   type SummarizeQuery,
@@ -255,6 +257,31 @@ export class DirectoryDO extends DurableObject<Env> {
       estimated_micro: total.e,
       models,
     };
+  }
+
+  /**
+   * 期間（[from, to)）に動きのあった利用者の ID（タスクの created_at・consult の at）。重複なし・上限つき。
+   * 全員の実績を、各利用者の台帳（UserDO）から集めるときの宛先。ID だけで、タスクの値は返さない。
+   */
+  listOwnerIds(query: { from: number; to: number }): ListOwnerIdsResult {
+    if (!Number.isSafeInteger(query?.from) || !Number.isSafeInteger(query.to)) {
+      return { ok: false, code: "invalid_input" };
+    }
+    const ids = this.ctx.storage.sql
+      .exec<{ owner_id: number }>(
+        `SELECT owner_id FROM task_index WHERE created_at >= ? AND created_at < ?
+         UNION
+         SELECT owner_id FROM consult_index WHERE at >= ? AND at < ?
+         ORDER BY owner_id LIMIT ?`,
+        query.from,
+        query.to,
+        query.from,
+        query.to,
+        MAX_OWNER_IDS + 1,
+      )
+      .toArray()
+      .map((r) => r.owner_id);
+    return { ok: true, ids: ids.slice(0, MAX_OWNER_IDS), truncated: ids.length > MAX_OWNER_IDS };
   }
 
   /** テスト専用: 1 件の consult の行（revision つき）。ENVIRONMENT=test のときだけ。 */

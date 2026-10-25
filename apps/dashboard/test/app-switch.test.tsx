@@ -1,9 +1,5 @@
 import type { TaskDetailDto, VisibleTaskDto } from "@rovo/dashboard-contract";
-import {
-  overviewFixture,
-  taskDetailRunningFixture,
-  taskEventsFixture,
-} from "@rovo/dashboard-contract/fixtures";
+import { overviewFixture, taskDetailRunningFixture } from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +9,7 @@ import { LANG_KEY } from "../src/prefs";
 import { markKindOf, markLabel } from "../src/status";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
 import { tJa } from "./lang";
+import { legacyTailEvents } from "./legacy-events";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -95,7 +92,7 @@ async function mount(path: string, script: Script = {}) {
     if (m) {
       const id = m[1] as string;
       if (m[2]) {
-        return script.events?.(id) ?? json(200, { ...taskEventsFixture, task_id: id });
+        return script.events?.(id) ?? json(200, { ...legacyTailEvents, task_id: id });
       }
       const n = counts.get(id) ?? 0;
       counts.set(id, n + 1);

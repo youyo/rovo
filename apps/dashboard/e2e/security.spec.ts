@@ -103,7 +103,13 @@ test("(7) 題名・command・出力の悪意のある入力は文字として出
   await expect(async () => {
     await page.reload();
     await expect(page.locator("ol.steps")).toContainText("<img src=x", { timeout: 3_000 });
-    await expect(page.locator("pre.output")).toContainText('<img src=x onerror="window.__xss=1">', {
+    // 出力は行の中（▸ を開くと出る）
+    const step = page.locator("ol.steps li.step").filter({ hasText: "<img src=x" });
+    const details = step.locator("details.step-details");
+    if ((await details.getAttribute("open", { timeout: 3_000 })) === null) {
+      await step.locator("summary").click({ timeout: 3_000 });
+    }
+    await expect(step.locator("pre.output")).toContainText('<img src=x onerror="window.__xss=1">', {
       timeout: 3_000,
     });
   }).toPass({ timeout: 60_000 });

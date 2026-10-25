@@ -59,7 +59,9 @@ describe("consult: pending と consult_result（E2E）", () => {
       expect(r.isError).toBeFalsy();
       const out = bodyOf(r);
       expect(out).toMatchObject({ text: "quick", model: "anthropic/claude-sonnet-5-5" });
-      expect(Object.keys(out).sort()).toEqual(["cost_usd", "model", "text", "usage"]);
+      // effort は省略時の既定（CONSULT_EFFORT 未設定 = medium。sonnet-5-5 は medium を受け付ける）
+      expect(out.effort).toBe("medium");
+      expect(Object.keys(out).sort()).toEqual(["cost_usd", "effort", "model", "text", "usage"]);
       expect(await budget(client)).toMatchObject({ reserved_usd: 0, pending_consults: 0 });
     } finally {
       await client.close();
@@ -94,6 +96,7 @@ describe("consult: pending と consult_result（E2E）", () => {
         text: "a long thought",
         model: "anthropic/claude-sonnet-5-5",
         usage: { input: 20_000, output: 1_000, cache_read: 0, cache_write: 0 },
+        effort: "medium",
       });
       // (20000 + 1000) × $1/M
       expect(done.cost_usd).toBeCloseTo(0.021, 9);
@@ -109,6 +112,26 @@ describe("consult: pending と consult_result（E2E）", () => {
       expect(finished).toHaveLength(1);
       expect(finished[0]).toMatchObject({ userId: user.id, model: "anthropic/claude-sonnet-5-5" });
       expect(JSON.stringify(await auditRecords())).not.toContain("a long thought");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("effort を指定した遅い呼び出し: pending を経ても consult_result の done にその値（high）が返る", async () => {
+    const { user, client } = await memberClient("eff");
+    try {
+      const q = `pending e2e effort ${user.id}`;
+      await setConsultScript(q, {
+        text: "deep thought",
+        usage: { input: 1_000, output: 100 },
+        delayMs: 2_500,
+      });
+      const pending = bodyOf(await ask(client, q, { effort: "high" }));
+      expect(pending.status).toBe("pending");
+      const done = bodyOf(await result(client, String(pending.consult_id)));
+      expect(done).toMatchObject({ status: "done", text: "deep thought", effort: "high" });
+      // 取り直しも同じ
+      expect(bodyOf(await result(client, String(pending.consult_id), 0))).toEqual(done);
     } finally {
       await client.close();
     }

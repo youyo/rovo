@@ -1275,9 +1275,9 @@ export class AgentDO extends DurableObject<Env> {
     });
 
     // guardProvider が thinking の補正と、maxTokens の上限・metadata の付与を行う
-    // consult の思考レベルはモデルごとの既定のまま（req.model の effort。タスクごとの上書きは無い。off なら渡さない）。思考のトークンは出力として課金され、
-    // maxTokens（予約額から計算した上限）の中に収まる
-    // 依頼の effort（gateway が検査・解決済み）をそのモデルが受け付けるときだけ使う。無い・受け付けないときはモデルごとの既定
+    // consult の思考レベル: 依頼の effort。思考のトークンは出力として課金され、maxTokens（予約額から計算した上限）の中に収まる。
+    // 依頼の effort（gateway が検査・解決済み）をそのモデルが受け付けるときだけ使う。
+    // 無い・受け付けないときはモデルごとの既定（req.model の effort。off なら渡さない）
     const usable =
       req.effort !== undefined &&
       isEffort(req.effort) &&

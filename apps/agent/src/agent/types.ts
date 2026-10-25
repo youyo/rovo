@@ -238,9 +238,9 @@ export type ConsultResult =
       model: string;
       usage: ConsultUsage;
       costUsd: number;
-      /** 成功なのにプロバイダーが usage を返さなかった（トークンが 0）。costUsd は呼ぶ前の最悪の場合の見積り */
       /** 実際に使った思考レベル */
       effort?: Effort;
+      /** 成功なのにプロバイダーが usage を返さなかった（トークンが 0）。costUsd は呼ぶ前の最悪の場合の見積り */
       usageMissing?: true;
       /** costUsd が実費ではなく見積もり（最悪の場合の見積り）。budget_status の estimated_usd に数える */
       costEstimated?: true;

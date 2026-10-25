@@ -330,6 +330,46 @@ describe("UserDO.waitConsult", () => {
     expect(await f.stub.budgetStatus()).toMatchObject({ spent_usd: 0.0012, reserved_usd: 0 });
   });
 
+  it("effort: 依頼の effort が答えに入って保存され、取り直しでも同じ。agent が返した effort を優先する", async () => {
+    const f = await fixture();
+    const id = newId();
+    await f.stub.reserveConsult(id, "anthropic/claude-sonnet-5-5", f.owner);
+    await f.stub.startConsult(request(id, f.uid, { effort: "high" }));
+    f.agent.release(id, okResult({ effort: "low" }));
+    const first = await f.stub.waitConsult(id, f.uid, 5000);
+    expect(first).toMatchObject({ ok: true, status: "done", value: { effort: "low" } });
+    expect(await f.stub.waitConsult(id, f.uid, 0)).toEqual(first);
+
+    const id2 = newId();
+    await f.stub.reserveConsult(id2, "anthropic/claude-sonnet-5-5", f.owner);
+    await f.stub.startConsult(request(id2, f.uid, { effort: "high" }));
+    f.agent.release(id2);
+    expect(await f.stub.waitConsult(id2, f.uid, 5000)).toMatchObject({
+      value: { effort: "high" },
+    });
+  });
+
+  it("古い保存データ（effort の無い答え）も consult_result で読める（effort は付かない）", async () => {
+    const f = await fixture();
+    const { id } = await f.begin();
+    f.agent.release(id);
+    await f.stub.waitConsult(id, f.uid, 5000);
+    const legacy = {
+      text: "old answer",
+      model: "anthropic/claude-sonnet-5-5",
+      usage: { input: 1, output: 2, cache_read: 0, cache_write: 0 },
+      cost_usd: 0.001,
+    };
+    await sql(
+      f.stub,
+      "UPDATE consult_answer SET result_json = ? WHERE consult_id = ?",
+      JSON.stringify(legacy),
+      id,
+    );
+    const r = await f.stub.waitConsult(id, f.uid, 0);
+    expect(r).toEqual({ ok: true, status: "done", value: legacy });
+  });
+
   it("保持期間（完了から 1 時間）の内は取れ、過ぎたら not_found になって行も消える", async () => {
     const f = await fixture();
     const { id } = await f.begin();

@@ -288,12 +288,66 @@ describe("チームボード: 成果の推移（直近 14 日）", () => {
     expect(text(c.querySelector("#tb-flow-h"))).toContain("14");
   });
 
-  it("棒は 14 本。失敗のある日だけ、色でなく形の印がある", () => {
+  it("棒は 14 日分。失敗のある日だけ、色でなく形（斜線の塗り）の失敗の棒がある", () => {
     const c = mount({ data: withFlow() });
     const days = c.querySelectorAll("[data-flow] [data-day]");
     expect(days).toHaveLength(14);
     expect(c.querySelectorAll("[data-flow] [data-fail-mark]")).toHaveLength(1);
-    expect(c.querySelector("[data-day='2026-10-21'] [data-fail-mark]")).not.toBeNull();
+    const fail = c.querySelector("[data-day='2026-10-21'] [data-fail-mark]");
+    expect(fail).not.toBeNull();
+    // 完了の棒（無地の塗り）と形が違う: 斜線のパターンの塗り + 枠
+    expect(fail?.getAttribute("fill")).toMatch(/^url\(#/);
+    expect(
+      c.querySelector("[data-day='2026-10-21'] .tb-flow-bar")?.getAttribute("fill"),
+    ).toBeNull();
+  });
+
+  it("失敗の棒も件数に比例した高さ（完了の棒と同じ縦軸・同じ基線）", () => {
+    const c = mount({ data: withFlow() });
+    const num = (el: Element | null, a: string) => Number(el?.getAttribute(a));
+    const done = c.querySelector("[data-day='2026-10-21'] .tb-flow-bar");
+    const fail = c.querySelector("[data-day='2026-10-21'] [data-fail-mark]");
+    const peak = c.querySelector("[data-day='2026-10-20'] .tb-flow-bar");
+    // 最大は 10 件（高さ 60）。6 件 = 36、2 件 = 12
+    expect(num(peak, "height")).toBe(60);
+    expect(num(done, "height")).toBe(36);
+    expect(num(fail, "height")).toBe(12);
+    expect(num(fail, "y") + num(fail, "height")).toBe(num(done, "y") + num(done, "height"));
+    // 同じ日の 2 本は重ならず隣り合う（積み上げない）
+    expect(num(fail, "x")).toBeGreaterThanOrEqual(num(done, "x") + num(done, "width"));
+  });
+
+  it("失敗が完了より多い日は、縦軸の最大が失敗の件数になる", () => {
+    const c = mount({
+      data: withFlow({
+        days: [{ date: "2026-10-20", completed: 2, failed: 8, budget_exceeded: 0, cancelled: 0 }],
+      }),
+    });
+    const fail = c.querySelector("[data-day='2026-10-20'] [data-fail-mark]");
+    const done = c.querySelector("[data-day='2026-10-20'] .tb-flow-bar");
+    expect(Number(fail?.getAttribute("height"))).toBe(60);
+    expect(Number(done?.getAttribute("height"))).toBe(15);
+  });
+
+  it("横軸に日付のラベル: 両端（14 日前と今日）と週の区切り。ロケールの短い書き方", () => {
+    const ja = mount({ data: withFlow() }, inJa);
+    const labels = (c: Element) =>
+      [...c.querySelectorAll("[data-flow] [data-axis-label]")].map((e) => text(e));
+    expect(labels(ja)).toEqual(["10/8", "10/15", "10/21"]);
+    const en = mount({ data: withFlow() }, inEn);
+    expect(labels(en)).toEqual(["10/8", "10/15", "10/21"]);
+  });
+
+  it("間引いた日も、読み上げ（aria-label）と title で日付と件数が分かる", () => {
+    const c = mount({ data: withFlow() }, inJa);
+    const g = c.querySelector("[data-day='2026-10-12']");
+    expect(g?.getAttribute("role")).toBe("img");
+    expect(g?.getAttribute("aria-label")).toBe("2026-10-12: 完了 0 件、失敗 0 件");
+    expect(text(g?.querySelector("title") ?? null)).toBe("2026-10-12: 完了 0 件、失敗 0 件");
+    // 横軸の文字は視覚用（読み上げは各日の aria-label が受け持つ）
+    expect(
+      c.querySelector("[data-flow] [data-axis-label]")?.closest("[aria-hidden='true']"),
+    ).not.toBeNull();
   });
 
   it("失敗率は % と件数の併記、中央値、マージ数、脚注", () => {

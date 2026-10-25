@@ -1,6 +1,7 @@
 import type { OverviewDto, VisibleTaskDto, WaitingDto } from "@rovo/dashboard-contract";
 import { isPlainLeftClick } from "./click";
-import { formatCount, formatDuration, formatUsd, singleLine } from "./format";
+import { formatCount, formatDuration, formatShortDate, formatUsd, singleLine } from "./format";
+import type { T } from "./i18n";
 import { useT } from "./lang";
 import { taskPath } from "./route";
 import { markKindOf, markLabel } from "./status";
@@ -252,44 +253,105 @@ function MonthSection(props: { month: MonthCosts }) {
   );
 }
 
-const BAR_W = 14;
-const BAR_GAP = 6;
+const BAR_W = 9;
+const BAR_PAIR_GAP = 1;
+const GROUP_W = BAR_W * 2 + BAR_PAIR_GAP;
+const GROUP_GAP = 7;
 const CHART_H = 60;
-const FAIL_H = 10;
+/** 0 件でない棒が潰れて見えなくならない最小の高さ（件数の比例は保つ） */
+const MIN_BAR_H = 2;
+const HATCH_ID = "tb-flow-hatch";
+
+const barH = (n: number, max: number) => (n <= 0 ? 0 : Math.max(MIN_BAR_H, (n / max) * CHART_H));
+
+/** 横軸に日付を出す日（古い順の添字）: 14 日前・1 週間前・今日。狭い幅でも重ならない数に間引く */
+const AXIS_TICKS = [0, 7, 13];
+
+/** YYYY-MM-DD（UTC の日付）を、ロケールの短い月日（ja は 10/25、en も 10/25）にする */
+function shortDate(date: string, t: T): string {
+  const ms = Date.parse(date);
+  return Number.isFinite(ms) ? formatShortDate(ms, t) : date;
+}
 
 function FlowChart(props: { flow: Flow }) {
   const t = useT();
   const { days } = props.flow;
-  const max = Math.max(1, ...days.map((d) => d.completed));
-  const w = days.length * (BAR_W + BAR_GAP) - BAR_GAP;
+  const max = Math.max(1, ...days.map((d) => Math.max(d.completed, d.failed)));
+  const pitch = GROUP_W + GROUP_GAP;
+  const w = days.length * pitch - GROUP_GAP;
   return (
-    <svg
-      className="tb-flow-chart"
-      viewBox={`0 0 ${w} ${CHART_H + FAIL_H + 2}`}
-      role="img"
-      aria-label={t("board.flowChart")}
-    >
-      {days.map((d, i) => {
-        const x = i * (BAR_W + BAR_GAP);
-        const h = (d.completed / max) * CHART_H;
-        return (
-          <g key={d.date} data-day={d.date} data-completed={d.completed} data-failed={d.failed}>
-            <title>
-              {t("board.flowDay", { date: d.date, done: d.completed, failed: d.failed })}
-            </title>
-            <rect className="tb-flow-bar" x={x} y={CHART_H - h} width={BAR_W} height={h} />
-            {d.failed > 0 ? (
-              <path
-                className="tb-flow-fail"
-                data-fail-mark=""
-                d={`M${x + 2} ${CHART_H + 2} L${x + BAR_W - 2} ${CHART_H + FAIL_H} M${x + BAR_W - 2} ${CHART_H + 2} L${x + 2} ${CHART_H + FAIL_H}`}
+    <div className="tb-flow-plot">
+      {/* biome-ignore lint/a11y/useSemanticElements: SVG の図の集まり。fieldset は使えない */}
+      <svg
+        className="tb-flow-chart"
+        viewBox={`0 0 ${w} ${CHART_H + 1}`}
+        role="group"
+        aria-label={t("board.flowChart")}
+      >
+        <defs>
+          <pattern id={HATCH_ID} width="4" height="4" patternUnits="userSpaceOnUse">
+            <path className="tb-flow-hatch-line" d="M-1 5 L5 -1 M-1 1 L1 -1 M3 5 L5 3" />
+          </pattern>
+        </defs>
+        {days.map((d, i) => {
+          const x = i * pitch;
+          const hDone = barH(d.completed, max);
+          const hFail = barH(d.failed, max);
+          const label = t("board.flowDay", { date: d.date, done: d.completed, failed: d.failed });
+          return (
+            // biome-ignore lint/a11y/noInteractiveElementToNoninteractiveRole: SVG の g は操作の要素ではない。日ごとに読み上げさせる
+            <g
+              key={d.date}
+              data-day={d.date}
+              data-completed={d.completed}
+              data-failed={d.failed}
+              role="img"
+              aria-label={label}
+            >
+              <title>{label}</title>
+              <rect
+                className="tb-flow-bar"
+                x={x}
+                y={CHART_H - hDone}
+                width={BAR_W}
+                height={hDone}
               />
-            ) : null}
-          </g>
-        );
-      })}
-      <line className="tb-flow-base" x1="0" y1={CHART_H} x2={w} y2={CHART_H} />
-    </svg>
+              {d.failed > 0 ? (
+                <rect
+                  className="tb-flow-fail"
+                  data-fail-mark=""
+                  fill={`url(#${HATCH_ID})`}
+                  x={x + BAR_W + BAR_PAIR_GAP + 0.5}
+                  y={CHART_H - hFail}
+                  width={BAR_W - 1}
+                  height={hFail}
+                />
+              ) : null}
+            </g>
+          );
+        })}
+        <line className="tb-flow-base" x1="0" y1={CHART_H} x2={w} y2={CHART_H} />
+      </svg>
+      <div className="tb-flow-axis" aria-hidden="true">
+        {AXIS_TICKS.filter((i) => days[i] !== undefined).map((i) => {
+          const last = i === days.length - 1;
+          const first = i === 0;
+          return (
+            <span
+              key={i}
+              className={`tb-flow-tick${first ? " tb-flow-tick--start" : last ? " tb-flow-tick--end" : ""}`}
+              data-axis-label=""
+              title={days[i]?.date}
+              style={
+                first || last ? undefined : { left: `${((i * pitch + GROUP_W / 2) / w) * 100}%` }
+              }
+            >
+              {shortDate(days[i]?.date ?? "", t)}
+            </span>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -303,8 +365,21 @@ function FlowSection(props: { flow: Flow }) {
       <div className="tb-flow-body">
         <FlowChart flow={f} />
         <p className="soft tb-flow-legend">
-          <ShapeSymbol shape="check" tone="ok" /> {t("board.flowDone")}{" "}
-          <ShapeSymbol shape="cross" tone="bad" /> {t("board.flowFailed")}
+          <svg className="tb-flow-key" viewBox="0 0 9 9" aria-hidden="true">
+            <rect className="tb-flow-bar" x="0" y="0" width="9" height="9" />
+          </svg>{" "}
+          {t("board.flowDone")}{" "}
+          <svg className="tb-flow-key" viewBox="0 0 9 9" aria-hidden="true">
+            <rect
+              className="tb-flow-fail"
+              fill={`url(#${HATCH_ID})`}
+              x="0.5"
+              y="0.5"
+              width="8"
+              height="8"
+            />
+          </svg>{" "}
+          {t("board.flowFailed")}
         </p>
         <dl className="tb-flow-stats">
           <div data-flow-rate="">

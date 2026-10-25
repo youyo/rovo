@@ -1803,7 +1803,6 @@ summary.step-row:hover {
 .tb-flow-chart {
   display: block;
   width: 100%;
-  max-width: 480px;
   height: auto;
 }
 .tb-flow-bar {
@@ -1811,8 +1810,44 @@ summary.step-row:hover {
 }
 .tb-flow-fail {
   stroke: var(--bad, currentColor);
-  stroke-width: 2;
+  stroke-width: 1;
+}
+.tb-flow-hatch-line {
+  stroke: var(--bad, currentColor);
+  stroke-width: 1;
   fill: none;
+}
+.tb-flow-plot {
+  position: relative;
+  max-width: 480px;
+}
+.tb-flow-axis {
+  position: relative;
+  height: 1.4em;
+  margin-top: 2px;
+  font-size: var(--fs-small);
+  color: var(--soft, inherit);
+  font-variant-numeric: tabular-nums;
+}
+.tb-flow-tick {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+.tb-flow-tick--start {
+  left: 0;
+  transform: none;
+}
+.tb-flow-tick--end {
+  right: 0;
+  transform: none;
+}
+.tb-flow-key {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  vertical-align: -0.05em;
 }
 .tb-flow-base {
   stroke: var(--line);

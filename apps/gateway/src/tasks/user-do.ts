@@ -1359,9 +1359,11 @@ export class UserDO extends DurableObject<Env> {
         "SELECT task_id FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
       )
       .toArray();
+    let closed = 0;
     for (const { task_id } of open) {
       const t = ulidTime(task_id.slice("consult-".length));
       if (t === undefined || at - t < CONSULT_STALE_AFTER_MS) continue;
+      closed++;
       sql.exec(
         "UPDATE task_budget SET settled_micro = MAX(settled_micro, reserved_micro), settled_estimated = 1, closed = 1 WHERE task_id = ?",
         task_id,
@@ -1377,6 +1379,9 @@ export class UserDO extends DurableObject<Env> {
       this.wakeConsultSoon(task_id);
     }
     sql.exec("DELETE FROM consult_answer WHERE expires_at IS NOT NULL AND expires_at <= ?", at);
+    // 閉じた分の確定の予定（consult_reconcile）の alarm を、どの経路（reserve 系・alarm）で閉じても立てる。
+    // alarm は waitUntil で非同期に置くので、同期区間の中から呼んでよい（既に早い alarm があれば動かさない）
+    if (closed > 0) this.scheduleConsultDeadlineAlarm();
   }
 
   /** 同期区間内で呼ぶ。pending の答えを failed にする（pending でなければ何もしない）。 */

@@ -275,6 +275,27 @@ describe("UserDO: consult の費用の確定", () => {
     expect(await plan(stub, id)).toEqual({ base: T0 + 11 * MIN, attempt: 0, done: 0 });
   });
 
+  it("reserve 経路で期限切れを閉じても、確定の alarm が立つ", async () => {
+    const { uid, stub, clock } = await setup();
+    // 索引の配送の alarm（約 10 秒後）と区別するため、配送を無効にする
+    await runInDurableObject(stub, (i) => {
+      (i as unknown as { env: Record<string, unknown> }).env.DIRECTORY_DO = undefined;
+    });
+    const old = newConsultId(T0);
+    await stub.reserveConsult(old, MODEL, { id: uid, login: "alice" });
+    expect(await alarmOf(stub)).toBeNull();
+    clock.t = T0 + 11 * MIN;
+    await stub.reserveConsult(newConsultId(clock.t), MODEL, { id: uid, login: "alice" });
+    expect(await plan(stub, old)).toEqual({ base: T0 + 11 * MIN, attempt: 0, done: 0 });
+    let at: number | null = null;
+    for (let i = 0; i < 20 && at === null; i++) {
+      at = await alarmOf(stub);
+      if (at === null) await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(at).not.toBeNull();
+    expect(Math.abs((at as number) - (Date.now() + 2 * MIN))).toBeLessThan(10_000);
+  });
+
   it("確定前に gateway 確定済みなら書かずに終える（二重に上書きしない）", async () => {
     const { uid, stub, results, clock } = await setup();
     const id = await settled(stub, uid, 0.1);

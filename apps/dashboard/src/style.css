@@ -1276,7 +1276,8 @@ summary.step-row:hover {
   list-style: none;
   color: var(--log-dim);
   font-size: 0.85em;
-  padding: 2px 0 0;
+  /* 手順の行（.step-row）の本文の列にそろえる: 左の余白 16px + ▸ 14px + 印 16px + 間 8px × 2 */
+  padding: 8px 16px 0 62px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

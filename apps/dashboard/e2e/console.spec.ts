@@ -246,7 +246,7 @@ test("(17) 実行中のコマンド: 経過時間と点滅カーソル。prefers
   const running = page.locator(".screen .output-running");
   await expect(running).toContainText("実行中");
   await expect(running).toContainText("1 分 5 秒");
-  await expect(page.locator("pre.output")).toHaveText("step 1\nstep 2\n");
+  await expect(page.locator(".output-box pre.output")).toHaveText("step 1\nstep 2\n");
   const cursor = page.locator(".screen .cursor");
   await expect(cursor).toHaveCount(1);
   const animation = () => cursor.evaluate((el) => getComputedStyle(el).animationName);

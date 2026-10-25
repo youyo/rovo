@@ -103,7 +103,7 @@ test("(7) 題名・command・出力の悪意のある入力は文字として出
   await expect(async () => {
     await page.reload();
     await expect(page.locator("ol.steps")).toContainText("<img src=x", { timeout: 3_000 });
-    await expect(page.locator("pre.output")).toContainText('<img src=x onerror="window.__xss=1">', {
+    await expect(page.locator(".output-box pre.output")).toContainText('<img src=x onerror="window.__xss=1">', {
       timeout: 3_000,
     });
   }).toPass({ timeout: 60_000 });

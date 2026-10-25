@@ -27,7 +27,7 @@ test("(3) 詳細に、帯・進み具合・出力の枠・Draft PR の枠が出�
   }).toPass({ timeout: 60_000 });
   await expect(steps.first()).toHaveAttribute("data-seq", /^\d+$/);
   // 出力の枠（暗い枠。末尾と、秘密を伏せている注記）
-  await expect(page.locator("pre.output")).toContainText("PASS all");
+  await expect(page.locator(".output-box pre.output")).toContainText("PASS all");
   await expect(page.locator(".output-note")).toContainText("秘密は伏せて表示しています");
   await expect(page.locator("[data-pr]")).toBeVisible();
 });

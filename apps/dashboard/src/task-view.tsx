@@ -188,7 +188,7 @@ function StepItem(props: {
   const cls = `step${step.current ? " step--now" : ""}${step.tone === "fail" ? " step--fail" : ""}${
     step.command ? " step--cmd" : ""
   }`;
-  const expandable = step.note !== "" || props.below !== undefined;
+  const expandable = step.note !== "" || props.below !== undefined || step.outputTail !== undefined;
   const cells = (
     <>
       {expandable ? (
@@ -231,7 +231,13 @@ function StepItem(props: {
           <summary className="step-row">{cells}</summary>
           <div className="step-more">
             {step.note === "" ? null : <p className="step-detail">{step.note}</p>}
-            {props.below}
+            {props.below ??
+              (step.outputTail === undefined ? null : (
+                <div className="step-output">
+                  <OutputLines tail={step.outputTail} />
+                  <p className="output-note">{t("output.note")}</p>
+                </div>
+              ))}
           </div>
         </details>
       ) : (
@@ -419,6 +425,7 @@ export function TaskView(props: {
   // 実行中でない（終わったコマンドの末尾）、またはいまの行がコマンドでないときは、手順の外の出力の枠に出す
   // （終わったコマンドの出力がどの行のものかは、決めつけない）
   const lastStep = steps.at(-1);
+  const hasStepTail = steps.some((s) => s.outputTail !== undefined);
   const attachSeq = running && lastStep?.current && lastStep.command ? lastStep.seq : null;
 
   const scroll = useStickToBottom(
@@ -586,7 +593,7 @@ export function TaskView(props: {
             </ol>
           )}
 
-          {attachSeq === null ? outputBox : null}
+          {attachSeq === null && (running || !hasStepTail) ? outputBox : null}
 
           {active && !running ? (
             <div className="prompt-line">

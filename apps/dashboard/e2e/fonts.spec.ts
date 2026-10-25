@@ -57,7 +57,7 @@ test("(11) 書体は同梱のものが同一オリジンから読まれ、外部
   const firstPaintFonts = fonts.map((f) => ({ ...f }));
   // 詳細（画面の出力）
   await page.goto(taskPath(s.tasks.done as string));
-  await expect(page.locator("pre.output")).toBeVisible();
+  await expect(page.locator(".output-box pre.output")).toBeVisible();
   await waitFontsLoaded(page);
 
   const loaded = await page.evaluate(() =>

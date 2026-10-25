@@ -14,6 +14,16 @@ import { markKindOf, markLabel } from "../src/status";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
 import { tJa } from "./lang";
 
+/** output_tail を持たない古い履歴（出力は手順の外の枠に出る） */
+const legacyTailEvents = {
+  ...taskEventsFixture,
+  events: taskEventsFixture.events.map((e) => {
+    if (e.type !== "command") return e;
+    const { output_tail: _omit, ...rest } = e;
+    return rest;
+  }),
+};
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 // レール・タイムラインでの切り替え: ページを読み直さず pushState。fresh=1 は URL を直接開いたときの最初の取得だけ。
@@ -95,7 +105,7 @@ async function mount(path: string, script: Script = {}) {
     if (m) {
       const id = m[1] as string;
       if (m[2]) {
-        return script.events?.(id) ?? json(200, { ...taskEventsFixture, task_id: id });
+        return script.events?.(id) ?? json(200, { ...legacyTailEvents, task_id: id });
       }
       const n = counts.get(id) ?? 0;
       counts.set(id, n + 1);

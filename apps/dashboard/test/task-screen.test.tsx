@@ -13,6 +13,16 @@ import { formatUsd } from "../src/format";
 import { TaskScreen } from "../src/task-screen";
 import { inJa, tJa } from "./lang";
 
+/** output_tail を持たない古い履歴（出力は手順の外の枠に出る） */
+const legacyTailEvents = {
+  ...taskEventsFixture,
+  events: taskEventsFixture.events.map((e) => {
+    if (e.type !== "command") return e;
+    const { output_tail: _omit, ...rest } = e;
+    return rest;
+  }),
+};
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const ID = taskDetailRunningFixture.task.task_id;
@@ -87,7 +97,7 @@ function server(script: Partial<Script> = {}) {
       return (script.detail ?? (() => json(200, taskDetailRunningFixture)))(detailN++);
     }
     if (url.pathname === `/dashboard/api/tasks/${ID}/events`) {
-      return (script.events ?? (() => json(200, taskEventsFixture)))(url, eventsN++);
+      return (script.events ?? (() => json(200, legacyTailEvents)))(url, eventsN++);
     }
     return json(404, { error: "not_found" });
   });
@@ -852,7 +862,7 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
     await mount(s, makeEnv(), () => {}, { cache });
     const got = cache.get(ID);
     expect(got?.detail).toEqual(taskDetailRunningFixture);
-    expect(got?.events).toEqual(taskEventsFixture.events);
+    expect(got?.events).toEqual(legacyTailEvents.events);
     expect(got?.hasOlder).toBe(false);
   });
 
@@ -863,12 +873,12 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
         ...taskDetailRunningFixture,
         output: { tail: "CACHED-TAIL", redacted: true },
       },
-      events: taskEventsFixture.events,
+      events: legacyTailEvents.events,
       hasOlder: false,
     });
     // 詳細が返らない間の表示を見る（events は返る）
     const hold = vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).includes("/events")) return json(200, taskEventsFixture);
+      if (String(input).includes("/events")) return json(200, legacyTailEvents);
       return never();
     });
     const { c } = await mount({ ...server(), fn: hold }, makeEnv(), () => {}, {
@@ -885,7 +895,7 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
     const cache = createDetailCache();
     cache.set(ID, {
       detail: { ...taskDetailRunningFixture, output: { tail: "CACHED-TAIL", redacted: true } },
-      events: taskEventsFixture.events,
+      events: legacyTailEvents.events,
       hasOlder: false,
     });
     const s = server({

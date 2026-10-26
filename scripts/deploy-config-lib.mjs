@@ -528,12 +528,36 @@ function fillJsonPlaceholder(text, name, value) {
   );
 }
 
+/**
+ * 雛形で 1 行に固定してある配列・オブジェクト（`"r2_buckets": [{ ... }]` など）に値を埋め込む行を、整形し直す。
+ * 値が長いと biome は展開するので、置換の結果が行幅を超えるなら formatJson を通す（収まるなら今まで通り 1 行）。
+ */
+function reformatStructuredLines(text, values) {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (line.trim().startsWith("//") || !PLACEHOLDER.test(line)) return line;
+      const m = /^(\s*)((?:"[^"\n]*": )?)([[{].*[\]}])(,?)$/.exec(line);
+      if (!m) return line;
+      let filled = m[3];
+      for (const [name, v] of Object.entries(values))
+        filled = filled.replaceAll(`<${name}>`, () => esc(v));
+      try {
+        return formatJson(JSON.parse(filled), `${m[1]}${m[2]}`, m[4], m[1]);
+      } catch {
+        return line;
+      }
+    })
+    .join("\n");
+}
+
 const HEADER =
   "// このファイルは `mise run deploy:config` が生成した（deploy.example/ の雛形 + rovo.config.json + infra.json）。直接編集しない。\n";
 
 function renderOne(app, text, values, overrides, jsonValues = {}) {
   let out = text;
   for (const [name, v] of Object.entries(jsonValues)) out = fillJsonPlaceholder(out, name, v);
+  out = reformatStructuredLines(out, values);
   for (const [name, v] of Object.entries(values)) out = out.replaceAll(`<${name}>`, () => esc(v));
   for (const [k, v] of Object.entries(overrides)) {
     const re = new RegExp(`^(\\s*"${k}":\\s*)"[^"]*"`, "m");

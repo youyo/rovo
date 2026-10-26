@@ -153,8 +153,12 @@ describe("回帰: 本番相当の入力から手書き相当の設定が出る",
 });
 
 describe("customDomain（任意の独自ドメイン）", () => {
-  const gen = (patch) =>
-    generateAll(validated({ ...productionLike(), ...patch }), infra, templates);
+  const gen = (patch, infraPatch = {}) =>
+    generateAll(
+      validated({ ...productionLike(), ...patch }),
+      { ...infra, ...infraPatch },
+      templates,
+    );
   const errs = (patch) => validateConfig({ ...productionLike(), ...patch }).errors;
   it("未設定: gateway の routes は [] で、agent / web には routes が出ない", () => {
     const o = gen({});
@@ -182,7 +186,7 @@ describe("customDomain（任意の独自ドメイン）", () => {
     assert.equal(r.status, 0, r.stderr);
     return r.stdout;
   };
-  for (const [label, patch] of [
+  for (const [label, patch, infraPatch] of [
     ["customDomain なし", {}],
     ["customDomain あり", { customDomain: "rovo.example.org", publicBaseUrl: undefined }],
     [
@@ -192,9 +196,16 @@ describe("customDomain（任意の独自ドメイン）", () => {
         publicBaseUrl: undefined,
       },
     ],
+    // 雛形で 1 行に固定した行（r2_buckets / durable_objects / kv_namespaces）も、値が長ければ biome は展開する
+    ["R2 のバケット名が最大長（63 文字）", {}, { archive_bucket_name: "r".repeat(63) }],
+    [
+      "gateway と agent の Worker 名が長い",
+      { workerNames: { gateway: "g".repeat(60), agent: "a".repeat(60), web: "w".repeat(60) } },
+    ],
+    ["KV の namespace id が長い", {}, { kv_namespace_id: "k".repeat(90) }],
   ]) {
     it(`${label}: 生成物が biome の整形と一致する（format しても差分が出ない）`, () => {
-      const o = gen(patch);
+      const o = gen(patch, infraPatch);
       for (const n of ["gateway", "agent", "web"]) assert.equal(o[n], biomeFormat(n, o[n]), n);
     });
   }

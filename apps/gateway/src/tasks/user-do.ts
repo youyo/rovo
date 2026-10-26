@@ -4,10 +4,16 @@ import { auditFromWorker } from "../audit-sink";
 import { isUserIdAllowed, loadAllowRules } from "../auth/allowlist";
 import {
   type ConsultFailure,
+  type ConsultToolsExtras,
   type ConsultValue,
   interpretConsult,
   unavailableFailure,
 } from "../consult-answer";
+import {
+  CONSULT_STEP_TIMEOUT_MS,
+  type ConsultToolsOutcome,
+  runConsultTools,
+} from "../consult-tools";
 import {
   randomToken,
   SESSION_ABSOLUTE_MS,
@@ -39,6 +45,7 @@ import {
 } from "../github";
 import { errorMessageForLog } from "../log-error";
 import { testConsultTiming, withTestScripts } from "../test-routes";
+import type { WebPort } from "../web/contract";
 import {
   consultBudgetUsd,
   consultToolsBudgetUsd,
@@ -53,9 +60,15 @@ import {
   RECONCILE_DELAYS_MS,
 } from "./gateway-cost";
 import { addColumnIfMissing } from "./sql-schema";
+import { parsePrices } from "./summary";
 import type { TaskDO } from "./task-do";
 import { isConsultId, isTaskId, ulid, ulidTime } from "./ulid";
-import { MAX_CONCURRENT_WAITERS, MAX_WAIT_SECONDS, WAIT_RETRY_AFTER_SECONDS } from "./validation";
+import {
+  type ConsultToolName,
+  MAX_CONCURRENT_WAITERS,
+  MAX_WAIT_SECONDS,
+  WAIT_RETRY_AFTER_SECONDS,
+} from "./validation";
 
 /** requests の保存期間。 */
 export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -110,6 +123,11 @@ const MAX_MEMBER_ATTEMPTS = 3;
 const MAX_RECONCILE_ATTEMPTS = 5;
 
 const MICRO = 1_000_000;
+
+/** 精算されない consult の予約を閉じるまでの時間。道具つき（task_budget.consult_tools = 1）は長い */
+function staleAfterMs(consultTools: number): number {
+  return consultTools === 1 ? CONSULT_TOOLS_STALE_AFTER_MS : CONSULT_STALE_AFTER_MS;
+}
 /** MONTHLY_BUDGET_USD が未設定・不正なときの月額上限（USD）。 */
 export const DEFAULT_MONTHLY_BUDGET_USD = 100;
 
@@ -128,6 +146,12 @@ export const CONSULT_BACKGROUND_TIMEOUT_MS = 5 * 60 * 1000;
  * 裏の上限より短いと、pending 中に閉じてしまう。
  */
 export const CONSULT_STALE_AFTER_MS = CONSULT_BACKGROUND_TIMEOUT_MS + 5 * 60 * 1000;
+/**
+ * 道具つきの consult（#135）の裏の上限。モデルの往復（1 歩 120 秒まで × 最大 6 歩）と web の呼び出しを含む。
+ * 期限切れ（予約額で閉じる）も、これに合わせて延ばす（task_budget.consult_tools の行だけ）
+ */
+export const CONSULT_TOOLS_BACKGROUND_TIMEOUT_MS = 10 * 60 * 1000;
+export const CONSULT_TOOLS_STALE_AFTER_MS = CONSULT_TOOLS_BACKGROUND_TIMEOUT_MS + 5 * 60 * 1000;
 /** 完了した consult の答え（consult_answer）を持つ期間。過ぎたら本文ごと捨てる（以後 not_found） */
 export const CONSULT_ANSWER_TTL_MS = 60 * 60 * 1000;
 /** 同時に開いておける consult の数（予約から精算まで）。超えたら concurrency_limit。暴走時の UserDO の負荷を抑える */
@@ -412,6 +436,12 @@ export class UserDO extends DurableObject<Env> {
     withTestScripts(this.env, this.env.AGENT_DO.getByName(consultId) as unknown as AgentRpc);
   /** 裏のモデル呼び出しを待つ上限（ms）。Unit が短くする */
   consultBackgroundTimeoutMs = CONSULT_BACKGROUND_TIMEOUT_MS;
+  /** 道具つきの consult の裏の上限（Unit が差し替える） */
+  consultToolsBackgroundTimeoutMs = CONSULT_TOOLS_BACKGROUND_TIMEOUT_MS;
+  /** 道具つきの consult の 1 歩を待つ上限（Unit が差し替える） */
+  consultStepTimeoutMs = CONSULT_STEP_TIMEOUT_MS;
+  /** 道具つきの consult が使う web（caller parent の WEB。Unit が差し替える） */
+  consultWeb: () => WebPort | undefined = () => (this.env as unknown as { WEB?: WebPort }).WEB;
   /** consult の答えを待っている呼び出し（メモリのみ。UserDO が作り直されたら消える。正本は consult_answer の行） */
   private consultWaiters = new Set<ConsultWaiter>();
 
@@ -1394,20 +1424,21 @@ export class UserDO extends DurableObject<Env> {
   private closeStaleConsults(at: number): void {
     const sql = this.ctx.storage.sql;
     const open = sql
-      .exec<{ task_id: string }>(
-        "SELECT task_id FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
+      .exec<{ task_id: string; consult_tools: number }>(
+        "SELECT task_id, consult_tools FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
       )
       .toArray();
     let closed = 0;
-    for (const { task_id } of open) {
+    for (const { task_id, consult_tools } of open) {
       const t = ulidTime(task_id.slice("consult-".length));
-      if (t === undefined || at - t < CONSULT_STALE_AFTER_MS) continue;
+      if (t === undefined || at - t < staleAfterMs(consult_tools)) continue;
       closed++;
       sql.exec(
         "UPDATE task_budget SET settled_micro = MAX(settled_micro, reserved_micro), settled_estimated = 1, closed = 1 WHERE task_id = ?",
         task_id,
       );
-      this.markConsultSettled(task_id);
+      // 道具つきは、歩の数と web の費用が分からないので、費用の確定（AI Gateway のログでの上書き）をしない（予約額のまま）
+      this.markConsultSettled(task_id, consult_tools === 1 ? { reconcile: false } : undefined);
       const settled = sql
         .exec<{ settled_micro: number }>(
           "SELECT settled_micro FROM task_budget WHERE task_id = ?",
@@ -1506,14 +1537,23 @@ export class UserDO extends DurableObject<Env> {
    * 待っている呼び出しを起こす。呼び出し側（gateway のリクエスト）の切断に左右されない。
    * 予約（reserveConsult）が開いていない consult は始めない。同じ consult の再送は、モデルを二重に呼ばない。
    */
-  async startConsult(request: ConsultRequest): Promise<ConsultStartResult> {
+  async startConsult(
+    request: ConsultRequest,
+    opts?: { tools?: ConsultToolName[] },
+  ): Promise<ConsultStartResult> {
     const consultId = request?.consultId;
     if (!isConsultId(consultId)) return { ok: false, code: "invalid_input" };
     const ownerId = Number(request.userId);
     if (!Number.isSafeInteger(ownerId)) return { ok: false, code: "invalid_input" };
+    // 道具（#135）。検査済みの名前だけ（consult サービスが入力を検証済み。念のため既知の名前に絞る）
+    const tools = (opts?.tools ?? []).filter(
+      (t, i, all): t is ConsultToolName =>
+        (t === "web_search" || t === "web_fetch") && all.indexOf(t) === i,
+    );
     // test のときだけ、E2E が裏の上限を縮める
     const backgroundMs =
-      (await testConsultTiming(this.env))?.backgroundTimeoutMs ?? this.consultBackgroundTimeoutMs;
+      (await testConsultTiming(this.env))?.backgroundTimeoutMs ??
+      (tools.length > 0 ? this.consultToolsBackgroundTimeoutMs : this.consultBackgroundTimeoutMs);
     const state = this.ctx.storage.transactionSync((): "not_found" | "exists" | "started" => {
       const sql = this.ctx.storage.sql;
       if (
@@ -1538,31 +1578,59 @@ export class UserDO extends DurableObject<Env> {
     if (state === "not_found") return { ok: false, code: "not_found" };
     if (state === "started") {
       // 完了まで待つ。待つ間は未完了の RPC が DO を生かす。waitUntil は念のため（失敗を握りつぶさない処理なので例外は出ない）
-      this.ctx.waitUntil(this.runConsult(request, backgroundMs));
+      this.ctx.waitUntil(this.runConsult(request, backgroundMs, tools));
       this.scheduleConsultDeadlineAlarm();
     }
     return { ok: true };
   }
 
-  /** 裏の処理。AgentDO.consult を上限まで待ち、完了処理に渡す。例外は出さない。 */
-  private async runConsult(request: ConsultRequest, backgroundMs: number): Promise<void> {
+  /**
+   * 裏の処理。AgentDO.consult を上限まで待ち、完了処理に渡す。例外は出さない。
+   * 道具つき（#135）は、往復（runConsultTools）を上限まで回す。上限を過ぎたら以後の歩・道具を呼ばず、予約額で精算する
+   */
+  private async runConsult(
+    request: ConsultRequest,
+    backgroundMs: number,
+    tools: ConsultToolName[] = [],
+  ): Promise<void> {
     let result: ConsultResult | undefined;
+    let toolsOutcome: ConsultToolsOutcome | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
     try {
+      const work: Promise<ConsultResult | undefined> =
+        tools.length > 0
+          ? runConsultTools(request, tools, {
+              step: (req) => this.consultAgent(request.consultId).consult(req),
+              consumeQuota: (kind) => this.consumeWebQuota(kind),
+              web: this.consultWeb(),
+              webPrices: (() => {
+                const p = parsePrices(this.env);
+                return { searchUsdPer1k: p.webUsdPer1kSearch, fetchUsdPer1k: p.webUsdPer1kFetch };
+              })(),
+              stepTimeoutMs: this.consultStepTimeoutMs,
+              stopped: () => stopped,
+            }).then((o) => {
+              toolsOutcome = o;
+              return o.result;
+            })
+          : this.consultAgent(request.consultId).consult(request);
       result = await Promise.race([
-        this.consultAgent(request.consultId).consult(request),
+        work,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("consult timeout")), backgroundMs);
         }),
       ]);
     } catch (e) {
       // 例外・時間切れは、実費が分からないので予約額で精算する（完了処理が undefined を実費不明として扱う）
+      stopped = true;
+      toolsOutcome = undefined;
       console.error("consult_error", e instanceof Error ? e.name : typeof e);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
     try {
-      await this.finishConsult(request, result);
+      await this.finishConsult(request, result, tools.length > 0, toolsOutcome);
     } catch (e) {
       // 保存と精算は同じ区間なので、失敗すれば両方とも起きていない（pending のまま。期限が予約額で閉じる）
       console.error("consult_finish_error", e instanceof Error ? e.name : typeof e);
@@ -1576,9 +1644,22 @@ export class UserDO extends DurableObject<Env> {
   private async finishConsult(
     request: ConsultRequest,
     result: ConsultResult | undefined,
+    withTools = false,
+    toolsOutcome?: ConsultToolsOutcome,
   ): Promise<void> {
     const consultId = request.consultId;
-    let outcome = interpretConsult(result, request.effort);
+    const extras: ConsultToolsExtras = {
+      ...(toolsOutcome?.toolsUsed ? { toolsUsed: toolsOutcome.toolsUsed } : {}),
+      ...(toolsOutcome?.toolsClosed ? { toolsClosed: toolsOutcome.toolsClosed } : {}),
+    };
+    let outcome = interpretConsult(result, request.effort, extras);
+    // 費用の確定（AI Gateway のログ）: 道具つきは往復の歩の数と web の費用を渡す。往復の結果が無い（上限切れ・例外）ときは
+    // 歩の数も web の費用も分からないので確定しない（予約額のまま）
+    const settleDetail = withTools
+      ? toolsOutcome
+        ? { modelCalls: Math.max(1, toolsOutcome.modelCalls), webMicro: toolsOutcome.webMicro }
+        : { reconcile: false }
+      : undefined;
     if (
       outcome.status === "done" &&
       new TextEncoder().encode(JSON.stringify(outcome.value)).length > CONSULT_ANSWER_MAX_BYTES
@@ -1598,7 +1679,12 @@ export class UserDO extends DurableObject<Env> {
         .exec<ConsultAnswerRow>("SELECT status FROM consult_answer WHERE consult_id = ?", consultId)
         .toArray()[0];
       if (row?.status !== "pending") return null;
-      const settled = this.settleConsultInSection(consultId, outcome.settleUsd, outcome.estimated);
+      const settled = this.settleConsultInSection(
+        consultId,
+        outcome.settleUsd,
+        outcome.estimated,
+        settleDetail,
+      );
       if (!settled.ok) return null;
       const costUsd = settled.settled_micro / MICRO;
       if (!settled.applied) {
@@ -1632,6 +1718,14 @@ export class UserDO extends DurableObject<Env> {
       cost_usd: done.costUsd,
       // 成功なのに usage が返らなかった（費用は呼ぶ前の見積りで精算した）
       ...(outcome.status === "done" && outcome.usageMissing ? { reason: "usage_missing" } : {}),
+      // 道具つき（#135）: 実行した web の回数
+      ...(withTools
+        ? {
+            kind: "tools",
+            web_search: toolsOutcome?.webSearch ?? 0,
+            web_fetch: toolsOutcome?.webFetch ?? 0,
+          }
+        : {}),
     });
   }
 
@@ -1757,13 +1851,13 @@ export class UserDO extends DurableObject<Env> {
     const consider = (t: number | undefined) => {
       if (t !== undefined && (next === undefined || t < next)) next = t;
     };
-    for (const { task_id } of sql
-      .exec<{ task_id: string }>(
-        "SELECT task_id FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
+    for (const { task_id, consult_tools } of sql
+      .exec<{ task_id: string; consult_tools: number }>(
+        "SELECT task_id, consult_tools FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
       )
       .toArray()) {
       const t = ulidTime(task_id.slice("consult-".length));
-      if (t !== undefined) consider(t + CONSULT_STALE_AFTER_MS);
+      if (t !== undefined) consider(t + staleAfterMs(consult_tools));
     }
     const expiry = sql
       .exec<{ t: number | null }>(

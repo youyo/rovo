@@ -17,6 +17,7 @@ import {
 import { taskListSchema } from "../tasks/task-list";
 import type { WebPort } from "../web/contract";
 import {
+  callWebWithQuota,
   isWebBrowseEnabled,
   mapWebError,
   shapeBrowseResult,
@@ -385,28 +386,28 @@ async function runWeb<R, V>(
   }
   const invalid = precheck?.() ?? null;
   if (invalid !== null) return { ok: false, error: { code: "invalid_input", message: invalid } };
-  const quota = await userDo.consumeWebQuota(kind);
-  if (!quota.ok) {
+  const r = await callWebWithQuota(
+    () => userDo.consumeWebQuota(kind),
+    () => call(web, String(principal.githubUserId)),
+  );
+  if (r.ok) return { ok: true, value: shape(r.value) };
+  if (r.reason === "quota") {
     return {
       ok: false,
       error: {
         code: "quota_exceeded",
-        message: `daily limit of ${quota.limit} web_${kind} calls reached (UTC); try again after 00:00 UTC`,
+        message: `daily limit of ${r.limit} web_${kind} calls reached (UTC); try again after 00:00 UTC`,
         retry_after_seconds: secondsUntilUtcMidnight(Date.now()),
       },
     };
   }
-  try {
-    const r = await call(web, String(principal.githubUserId));
-    return { ok: true, value: shape(r) };
-  } catch (e) {
-    const mapped = mapWebError(e);
-    // 内容は出さない（エラー名だけ）。想定外（internal）のときだけ記録する
-    if (mapped.code === "internal") {
-      console.error("mcp_tool_error", `web_${kind}`, e instanceof Error ? e.name : typeof e);
-    }
-    return { ok: false, error: mapped };
+  const mapped = mapWebError(r.error);
+  // 内容は出さない（エラー名だけ）。想定外（internal）のときだけ記録する
+  if (mapped.code === "internal") {
+    const e = r.error;
+    console.error("mcp_tool_error", `web_${kind}`, e instanceof Error ? e.name : typeof e);
   }
+  return { ok: false, error: mapped };
 }
 
 /**

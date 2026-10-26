@@ -84,6 +84,30 @@ export function isWebBrowseEnabled(env: { WEB_BROWSE_ENABLED?: unknown }): boole
   return typeof v === "string" && v.trim().toLowerCase() === "true";
 }
 
+/** 上限の消費と web の呼び出しの結果（quota は上限に達して呼ばなかった。error は呼んだが失敗した） */
+export type WebCallOutcome<R> =
+  | { ok: true; value: R }
+  | { ok: false; reason: "quota"; limit: number }
+  | { ok: false; reason: "error"; error: unknown };
+
+/**
+ * 日ごとの上限を 1 回分消費してから web を呼ぶ（MCP の web_search / web_fetch / web_browse と、道具つきの consult が共有する）。
+ * 上限に達していれば呼ばない。呼び出しが失敗しても消費は戻さない（課金と取得の副作用が起きうるため）。
+ * エラーの見せ方（MCP のエラー / モデルへのエラーの結果）は呼び出し側が決める。
+ */
+export async function callWebWithQuota<R>(
+  consume: () => { ok: boolean; limit: number } | Promise<{ ok: boolean; limit: number }>,
+  call: () => Promise<R>,
+): Promise<WebCallOutcome<R>> {
+  const quota = await consume();
+  if (!quota.ok) return { ok: false, reason: "quota", limit: quota.limit };
+  try {
+    return { ok: true, value: await call() };
+  } catch (error) {
+    return { ok: false, reason: "error", error };
+  }
+}
+
 /** web が設定の誤りで失敗したときの固定の文言（再試行を促さない） */
 export const WEB_MISCONFIGURED_MESSAGE =
   "web research is misconfigured on the operator side; retrying will not help (the operator must fix the configuration)";

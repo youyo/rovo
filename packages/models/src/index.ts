@@ -524,6 +524,12 @@ export function computeCostUsd(price: ModelPrice, usage: TokenUsage): number {
   );
 }
 
+export {
+  estimateCallCostUsd,
+  estimateTokens,
+  maxOutputTokensWithin,
+  REQUEST_OVERHEAD_TOKENS,
+} from "./estimate";
 // Sandbox コンテナの大きさと単価（D13）。deploy:config（scripts/*.mjs）も同じ表を読むので、依存のない別ファイルに置く。
 export {
   DEFAULT_MAX_SANDBOX_INSTANCE,

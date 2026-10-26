@@ -1,5 +1,6 @@
 import type { Effort } from "@rovo/models";
 import type { ConsultResult } from "./agent/contract";
+import { type ToolsClosed, type ToolsUsed, wrapUntrustedConsult } from "./consult-tools";
 import type { ErrorCode } from "./tasks/service";
 
 /**
@@ -7,7 +8,10 @@ import type { ErrorCode } from "./tasks/service";
  * 失敗の message は固定の文言にする（ワーカーの自由文を返さない。invalid_input の理由コードだけは従来どおり付ける）。
  */
 
-/** 成功の値（今の consult の応答と同じ形。フィールドを足さない） */
+/**
+ * 成功の値（今の consult の応答と同じ形）。道具（tools。#135）を指定した consult だけ、tools_used（モデルが道具を呼んだとき）と
+ * tools_closed（上限・予算・日ごとの上限で道具を閉じたとき）が付く。道具を使った答えの text は非信頼データとして囲む
+ */
 export type ConsultValue = {
   text: string;
   model: string;
@@ -15,7 +19,14 @@ export type ConsultValue = {
   cost_usd: number;
   /** 使った思考レベル */
   effort?: Effort;
+  /** モデルが呼んだ道具（web の回数と、呼び出しのクエリ・URL。長さは切り詰める） */
+  tools_used?: ToolsUsed;
+  /** 道具を途中で閉じた理由 */
+  tools_closed?: ToolsClosed;
 };
+
+/** 道具つきの consult の往復で分かったこと（interpretConsult が答えに載せる） */
+export type ConsultToolsExtras = { toolsUsed?: ToolsUsed; toolsClosed?: ToolsClosed };
 
 /** 失敗の中身（50 秒以内の失敗のエラーと、consult_result の failed の error で共通） */
 export type ConsultFailure = { code: ErrorCode; message: string; retry_after_seconds?: number };
@@ -28,7 +39,21 @@ export function isConsultResult(v: unknown): v is ConsultResult {
   const finiteCost = typeof r.costUsd === "number" && Number.isFinite(r.costUsd) && r.costUsd >= 0;
   if (r.ok === true) {
     const u = r.usage as Record<string, unknown> | undefined;
+    // 道具の呼び出し（#135）は、あれば id・name・argumentsJson の文字列の並び
+    const calls = r.toolCalls;
+    const callsOk =
+      calls === undefined ||
+      (Array.isArray(calls) &&
+        calls.every(
+          (c) =>
+            typeof c === "object" &&
+            c !== null &&
+            typeof (c as Record<string, unknown>).id === "string" &&
+            typeof (c as Record<string, unknown>).name === "string" &&
+            typeof (c as Record<string, unknown>).argumentsJson === "string",
+        ));
     return (
+      callsOk &&
       finiteCost &&
       typeof r.text === "string" &&
       typeof r.model === "string" &&
@@ -75,6 +100,8 @@ export function interpretConsult(
   result: ConsultResult | undefined,
   /** 依頼で渡した（または gateway が解決した）思考レベル。agent が effort を返さないときの値 */
   requestedEffort?: Effort,
+  /** 道具つきの consult（#135）の往復の結果 */
+  extras: ConsultToolsExtras = {},
 ): ConsultOutcome {
   if (result === undefined) {
     return { status: "failed", error: unavailableFailure(), settleUsd: null, estimated: true };
@@ -92,7 +119,8 @@ export function interpretConsult(
     return {
       status: "done",
       value: {
-        text: result.text,
+        // 道具を使った答えは、道具の結果（第三者が書いた web の内容）を読んだモデルの出力なので、非信頼データとして囲む
+        text: extras.toolsUsed ? wrapUntrustedConsult(result.text) : result.text,
         model: result.model,
         usage: {
           input: result.usage.input,
@@ -104,6 +132,8 @@ export function interpretConsult(
         ...((result.effort ?? requestedEffort) !== undefined
           ? { effort: (result.effort ?? requestedEffort) as Effort }
           : {}),
+        ...(extras.toolsUsed ? { tools_used: extras.toolsUsed } : {}),
+        ...(extras.toolsClosed ? { tools_closed: extras.toolsClosed } : {}),
       },
       settleUsd: result.costUsd,
       estimated,

@@ -69,14 +69,16 @@ describe("予算の欄（自分の予算と全員の実績を 1 つの欄にま�
     expect(dl.querySelectorAll(":scope > div > dd")).toHaveLength(4);
   });
 
-  it("「あと N 件始められます」を残す", () => {
+  it("「今すぐ同時に N 件始められます」を残す", () => {
     const c = mount();
-    expect(c.querySelector("[data-budget-startable]")?.textContent).toBe("あと 2 件始められます。");
+    expect(c.querySelector("[data-budget-startable]")?.textContent).toBe(
+      "今すぐ同時に 2 件始められます。",
+    );
     const zero = mount({
       ...overviewFixture,
       budget: { ...overviewFixture.budget, startable: 0 },
     });
-    expect(zero.textContent).toContain("あと 0 件始められます。");
+    expect(zero.textContent).toContain("今すぐ同時に 0 件始められます。");
   });
 
   it("上限は契約の monthly_budget_usd。残りが 0 でも出る", () => {

@@ -59,7 +59,7 @@ describe("ステータスバー（tmux 風。下に 1 行、狭いと折り返�
     const c = mount();
     // 上限は契約の monthly_budget_usd
     expect(item(c, "budget-me")?.textContent).toBe("今月 $11.40 / $49.90");
-    expect(item(c, "budget-left")?.textContent).toBe("残り $38.50  あと 2 件");
+    expect(item(c, "budget-left")?.textContent).toBe("残り $38.50  同時にあと 2 件");
   });
 
   it("今月の使用量のメーター（SVG。style 属性は使えない）: 使った額 / 上限の比率。上限が分からないときは出さない", () => {

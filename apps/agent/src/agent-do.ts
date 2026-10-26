@@ -1324,6 +1324,9 @@ export class AgentDO extends DurableObject<Env> {
   async consult(req: ConsultRequest): Promise<ConsultResult> {
     const name = this.ctx.id.name;
     try {
+      // 道具の往復（#135）では、前の歩の終わりに保存データ（テーブルごと）を消した同じインスタンスに、次の歩が来る。
+      // 使う前にテーブルを作り直す（冪等。終わったらまた消す）
+      this.store.ensureSchema();
       return await this.runConsult(name, req);
     } catch (e) {
       console.error("consult_error", e instanceof Error ? e.name : typeof e);

@@ -143,6 +143,38 @@ describe("AgentDO.consult: 道具つきの 1 歩（#135）", () => {
     expect(t.seen.toolResults[0]).toEqual(["[web_search] verdict: allow.\nresult text"]);
   });
 
+  it("同じインスタンスで続きの歩を頼める（1 歩ごとに保存データを消しても、次の歩が動く。UserDO は consultId の同じインスタンスに歩を頼む）", async () => {
+    const t = setup({ tools: TOOLS });
+    const script = [
+      {
+        toolCall: { name: "web_search", arguments: { query: "q" } },
+        usage: { input: 10, output: 1 },
+      },
+      { text: "final", usage: { input: 20, output: 2 } },
+    ];
+    await t.stub.setScript(t.question, script);
+    const first = asOk(await t.stub.consult(t.request));
+    const call = first.toolCalls?.[0];
+    expect(call?.name).toBe("web_search");
+    await t.stub.setScript(t.question, script);
+    const second = asOk(
+      await t.stub.consult({
+        ...t.request,
+        transcript: [
+          { role: "assistant", content: "", toolCalls: first.toolCalls ?? [] },
+          {
+            role: "toolResult",
+            toolCallId: call?.id ?? "",
+            toolName: "web_search",
+            content: "[web_search] verdict: allow.\nx",
+            isError: false,
+          },
+        ],
+      }),
+    );
+    expect(second.text).toBe("final");
+  });
+
   it("道具を渡すとき・途中の会話があるときは、rovo の固定の安全の節を利用者の system より前に付ける", async () => {
     const t = setup({ tools: TOOLS });
     await t.stub.setScript(t.question, [{ text: "ok" }]);

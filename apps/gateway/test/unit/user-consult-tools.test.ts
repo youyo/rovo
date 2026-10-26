@@ -318,6 +318,8 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
           { name: "web_browse", args: { url: "https://a.example.com/" } },
           { name: "web_search", args: {} },
           { name: "web_fetch", args: { url: "https://a.example.com/" } },
+          // 禁止先（private なアドレス）は web を呼ばずに引数の誤り（MCP の web_fetch と同じ判定。日ごとの上限も消費しない）
+          { name: "web_fetch", args: { url: "http://127.0.0.1/admin" } },
         ]),
         okResult({ text: "done" }),
       ],
@@ -335,6 +337,11 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
       true,
       true,
       true,
+      true,
+    ]);
+    expect(f.web.fetches).toHaveLength(0);
+    expect(await sql(f.stub, "SELECT kind, count FROM web_usage")).toEqual([
+      { kind: "fetch", count: 1 },
     ]);
     const text = JSON.stringify(results);
     expect(text).toContain("unknown_tool");

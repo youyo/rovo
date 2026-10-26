@@ -11,6 +11,7 @@ import {
   formatWebSearch,
   type WebToolResult,
 } from "@rovo/web-format";
+import { checkUrl } from "../../web/src/url-policy";
 import type {
   ConsultRequest,
   ConsultResult,
@@ -202,9 +203,12 @@ function parseArgs(tool: ConsultToolName, json: string): ArgsOf {
     return { ok: true, tool, query: q };
   }
   const url = o.url;
-  if (typeof url !== "string" || url.length > MAX_URL_LENGTH || !/^https?:\/\//i.test(url)) {
+  if (typeof url !== "string" || url.length > MAX_URL_LENGTH) {
     return { ok: false, message: "url must be an http or https URL" };
   }
+  // MCP の web_fetch と同じ判定（禁止先・形の誤り）。日ごとの上限を消費する前に断る
+  const c = checkUrl(url);
+  if (!c.ok) return { ok: false, message: c.message };
   return { ok: true, tool, url };
 }
 

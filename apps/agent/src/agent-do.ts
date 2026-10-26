@@ -1455,9 +1455,10 @@ export class AgentDO extends DurableObject<Env> {
       maxTokens,
       metadata: { userId: req.userId, consultId: req.consultId, caller: "consult" },
       ...(reasoning !== undefined ? { reasoning } : {}),
-      // 道具の往復の歩では、最後のメッセージ（道具の結果）にもキャッシュのブレークポイントを置く
+      // 道具の往復の歩（道具を渡す歩）では、最後のメッセージ（道具の結果）にもキャッシュのブレークポイントを置く。
+      // 道具を閉じた最後の歩は次が無いので置かない
       onPayload: (payload: unknown, m: Model<Api>) =>
-        applyConsultCacheControl(m, payload, { lastMessage: transcript !== undefined }),
+        applyConsultCacheControl(m, payload, { lastMessage: tools !== undefined }),
       now: this.now(),
     });
     if (step.kind === "timeout") throw new Error("consult model step failed");

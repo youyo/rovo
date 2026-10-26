@@ -5,6 +5,8 @@ on:
   workflow_dispatch:
 jobs:
   arch:
+    # upstream（公開）専用。下流の private リポジトリに取り込まれても、コードの解析結果を外部へ送らない。
+    if: github.repository == 'youyo/rovo'
     runs-on: ubuntu-latest
     permissions:
       contents: read

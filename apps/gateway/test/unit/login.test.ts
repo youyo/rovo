@@ -323,7 +323,7 @@ describe("POST /authorize（同意の送信）", () => {
     },
   );
 
-  it.each(["GITHUB_APP_CLIENT_ID", "GITHUB_APP_CLIENT_SECRET", "ALLOWED_ORG", "ALLOWED_TEAM"])(
+  it.each(["GITHUB_APP_CLIENT_ID", "GITHUB_APP_CLIENT_SECRET", "ALLOWED_ORG"])(
     "%s が未設定ならログインを開始しない",
     async (name) => {
       const { env, provider } = makeEnv({ [name]: "" });
@@ -333,6 +333,15 @@ describe("POST /authorize（同意の送信）", () => {
       expect(provider.beginUpstream).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("POST /authorize: org だけの許可ルール", () => {
+  it("ALLOWED_TEAM が空でもログインを開始する（org の全員を許可）", async () => {
+    const { env, provider } = makeEnv({ ALLOWED_TEAM: "" });
+    const res = await post(env, approveForm());
+    expect(res.status).not.toBe(500);
+    expect(provider.beginUpstream).toHaveBeenCalled();
+  });
 });
 
 describe("GET /callback", () => {
@@ -511,7 +520,6 @@ describe("ALLOWED_USER_IDS（数値の user ID の許可リスト）", () => {
   });
 
   it.each([
-    ["org だけ + 一致する ID", { ALLOWED_TEAM: "", ALLOWED_USER_IDS: "1001" }],
     ["team だけ + 一致する ID", { ALLOWED_ORG: "", ALLOWED_USER_IDS: "1001" }],
     ["ID が不正（空要素）", { ...NO_TEAM, ALLOWED_USER_IDS: "1001,,2" }],
     ["ID が不正（重複）", { ...NO_TEAM, ALLOWED_USER_IDS: "1001,1001" }],

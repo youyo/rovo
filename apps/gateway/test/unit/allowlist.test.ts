@@ -26,7 +26,7 @@ describe("loadAllowRules: ALLOWED_USER_IDS の解析", () => {
       expect(r).toBeNull();
     } else {
       expect(r).not.toBeNull();
-      expect(r?.team).toBeNull();
+      expect(r?.membership).toBeNull();
       expect([...(r?.userIds ?? [])]).toEqual(expected);
     }
   });
@@ -34,16 +34,26 @@ describe("loadAllowRules: ALLOWED_USER_IDS の解析", () => {
 
 describe("loadAllowRules: ルールの組み合わせ", () => {
   it("ID だけ: 有効", () => {
-    expect(loadAllowRules({ ALLOWED_USER_IDS: "10" })?.team).toBeNull();
+    expect(loadAllowRules({ ALLOWED_USER_IDS: "10" })?.membership).toBeNull();
   });
   it("org/team だけ: 有効", () => {
     const r = loadAllowRules({ ALLOWED_ORG: "acme", ALLOWED_TEAM: "core" });
-    expect(r?.team).toEqual({ org: "acme", team: "core" });
+    expect(r?.membership).toEqual({ org: "acme", team: "core" });
     expect(r?.userIds).toBeNull();
+  });
+  it("org だけ: 有効（org の全員を許可。team は null）", () => {
+    const r = loadAllowRules({ ALLOWED_ORG: "acme" });
+    expect(r?.membership).toEqual({ org: "acme", team: null });
+    expect(r?.userIds).toBeNull();
+  });
+  it("org だけ（team が空文字）+ ID: 有効で OR", () => {
+    const r = loadAllowRules({ ALLOWED_ORG: "acme", ALLOWED_TEAM: "", ALLOWED_USER_IDS: "10" });
+    expect(r?.membership).toEqual({ org: "acme", team: null });
+    expect(r?.userIds?.has(10)).toBe(true);
   });
   it("両方: 有効", () => {
     const r = loadAllowRules({ ALLOWED_ORG: "acme", ALLOWED_TEAM: "core", ALLOWED_USER_IDS: "10" });
-    expect(r?.team).toEqual({ org: "acme", team: "core" });
+    expect(r?.membership).toEqual({ org: "acme", team: "core" });
     expect(r?.userIds?.has(10)).toBe(true);
   });
   it.each<[string, E]>([
@@ -53,15 +63,10 @@ describe("loadAllowRules: ルールの組み合わせ", () => {
     expect(loadAllowRules(env)).toBeNull();
   });
   it.each<[string, E]>([
-    ["org だけ", { ALLOWED_ORG: "acme" }],
     ["team だけ", { ALLOWED_TEAM: "core" }],
-    ["org だけ + 有効な ID", { ALLOWED_ORG: "acme", ALLOWED_USER_IDS: "10" }],
     ["team だけ + 有効な ID", { ALLOWED_TEAM: "core", ALLOWED_USER_IDS: "10" }],
-    [
-      "org だけ（team が空文字）+ 有効な ID",
-      { ALLOWED_ORG: "acme", ALLOWED_TEAM: "", ALLOWED_USER_IDS: "10" },
-    ],
-  ])("片方だけの org/team は ID が有効でも不正（fail closed）: %s", (_n, env) => {
+    ["team だけ（org が空文字）", { ALLOWED_ORG: "", ALLOWED_TEAM: "core" }],
+  ])("team だけ（org なし）は ID が有効でも不正（fail closed）: %s", (_n, env) => {
     expect(loadAllowRules(env)).toBeNull();
   });
   it("org/team が完全でも、ID が不正なら全体が不正", () => {

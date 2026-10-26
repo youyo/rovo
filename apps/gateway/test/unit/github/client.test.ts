@@ -390,3 +390,54 @@ describe("findWritableRepository", () => {
     expect(await codeOf(client.findWritableRepository("t", "nonsense"))).toBe("forbidden");
   });
 });
+
+describe("org 所属（GET /user/memberships/orgs/{org}。トークンの持ち主の所属）", () => {
+  const path = "GET /user/memberships/orgs/my-org";
+  const args = { org: "my-org" };
+
+  it("active", async () => {
+    const { client } = make({ [path]: () => json({ state: "active", role: "member" }) });
+    expect(await client.getOrgMembership("t", args)).toBe("active");
+    expect(await client.isActiveOrgMember("t", args)).toBe(true);
+  });
+
+  it("pending（招待中）は許可しない", async () => {
+    const { client } = make({ [path]: () => json({ state: "pending", role: "member" }) });
+    expect(await client.getOrgMembership("t", args)).toBe("pending");
+    expect(await client.isActiveOrgMember("t", args)).toBe(false);
+  });
+
+  it("404（所属していない・外部コラボレーター）は所属なし", async () => {
+    const { client } = make({ [path]: () => json({ message: "Not Found" }, { status: 404 }) });
+    expect(await client.getOrgMembership("t", args)).toBe("none");
+    expect(await client.isActiveOrgMember("t", args)).toBe(false);
+  });
+
+  it("未知の state・state 無しは所属なし扱い（fail closed）", async () => {
+    for (const body of [{ state: "weird" }, {}]) {
+      const { client } = make({ [path]: () => json(body) });
+      expect(await client.isActiveOrgMember("t", args)).toBe(false);
+    }
+  });
+
+  it("401 / 403 / 5xx は例外（分類つき。黙って所属なしにしない）", async () => {
+    for (const [status, code] of [
+      [401, "reauth_required"],
+      [403, "forbidden"],
+      [500, "upstream_unavailable"],
+      [429, "upstream_unavailable"],
+    ] as const) {
+      const { client } = make({ [path]: () => json({}, { status }) });
+      expect(await codeOf(client.isActiveOrgMember("t", args))).toBe(code);
+      expect(await codeOf(client.getOrgMembership("t", args))).toBe(code);
+    }
+  });
+
+  it("org はエンコードされる", async () => {
+    const { client, calls } = make({
+      "GET /user/memberships/orgs/o%2Fx": () => json({ state: "active" }),
+    });
+    await client.getOrgMembership("t", { org: "o/x" });
+    expect(calls).toHaveLength(1);
+  });
+});

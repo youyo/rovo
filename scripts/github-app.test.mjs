@@ -39,7 +39,7 @@ describe("manifest", () => {
       name: "rovo-acme-ab12",
       publicBaseUrl: base.publicBaseUrl,
       redirectUrl: "http://127.0.0.1:5555/callback",
-      team: false,
+      members: false,
     });
     assert.deepEqual(m, {
       name: "rovo-acme-ab12",
@@ -60,12 +60,12 @@ describe("manifest", () => {
       setup_on_update: false,
     });
   });
-  it("team を使うときだけ Members: read を足す", () => {
+  it("org の所属を確かめるとき（allowed.org がある）だけ Members: read を足す", () => {
     const m = buildManifest({
       name: "n",
       publicBaseUrl: base.publicBaseUrl,
       redirectUrl: "http://127.0.0.1:1/callback",
-      team: true,
+      members: true,
     });
     assert.equal(m.default_permissions.members, "read");
   });
@@ -198,6 +198,10 @@ const CONFIG_TEXT = `{
   "allowed": { "userIds": ["1001"] }
 }
 `;
+const CONFIG_ORG_ONLY_TEXT = CONFIG_TEXT.replace(
+  '"allowed": { "userIds": ["1001"] }',
+  '"allowed": { "org": "acme-org" }',
+);
 const CONFIG_ORG_TEXT = CONFIG_TEXT.replace(
   '"allowed": { "userIds": ["1001"] }',
   '"allowed": { "org": "acme-org", "team": "devs" }',
@@ -338,6 +342,14 @@ describe("フロー", () => {
     assert.match(r.out, /installations\/new/);
     assert.match(r.out, /User-to-server token expiration|Expire user authorization tokens/);
     assert.match(r.out, new RegExp(`/settings/apps/${FAKE_APP.slug}`));
+  });
+
+  it("allowed.org だけ（team なし）でも Members: read を宣言する", async () => {
+    writeFileSync(join(work, "rovo.config.json"), CONFIG_ORG_ONLY_TEXT);
+    const r = await run(["--no-deploy"]);
+    assert.equal(r.code, 0, r.out);
+    const b = JSON.parse(lines("browser.log").at(-1));
+    assert.equal(b.manifest.default_permissions.members, "read");
   });
 
   it("allowed.org があれば、組織の画面に作る。--personal で個人に、--org で上書きできる", async () => {

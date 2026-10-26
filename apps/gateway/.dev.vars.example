@@ -37,7 +37,8 @@ GITHUB_APP_PRIVATE_KEY=
 # MODEL_EFFORTS=anthropic/claude-sonnet-5-5=medium,anthropic/claude-haiku-5-5=off
 
 # ログインとツール呼び出しを許可する範囲。次の 2 つのうち少なくとも 1 つを設定する（どちらかを満たせば許可）。
-# 1. org と team（slug）。対で設定する。片方だけだと設定の誤りとしてログインできない
+# 1. org（slug）だけなら、その org の active メンバー全員を許可する。org と team（slug）を両方設定すれば、その team の active メンバーだけ。
+#    team だけ（org なし）は設定の誤りとしてログインできない
 ALLOWED_ORG=
 ALLOWED_TEAM=
 # 2. GitHub の数値の user ID（カンマ区切り。個人で使うときはこちら）。自分の ID: gh api user --jq .id

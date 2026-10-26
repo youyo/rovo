@@ -628,7 +628,7 @@ export class UserDO extends DurableObject<Env> {
     const rules = loadAllowRules(this.env);
     if (!rules) return "denied";
     if (isUserIdAllowed(rules, githubUserId)) return "allowed";
-    if (!rules.team) return "denied";
+    if (!rules.membership) return "denied";
     const member = await this.ensureMember(githubUserId);
     if (member.ok) return "allowed";
     return member.code === "forbidden" || member.code === "reauth_required"
@@ -2411,11 +2411,13 @@ export class UserDO extends DurableObject<Env> {
       if (user.id !== githubUserId) return "mismatch" as const;
       // user ID のルールは、その場で取得した user.id で判定する（通れば team の確認は不要）
       if (isUserIdAllowed(rules, user.id)) return "active" as const;
-      // ID で通らず、org/team の対が設定されているときだけ team を確認する。無ければ拒否
-      if (!rules.team) return "none" as const;
+      // ID で通らず、org のルールが設定されているときだけ所属を確認する（team があれば team、無ければ org）。無ければ拒否
+      const { membership } = rules;
+      if (!membership) return "none" as const;
+      if (membership.team === null) return client.getOrgMembership(tok, { org: membership.org });
       return client.getTeamMembership(tok, {
-        org: rules.team.org,
-        teamSlug: rules.team.team,
+        org: membership.org,
+        teamSlug: membership.team,
         username: user.login,
       });
     });

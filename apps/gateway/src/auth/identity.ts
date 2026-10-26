@@ -24,7 +24,7 @@ export interface LoginConfig {
 export function loadConfig(env: Env, deps: LoginDeps): LoginConfig | null {
   const { GITHUB_APP_CLIENT_ID: id, GITHUB_APP_CLIENT_SECRET: secret } = env;
   if (!id || !secret || !env.PUBLIC_BASE_URL) return null;
-  // org/team と user ID の許可ルール。不正・不足（org/team の片方だけ、ID の不正な要素など）なら null
+  // org/team と user ID の許可ルール。不正・不足（team だけ、ID の不正な要素など）なら null
   const rules = loadAllowRules(env);
   if (!rules) return null;
   let urls: ReturnType<typeof resolveGitHubBaseUrls>;
@@ -68,16 +68,20 @@ export async function verifyIdentity(
   try {
     const tokens = await config.client.exchangeCode({ code, redirectUri: config.redirectUri });
     const user = await config.client.getUser(tokens.accessToken);
-    // user ID のルールは GET /user で得た id で判定する。通らず、org/team の対があるときだけ team を確認する
+    // user ID のルールは GET /user で得た id で判定する。通らず、org のルールがあるときだけ所属を確認する
+    // （team があれば team、無ければ org の active メンバー）
     const { rules } = config;
+    const { membership } = rules;
     const member =
       isUserIdAllowed(rules, user.id) ||
-      (rules.team !== null &&
-        (await config.client.isActiveTeamMember(tokens.accessToken, {
-          org: rules.team.org,
-          teamSlug: rules.team.team,
-          username: user.login,
-        })));
+      (membership !== null &&
+        (membership.team !== null
+          ? await config.client.isActiveTeamMember(tokens.accessToken, {
+              org: membership.org,
+              teamSlug: membership.team,
+              username: user.login,
+            })
+          : await config.client.isActiveOrgMember(tokens.accessToken, { org: membership.org })));
     if (!member) {
       await auditFromWorker(env, "authz_denied", {
         userId: user.id,

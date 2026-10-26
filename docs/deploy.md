@@ -105,7 +105,7 @@ GitHub の公式の manifest フロー（[Registering a GitHub App from a manife
 | 6 | **人（ブラウザ）** | 開いた Install のページ（`https://github.com/apps/<slug>/installations/new`）で、対象の org / リポジトリに入れる |
 | 7 | **人（ブラウザ）** | App の設定画面（Optional features）で **User-to-server token expiration**（「ユーザートークンに期限を付ける」）が有効なことを確かめる。manifest では指定できない（docs に記載が無い）。無効でも動く（6） |
 
-manifest の内容: `name` は `rovo-<namePrefix>-<乱数>`（GitHub 全体で一意。`--name` で指定）、`url` は `publicBaseUrl`、`callback_urls` は `<publicBaseUrl>/callback`、`request_oauth_on_install: false`、`public: false`、`hook_attributes: { url: publicBaseUrl, active: false }`（Webhook は使わない）、`default_permissions` は Contents: write / Pull requests: write / Metadata: read（`allowed.team` を使うときだけ Members: read を足す）、`default_events: []`、`setup_on_update: false`。
+manifest の内容: `name` は `rovo-<namePrefix>-<乱数>`（GitHub 全体で一意。`--name` で指定）、`url` は `publicBaseUrl`、`callback_urls` は `<publicBaseUrl>/callback`、`request_oauth_on_install: false`、`public: false`、`hook_attributes: { url: publicBaseUrl, active: false }`（Webhook は使わない）、`default_permissions` は Contents: write / Pull requests: write / Metadata: read（`allowed.org` を使うとき、org だけでも team 付きでも、Members: read を足す）、`default_events: []`、`setup_on_update: false`。
 
 - **何も書かずに止まる場合**: 待ち時間切れ（既定 15 分。manifest の code は 1 時間で失効する）、state の不一致、`code` が無い、conversions の失敗や応答の欠け。止まるときは `rovo.config.json` も secret も変えない。GitHub 側に App が作られていたら、GitHub の画面で削除してやり直す。
 - **secret の put に失敗した場合**: `rovo.config.json` を変えずに止まる（client secret と秘密鍵は保存していないので、その App は使えない。削除してやり直す）。
@@ -134,7 +134,7 @@ AI Gateway にプロバイダーのキーを、エイリアス `default` で登�
 | `customDomain` | | なし（workers.dev のまま） | 任意の独自ドメイン（ホスト名だけ。小文字で、スキーム・パス・ポート・末尾のドットなし、ドットを 1 つ以上含む。例 `rovo.example.com`）。gateway の `routes` に `[{ "pattern": "<host>", "custom_domain": true }]` が出る（未設定は `[]`）。既定では workers.dev の URL も使える（止めるなら `workersDev`）。agent・web には出ない。手順は下の「独自ドメインを使う」 |
 | `workersDev` | | `true` | gateway の workers.dev の URL（と preview / version の URL）を有効にするか（boolean）。`false` で gateway の `workers_dev` と `preview_urls` が `false` になる。`false` には `customDomain` が要る（無いとエラー。gateway に届く URL が無くなるため）。agent・web は常に `false` で変わらない。手順は下の「独自ドメインを使う」 |
 | `githubApp.id` / `.clientId` | 後で可 | 空 | `GITHUB_APP_ID` / `GITHUB_APP_CLIENT_ID`。空のあいだはログインできない（fail closed） |
-| `allowed.org` / `.team` / `.userIds` | どちらか必須 | | `ALLOWED_ORG` / `ALLOWED_TEAM`（対）/ `ALLOWED_USER_IDS`（数値の ID の配列かカンマ区切り） |
+| `allowed.org` / `.team` / `.userIds` | どちらか必須 | | `ALLOWED_ORG` / `ALLOWED_TEAM`（`org` だけなら org の全員を許可。`team` だけは不可）/ `ALLOWED_USER_IDS`（数値の ID の配列かカンマ区切り） |
 | `budget.monthlyUsd` / `.taskUsd` / `.consultUsd` | | 100 / 10 / 0.5 | `MONTHLY_BUDGET_USD` / `TASK_BUDGET_USD` / `CONSULT_BUDGET_USD` |
 | `concurrency.maxTasks` | | 2 | `MAX_CONCURRENT_TASKS`。利用者ごとに同時に実行できるタスクの上限（1 以上の整数。それ以外・未知のキーはエラー） |
 | `models.default` / `.list` / `.efforts` | | 雛形のとおり | `AGENT_MODEL` / `AGENT_MODELS`（配列かカンマ区切り）/ `MODEL_EFFORTS`（`{モデルの id: レベル}` か文字列）。**gateway と agent の同名の var に同じ値が入る** |
@@ -238,8 +238,8 @@ ROVO_DEPLOY_DIR=deploy mise run deploy:all
 | `ENVIRONMENT` | gateway / agent / web | 既定 `production` | `production` | `test` は E2E 専用。**本番で `test` にしない**（本番で GitHub の接続先の上書きを指定すると起動時に拒否される） |
 | `PUBLIC_BASE_URL` | gateway | 必須 | `https://<YOUR_GATEWAY_HOST>` | 公開 URL。OAuth の issuer と `/mcp` の resource、GitHub のコールバック URL（`<PUBLIC_BASE_URL>/callback`）になる。本番は `https` |
 | `GITHUB_APP_CLIENT_ID` | gateway | 必須 | `<YOUR_GITHUB_APP_CLIENT_ID>` | GitHub App の Client ID（秘密ではない）。空だとログインは失敗する（fail closed） |
-| `ALLOWED_ORG` | gateway | org/team か `ALLOWED_USER_IDS` のどちらかが必須（org/team は対） | `<YOUR_ORG>` | ログインと全ツール呼び出しを許す org の slug。`ALLOWED_TEAM` と対で設定する。**片方だけ設定すると設定の誤りとしてログインできない**（`ALLOWED_USER_IDS` に切り替わらない） |
-| `ALLOWED_TEAM` | gateway | 同上 | `<YOUR_TEAM>` | 許す team の slug。ワーカー team のメンバーも許可される。`ALLOWED_ORG` と対 |
+| `ALLOWED_ORG` | gateway | `ALLOWED_ORG` か `ALLOWED_USER_IDS` のどちらかが必須 | `<YOUR_ORG>` | ログインと全ツール呼び出しを許す org の slug。**`ALLOWED_TEAM` を空にすると、その org の active メンバー全員を許可する**（招待中・外部コラボレーターは不可）。`ALLOWED_TEAM` だけ設定する（org なし）と設定の誤りとしてログインできない（`ALLOWED_USER_IDS` に切り替わらない） |
+| `ALLOWED_TEAM` | gateway | 同上 | `<YOUR_TEAM>` | 許す team の slug（任意）。設定すると org 全員ではなく、この team の active メンバーだけを許す。ワーカー team のメンバーも許可される。`ALLOWED_ORG` が要る |
 | `ALLOWED_USER_IDS` | gateway | org/team か `ALLOWED_USER_IDS` のどちらかが必須 | `<YOUR_GITHUB_USER_ID>`（複数はカンマ区切り） | ログインと全ツール呼び出しを許す GitHub の**数値の user ID**。個人アカウントには team が無いので、個人で使うときはこちらを使う。自分の ID は `gh api user --jq .id`。login（ユーザー名）は改名でき、空いた名前を他人が取れるので使わない。前後の空白は無視する。**1 つでも不正な要素（数字以外・0・重複・空要素）があれば、設定全体が不正としてログインできない**（不正な要素を読み飛ばさない）。org/team と両方を設定した場合は、どちらかを満たせば許可する。ID で許可する場合も、トークンの持ち主の確認（`GET /user`）は省略しない |
 | `GITHUB_APP_ID` | gateway | 必須 | `<YOUR_GITHUB_APP_ID>` | GitHub App の App ID（秘密ではない）。Installation Token の発行に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる |
 | `DRAFT_PR_FALLBACK` | gateway | 任意 | `fail` | Draft PR を作れないリポジトリ（Free プランの private など）での扱い。`fail`（既定）/ `ready`。不正な値は `fail` |
@@ -324,7 +324,7 @@ web に secret は無い（GitHub のトークンも Anthropic のキーも持�
   - `task_pr_merge` は、マージの前に PR の head の commit に付いた GitHub の check を読む（`GET .../commits/{sha}/check-runs` と `GET .../commits/{sha}/status`）。これに **Checks: Read-only** と **Commit statuses: Read-only** が要る（manifest で自動で付く。すでに作った App は、App の設定で権限を足して、Install した org / アカウントで承認する）。この 2 つの権限は**任意**: 無い・読めない（403・5xx・ネットワークの失敗）ときは、マージを止めずに通し、応答の `warnings` に `checks_unreadable` を入れる（止めるかどうかは GitHub のブランチルールの責務）。足すと CI の結果を確かめられる。失敗している check があれば `merge_blocked`（`checks_failing`）、実行中・保留なら `merge_blocked`（`checks_pending`）。**check が 1 つも無ければ通る**（厳しくしたいときは GitHub のブランチ保護を使う）
   - `task_pr_ready` / `task_pr_merge`（D9）は、**Installation Token ではなく、利用者の GitHub のユーザートークン**で行うので、有効な権限は「App の権限」と「利用者本人の権限」の共通部分になる。Draft → Ready（GraphQL の `markPullRequestReadyForReview`）とマージ（`PUT .../pulls/{n}/merge`）には **Pull requests: write** と **Contents: write** が、`delete_branch`（`DELETE .../git/refs/heads/{branch}`）には **Contents: write** が要る。App の権限が read になっていると `forbidden` になる。利用者にそのリポジトリへの書き込み権限が無い場合も同じ。権限の表は GitHub の記述に基づくので、実機の受入（[acceptance.md](specs/acceptance.md) の 21 節）で確かめる
   - ブランチ保護（必須レビュー・必須チェック・ruleset）は GitHub が利用者のトークンに対して適用する。`review_policy` によらず、保護に拒否されたら `merge_blocked` になり、マージされない（組織としての強制は GitHub に任せる）
-- **Organization permissions**: Members: Read-only（team 所属の確認に使う。`ALLOWED_USER_IDS` だけで認可する個人利用では使わない）
+- **Organization permissions**: Members: Read-only（org 単独（org の全員を許可）でも team 付きでも、所属の確認に使う。権限は同じ。`ALLOWED_USER_IDS` だけで認可する個人利用では使わない）
 - App を対象の org / リポジトリに **Install** する。個人アカウントのリポジトリでも、`task_start` の Installation と push 権限の確認はそのまま動く（`ALLOWED_USER_IDS` で認可した利用者は、org の Members 権限を使わない）。`task_start` は、利用者のトークンで見える Installation に対象リポジトリが含まれ、利用者に push 権限があるときだけ成功する（公開リポジトリでも App が未導入なら `forbidden`）
 
 **秘密鍵の変換**: GitHub がダウンロードさせる鍵は PKCS#1（`BEGIN RSA PRIVATE KEY`）。gateway は PKCS#8 を受け付ける。`mise run deploy:secrets -- --pem <.pem>`（または `setup`）が、`openssl pkcs8 -topk8 -nocrypt` で変換して標準入力で `wrangler secret put` に流す（変換後のファイルは作らない）。鍵のファイルはリポジトリに置かない。手で行うなら:
@@ -488,7 +488,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 
 | 症状 | 原因 |
 |---|---|
-| ログインできない | `ALLOWED_ORG` / `ALLOWED_TEAM` / `ALLOWED_USER_IDS` のどのルールも設定されていない、`ALLOWED_ORG` と `ALLOWED_TEAM` の片方だけ、`ALLOWED_USER_IDS` に不正な要素がある、または許可されていない。`GITHUB_APP_CLIENT_ID` が空 |
+| ログインできない | `ALLOWED_ORG` / `ALLOWED_TEAM` / `ALLOWED_USER_IDS` のどのルールも設定されていない、`ALLOWED_TEAM` だけで `ALLOWED_ORG` が無い、`ALLOWED_USER_IDS` に不正な要素がある、または許可されていない。`GITHUB_APP_CLIENT_ID` が空 |
 | `task_start` が `github_app_not_configured` で FAILED | `GITHUB_APP_ID` または `GITHUB_APP_PRIVATE_KEY` が未設定 |
 | `task_start` が `ai_gateway_not_configured` で拒否される | agent の `AI_GATEWAY_ID` が空 |
 | `task_start` が `forbidden` | App が対象リポジトリに未導入、または push 権限が無い |

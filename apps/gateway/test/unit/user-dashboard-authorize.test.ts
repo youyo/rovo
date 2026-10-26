@@ -108,6 +108,49 @@ describe("authorizeDashboardSession（セッション + 許可ルールの確か
     expect(gh.calls.length).toBe(n);
   });
 
+  it("org だけのルール: active は ok、pending・none・403 は unauthenticated、5xx は unavailable", async () => {
+    const { uid, gh, stub, session } = await setup();
+    await patchEnv(stub, { ALLOWED_ORG: "acme", ALLOWED_TEAM: "" });
+    gh.team = "none"; // team の確認には落ちない
+    gh.org = "active";
+    expect(await stub.authorizeDashboardSession(uid, session.sid, session.version)).toMatchObject({
+      ok: true,
+    });
+    for (const state of ["pending", "none", "forbidden"] as const) {
+      gh.org = state;
+      await runInDurableObject(stub, (i) => {
+        (i as unknown as { ctx: DurableObjectState }).ctx.storage.sql.exec(
+          "DELETE FROM membership_cache",
+        );
+      });
+      expect(
+        await stub.authorizeDashboardSession(uid, session.sid, session.version),
+        state,
+      ).toEqual({ ok: false, kind: "unauthenticated" });
+    }
+    gh.org = "active";
+    gh.apiFault = 500;
+    await runInDurableObject(stub, (i) => {
+      (i as unknown as { ctx: DurableObjectState }).ctx.storage.sql.exec(
+        "DELETE FROM membership_cache",
+      );
+    });
+    expect(await stub.authorizeDashboardSession(uid, session.sid, session.version)).toEqual({
+      ok: false,
+      kind: "unavailable",
+    });
+  });
+
+  it("team だけ（org なし）のルールは org の確認に落ちず unauthenticated", async () => {
+    const { uid, gh, stub, session } = await setup();
+    await patchEnv(stub, { ALLOWED_ORG: "", ALLOWED_TEAM: "core" });
+    gh.org = "active";
+    expect(await stub.authorizeDashboardSession(uid, session.sid, session.version)).toEqual({
+      ok: false,
+      kind: "unauthenticated",
+    });
+  });
+
   it("team の確認が GitHub の障害で出来ないときは unavailable（通さない）。セッションは消さず、復旧すれば使える", async () => {
     const { c, uid, gh, stub, session } = await setup();
     c.advance(MEMBERSHIP_CACHE_TTL_MS + 1000); // キャッシュ切れ

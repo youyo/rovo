@@ -2,14 +2,15 @@
  * 認可の許可ルール（ログインとツール呼び出しで共通）。
  *
  * ルールは 2 つあり、どちらも任意。少なくとも 1 つが完全に設定されている必要があり、どちらかを満たせば許可（OR）。
- * - org/team: ALLOWED_ORG と ALLOWED_TEAM は対。片方だけなら設定の誤り（null。fail closed）
+ * - org/team: ALLOWED_ORG と ALLOWED_TEAM があれば team の active メンバーを許可。ALLOWED_ORG だけなら org の active メンバー全員を許可。
+ *   ALLOWED_TEAM だけ（org なし）は設定の誤り（null。fail closed。org の全員の許可には切り替えない）
  * - user ID: ALLOWED_USER_IDS はカンマ区切りの正の整数。1 つでも不正な要素があれば設定全体が不正（null）
  * 設定が不正・不足なら null を返し、呼び出し側は必ず拒否する。
  */
 
 export interface AllowRules {
-  /** org/team のルール。無ければ null */
-  team: { org: string; team: string } | null;
+  /** org/team のルール。team が null なら org の active メンバー全員。ルールが無ければ null */
+  membership: { org: string; team: string | null } | null;
   /** user ID のルール。無ければ null */
   userIds: ReadonlySet<number> | null;
 }
@@ -40,13 +41,13 @@ function parseUserIds(raw: string | undefined): ReadonlySet<number> | null | "in
 export function loadAllowRules(env: AllowEnv): AllowRules | null {
   const org = env.ALLOWED_ORG ?? "";
   const team = env.ALLOWED_TEAM ?? "";
-  // 片方だけは設定の誤り。user ID のルールに切り替えない
-  if ((org === "") !== (team === "")) return null;
+  // team だけ（org なし）は設定の誤り。org の確認にも user ID のルールにも切り替えない
+  if (org === "" && team !== "") return null;
   const userIds = parseUserIds(env.ALLOWED_USER_IDS);
   if (userIds === "invalid") return null;
-  const teamRule = org !== "" ? { org, team } : null;
-  if (!teamRule && !userIds) return null;
-  return { team: teamRule, userIds };
+  const membership = org !== "" ? { org, team: team === "" ? null : team } : null;
+  if (!membership && !userIds) return null;
+  return { membership, userIds };
 }
 
 /** user ID のルールで許可されるか（ルールが無ければ false）。呼び出し側は GET /user で得た id を渡す。 */

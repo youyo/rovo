@@ -514,9 +514,27 @@ describe("入力の検証", () => {
   it("認可のルールが 1 つも無い", () => {
     assert.ok(bad({ allowed: {} }).some((e) => e.includes("allowed")));
   });
-  it("org と team は対（片方だけは不正）", () => {
-    assert.ok(bad({ allowed: { org: "o", userIds: "1" } }).some((e) => e.includes("allowed")));
+  it("team には org が要る（team だけは不正）。org だけは org の全員の許可で有効", () => {
+    assert.ok(bad({ allowed: { team: "t", userIds: "1" } }).some((e) => e.includes("allowed")));
+    assert.ok(bad({ allowed: { team: "t" } }).some((e) => e.includes("allowed")));
     assert.deepEqual(bad({ allowed: { org: "o", team: "t" } }), []);
+    assert.deepEqual(bad({ allowed: { org: "o" } }), []);
+    assert.deepEqual(bad({ allowed: { org: "o", userIds: "1" } }), []);
+  });
+  it("org だけの生成物は ALLOWED_TEAM が空文字で、ALLOWED_ORG が入る", () => {
+    const g = parseJsonc(
+      generateAll(
+        validated({
+          accountId: ACCOUNT_ID,
+          publicBaseUrl: "https://rovo.example.com",
+          allowed: { org: "acme" },
+        }),
+        infra,
+        templates,
+      ).gateway,
+    );
+    assert.equal(g.vars.ALLOWED_ORG, "acme");
+    assert.equal(g.vars.ALLOWED_TEAM, "");
   });
   it("userIds は正の整数だけ", () => {
     assert.ok(bad({ allowed: { userIds: ["1", "x"] } }).some((e) => e.includes("userIds")));

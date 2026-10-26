@@ -56,7 +56,6 @@ import { MAX_CONCURRENT_WAITERS, MAX_WAIT_SECONDS, WAIT_RETRY_AFTER_SECONDS } fr
 export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** 未作成の予約を回収し始めるまでの運用値。安全性は TaskDO の tombstone が保証する。 */
 export const RESERVATION_RECLAIM_AFTER_MS = 10 * 60 * 1000;
-/** team 所属の再検証結果をキャッシュする時間。team から外れてから使えなくなるまでの遅れの上限。 */
 /** キャッシュの鍵に使う org/team の設定の指紋（正規化した JSON。ID のルールは含めない: ID は毎回その場で判定する）。 */
 function rulesFingerprint(rules: {
   membership: { org: string; team: string | null } | null;
@@ -64,6 +63,7 @@ function rulesFingerprint(rules: {
   return JSON.stringify(rules.membership ? [rules.membership.org, rules.membership.team] : null);
 }
 
+/** org / team 所属の再検証結果をキャッシュする時間。所属から外れてから使えなくなるまでの遅れの上限。 */
 export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
 /** 閲覧者の見えるリポジトリの集合のキャッシュ時間（D6。権限の取り消しが一覧に反映されるまでの遅れの上限）。 */
 export const VISIBLE_CACHE_TTL_MS = 30 * 1000;

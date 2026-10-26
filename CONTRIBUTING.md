@@ -31,6 +31,8 @@ mise run test           # unit + infra + E2E (Docker required)
 mise run scan:secrets   # secrets and personal values in HEAD and the whole history
 ```
 
+While you work, `mise run test:affected` runs lint plus only the Unit and E2E tasks related to the files you changed (against `origin/main`, including uncommitted and untracked files; E2E tasks run one after another and it stops at the first failure). `mise run test:affected:plan` only prints that plan. Files that match no rule run everything.
+
 All three must exit with 0. If you only touched one area, running the related `test:unit:*` task while you work is fine, but the full `mise run test` and `mise run lint` are what a pull request is checked against.
 
 ## Pull requests

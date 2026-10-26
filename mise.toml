@@ -119,8 +119,8 @@ description = "commit の作者の静的な検査（scripts/commit-author.test.m
 run = "node --test scripts/commit-author.test.mjs"
 
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + agent の本物の git のテスト + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + 昇格の判断に渡す事実の収集スクリプト + pnpm / yarn の本体の用意スクリプト）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:agent-git", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:promote-state", "test:scale-facts", "test:pm-prepare", "test:commit-author"]
+description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + agent の本物の git のテスト + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + 昇格の判断に渡す事実の収集スクリプト + pnpm / yarn の本体の用意スクリプト + test:affected の計画関数）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:agent-git", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:promote-state", "test:scale-facts", "test:pm-prepare", "test:commit-author", "test:test-affected"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
@@ -383,3 +383,17 @@ run = "bash scripts/deploy.sh all"
 [tasks."deploy:secrets"]
 description = "入っていない secret だけを wrangler secret put で入れる。人が入力するのは GITHUB_APP_CLIENT_SECRET（隠した入力）だけ。GITHUB_APP_PRIVATE_KEY は --pem の .pem を PKCS#8 に変換、CLOUDFLARE_API_TOKEN は terraform output -raw、TOKEN_ENC_KEY は gateway と agent で別々に自動生成。既存の secret は上書きしない（入れ直すなら --rotate <名前>）。値は引数・env・ログに載せない。使い方: mise run deploy:secrets -- [--pem <path>] [--skip-github-app] [--rotate <名前>]"
 run = "bash scripts/deploy.sh secrets"
+
+# ---- 変更に関係するテストだけ流す ----
+
+[tasks."test:test-affected"]
+description = "test:affected の計画関数（scripts/test-affected-lib.mjs。変更ファイル → 流すタスク）のテスト。node:test。git も mise も呼ばない"
+run = "node --test scripts/test-affected.test.mjs"
+
+[tasks."test:affected:plan"]
+description = "変更されたファイル（base との差分 + 未コミット + 未追跡）から、流すべき lint / Unit / E2E のタスクを表示するだけで、実行しない。使い方: mise run test:affected:plan -- [--base <ref>]（既定の base は origin/main、無ければ main）"
+run = "node scripts/test-affected.mjs --dry-run"
+
+[tasks."test:affected"]
+description = "変更されたファイルに関係する lint / Unit / E2E だけを流す。E2E は直列の順（gateway → nologs → userids → dashboard → docker → full）で、最初の失敗で止まる。どの規則にも当たらないファイルがあれば全部流す。dashboard の E2E は spec だけの変更ならその spec だけに絞る（手動でも mise run test:e2e:dashboard -- e2e/<name>.spec.ts）。E2E は Docker や Playwright を使う。PR の前の最終確認は mise run test。使い方: mise run test:affected -- [--base <ref>] [--dry-run]"
+run = "node scripts/test-affected.mjs"

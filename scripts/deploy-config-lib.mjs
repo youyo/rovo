@@ -481,13 +481,83 @@ function jsonPlaceholderValues(config) {
   };
 }
 
+const LINE_WIDTH = 100; // biome.json の formatter.lineWidth（下流も同じ設定を使う前提）
+const INDENT = "  ";
+
+/** biome の JSONC の整形どおりの 1 行形（配列は [a, b]、オブジェクトは { "k": v }、空は [] / {}）。 */
+function flatJson(v) {
+  if (Array.isArray(v)) return v.length === 0 ? "[]" : `[${v.map(flatJson).join(", ")}]`;
+  if (isObj(v)) {
+    const e = Object.entries(v);
+    return e.length === 0
+      ? "{}"
+      : `{ ${e.map(([k, x]) => `${JSON.stringify(k)}: ${flatJson(x)}`).join(", ")} }`;
+  }
+  return JSON.stringify(v);
+}
+
+/**
+ * 値を biome の整形と一致する形で出す。head は値より前の文字列（インデント + "key": ）、tail は値の後ろ（,）。
+ * 行幅に収まれば 1 行、収まらなければ 1 段ずつ展開する。生成物は下流の lint:biome に通るので、詰めた JSON.stringify は使わない。
+ * （biome を依存にすると下流の deploy:config に node_modules が要るため、規則をここに持つ。tests が biome と突き合わせる。）
+ */
+function formatJson(v, head, tail, indent) {
+  const flat = flatJson(v);
+  const isEmpty = flat === "[]" || flat === "{}";
+  if (isEmpty || head.length + flat.length + tail.length <= LINE_WIDTH)
+    return `${head}${flat}${tail}`;
+  const inner = indent + INDENT;
+  if (Array.isArray(v)) {
+    const rows = v.map((x, i) => formatJson(x, inner, i < v.length - 1 ? "," : "", inner));
+    return `${head}[\n${rows.join("\n")}\n${indent}]${tail}`;
+  }
+  if (isObj(v)) {
+    const rows = Object.entries(v).map(([k, x], i, all) =>
+      formatJson(x, `${inner}${JSON.stringify(k)}: `, i < all.length - 1 ? "," : "", inner),
+    );
+    return `${head}{\n${rows.join("\n")}\n${indent}}${tail}`;
+  }
+  return `${head}${flat}${tail}`;
+}
+
+/** 雛形の `"key": "<NAME>",` の行（コメントは除く）を、値の整形済みの JSON で置き換える。 */
+function fillJsonPlaceholder(text, name, value) {
+  const re = new RegExp(`^(\\s*)("[^"\\n]*": )"<${name}>"(,?)$`, "gm");
+  return text.replace(re, (_, indent, key, comma) =>
+    formatJson(value, `${indent}${key}`, comma, indent),
+  );
+}
+
+/**
+ * 雛形で 1 行に固定してある配列・オブジェクト（`"r2_buckets": [{ ... }]` など）に値を埋め込む行を、整形し直す。
+ * 値が長いと biome は展開するので、置換の結果が行幅を超えるなら formatJson を通す（収まるなら今まで通り 1 行）。
+ */
+function reformatStructuredLines(text, values) {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (line.trim().startsWith("//") || !PLACEHOLDER.test(line)) return line;
+      const m = /^(\s*)((?:"[^"\n]*": )?)([[{].*[\]}])(,?)$/.exec(line);
+      if (!m) return line;
+      let filled = m[3];
+      for (const [name, v] of Object.entries(values))
+        filled = filled.replaceAll(`<${name}>`, () => esc(v));
+      try {
+        return formatJson(JSON.parse(filled), `${m[1]}${m[2]}`, m[4], m[1]);
+      } catch {
+        return line;
+      }
+    })
+    .join("\n");
+}
+
 const HEADER =
   "// このファイルは `mise run deploy:config` が生成した（deploy.example/ の雛形 + rovo.config.json + infra.json）。直接編集しない。\n";
 
 function renderOne(app, text, values, overrides, jsonValues = {}) {
   let out = text;
-  for (const [name, v] of Object.entries(jsonValues))
-    out = out.replaceAll(`"<${name}>"`, () => JSON.stringify(v));
+  for (const [name, v] of Object.entries(jsonValues)) out = fillJsonPlaceholder(out, name, v);
+  out = reformatStructuredLines(out, values);
   for (const [name, v] of Object.entries(values)) out = out.replaceAll(`<${name}>`, () => esc(v));
   for (const [k, v] of Object.entries(overrides)) {
     const re = new RegExp(`^(\\s*"${k}":\\s*)"[^"]*"`, "m");

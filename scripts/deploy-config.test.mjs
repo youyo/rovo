@@ -172,6 +172,40 @@ describe("customDomain（任意の独自ドメイン）", () => {
     assert.equal(parseJsonc(o.web).routes, undefined);
     assert.equal(g.workers_dev, true); // routes があると既定が false になるので明示
   });
+  // 生成物は下流でコミットされ、下流の biome（lint:biome）が整形を検査する。整形済みの形で出ること（#127）
+  const biomeFormat = (name, text) => {
+    const r = spawnSync(
+      join(root, "node_modules", ".bin", "biome"),
+      ["format", `--stdin-file-path=deploy/${name}.wrangler.jsonc`],
+      { cwd: root, input: text, encoding: "utf8" },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  };
+  for (const [label, patch] of [
+    ["customDomain なし", {}],
+    ["customDomain あり", { customDomain: "rovo.example.org", publicBaseUrl: undefined }],
+    [
+      "customDomain が長く 1 行に収まらない",
+      {
+        customDomain: `${"a".repeat(60)}.${"b".repeat(60)}.example.org`,
+        publicBaseUrl: undefined,
+      },
+    ],
+  ]) {
+    it(`${label}: 生成物が biome の整形と一致する（format しても差分が出ない）`, () => {
+      const o = gen(patch);
+      for (const n of ["gateway", "agent", "web"]) assert.equal(o[n], biomeFormat(n, o[n]), n);
+    });
+  }
+  it("customDomain あり: routes は 1 行にまとまる（biome の整形形）", () => {
+    const o = gen({ customDomain: "rovo.example.org", publicBaseUrl: undefined });
+    assert.ok(
+      o.gateway.includes(
+        '  "routes": [{ "pattern": "rovo.example.org", "custom_domain": true }],\n',
+      ),
+    );
+  });
   it("publicBaseUrl と同じホストなら通る（末尾スラッシュは無視）", () => {
     const o = gen({ customDomain: "rovo.example.com", publicBaseUrl: "https://rovo.example.com/" });
     assert.equal(parseJsonc(o.gateway).vars.PUBLIC_BASE_URL, "https://rovo.example.com");

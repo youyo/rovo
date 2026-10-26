@@ -115,4 +115,26 @@ echo "deploy from downstream" > "$work/l/f.txt"
 commit "$work/l" "fix" "x"
 "$scan" "$work/l" >/dev/null 2>&1; expect "(g2) 履歴だけにある他のリポジトリ名は参考（失敗にしない）" 0 $?
 
+# (h) --gitleaks-only: 下流（private）の CI 用。gitleaks だけを流し、scan-patterns 専用の対象では失敗しない
+gl=("$scan" --gitleaks-only)
+"${gl[@]}" "$work/a" >/dev/null 2>&1; expect "(h1) --gitleaks-only: HEAD の秘密を検出して失敗する" 1 $?
+"${gl[@]}" "$work/b" >/dev/null 2>&1; expect "(h2) --gitleaks-only: account id・workers.dev・絶対パスは検出しない（履歴にあっても）" 0 $?
+"${gl[@]}" "$work/k" >/dev/null 2>&1; expect "(h3) --gitleaks-only: 他のリポジトリ名は検出しない" 0 $?
+"${gl[@]}" "$work/d" >/dev/null 2>&1; expect "(h4) --gitleaks-only: Claude-Session は検出しない" 0 $?
+mk "$work/n"
+echo "token = $real" > "$work/n/f.txt"
+commit "$work/n" "add" "x"
+git -C "$work/n" rm -q f.txt && echo ok > "$work/n/g.txt" && commit "$work/n" "rm" "x"
+"${gl[@]}" "$work/n" >/dev/null 2>&1; expect "(h5) --gitleaks-only: 履歴にだけある秘密を検出して失敗する" 1 $?
+out="$("${gl[@]}" "$work/b" 2>&1)"
+echo "$out" | grep -q "自前の正規表現"; expect "(h6) --gitleaks-only: 自前の正規表現は流さない" 1 $?
+
+# (i) upstream 専用のワークフローは youyo/rovo でだけ動く（下流に取り込まれても止まる）
+wf="$here/../.github/workflows"
+job_if() { awk -v job="  $2:" '$0==job{f=1;next} f&&/^  [a-z]/{f=0} f&&/^    if:/{print}' "$wf/$1"; }
+job_if sketio-arch.yml arch | grep -q "github.repository == 'youyo/rovo'"; expect "(i1) architecture の arch ジョブは upstream だけで動く" 0 $?
+job_if ci.yml patterns | grep -q "github.repository == 'youyo/rovo'"; expect "(i2) ci の patterns ジョブ（公開点検）は upstream だけで動く" 0 $?
+job_if ci.yml secrets | grep -q "if:"; expect "(i3) ci の secrets ジョブ（gitleaks）には条件を付けない（下流でも動く）" 1 $?
+grep -q "scan:gitleaks" "$wf/ci.yml"; expect "(i4) ci は gitleaks だけの経路（scan:gitleaks）を使う" 0 $?
+
 exit "$fail"

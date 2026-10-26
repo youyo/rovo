@@ -36,8 +36,24 @@ jobs:
       - run: mise run lint
       - run: mise run test:unit
 
-  # 公開前の点検と同じ検査。全履歴を調べるので fetch-depth: 0。
+  # 本物の秘密の検出（gitleaks）。下流の private リポジトリに取り込まれても動く（条件を付けない）。
+  # 全履歴を調べるので fetch-depth: 0。
   secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - run: mise run scan:gitleaks
+
+  # 公開のための点検（account id・workers.dev・リポジトリ名・絶対パス・Claude-Session）。
+  # upstream を公開するためのもので、下流は account id などを持つのが正しいので upstream だけで動かす。
+  # gitleaks も含めた手元の点検は mise run scan:secrets。
+  patterns:
+    if: github.repository == 'youyo/rovo'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

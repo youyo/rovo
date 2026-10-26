@@ -330,6 +330,10 @@ run = "bash scripts/test-scan-secrets.sh"
 description = "公開前の点検: HEAD と全履歴の秘密・個人の値を gitleaks と自前の正規表現で調べる。Claude-Session は上限 0（1 本でもあれば失敗）。test / lint には含めない"
 run = "bash scripts/scan-secrets.sh"
 
+[tasks."scan:gitleaks"]
+description = "gitleaks だけ（HEAD と全履歴の本物の秘密の検出）。scan:secrets の自前の正規表現（公開のための点検）は流さない。下流の private リポジトリの CI 用。test / lint には含めない"
+run = "bash scripts/scan-secrets.sh --gitleaks-only"
+
 [tasks."release:check"]
 description = "公開前の点検一式（scan:secrets の自己確認、scan:secrets、pnpm audit）。test / lint には含めない"
 run = [

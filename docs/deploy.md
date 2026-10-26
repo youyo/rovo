@@ -186,6 +186,8 @@ AI Gateway の ID・KV の id・アーカイブのバケット名は Terraform �
 
 > rovo の `apps/*/wrangler.jsonc` に本番の値を書かないこと。特に `r2_buckets` は下流の設定にだけ置く。
 
+upstream 専用のワークフローは `github.repository == 'youyo/rovo'` のときだけ動くので、下流では何もせず自動で止まる（architecture の解析、`ci.yml` の公開のための点検 `patterns`。下流は account id などを持つのが正しく、コードを外部へ送らないため）。gitleaks（`ci.yml` の `secrets`、`mise run scan:gitleaks`）は下流でも動く。本物の秘密の検出は下流にも要るため。
+
 確かめた範囲（2026-10-20）: `deploy.example/` の gateway と web を `wrangler deploy --dry-run -c <設定>`（`apps/<name>` で実行）でバンドルし、`main` が設定ファイルからの相対パスで解決されることを確かめた。agent も `--containers-rollout=none` で通った。コンテナのイメージのビルド（`dockerfile` の相対パスの解決）は、実際のデプロイでしか確かめられない。**【実機で確認して追記】** D12 の生成器を使った `setup` の通し（実アカウント）も未確認。**【実機で確認して追記】** D12b の manifest の受理（GitHub が manifest を受け付けるか、`redirect_url` が loopback で通るか）、User-to-server token expiration の既定、`byok` の権限（Secrets Store）と PUT（Rotate）の形も未確認。**【実機で確認して追記】**
 
 ### 独自ドメインを使う（任意。`customDomain`）

@@ -87,3 +87,48 @@ test("(L4) 1280px: 従来どおり一覧と詳細が並ぶ。「← 一覧」は
   await expect(page.locator(".console h1")).toBeVisible();
   await expect(page.locator("button.back-to-list")).toHaveCount(0);
 });
+
+const overflowOf = (page: Page, sel: string) =>
+  page.locator(sel).evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth }));
+
+test("(L5) 390px: 詳細の工程の段は 4 つとも見え、補足の文字は出ず、横にはみ出さない", async ({
+  page,
+}) => {
+  await loginAs(page, s.users.alice);
+  await narrow(page);
+  await rail(page, id("running")).click();
+  await expect(page.locator(".console h1")).toBeVisible();
+  const jobs = page.locator("[data-band] .job");
+  await expect(jobs).toHaveCount(4);
+  for (let i = 0; i < 4; i++) {
+    await expect(jobs.nth(i)).toBeVisible();
+    await expect(jobs.nth(i).locator("small")).toBeHidden();
+    const box = await jobs.nth(i).boundingBox();
+    expect(box && box.x >= 0 && box.x + box.width <= 390).toBe(true);
+  }
+  const band = await overflowOf(page, "[data-band]");
+  expect(band.sw).toBeLessThanOrEqual(band.cw);
+  const doc = await overflowOf(page, "html");
+  expect(doc.sw).toBeLessThanOrEqual(doc.cw);
+});
+
+test("(L6) 390px: チームの一覧もレールの高さを絞らず、ボードが一覧の下にある", async ({ page }) => {
+  await loginAs(page, s.users.alice);
+  await narrow(page);
+  await page.getByRole("button", { name: "チーム", exact: true }).click();
+  const board = page.locator("[data-teamboard]");
+  await expect(board).toBeVisible();
+  await expect(page.locator("nav.rail")).toHaveCSS("max-height", "none");
+  const r = await page.locator("nav.rail").boundingBox();
+  const b = await board.boundingBox();
+  expect(r && b && b.y >= r.y + r.height - 1).toBe(true);
+});
+
+test("(L7) 1280px: 工程の段は従来どおり補足の文字が出る", async ({ page }) => {
+  await loginAs(page, s.users.alice);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.locator(".console h1")).toBeVisible();
+  const smalls = page.locator("[data-band] .job small");
+  await expect(smalls).toHaveCount(4);
+  for (let i = 0; i < 4; i++) await expect(smalls.nth(i)).toBeVisible();
+});

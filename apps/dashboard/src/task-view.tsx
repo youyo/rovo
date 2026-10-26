@@ -146,7 +146,12 @@ function Band(props: { band: BandStep[]; timings: Partial<Record<BandStep["key"]
                 aria-hidden="true"
               />
             ) : null}
-            <span className="job" title={t("band.item", { name: b.name, label: b.label })}>
+            <span
+              className="job"
+              title={`${t("band.item", { name: b.name, label: b.label })}${
+                small === b.label ? "" : `${t("common.sep")}${small}`
+              }`}
+            >
               <JobIcon state={b.state} />
               <span className="band-name">{b.name}</span>
               <small>{small}</small>

@@ -225,7 +225,7 @@ describe("モバイル幅: 一覧と詳細の切り替え", () => {
     expect(text(c.querySelector(".state"))).not.toContain("ダッシュボードに戻る");
   });
 
-  it("一覧だけの画面（マイタスク）は data-narrow-list。チームはボードが続くので付けない", async () => {
+  it("一覧の画面は、マイタスクもチームも data-narrow-list（レールの高さを絞らない）。詳細には付けない", async () => {
     const { c } = await mount("/dashboard/");
     expect(c.querySelector(".main[data-narrow-list]")).not.toBeNull();
     const b = [...c.querySelectorAll("fieldset.seg button")].find(
@@ -235,7 +235,19 @@ describe("モバイル幅: 一覧と詳細の切り替え", () => {
       b.click();
       await settle();
     });
-    expect(c.querySelector(".main[data-narrow-list]")).toBeNull();
+    expect(c.querySelector(".main[data-narrow-list]")).not.toBeNull();
+    expect(c.querySelector("[data-teamboard]")).not.toBeNull();
+  });
+
+  it("詳細の工程の段: 補足（所要・済み）は各 job の title にも長い形で残る", async () => {
+    const { c } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
+    const jobs = [...c.querySelectorAll("[data-band] .job")];
+    expect(jobs.length).toBe(4);
+    for (const j of jobs) {
+      const small = text(j.querySelector("small"));
+      expect(small).not.toBe("");
+      expect(j.getAttribute("title")).toContain(small);
+    }
   });
 
   it("レールの所要は短い表記で、title に長い形", async () => {

@@ -48,6 +48,11 @@ description = "packages/models の Unit テスト（許可リスト・カタロ�
 dir = "packages/models"
 run = "pnpm exec vitest run --config vitest.config.ts"
 
+[tasks."test:unit:web-format"]
+description = "packages/web-format の Unit テスト（web の結果をモデルに見せる整形。ワーカーと consult が共有する。vitest。workerd は使わない）"
+dir = "packages/web-format"
+run = "pnpm exec vitest run --config vitest.config.ts"
+
 [tasks."test:unit:dashboard"]
 description = "apps/dashboard（SPA）の Unit テスト（vitest + jsdom）。ビルドも workerd も使わない"
 dir = "apps/dashboard"
@@ -119,8 +124,8 @@ description = "commit の作者の静的な検査（scripts/commit-author.test.m
 run = "node --test scripts/commit-author.test.mjs"
 
 [tasks."test:unit"]
-description = "Unit テスト（audit + models + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + agent の本物の git のテスト + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + 昇格の判断に渡す事実の収集スクリプト + pnpm / yarn の本体の用意スクリプト + test:affected の計画関数）"
-depends = ["test:unit:audit", "test:unit:models", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:agent-git", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:promote-state", "test:scale-facts", "test:pm-prepare", "test:commit-author", "test:test-affected"]
+description = "Unit テスト（audit + models + web-format + dashboard + dashboard の成果物 + dashboard-contract + gateway + agent + agent の本物の git のテスト + web + デプロイスクリプト + 設定の生成器 + setup + github-app + byok + 依存キャッシュのスクリプト + 昇格の判断に渡す事実の収集スクリプト + pnpm / yarn の本体の用意スクリプト + test:affected の計画関数）"
+depends = ["test:unit:audit", "test:unit:models", "test:unit:web-format", "test:unit:dashboard", "test:dashboard:dist", "test:unit:dashboard-contract", "test:unit:gateway", "test:unit:agent", "test:unit:agent-git", "test:unit:web", "test:deploy", "test:deploy:config", "test:setup", "test:github-app", "test:byok", "test:deps-scripts", "test:promote-state", "test:scale-facts", "test:pm-prepare", "test:commit-author", "test:test-affected"]
 
 [tasks."test:infra"]
 description = "infra/ の Terraform のテスト（terraform test + mock_provider。Cloudflare の資格情報は要らず、アカウントにも触れない。provider の取得にネットワークが要る）"
@@ -215,6 +220,11 @@ description = "packages/models の型検査"
 dir = "packages/models"
 run = "pnpm exec tsc -p tsconfig.json"
 
+[tasks."typecheck:web-format"]
+description = "packages/web-format の型検査"
+dir = "packages/web-format"
+run = "pnpm exec tsc -p tsconfig.json"
+
 [tasks."typecheck:dashboard"]
 description = "dashboard の型検査"
 dir = "apps/dashboard"
@@ -242,7 +252,7 @@ run = "pnpm exec tsc -p tsconfig.json"
 
 [tasks.typecheck]
 description = "TypeScript の型検査（全アプリ）"
-depends = ["typecheck:audit", "typecheck:models", "typecheck:dashboard", "typecheck:dashboard-contract", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
+depends = ["typecheck:audit", "typecheck:models", "typecheck:web-format", "typecheck:dashboard", "typecheck:dashboard-contract", "typecheck:gateway", "typecheck:agent", "typecheck:web"]
 
 [tasks."lint:biome"]
 description = "Biome による lint / format チェック"

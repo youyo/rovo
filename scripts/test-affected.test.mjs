@@ -150,6 +150,14 @@ describe("planTests: contract・gateway・agent・web・packages", () => {
       "test:unit:agent",
     ]);
   });
+  it("packages/web-format は agent と gateway の unit に波及する（ワーカーと consult が共有する）", () => {
+    assert.deepEqual(tasks(["packages/web-format/src/format.ts"]), [
+      "lint",
+      "test:unit:web-format",
+      "test:unit:gateway",
+      "test:unit:agent",
+    ]);
+  });
   it("packages/audit は gateway・agent・web の unit に波及する", () => {
     assert.deepEqual(tasks(["packages/audit/src/index.ts"]), [
       "lint",

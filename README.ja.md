@@ -119,6 +119,7 @@ packages/audit  (監査ログの共通ライブラリ。3 つの Worker が使�
 | `apps/web` | Web Research Service（状態を持たない別 Worker） |
 | `packages/audit` | 監査イベントを 1 行の構造化 JSON で出す `audit()` |
 | `packages/models` | 使えるモデルの許可リストと、pi-ai のカタログから取る単価・費用計算（gateway と agent が共有） |
+| `packages/web-format` | web_search / web_fetch の結果を、非信頼データとして囲んでモデルに見せる整形（ワーカーと `consult` が共有） |
 
 下の図は [Sketio Arch](https://gh.sketio.app/youyo/rovo?lang=ja) がコードから描いたもので、`main` を解析するたびに新しくなる（図の中の文字は英語）。ほかの表示: [インフラ](https://gh.sketio.app/youyo/rovo?view=infra&lang=ja) / [アプリ](https://gh.sketio.app/youyo/rovo?view=app&lang=ja) / [デプロイ](https://gh.sketio.app/youyo/rovo?view=deploy&lang=ja)。
 

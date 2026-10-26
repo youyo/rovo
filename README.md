@@ -119,6 +119,7 @@ packages/audit  (shared audit-log library, used by all 3 Workers)
 | `apps/web` | Web Research Service (a separate, stateless Worker) |
 | `packages/audit` | `audit()`, which emits audit events as one-line structured JSON |
 | `packages/models` | Allowlist of usable models, and prices and cost calculation taken from the pi-ai catalog (shared by gateway and agent) |
+| `packages/web-format` | How web_search / web_fetch results are shown to a model, wrapped as untrusted data (shared by the worker and `consult`) |
 
 The diagram below is generated from the code by [Sketio Arch](https://gh.sketio.app/youyo/rovo) and updates on every analysis of `main`. Other views: [infrastructure](https://gh.sketio.app/youyo/rovo?view=infra) / [application](https://gh.sketio.app/youyo/rovo?view=app) / [deployment](https://gh.sketio.app/youyo/rovo?view=deploy).
 

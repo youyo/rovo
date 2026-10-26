@@ -493,6 +493,32 @@ describe("consult（consult_started / consult_finished。D10）", () => {
     }
   });
 
+  it("道具つき（#135）: kind: tools と、consult_finished の web_search / web_fetch の回数（非負の整数）を通す", () => {
+    const rec = run("consult_finished", {
+      userId: 5,
+      caller: "parent",
+      model: "anthropic/claude-sonnet-5-5",
+      consult_id: id,
+      cost_usd: 0.2,
+      kind: "tools",
+      web_search: 2,
+      web_fetch: 3,
+    }).record;
+    expect(rec).toMatchObject({ kind: "tools", web_search: 2, web_fetch: 3 });
+    // キーの順序は固定（cost_usd の後ろ）
+    expect(Object.keys(rec ?? {}).slice(-3)).toEqual(["cost_usd", "web_search", "web_fetch"]);
+    for (const bad of [-1, 1.5, Number.NaN, "2", null]) {
+      const r = run("consult_finished", { userId: 5, web_search: bad, web_fetch: bad }).record;
+      expect(r, String(bad)).not.toHaveProperty("web_search");
+      expect(r, String(bad)).not.toHaveProperty("web_fetch");
+    }
+    // 回数は consult_finished だけ（started と他のイベントには出さない）
+    const started = run("consult_started", { userId: 5, kind: "tools", web_search: 1 }).record;
+    expect(started).toMatchObject({ kind: "tools" });
+    expect(started).not.toHaveProperty("web_search");
+    expect(run("task_cancelled", { web_fetch: 1 }).record).not.toHaveProperty("web_fetch");
+  });
+
   it("他のイベントでは model / cost_usd / consult_id を通さない", () => {
     const rec = run("task_cancelled", {
       model: "anthropic/claude-sonnet-5-5",

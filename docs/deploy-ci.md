@@ -61,7 +61,7 @@ Terraform 用とデプロイ用のトークンは、どちらも env の `CLOUDF
 
 `deploy/` は Terraform の出力（`kv_namespace_id` など）に依存するので、リソースを作ってから生成する。2 回に分ける。
 
-1. **1 回目のコミット**: `infra/backend.tf`（infra/README.md の R2 の例）、`rovo.config.json`、ワークフロー。`deploy/` はまだ無い。PR で `plan` を確かめてから main に入れると、`apply` が通ってリソースができる。**この push の `deploy` ジョブは `deploy:config:check` で止まる**（`deploy/infra.json` が無いため。想定どおり）。
+1. **1 回目のコミット**: `infra/backend.tf`（infra/README.md の R2 の例）、`rovo.config.json`、ワークフロー。`deploy/` はまだ無い。PR で `plan` を確かめてから main に入れると（この PR の `plan` は `deploy/infra.json` が無いので `deploy:config:check` を飛ばす）、`apply` が通ってリソースができる。**この push の `deploy` ジョブは `deploy:config:check` で止まる**（`deploy/infra.json` が無いため。想定どおり）。
 2. **`deploy/` を作る**: 手元で state の資格情報（`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`）と Terraform 用のトークンを env に入れ、`terraform -chdir=infra init -input=false` のあとに `mise run deploy:config` を実行する（infra/README.md の「state を読むタスクと必要な env」）。
 3. **2 回目のコミット**: できた `deploy/` をコミットして main に入れる。`deploy` ジョブが web → agent → gateway → secret と流れる。
 4. GitHub App は手元で作る（`mise run github-app`。deploy.md の 4）。BYOK は `mise run byok -- anthropic`（Cloudflare のトークンが要る手元の作業。同じ deploy.md の 4）。

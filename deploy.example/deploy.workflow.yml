@@ -54,8 +54,11 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
       # 生成物（deploy/）が rovo.config.json と雛形から作り直した結果と一致するか。資格情報は要らない
+      # 初回の PR は deploy/ がまだ無い（docs/deploy-ci.md の 5）ので、そのときは飛ばす
       - run: mise run install
+        if: hashFiles('deploy/infra.json') != ''
       - run: mise run deploy:config:check
+        if: hashFiles('deploy/infra.json') != ''
 
   # main への push: terraform apply
   apply:

@@ -36,7 +36,7 @@ case "$*" in
   *" init "*) exit 0 ;;
   *" apply "*)
     [ -n "${FAKE_APPLY_FAIL:-}" ] && exit 1
-    for a in "$@"; do case "$a" in -var-file=*) cp "${a#-var-file=}" "$work_vars" ;; esac; done
+    for a in "$@"; do case "$a" in -var-file=*) cp "${a#-var-file=}" "$work_vars"; echo "${a#-var-file=}" > "$work_vars.name" ;; esac; done
     exit 0 ;;
   *"output -raw kv_namespace_id") printf 'kv-namespace-id-example' ;;
   *"output -raw archive_bucket_name") printf 'acme-archive' ;;
@@ -139,6 +139,8 @@ gateway exec wrangler secret put TOKEN_ENC_KEY -c DEPLOY/gateway.wrangler.jsonc
 agent exec wrangler secret put TOKEN_ENC_KEY -c DEPLOY/agent.wrangler.jsonc" "$seq"
 
 expect "(b3) terraform apply には config から作った var-file を渡す（account_id / name_prefix / worker_names）" "$ACCOUNT_ID acme acme-agent" "$(node -e 'const v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(v.account_id,v.name_prefix,v.worker_names.agent)' "$work_vars")"
+case "$(cat "$work_vars.name")" in *.json) vf_ext=json ;; *) vf_ext=other ;; esac
+expect "(b3b) -var-file のファイル名は .json で終わる（本物の terraform は拡張子で HCL / JSON を決める）" json "$vf_ext"
 for n in gateway agent web; do
   [ -f "$work/deploy/$n.wrangler.jsonc" ]; expect "(b4) deploy/$n.wrangler.jsonc が生成される" 0 $?
 done

@@ -61,8 +61,10 @@ base_url="$(config_cli get publicBaseUrl)"
 echo "  OK"
 
 # ---- 2. Terraform ---------------------------------------------------------------
-tfvars="$(mktemp)"
-trap 'rm -f "$tfvars"' EXIT
+# Terraform は拡張子で HCL / JSON を決めるので、.tfvars.json で終わるファイルにする（mktemp のサフィックス指定は macOS と GNU で違うため、ディレクトリを作る）
+tfvars_dir="$(mktemp -d)"
+trap 'rm -rf "$tfvars_dir"' EXIT
+tfvars="$tfvars_dir/rovo.tfvars.json"
 config_cli tfvars > "$tfvars"
 echo "==> terraform init / apply（infra/）"
 terraform -chdir="$root/infra" init -input=false

@@ -15,6 +15,7 @@ import {
 import { LoginView } from "./login-view";
 import { parseRoute, type Route, taskPath } from "./route";
 import { type AuthState, fetchMe, loginHref, logout } from "./session";
+import { useNarrow } from "./use-narrow";
 import { Workspace } from "./workspace";
 
 /**
@@ -36,6 +37,7 @@ export function App() {
 
 function Dashboard() {
   const t = useT();
+  const narrow = useNarrow();
   const [auth, setAuth] = useState<AuthState>({ state: "loading" });
   // 既定は「マイタスク」（scope = me。切り替えは使える）
   const [scope, setScope] = useState<Scope>("me");
@@ -111,12 +113,25 @@ function Dashboard() {
   const onSelectTask = useCallback(
     (id: string) => {
       if (route.kind === "task" && route.id === id) return;
-      history.pushState(null, "", dayHref(taskPath(id), day ?? null));
+      // 一覧から選んだ印（狭い幅の「← 一覧」は、印があれば履歴を戻る）
+      history.pushState({ from: "list" }, "", dayHref(taskPath(id), day ?? null));
       setFreshTaskId(null);
       setRoute({ kind: "task", id });
     },
     [route, day],
   );
+
+  // 狭い幅の詳細の「← 一覧」。日付の前後送りと同じ流儀で pushState（見ている日は残す）。戻るで詳細に戻れる
+  const onBack = useCallback(() => {
+    // 一覧から選んで開いたなら履歴を戻る（[一覧, 詳細, 一覧] と積まない。route は popstate が更新する）
+    if ((history.state as { from?: string } | null)?.from === "list") {
+      history.back();
+      return;
+    }
+    history.pushState(null, "", dayHref("/dashboard/", day ?? null));
+    setFreshTaskId(null);
+    setRoute({ kind: "overview" });
+  }, [day]);
 
   // 「チーム」をもう一度押す: タスクを選んでいるなら選択を外してチームボードに戻る（見ている日は残す）
   const onScopeChange = useCallback(
@@ -127,9 +142,15 @@ function Dashboard() {
         setRoute({ kind: "overview" });
         return;
       }
+      // 狭い幅の詳細でスコープを押したら、一覧へ移る
+      if (narrow && route.kind === "task") {
+        history.pushState(null, "", dayHref("/dashboard/", day ?? null));
+        setFreshTaskId(null);
+        setRoute({ kind: "overview" });
+      }
       setScope(next);
     },
-    [scope, route.kind, day],
+    [scope, route.kind, day, narrow],
   );
 
   const onLogout = useCallback(() => {
@@ -161,6 +182,7 @@ function Dashboard() {
           onDayChange={onDayChange}
           onTaskSettled={onTaskSettled}
           onSelectTask={onSelectTask}
+          onBack={onBack}
           detailCache={detailCache}
           freshTaskId={freshTaskId}
           onUnauthorized={onUnauthorized}

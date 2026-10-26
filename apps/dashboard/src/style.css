@@ -1753,6 +1753,10 @@ summary.step-row:hover {
   .rail-col > .rail {
     border-bottom: 0;
   }
+  /* 一覧だけの画面（マイタスクの /dashboard）は、レールの高さを絞らずページのスクロールに任せる */
+  .main[data-narrow-list] .rail {
+    max-height: none;
+  }
   .console-col {
     padding: 14px 16px;
   }

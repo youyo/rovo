@@ -4,6 +4,7 @@ import type { DetailCache } from "./detail-cache";
 import { useT } from "./lang";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
 import { TaskPreview, TaskView } from "./task-view";
+import { useNarrow } from "./use-narrow";
 import { type TaskDetailDeps, useTaskDetail } from "./use-task-detail";
 
 const BACK = "/dashboard/";
@@ -31,6 +32,7 @@ export function TaskScreen(props: {
   onSettled?: (task: TaskDetailDto["task"] | null) => void;
 }) {
   const t = useT();
+  const narrow = useNarrow();
   const [ownAutoRefresh, setOwnAutoRefresh] = useState(() => loadAutoRefresh());
   const autoRefresh = props.autoRefresh ?? ownAutoRefresh;
   const { state, refresh, loadOlder } = useTaskDetail(props.id, autoRefresh, {
@@ -86,9 +88,12 @@ export function TaskScreen(props: {
         <div className="state">
           <h1>{t("state.notFoundTitle")}</h1>
           <p role="alert">{t("state.notFound")}</p>
-          <p>
-            <a href={BACK}>{t("state.backToDashboard")}</a>
-          </p>
+          {/* 狭い幅は上に「← 一覧」があるので、素のリンクは出さない */}
+          {narrow ? null : (
+            <p>
+              <a href={BACK}>{t("state.backToDashboard")}</a>
+            </p>
+          )}
         </div>
       );
     case "error":

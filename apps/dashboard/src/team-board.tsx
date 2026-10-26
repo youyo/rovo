@@ -16,6 +16,7 @@ import {
   type TeamPerson,
   type TeamRepo,
 } from "./team";
+import { useNarrow } from "./use-narrow";
 
 /** 依頼者の頭文字（丸に入れる 1 文字） */
 function initialOf(login: string): string {
@@ -85,6 +86,7 @@ function PersonRow(props: {
   onSelect?: (id: string) => void;
 }) {
   const t = useT();
+  const narrow = useNarrow();
   const { person: p, isToday } = props;
   const login = singleLine(p.login);
   return (
@@ -107,7 +109,10 @@ function PersonRow(props: {
           </span>
         ) : null}
         <span className="tb-group" data-group="day">
-          <span className="tb-cap">{isToday ? t("board.capToday") : t("board.capDay")}</span>
+          {/* 狭い幅の過去の日は、箱の見出しが「この日」なので行のラベルは出さない */}
+          {narrow && !isToday ? null : (
+            <span className="tb-cap">{isToday ? t("board.capToday") : t("board.capDay")}</span>
+          )}
           <Stat kind="done" label={t("board.done")} value={p.done} />
           <Stat kind="failed" label={t("board.failed")} value={p.failed} />
           <span className="tb-cost" title={t("board.cost")}>

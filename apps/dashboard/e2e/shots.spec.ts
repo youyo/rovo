@@ -38,7 +38,10 @@ for (const scheme of ["light", "dark"] as const) {
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/dashboard/");
-    await settle(page);
+    // 狭い幅の一覧はレールだけ（詳細は出ない）
+    await expect(page.locator("nav.rail")).toBeVisible();
+    await expect(page.locator(".statusbar")).toBeVisible();
+    await page.evaluate(() => document.fonts.ready);
     await page.screenshot({ path: join(dir, `${scheme}-mobile-overview.png`), fullPage: true });
 
     // 引き出しを開いた状態（内訳）

@@ -6,6 +6,7 @@ import {
   formatDateTime,
   formatDayHeading,
   formatDuration,
+  formatDurationShort,
   formatUsd,
   isAllowedPrUrl,
   modelFamily,
@@ -173,5 +174,17 @@ describe("formatDateTime", () => {
   });
   it("en: 年月日・秒・タイムゾーンの略称つき", () => {
     expect(formatDateTime(ms, tEn, "UTC")).toMatch(/10\/25\/2026.*01:04:12.*UTC/);
+  });
+});
+
+describe("formatDurationShort（狭い幅のレール）", () => {
+  it("1 分未満は N s、1 時間未満は M:SS、1 時間以上は H:MM:SS", () => {
+    expect(formatDurationShort(58_000)).toBe("58s");
+    expect(formatDurationShort(592_000)).toBe("9:52");
+    expect(formatDurationShort(60_000)).toBe("1:00");
+    expect(formatDurationShort(3_723_000)).toBe("1:02:03");
+    expect(formatDurationShort(0)).toBe("0s");
+    expect(formatDurationShort(-5)).toBe("0s");
+    expect(formatDurationShort(Number.NaN)).toBe("0s");
   });
 });

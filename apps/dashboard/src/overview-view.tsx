@@ -45,13 +45,19 @@ export function OverviewView(props: {
   /** レールで開いているタブ。onRailTabChange が無ければタブを出さず、日のタスクだけ */
   railTab?: RailTab;
   onRailTabChange?: (tab: RailTab) => void;
+  /**
+   * 表示の形。split（既定）は レール + コンソール。狭い幅の切り替えでは、list は一覧（レール）だけ、
+   * detail は詳細（コンソール）だけを出す（detail は帯も出さない）。list で console が null ならコンソールの場所も作らない
+   */
+  mode?: "split" | "list" | "detail";
 }) {
   const { data } = props;
   const t = useT();
+  const mode = props.mode ?? "split";
   let band: ReactNode = null;
   // 更新時刻（引き出しの表示）。タイムラインの「いま」は今日のときだけ使う
   const nowMs = data ? Date.parse(data.generated_at) : 0;
-  if (data && data.scope === "all") {
+  if (data && data.scope === "all" && mode !== "detail") {
     const dayStart = Date.parse(data.range.from);
     const domain = timelineDomain({
       starts: [...data.tasks.map(taskTime), ...data.consults.map((c) => Date.parse(c.at))],
@@ -183,9 +189,14 @@ export function OverviewView(props: {
 
       {band}
 
-      <div className="main">
-        {railNode}
-        <div className="console-col">{props.console}</div>
+      <div
+        className="main"
+        {...(mode === "list" && props.console === null ? { "data-narrow-list": "" } : {})}
+      >
+        {mode === "detail" ? null : railNode}
+        {mode === "list" && props.console === null ? null : (
+          <div className="console-col">{props.console}</div>
+        )}
       </div>
 
       {data ? (

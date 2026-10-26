@@ -122,6 +122,15 @@ export function formatDuration(ms: number, t: T): string {
   return t("duration.hours", { h: Math.floor(total / 3600), m: Math.floor((total % 3600) / 60) });
 }
 
+/** 狭い幅用の短い経過時間: 58s / 9:52 / 1:02:03。ロケールに依らない。負と NaN は 0s。 */
+export function formatDurationShort(ms: number): string {
+  const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (total < 60) return `${total}s`;
+  if (total < 3600) return `${Math.floor(total / 60)}:${pad(total % 60)}`;
+  return `${Math.floor(total / 3600)}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
+}
+
 /** 桁区切りの整数（ロケールの Intl）。 */
 export function formatCount(n: number, t: T): string {
   return new Intl.NumberFormat(locale(t), { maximumFractionDigits: 0 }).format(Math.trunc(n));

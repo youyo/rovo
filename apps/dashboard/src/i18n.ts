@@ -282,6 +282,7 @@ const en = {
 
   // --- コンソール（詳細）
   "console.label": "Console",
+  "console.back": "← Tasks",
   "console.selectHint": "Select a task to see its progress stream in here.",
   // --- チームボード（チームで何も選んでいないときの中央）
   "board.label": "Team board",
@@ -298,7 +299,7 @@ const en = {
   "board.more": "+{n} more",
   "board.colRepo": "Repository",
   "board.colCountToday": "Tasks today",
-  "board.colCountDay": "Tasks this day",
+  "board.colCountDay": "Tasks",
   "board.colPrs": "PRs waiting for review",
   "board.prTitle": "Open pull request #{n} on GitHub",
   "board.noRepos": "No tasks yet.",
@@ -640,6 +641,7 @@ const ja: Record<Key, string> = {
     "Unified Billing のクレジット（Web 検索など。BYOK のモデル費用は含まない）",
 
   "console.label": "コンソール",
+  "console.back": "← 一覧",
   "console.selectHint": "タスクを選ぶと、ここに進み具合が流れます。",
   // --- チームボード（チームで何も選んでいないときの中央）
   "board.label": "チームボード",
@@ -656,7 +658,7 @@ const ja: Record<Key, string> = {
   "board.more": "+{n}",
   "board.colRepo": "リポジトリ",
   "board.colCountToday": "今日の件数",
-  "board.colCountDay": "この日の件数",
+  "board.colCountDay": "件数",
   "board.colPrs": "待ちの PR",
   "board.prTitle": "GitHub で PR #{n} を開く",
   "board.noRepos": "タスクはまだありません。",

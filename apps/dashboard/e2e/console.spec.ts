@@ -341,19 +341,21 @@ for (const [name, path] of [
   ["一覧", "/dashboard/"],
   ["詳細", taskPath(id("long"))],
 ] as const) {
-  test(`(21) スマホ幅 390px の${name}: レールはコンソールの上、ステータスバーは折り返す、ページは横にスクロールしない`, async ({
+  test(`(21) スマホ幅 390px の${name}: 一覧と詳細は切り替わる（${name}だけ出る）、ステータスバーは折り返す、ページは横にスクロールしない`, async ({
     page,
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await loginAs(page, s.users.alice, path);
-    await expect(page.locator(".console h1")).toBeVisible();
-    // 一覧・コンソールは届いたものから描かれるので、レールの行が出て配置が落ち着いてから測る
-    await expect(page.locator("a.rail-row").first()).toBeVisible();
-
-    const railBox = await box(page, "nav.rail");
-    const consoleBox = await box(page, ".console");
-    expect(railBox.y + railBox.height).toBeLessThanOrEqual(consoleBox.y + 1);
-    expect(railBox.width).toBeGreaterThan(300);
+    if (name === "一覧") {
+      // 一覧はレールだけ（詳細は出ない）
+      await expect(page.locator("a.rail-row").first()).toBeVisible();
+      await expect(page.locator(".console")).toHaveCount(0);
+      expect((await box(page, "nav.rail")).width).toBeGreaterThan(300);
+    } else {
+      // 詳細はコンソールだけ（レールは出ない）
+      await expect(page.locator(".console h1")).toBeVisible();
+      await expect(page.locator("nav.rail")).toHaveCount(0);
+    }
 
     // 横スクロールはコンソールの中だけ（ページ全体は横にあふれない）
     const overflow = await page.evaluate(() => ({
@@ -361,9 +363,11 @@ for (const [name, path] of [
       view: window.innerWidth,
     }));
     expect(overflow.doc).toBeLessThanOrEqual(overflow.view);
-    expect(await page.locator(".screen").evaluate((el) => getComputedStyle(el).overflowX)).toMatch(
-      /auto|scroll/,
-    );
+    if (name === "詳細") {
+      expect(
+        await page.locator(".screen").evaluate((el) => getComputedStyle(el).overflowX),
+      ).toMatch(/auto|scroll/);
+    }
 
     // ステータスバーは 1 行に収まらず折り返す。はみ出さない
     const bar = await box(page, ".statusbar");

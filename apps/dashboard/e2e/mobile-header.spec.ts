@@ -9,7 +9,7 @@ import { readState } from "./state";
 const s = readState();
 
 async function settle(page: Page) {
-  await expect(page.locator(".console h1, [data-teamboard]").first()).toBeVisible();
+  await expect(page.locator(".console h1, [data-teamboard], nav.rail").first()).toBeVisible();
   // 狭い形への切り替えは matchMedia の通知で描き直してから。描き直しの前に測ると広い形の高さになる
   const width = page.viewportSize()?.width ?? 0;
   if (width <= 720) await expect(page.locator("header button.lang-one")).toBeVisible();

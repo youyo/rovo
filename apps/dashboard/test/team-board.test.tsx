@@ -5,12 +5,13 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TeamBoard } from "../src/team-board";
 import { clickLink } from "./click-link";
-import { inEn, inJa } from "./lang";
+import { inEn, inJa, tEn } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const roots: { unmount: () => void }[] = [];
 afterEach(() => {
+  vi.unstubAllGlobals();
   for (const r of roots.splice(0)) act(() => r.unmount());
   document.body.innerHTML = "";
 });
@@ -405,5 +406,36 @@ describe("チームボード: 成果の推移（直近 14 日）", () => {
 
   it("flow が無い古い応答では区画を出さない", () => {
     expect(mount().querySelector("[data-flow]")).toBeNull();
+  });
+});
+
+function stubNarrow(narrow: boolean) {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: narrow && query.includes("max-width: 720px"),
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+}
+
+describe("チームボード: 狭い幅の重複の整理と列見出し", () => {
+  it("過去の日の表の列見出しは「件数」（表の題に「この日」がある）。英語も短い", () => {
+    const c = mount({ isToday: false });
+    const heads = [...c.querySelectorAll(".tb-repos thead th")].map((h) => h.textContent);
+    expect(heads).toEqual(["リポジトリ", "件数", "待ちの PR"]);
+    expect(tEn("board.colCountDay")).toBe("Tasks");
+  });
+
+  it("狭い幅の過去の日: 人ごとの行に「この日」のラベルを出さない（箱の見出しは残る）", () => {
+    stubNarrow(true);
+    const c = mount({ isToday: false });
+    expect(text(c.querySelector("#tb-people-h"))).toBe("この日");
+    expect(c.querySelector("li.tb-person .tb-cap")).toBeNull();
+  });
+
+  it("広い幅の過去の日: 従来どおり人ごとの行に「この日」", () => {
+    stubNarrow(false);
+    const c = mount({ isToday: false });
+    expect(text(c.querySelector("li.tb-person .tb-cap"))).toBe("この日");
   });
 });

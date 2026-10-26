@@ -233,7 +233,7 @@ test("(TB5) 過去の日: 走行中の欄を出さず、その日の完了・失
   const alice = person(page, s.users.alice.login);
   await expect(alice.locator('[data-stat="done"] .tb-stat-n')).not.toHaveText("0");
   await expect(alice.locator(".tb-cost")).toBeVisible();
-  await expect(page.locator(".tb-repos thead th").nth(1)).toHaveText("この日の件数");
+  await expect(page.locator(".tb-repos thead th").nth(1)).toHaveText("件数");
 });
 
 const monthSection = (page: Page) => page.locator("[data-month]");

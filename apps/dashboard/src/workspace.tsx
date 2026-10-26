@@ -1,5 +1,5 @@
 import type { TaskDetailDto } from "@rovo/dashboard-contract";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import type { Scope } from "./api";
 import type { DayKey } from "./day";
 import type { DetailCache } from "./detail-cache";
@@ -14,6 +14,7 @@ import { TaskScreen } from "./task-screen";
 import { TeamBoard } from "./team-board";
 import { useBudget } from "./use-budget";
 import { type CloudflareDeps, useCloudflare } from "./use-cloudflare";
+import { useNarrow } from "./use-narrow";
 import { type OverviewDeps, useOverview } from "./use-overview";
 import { useWaiting } from "./use-waiting";
 
@@ -36,6 +37,8 @@ export function Workspace(props: {
   onUnauthorized: () => void;
   /** レール・タイムラインの行の左クリック。ページを読み直さず、URL を pushState で変えて選ぶ（修飾キー付き・中クリックは呼ばれない） */
   onSelectTask?: (id: string) => void;
+  /** 狭い幅の詳細の「← 一覧」。URL を pushState で一覧に戻す（見ている日は保つ） */
+  onBack?: () => void;
   /** 開いたことのあるタスクの最後の詳細（メモリ上）。切り替えた瞬間にすぐ描くため。無ければキャッシュしない */
   detailCache?: DetailCache;
   /**
@@ -50,6 +53,8 @@ export function Workspace(props: {
 }) {
   const { route, scope, day, onUnauthorized } = props;
   const t = useT();
+  // 狭い幅だけ、一覧と詳細を切り替える（広い幅はレール + コンソールを並べる従来の形）
+  const narrow = useNarrow();
   const [autoRefresh, setAutoRefresh] = useState(() => loadAutoRefresh());
   const { state, refresh } = useOverview(scope, day, autoRefresh, props.deps);
   // Cloudflare は一覧とは別の 60 秒間隔。失敗しても一覧は出す（401 だけは一覧と同じ扱い）
@@ -80,12 +85,34 @@ export function Workspace(props: {
   }, [refresh, refreshWaiting]);
 
   const data = state.phase === "ready" ? state.data : null;
+
+  // 狭い幅の切り替えのスクロール: 詳細に入ったら先頭へ。一覧に戻ったら、直前に開いていたタスクの行を中央に出して focus
+  const lastOpened = useRef<string | null>(null);
+  const routeTaskId = route.kind === "task" ? route.id : null;
+  const hasData = data !== null;
+  useEffect(() => {
+    if (!narrow) return;
+    if (routeTaskId !== null) {
+      lastOpened.current = routeTaskId;
+      if (typeof window.scrollTo === "function") window.scrollTo(0, 0);
+      return;
+    }
+    const id = lastOpened.current;
+    if (id === null || !hasData) return;
+    const row = [...document.querySelectorAll<HTMLElement>("a.rail-row")].find(
+      (el) => el.dataset.taskId === id,
+    );
+    lastOpened.current = null;
+    if (!row) return;
+    row.scrollIntoView?.({ block: "center" });
+    row.focus();
+  }, [narrow, routeTaskId, hasData]);
   // チームで何も選んでいないとき（一覧の URL）は、コンソールではなくチームボードを出す。マイタスクは今までどおり既定のタスク
   const showBoard = route.kind === "overview" && scope === "all";
   const consoleId =
     route.kind === "task"
       ? route.id
-      : data && !showBoard
+      : data && !showBoard && !narrow
         ? (pickConsoleTask(data.tasks)?.task_id ?? null)
         : null;
 
@@ -125,50 +152,65 @@ export function Workspace(props: {
         }
       : null;
 
-  const consoleNode = showBoard ? (
-    data === null ? (
-      <section className="console console--empty" aria-label={t("board.label")}>
-        <p className="soft" role="status">
-          {t("common.loading")}
-        </p>
+  const consoleNode =
+    narrow && route.kind === "overview" && !showBoard ? null : showBoard ? (
+      data === null ? (
+        <section className="console console--empty" aria-label={t("board.label")}>
+          <p className="soft" role="status">
+            {t("common.loading")}
+          </p>
+        </section>
+      ) : (
+        <TeamBoard
+          data={data}
+          waiting={waiting.state.phase === "ready" ? waiting.state.data : null}
+          isToday={day === null}
+          onSelectTask={props.onSelectTask}
+        />
+      )
+    ) : consoleId === null ? (
+      <section className="console console--empty" aria-label={t("console.label")}>
+        {data === null ? (
+          <p className="soft" role="status">
+            {t("common.loading")}
+          </p>
+        ) : (
+          <p className="soft">{t("console.selectHint")}</p>
+        )}
       </section>
     ) : (
-      <TeamBoard
-        data={data}
-        waiting={waiting.state.phase === "ready" ? waiting.state.data : null}
-        isToday={day === null}
-        onSelectTask={props.onSelectTask}
+      <TaskScreen
+        key={consoleId}
+        id={consoleId}
+        cache={props.detailCache}
+        fresh={props.freshTaskId === undefined ? undefined : consoleId === props.freshTaskId}
+        preview={preview}
+        onUnauthorized={onUnauthorized}
+        autoRefresh={autoRefresh}
+        onAutoRefreshChange={onAutoRefreshChange}
+        onRefreshAlso={refresh}
+        onSettled={props.onTaskSettled}
       />
-    )
-  ) : consoleId === null ? (
-    <section className="console console--empty" aria-label={t("console.label")}>
-      {data === null ? (
-        <p className="soft" role="status">
-          {t("common.loading")}
-        </p>
-      ) : (
-        <p className="soft">{t("console.selectHint")}</p>
-      )}
-    </section>
-  ) : (
-    <TaskScreen
-      key={consoleId}
-      id={consoleId}
-      cache={props.detailCache}
-      fresh={props.freshTaskId === undefined ? undefined : consoleId === props.freshTaskId}
-      preview={preview}
-      onUnauthorized={onUnauthorized}
-      autoRefresh={autoRefresh}
-      onAutoRefreshChange={onAutoRefreshChange}
-      onRefreshAlso={refresh}
-      onSettled={props.onTaskSettled}
-    />
-  );
+    );
+
+  const detailOnly = narrow && route.kind === "task";
+  const consoleWithBack =
+    detailOnly && props.onBack ? (
+      <>
+        <button type="button" className="back-to-list" onClick={props.onBack}>
+          {t("console.back")}
+        </button>
+        {consoleNode}
+      </>
+    ) : (
+      consoleNode
+    );
 
   return (
     <>
       {header}
       <OverviewView
+        mode={narrow ? (route.kind === "task" ? "detail" : "list") : "split"}
         data={data}
         isToday={day === null}
         stale={state.phase === "ready" ? state.stale : false}
@@ -182,7 +224,7 @@ export function Workspace(props: {
         onRailTabChange={setRailTab}
         selectedId={consoleId}
         onSelectTask={props.onSelectTask}
-        console={consoleNode}
+        console={consoleWithBack}
         railNote={railNote(state.phase, t)}
         showRefreshControls={consoleId === null}
       />

@@ -189,10 +189,7 @@ export function OverviewView(props: {
 
       {band}
 
-      <div
-        className="main"
-        {...(mode === "list" && props.console === null ? { "data-narrow-list": "" } : {})}
-      >
+      <div className="main" {...(mode === "list" ? { "data-narrow-list": "" } : {})}>
         {mode === "detail" ? null : railNode}
         {mode === "list" && props.console === null ? null : (
           <div className="console-col">{props.console}</div>

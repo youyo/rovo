@@ -167,3 +167,39 @@ describe("チームボード（幅 360px でも横にはみ出さない）", () 
     expect(narrow).toMatch(/\.tb-stat-label\s*\{[^}]*clip-path:\s*inset\(50%\)/);
   });
 });
+
+/** @media (max-width: 720px) の節の本体をすべて連結する（波括弧の対応で切り出す） */
+function narrowCss(): string {
+  const out: string[] = [];
+  const re = /@media \(max-width: 720px\) \{/g;
+  for (let m = re.exec(css); m; m = re.exec(css)) {
+    let depth = 1;
+    let i = re.lastIndex;
+    while (depth > 0 && i < css.length) {
+      if (css[i] === "{") depth++;
+      else if (css[i] === "}") depth--;
+      i++;
+    }
+    out.push(css.slice(re.lastIndex, i - 1));
+  }
+  return out.join("\n");
+}
+
+describe("狭い幅の工程の段（準備・実行・検証・PR の 4 つが必ず収まる）", () => {
+  const narrow = narrowCss();
+  const rule = (sel: string) => {
+    const m = new RegExp(`(?:^|\\n)\\s*${escapeRe(sel)}\\s*\\{([^}]*)\\}`).exec(narrow);
+    if (!m) throw new Error(`狭い幅の節に ${sel} が無い`);
+    return m[1] as string;
+  };
+
+  it("補足の文字（所要・済み）は出さない", () => {
+    expect(rule(".job small")).toMatch(/display:\s*none/);
+  });
+
+  it("段の間の線は短くし、段は折り返せる", () => {
+    expect(rule(".band-edge")).toMatch(/min-width:\s*(\d|1[0-2])px/);
+    expect(rule(".band")).toMatch(/flex-wrap:\s*wrap/);
+    expect(rule(".band")).toMatch(/overflow-x:\s*visible/);
+  });
+});

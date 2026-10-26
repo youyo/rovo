@@ -1753,7 +1753,7 @@ summary.step-row:hover {
   .rail-col > .rail {
     border-bottom: 0;
   }
-  /* 一覧だけの画面（マイタスクの /dashboard）は、レールの高さを絞らずページのスクロールに任せる */
+  /* 一覧の画面（マイタスク・チームの /dashboard）は、レールの高さを絞らずページのスクロールに任せる（チームはボードが下に続く） */
   .main[data-narrow-list] .rail {
     max-height: none;
   }
@@ -1770,15 +1770,27 @@ summary.step-row:hover {
   .con-head h1 {
     font-size: 18px;
   }
+  /* 工程の段（準備・実行・検証・PR）: 補足の文字は出さず（title に長い形）、線は短く、収まらなければ折り返す */
   .band {
-    padding: 14px 12px;
+    padding: 12px;
+    flex-wrap: wrap;
+    row-gap: 8px;
+    overflow-x: visible;
+  }
+  .band-item {
+    flex: 0 1 auto;
+  }
+  .band-edge {
+    flex: 0 0 8px;
+    min-width: 8px;
   }
   .job {
-    gap: 6px;
-    padding: 6px 10px;
+    gap: 4px;
+    padding: 5px 7px;
+    font-size: 13px;
   }
   .job small {
-    margin-left: 2px;
+    display: none;
   }
   .logbox {
     flex-basis: clamp(300px, 55vh, 520px);

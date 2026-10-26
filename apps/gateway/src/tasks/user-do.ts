@@ -57,6 +57,13 @@ export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** 未作成の予約を回収し始めるまでの運用値。安全性は TaskDO の tombstone が保証する。 */
 export const RESERVATION_RECLAIM_AFTER_MS = 10 * 60 * 1000;
 /** team 所属の再検証結果をキャッシュする時間。team から外れてから使えなくなるまでの遅れの上限。 */
+/** キャッシュの鍵に使う org/team の設定の指紋（正規化した JSON。ID のルールは含めない: ID は毎回その場で判定する）。 */
+function rulesFingerprint(rules: {
+  membership: { org: string; team: string | null } | null;
+}): string {
+  return JSON.stringify(rules.membership ? [rules.membership.org, rules.membership.team] : null);
+}
+
 export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
 /** 閲覧者の見えるリポジトリの集合のキャッシュ時間（D6。権限の取り消しが一覧に反映されるまでの遅れの上限）。 */
 export const VISIBLE_CACHE_TTL_MS = 30 * 1000;
@@ -489,10 +496,13 @@ export class UserDO extends DurableObject<Env> {
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       checked_at INTEGER NOT NULL,
       result TEXT NOT NULL,
-      github_user_id INTEGER
+      github_user_id INTEGER,
+      rules_fingerprint TEXT
     )`);
     // 旧スキーマ（github_user_id なし）の DO を移行する。NULL の行はキャッシュとして使わない。
     addColumnIfMissing(sql, "membership_cache", "github_user_id", "INTEGER");
+    // 確認したときの org/team の設定の指紋。NULL（旧行）や今の設定と違う行はキャッシュとして使わない。
+    addColumnIfMissing(sql, "membership_cache", "rules_fingerprint", "TEXT");
     // 資格の正本。access_token_enc が NULL の行は「削除済み」（世代だけを残す tombstone）。
     sql.exec(`CREATE TABLE IF NOT EXISTS github_credential (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -2083,8 +2093,12 @@ export class UserDO extends DurableObject<Env> {
    */
   async ensureMember(githubUserId: number): Promise<MemberResult> {
     try {
+      // 設定は、キャッシュより先に毎回読み直す。不正・不足ならキャッシュが active でも拒否（toFailure で internal）
+      const rules = loadAllowRules(this.env);
+      if (!rules) throw new Error("allow rules are not configured");
+      const fingerprint = rulesFingerprint(rules);
       for (let attempt = 0; attempt < MAX_MEMBER_ATTEMPTS; attempt++) {
-        const cached = this.cachedMembership(githubUserId);
+        const cached = this.cachedMembership(githubUserId, fingerprint);
         if (cached === "active") return { ok: true };
         if (cached === "denied") return this.notMember();
         const epoch = this.loginEpoch;
@@ -2385,13 +2399,20 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /** キャッシュは、確認したユーザー本人の問い合わせにだけ使う（別の id は必ず確認し直す）。 */
-  private cachedMembership(githubUserId: number): "active" | "denied" | null {
+  private cachedMembership(githubUserId: number, fingerprint: string): "active" | "denied" | null {
     const row = this.ctx.storage.sql
-      .exec<{ checked_at: number; result: string; github_user_id: number | null }>(
-        "SELECT checked_at, result, github_user_id FROM membership_cache WHERE singleton = 1",
+      .exec<{
+        checked_at: number;
+        result: string;
+        github_user_id: number | null;
+        rules_fingerprint: string | null;
+      }>(
+        "SELECT checked_at, result, github_user_id, rules_fingerprint FROM membership_cache WHERE singleton = 1",
       )
       .toArray()[0];
     if (!row || row.github_user_id !== githubUserId) return null;
+    // org/team の設定が変わったら、古い結果は使わない（旧行は指紋が無いので使わない）
+    if (row.rules_fingerprint !== fingerprint) return null;
     const age = this.now() - row.checked_at;
     if (age < 0 || age >= MEMBERSHIP_CACHE_TTL_MS) return null;
     return row.result === "active" ? "active" : "denied";
@@ -2425,10 +2446,11 @@ export class UserDO extends DurableObject<Env> {
     if (epoch !== this.loginEpoch) return STALE;
     if (state === "mismatch") return this.notMember();
     this.ctx.storage.sql.exec(
-      "INSERT OR REPLACE INTO membership_cache (singleton, checked_at, result, github_user_id) VALUES (1, ?, ?, ?)",
+      "INSERT OR REPLACE INTO membership_cache (singleton, checked_at, result, github_user_id, rules_fingerprint) VALUES (1, ?, ?, ?, ?)",
       this.now(),
       state === "active" ? "active" : "denied",
       githubUserId,
+      rulesFingerprint(rules),
     );
     return state === "active" ? { ok: true } : this.notMember();
   }

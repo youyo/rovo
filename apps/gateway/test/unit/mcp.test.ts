@@ -1792,6 +1792,8 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       context_window: 1_000_000,
       default: true,
       effort: "high",
+      // consult の tools（#135）を渡せるか
+      tool_calling: true,
       available: true,
     });
     const haiku = models.find((m) => m.id === "anthropic/claude-haiku-5-5");
@@ -1807,7 +1809,12 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
     expect(models.find((m) => m.id === "openai/gpt-6-sol")).toMatchObject({
       provider: "openai",
       api: "openai-responses",
+      tool_calling: true,
     });
+    // Workers AI は tool calling を実機で確かめていないので false（fail closed）
+    expect(models.find((m) => m.id === "workers-ai/@cf/openai/gpt-oss-120b")?.tool_calling).toBe(
+      false,
+    );
     // effort: モデルごとに固定の思考レベル（初期値に MODEL_EFFORTS を重ねた最終の値。Unit の haiku は minimal に上書き）
     expect(models.map((m) => [m.id, m.effort])).toEqual([
       ["anthropic/claude-sonnet-5-5", "high"],
@@ -1842,6 +1849,7 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       remaining_usd: 100,
       task_budget_usd: 10,
       consult_budget_usd: 0.5,
+      consult_tools_budget_usd: 1,
       max_concurrent_tasks: 10,
       // 同時に実行できるタスクの上限（設定値。Unit の vitest.config.ts は 1。未設定の既定は 2 で user-concurrency.test.ts が見る）
       concurrency_limit: 1,

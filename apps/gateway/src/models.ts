@@ -77,6 +77,8 @@ export type ModelListing = {
   default: boolean;
   /** 思考レベルの既定（モデルごと。off / minimal / low / medium / high / xhigh / max）。task_start の effort で上書きできる。考える量が多いほど出力トークン＝費用が増える */
   effort: Effort;
+  /** consult の tools（web_search / web_fetch。#135）を渡せるか。false のモデルに tools を渡すと invalid_input */
+  tool_calling: boolean;
   /** 今使えるか（D10b）。AI Gateway にそのプロバイダーのキー（alias が default）が BYOK 登録されていないと false。Workers AI は常に true */
   available: boolean;
   /** available が false の理由。"no_provider_key"（キーが登録されていない）。available が true なら付かない */
@@ -197,6 +199,7 @@ export async function listModels(env: ModelEnv, deps?: ProviderKeysDeps): Promis
       context_window: info.contextWindow,
       default: id === def,
       effort: effortOf(env, id),
+      tool_calling: info.toolCalling,
       available,
       ...(available ? {} : { unavailable_reason: "no_provider_key" as const }),
     });

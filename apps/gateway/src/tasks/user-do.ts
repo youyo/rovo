@@ -39,7 +39,12 @@ import {
 } from "../github";
 import { errorMessageForLog } from "../log-error";
 import { testConsultTiming, withTestScripts } from "../test-routes";
-import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
+import {
+  consultBudgetUsd,
+  consultToolsBudgetUsd,
+  maxConcurrentTasks,
+  taskBudgetUsd,
+} from "./budget";
 import { MAX_BUDGET_EXTENSIONS } from "./budget-question";
 import {
   fetchConsultGatewayCost,
@@ -185,6 +190,8 @@ export type BudgetStatus = {
   remaining_usd: number;
   task_budget_usd: number;
   consult_budget_usd: number;
+  /** 道具（tools）を使う consult 1 回が予約する額（CONSULT_TOOLS_BUDGET_USD。既定 1）。#135 */
+  consult_tools_budget_usd: number;
   /** 残りの月額予算で、タスクの予約額（task_budget_usd）を何件分予約できるかの見積もり。同時実行の上限ではない（上限は concurrency_limit） */
   max_concurrent_tasks: number;
   /** 利用者ごとに同時に実行できるタスクの上限（設定値 MAX_CONCURRENT_TASKS。既定 2）。実際に同時に実行できる数は、これと max_concurrent_tasks の小さいほう */
@@ -485,6 +492,9 @@ export class UserDO extends DurableObject<Env> {
     addColumnIfMissing(sql, "task_budget", "cost_source", "TEXT NOT NULL DEFAULT 'estimate'");
     // 予算の延長（budget_policy: ask）で承認された回数。延長のたびに reserved_micro へタスク予算と同じ額を足す
     addColumnIfMissing(sql, "task_budget", "extensions", "INTEGER NOT NULL DEFAULT 0");
+    // consult の行で、道具（tools。#135）を使うものは 1。予約額（CONSULT_TOOLS_BUDGET_USD）と、裏の上限・期限切れの時間を切り替える。
+    // タスクの行と列の追加前の consult は 0（道具なし）
+    addColumnIfMissing(sql, "task_budget", "consult_tools", "INTEGER NOT NULL DEFAULT 0");
     // クライアント（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
     sql.exec(`CREATE TABLE IF NOT EXISTS web_usage (
       day TEXT NOT NULL,
@@ -1269,6 +1279,7 @@ export class UserDO extends DurableObject<Env> {
       remaining_usd: remaining / MICRO,
       task_budget_usd: taskMicro / MICRO,
       consult_budget_usd: consultBudgetUsd(this.env),
+      consult_tools_budget_usd: consultToolsBudgetUsd(this.env),
       max_concurrent_tasks: taskMicro > 0 ? Math.floor(remaining / taskMicro) : 0,
       concurrency_limit: this.concurrencyLimit(),
       pending_consults: this.openConsultCount(),
@@ -1297,14 +1308,20 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * consult の予約。同時実行の枠は使わず、月の枠から CONSULT_BUDGET_USD を予約する（task_budget に consult の行を足す）。
-   * 足りなければ budget_exceeded。同じ consultId の再送は冪等。
+   * consult の予約。同時実行の枠は使わず、月の枠から CONSULT_BUDGET_USD（道具つきは CONSULT_TOOLS_BUDGET_USD）を予約する
+   * （task_budget に consult の行を足す）。足りなければ budget_exceeded。同じ consultId の再送は冪等（最初の予約額のまま）。
    * 精算されないまま CONSULT_STALE_AFTER_MS を過ぎた consult の予約は、予約額で閉じる（実費が分からないので、
    * 予約より少なく数えない側に倒す）。
    */
-  reserveConsult(consultId: string, model?: string, owner?: ConsultOwner): ConsultReserveResult {
+  reserveConsult(
+    consultId: string,
+    model?: string,
+    owner?: ConsultOwner,
+    opts?: { tools?: boolean },
+  ): ConsultReserveResult {
     if (!isConsultId(consultId)) return { ok: false, code: "invalid_input" };
-    const reservedUsd = consultBudgetUsd(this.env);
+    const tools = opts?.tools === true;
+    const reservedUsd = tools ? consultToolsBudgetUsd(this.env) : consultBudgetUsd(this.env);
     const result = this.ctx.storage.transactionSync((): ConsultReserveResult => {
       const sql = this.ctx.storage.sql;
       const at = this.now();
@@ -1326,10 +1343,11 @@ export class UserDO extends DurableObject<Env> {
         return { ok: false, code: "budget_exceeded" };
       }
       sql.exec(
-        "INSERT INTO task_budget (task_id, month, reserved_micro) VALUES (?, ?, ?)",
+        "INSERT INTO task_budget (task_id, month, reserved_micro, consult_tools) VALUES (?, ?, ?, ?)",
         consultId,
         month,
         reservedMicro,
+        tools ? 1 : 0,
       );
       // 索引用の行（モデルと所有者が分かるときだけ。予約と同じ同期区間で作る）
       if (typeof model === "string" && model !== "" && owner && Number.isSafeInteger(owner.id)) {

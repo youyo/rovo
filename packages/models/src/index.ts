@@ -154,7 +154,25 @@ export interface ModelInfo {
   thinkingLevelMap: Readonly<Record<string, string | null>>;
   /** カタログの compat.forceAdaptiveThinking（Anthropic の adaptive thinking。思考が max_tokens の中に収まる） */
   forceAdaptiveThinking: boolean;
+  /**
+   * モデルに道具（tool calling）を渡せるか（consult の tools。#135）。カタログに対応の項目が無いので、api から決める
+   * （TOOL_CALLING_APIS）。分からないものは false（fail closed）
+   */
+  toolCalling: boolean;
 }
+
+/**
+ * 道具の呼び出しに対応すると扱う api。根拠:
+ * - anthropic-messages: ワーカー（Pi のツール）・review_model の読み取りの道具が、この api の Anthropic のモデルで動いている
+ * - openai-responses: task_start の model と review_model に OpenAI のモデル（gpt-6-*）を許していて、ワーカーは道具なしでは
+ *   作業できない（同じ Pi の道具の経路を通る）
+ * Workers AI（openai-completions。agents の createAI が env.AI.run に流す経路）は、tool_calls の経路を fake の AI バインディングの
+ * unit でしか確かめていない（design.md の D10b）ので、実機で確かめるまで非対応にする。
+ */
+const TOOL_CALLING_APIS: ReadonlySet<ModelApi> = new Set([
+  "anthropic-messages",
+  "openai-responses",
+]);
 
 export interface TokenUsage {
   input: number;
@@ -249,6 +267,7 @@ function readEntry(id: string, raw: unknown): ModelInfo | undefined {
       typeof e.compat === "object" &&
       e.compat !== null &&
       (e.compat as Record<string, unknown>).forceAdaptiveThinking === true,
+    toolCalling: provider !== "workers-ai" && TOOL_CALLING_APIS.has(api),
     price: {
       inputPerMTok: cost.input,
       outputPerMTok: cost.output,
@@ -312,6 +331,11 @@ const INFOS: ReadonlyMap<string, ModelInfo> = (() => {
 /** 許可リストにあり、カタログに cost 付きで存在するモデルの情報。それ以外は undefined。 */
 export function modelInfo(id: string): ModelInfo | undefined {
   return INFOS.get(id);
+}
+
+/** consult の道具（web_search / web_fetch）を渡せるモデルか。許可リストの外・単価の分からないモデルは false（fail closed）。 */
+export function supportsToolCalling(id: string): boolean {
+  return modelInfo(id)?.toolCalling === true;
 }
 
 /**

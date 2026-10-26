@@ -36,7 +36,7 @@ const productionLike = () => ({
   publicBaseUrl: "https://rovo.example.com",
   githubApp: { id: "123456", clientId: "Iv1.exampleclientid" },
   allowed: { userIds: ["1001", "1002"] },
-  budget: { monthlyUsd: 50, taskUsd: 5, consultUsd: 0.25 },
+  budget: { monthlyUsd: 50, taskUsd: 5, consultUsd: 0.25, consultToolsUsd: 0.75 },
   models: {
     default: "anthropic/claude-sonnet-5-5",
     list: [
@@ -314,6 +314,8 @@ describe("既定値", () => {
     assert.equal(g.vars.MONTHLY_BUDGET_USD, "100");
     assert.equal(g.vars.TASK_BUDGET_USD, "10");
     assert.equal(g.vars.CONSULT_BUDGET_USD, "0.5");
+    // 道具つきの consult（#135）の予約額。既定 1
+    assert.equal(g.vars.CONSULT_TOOLS_BUDGET_USD, "1");
     assert.equal(g.vars.MAX_CONCURRENT_TASKS, "2");
     assert.equal(g.vars.WEB_BROWSE_ENABLED, "false");
     assert.equal(g.vars.ALLOWED_ORG, "");
@@ -694,7 +696,7 @@ esac
   it("--check: config を変えたのに作り直していなければ 1", () => {
     const changed = {
       ...productionLike(),
-      budget: { monthlyUsd: 77, taskUsd: 5, consultUsd: 0.25 },
+      budget: { monthlyUsd: 77, taskUsd: 5, consultUsd: 0.25, consultToolsUsd: 0.75 },
     };
     writeFileSync(cfgPath, JSON.stringify(changed));
     const r = run("--check");

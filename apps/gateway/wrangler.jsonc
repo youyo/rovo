@@ -81,6 +81,9 @@
     // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する）。不正な値・0 以下は 0.5。
     // max_output_tokens もこの額に収まるよう絞られる。
     "CONSULT_BUDGET_USD": "0.5",
+    // 道具（web_search / web_fetch）を使う consult 1 回に予約する額（USD。モデルの往復と web の実費で精算する）。不正な値・0 以下は 1。
+    // 道具なしの consult は CONSULT_BUDGET_USD のまま。
+    "CONSULT_TOOLS_BUDGET_USD": "1",
     // 利用者ごとに同時に実行できるタスクの上限（1 以上の整数。不正な値・未設定は 2）。月額の枠とは別に、両方を満たすときだけ task_start が通る。
     // 上限に達すると concurrency_limit。値は budget_status の concurrency_limit で見える。
     "MAX_CONCURRENT_TASKS": "2",

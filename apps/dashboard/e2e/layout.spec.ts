@@ -66,7 +66,9 @@ test("(23) 背の高い画面: ステータスバーがビューポートの下�
   }
 });
 
-test("(24) スマホ幅では縦に積み、高さを固定せずページ全体がスクロールする", async ({ page }) => {
+test("(24) スマホ幅の詳細: レールは出ず（一覧と詳細は切り替わる）、高さを固定せずページ全体がスクロールする", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 390, height: 600 });
   await loginAs(page, s.users.alice, taskPath(id("long")));
   await expect(page.locator(".screen")).toBeVisible();
@@ -75,9 +77,7 @@ test("(24) スマホ幅では縦に積み、高さを固定せずページ全体
     view: window.innerHeight,
   }));
   expect(doc.doc).toBeGreaterThan(doc.view);
-  const railBox = await box(page, "nav.rail");
-  const consoleBox = await box(page, ".console");
-  expect(railBox.y + railBox.height).toBeLessThanOrEqual(consoleBox.y + 1);
+  await expect(page.locator("nav.rail")).toHaveCount(0);
   expect((await box(page, ".screen")).height).toBeGreaterThan(250);
 });
 

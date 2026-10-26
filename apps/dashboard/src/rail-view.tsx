@@ -1,11 +1,19 @@
 import type { VisibleTaskDto } from "@rovo/dashboard-contract";
 import { isPlainLeftClick } from "./click";
-import { formatDuration, formatUsd, modelFamily, shortModel, singleLine } from "./format";
+import {
+  formatDuration,
+  formatDurationShort,
+  formatUsd,
+  modelFamily,
+  shortModel,
+  singleLine,
+} from "./format";
 import { useT } from "./lang";
 import { taskPath } from "./route";
 import { isTerminal, markKindOf, markLabel } from "./status";
 import { MarkSymbol } from "./status-mark";
 import { taskTime } from "./timeline";
+import { useNarrow } from "./use-narrow";
 
 /** 行の所要。終わったタスクは終了まで、実行中は at（一覧の更新時刻）までの経過 */
 function elapsedMs(t: VisibleTaskDto, at: number): number {
@@ -42,6 +50,7 @@ export function TaskRail(props: {
 }) {
   const { onSelect } = props;
   const t = useT();
+  const narrow = useNarrow();
   const at = props.at ?? Date.now();
   const rows = [...props.tasks].sort((a, b) => taskTime(b) - taskTime(a));
   return (
@@ -75,7 +84,14 @@ export function TaskRail(props: {
           >
             <MarkSymbol kind={kind} />
             <span className="rail-title">{singleLine(task.title)}</span>
-            <span className="rail-time">{formatDuration(elapsedMs(task, at), t)}</span>
+            <span
+              className="rail-time"
+              {...(narrow ? { title: formatDuration(elapsedMs(task, at), t) } : {})}
+            >
+              {narrow
+                ? formatDurationShort(elapsedMs(task, at))
+                : formatDuration(elapsedMs(task, at), t)}
+            </span>
             <span className="rail-meta">
               {props.showOwner ? (
                 <span className="rail-owner">

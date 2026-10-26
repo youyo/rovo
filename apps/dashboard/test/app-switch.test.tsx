@@ -180,7 +180,7 @@ describe("レール・タイムラインでの切り替え: ページを読み�
     expect(await leftClick(railRow(c, B))).toBe(true);
 
     expect(push).toHaveBeenCalledTimes(1);
-    expect(push).toHaveBeenCalledWith(null, "", `/dashboard/tasks/${B}`);
+    expect(push).toHaveBeenCalledWith({ from: "list" }, "", `/dashboard/tasks/${B}`);
     expect(location.pathname).toBe(`/dashboard/tasks/${B}`);
     expect(location.search).toBe("");
     expect(history.length).toBe(length + 1);
@@ -195,7 +195,7 @@ describe("レール・タイムラインでの切り替え: ページを読み�
     const { c } = await mount("/dashboard/", { team: true });
     const push = vi.spyOn(history, "pushState");
     expect(await leftClick(barOf(c, C))).toBe(true);
-    expect(push).toHaveBeenCalledWith(null, "", `/dashboard/tasks/${C}`);
+    expect(push).toHaveBeenCalledWith({ from: "list" }, "", `/dashboard/tasks/${C}`);
     expect(location.pathname).toBe(`/dashboard/tasks/${C}`);
     expect(consoleTitle(c)).toBe(rowOf(C).title);
     expect(selectedId(c)).toBe(C);
@@ -240,7 +240,7 @@ describe("レール・タイムラインでの切り替え: ページを読み�
     const { c } = await mount(`/dashboard/?day=${day}&x=1`);
     const push = vi.spyOn(history, "pushState");
     await leftClick(railRow(c, B));
-    expect(push).toHaveBeenCalledWith(null, "", `/dashboard/tasks/${B}?day=${day}`);
+    expect(push).toHaveBeenCalledWith({ from: "list" }, "", `/dashboard/tasks/${B}?day=${day}`);
     expect(location.search).toBe(`?day=${day}`);
 
     await back();

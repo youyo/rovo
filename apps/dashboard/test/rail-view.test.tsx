@@ -2,7 +2,7 @@ import type { VisibleTaskDto } from "@rovo/dashboard-contract";
 import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatDuration, formatUsd, modelFamily, shortModel } from "../src/format";
 import { TaskRail } from "../src/rail-view";
 import { MARKS } from "../src/status";
@@ -14,6 +14,7 @@ import { inJa, tJa } from "./lang";
 
 const roots: { unmount: () => void }[] = [];
 afterEach(() => {
+  vi.unstubAllGlobals();
   for (const r of roots.splice(0)) act(() => r.unmount());
   document.body.innerHTML = "";
 });
@@ -135,6 +136,19 @@ describe("タスクのレール（1 行 1 タスク）", () => {
     expect(c2.querySelector(".rail-time")?.textContent).toBe(
       formatDuration(59 * 60_000 + 20_000, tJa),
     );
+  });
+
+  it("狭い幅の所要は短い表記（9:52 / 58s / 1:02:03）。広い幅は従来どおり", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("max-width: 720px"),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const running = overviewFixture.tasks[3] as VisibleTaskDto; // 20 分
+    expect(mount([running]).querySelector(".rail-time")?.textContent).toBe("20:00");
+    const first = overviewFixture.tasks[0] as VisibleTaskDto; // 59 分 20 秒
+    expect(mount([first]).querySelector(".rail-time")?.textContent).toBe("59:20");
   });
 
   it("印: 回る輪は実行中だけが回る（spin）。状態ごとの形は MARKS の割り当て", () => {

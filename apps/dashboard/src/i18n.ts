@@ -210,7 +210,7 @@ const en = {
   "bar.month": "This month {spent}",
   "bar.monthLimit": "This month {spent} / {limit}",
   "bar.monthLoading": "This month Loading…",
-  "bar.left": "{remaining} left  {n} more",
+  "bar.left": "{remaining} left  {n} more at once",
   "bar.leftLoading": "Left Loading…",
   "bar.all": "Everyone {amount}",
   "bar.allLoading": "Everyone Loading…",
@@ -231,7 +231,8 @@ const en = {
   "budget.remaining": "Your remaining",
   "budget.limit": "Your limit",
   "budget.all": "Everyone's total",
-  "budget.startable": "You can start {n} more task.|You can start {n} more tasks.",
+  "budget.startable":
+    "You can start {n} more task right now (concurrency limit).|You can start {n} more tasks right now (concurrency limit).",
   "budget.hidden":
     "{n} task in a repository you can't access is included in the cost total.|{n} tasks in repositories you can't access are included in the cost total.",
   "budget.pace":
@@ -573,7 +574,7 @@ const ja: Record<Key, string> = {
   "bar.month": "今月 {spent}",
   "bar.monthLimit": "今月 {spent} / {limit}",
   "bar.monthLoading": "今月 読み込み中…",
-  "bar.left": "残り {remaining}  あと {n} 件",
+  "bar.left": "残り {remaining}  同時にあと {n} 件",
   "bar.leftLoading": "残り 読み込み中…",
   "bar.all": "全員 {amount}",
   "bar.allLoading": "全員 読み込み中…",
@@ -593,7 +594,7 @@ const ja: Record<Key, string> = {
   "budget.remaining": "あなたの残り",
   "budget.limit": "あなたの上限",
   "budget.all": "全員の実績",
-  "budget.startable": "あと {n} 件始められます。",
+  "budget.startable": "今すぐ同時に {n} 件始められます。",
   "budget.hidden": "権限の無いリポジトリのタスクが {n} 件、費用の合計に含まれます。",
   "budget.pace":
     "UTC の月の {day} 日目で {spent} 使いました。この速さだと月末に約 {projected} の見込みです。",

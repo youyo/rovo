@@ -193,7 +193,7 @@ describe("内訳の引き出し（情報を消さない。開閉できる）", (
     expect(budget?.textContent).toContain("$38.50");
     expect(budget?.textContent).toContain("$49.90");
     expect(budget?.textContent).toContain("$43.90");
-    expect(budget?.textContent).toContain("今すぐ同時に 2 件始められます");
+    expect(budget?.textContent).toContain("同時に 2 件始められます");
     const text = c.textContent ?? "";
     expect(text).not.toContain("あなたの今月の予算"); // 別々の欄の見出しは無い
     expect(text).not.toContain("全員の今月の実績");

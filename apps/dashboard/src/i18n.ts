@@ -232,7 +232,7 @@ const en = {
   "budget.limit": "Your limit",
   "budget.all": "Everyone's total",
   "budget.startable":
-    "You can start {n} more task right now (concurrency limit).|You can start {n} more tasks right now (concurrency limit).",
+    "You can start {n} more task at once (concurrency limit).|You can start {n} more tasks at once (concurrency limit).",
   "budget.hidden":
     "{n} task in a repository you can't access is included in the cost total.|{n} tasks in repositories you can't access are included in the cost total.",
   "budget.pace":
@@ -594,7 +594,7 @@ const ja: Record<Key, string> = {
   "budget.remaining": "あなたの残り",
   "budget.limit": "あなたの上限",
   "budget.all": "全員の実績",
-  "budget.startable": "今すぐ同時に {n} 件始められます。",
+  "budget.startable": "同時に {n} 件始められます。",
   "budget.hidden": "権限の無いリポジトリのタスクが {n} 件、費用の合計に含まれます。",
   "budget.pace":
     "UTC の月の {day} 日目で {spent} 使いました。この速さだと月末に約 {projected} の見込みです。",

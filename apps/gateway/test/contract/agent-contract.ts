@@ -34,6 +34,12 @@ export type Checks = [
   // D10: consult の依頼と結果
   Assert<Equal<Gateway.ConsultRequest, Agent.ConsultRequest>>,
   Assert<Equal<Gateway.ConsultResult, Agent.ConsultResult>>,
+  // #135: consult の道具（往復は UserDO が回し、AgentDO は 1 歩だけ）
+  Assert<Equal<Gateway.ConsultToolDef, Agent.ConsultToolDef>>,
+  Assert<Equal<Gateway.ConsultToolCall, Agent.ConsultToolCall>>,
+  Assert<Equal<Gateway.ConsultTranscriptMessage, Agent.ConsultTranscriptMessage>>,
+  Assert<Equal<Gateway.ConsultRequest["tools"], Agent.ConsultToolDef[] | undefined>>,
+  Assert<Equal<Gateway.ConsultRequest["transcript"], Agent.ConsultTranscriptMessage[] | undefined>>,
   // 同一の関数型として扱える（Gateway のスタブに apps/agent の型で書いた実装を代入できる）
   Assert<
     Equal<

@@ -203,6 +203,13 @@ export type BudgetStatus = {
 };
 
 export type SettleResult = { ok: true; applied: boolean } | { ok: false };
+
+/**
+ * consult の精算に添える、費用の確定（AI Gateway のログ）のための値（#135）。modelCalls はモデルを呼んだ歩の数（既定 1）、
+ * webMicro は web の費用（マイクロドル。ログに載らないので確定額に足す。既定 0）。reconcile: false は確定の予定を作らない
+ * （道具つきで歩の数が分からないまま閉じたとき。予約額のまま残す）
+ */
+export type ConsultSettleDetail = { modelCalls?: number; webMicro?: number; reconcile?: boolean };
 export type FinishResult = { ok: true; released: boolean };
 
 type ConsultLogRow = {
@@ -476,6 +483,10 @@ export class UserDO extends DurableObject<Env> {
     sql.exec(
       "CREATE INDEX IF NOT EXISTS consult_reconcile_open ON consult_reconcile (done) WHERE done = 0",
     );
+    // 道具つきの consult（#135）: AI Gateway のログで確かめる呼び出しの数（往復の歩の数）と、ログに載らない web の費用（マイクロドル）。
+    // 確定額は「AI Gateway の額 + web_micro」。列の追加前の行・道具なしは 1 回・0
+    addColumnIfMissing(sql, "consult_reconcile", "model_calls", "INTEGER NOT NULL DEFAULT 1");
+    addColumnIfMissing(sql, "consult_reconcile", "web_micro", "INTEGER NOT NULL DEFAULT 0");
     // 配送の失敗の記録（バックオフ）。1 行だけ
     sql.exec(`CREATE TABLE IF NOT EXISTS consult_outbox (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -1437,7 +1448,12 @@ export class UserDO extends DurableObject<Env> {
    * 見積もりで確定した印（settled_estimated）を立てる（budget_status の estimated_usd に数える）。
    * 通常は裏の完了（finishConsult）が呼ぶ。gateway のリクエストは精算しない。
    */
-  settleConsult(consultId: string, costUsd: number | null, estimated = false): SettleResult {
+  settleConsult(
+    consultId: string,
+    costUsd: number | null,
+    estimated = false,
+    detail?: ConsultSettleDetail,
+  ): SettleResult {
     if (!isConsultId(consultId)) return { ok: false };
     if (costUsd !== null && (!Number.isFinite(costUsd) || costUsd < 0)) {
       const known = this.ctx.storage.sql
@@ -1446,7 +1462,7 @@ export class UserDO extends DurableObject<Env> {
       return known.length > 0 ? { ok: true, applied: false } : { ok: false };
     }
     const result = this.ctx.storage.transactionSync(() =>
-      this.settleConsultInSection(consultId, costUsd, estimated),
+      this.settleConsultInSection(consultId, costUsd, estimated, detail),
     );
     this.requestConsultAlarm();
     this.scheduleConsultDeadlineAlarm();
@@ -1459,6 +1475,7 @@ export class UserDO extends DurableObject<Env> {
     consultId: string,
     costUsd: number | null,
     estimated: boolean,
+    detail?: ConsultSettleDetail,
   ): { ok: true; applied: boolean; settled_micro: number } | { ok: false } {
     const sql = this.ctx.storage.sql;
     const row = sql
@@ -1477,7 +1494,7 @@ export class UserDO extends DurableObject<Env> {
       consultId,
     );
     // 索引の行を同じ同期区間で確定する（精算と索引が食い違わない）
-    this.markConsultSettled(consultId);
+    this.markConsultSettled(consultId, detail);
     return { ok: true, applied: true, settled_micro: micro };
   }
 
@@ -1765,13 +1782,20 @@ export class UserDO extends DurableObject<Env> {
     return fetchConsultGatewayCost(this.env, consultId, modelCalls);
   }
 
-  /** 同期区間の中で呼ぶ。精算された consult の確定の予定を作る（設定が無い環境では作らない。再精算で作り直さない）。 */
-  private scheduleConsultReconcile(consultId: string): void {
-    if (!gatewayCostConfigured(this.env)) return;
+  /**
+   * 同期区間の中で呼ぶ。精算された consult の確定の予定を作る（設定が無い環境では作らない。再精算で作り直さない）。
+   * 道具つき（#135）は、確かめる呼び出しの数（歩の数）と web の費用を一緒に持つ
+   */
+  private scheduleConsultReconcile(consultId: string, detail?: ConsultSettleDetail): void {
+    if (!gatewayCostConfigured(this.env) || detail?.reconcile === false) return;
+    const calls = detail?.modelCalls;
+    const web = detail?.webMicro;
     this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO consult_reconcile (consult_id, base) VALUES (?, ?)",
+      "INSERT OR IGNORE INTO consult_reconcile (consult_id, base, model_calls, web_micro) VALUES (?, ?, ?, ?)",
       consultId,
       this.now(),
+      typeof calls === "number" && Number.isSafeInteger(calls) && calls >= 1 ? calls : 1,
+      typeof web === "number" && Number.isSafeInteger(web) && web >= 0 ? web : 0,
     );
   }
 
@@ -1800,8 +1824,14 @@ export class UserDO extends DurableObject<Env> {
       at - CONSULT_LOG_RETENTION_MS,
     );
     const due = sql
-      .exec<{ consult_id: string; base: number; attempt: number }>(
-        "SELECT consult_id, base, attempt FROM consult_reconcile WHERE done = 0 ORDER BY base, consult_id",
+      .exec<{
+        consult_id: string;
+        base: number;
+        attempt: number;
+        model_calls: number;
+        web_micro: number;
+      }>(
+        "SELECT consult_id, base, attempt, model_calls, web_micro FROM consult_reconcile WHERE done = 0 ORDER BY base, consult_id",
       )
       .toArray()
       .filter((r) => {
@@ -1812,8 +1842,9 @@ export class UserDO extends DurableObject<Env> {
     for (const r of due) {
       let result: GatewayCostResult;
       try {
-        // 1 回の consult が AI Gateway を呼ぶのは 1 回（AgentDO.consult は streamSimple を 1 回だけ呼ぶ）
-        result = await this.gatewayConsultCost(r.consult_id, 1);
+        // 道具なしの consult が AI Gateway を呼ぶのは 1 回（AgentDO.consult は streamSimple を 1 回だけ呼ぶ）。
+        // 道具つき（#135）は往復の歩の数（精算のときに model_calls に残した数）
+        result = await this.gatewayConsultCost(r.consult_id, Math.max(1, r.model_calls));
       } catch {
         result = { state: "pending" };
       }
@@ -1825,7 +1856,11 @@ export class UserDO extends DurableObject<Env> {
         result.micro >= 0
       ) {
         this.ctx.storage.transactionSync(() => {
-          this.applyConsultGatewayCost(r.consult_id, Math.round(result.micro));
+          // web の費用は AI Gateway のログに載らないので足す（上書きで消さない）
+          this.applyConsultGatewayCost(
+            r.consult_id,
+            Math.round(result.micro) + Math.max(0, r.web_micro),
+          );
           sql.exec("UPDATE consult_reconcile SET done = 1 WHERE consult_id = ?", r.consult_id);
         });
       } else {
@@ -1841,8 +1876,8 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * 同期区間の中で呼ぶ。閉じた consult のうち、まだ estimate のものだけ settled_micro を確定額で上書きして gateway にする
-   * （予約額・見積もりで精算したものも置き換える）。consult_log にも写して dirty にする。すでに gateway なら何もしない（冪等）。
+   * 同期区間の中で呼ぶ。閉じた consult のうち、まだ estimate のものだけ settled_micro を確定額（AI Gateway の額 + web の費用）で
+   * 上書きして gateway にする（予約額・見積もりで精算したものも置き換える）。consult_log にも写して dirty にする。すでに gateway なら何もしない（冪等）。
    */
   private applyConsultGatewayCost(consultId: string, micro: number): void {
     const sql = this.ctx.storage.sql;
@@ -1868,8 +1903,8 @@ export class UserDO extends DurableObject<Env> {
    * 同期区間の中で呼ぶ。task_budget で確定した consult の値を consult_log に写し、revision を上げて dirty にする。
    * consult_log に行が無い consult（デプロイ前の予約など）は何もしない。
    */
-  private markConsultSettled(consultId: string): void {
-    this.scheduleConsultReconcile(consultId);
+  private markConsultSettled(consultId: string, detail?: ConsultSettleDetail): void {
+    this.scheduleConsultReconcile(consultId, detail);
     const cursor = this.ctx.storage.sql.exec(
       `UPDATE consult_log SET
          cost_micro = (SELECT settled_micro FROM task_budget WHERE task_id = consult_log.consult_id),

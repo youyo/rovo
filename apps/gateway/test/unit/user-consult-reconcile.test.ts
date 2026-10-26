@@ -154,6 +154,59 @@ describe("UserDO: consult の費用の確定", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("道具つき（#135）: 問い合わせる呼び出しの数は精算で渡した model_calls、上書きは「AI Gateway の額 + web の費用」", async () => {
+    const { uid, stub, calls, results, clock } = await setup();
+    const id = newConsultId();
+    await stub.reserveConsult(id, MODEL, { id: uid, login: "alice" }, { tools: true });
+    // モデルを 3 回呼び、web に 0.01 USD かかった（実費 0.2 で精算）
+    expect(await stub.settleConsult(id, 0.2, false, { modelCalls: 3, webMicro: 10_000 })).toEqual({
+      ok: true,
+      applied: true,
+    });
+    expect(
+      (
+        await sql<Record<string, unknown>>(
+          stub,
+          "SELECT model_calls, web_micro FROM consult_reconcile WHERE consult_id = ?",
+          id,
+        )
+      )[0],
+    ).toEqual({ model_calls: 3, web_micro: 10_000 });
+    await runInDurableObject(stub, (i) => {
+      (i as unknown as { env: Record<string, unknown> }).env.DIRECTORY_DO = undefined;
+    });
+    clock.t += 2 * MIN;
+    results.push({ state: "confirmed", micro: 150_000 });
+    await fire(stub);
+    expect(calls).toEqual([[id, 3]]);
+    // web の費用は AI Gateway のログに載らないので、確定額に足す（消さない）
+    expect(await budget(stub, id)).toEqual({
+      settled_micro: 160_000,
+      settled_estimated: 0,
+      cost_source: "gateway",
+    });
+    expect(await logRow(stub, id)).toMatchObject({ cost_micro: 160_000, estimated: 0 });
+  });
+
+  it("model_calls / web_micro を渡さない精算（道具なし）は、従来どおり 1 回・web 0", async () => {
+    const { uid, stub, calls, results, clock } = await setup();
+    const id = await settled(stub, uid, 0.1);
+    expect(
+      (
+        await sql<Record<string, unknown>>(
+          stub,
+          "SELECT model_calls, web_micro FROM consult_reconcile WHERE consult_id = ?",
+          id,
+        )
+      )[0],
+    ).toEqual({ model_calls: 1, web_micro: 0 });
+    clock.t += 2 * MIN;
+    results.push({ state: "confirmed", micro: 70_000 });
+    await fire(stub);
+    expect(calls).toEqual([[id, 1]]);
+    expect(await budget(stub, id)).toMatchObject({ settled_micro: 70_000 });
+  });
+
   it("確定した額が同じ alarm の中で索引（Directory）へ届き、他の用事（配送）を壊さない", async () => {
     const { uid, stub, results, clock } = await setup();
     const sent: { cost_micro?: number; revision: number }[] = [];

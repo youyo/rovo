@@ -21,7 +21,7 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 
 1. 認証は env の `CLOUDFLARE_API_TOKEN` から読む（provider の設定は `provider "cloudflare" {}` だけ）。このトークンには、R2・Workers KV・AI Gateway の編集、Logs の編集（Logpush）、API トークンの編集（Logpush 用と gateway の読み取り用のトークンを作るため）の権限が要る。**人が作る Cloudflare のトークンはこれだけ**（デプロイは `wrangler login`）。
 2. `terraform.tfvars.example` をコピーして、`account_id` などを書く。
-3. **state の置き場所（backend）を決める。** この `infra/` には `backend` ブロックが無い。`infra/backend.tf` を足して決める（例: S3 互換の R2、Terraform Cloud）。決めないと state はローカルの `terraform.tfstate` に置かれる。
+3. **state の置き場所（backend）を決める。** この `infra/` には `backend` ブロックが無い。`infra/backend.tf` を足して決める（例: S3 互換の R2、Terraform Cloud）。決めないと state はローカルの `terraform.tfstate` に置かれる。R2 の例と制約は下の「remote backend（S3 互換の R2）の例と制約」。
 4. `terraform init` → `terraform plan` → `terraform apply`（`infra/` で実行）。
 5. `terraform output` の非秘密の値は、`mise run deploy:config` が読んで下流の wrangler 設定を生成する（手で書き写さない。docs/deploy.md の 4）。
 
@@ -35,6 +35,51 @@ rovo を自分のアカウントにデプロイするときに必要な Cloudfla
 | `gateway_cloudflare_api_token`（**sensitive**） | gateway の secret `CLOUDFLARE_API_TOKEN`。`deploy:secrets` だけが `terraform output -raw` で読む。`deploy:config` は読まない（`terraform output -json` は sensitive の値も出すので使わない） |
 
 6. AI Gateway の画面で、Anthropic の API キーを BYOK として登録する。
+
+## remote backend（S3 互換の R2）の例と制約
+
+CI から使うなら state は remote に置く。R2 に置く `infra/backend.tf` の例（バケットは Terraform とは別に、先に作っておく。値はすべてプレースホルダ）。
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket = "<YOUR_STATE_BUCKET>"
+    key    = "rovo/terraform.tfstate"
+    region = "auto"
+
+    endpoints = {
+      s3 = "https://<YOUR_ACCOUNT_ID>.r2.cloudflarestorage.com"
+    }
+
+    # R2 は AWS ではないので、AWS 向けの確認と path style 以外の指定を止める
+    use_path_style              = true
+    skip_credentials_validation = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_s3_checksum            = true
+  }
+}
+```
+
+この例は Terraform の S3 backend の設定項目（Terraform 1.9 以上。`infra/versions.tf` の `required_version`）に沿って書いたもので、この repository では実際の R2 に対して流していない（**未検証**。下流で通った設定と食い違ったら、下流の設定を正とする）。
+
+- **backend の設定は `backend.tf` にインラインで書く。** `mise run setup`（`scripts/setup.sh`）は `terraform init -input=false` を、`deploy:config`（`scripts/deploy-config.mjs`）と `deploy:secrets`（`scripts/deploy.sh`）は `terraform output -raw ...` を実行するが、どれも `-backend-config` を渡さない。bucket や endpoint を別ファイルに分けて `-backend-config` で渡す書き方は、これらのタスクでは使えない。
+- **`setup` だけが `terraform init` を行う。** `deploy:config` と `deploy:secrets` は init を行わないので、`setup` を流していない環境（CI など）では、先に `terraform -chdir=infra init -input=false` を実行しておく。
+
+### state を読むタスクと必要な env
+
+remote backend では、Terraform 以外のタスクも state を読むので、R2 のアクセスキーが要る。**env の `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY` に、R2 の S3 互換のキー（state のバケットに読み書きできるもの）を入れる。**
+
+| タスク | state を読むか | 内容 |
+|---|---|---|
+| `setup` | 読む・書く | `terraform init` / `apply` |
+| `deploy:config` | 読む | `terraform output -raw` で非秘密の 4 つを読む。`--no-terraform` と `--check`（`deploy:config:check`）は Terraform を呼ばないので不要 |
+| `deploy:secrets` | 条件つきで読む | gateway の secret `CLOUDFLARE_API_TOKEN` を**入れるとき**だけ `terraform output -raw gateway_cloudflare_api_token` を読む。すでに入っていれば読まない（`--rotate cloudflare-token` / `--rotate all` は入れ直すので読む）。`--skip-github-app` でも読む |
+| `deploy:web` / `deploy:agent` / `deploy:gateway` / `deploy:all` | 読まない | wrangler だけ |
+| `byok` / `github-app` | 読まない | `deploy/infra.json`（保存済みの出力）を使う |
+
+CI では、デプロイのジョブにも state 用の secret を渡すことになる（[docs/deploy-ci.md](../docs/deploy-ci.md)）。
 
 ## state は非公開の場所に置く
 

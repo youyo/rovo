@@ -28,6 +28,8 @@ export interface ScriptStep {
   status?: number;
   /** モデルの呼び出しの失敗を再現する（stopReason: error。usage があればそれまでの消費として報告する） */
   error?: string;
+  /** 出力の上限で切れた応答を再現する（stopReason: length。道具の呼び出しがあっても length にする） */
+  stopReason?: "length";
   /** 応答を返すまでの待ち（ms）。呼び出しの途中で cancel されるケースの再現用。abort しても応答は返る（usage が後から増える）。 */
   delayMs?: number;
 }
@@ -205,7 +207,7 @@ export function createScriptedProvider(
       provider: SCRIPTED_PROVIDER_ID,
       model: SCRIPTED_MODEL_ID,
       usage,
-      stopReason: toolCall ? "toolUse" : "stop",
+      stopReason: step.stopReason ?? (toolCall ? "toolUse" : "stop"),
       timestamp: Date.now(),
     };
     const emit = () => {
@@ -233,7 +235,11 @@ export function createScriptedProvider(
         return;
       }
       if (!step.delayMs) out.push({ type: "start", partial: message });
-      out.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
+      out.push({
+        type: "done",
+        reason: message.stopReason as "stop" | "toolUse" | "length",
+        message,
+      });
       out.end(message);
     };
     if (step.delayMs) {

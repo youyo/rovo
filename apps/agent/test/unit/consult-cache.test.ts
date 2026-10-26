@@ -75,6 +75,61 @@ describe("applyConsultCacheControl（consult の prompt caching）", () => {
     expect(out.messages[1]?.content[0]?.cache_control).toEqual(eph);
   });
 
+  it("道具の往復の歩（lastMessage）: 最後のメッセージの末尾にも付け、次の歩で道具の結果まで読めるようにする。合計 4 個以内", () => {
+    const payload = {
+      system: [
+        { type: "text", text: "S0", cache_control: eph },
+        { type: "text", text: "S1", cache_control: eph },
+      ],
+      tools: [
+        { name: "web_search", input_schema: {} },
+        { name: "web_fetch", input_schema: {}, cache_control: eph },
+      ],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "q1" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "a1" },
+            { type: "tool_use", id: "c1", name: "web_search", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "c1", content: "r", cache_control: eph }],
+        },
+      ],
+    };
+    const out = applyConsultCacheControl(anthropic, payload, { lastMessage: true }) as {
+      system: { cache_control?: unknown }[];
+      tools: { cache_control?: unknown }[];
+      messages: { content: { cache_control?: unknown }[] }[];
+    };
+    // 最後の user（道具の結果）の直前の assistant と、最後のメッセージの末尾
+    expect(out.messages[1]?.content[1]?.cache_control).toEqual(eph);
+    expect(out.messages[2]?.content[0]?.cache_control).toEqual(eph);
+    expect(out.messages[0]?.content[0]?.cache_control).toBeUndefined();
+    // system は末尾だけ（4 個の上限に収める）
+    expect(out.system[0]?.cache_control).toBeUndefined();
+    expect(out.system[1]?.cache_control).toEqual(eph);
+    const count = [...out.system, ...out.tools, ...out.messages.flatMap((m) => m.content)].filter(
+      (b) => b.cache_control !== undefined,
+    ).length;
+    expect(count).toBeLessThanOrEqual(4);
+    expect(count).toBe(4);
+  });
+
+  it("lastMessage を付けないとき（道具なしの consult）は、最後のメッセージに付けない（従来どおり）", () => {
+    const out = applyConsultCacheControl(anthropic, {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "q1" }] },
+        { role: "assistant", content: [{ type: "text", text: "a1" }] },
+        { role: "user", content: [{ type: "text", text: "q2", cache_control: eph }] },
+      ],
+    }) as { messages: { content: { cache_control?: unknown }[] }[] };
+    expect(out.messages[2]?.content[0]?.cache_control).toBeUndefined();
+  });
+
   it("元の payload を書き換えない", () => {
     const payload = {
       messages: [

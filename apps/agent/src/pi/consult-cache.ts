@@ -28,8 +28,16 @@ function stripped(content: unknown): Block[] | undefined {
  * - 最後の user メッセージより前の部分（その直前のメッセージの末尾のブロック）
  * に付け、messages の他の cache_control（pi が付けた最後のメッセージのもの）は外す。
  * Anthropic 以外のモデル（OpenAI は自動キャッシュ）と、形の合わない payload は何もしない。元の payload は書き換えない。
+ *
+ * 道具の往復の歩（opts.lastMessage。#135）では、最後のメッセージ（道具の結果）の末尾にも付ける。次の歩は同じ前置きに
+ * 1 往復を足しただけなので、そこまでがキャッシュから読まれる。Anthropic のブレークポイントは 4 個までなので、system は
+ * 末尾のブロックだけに残す（system 1・道具の定義 1（pi が付ける）・最後の user の前 1・最後 1 の合計 4 個）。
  */
-export function applyConsultCacheControl(model: Model<Api>, payload: unknown): unknown {
+export function applyConsultCacheControl(
+  model: Model<Api>,
+  payload: unknown,
+  opts: { lastMessage?: boolean } = {},
+): unknown {
   if (model.api !== "anthropic-messages" && !/claude/i.test(model.id)) return payload;
   if (!isObject(payload) || !Array.isArray(payload.messages)) return payload;
   const messages = payload.messages as Message[];
@@ -43,10 +51,17 @@ export function applyConsultCacheControl(model: Model<Api>, payload: unknown): u
     }
   }
 
+  const lastIndex = messages.length - 1;
   const next = messages.map((m, i) => {
     if (!isObject(m)) return m;
     const blocks = stripped(m.content);
     if (blocks === undefined) return m;
+    if (opts.lastMessage === true && i === lastIndex && blocks.length > 0) {
+      const last = blocks[blocks.length - 1];
+      if (isObject(last)) {
+        return { ...m, content: [...blocks.slice(0, -1), { ...last, cache_control: EPHEMERAL }] };
+      }
+    }
     // 最後の user の直前のメッセージの、末尾のブロックに付ける
     if (lastUser > 0 && i === lastUser - 1 && blocks.length > 0) {
       const last = blocks[blocks.length - 1];
@@ -62,7 +77,11 @@ export function applyConsultCacheControl(model: Model<Api>, payload: unknown): u
   if (Array.isArray(system) && system.length > 0) {
     const last = system[system.length - 1];
     if (isObject(last)) {
-      system = [...system.slice(0, -1), { ...last, cache_control: EPHEMERAL }];
+      const head = system.slice(0, -1);
+      system = [
+        ...(opts.lastMessage === true ? (stripped(head) ?? head) : head),
+        { ...last, cache_control: EPHEMERAL },
+      ];
     }
   }
   return { ...payload, ...(system !== undefined ? { system } : {}), messages: next };

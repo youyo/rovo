@@ -1,0 +1,139 @@
+# GitHub Actions のワークフローの雛形（下流の private リポジトリ用。docs/deploy-ci.md）。
+# 下流が `.github/workflows/deploy.yml` にコピーして使う。upstream では動かさない（.github/workflows/ には置かない）。
+# 書き換える値は無い。Actions secret を、次の名前で登録する（docs/deploy-ci.md の表）。
+#
+#   CLOUDFLARE_API_TOKEN_TERRAFORM   Terraform 用のトークン（infra/README.md の権限）
+#   CLOUDFLARE_API_TOKEN_DEPLOY      デプロイ用（wrangler）のトークン
+#   R2_STATE_ACCESS_KEY_ID           state（R2）の S3 互換のアクセスキー
+#   R2_STATE_SECRET_ACCESS_KEY       同じく secret
+#
+# env の名前 CLOUDFLARE_API_TOKEN は、Terraform 用とデプロイ用のどちらも使う。
+# ジョブ全体の env には置かず、必要なステップだけに渡す（取り違えると権限不足で失敗する）。
+#
+# 前提: infra/backend.tf（remote backend。infra/README.md）、rovo.config.json、deploy/ の生成物がコミット済みであること。
+# 初回は deploy/ が Terraform の出力に依存するので、docs/deploy-ci.md の「初回の流れ」のとおり 2 回に分けてコミットする。
+name: deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 既定は読み取りだけ。ジョブごとに足す必要があればそのジョブで足す（この雛形はどれも足さない）
+permissions:
+  contents: read
+
+env:
+  ROVO_DEPLOY_DIR: deploy
+
+jobs:
+  # PR: terraform plan（apply はしない）。
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - run: node scripts/deploy-config.mjs tfvars > "$RUNNER_TEMP/rovo.tfvars.json"
+      # init は state（R2）を読むので、state 用のキーだけを渡す
+      - name: terraform init
+        run: terraform -chdir=infra init -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
+      # plan は state を書かないので、apply と衝突しないようにロックしない
+      - name: terraform plan
+        run: terraform -chdir=infra plan -input=false -lock=false -var-file="$RUNNER_TEMP/rovo.tfvars.json"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_TERRAFORM }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
+      # 生成物（deploy/）が rovo.config.json と雛形から作り直した結果と一致するか。資格情報は要らない
+      # 初回の PR は deploy/ がまだ無い（docs/deploy-ci.md の 5）ので、そのときは飛ばす
+      - run: mise run install
+        if: hashFiles('deploy/infra.json') != ''
+      - run: mise run deploy:config:check
+        if: hashFiles('deploy/infra.json') != ''
+
+  # main への push: terraform apply
+  apply:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: rovo-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - run: node scripts/deploy-config.mjs tfvars > "$RUNNER_TEMP/rovo.tfvars.json"
+      - name: terraform init
+        run: terraform -chdir=infra init -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
+      - name: terraform apply
+        run: terraform -chdir=infra apply -input=false -auto-approve -var-file="$RUNNER_TEMP/rovo.tfvars.json"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_TERRAFORM }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
+
+  # main への push: apply のあと、web → agent → gateway → secret の順にデプロイする。
+  # ここでは Terraform 用のトークンを使わない。CLOUDFLARE_API_TOKEN はデプロイ用（wrangler）だけ。
+  deploy:
+    if: github.event_name == 'push'
+    needs: apply
+    runs-on: ubuntu-latest # agent のイメージのビルドに Docker が要る（ubuntu-latest には入っている）
+    timeout-minutes: 60
+    concurrency:
+      group: rovo-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      # wrangler のトークンを複数のアカウントに渡している場合だけ要る（未検証。docs/deploy-ci.md）。普通は要らない
+      # CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - run: mise run install
+      - run: mise run deploy:config:check
+      # deploy:secrets が terraform output を読むために、init だけしておく（deploy:* は init しない）
+      - name: terraform init
+        run: terraform -chdir=infra init -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
+      - name: deploy web
+        run: mise run deploy:web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_DEPLOY }}
+      - name: deploy agent
+        run: mise run deploy:agent
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_DEPLOY }}
+      - name: deploy gateway
+        run: mise run deploy:gateway
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_DEPLOY }}
+      # 入っていない secret だけを入れる。GitHub App は CI では作らない（setup か github-app を手元で）ので --skip-github-app。
+      # gateway の CLOUDFLARE_API_TOKEN を入れるときだけ state を読むので、state 用のキーも渡す
+      - name: deploy secrets
+        run: mise run deploy:secrets -- --skip-github-app
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_DEPLOY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}

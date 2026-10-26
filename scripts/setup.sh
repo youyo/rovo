@@ -50,7 +50,7 @@ fi
 [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || need_fail "env の CLOUDFLARE_API_TOKEN が未設定（Terraform 用のトークン。権限は infra/README.md）"
 if command -v pnpm > /dev/null 2>&1; then
   who="$(cd "$root/apps/gateway" && env -u CLOUDFLARE_API_TOKEN pnpm exec wrangler whoami 2>&1 < /dev/null)" || who="not authenticated"
-  case "$who" in *"not authenticated"* | *"Not logged in"* | *"not logged in"*) need_fail "wrangler にログインしていない（pnpm exec wrangler login）" ;; esac
+  case "$who" in *"not authenticated"* | *"Not logged in"* | *"not logged in"*) need_fail "wrangler にログインしていない（pnpm --filter ./apps/gateway exec wrangler login）" ;; esac
 fi
 if ! config_cli get githubAppConfigured > /dev/null; then
   need_fail "rovo.config.json が不正、または無い（rovo.config.example.json をコピーして値を入れる）"

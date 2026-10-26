@@ -382,6 +382,10 @@ describe("D10b: プロバイダーキー（provider_configs）で使えるモデ
       });
       expect(models.find((m) => m.id === OSS)).toMatchObject({ available: true });
       expect(models.find((m) => m.id === SONNET)).toMatchObject({ available: true });
+      // consult の tools（#135）を渡せるか。Workers AI は実機で確かめるまで false（fail closed）
+      expect(models.find((m) => m.id === SONNET)).toMatchObject({ tool_calling: true });
+      expect(models.find((m) => m.id === SOL)).toMatchObject({ tool_calling: true });
+      expect(models.find((m) => m.id === OSS)).toMatchObject({ tool_calling: false });
 
       const task = await client.callTool({
         name: "task_start",

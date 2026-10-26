@@ -201,7 +201,8 @@ describe("UserDO.ensureMember", () => {
     const stub = await installFakeGitHub(newUserId(), gh);
     await runInDurableObject(stub, (instance) => {
       const i = instance as unknown as { env: Record<string, unknown>; credentials: null };
-      i.env = { ...i.env, ALLOWED_TEAM: "" };
+      // team だけ（org なし）は設定の誤り
+      i.env = { ...i.env, ALLOWED_ORG: "" };
       i.credentials = null;
     });
     const r = await stub.ensureMember(1);
@@ -495,7 +496,6 @@ describe("UserDO.ensureMember: ALLOWED_USER_IDS（数値の user ID の許可リ
   it.each([
     ["ID が不正（空要素）", { ...NO_TEAM, ALLOWED_USER_IDS: "1,,2" }],
     ["ID が不正（重複）", { ...NO_TEAM, ALLOWED_USER_IDS: "1,1" }],
-    ["org だけ + 一致する ID", { ALLOWED_TEAM: "", ALLOWED_USER_IDS: "1" }],
     ["team だけ + 一致する ID", { ALLOWED_ORG: "", ALLOWED_USER_IDS: "1" }],
     ["org/team も ID も無い", { ...NO_TEAM, ALLOWED_USER_IDS: "" }],
     ["org/team は完全だが ID が不正", { ALLOWED_USER_IDS: "1,x" }],
@@ -540,5 +540,128 @@ describe("UserDO.ensureMember: ALLOWED_USER_IDS（数値の user ID の許可リ
     );
     expect(restored ?? "").toBe("");
     expect(await stub.ensureMember(1)).toEqual({ ok: true }); // 元の org/team の構成で動く
+  });
+});
+
+describe("UserDO.ensureMember: org だけの許可ルール（org の active メンバー全員）", () => {
+  const ORG_ONLY = { ALLOWED_ORG: "acme", ALLOWED_TEAM: "" };
+  const memberships = (gh: FakeGitHubFetch, kind: "org" | "team") =>
+    gh.calls.filter((c) =>
+      kind === "org"
+        ? c.path === "/user/memberships/orgs/acme"
+        : c.path.startsWith("/orgs/acme/teams/"),
+    ).length;
+
+  it("org の active メンバーは active。team の確認は呼ばない", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.org = "active";
+    gh.team = "none"; // team には居ない
+    const stub = await installFakeGitHub(newUserId(), gh);
+    await withEnv(stub, ORG_ONLY, async () => {
+      expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    });
+    expect(memberships(gh, "org")).toBe(1);
+    expect(memberships(gh, "team")).toBe(0);
+  });
+
+  it("team の指定があれば従来どおり team を確認する（org の確認は呼ばない）", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.org = "none";
+    gh.team = "active";
+    const stub = await installFakeGitHub(newUserId(), gh);
+    expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    expect(memberships(gh, "team")).toBe(1);
+    expect(memberships(gh, "org")).toBe(0);
+  });
+
+  it.each(["pending", "none"] as const)("org が %s なら denied", async (state) => {
+    const gh = new FakeGitHubFetch();
+    gh.org = state;
+    const stub = await installFakeGitHub(newUserId(), gh);
+    await withEnv(stub, ORG_ONLY, async () => {
+      expect(await stub.ensureMember(1)).toMatchObject({ ok: false, code: "forbidden" });
+    });
+  });
+
+  it("403（App に権限が無い・org が App を制限）は所属なしとして黙らず、forbidden で拒否", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.org = "forbidden";
+    const stub = await installFakeGitHub(newUserId(), gh);
+    await withEnv(stub, ORG_ONLY, async () => {
+      expect(await stub.ensureMember(1)).toMatchObject({ ok: false, code: "forbidden" });
+    });
+    // 403 は結果をキャッシュしない（権限を直したらすぐ通る）
+    gh.org = "active";
+    await withEnv(stub, ORG_ONLY, async () => {
+      expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    });
+  });
+
+  it("5xx は upstream_unavailable（拒否だが所属なしとは区別）", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.apiFault = 500;
+    const stub = await installFakeGitHub(newUserId(), gh);
+    await withEnv(stub, ORG_ONLY, async () => {
+      expect(await stub.ensureMember(1)).toMatchObject({ ok: false, code: "upstream_unavailable" });
+    });
+  });
+
+  it("org が active でなくても、ID のルールで通れば active（OR）。org の確認は呼ばない", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.org = "none";
+    const stub = await installFakeGitHub(newUserId(), gh);
+    await withEnv(stub, { ...ORG_ONLY, ALLOWED_USER_IDS: "1" }, async () => {
+      expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    });
+    expect(memberships(gh, "org")).toBe(0);
+  });
+
+  it("キャッシュが active でも、設定を org だけから org+team に絞ったら再確認する（team に居なければ拒否）", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.org = "active";
+    gh.team = "none";
+    const stub = await installFakeGitHub(newUserId(), gh);
+    await withEnv(stub, ORG_ONLY, async () => {
+      expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    });
+    await withEnv(stub, { ALLOWED_ORG: "acme", ALLOWED_TEAM: "core" }, async () => {
+      expect(await stub.ensureMember(1)).toMatchObject({ ok: false, code: "forbidden" });
+    });
+    expect(memberships(gh, "team")).toBe(1);
+  });
+
+  it("キャッシュが active でも、設定が不正（team だけ）になったら拒否する", async () => {
+    const gh = new FakeGitHubFetch();
+    const stub = await installFakeGitHub(newUserId(), gh);
+    await withEnv(stub, ORG_ONLY, async () => {
+      expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    });
+    await withEnv(stub, { ALLOWED_ORG: "", ALLOWED_TEAM: "core" }, async () => {
+      expect(await stub.ensureMember(1)).toMatchObject({ ok: false, code: "internal" });
+    });
+  });
+
+  it("古い行（指紋なし）はキャッシュとして使わない", async () => {
+    const gh = new FakeGitHubFetch();
+    const stub = await installFakeGitHub(newUserId(), gh);
+    expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    await runInDurableObject(stub, (i) => {
+      (i as unknown as { ctx: DurableObjectState }).ctx.storage.sql.exec(
+        "UPDATE membership_cache SET rules_fingerprint = NULL",
+      );
+    });
+    const n = gh.calls.length;
+    expect(await stub.ensureMember(1)).toEqual({ ok: true });
+    expect(gh.calls.length).toBeGreaterThan(n);
+  });
+
+  it("team だけ（org なし）は org の確認に落ちず、internal で拒否する", async () => {
+    const gh = new FakeGitHubFetch();
+    gh.org = "active";
+    const stub = await installFakeGitHub(newUserId(), gh);
+    await withEnv(stub, { ALLOWED_ORG: "", ALLOWED_TEAM: "core" }, async () => {
+      expect(await stub.ensureMember(1)).toMatchObject({ ok: false, code: "internal" });
+    });
+    expect(memberships(gh, "org")).toBe(0);
   });
 });

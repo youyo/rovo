@@ -55,7 +55,7 @@
     "PUBLIC_BASE_URL": "https://rovo.example.com",
     "GITHUB_APP_ID": "123456",
     "GITHUB_APP_CLIENT_ID": "Iv1.exampleclientid",
-    // 認可: org/team（対で設定）か ALLOWED_USER_IDS（カンマ区切りの GitHub の数値 ID。gh api user --jq .id）の少なくとも 1 つ。
+    // 認可: org（org だけなら org の全員、team も設定すればその team のメンバーだけ）か ALLOWED_USER_IDS（カンマ区切りの GitHub の数値 ID。gh api user --jq .id）の少なくとも 1 つ。
     // 個人で使うなら ALLOWED_USER_IDS だけを設定し、ALLOWED_ORG / ALLOWED_TEAM は空にする。
     "ALLOWED_ORG": "",
     "ALLOWED_TEAM": "",

@@ -48,7 +48,7 @@
     // GitHub App のクライアント ID（秘密ではない）。デプロイ時に実値へ置き換える。空のままだとログインは失敗する（fail closed）。
     "GITHUB_APP_CLIENT_ID": "",
     // ログインとツール呼び出しを許可する範囲。次の 2 つのルールのうち少なくとも 1 つを完全に設定する（どちらかを満たせば許可）。
-    // - org/team: ALLOWED_ORG と ALLOWED_TEAM は対。片方だけならログインは失敗する（fail closed）。
+    // - org/team: ALLOWED_ORG だけなら org の active メンバー全員を許可。ALLOWED_TEAM も設定すればその team の active メンバーだけ。ALLOWED_TEAM だけ（org なし）ならログインは失敗する（fail closed）。
     // - user ID: ALLOWED_USER_IDS はカンマ区切りの GitHub の数値 ID（正の整数。不正な要素が 1 つでもあれば全体が不正）。
     //   login は改名できるので使わない。自分の ID は `gh api user --jq .id`。
     "ALLOWED_ORG": "",

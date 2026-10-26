@@ -186,7 +186,7 @@ manifest = buildManifest({
   name: appName,
   publicBaseUrl: config.publicBaseUrl,
   redirectUrl: `http://127.0.0.1:${port}/callback`,
-  team: config.allowed.team !== "",
+  members: config.allowed.org !== "",
 });
 const closeServer = () => {
   server.closeAllConnections?.();

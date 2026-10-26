@@ -166,6 +166,27 @@ export class GitHubClient {
     return "none";
   }
 
+  /**
+   * トークンの持ち主の org への所属（GET /user/memberships/orgs/{org}）。team と同じ 3 値。
+   * 404（所属していない・外部コラボレーター）は none。403（App に権限が無い・org が App を制限）などは GitHubError で、所属なしとして黙らせない。
+   */
+  async getOrgMembership(accessToken: string, args: { org: string }): Promise<TeamMembershipState> {
+    const res = await this.rawApi(
+      accessToken,
+      `/user/memberships/orgs/${encodeURIComponent(args.org)}`,
+    );
+    if (res.status === 404) return "none";
+    this.throwIfError(res);
+    const body = (await this.json(res)) as { state?: unknown };
+    if (body.state === "active") return "active";
+    if (body.state === "pending") return "pending";
+    return "none";
+  }
+
+  async isActiveOrgMember(accessToken: string, args: { org: string }): Promise<boolean> {
+    return (await this.getOrgMembership(accessToken, args)) === "active";
+  }
+
   async isActiveTeamMember(
     accessToken: string,
     args: { org: string; teamSlug: string; username: string },

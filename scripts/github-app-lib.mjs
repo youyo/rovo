@@ -19,9 +19,9 @@ export function defaultAppName(namePrefix) {
 
 /**
  * GitHub App manifest（docs/deploy.md の 6 の設定）。Webhook は使わない（active: false）。
- * @param {{name: string, publicBaseUrl: string, redirectUrl: string, team: boolean}} o
+ * @param {{name: string, publicBaseUrl: string, redirectUrl: string, members: boolean}} o
  */
-export function buildManifest({ name, publicBaseUrl, redirectUrl, team }) {
+export function buildManifest({ name, publicBaseUrl, redirectUrl, members }) {
   // checks / statuses の read は任意: あると task_pr_merge が PR の head の check（check run と commit status）の結果を確かめる。
   // 無くてもマージは止まらず、応答の warnings に checks_unreadable が入る
   const permissions = {
@@ -31,8 +31,8 @@ export function buildManifest({ name, publicBaseUrl, redirectUrl, team }) {
     checks: "read",
     statuses: "read",
   };
-  // org の Members: read は allowed.team で所属を確かめるときだけ
-  if (team) permissions.members = "read";
+  // org の Members: read は allowed.org（+ team）で所属を確かめるときだけ。org 単独も team も同じ権限
+  if (members) permissions.members = "read";
   return {
     name,
     url: publicBaseUrl,

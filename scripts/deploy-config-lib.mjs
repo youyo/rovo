@@ -249,7 +249,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
   let team = "";
   let userIds = "";
   if (!isObj(al)) {
-    errors.push("allowed: org + team か userIds の少なくとも 1 つを設定する");
+    errors.push("allowed: org（+ team）か userIds の少なくとも 1 つを設定する");
   } else {
     for (const k of Object.keys(al))
       if (!["org", "team", "userIds"].includes(k)) errors.push(`allowed.${k}: 未知のキー`);
@@ -267,10 +267,10 @@ export function validateConfig(raw, templates = loadTemplates()) {
       );
     }
     userIds = ids.join(",");
-    if ((org === "") !== (team === ""))
-      errors.push("allowed: org と team は対で設定する（片方だけは不正）");
+    if (org === "" && team !== "")
+      errors.push("allowed: team には org が要る（org だけなら org の全員を許可する）");
     else if (org === "" && userIds === "")
-      errors.push("allowed: org + team か userIds の少なくとも 1 つを設定する");
+      errors.push("allowed: org（+ team）か userIds の少なくとも 1 つを設定する");
   }
 
   const b = { ...DEFAULTS.budget, ...(isObj(raw.budget) ? raw.budget : {}) };

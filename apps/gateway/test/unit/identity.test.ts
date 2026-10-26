@@ -113,3 +113,55 @@ describe("verifyIdentity（MCP とダッシュボードの共通の身元確認�
     }
   });
 });
+
+describe("verifyIdentity: org だけの許可ルール", () => {
+  const ORG_ONLY = { ...env, ALLOWED_ORG: "acme", ALLOWED_TEAM: "" } as unknown as Env;
+  const TEAM_ONLY = { ...env, ALLOWED_ORG: "", ALLOWED_TEAM: "core" } as unknown as Env;
+
+  function orgFetch(orgResponse: () => Response, id: number, login: string) {
+    return routerFetch({
+      "POST /login/oauth/access_token": () => tokenResponse(),
+      "GET /user": () => json({ id, login }),
+      "GET /user/memberships/orgs/acme": orgResponse,
+      // team の確認に落ちたら、この応答で通ってしまうので検出できる
+      [`GET /orgs/acme/teams/core/memberships/${login}`]: () => json({ state: "active" }),
+    });
+  }
+  async function go(e: Env, orgResponse: () => Response) {
+    await clearWorkerAudit();
+    const id = newUserId();
+    const login = `ident-${id}`;
+    const config = loadConfig(e, { fetch: orgFetch(orgResponse, id, login).fetch });
+    if (!config) throw new Error("config");
+    const result = await verifyIdentity(e, config, "code", "dashboard");
+    return { result, audit: await readWorkerAudit(e) };
+  }
+
+  it("org の active メンバーは許可", async () => {
+    const r = await go(ORG_ONLY, () => json({ state: "active" }));
+    expect(r.result.ok).toBe(true);
+  });
+  it.each(["pending"] as const)("org が %s なら拒否（not_team_member を監査）", async (state) => {
+    const r = await go(ORG_ONLY, () => json({ state }));
+    expect(r.result).toEqual({ ok: false, kind: "denied" });
+    expect(r.audit.map((a) => a.reason)).toContain("not_team_member");
+  });
+  it("404（所属していない）は拒否", async () => {
+    const r = await go(ORG_ONLY, () => json({ message: "Not Found" }, { status: 404 }));
+    expect(r.result).toEqual({ ok: false, kind: "denied" });
+    expect(r.audit.map((a) => a.reason)).toContain("not_team_member");
+  });
+  it("403 は所属なしと偽らず拒否（資格は保存しない）", async () => {
+    const r = await go(ORG_ONLY, () => json({ message: "Forbidden" }, { status: 403 }));
+    expect(r.result).toEqual({ ok: false, kind: "denied" });
+  });
+  it("5xx は unavailable", async () => {
+    const r = await go(ORG_ONLY, () => json({ message: "x" }, { status: 503 }));
+    expect(r.result).toEqual({ ok: false, kind: "unavailable" });
+  });
+  it("team だけの設定は設定の誤りで、loadConfig が null（org の確認に落ちない）", () => {
+    expect(
+      loadConfig(TEAM_ONLY, { fetch: (async () => json({})) as unknown as typeof fetch }),
+    ).toBeNull();
+  });
+});

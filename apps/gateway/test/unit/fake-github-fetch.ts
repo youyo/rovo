@@ -11,6 +11,8 @@ import { userStub } from "./helpers";
 export class FakeGitHubFetch {
   user = { id: 1, login: "alice" };
   team: "active" | "pending" | "none" = "active";
+  /** GET /user/memberships/orgs/acme の応答（org だけの許可ルール用）。"forbidden" は 403 */
+  org: "active" | "pending" | "none" | "forbidden" = "active";
   repos: { id: number; full_name: string; push: boolean }[] = [
     { id: 4242, full_name: "acme/widgets", push: true },
   ];
@@ -144,6 +146,11 @@ export class FakeGitHubFetch {
     }
 
     if (url.pathname === "/user") return json(this.user);
+    if (url.pathname === "/user/memberships/orgs/acme") {
+      if (this.org === "none") return json({ message: "Not Found" }, 404);
+      if (this.org === "forbidden") return json({ message: "Forbidden" }, 403);
+      return json({ state: this.org });
+    }
     if (url.pathname === `/orgs/acme/teams/core/memberships/${this.user.login}`) {
       if (this.team === "none") return json({ message: "Not Found" }, 404);
       return json({ state: this.team });

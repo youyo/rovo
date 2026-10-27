@@ -1792,6 +1792,8 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       context_window: 1_000_000,
       default: true,
       effort: "high",
+      // consult の tools（#135）を渡せるか
+      tool_calling: true,
       available: true,
     });
     const haiku = models.find((m) => m.id === "anthropic/claude-haiku-5-5");
@@ -1807,7 +1809,12 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
     expect(models.find((m) => m.id === "openai/gpt-6-sol")).toMatchObject({
       provider: "openai",
       api: "openai-responses",
+      tool_calling: true,
     });
+    // Workers AI は tool calling を実機で確かめていないので false（fail closed）
+    expect(models.find((m) => m.id === "workers-ai/@cf/openai/gpt-oss-120b")?.tool_calling).toBe(
+      false,
+    );
     // effort: モデルごとに固定の思考レベル（初期値に MODEL_EFFORTS を重ねた最終の値。Unit の haiku は minimal に上書き）
     expect(models.map((m) => [m.id, m.effort])).toEqual([
       ["anthropic/claude-sonnet-5-5", "high"],
@@ -1842,6 +1849,7 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       remaining_usd: 100,
       task_budget_usd: 10,
       consult_budget_usd: 0.5,
+      consult_tools_budget_usd: 2.5,
       max_concurrent_tasks: 10,
       // 同時に実行できるタスクの上限（設定値。Unit の vitest.config.ts は 1。未設定の既定は 2 で user-concurrency.test.ts が見る）
       concurrency_limit: 1,
@@ -1881,6 +1889,8 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       "messages",
       "model",
       "system",
+      // #135: モデルに渡す道具
+      "tools",
     ]);
     expect(tool?.inputSchema.required).toEqual(["messages"]);
     for (const word of [
@@ -1934,6 +1944,59 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       arguments: { model: "openai/gpt-6-astra", messages: [{ role: "user", content: "x" }] },
     });
     expect(body(model)).toMatchObject({ code: "invalid_input" });
+    await client.close();
+  });
+
+  it("consult の tools（#135）: 入力は web_search / web_fetch の配列。説明に上限・予約額・tool_calling・tools_used・tools_closed・答えの囲みを書く", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const tools = await list(client);
+    const tool = tools.find((t) => t.name === "consult");
+    const props = tool?.inputSchema.properties as Record<
+      string,
+      { type?: string; items?: { enum?: string[] } }
+    >;
+    expect(props.tools?.type).toBe("array");
+    expect(props.tools?.items?.enum).toEqual(["web_search", "web_fetch"]);
+    const d = tool?.description ?? "";
+    for (const word of [
+      "tools",
+      "web_search",
+      "web_fetch",
+      "5 回",
+      "CONSULT_TOOLS_BUDGET_USD",
+      "consult_tools_budget_usd",
+      "tool_calling",
+      "tools_used",
+      "tools_closed",
+      "UNTRUSTED_CONSULT_ANSWER",
+      "WEB_SEARCH_DAILY_LIMIT",
+      "10 分",
+      "15 分",
+    ]) {
+      expect(d, word).toContain(word);
+    }
+    // 「1 回で完結する」は道具なしのときだけ
+    expect(d).not.toContain("rovo は会話を保存しない（1 回で完結する）");
+    const result = tools.find((t) => t.name === "consult_result");
+    expect(result?.description).toContain("tools_used");
+    const budget = tools.find((t) => t.name === "budget_status");
+    expect(budget?.description).toContain("consult_tools_budget_usd");
+    const text = client.getInstructions() ?? "";
+    expect(text).toContain("UNTRUSTED_CONSULT_ANSWER");
+    expect(text).toContain("consult の tools");
+    // web_browse は consult の道具にできない（invalid_input）
+    const bad = await client.callTool({
+      name: "consult",
+      arguments: { messages: [{ role: "user", content: "x" }], tools: ["web_browse"] },
+    });
+    expect(bad.isError).toBe(true);
+    expect(body(bad)).toMatchObject({ code: "invalid_input" });
+    const dup = await client.callTool({
+      name: "consult",
+      arguments: { messages: [{ role: "user", content: "x" }], tools: ["web_fetch", "web_fetch"] },
+    });
+    expect(body(dup)).toMatchObject({ code: "invalid_input" });
     await client.close();
   });
 

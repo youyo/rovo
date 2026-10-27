@@ -5,7 +5,7 @@
   "publicBaseUrl": "https://<YOUR_GATEWAY_HOST>",
   "githubApp": { "id": "", "clientId": "" },
   "allowed": { "org": "", "team": "", "userIds": ["<YOUR_GITHUB_USER_ID>"] },
-  "budget": { "monthlyUsd": 100, "taskUsd": 10, "consultUsd": 0.5 },
+  "budget": { "monthlyUsd": 100, "taskUsd": 10, "consultUsd": 0.5, "consultToolsUsd": 2.5 },
   "concurrency": { "maxTasks": 2 },
   "models": {
     "default": "anthropic/claude-sonnet-5-5",

@@ -1,6 +1,6 @@
 import type { AuditFields } from "@rovo/audit";
 import type { Effort } from "@rovo/models";
-import { parseConsultEffort, supportedEfforts } from "@rovo/models";
+import { parseConsultEffort, supportedEfforts, supportsToolCalling } from "@rovo/models";
 import { z } from "zod";
 import type { ConsultRequest } from "./agent/contract";
 import { auditFromWorker } from "./audit-sink";
@@ -22,6 +22,9 @@ import { testConsultTiming } from "./test-routes";
  * 最大 CONSULT_WAIT_MS（50 秒）だけ答えを待つ。間に合えば今と同じ形で返し、間に合わなければ pending を返して、
  * 答えは consult_result で受け取る。精算はこのリクエストの寿命に載らない（クライアントが切れても UserDO が済ませる）。
  * rovo は会話を保存しない（答えは UserDO に最長 1 時間だけ残る。50 秒以内に返した答えは返した時点で消す）。
+ *
+ * 道具（tools: web_search / web_fetch。#135）を指定したときは、tool calling に対応するモデルか（packages/models）を予約の前に確かめ、
+ * CONSULT_TOOLS_BUDGET_USD を予約し、UserDO がモデルとの往復（道具の実行を含む）を裏で回す。
  */
 
 export type { ConsultValue } from "./consult-answer";
@@ -114,6 +117,14 @@ export function createConsultService(
       const resolved = await resolveModel(env, input.model, providerKeys);
       if (!resolved.ok) return fail(resolved.code, resolved.message);
       const model = resolved.model;
+      // 道具（#135）。空の配列は道具なしと同じ。tool calling に対応しないモデルは予約の前に拒否する（fail closed）
+      const tools = input.tools ?? [];
+      if (tools.length > 0 && !supportsToolCalling(model)) {
+        return fail(
+          "invalid_input",
+          `the model ${model} does not support tools (tool calling); choose a model whose tool_calling is true in models_list, or call consult without tools`,
+        );
+      }
 
       // 思考レベル: 指定があればモデルで検査（対応外は invalid_input）。省略は CONSULT_EFFORT（未設定・不正は medium）。
       // 既定をモデルが受け付けないときは、モデルごとの既定に戻す（agent に effort を渡さない）
@@ -129,10 +140,12 @@ export function createConsultService(
 
       const users = deps.users(principal.githubUserId);
       const consultId = newConsultId();
-      const reserved = await users.reserveConsult(consultId, model, {
-        id: principal.githubUserId,
-        login: principal.login,
-      });
+      const reserved = await users.reserveConsult(
+        consultId,
+        model,
+        { id: principal.githubUserId, login: principal.login },
+        ...(tools.length > 0 ? [{ tools: true }] : []),
+      );
       if (!reserved.ok) {
         if (reserved.code === "budget_exceeded") {
           return fail("budget_exceeded", "the monthly budget is insufficient for a consult");
@@ -151,6 +164,7 @@ export function createConsultService(
         caller: "parent",
         model,
         consult_id: consultId,
+        ...(tools.length > 0 ? { kind: "tools" } : {}),
       };
       await auditFromWorker(env, "consult_started", audit);
 
@@ -171,7 +185,7 @@ export function createConsultService(
       // 裏のモデル呼び出しと精算は UserDO の中で完結する（このリクエストの寿命に載らない）
       let started: Awaited<ReturnType<typeof users.startConsult>>;
       try {
-        started = await users.startConsult(request);
+        started = await users.startConsult(request, ...(tools.length > 0 ? [{ tools }] : []));
       } catch (e) {
         // 開始できたか分からない。予約は UserDO の期限（CONSULT_STALE_AFTER_MS）が予約額で閉じる
         console.error("consult_start_error", e instanceof Error ? e.name : typeof e);

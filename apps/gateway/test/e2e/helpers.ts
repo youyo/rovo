@@ -184,21 +184,27 @@ export async function emitAgentEvent(
  * consult の台本を預ける（ENVIRONMENT=test のときだけある /__test/agent/set-script）。key は consult の最初の user メッセージ。
  * 偽の AgentDO が text と usage をそのまま返し、費用はキャッシュ込みの scripted の単価（$1/100万、cacheRead $0.1、cacheWrite $1.25）で計算する。
  */
+export type ConsultScriptStep = {
+  text?: string;
+  usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** 失敗を返す（model_rejected = モデルの 4xx、model_error = 5xx など）。費用は 0 */
+  fail?: { code: "model_rejected" | "model_error" };
+  /** 応答するまでの遅れ（ms）。遅いモデル（consult の pending）の再現に使う */
+  delayMs?: number;
+  /** 道具つきの consult（#135）: この手でモデルが呼ぶ道具 */
+  toolCalls?: { name: string; arguments: Record<string, unknown> }[];
+  /** 道具つきの consult: 途中の会話の道具の結果を text の後ろに付けて返す */
+  echoTranscript?: boolean;
+};
+
 export async function setConsultScript(
   key: string,
-  step: {
-    text?: string;
-    usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
-    /** 失敗を返す（model_rejected = モデルの 4xx、model_error = 5xx など）。費用は 0 */
-    fail?: { code: "model_rejected" | "model_error" };
-    /** 応答するまでの遅れ（ms）。遅いモデル（consult の pending）の再現に使う */
-    delayMs?: number;
-  },
+  step: ConsultScriptStep | ConsultScriptStep[],
 ): Promise<void> {
   const res = await fetch(`${baseUrl}/__test/agent/set-script`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ key, script: [step] }),
+    body: JSON.stringify({ key, script: Array.isArray(step) ? step : [step] }),
   });
   if (!res.ok) throw new Error(`/__test/agent/set-script failed: ${res.status}`);
 }

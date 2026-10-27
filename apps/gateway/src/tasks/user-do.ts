@@ -4,10 +4,16 @@ import { auditFromWorker } from "../audit-sink";
 import { isUserIdAllowed, loadAllowRules } from "../auth/allowlist";
 import {
   type ConsultFailure,
+  type ConsultToolsExtras,
   type ConsultValue,
   interpretConsult,
   unavailableFailure,
 } from "../consult-answer";
+import {
+  CONSULT_STEP_TIMEOUT_MS,
+  type ConsultToolsOutcome,
+  runConsultTools,
+} from "../consult-tools";
 import {
   randomToken,
   SESSION_ABSOLUTE_MS,
@@ -39,7 +45,13 @@ import {
 } from "../github";
 import { errorMessageForLog } from "../log-error";
 import { testConsultTiming, withTestScripts } from "../test-routes";
-import { consultBudgetUsd, maxConcurrentTasks, taskBudgetUsd } from "./budget";
+import type { WebPort } from "../web/contract";
+import {
+  consultBudgetUsd,
+  consultToolsBudgetUsd,
+  maxConcurrentTasks,
+  taskBudgetUsd,
+} from "./budget";
 import { MAX_BUDGET_EXTENSIONS } from "./budget-question";
 import {
   fetchConsultGatewayCost,
@@ -48,9 +60,15 @@ import {
   RECONCILE_DELAYS_MS,
 } from "./gateway-cost";
 import { addColumnIfMissing } from "./sql-schema";
+import { parsePrices } from "./summary";
 import type { TaskDO } from "./task-do";
 import { isConsultId, isTaskId, ulid, ulidTime } from "./ulid";
-import { MAX_CONCURRENT_WAITERS, MAX_WAIT_SECONDS, WAIT_RETRY_AFTER_SECONDS } from "./validation";
+import {
+  type ConsultToolName,
+  MAX_CONCURRENT_WAITERS,
+  MAX_WAIT_SECONDS,
+  WAIT_RETRY_AFTER_SECONDS,
+} from "./validation";
 
 /** requests の保存期間。 */
 export const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -105,6 +123,11 @@ const MAX_MEMBER_ATTEMPTS = 3;
 const MAX_RECONCILE_ATTEMPTS = 5;
 
 const MICRO = 1_000_000;
+
+/** 精算されない consult の予約を閉じるまでの時間。道具つき（task_budget.consult_tools = 1）は長い */
+function staleAfterMs(consultTools: number): number {
+  return consultTools === 1 ? CONSULT_TOOLS_STALE_AFTER_MS : CONSULT_STALE_AFTER_MS;
+}
 /** MONTHLY_BUDGET_USD が未設定・不正なときの月額上限（USD）。 */
 export const DEFAULT_MONTHLY_BUDGET_USD = 100;
 
@@ -123,6 +146,12 @@ export const CONSULT_BACKGROUND_TIMEOUT_MS = 5 * 60 * 1000;
  * 裏の上限より短いと、pending 中に閉じてしまう。
  */
 export const CONSULT_STALE_AFTER_MS = CONSULT_BACKGROUND_TIMEOUT_MS + 5 * 60 * 1000;
+/**
+ * 道具つきの consult（#135）の裏の上限。モデルの往復（1 歩 120 秒まで × 最大 6 歩）と web の呼び出しを含む。
+ * 期限切れ（予約額で閉じる）も、これに合わせて延ばす（task_budget.consult_tools の行だけ）
+ */
+export const CONSULT_TOOLS_BACKGROUND_TIMEOUT_MS = 10 * 60 * 1000;
+export const CONSULT_TOOLS_STALE_AFTER_MS = CONSULT_TOOLS_BACKGROUND_TIMEOUT_MS + 5 * 60 * 1000;
 /** 完了した consult の答え（consult_answer）を持つ期間。過ぎたら本文ごと捨てる（以後 not_found） */
 export const CONSULT_ANSWER_TTL_MS = 60 * 60 * 1000;
 /** 同時に開いておける consult の数（予約から精算まで）。超えたら concurrency_limit。暴走時の UserDO の負荷を抑える */
@@ -185,6 +214,8 @@ export type BudgetStatus = {
   remaining_usd: number;
   task_budget_usd: number;
   consult_budget_usd: number;
+  /** 道具（tools）を使う consult 1 回が予約する額（CONSULT_TOOLS_BUDGET_USD。既定 2.5）。#135 */
+  consult_tools_budget_usd: number;
   /** 残りの月額予算で、タスクの予約額（task_budget_usd）を何件分予約できるかの見積もり。同時実行の上限ではない（上限は concurrency_limit） */
   max_concurrent_tasks: number;
   /** 利用者ごとに同時に実行できるタスクの上限（設定値 MAX_CONCURRENT_TASKS。既定 2）。実際に同時に実行できる数は、これと max_concurrent_tasks の小さいほう */
@@ -196,6 +227,13 @@ export type BudgetStatus = {
 };
 
 export type SettleResult = { ok: true; applied: boolean } | { ok: false };
+
+/**
+ * consult の精算に添える、費用の確定（AI Gateway のログ）のための値（#135）。modelCalls はモデルを呼んだ歩の数（既定 1）、
+ * webMicro は web の費用（マイクロドル。ログに載らないので確定額に足す。既定 0）。reconcile: false は確定の予定を作らない
+ * （道具つきで歩の数が分からないまま閉じたとき。予約額のまま残す）
+ */
+export type ConsultSettleDetail = { modelCalls?: number; webMicro?: number; reconcile?: boolean };
 export type FinishResult = { ok: true; released: boolean };
 
 type ConsultLogRow = {
@@ -398,6 +436,12 @@ export class UserDO extends DurableObject<Env> {
     withTestScripts(this.env, this.env.AGENT_DO.getByName(consultId) as unknown as AgentRpc);
   /** 裏のモデル呼び出しを待つ上限（ms）。Unit が短くする */
   consultBackgroundTimeoutMs = CONSULT_BACKGROUND_TIMEOUT_MS;
+  /** 道具つきの consult の裏の上限（Unit が差し替える） */
+  consultToolsBackgroundTimeoutMs = CONSULT_TOOLS_BACKGROUND_TIMEOUT_MS;
+  /** 道具つきの consult の 1 歩を待つ上限（Unit が差し替える） */
+  consultStepTimeoutMs = CONSULT_STEP_TIMEOUT_MS;
+  /** 道具つきの consult が使う web（caller parent の WEB。Unit が差し替える） */
+  consultWeb: () => WebPort | undefined = () => (this.env as unknown as { WEB?: WebPort }).WEB;
   /** consult の答えを待っている呼び出し（メモリのみ。UserDO が作り直されたら消える。正本は consult_answer の行） */
   private consultWaiters = new Set<ConsultWaiter>();
 
@@ -469,6 +513,10 @@ export class UserDO extends DurableObject<Env> {
     sql.exec(
       "CREATE INDEX IF NOT EXISTS consult_reconcile_open ON consult_reconcile (done) WHERE done = 0",
     );
+    // 道具つきの consult（#135）: AI Gateway のログで確かめる呼び出しの数（往復の歩の数）と、ログに載らない web の費用（マイクロドル）。
+    // 確定額は「AI Gateway の額 + web_micro」。列の追加前の行・道具なしは 1 回・0
+    addColumnIfMissing(sql, "consult_reconcile", "model_calls", "INTEGER NOT NULL DEFAULT 1");
+    addColumnIfMissing(sql, "consult_reconcile", "web_micro", "INTEGER NOT NULL DEFAULT 0");
     // 配送の失敗の記録（バックオフ）。1 行だけ
     sql.exec(`CREATE TABLE IF NOT EXISTS consult_outbox (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -485,6 +533,9 @@ export class UserDO extends DurableObject<Env> {
     addColumnIfMissing(sql, "task_budget", "cost_source", "TEXT NOT NULL DEFAULT 'estimate'");
     // 予算の延長（budget_policy: ask）で承認された回数。延長のたびに reserved_micro へタスク予算と同じ額を足す
     addColumnIfMissing(sql, "task_budget", "extensions", "INTEGER NOT NULL DEFAULT 0");
+    // consult の行で、道具（tools。#135）を使うものは 1。予約額（CONSULT_TOOLS_BUDGET_USD）と、裏の上限・期限切れの時間を切り替える。
+    // タスクの行と列の追加前の consult は 0（道具なし）
+    addColumnIfMissing(sql, "task_budget", "consult_tools", "INTEGER NOT NULL DEFAULT 0");
     // クライアント（MCP の web_search / web_fetch / web_browse）の回数。UTC の日付ごと・種別ごと。
     sql.exec(`CREATE TABLE IF NOT EXISTS web_usage (
       day TEXT NOT NULL,
@@ -1269,6 +1320,7 @@ export class UserDO extends DurableObject<Env> {
       remaining_usd: remaining / MICRO,
       task_budget_usd: taskMicro / MICRO,
       consult_budget_usd: consultBudgetUsd(this.env),
+      consult_tools_budget_usd: consultToolsBudgetUsd(this.env),
       max_concurrent_tasks: taskMicro > 0 ? Math.floor(remaining / taskMicro) : 0,
       concurrency_limit: this.concurrencyLimit(),
       pending_consults: this.openConsultCount(),
@@ -1297,14 +1349,20 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * consult の予約。同時実行の枠は使わず、月の枠から CONSULT_BUDGET_USD を予約する（task_budget に consult の行を足す）。
-   * 足りなければ budget_exceeded。同じ consultId の再送は冪等。
+   * consult の予約。同時実行の枠は使わず、月の枠から CONSULT_BUDGET_USD（道具つきは CONSULT_TOOLS_BUDGET_USD）を予約する
+   * （task_budget に consult の行を足す）。足りなければ budget_exceeded。同じ consultId の再送は冪等（最初の予約額のまま）。
    * 精算されないまま CONSULT_STALE_AFTER_MS を過ぎた consult の予約は、予約額で閉じる（実費が分からないので、
    * 予約より少なく数えない側に倒す）。
    */
-  reserveConsult(consultId: string, model?: string, owner?: ConsultOwner): ConsultReserveResult {
+  reserveConsult(
+    consultId: string,
+    model?: string,
+    owner?: ConsultOwner,
+    opts?: { tools?: boolean },
+  ): ConsultReserveResult {
     if (!isConsultId(consultId)) return { ok: false, code: "invalid_input" };
-    const reservedUsd = consultBudgetUsd(this.env);
+    const tools = opts?.tools === true;
+    const reservedUsd = tools ? consultToolsBudgetUsd(this.env) : consultBudgetUsd(this.env);
     const result = this.ctx.storage.transactionSync((): ConsultReserveResult => {
       const sql = this.ctx.storage.sql;
       const at = this.now();
@@ -1326,10 +1384,11 @@ export class UserDO extends DurableObject<Env> {
         return { ok: false, code: "budget_exceeded" };
       }
       sql.exec(
-        "INSERT INTO task_budget (task_id, month, reserved_micro) VALUES (?, ?, ?)",
+        "INSERT INTO task_budget (task_id, month, reserved_micro, consult_tools) VALUES (?, ?, ?, ?)",
         consultId,
         month,
         reservedMicro,
+        tools ? 1 : 0,
       );
       // 索引用の行（モデルと所有者が分かるときだけ。予約と同じ同期区間で作る）
       if (typeof model === "string" && model !== "" && owner && Number.isSafeInteger(owner.id)) {
@@ -1365,20 +1424,21 @@ export class UserDO extends DurableObject<Env> {
   private closeStaleConsults(at: number): void {
     const sql = this.ctx.storage.sql;
     const open = sql
-      .exec<{ task_id: string }>(
-        "SELECT task_id FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
+      .exec<{ task_id: string; consult_tools: number }>(
+        "SELECT task_id, consult_tools FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
       )
       .toArray();
     let closed = 0;
-    for (const { task_id } of open) {
+    for (const { task_id, consult_tools } of open) {
       const t = ulidTime(task_id.slice("consult-".length));
-      if (t === undefined || at - t < CONSULT_STALE_AFTER_MS) continue;
+      if (t === undefined || at - t < staleAfterMs(consult_tools)) continue;
       closed++;
       sql.exec(
         "UPDATE task_budget SET settled_micro = MAX(settled_micro, reserved_micro), settled_estimated = 1, closed = 1 WHERE task_id = ?",
         task_id,
       );
-      this.markConsultSettled(task_id);
+      // 道具つきは、歩の数と web の費用が分からないので、費用の確定（AI Gateway のログでの上書き）をしない（予約額のまま）
+      this.markConsultSettled(task_id, consult_tools === 1 ? { reconcile: false } : undefined);
       const settled = sql
         .exec<{ settled_micro: number }>(
           "SELECT settled_micro FROM task_budget WHERE task_id = ?",
@@ -1419,7 +1479,12 @@ export class UserDO extends DurableObject<Env> {
    * 見積もりで確定した印（settled_estimated）を立てる（budget_status の estimated_usd に数える）。
    * 通常は裏の完了（finishConsult）が呼ぶ。gateway のリクエストは精算しない。
    */
-  settleConsult(consultId: string, costUsd: number | null, estimated = false): SettleResult {
+  settleConsult(
+    consultId: string,
+    costUsd: number | null,
+    estimated = false,
+    detail?: ConsultSettleDetail,
+  ): SettleResult {
     if (!isConsultId(consultId)) return { ok: false };
     if (costUsd !== null && (!Number.isFinite(costUsd) || costUsd < 0)) {
       const known = this.ctx.storage.sql
@@ -1428,7 +1493,7 @@ export class UserDO extends DurableObject<Env> {
       return known.length > 0 ? { ok: true, applied: false } : { ok: false };
     }
     const result = this.ctx.storage.transactionSync(() =>
-      this.settleConsultInSection(consultId, costUsd, estimated),
+      this.settleConsultInSection(consultId, costUsd, estimated, detail),
     );
     this.requestConsultAlarm();
     this.scheduleConsultDeadlineAlarm();
@@ -1441,6 +1506,7 @@ export class UserDO extends DurableObject<Env> {
     consultId: string,
     costUsd: number | null,
     estimated: boolean,
+    detail?: ConsultSettleDetail,
   ): { ok: true; applied: boolean; settled_micro: number } | { ok: false } {
     const sql = this.ctx.storage.sql;
     const row = sql
@@ -1459,7 +1525,7 @@ export class UserDO extends DurableObject<Env> {
       consultId,
     );
     // 索引の行を同じ同期区間で確定する（精算と索引が食い違わない）
-    this.markConsultSettled(consultId);
+    this.markConsultSettled(consultId, detail);
     return { ok: true, applied: true, settled_micro: micro };
   }
 
@@ -1471,14 +1537,23 @@ export class UserDO extends DurableObject<Env> {
    * 待っている呼び出しを起こす。呼び出し側（gateway のリクエスト）の切断に左右されない。
    * 予約（reserveConsult）が開いていない consult は始めない。同じ consult の再送は、モデルを二重に呼ばない。
    */
-  async startConsult(request: ConsultRequest): Promise<ConsultStartResult> {
+  async startConsult(
+    request: ConsultRequest,
+    opts?: { tools?: ConsultToolName[] },
+  ): Promise<ConsultStartResult> {
     const consultId = request?.consultId;
     if (!isConsultId(consultId)) return { ok: false, code: "invalid_input" };
     const ownerId = Number(request.userId);
     if (!Number.isSafeInteger(ownerId)) return { ok: false, code: "invalid_input" };
+    // 道具（#135）。検査済みの名前だけ（consult サービスが入力を検証済み。念のため既知の名前に絞る）
+    const tools = (opts?.tools ?? []).filter(
+      (t, i, all): t is ConsultToolName =>
+        (t === "web_search" || t === "web_fetch") && all.indexOf(t) === i,
+    );
     // test のときだけ、E2E が裏の上限を縮める
     const backgroundMs =
-      (await testConsultTiming(this.env))?.backgroundTimeoutMs ?? this.consultBackgroundTimeoutMs;
+      (await testConsultTiming(this.env))?.backgroundTimeoutMs ??
+      (tools.length > 0 ? this.consultToolsBackgroundTimeoutMs : this.consultBackgroundTimeoutMs);
     const state = this.ctx.storage.transactionSync((): "not_found" | "exists" | "started" => {
       const sql = this.ctx.storage.sql;
       if (
@@ -1503,31 +1578,59 @@ export class UserDO extends DurableObject<Env> {
     if (state === "not_found") return { ok: false, code: "not_found" };
     if (state === "started") {
       // 完了まで待つ。待つ間は未完了の RPC が DO を生かす。waitUntil は念のため（失敗を握りつぶさない処理なので例外は出ない）
-      this.ctx.waitUntil(this.runConsult(request, backgroundMs));
+      this.ctx.waitUntil(this.runConsult(request, backgroundMs, tools));
       this.scheduleConsultDeadlineAlarm();
     }
     return { ok: true };
   }
 
-  /** 裏の処理。AgentDO.consult を上限まで待ち、完了処理に渡す。例外は出さない。 */
-  private async runConsult(request: ConsultRequest, backgroundMs: number): Promise<void> {
+  /**
+   * 裏の処理。AgentDO.consult を上限まで待ち、完了処理に渡す。例外は出さない。
+   * 道具つき（#135）は、往復（runConsultTools）を上限まで回す。上限を過ぎたら以後の歩・道具を呼ばず、予約額で精算する
+   */
+  private async runConsult(
+    request: ConsultRequest,
+    backgroundMs: number,
+    tools: ConsultToolName[] = [],
+  ): Promise<void> {
     let result: ConsultResult | undefined;
+    let toolsOutcome: ConsultToolsOutcome | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
     try {
+      const work: Promise<ConsultResult | undefined> =
+        tools.length > 0
+          ? runConsultTools(request, tools, {
+              step: (req) => this.consultAgent(request.consultId).consult(req),
+              consumeQuota: (kind) => this.consumeWebQuota(kind),
+              web: this.consultWeb(),
+              webPrices: (() => {
+                const p = parsePrices(this.env);
+                return { searchUsdPer1k: p.webUsdPer1kSearch, fetchUsdPer1k: p.webUsdPer1kFetch };
+              })(),
+              stepTimeoutMs: this.consultStepTimeoutMs,
+              stopped: () => stopped,
+            }).then((o) => {
+              toolsOutcome = o;
+              return o.result;
+            })
+          : this.consultAgent(request.consultId).consult(request);
       result = await Promise.race([
-        this.consultAgent(request.consultId).consult(request),
+        work,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("consult timeout")), backgroundMs);
         }),
       ]);
     } catch (e) {
       // 例外・時間切れは、実費が分からないので予約額で精算する（完了処理が undefined を実費不明として扱う）
+      stopped = true;
+      toolsOutcome = undefined;
       console.error("consult_error", e instanceof Error ? e.name : typeof e);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
     try {
-      await this.finishConsult(request, result);
+      await this.finishConsult(request, result, tools.length > 0, toolsOutcome);
     } catch (e) {
       // 保存と精算は同じ区間なので、失敗すれば両方とも起きていない（pending のまま。期限が予約額で閉じる）
       console.error("consult_finish_error", e instanceof Error ? e.name : typeof e);
@@ -1541,9 +1644,22 @@ export class UserDO extends DurableObject<Env> {
   private async finishConsult(
     request: ConsultRequest,
     result: ConsultResult | undefined,
+    withTools = false,
+    toolsOutcome?: ConsultToolsOutcome,
   ): Promise<void> {
     const consultId = request.consultId;
-    let outcome = interpretConsult(result, request.effort);
+    const extras: ConsultToolsExtras = {
+      ...(toolsOutcome?.toolsUsed ? { toolsUsed: toolsOutcome.toolsUsed } : {}),
+      ...(toolsOutcome?.toolsClosed ? { toolsClosed: toolsOutcome.toolsClosed } : {}),
+    };
+    let outcome = interpretConsult(result, request.effort, extras);
+    // 費用の確定（AI Gateway のログ）: 道具つきは往復の歩の数と web の費用を渡す。往復の結果が無い（上限切れ・例外）ときは
+    // 歩の数も web の費用も分からないので確定しない（予約額のまま）
+    const settleDetail = withTools
+      ? toolsOutcome
+        ? { modelCalls: Math.max(1, toolsOutcome.modelCalls), webMicro: toolsOutcome.webMicro }
+        : { reconcile: false }
+      : undefined;
     if (
       outcome.status === "done" &&
       new TextEncoder().encode(JSON.stringify(outcome.value)).length > CONSULT_ANSWER_MAX_BYTES
@@ -1563,7 +1679,12 @@ export class UserDO extends DurableObject<Env> {
         .exec<ConsultAnswerRow>("SELECT status FROM consult_answer WHERE consult_id = ?", consultId)
         .toArray()[0];
       if (row?.status !== "pending") return null;
-      const settled = this.settleConsultInSection(consultId, outcome.settleUsd, outcome.estimated);
+      const settled = this.settleConsultInSection(
+        consultId,
+        outcome.settleUsd,
+        outcome.estimated,
+        settleDetail,
+      );
       if (!settled.ok) return null;
       const costUsd = settled.settled_micro / MICRO;
       if (!settled.applied) {
@@ -1597,6 +1718,14 @@ export class UserDO extends DurableObject<Env> {
       cost_usd: done.costUsd,
       // 成功なのに usage が返らなかった（費用は呼ぶ前の見積りで精算した）
       ...(outcome.status === "done" && outcome.usageMissing ? { reason: "usage_missing" } : {}),
+      // 道具つき（#135）: 実行した web の回数
+      ...(withTools
+        ? {
+            kind: "tools",
+            web_search: toolsOutcome?.webSearch ?? 0,
+            web_fetch: toolsOutcome?.webFetch ?? 0,
+          }
+        : {}),
     });
   }
 
@@ -1722,13 +1851,13 @@ export class UserDO extends DurableObject<Env> {
     const consider = (t: number | undefined) => {
       if (t !== undefined && (next === undefined || t < next)) next = t;
     };
-    for (const { task_id } of sql
-      .exec<{ task_id: string }>(
-        "SELECT task_id FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
+    for (const { task_id, consult_tools } of sql
+      .exec<{ task_id: string; consult_tools: number }>(
+        "SELECT task_id, consult_tools FROM task_budget WHERE closed = 0 AND task_id LIKE 'consult-%'",
       )
       .toArray()) {
       const t = ulidTime(task_id.slice("consult-".length));
-      if (t !== undefined) consider(t + CONSULT_STALE_AFTER_MS);
+      if (t !== undefined) consider(t + staleAfterMs(consult_tools));
     }
     const expiry = sql
       .exec<{ t: number | null }>(
@@ -1747,13 +1876,20 @@ export class UserDO extends DurableObject<Env> {
     return fetchConsultGatewayCost(this.env, consultId, modelCalls);
   }
 
-  /** 同期区間の中で呼ぶ。精算された consult の確定の予定を作る（設定が無い環境では作らない。再精算で作り直さない）。 */
-  private scheduleConsultReconcile(consultId: string): void {
-    if (!gatewayCostConfigured(this.env)) return;
+  /**
+   * 同期区間の中で呼ぶ。精算された consult の確定の予定を作る（設定が無い環境では作らない。再精算で作り直さない）。
+   * 道具つき（#135）は、確かめる呼び出しの数（歩の数）と web の費用を一緒に持つ
+   */
+  private scheduleConsultReconcile(consultId: string, detail?: ConsultSettleDetail): void {
+    if (!gatewayCostConfigured(this.env) || detail?.reconcile === false) return;
+    const calls = detail?.modelCalls;
+    const web = detail?.webMicro;
     this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO consult_reconcile (consult_id, base) VALUES (?, ?)",
+      "INSERT OR IGNORE INTO consult_reconcile (consult_id, base, model_calls, web_micro) VALUES (?, ?, ?, ?)",
       consultId,
       this.now(),
+      typeof calls === "number" && Number.isSafeInteger(calls) && calls >= 1 ? calls : 1,
+      typeof web === "number" && Number.isSafeInteger(web) && web >= 0 ? web : 0,
     );
   }
 
@@ -1782,8 +1918,14 @@ export class UserDO extends DurableObject<Env> {
       at - CONSULT_LOG_RETENTION_MS,
     );
     const due = sql
-      .exec<{ consult_id: string; base: number; attempt: number }>(
-        "SELECT consult_id, base, attempt FROM consult_reconcile WHERE done = 0 ORDER BY base, consult_id",
+      .exec<{
+        consult_id: string;
+        base: number;
+        attempt: number;
+        model_calls: number;
+        web_micro: number;
+      }>(
+        "SELECT consult_id, base, attempt, model_calls, web_micro FROM consult_reconcile WHERE done = 0 ORDER BY base, consult_id",
       )
       .toArray()
       .filter((r) => {
@@ -1794,8 +1936,9 @@ export class UserDO extends DurableObject<Env> {
     for (const r of due) {
       let result: GatewayCostResult;
       try {
-        // 1 回の consult が AI Gateway を呼ぶのは 1 回（AgentDO.consult は streamSimple を 1 回だけ呼ぶ）
-        result = await this.gatewayConsultCost(r.consult_id, 1);
+        // 道具なしの consult が AI Gateway を呼ぶのは 1 回（AgentDO.consult は streamSimple を 1 回だけ呼ぶ）。
+        // 道具つき（#135）は往復の歩の数（精算のときに model_calls に残した数）
+        result = await this.gatewayConsultCost(r.consult_id, Math.max(1, r.model_calls));
       } catch {
         result = { state: "pending" };
       }
@@ -1807,7 +1950,11 @@ export class UserDO extends DurableObject<Env> {
         result.micro >= 0
       ) {
         this.ctx.storage.transactionSync(() => {
-          this.applyConsultGatewayCost(r.consult_id, Math.round(result.micro));
+          // web の費用は AI Gateway のログに載らないので足す（上書きで消さない）
+          this.applyConsultGatewayCost(
+            r.consult_id,
+            Math.round(result.micro) + Math.max(0, r.web_micro),
+          );
           sql.exec("UPDATE consult_reconcile SET done = 1 WHERE consult_id = ?", r.consult_id);
         });
       } else {
@@ -1823,8 +1970,8 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * 同期区間の中で呼ぶ。閉じた consult のうち、まだ estimate のものだけ settled_micro を確定額で上書きして gateway にする
-   * （予約額・見積もりで精算したものも置き換える）。consult_log にも写して dirty にする。すでに gateway なら何もしない（冪等）。
+   * 同期区間の中で呼ぶ。閉じた consult のうち、まだ estimate のものだけ settled_micro を確定額（AI Gateway の額 + web の費用）で
+   * 上書きして gateway にする（予約額・見積もりで精算したものも置き換える）。consult_log にも写して dirty にする。すでに gateway なら何もしない（冪等）。
    */
   private applyConsultGatewayCost(consultId: string, micro: number): void {
     const sql = this.ctx.storage.sql;
@@ -1850,8 +1997,8 @@ export class UserDO extends DurableObject<Env> {
    * 同期区間の中で呼ぶ。task_budget で確定した consult の値を consult_log に写し、revision を上げて dirty にする。
    * consult_log に行が無い consult（デプロイ前の予約など）は何もしない。
    */
-  private markConsultSettled(consultId: string): void {
-    this.scheduleConsultReconcile(consultId);
+  private markConsultSettled(consultId: string, detail?: ConsultSettleDetail): void {
+    this.scheduleConsultReconcile(consultId, detail);
     const cursor = this.ctx.storage.sql.exec(
       `UPDATE consult_log SET
          cost_micro = (SELECT settled_micro FROM task_budget WHERE task_id = consult_log.consult_id),

@@ -59,11 +59,22 @@ function writeE2eConfig(dir: string, opts: { logs: boolean }): string {
   // ai バインディングは常にリモートの Workers AI につながる（実アカウントを呼ぶ）ので、E2E では外し、
   // 偽の AI（fake-agent-worker の FakeAI。WorkerEntrypoint の run）への service binding に差し替える
   const { ai: _ai, ...withoutAi } = base;
+  // WEB（Web Research Service）も、偽の FakeWebResearch に差し替える（gateway 単体の E2E では rovo-web を起動しない。
+  // 道具つきの consult の E2E が使う。caller は本番と同じく props で parent に固定する）
+  const services = ((base.services as { binding?: string }[] | undefined) ?? []).filter(
+    (s) => s.binding !== "WEB",
+  );
   const config = {
     ...withoutAi,
     services: [
-      ...((base.services as unknown[] | undefined) ?? []),
+      ...services,
       { binding: "AI", service: "rovo-agent", entrypoint: "FakeAI" },
+      {
+        binding: "WEB",
+        service: "rovo-agent",
+        entrypoint: "FakeWebResearch",
+        props: { caller: "parent" },
+      },
     ],
     main: join(GATEWAY_DIR, String(base.main)),
     // assets.directory も設定の置き場所（一時ディレクトリ）からの相対にならないよう絶対パスにする。

@@ -85,6 +85,9 @@ export type AuditFields = {
   consult_id?: string;
   /** consult_finished・review_* だけ: 実費（USD。非負の有限数） */
   cost_usd?: number;
+  /** consult_finished だけ: 道具つきの consult（kind: "tools"）で実行した web_search / web_fetch の回数（非負の整数） */
+  web_search?: number;
+  web_fetch?: number;
   /** review_* だけ: 直すべき点・提案の件数（非負の整数） */
   must_fix_count?: number;
   suggestion_count?: number;
@@ -148,7 +151,17 @@ const EVENT_FIELDS: Readonly<
   Partial<
     Record<
       AuditEventName,
-      readonly ("op" | "dest" | "metrics" | "prefix" | "bytes" | "policy" | "consult" | "review")[]
+      readonly (
+        | "op"
+        | "dest"
+        | "metrics"
+        | "prefix"
+        | "bytes"
+        | "policy"
+        | "consult"
+        | "web_counts"
+        | "review"
+      )[]
     >
   >
 > = {
@@ -160,7 +173,7 @@ const EVENT_FIELDS: Readonly<
   pr_merged: ["policy"],
   pr_denied: ["policy"],
   consult_started: ["consult"],
-  consult_finished: ["consult"],
+  consult_finished: ["consult", "web_counts"],
   review_started: ["review"],
   review_posted: ["review"],
   review_failed: ["review"],
@@ -285,6 +298,12 @@ export function buildAudit(
       "cost_usd",
       typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined,
     );
+  }
+  if (extra.includes("web_counts")) {
+    for (const key of ["web_search", "web_fetch"]) {
+      const n = own(key);
+      put(key, typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : undefined);
+    }
   }
   if (extra.includes("review")) {
     put("model", safeCode(own("model"), MODEL_RE));

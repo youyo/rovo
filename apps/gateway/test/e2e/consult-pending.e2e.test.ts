@@ -305,3 +305,106 @@ describe("consult: pending と consult_result（E2E）", () => {
     }
   });
 });
+
+describe("consult の tools（#135。E2E）", () => {
+  it("tools を渡すと、モデルが呼んだ web_search を WEB（偽の Web Research Service）で実行して次の歩に渡し、囲んだ答え・tools_used・モデル + web の費用を返す", async () => {
+    const { user, client } = await memberClient("tools");
+    try {
+      const q = `consult tools e2e ${user.id}`;
+      await setConsultScript(q, [
+        {
+          text: "",
+          usage: { input: 1000, output: 100 },
+          toolCalls: [{ name: "web_search", arguments: { query: "rovo latest release" } }],
+        },
+        {
+          text: "rovo 2.0 is the latest.",
+          usage: { input: 2000, output: 200 },
+          echoTranscript: true,
+        },
+      ]);
+      const r = await ask(client, q, { tools: ["web_search", "web_fetch"] });
+      expect(r.isError).toBeFalsy();
+      const out = bodyOf(r);
+      const text = String(out.text);
+      // 道具を使った答えは非信頼データとして囲む
+      expect(text.startsWith("<<<UNTRUSTED_CONSULT_ANSWER:")).toBe(true);
+      expect(text.endsWith("<<<END_UNTRUSTED_CONSULT_ANSWER>>>")).toBe(true);
+      expect(text).toContain("rovo 2.0 is the latest.");
+      // 2 歩目のモデルには、ワーカーと同じ整形の結果（判定の行と囲み）が渡った
+      expect(text).toContain("[web_search] verdict: allow.");
+      expect(text).toContain("fake search result for: rovo latest release");
+      expect(out.tools_used).toEqual({
+        web_search: 1,
+        web_fetch: 0,
+        calls: [{ tool: "web_search", query: "rovo latest release" }],
+      });
+      expect(out).not.toHaveProperty("tools_closed");
+      // (1000 + 100) + (2000 + 200) トークン × $1/M + web_search 1 回 × WEB_USD_PER_1K_SEARCH（5.00）/ 1000
+      expect(Number(out.cost_usd)).toBeCloseTo(0.0033 + 0.005, 9);
+      expect(out.usage).toEqual({ input: 3000, output: 300, cache_read: 0, cache_write: 0 });
+      const after = await budget(client);
+      expect(after).toMatchObject({
+        reserved_usd: 0,
+        pending_consults: 0,
+        consult_tools_budget_usd: 2.5,
+      });
+      expect(after.spent_usd).toBeCloseTo(0.0083, 9);
+      const finished = await waitForAudit(
+        (x) => x.event === "consult_finished" && x.userId === user.id,
+      );
+      expect(finished).toMatchObject({ kind: "tools", web_search: 1, web_fetch: 0 });
+      const started = (await auditRecords()).find(
+        (x) => x.event === "consult_started" && x.userId === user.id,
+      );
+      expect(started).toMatchObject({ kind: "tools" });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("道具つきでも pending → consult_result の done に tools_used が付く。pending の間は道具つきの予約額（2.5）が reserved に出る", async () => {
+    const { user, client } = await memberClient("toolsslow");
+    try {
+      const q = `consult tools slow e2e ${user.id}`;
+      await setConsultScript(q, [
+        {
+          text: "",
+          toolCalls: [
+            { name: "web_fetch", arguments: { url: "https://docs.example.com/release" } },
+          ],
+        },
+        { text: "read it", delayMs: 2_500, echoTranscript: true },
+      ]);
+      const pending = bodyOf(await ask(client, q, { tools: ["web_fetch"] }));
+      expect(pending).toMatchObject({ status: "pending" });
+      expect(await budget(client)).toMatchObject({ reserved_usd: 2.5, pending_consults: 1 });
+      const done = bodyOf(await result(client, String(pending.consult_id)));
+      expect(done).toMatchObject({
+        status: "done",
+        tools_used: {
+          web_search: 0,
+          web_fetch: 1,
+          calls: [{ tool: "web_fetch", url: "https://docs.example.com/release" }],
+        },
+      });
+      expect(String(done.text)).toContain("fake page body of https://docs.example.com/release");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("重複・web_browse は invalid_input で、予約もしない", async () => {
+    const { client } = await memberClient("toolsbad");
+    try {
+      for (const tools of [["web_browse"], ["web_search", "web_search"]]) {
+        const r = await ask(client, "x", { tools });
+        expect(r.isError, JSON.stringify(tools)).toBe(true);
+        expect(bodyOf(r)).toMatchObject({ code: "invalid_input" });
+      }
+      expect(await budget(client)).toMatchObject({ reserved_usd: 0, spent_usd: 0 });
+    } finally {
+      await client.close();
+    }
+  });
+});

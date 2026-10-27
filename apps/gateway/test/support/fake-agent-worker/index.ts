@@ -4,6 +4,8 @@
 export { FakeAgentDO as AgentDO } from "../fake-agent-do";
 // gateway の AI バインディング（Workers AI）の代わり。E2E 用の設定で service binding に差し替える
 export { FakeAI } from "./fake-ai";
+// gateway の WEB（Web Research Service）の代わり。E2E 用の設定で service binding に差し替える
+export { FakeWebResearch } from "./fake-web";
 
 export default {
   fetch(): Response {

@@ -220,6 +220,42 @@ export interface ConsultMessage {
   content: string;
 }
 
+/**
+ * consult の道具の定義（#135。web_search / web_fetch）。UserDO が道具の往復を回すときだけ、各歩の依頼に渡す。
+ * 道具を実行するのは UserDO（gateway）で、AgentDO はモデルに定義を見せて、呼び出しを返すだけ。
+ * JSON の値は文字列で運ぶ（unknown や再帰の型は DO の RPC の型を壊すため）
+ */
+export interface ConsultToolDef {
+  name: string;
+  description: string;
+  /** 引数の JSON Schema（object）を JSON にした文字列 */
+  parametersJson: string;
+}
+
+/** モデルが呼んだ道具（1 件）。id は toolResult の toolCallId と対にする */
+export interface ConsultToolCall {
+  id: string;
+  name: string;
+  /** モデルが渡した引数（object）を JSON にした文字列。形の検査は道具を実行する UserDO が行う */
+  argumentsJson: string;
+}
+
+/**
+ * 道具の往復の途中の会話（#135）。依頼の messages の後ろに続く。assistant の toolCalls はその応答で呼んだ道具、
+ * toolResult はその結果（呼び出しごとに 1 件。UserDO が整形・囲み済みの文字列）。道具を閉じた最後の歩では、
+ * UserDO が道具のブロックを文字にたたんで（user / assistant だけにして）渡す
+ */
+export type ConsultTranscriptMessage =
+  | { role: "user"; content: string }
+  | {
+      role: "assistant";
+      content: string;
+      toolCalls?: ConsultToolCall[];
+      /** 前の歩の ConsultResult の assistantJson をそのまま戻す（中身は解釈しない） */
+      assistantJson?: string;
+    }
+  | { role: "toolResult"; toolCallId: string; toolName: string; content: string; isError: boolean };
+
 /** AgentDO.consult の依頼。consult ごとに別の AgentDO インスタンス（名前は consultId）で動く。 */
 export interface ConsultRequest {
   /** `consult-<ULID>`。AgentDO のインスタンス名と同じ。AI Gateway の metadata に載せる */
@@ -233,8 +269,18 @@ export interface ConsultRequest {
   maxOutputTokens?: number;
   /** 思考レベル。モデルが受け付けない・無いときはモデルごとの既定。思考のトークンは maxOutputTokens の中に収まる */
   effort?: Effort;
-  /** この consult に使える上限（USD）。UserDO で月の枠から予約した額 */
+  /**
+   * この consult（の 1 歩）に使える上限（USD）。道具なしは UserDO で月の枠から予約した額。道具の往復では
+   * 「予約額 − それまでの歩の費用と web の費用」
+   */
   budgetUsd: number;
+  /**
+   * モデルに渡す道具（#135）。渡したときだけ、モデルが道具を呼べる（呼んだら ok の toolCalls に返す。実行はしない）。
+   * 渡さない依頼（古い gateway・道具なし）は従来どおり 1 回で完結する
+   */
+  tools?: ConsultToolDef[];
+  /** 道具の往復の途中の会話（messages の後ろに続く）。道具のブロックを含むなら tools も渡す */
+  transcript?: ConsultTranscriptMessage[];
 }
 
 export interface ConsultUsage {
@@ -265,6 +311,16 @@ export type ConsultResult =
       usageMissing?: true;
       /** costUsd が実費ではなく見積もり（最悪の場合の見積り）。budget_status の estimated_usd に数える */
       costEstimated?: true;
+      /** モデルが呼んだ道具（tools を渡した依頼だけ。#135）。UserDO が実行して、結果を transcript に足して次の歩を頼む */
+      toolCalls?: ConsultToolCall[];
+      /** 出力の上限（max_tokens）で切れた */
+      truncated?: true;
+      /**
+       * 道具を呼んだ歩の assistant の content（pi-ai の形。署名つきの thinking・reasoning のアイテムを含む）を JSON にした不透明な文字列。
+       * UserDO は解釈せずに transcript の assistant の assistantJson に入れて次の歩で戻す（thinking が有効なとき、
+       * 署名つきの thinking の無い tool_use はプロバイダーに拒否されるため）。大きすぎるときは付かない
+       */
+      assistantJson?: string;
     }
   /**
    * 失敗。costUsd はそれまでにかかった実費（モデルを呼ぶ前の失敗は 0）。

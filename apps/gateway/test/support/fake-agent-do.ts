@@ -84,6 +84,10 @@ export type ConsultScriptStep = {
   fail?: { code: "model_rejected" | "model_error" };
   /** 応答するまでの遅れ（ms）。遅いモデル（consult の pending）の再現に使う */
   delayMs?: number;
+  /** 道具つきの consult（#135）: この手でモデルが呼ぶ道具（依頼に tools があるときだけ返す） */
+  toolCalls?: { name: string; arguments: Record<string, unknown> }[];
+  /** 道具つきの consult: 途中の会話の道具の結果（とたたんだ user の文）を text の後ろに付けて返す（E2E が中身を確かめる） */
+  echoTranscript?: boolean;
 };
 
 const STATE_KEY = "fake-agent-state";
@@ -102,7 +106,7 @@ type Saved = {
   callCounts: FakeCalls;
   pendingQuestion: string | undefined;
   seenSteers: string[];
-  consultScripts: [string, ConsultScriptStep][];
+  consultScripts: [string, ConsultScriptStep[]][];
 };
 
 const TERMINAL: readonly AgentPhase[] = ["completed", "failed", "budget_exceeded", "cancelled"];
@@ -201,13 +205,16 @@ export class FakeAgentDO extends DurableObject {
   // ---- 制御用 RPC（テストから呼ぶ）----
 
   /** 台本付き consult の台本（key は最初の user メッセージ。本物の AgentDO.setScript と同じ形）。 */
-  private consultScripts = new Map<string, ConsultScriptStep>();
+  private consultScripts = new Map<string, ConsultScriptStep[]>();
 
-  /** E2E 用: consult の台本を置く（withTestScripts が consult の直前に呼ぶ）。最初の 1 手だけ使う。 */
+  /**
+   * E2E 用: consult の台本を置く（withTestScripts が consult の直前に呼ぶ。同じ台本の置き直しは冪等）。
+   * 道具なしの consult は最初の 1 手だけを使う。道具つき（#135）は、本物の台本付き fake と同じく
+   * 「途中の会話（transcript）の assistant の数」で何手目かを決める
+   */
   setScript(key: string, script: ConsultScriptStep[]): void {
-    const first = script[0];
-    if (first) {
-      this.consultScripts.set(key, first);
+    if (script.length > 0) {
+      this.consultScripts.set(key, script);
       this.save();
     }
   }
@@ -458,7 +465,8 @@ export class FakeAgentDO extends DurableObject {
   async consult(req: ConsultRequest): Promise<ConsultResult> {
     this.callCounts.consults.push(req);
     this.save();
-    const step = this.consultScripts.get(req.messages[0]?.content ?? "");
+    const turn = (req.transcript ?? []).filter((m) => m.role === "assistant").length;
+    const step = this.consultScripts.get(req.messages[0]?.content ?? "")?.[turn];
     if (step?.delayMs) await new Promise((r) => setTimeout(r, step.delayMs));
     if (step?.fail) {
       return {
@@ -477,12 +485,36 @@ export class FakeAgentDO extends DurableObject {
     const costUsd =
       (usage.input * 1 + usage.output * 1 + usage.cacheRead * 0.1 + usage.cacheWrite * 1.25) /
       1_000_000;
+    const echoed = step?.echoTranscript
+      ? (req.transcript ?? [])
+          .flatMap((m) => (m.role === "toolResult" || m.role === "user" ? [m.content] : []))
+          .join("\n")
+      : "";
+    const calls = req.tools && step?.toolCalls ? step.toolCalls : [];
     return {
       ok: true,
-      text: step?.text ?? "fake consult answer",
+      text: `${step?.text ?? "fake consult answer"}${echoed ? `\n${echoed}` : ""}`,
       model: req.model,
       usage,
       costUsd,
+      ...(calls.length > 0
+        ? {
+            toolCalls: calls.map((c, i) => ({
+              id: `call_${turn}_${i}`,
+              name: c.name,
+              argumentsJson: JSON.stringify(c.arguments),
+            })),
+            // 本物の AgentDO と同じく、道具を呼んだ歩の assistant の content を返す（gateway は次の歩で戻す）
+            assistantJson: JSON.stringify(
+              calls.map((c, i) => ({
+                type: "toolCall",
+                id: `call_${turn}_${i}`,
+                name: c.name,
+                arguments: c.arguments,
+              })),
+            ),
+          }
+        : {}),
     };
   }
 

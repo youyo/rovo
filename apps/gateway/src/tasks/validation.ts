@@ -348,6 +348,12 @@ export const MAX_CONSULT_MESSAGES = 100;
 export const MAX_CONSULT_OUTPUT_TOKENS = 64_000;
 export const MAX_CONSULT_INPUT_BYTES = 256 * 1024;
 
+/**
+ * consult でモデルに渡せる道具（#135）。web_browse は渡さない（JS の描画は費用と時間が大きく、consult の往復の上限に合わない）。
+ */
+export const CONSULT_TOOLS = ["web_search", "web_fetch"] as const;
+export type ConsultToolName = (typeof CONSULT_TOOLS)[number];
+
 /** consult の入力。messages は最初と最後が user（Anthropic の API の制約と、「最後の user の質問に答える」意味に合わせる）。 */
 export const consultInputSchema = z
   .object({
@@ -365,8 +371,13 @@ export const consultInputSchema = z
     max_output_tokens: z.number().int().min(1).max(MAX_CONSULT_OUTPUT_TOKENS).optional(),
     /** 思考レベル（その呼び出しだけ）。省略は CONSULT_EFFORT。モデルが受け付けるかは consult サービスが確かめる */
     effort: z.enum(EFFORT_LEVELS).optional(),
+    /** モデルに渡す道具（#135）。空の配列は道具なしと同じ。重複は不可。モデルが道具に対応するかは consult サービスが確かめる */
+    tools: z.array(z.enum(CONSULT_TOOLS)).max(CONSULT_TOOLS.length).optional(),
   })
   .superRefine((v, ctx) => {
+    if (v.tools !== undefined && new Set(v.tools).size !== v.tools.length) {
+      ctx.addIssue({ code: "custom", path: ["tools"], message: "duplicate tools" });
+    }
     if (v.messages[0]?.role !== "user") {
       ctx.addIssue({ code: "custom", path: ["messages", 0], message: "最初のメッセージは user" });
     }

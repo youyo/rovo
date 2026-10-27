@@ -28,6 +28,10 @@ export interface ScriptStep {
   status?: number;
   /** モデルの呼び出しの失敗を再現する（stopReason: error。usage があればそれまでの消費として報告する） */
   error?: string;
+  /** 署名つきの thinking のブロック（content の先頭に置く。thinking を持ち回れるかの確認用） */
+  thinking?: { text: string; signature?: string; redacted?: boolean };
+  /** 出力の上限で切れた応答を再現する（stopReason: length。道具の呼び出しがあっても length にする） */
+  stopReason?: "length";
   /** 応答を返すまでの待ち（ms）。呼び出しの途中で cancel されるケースの再現用。abort しても応答は返る（usage が後から増える）。 */
   delayMs?: number;
 }
@@ -141,6 +145,8 @@ export function createScriptedProvider(
     reasoning?: string;
     /** このリクエストでモデルに渡った道具の名前 */
     toolNames?: string[];
+    /** transcript の assistant ごとの content のブロックの種類 */
+    assistantBlocks?: string[][];
   }) => void,
 ): Provider {
   const stream = (
@@ -162,6 +168,9 @@ export function createScriptedProvider(
       systemText: systemText(context),
       reasoning: options?.reasoning,
       toolNames: toolNamesOf(context),
+      assistantBlocks: context.messages.flatMap((m) =>
+        m.role === "assistant" ? [m.content.map((c) => c.type)] : [],
+      ),
     });
     const turn = context.messages.filter((m) => m.role === "assistant").length;
     const step = getScript(userText(context))[turn] ?? { text: "script exhausted" };
@@ -187,6 +196,16 @@ export function createScriptedProvider(
       cost,
     };
     const content: AssistantMessage["content"] = [];
+    if (step.thinking) {
+      content.push({
+        type: "thinking",
+        thinking: step.thinking.text,
+        ...(step.thinking.signature !== undefined
+          ? { thinkingSignature: step.thinking.signature }
+          : {}),
+        ...(step.thinking.redacted ? { redacted: true } : {}),
+      });
+    }
     if (step.text) content.push({ type: "text", text: step.text });
     const calls = step.toolCalls ?? (step.toolCall ? [step.toolCall] : []);
     const toolCall = calls.length > 0 ? true : undefined;
@@ -205,7 +224,7 @@ export function createScriptedProvider(
       provider: SCRIPTED_PROVIDER_ID,
       model: SCRIPTED_MODEL_ID,
       usage,
-      stopReason: toolCall ? "toolUse" : "stop",
+      stopReason: step.stopReason ?? (toolCall ? "toolUse" : "stop"),
       timestamp: Date.now(),
     };
     const emit = () => {
@@ -233,7 +252,11 @@ export function createScriptedProvider(
         return;
       }
       if (!step.delayMs) out.push({ type: "start", partial: message });
-      out.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
+      out.push({
+        type: "done",
+        reason: message.stopReason as "stop" | "toolUse" | "length",
+        message,
+      });
       out.end(message);
     };
     if (step.delayMs) {

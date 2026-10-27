@@ -69,6 +69,8 @@
     "TASK_BUDGET_USD": "<TASK_BUDGET_USD>",
     // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する。既定 0.5）。max_output_tokens もこの額に収まるよう絞られる。
     "CONSULT_BUDGET_USD": "<CONSULT_BUDGET_USD>",
+    // 道具（web_search / web_fetch）を使う consult 1 回に予約する額（USD。モデルの往復と web の実費で精算する。既定 2.5）。道具なしの consult は CONSULT_BUDGET_USD のまま。
+    "CONSULT_TOOLS_BUDGET_USD": "<CONSULT_TOOLS_BUDGET_USD>",
     // 利用者ごとに同時に実行できるタスクの上限（rovo.config.json の concurrency.maxTasks。1 以上の整数。既定 2）。月額の枠とは別で、両方を満たすときだけ task_start が通る。
     // 上限に達すると concurrency_limit。値は budget_status の concurrency_limit で見える。
     "MAX_CONCURRENT_TASKS": "<MAX_CONCURRENT_TASKS>",

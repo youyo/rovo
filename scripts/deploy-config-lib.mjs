@@ -22,7 +22,7 @@ export const APPS = ["gateway", "agent", "web"];
 export const DEFAULTS = {
   namePrefix: "rovo",
   workerNames: { gateway: "rovo-gateway", agent: "rovo-agent", web: "rovo-web" },
-  budget: { monthlyUsd: 100, taskUsd: 10, consultUsd: 0.5 },
+  budget: { monthlyUsd: 100, taskUsd: 10, consultUsd: 0.5, consultToolsUsd: 2.5 },
   // 利用者ごとに同時に実行できるタスクの上限（gateway の MAX_CONCURRENT_TASKS）。OSS の既定は 2
   concurrency: { maxTasks: 2 },
   models: {
@@ -277,7 +277,7 @@ export function validateConfig(raw, templates = loadTemplates()) {
   if (raw.budget !== undefined && !isObj(raw.budget)) errors.push("budget: オブジェクトにする");
   for (const k of Object.keys(isObj(raw.budget) ? raw.budget : {})) {
     if (!(k in DEFAULTS.budget))
-      errors.push(`budget.${k}: 未知のキー（monthlyUsd / taskUsd / consultUsd）`);
+      errors.push(`budget.${k}: 未知のキー（monthlyUsd / taskUsd / consultUsd / consultToolsUsd）`);
   }
   for (const k of Object.keys(DEFAULTS.budget)) {
     if (typeof b[k] !== "number" || !Number.isFinite(b[k]) || b[k] <= 0)
@@ -457,6 +457,7 @@ function placeholderValues(config, infra) {
     MONTHLY_BUDGET_USD: config.budget.monthlyUsd,
     TASK_BUDGET_USD: config.budget.taskUsd,
     CONSULT_BUDGET_USD: config.budget.consultUsd,
+    CONSULT_TOOLS_BUDGET_USD: config.budget.consultToolsUsd,
     MAX_CONCURRENT_TASKS: String(config.concurrency.maxTasks),
     AGENT_MODEL: config.models.default,
     AGENT_MODELS: config.models.list.join(","),

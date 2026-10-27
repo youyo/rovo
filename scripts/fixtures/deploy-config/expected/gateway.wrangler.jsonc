@@ -65,6 +65,8 @@
     "TASK_BUDGET_USD": "5",
     // consult（セカンドオピニオン）1 回に月額の枠から予約する額（USD。実費で精算する。既定 0.5）。max_output_tokens もこの額に収まるよう絞られる。
     "CONSULT_BUDGET_USD": "0.25",
+    // 道具（web_search / web_fetch）を使う consult 1 回に予約する額（USD。モデルの往復と web の実費で精算する。既定 2.5）。道具なしの consult は CONSULT_BUDGET_USD のまま。
+    "CONSULT_TOOLS_BUDGET_USD": "0.75",
     "MAX_CONCURRENT_TASKS": "3",
     // 使えるモデル。AGENT_MODEL は既定（task_start の model を省略したとき）、AGENT_MODELS はカンマ区切りの選べるモデル
     // （task_start の model と consult の model。models_list に出る）。空なら AGENT_MODEL だけ。agent の同名の var と同じ値にする。

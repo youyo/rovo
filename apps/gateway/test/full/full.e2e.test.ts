@@ -1405,6 +1405,40 @@ describe("Gateway → Web Research Service（Phase 5: クライアントの MCP 
     await other.close();
   });
 
+  it("p1. consult の tools（#135）: 台本のモデルが web_search を呼ぶと、gateway が Web Research Service（caller parent）で実行して次の歩に渡し、囲んだ答え・tools_used・web の費用込みの cost_usd が返る", async () => {
+    const client = await newClient("connie");
+    const q = `full consult tools ${Date.now()}`;
+    await testPost("/__test/agent/set-script", {
+      key: q,
+      script: [
+        {
+          toolCall: { name: "web_search", arguments: { query: "rovo guide" } },
+          usage: { input: 1000, output: 100 },
+        },
+        { text: "Read the Rovo Guide.", usage: { input: 3000, output: 200 } },
+      ],
+    });
+    const r = await call(client, "consult", {
+      messages: [{ role: "user", content: q }],
+      tools: ["web_search"],
+    });
+    expect(r.isError, JSON.stringify(r.body)).toBe(false);
+    const text = String(r.body.text);
+    expect(text.startsWith("<<<UNTRUSTED_CONSULT_ANSWER:")).toBe(true);
+    expect(text).toContain("Read the Rovo Guide.");
+    expect(r.body.tools_used).toEqual({
+      web_search: 1,
+      web_fetch: 0,
+      calls: [{ tool: "web_search", query: "rovo guide" }],
+    });
+    // 本物の Web Research Service（偽の検索 API）まで届いた
+    const searchReq = fakeWeb.requests.findLast((x) => x.path === "/ai/websearch");
+    expect(searchReq?.body).toMatchObject({ query: "rovo guide" });
+    // モデル 2 歩（台本の単価 $1/M）+ web_search 1 回（WEB_USD_PER_1K_SEARCH 5.00 / 1000）
+    expect(Number(r.body.cost_usd)).toBeCloseTo((1100 + 3200) / 1e6 + 0.005, 9);
+    await client.close();
+  });
+
   it("p2. 不正な URL・private な URL は invalid_input（web が拒否する）", async () => {
     const client = await newClient("pia");
     for (const url of [

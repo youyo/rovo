@@ -60,7 +60,15 @@ export class AgentStore {
     private readonly ctx: DurableObjectState,
     private readonly now: () => number,
   ) {
-    const sql = ctx.storage.sql;
+    this.ensureSchema();
+  }
+
+  /**
+   * テーブルを作る（冪等）。storage.deleteAll() のあとに同じインスタンスを使い続けるとき（consult の道具の往復は、
+   * 1 歩ごとに保存データを消し、同じインスタンスに次の歩が来る。#135）は、使う前にもう一度呼ぶ
+   */
+  ensureSchema(): void {
+    const sql = this.ctx.storage.sql;
     sql.exec("CREATE TABLE IF NOT EXISTS agent_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     sql.exec(
       "CREATE TABLE IF NOT EXISTS agent_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL)",

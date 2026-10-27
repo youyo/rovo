@@ -57,6 +57,8 @@ describe("UserDO.budgetStatus（budget_status）", () => {
       remaining_usd: 100,
       task_budget_usd: 10,
       consult_budget_usd: 0.5,
+      // 道具つきの consult（#135）が予約する額。CONSULT_TOOLS_BUDGET_USD（既定 2.5）
+      consult_tools_budget_usd: 2.5,
       max_concurrent_tasks: 10,
       concurrency_limit: 1, // Unit の vitest.config.ts の MAX_CONCURRENT_TASKS
       pending_consults: 0,
@@ -142,6 +144,39 @@ describe("UserDO.reserveConsult / settleConsult", () => {
       { task_id: id, month: "2026-01", reserved_micro: 0.5 * MICRO, settled_micro: 0, closed: 0 },
     ]);
     expect(await stub.budgetStatus()).toMatchObject({ reserved_usd: 10.5, remaining_usd: 89.5 });
+  });
+
+  it("道具つき（tools: true）は CONSULT_TOOLS_BUDGET_USD（既定 2.5）を予約し、行に道具ありを持つ。足りなければ budget_exceeded", async () => {
+    const stub = userStub(newUserId());
+    await setup(stub);
+    const id = newConsultId();
+    expect(await stub.reserveConsult(id, undefined, undefined, { tools: true })).toEqual({
+      ok: true,
+      reserved_usd: 2.5,
+    });
+    const plain = newConsultId(Date.UTC(2026, 0, 15, 12, 0, 1));
+    expect(await stub.reserveConsult(plain)).toEqual({ ok: true, reserved_usd: 0.5 });
+    expect(
+      await sql(
+        stub,
+        "SELECT task_id, reserved_micro, consult_tools FROM task_budget ORDER BY task_id",
+      ),
+    ).toEqual([
+      { task_id: id, reserved_micro: 2.5 * MICRO, consult_tools: 1 },
+      { task_id: plain, reserved_micro: 0.5 * MICRO, consult_tools: 0 },
+    ]);
+    expect(await stub.budgetStatus()).toMatchObject({ reserved_usd: 3 });
+
+    const poor = userStub(newUserId());
+    await setup(poor, { limitUsd: 2.4 });
+    expect(
+      await poor.reserveConsult(newConsultId(), undefined, undefined, { tools: true }),
+    ).toEqual({ ok: false, code: "budget_exceeded" });
+    // 道具なしなら同じ残りで通る
+    expect(await poor.reserveConsult(newConsultId())).toMatchObject({
+      ok: true,
+      reserved_usd: 0.5,
+    });
   });
 
   it("月の枠が足りなければ budget_exceeded で、行も作らない。ちょうど足りれば通る", async () => {

@@ -19,6 +19,7 @@ const ORDER = [
   "lint",
   "test:unit:audit",
   "test:unit:models",
+  "test:unit:web-format",
   "test:unit:dashboard",
   "test:dashboard:dist",
   "test:unit:dashboard-contract",
@@ -109,6 +110,8 @@ const RULES = [
     ],
   ],
   ["packages/models/**", ["test:unit:models", "test:unit:gateway", "test:unit:agent"]],
+  // web の結果の整形。ワーカー（agent）と consult（gateway の UserDO）が使う
+  ["packages/web-format/**", ["test:unit:web-format", "test:unit:gateway", "test:unit:agent"]],
   [
     "packages/audit/**",
     ["test:unit:audit", "test:unit:gateway", "test:unit:agent", "test:unit:web"],

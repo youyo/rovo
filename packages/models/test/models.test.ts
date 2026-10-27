@@ -34,6 +34,7 @@ import {
   sandboxUsdPerHour,
   selectableSandboxInstancesUpTo,
   supportedEfforts,
+  supportsToolCalling,
   thinkingOffFor,
 } from "../src";
 
@@ -83,6 +84,20 @@ describe("許可リストとカタログ", () => {
       provider: "openai",
       api: "openai-responses",
     });
+  });
+
+  it("道具の呼び出し（tool calling）の対応は api から決める（anthropic-messages と openai-responses は対応、Workers AI と未知は非対応で fail closed）", () => {
+    for (const id of ALLOWED_MODEL_IDS) {
+      const info = modelInfo(id);
+      const expected = info?.api === "anthropic-messages" || info?.api === "openai-responses";
+      expect(info?.toolCalling, id).toBe(expected);
+      expect(supportsToolCalling(id), id).toBe(expected);
+    }
+    expect(supportsToolCalling("anthropic/claude-sonnet-5-5")).toBe(true);
+    expect(supportsToolCalling("openai/gpt-6-sol")).toBe(true);
+    expect(supportsToolCalling("workers-ai/@cf/openai/gpt-oss-120b")).toBe(false);
+    expect(supportsToolCalling("anthropic/unknown")).toBe(false);
+    expect(supportsToolCalling("__proto__")).toBe(false);
   });
 
   it("許可リストに無い id は undefined（カタログにあっても使えない）", () => {

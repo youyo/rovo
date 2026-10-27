@@ -100,6 +100,7 @@ D の要点:
 - 予約額は `CONSULT_TOOLS_BUDGET_USD`（既定 1）。予約の行（`task_budget`）の `consult_tools = 1` で、道具つきと分かる。
 - 裏の上限は 10 分（`CONSULT_TOOLS_BACKGROUND_TIMEOUT_MS`。1 歩は 120 秒まで）、期限切れは 15 分（`CONSULT_TOOLS_STALE_AFTER_MS`）。道具なしは今までどおり 5 分と 10 分。
 - 上限を過ぎたら、以後の歩・道具を呼ばずに予約額で精算する（`estimated`）。
+- 古い agent と新しい gateway が混ざったときは、道具の呼び出しが返らないので道具が使われないだけで、安全側に倒れる（仕様として許容する。デプロイの順序は web → agent → gateway）。
 - 答え（done）には `tools_used` / `tools_closed` が付くことがあり、道具を使った text は非信頼データとして囲む（下の「非信頼データの扱い」）。
 
 ## 費用の確定（AI Gateway のログ）

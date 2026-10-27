@@ -504,6 +504,15 @@ export class FakeAgentDO extends DurableObject {
               name: c.name,
               argumentsJson: JSON.stringify(c.arguments),
             })),
+            // 本物の AgentDO と同じく、道具を呼んだ歩の assistant の content を返す（gateway は次の歩で戻す）
+            assistantJson: JSON.stringify(
+              calls.map((c, i) => ({
+                type: "toolCall",
+                id: `call_${turn}_${i}`,
+                name: c.name,
+                arguments: c.arguments,
+              })),
+            ),
           }
         : {}),
     };

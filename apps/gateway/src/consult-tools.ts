@@ -464,7 +464,13 @@ export async function runConsultTools(
         ...(estimated ? { costEstimated: true as const } : {}),
       });
     }
-    transcript.push({ role: "assistant", content: r.text, toolCalls: requested });
+    // assistant の content（署名つきの thinking など。不透明な JSON）は解釈せずに次の歩で戻す
+    transcript.push({
+      role: "assistant",
+      content: r.text,
+      toolCalls: requested,
+      ...(typeof r.assistantJson === "string" ? { assistantJson: r.assistantJson } : {}),
+    });
     for (const c of requested) {
       recorded.push(recordOf(c, tools));
       let res: WebToolResult;
@@ -483,5 +489,8 @@ export async function runConsultTools(
       });
       toolBytes += utf8(res.text);
     }
+    // assistant の content が返らなかった（大きすぎた）ときは、thinking の無い tool_use を送ると拒否されうるので、
+    // 次の歩では道具を閉じて会話をたたむ
+    if (typeof r.assistantJson !== "string") closed ??= "limit";
   }
 }

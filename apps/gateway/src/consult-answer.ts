@@ -54,6 +54,7 @@ export function isConsultResult(v: unknown): v is ConsultResult {
         ));
     return (
       callsOk &&
+      (r.assistantJson === undefined || typeof r.assistantJson === "string") &&
       finiteCost &&
       typeof r.text === "string" &&
       typeof r.model === "string" &&

@@ -45,6 +45,8 @@ type Seen = {
   systemTexts: (string | undefined)[];
   userTexts: string[][];
   maxTokens: (number | undefined)[];
+  /** モデルに渡った assistant の content のブロックの種類（thinking を持ち回れているかの観測） */
+  assistantBlocks: string[][][];
 };
 
 function setup(over: Partial<ConsultRequest> = {}) {
@@ -55,6 +57,7 @@ function setup(over: Partial<ConsultRequest> = {}) {
     systemTexts: [],
     userTexts: [],
     maxTokens: [],
+    assistantBlocks: [],
   };
   setAgentTestOverrides(name, {
     onModelCall: (ctx) => {
@@ -63,6 +66,7 @@ function setup(over: Partial<ConsultRequest> = {}) {
       seen.systemTexts.push(ctx?.systemText);
       seen.userTexts.push(ctx?.userTexts ?? []);
       seen.maxTokens.push(ctx?.maxTokens);
+      seen.assistantBlocks.push(ctx?.assistantBlocks ?? []);
     },
   });
   const question = `what is new in ${name}?`;
@@ -210,6 +214,96 @@ describe("AgentDO.consult: 道具つきの 1 歩（#135）", () => {
     expect(r).not.toHaveProperty("toolCalls");
     expect(r).not.toHaveProperty("truncated");
     expect(r.text).toBe("plain");
+  });
+
+  it("道具を呼んだ歩は assistant の content（署名つきの thinking を含む）を assistantJson で返し、次の歩でそのまま戻す", async () => {
+    const t = setup({ tools: TOOLS });
+    const script = [
+      {
+        thinking: { text: "I should search.", signature: "SIG-1" },
+        toolCall: { name: "web_search", arguments: { query: "q" } },
+      },
+      { text: "final" },
+    ];
+    await t.stub.setScript(t.question, script);
+    const first = asOk(await t.stub.consult(t.request));
+    expect(typeof first.assistantJson).toBe("string");
+    const blocks = JSON.parse(first.assistantJson ?? "[]") as Record<string, unknown>[];
+    expect(blocks.map((b) => b.type)).toEqual(["thinking", "toolCall"]);
+    expect(blocks[0]).toMatchObject({ thinking: "I should search.", thinkingSignature: "SIG-1" });
+    const call = first.toolCalls?.[0];
+    await t.stub.setScript(t.question, script);
+    asOk(
+      await t.stub.consult({
+        ...t.request,
+        transcript: [
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: first.toolCalls ?? [],
+            ...(first.assistantJson ? { assistantJson: first.assistantJson } : {}),
+          },
+          {
+            role: "toolResult",
+            toolCallId: call?.id ?? "",
+            toolName: "web_search",
+            content: "r",
+            isError: false,
+          },
+        ],
+      }),
+    );
+    // 2 歩目のモデルには、thinking → toolCall の順の assistant が渡る
+    expect(t.seen.assistantBlocks[1]).toEqual([["thinking", "toolCall"]]);
+  });
+
+  it("道具を呼ばなかった歩（最後の答え）は assistantJson を返さない", async () => {
+    const t = setup({ tools: TOOLS });
+    await t.stub.setScript(t.question, [{ thinking: { text: "t", signature: "s" }, text: "done" }]);
+    const r = asOk(await t.stub.consult(t.request));
+    expect(r).not.toHaveProperty("assistantJson");
+  });
+
+  it("壊れた assistantJson（JSON でない・配列でない・知らないブロック・toolCalls と食い違う・大きすぎる）は invalid_request", async () => {
+    const call = { id: "c1", name: "web_search", argumentsJson: "{}" };
+    const okBlocks = JSON.stringify([
+      { type: "thinking", thinking: "t", thinkingSignature: "s" },
+      { type: "toolCall", id: "c1", name: "web_search", arguments: {} },
+    ]);
+    const result = {
+      role: "toolResult" as const,
+      toolCallId: "c1",
+      toolName: "web_search",
+      content: "r",
+      isError: false,
+    };
+    for (const assistantJson of [
+      "not json",
+      "{}",
+      JSON.stringify([{ type: "image", data: "x", mimeType: "image/png" }]),
+      JSON.stringify([{ type: "toolCall", id: "other", name: "web_search", arguments: {} }]),
+      JSON.stringify([{ type: "text", text: "x".repeat(300_000) }]),
+    ]) {
+      const t = setup({
+        tools: TOOLS,
+        transcript: [{ role: "assistant", content: "", toolCalls: [call], assistantJson }, result],
+      });
+      expect(await t.stub.consult(t.request), assistantJson.slice(0, 40)).toMatchObject({
+        ok: false,
+        code: "invalid_request",
+      });
+      expect(t.seen.userTexts).toHaveLength(0);
+    }
+    // 正しい形なら通る
+    const good = setup({
+      tools: TOOLS,
+      transcript: [
+        { role: "assistant", content: "", toolCalls: [call], assistantJson: okBlocks },
+        result,
+      ],
+    });
+    await good.stub.setScript(good.question, [{ text: "a" }, { text: "b" }]);
+    expect(await good.stub.consult(good.request)).toMatchObject({ ok: true });
   });
 
   it("壊れた道具・途中の会話は、モデルを呼ばずに invalid_request", async () => {

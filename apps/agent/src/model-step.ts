@@ -40,7 +40,17 @@ export interface StepToolCall {
  */
 export type StepMessage =
   | { role: "user"; content: string | string[] }
-  | { role: "assistant"; text: string; toolCalls?: StepToolCall[] }
+  | {
+      role: "assistant";
+      text: string;
+      toolCalls?: StepToolCall[];
+      /**
+       * 前の歩でモデルが返した assistant の content そのもの（#135）。あればこれで組み立てる（text と toolCalls は使わない）。
+       * 署名つきの thinking（Anthropic）や reasoning のアイテム（OpenAI。thinkingSignature の JSON）を落とすと、
+       * thinking が有効なときに道具の結果を渡す歩がプロバイダーに拒否される
+       */
+      content?: AssistantMessage["content"];
+    }
   | { role: "toolResult"; id: string; name: string; text: string; isError: boolean };
 
 export interface ModelStepRequest {
@@ -88,6 +98,8 @@ export type ModelStepOutcome =
   | {
       kind: "ok";
       text: string;
+      /** モデルが返した assistant の content（thinking・署名を含む。次の歩で戻す） */
+      content: AssistantMessage["content"];
       toolCalls: StepToolCall[];
       /** 出力の上限で切れた */
       truncated: boolean;
@@ -132,6 +144,21 @@ function toPiMessages(model: Model<Api>, messages: StepMessage[], now: number): 
       ];
     }
     const calls = m.toolCalls ?? [];
+    const stopReason = calls.length > 0 ? ("toolUse" as const) : ("stop" as const);
+    if (m.content) {
+      return [
+        {
+          role: "assistant" as const,
+          content: m.content,
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: ZERO,
+          stopReason,
+          timestamp: now,
+        },
+      ];
+    }
     return [
       {
         role: "assistant" as const,
@@ -235,6 +262,7 @@ export async function runModelStep(req: ModelStepRequest): Promise<ModelStepOutc
   return {
     kind: "ok",
     text,
+    content: message.content,
     toolCalls,
     truncated: message.stopReason === "length",
     usage,

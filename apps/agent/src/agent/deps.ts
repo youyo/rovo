@@ -60,6 +60,8 @@ export interface AgentTestOverrides {
     systemText?: string;
     reasoning?: string;
     toolNames?: string[];
+    /** transcript の assistant ごとの content のブロックの種類 */
+    assistantBlocks?: string[][];
   }) => void;
 }
 

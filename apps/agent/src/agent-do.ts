@@ -206,10 +206,17 @@ function consultTranscript(raw: unknown, hasTools: boolean): StepMessage[] | und
         }
       }
       if (r.content === "" && calls.length === 0) return null;
+      // 前の歩の assistant の content（署名つきの thinking など）。壊れていれば fail closed
+      let content: AssistantMessage["content"] | undefined;
+      if (r.assistantJson !== undefined) {
+        content = assistantContentOf(r.assistantJson, calls) ?? undefined;
+        if (content === undefined) return null;
+      }
       out.push({
         role: "assistant",
         text: r.content,
         ...(calls.length > 0 ? { toolCalls: calls } : {}),
+        ...(content ? { content } : {}),
       });
     } else if (r.role === "toolResult") {
       if (!hasTools) return null;
@@ -225,6 +232,48 @@ function consultTranscript(raw: unknown, hasTools: boolean): StepMessage[] | und
   const end = out[out.length - 1];
   if (end?.role !== "user" && end?.role !== "toolResult") return null;
   return out;
+}
+
+/**
+ * assistantJson（前の歩でこの AgentDO が返した assistant の content）を検査して戻す。JSON の配列で、ブロックは text・thinking・
+ * toolCall だけ。toolCall の id は transcript の toolCalls と同じ集合であること（道具の結果と対にするため）。壊れていれば null
+ */
+function assistantContentOf(
+  json: unknown,
+  calls: readonly StepToolCall[],
+): AssistantMessage["content"] | null {
+  if (typeof json !== "string" || estimateTokens(json) > CONSULT_MAX_ASSISTANT_JSON_BYTES) {
+    return null;
+  }
+  let v: unknown;
+  try {
+    v = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(v) || v.length === 0) return null;
+  const ids: string[] = [];
+  for (const b of v as unknown[]) {
+    if (typeof b !== "object" || b === null) return null;
+    const r = b as Record<string, unknown>;
+    if (r.type === "text") {
+      if (typeof r.text !== "string") return null;
+    } else if (r.type === "thinking") {
+      if (typeof r.thinking !== "string") return null;
+      if (r.thinkingSignature !== undefined && typeof r.thinkingSignature !== "string") return null;
+    } else if (r.type === "toolCall") {
+      if (typeof r.id !== "string" || typeof r.name !== "string") return null;
+      if (typeof r.arguments !== "object" || r.arguments === null || Array.isArray(r.arguments)) {
+        return null;
+      }
+      ids.push(r.id);
+    } else {
+      return null;
+    }
+  }
+  const want = calls.map((c) => c.id);
+  if (ids.length !== want.length || want.some((id) => !ids.includes(id))) return null;
+  return v as AssistantMessage["content"];
 }
 
 /** JSON の object（配列・null でない）だけを返す。それ以外は undefined */
@@ -283,6 +332,11 @@ const CONSULT_MAX_TOOL_DESCRIPTION = 4_000;
 const CONSULT_MAX_TOOL_SCHEMA_BYTES = 16 * 1024;
 /** 道具の往復の途中の会話の件数の上限（UserDO は道具の呼び出しを合計 5 回までにする。余裕を見る） */
 const CONSULT_MAX_TRANSCRIPT = 64;
+/**
+ * 道具を呼んだ歩の assistant の content（assistantJson）の上限（UTF-8 のバイト数）。思考の本文と署名を含む。
+ * 往復の会話は歩ごとに RPC で運ぶので、6 歩分でも DO の RPC と UserDO の答えの行（約 1.9MB）に十分収まる大きさにする
+ */
+const CONSULT_MAX_ASSISTANT_JSON_BYTES = 128 * 1024;
 /**
  * 道具を渡す consult（と、道具を閉じた最後の歩）で、利用者の system より前に必ず付ける rovo の固定の節。
  * ワーカーの system prompt の web の節（buildSystemPrompt の "web"）と同じ規則で、道具の結果を非信頼データとして扱わせる。
@@ -1491,6 +1545,9 @@ export class AgentDO extends DurableObject<Env> {
     }
     const text = step.text;
     // 道具を渡した依頼だけ、呼んだ道具を返す（引数は JSON の文字列。実行は UserDO）
+    // 道具を呼んだ歩は、assistant の content（署名つきの thinking など）も返す（UserDO が次の歩で戻す）。大きすぎれば付けない
+    const assistantJson =
+      tools && step.toolCalls.length > 0 ? JSON.stringify(step.content) : undefined;
     const extra = {
       ...(tools && step.toolCalls.length > 0
         ? {
@@ -1500,6 +1557,10 @@ export class AgentDO extends DurableObject<Env> {
               argumentsJson: JSON.stringify(c.arguments ?? {}),
             })),
           }
+        : {}),
+      ...(assistantJson !== undefined &&
+      estimateTokens(assistantJson) <= CONSULT_MAX_ASSISTANT_JSON_BYTES
+        ? { assistantJson }
         : {}),
       ...(withTools && step.truncated ? { truncated: true as const } : {}),
     };

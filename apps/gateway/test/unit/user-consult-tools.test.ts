@@ -98,6 +98,16 @@ const toolStep = (
       name: c.name,
       argumentsJson: JSON.stringify(c.args),
     })),
+    // AgentDO が返す assistant の content（不透明な JSON。gateway は解釈しない）
+    assistantJson: JSON.stringify([
+      { type: "thinking", thinking: "plan", thinkingSignature: "SIG" },
+      ...calls.map((c, i) => ({
+        type: "toolCall",
+        id: `call_${i}_${c.name}`,
+        name: c.name,
+        arguments: c.args,
+      })),
+    ]),
     ...over,
   });
 
@@ -256,6 +266,29 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
     expect(await sql(f.stub, "SELECT kind, count FROM web_usage")).toEqual([
       { kind: "search", count: 1 },
     ]);
+  });
+
+  it("道具を呼んだ歩の assistantJson（署名つきの thinking など）を、解釈せずに次の歩の transcript でそのまま戻す", async () => {
+    const step = toolStep([{ name: "web_search", args: { query: "q" } }]);
+    const f = await fixture([step, okResult({ text: "a" })]);
+    doneValue((await f.run()).done);
+    const assistant = f.agent.calls[1]?.transcript?.[0];
+    expect(assistant).toMatchObject({
+      role: "assistant",
+      assistantJson: step.ok ? step.assistantJson : "",
+    });
+  });
+
+  it("assistantJson の無い道具の呼び出し（大きすぎて付かなかった）は実行するが、次の歩では道具を閉じて会話をたたむ（thinking の無い tool_use を送らない）", async () => {
+    const f = await fixture([
+      toolStep([{ name: "web_search", args: { query: "q" } }], { assistantJson: undefined }),
+      okResult({ text: "a" }),
+    ]);
+    const value = doneValue((await f.run()).done);
+    expect(f.web.searches).toHaveLength(1);
+    expect(f.agent.calls[1]?.tools).toBeUndefined();
+    expect(JSON.stringify(f.agent.calls[1]?.transcript)).not.toContain("toolResult");
+    expect(value.tools_closed).toBe("limit");
   });
 
   it("道具を呼ばずに答えたら、本文は囲まず tools_used も付けない（従来の consult と同じ形）", async () => {

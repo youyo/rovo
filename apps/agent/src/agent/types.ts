@@ -247,7 +247,13 @@ export interface ConsultToolCall {
  */
 export type ConsultTranscriptMessage =
   | { role: "user"; content: string }
-  | { role: "assistant"; content: string; toolCalls?: ConsultToolCall[] }
+  | {
+      role: "assistant";
+      content: string;
+      toolCalls?: ConsultToolCall[];
+      /** 前の歩の ConsultResult の assistantJson をそのまま戻す（中身は解釈しない） */
+      assistantJson?: string;
+    }
   | { role: "toolResult"; toolCallId: string; toolName: string; content: string; isError: boolean };
 
 /** AgentDO.consult の依頼。consult ごとに別の AgentDO インスタンス（名前は consultId）で動く。 */
@@ -309,6 +315,12 @@ export type ConsultResult =
       toolCalls?: ConsultToolCall[];
       /** 出力の上限（max_tokens）で切れた */
       truncated?: true;
+      /**
+       * 道具を呼んだ歩の assistant の content（pi-ai の形。署名つきの thinking・reasoning のアイテムを含む）を JSON にした不透明な文字列。
+       * UserDO は解釈せずに transcript の assistant の assistantJson に入れて次の歩で戻す（thinking が有効なとき、
+       * 署名つきの thinking の無い tool_use はプロバイダーに拒否されるため）。大きすぎるときは付かない
+       */
+      assistantJson?: string;
     }
   /**
    * 失敗。costUsd はそれまでにかかった実費（モデルを呼ぶ前の失敗は 0）。

@@ -1,5 +1,5 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
-import { formatUsd, shortModel } from "./format";
+import { formatUsd, shortModel, startableView } from "./format";
 import { useT } from "./lang";
 import { monthPace } from "./pace";
 
@@ -20,6 +20,7 @@ function monthlyLimit(budget: OverviewDto["budget"]): number | null {
  */
 export function BudgetPanel(props: { data: OverviewDto }) {
   const { budget, month } = props.data;
+  const startable = startableView(budget);
   const t = useT();
   const limit = monthlyLimit(budget);
   // 月のペース: 一覧の取得時刻（generated_at）を「いま」にして、画面側だけで計算する
@@ -75,7 +76,13 @@ export function BudgetPanel(props: { data: OverviewDto }) {
           ) : null}
         </p>
       )}
-      <p data-budget-startable="">{t("budget.startable", { n: budget.startable })}</p>
+      <p data-budget-startable={startable.kind}>
+        {startable.kind === "none"
+          ? t("budget.startableNone")
+          : startable.kind === "budget"
+            ? t("budget.startableByBudget", { n: startable.n })
+            : t("budget.startable", { n: startable.n, m: startable.budgetCount })}
+      </p>
       {month.hidden_tasks.count > 0 ? (
         <p className="soft" data-hidden-tasks={month.hidden_tasks.count}>
           {t("budget.hidden", { n: month.hidden_tasks.count })}

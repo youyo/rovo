@@ -62,6 +62,19 @@ describe("ステータスバー（tmux 風。下に 1 行、狭いと折り返�
     expect(item(c, "budget-left")?.textContent).toBe("残り $38.50  同時にあと 2 件");
   });
 
+  it("予算が件数を決めているときだけ「予算であと N 件」", () => {
+    const c = mount({
+      ...overviewFixture,
+      budget: {
+        ...overviewFixture.budget,
+        max_concurrent_tasks: 1,
+        concurrency_limit: 10,
+        startable: 1,
+      },
+    });
+    expect(item(c, "budget-left")?.textContent).toBe("残り $38.50  予算であと 1 件");
+  });
+
   it("今月の使用量のメーター（SVG。style 属性は使えない）: 使った額 / 上限の比率。上限が分からないときは出さない", () => {
     const c = mount();
     const meter = c.querySelector(".statusbar svg.meter") as SVGElement;

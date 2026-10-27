@@ -1,4 +1,4 @@
-import { expect, loginAs, openDrawer, rail, taskPath, test } from "./fixtures";
+import { expect, loginAs, openDrawer, rail, taskPath, test, withBudgetBinding } from "./fixtures";
 import { readState } from "./state";
 
 const s = readState();
@@ -98,4 +98,53 @@ test("(9) 状態が DOM の属性とアクセシブルな名前で判別でき�
   await openDrawer(page);
   await expect(page.getByRole("list", { name: "凡例" })).toContainText("完了");
   await expect(page.getByRole("list", { name: "凡例" })).toContainText("失敗");
+});
+
+test("(1b) あと何件: ふだん（b >= h）は同時と予算の件数を並べる", async ({ page }) => {
+  // E2E の gateway は予算の方が少ない（b < h）ので、b >= h は応答の差し替えで作る
+  await withBudgetBinding(page, {
+    max_concurrent_tasks: 19,
+    concurrency_limit: 2,
+    running_slots: 0,
+    startable: 2,
+  });
+  await loginAs(page, s.users.alice);
+  await expect(page.locator('.statusbar [data-sb="budget-left"]')).toContainText("同時にあと 2 件");
+  await openDrawer(page);
+  await expect(page.locator("[data-budget-startable]")).toHaveText(
+    "同時に 2 件始められます（予算では 19 件分）。",
+  );
+});
+
+test("(1c) 予算が件数を決めているとき（b < h）: 欄は「予算の残りで、あと N 件」、バーは「予算であと N 件」", async ({
+  page,
+}) => {
+  await withBudgetBinding(page, {
+    max_concurrent_tasks: 1,
+    concurrency_limit: 10,
+    running_slots: 0,
+    startable: 1,
+  });
+  await loginAs(page, s.users.alice);
+  await expect(page.locator('.statusbar [data-sb="budget-left"]')).toContainText("予算であと 1 件");
+  await openDrawer(page);
+  await expect(page.locator("[data-budget-startable]")).toHaveText(
+    "予算の残りで、あと 1 件始められます。",
+  );
+});
+
+test("(1d) 予算が 0 件分のとき: 「予算の残りが足りないため、新しいタスクは始められません」", async ({
+  page,
+}) => {
+  await withBudgetBinding(page, {
+    max_concurrent_tasks: 0,
+    concurrency_limit: 10,
+    running_slots: 0,
+    startable: 0,
+  });
+  await loginAs(page, s.users.alice);
+  await openDrawer(page);
+  await expect(page.locator("[data-budget-startable]")).toHaveText(
+    "予算の残りが足りないため、新しいタスクは始められません。",
+  );
 });

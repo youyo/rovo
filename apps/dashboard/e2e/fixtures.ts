@@ -1,4 +1,4 @@
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type Page, type Route } from "@playwright/test";
 import { admin } from "./api";
 import { type E2eUser, readState } from "./state";
 
@@ -93,4 +93,45 @@ export async function openDrawer(page: Page): Promise<void> {
   const button = page.getByRole("button", { name: "内訳" });
   if ((await button.getAttribute("aria-expanded")) !== "true") await button.click();
   await expect(page.locator(".drawer")).toBeVisible();
+}
+
+/**
+ * 予算の件数が同時実行の空きより少ない（b < h）画面を作る。実 gateway の応答のうち、budget の
+ * 件数まわり（max_concurrent_tasks・concurrency_limit・running_slots・startable）だけを差し替える
+ * （概要 API と /budget の両方。ステータスバーは先に /budget で描くため）。loginAs の前に呼ぶ。
+ */
+export async function withBudgetBinding(
+  page: Page,
+  patch: {
+    max_concurrent_tasks: number;
+    concurrency_limit: number;
+    running_slots: number;
+    startable: number;
+  },
+): Promise<void> {
+  const rewrite = (pick: (body: Record<string, unknown>) => Record<string, unknown>) => {
+    return async (route: Route) => {
+      const res = await route.fetch({
+        headers: { ...route.request().headers(), "sec-fetch-site": "same-origin" },
+      });
+      if (res.status() !== 200) {
+        await route.fulfill({ response: res });
+        return;
+      }
+      const body = (await res.json()) as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...body, ...pick(body) }),
+      });
+    };
+  };
+  await page.route(
+    /\/dashboard\/api\/overview/,
+    rewrite((body) => ({ budget: { ...(body.budget as object), ...patch } })),
+  );
+  await page.route(
+    /\/dashboard\/api\/budget$/,
+    rewrite(() => patch),
+  );
 }

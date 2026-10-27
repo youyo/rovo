@@ -91,6 +91,24 @@ describe("英語の表示: 部品", () => {
     expect(c.textContent).not.toMatch(CJK);
   });
 
+  it("StatusBar: 残りの文言（ふだんは at once、予算が決めているときは within budget）", () => {
+    const bar = (budget: Partial<typeof overviewFixture.budget>) =>
+      mount(
+        createElement(StatusBar, {
+          data: { ...overviewFixture, budget: { ...overviewFixture.budget, ...budget } },
+          nowMs: Date.parse(overviewFixture.generated_at),
+          cloudflare: { phase: "ready", data: cloudflareSummaryWithEstimateFixture },
+          autoRefresh: true,
+          onAutoRefreshChange: () => {},
+          onRefresh: () => {},
+        }),
+      ).querySelector("[data-sb='budget-left']")?.textContent;
+    expect(bar({})).toBe("$38.50 left  2 more at once");
+    expect(bar({ max_concurrent_tasks: 1, concurrency_limit: 10, startable: 1 })).toBe(
+      "$38.50 left  1 more within budget",
+    );
+  });
+
   it("TaskRail: 空の文言も英語", () => {
     const c = mount(createElement(TaskRail, { tasks: [], selectedId: null }));
     expect(c.querySelector("nav")?.getAttribute("aria-label")).toBe("Tasks");

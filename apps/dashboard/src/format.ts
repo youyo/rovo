@@ -163,3 +163,32 @@ export function modelFamily(id: string): string {
   const m = /(sonnet|haiku|opus)/i.exec(name);
   return m?.[1] !== undefined ? m[1].toLowerCase() : name;
 }
+
+/** 「あと何件始められるか」の見せ方。 */
+export interface StartableView {
+  /** 始められる件数。サーバーの `startable` をそのまま使う（画面で計算し直さない） */
+  n: number;
+  /** 予算から見た件数（サーバーの `max_concurrent_tasks`。マイクロドルの整数で計算済み） */
+  budgetCount: number;
+  /** 予算が件数を決めているか（予算の件数が同時実行の空きより少ない） */
+  byBudget: boolean;
+  /** concurrency: 同時実行の上限が決めている / budget: 予算が決めている / none: 予算が足りず始められない */
+  kind: "concurrency" | "budget" | "none";
+}
+
+/**
+ * 予算の欄とステータスバーが共有する判定。h = 同時実行の空き、b = 予算の件数。
+ * remaining_usd と予約額からは計算し直さない（float の誤差で 1 件ずれる）。
+ */
+export function startableView(budget: {
+  startable: number;
+  max_concurrent_tasks: number;
+  concurrency_limit: number;
+  running_slots: number;
+}): StartableView {
+  const h = Math.max(0, budget.concurrency_limit - budget.running_slots);
+  const b = budget.max_concurrent_tasks;
+  const byBudget = b < h;
+  const kind = b === 0 ? "none" : byBudget ? "budget" : "concurrency";
+  return { n: budget.startable, budgetCount: b, byBudget, kind };
+}

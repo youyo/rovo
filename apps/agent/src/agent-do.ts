@@ -236,7 +236,9 @@ function consultTranscript(raw: unknown, hasTools: boolean): StepMessage[] | und
 
 /**
  * assistantJson（前の歩でこの AgentDO が返した assistant の content）を検査して戻す。JSON の配列で、ブロックは text・thinking・
- * toolCall だけ。toolCall の id は transcript の toolCalls と同じ集合であること（道具の結果と対にするため）。壊れていれば null
+ * toolCall だけ。toolCall は transcript の toolCalls と id・name・arguments（正規化した JSON で比べる。キーの順序が違っても
+ * 意味が同じなら一致）がすべて同じ集合であること（道具の結果と対にするため。実行した呼び出しと違う内容をモデルに戻さない）。
+ * 壊れていれば null（fail closed）
  */
 function assistantContentOf(
   json: unknown,
@@ -252,7 +254,7 @@ function assistantContentOf(
     return null;
   }
   if (!Array.isArray(v) || v.length === 0) return null;
-  const ids: string[] = [];
+  const seen: string[] = [];
   for (const b of v as unknown[]) {
     if (typeof b !== "object" || b === null) return null;
     const r = b as Record<string, unknown>;
@@ -266,15 +268,32 @@ function assistantContentOf(
       if (typeof r.arguments !== "object" || r.arguments === null || Array.isArray(r.arguments)) {
         return null;
       }
-      ids.push(r.id);
+      seen.push(callKey(r.id, r.name, r.arguments));
     } else {
       return null;
     }
   }
-  const want = calls.map((c) => c.id);
-  if (ids.length !== want.length || want.some((id) => !ids.includes(id))) return null;
+  const want = calls.map((c) => callKey(c.id, c.name, c.arguments));
+  if (seen.length !== want.length || want.some((k) => !seen.includes(k))) return null;
   return v as AssistantMessage["content"];
 }
+
+/** 値の JSON を、object のキーを辞書順に並べて文字列にする（意味が同じなら同じ文字列になる） */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (typeof v === "object" && v !== null) {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "null";
+}
+
+/** 道具の呼び出しの照合用の鍵（id・name・arguments） */
+const callKey = (id: string, name: string, args: unknown): string =>
+  `${JSON.stringify(id)}|${JSON.stringify(name)}|${canonicalJson(args)}`;
 
 /** JSON の object（配列・null でない）だけを返す。それ以外は undefined */
 function parseJsonObject(text: string): JsonObject | undefined {

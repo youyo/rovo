@@ -41,6 +41,11 @@ import { callWebWithQuota } from "./web/tools";
  */
 
 export const CONSULT_MAX_TOOL_CALLS = 5;
+/**
+ * AgentDO が受け入れる途中の会話（transcript）の件数の上限（apps/agent/src/agent-do.ts の CONSULT_MAX_TRANSCRIPT と同じ値）。
+ * 道具を開いたまま次の歩を送って超えると invalid_request で consult 全体が失敗するので、超えるなら道具を閉じて会話をたたむ
+ */
+export const CONSULT_MAX_TRANSCRIPT = 64;
 /** 歩の上限（道具の呼び出しの上限 + 最後の 1 歩） */
 export const CONSULT_MAX_STEPS = CONSULT_MAX_TOOL_CALLS + 1;
 /** 道具の結果の累計の上限（UTF-8 のバイト数）。超えたら道具を閉じる */
@@ -239,6 +244,8 @@ export interface ConsultToolsDeps {
   stepTimeoutMs: number;
   /** 裏の処理全体の上限を過ぎた（以後の歩・道具を呼ばない） */
   stopped(): boolean;
+  /** AgentDO が受け入れる途中の会話の件数の上限（既定は CONSULT_MAX_TRANSCRIPT。テスト用に差し替えられる） */
+  maxTranscript?: number;
 }
 
 export type ConsultToolsOutcome = {
@@ -346,6 +353,7 @@ export async function runConsultTools(
   let searches = 0;
   let fetches = 0;
   let closed: ToolsClosed | undefined;
+  const maxTranscript = deps.maxTranscript ?? CONSULT_MAX_TRANSCRIPT;
 
   const webUsd = () =>
     (searches * deps.webPrices.searchUsdPer1k + fetches * deps.webPrices.fetchUsdPer1k) / 1000;
@@ -380,7 +388,10 @@ export async function runConsultTools(
       ...(estimated || stepEstimated ? { costEstimated: true as const } : {}),
     });
 
-  /** 前の歩でキャッシュから読まれたトークン数と、その応答の時刻（Date.now()） */
+  /**
+   * 前の歩でキャッシュから読まれたトークン数と、その歩のリクエストを送る前の時刻（Date.now()）。
+   * キャッシュの寿命はリクエストを送った時刻から数えるので、応答を受けた時刻ではなく送る前の時刻を使う
+   */
   let prevCache: { tokens: number; at: number } | undefined;
   /** 道具を開いた次の歩と、そのあとの最後の歩が、予約額に収まるか（最悪の単価の見積り） */
   const budgetFits = (): boolean => {
@@ -480,6 +491,9 @@ export async function runConsultTools(
         closed = "limit";
       } else if (tools.length > 0 && tools.every((t) => exhausted.has(t))) {
         closed = "quota";
+      } else if (transcript.length > maxTranscript) {
+        // 次の歩の transcript が AgentDO の受け入れ上限を超える: 開いたまま送ると consult 全体が失敗する
+        closed = "limit";
       } else if (!budgetFits()) {
         closed = "budget";
       }
@@ -542,6 +556,7 @@ export async function runConsultTools(
     };
 
     let r: ConsultResult | undefined;
+    const sentAt = Date.now();
     try {
       r = await withTimeout(deps.step(req), deps.stepTimeoutMs);
     } catch (e) {
@@ -590,7 +605,7 @@ export async function runConsultTools(
     usage.output += r.usage.output;
     usage.cacheRead += r.usage.cacheRead;
     usage.cacheWrite += r.usage.cacheWrite;
-    prevCache = { tokens: r.usage.cacheRead, at: Date.now() };
+    prevCache = { tokens: r.usage.cacheRead, at: sentAt };
 
     const requested = open && r.truncated !== true ? (r.toolCalls ?? []) : [];
     if (requested.length === 0) {

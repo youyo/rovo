@@ -306,6 +306,58 @@ describe("AgentDO.consult: 道具つきの 1 歩（#135）", () => {
     expect(await good.stub.consult(good.request)).toMatchObject({ ok: true });
   });
 
+  it("assistantJson の toolCall は、id だけでなく name と arguments も transcript の toolCalls と一致すること（意味が同じ JSON なら順序が違っても一致）", async () => {
+    const call = {
+      id: "c1",
+      name: "web_search",
+      argumentsJson: JSON.stringify({ query: "q", n: 1, nested: { a: 1, b: [1, 2] } }),
+    };
+    const result = {
+      role: "toolResult" as const,
+      toolCallId: "c1",
+      toolName: "web_search",
+      content: "r",
+      isError: false,
+    };
+    const withBlock = (block: Record<string, unknown>) =>
+      JSON.stringify([
+        { type: "thinking", thinking: "t", thinkingSignature: "s" },
+        { type: "toolCall", id: "c1", name: "web_search", arguments: {}, ...block },
+      ]);
+    const sameArgs = { nested: { b: [1, 2], a: 1 }, n: 1, query: "q" };
+    for (const assistantJson of [
+      withBlock({ name: "web_fetch", arguments: sameArgs }),
+      withBlock({ arguments: { ...sameArgs, query: "other" } }),
+      withBlock({ arguments: { query: "q" } }),
+      withBlock({ arguments: { ...sameArgs, nested: { a: 1, b: [2, 1] } } }),
+    ]) {
+      const t = setup({
+        tools: TOOLS,
+        transcript: [{ role: "assistant", content: "", toolCalls: [call], assistantJson }, result],
+      });
+      expect(await t.stub.consult(t.request), assistantJson).toMatchObject({
+        ok: false,
+        code: "invalid_request",
+      });
+      expect(t.seen.userTexts).toHaveLength(0);
+    }
+    // キーの順序だけが違う（意味が同じ）なら通る
+    const good = setup({
+      tools: TOOLS,
+      transcript: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [call],
+          assistantJson: withBlock({ arguments: sameArgs }),
+        },
+        result,
+      ],
+    });
+    await good.stub.setScript(good.question, [{ text: "a" }, { text: "b" }]);
+    expect(await good.stub.consult(good.request)).toMatchObject({ ok: true });
+  });
+
   it("壊れた道具・途中の会話は、モデルを呼ばずに invalid_request", async () => {
     const call = { id: "c1", name: "web_search", argumentsJson: "{}" };
     const bad: Partial<ConsultRequest>[] = [

@@ -1,9 +1,14 @@
 import { runInDurableObject } from "cloudflare:test";
+import { modelInfo } from "@rovo/models";
 import { describe, expect, it } from "vitest";
 import type { ConsultRequest, ConsultResult } from "../../src/agent/contract";
 import {
   CONSULT_FETCH_MAX_CHARS,
+  CONSULT_MAX_RECORDED_CALLS,
   CONSULT_MAX_TOOL_CALLS,
+  CONSULT_TOOL_RESULT_TOTAL_MAX_BYTES,
+  CONSULT_TOOL_STEP_OUTPUT_TOKENS,
+  consultToolsBudgetNeed,
   UNTRUSTED_CONSULT_BEGIN,
   UNTRUSTED_CONSULT_END,
 } from "../../src/consult-tools";
@@ -452,6 +457,172 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
     expect(value.tools_closed).toBe("budget");
     expect(value.text).toBe("answer without tools");
     expect(value).not.toHaveProperty("tools_used");
+  });
+
+  it("1 歩の中で結果の累計が上限を超えたら、その後の呼び出しは上限超過のエラーの結果にする（web を呼ばない）", async () => {
+    // 検索結果 1 件あたり約 30KB（1 件の上限 32KB の中）。4 件目で累計 96KB を超え、5 件目は実行しない
+    const bigSearch = (): WebSearchResponse => ({
+      ...searchResult(),
+      results: Array.from({ length: 10 }, (_, i) => ({
+        ...searchResult().results[0],
+        source: { url: `https://a.example.com/${i}`, retrieved_at: "t", via: "search" as const },
+        title: `t${i}`,
+        content: "a".repeat(2_900),
+      })) as WebSearchResponse["results"],
+    });
+    const search5 = Array.from({ length: 5 }, (_, i) => ({
+      name: "web_search",
+      args: { query: `q${i}` },
+    }));
+    const f = await fixture([toolStep(search5), okResult({ text: "a" })], {
+      web: fakeWeb({
+        async search() {
+          return bigSearch();
+        },
+      }),
+    });
+    doneValue((await f.run()).done);
+    const folded = JSON.stringify(f.agent.calls[1]?.transcript ?? []);
+    expect(folded).toContain("result size limit");
+    expect(await sql(f.stub, "SELECT kind, count FROM web_usage")).toEqual([
+      { kind: "search", count: 4 },
+    ]);
+  });
+
+  it("web_fetch の本文は 24,000 バイトまで（約 20,000 文字と両方）", async () => {
+    const f = await fixture(
+      [toolStep([{ name: "web_fetch", args: { url: "https://a.example.com/" } }]), okResult()],
+      {
+        web: fakeWeb({
+          async fetchUrl() {
+            return page("あ".repeat(CONSULT_FETCH_MAX_CHARS));
+          },
+        }),
+      },
+    );
+    doneValue((await f.run()).done);
+    const r = f.agent.calls[1]?.transcript?.[1];
+    const content = r?.role === "toolResult" ? r.content : "";
+    expect(Math.max(...(content.match(/あ+/g) ?? []).map((m) => m.length))).toBe(8000);
+    expect(content).toContain("(the content was truncated)");
+  });
+
+  it("最後の（たたんだ）歩が入力過大で断られたら、道具の結果を後ろから落として 1 回だけ再試行する", async () => {
+    const f = await fixture([
+      toolStep([
+        { name: "web_search", args: { query: "a" } },
+        { name: "web_search", args: { query: "b" } },
+        { name: "web_search", args: { query: "c" } },
+        { name: "web_search", args: { query: "d" } },
+        { name: "web_search", args: { query: "e" } },
+      ]),
+      { ok: false, code: "input_too_large", message: "m", costUsd: 0 },
+      okResult({ text: "fits now" }),
+    ]);
+    const value = doneValue((await f.run()).done);
+    expect(f.agent.calls).toHaveLength(3);
+    const second = JSON.stringify(f.agent.calls[1]?.transcript ?? []);
+    const third = JSON.stringify(f.agent.calls[2]?.transcript ?? []);
+    expect(third.length).toBeLessThan(second.length);
+    expect(third).toContain("dropped");
+    expect(value.text).toContain("fits now");
+  });
+
+  it("最後の歩の再試行は 1 回だけ（2 回目も入力過大なら失敗）", async () => {
+    const f = await fixture([
+      toolStep([{ name: "web_search", args: { query: "a" } }]),
+      // 道具を開いた歩の入力過大 → 道具を閉じる
+      { ok: false, code: "input_too_large", message: "m", costUsd: 0 },
+      // 最後の歩の入力過大 → 結果を落として 1 回だけ再試行
+      { ok: false, code: "input_too_large", message: "m", costUsd: 0 },
+      // 再試行も入力過大 → 失敗（それ以上は頼まない）
+      { ok: false, code: "input_too_large", message: "m", costUsd: 0 },
+      okResult({ text: "never" }),
+    ]);
+    const { done } = await f.run();
+    expect(done).toMatchObject({ status: "failed", error: { code: "invalid_input" } });
+    expect(f.agent.calls).toHaveLength(4);
+  });
+
+  it("1 応答の呼び出しが多すぎても、処理するのは残りの回数だけで、次の歩の transcript は 64 件を超えない（呼び出しごとに短い結果を付ける）", async () => {
+    const many = Array.from({ length: 100 }, (_, i) => ({
+      name: "web_search",
+      args: { query: `q${i}` },
+    }));
+    const f = await fixture([toolStep(many), okResult({ text: "a" })]);
+    const value = doneValue((await f.run()).done);
+    expect(f.web.searches).toHaveLength(CONSULT_MAX_TOOL_CALLS);
+    const t = f.agent.calls[1]?.transcript ?? [];
+    expect(t.length).toBeLessThanOrEqual(64);
+    expect(value.tools_closed).toBe("limit");
+  });
+
+  it(`tools_used.calls は ${"CONSULT_MAX_RECORDED_CALLS"} 件まで。超えたら calls_truncated を立てる`, async () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      name: "web_search",
+      args: { query: `q${i}` },
+    }));
+    const f = await fixture([toolStep(many), okResult({ text: "a" })]);
+    const value = doneValue((await f.run()).done);
+    expect(value.tools_used?.calls).toHaveLength(CONSULT_MAX_RECORDED_CALLS);
+    expect(value.tools_used).toMatchObject({ calls_truncated: true, web_search: 5 });
+  });
+
+  it("予約を使い切った（残りが 0）ときでも、モデルが道具の歩で書いた答えがあれば failed にせずそれを返す", async () => {
+    const f = await fixture([
+      toolStep([{ name: "web_search", args: { query: "a" } }], {
+        text: "partial answer",
+        costUsd: 5,
+      }),
+    ]);
+    const value = doneValue((await f.run()).done);
+    expect(value.text).toContain("partial answer");
+    expect(value.tools_closed).toBe("budget");
+    expect(value.cost_usd).toBeCloseTo(1, 9);
+  });
+
+  it("道具を開いた歩の出力の上限は 2048（client の max_output_tokens が小さければそちら）、最後の歩は client の値（無ければ AgentDO の既定）", async () => {
+    const f = await fixture([
+      toolStep([{ name: "web_search", args: { query: "a" } }]),
+      toolStep([{ name: "web_search", args: { query: "b" } }]),
+      okResult({ text: "a" }),
+    ]);
+    doneValue((await f.run()).done);
+    expect(CONSULT_TOOL_STEP_OUTPUT_TOKENS).toBe(2048);
+    expect(f.agent.calls.map((c) => c.maxOutputTokens)).toEqual([2048, 2048, 2048]);
+    // 道具を閉じた最後の歩: client の値が無ければ渡さない（AgentDO の既定 8192）
+    const g = await fixture([
+      toolStep(Array.from({ length: 5 }, () => ({ name: "web_search", args: { query: "a" } }))),
+      okResult(),
+    ]);
+    doneValue((await g.run()).done);
+    expect(g.agent.calls[0]?.maxOutputTokens).toBe(2048);
+    expect(g.agent.calls[1]).not.toHaveProperty("maxOutputTokens");
+  });
+
+  it("見積り（consultToolsBudgetNeed）: 次の歩 + 最後の歩。実際の途中の会話の大きさと次の歩で増えうる分を使い、前の歩の cacheRead を割り引く", () => {
+    const price = modelInfo("anthropic/claude-sonnet-5-5")?.price;
+    if (!price) throw new Error("no price");
+    const base = {
+      price,
+      baseTokens: 5_000,
+      toolBytes: 0,
+      callsUsed: 0,
+      webPrices: { searchUsdPer1k: 5, fetchUsdPer1k: 0 },
+    };
+    const first = consultToolsBudgetNeed(base);
+    // 結果がたまるほど、次の歩で増えうる分は減る（上限は累計の上限 + 1 件分）
+    const later = consultToolsBudgetNeed({
+      ...base,
+      baseTokens: 5_000 + CONSULT_TOOL_RESULT_TOTAL_MAX_BYTES,
+      toolBytes: CONSULT_TOOL_RESULT_TOTAL_MAX_BYTES,
+      callsUsed: 4,
+    });
+    expect(later).toBeGreaterThan(0);
+    const cached = consultToolsBudgetNeed({ ...base, baseTokens: 50_000, cachedTokens: 45_000 });
+    const uncached = consultToolsBudgetNeed({ ...base, baseTokens: 50_000 });
+    expect(cached).toBeLessThan(uncached);
+    expect(first).toBeLessThan(1);
   });
 
   it("道具つきの consult は、裏の上限が 10 分、精算されない予約の期限切れが 15 分（道具なしは 10 分のまま）", async () => {

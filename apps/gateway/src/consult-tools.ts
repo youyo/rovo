@@ -49,8 +49,21 @@ export const CONSULT_TOOL_RESULT_TOTAL_MAX_BYTES = 96 * 1024;
 export const CONSULT_FETCH_MAX_CHARS = 20_000;
 /** 1 歩（AgentDO.consult の 1 回）を待つ上限 */
 export const CONSULT_STEP_TIMEOUT_MS = 120_000;
-/** AgentDO の出力の既定の上限（CONSULT_DEFAULT_OUTPUT_TOKENS と同じ）。予算の確認の見積りに使う */
-const STEP_OUTPUT_TOKENS = 8192;
+/** AgentDO の出力の既定の上限（CONSULT_DEFAULT_OUTPUT_TOKENS と同じ）。最後の歩の見積りに使う */
+const FINAL_OUTPUT_TOKENS = 8192;
+/**
+ * 道具を開いている途中の歩の出力の上限（client の max_output_tokens がそれより小さければそちら）。途中の歩は道具を呼ぶだけで、
+ * 長い答えは最後の歩で書く。小さくすると、途中の歩の見積り（＝道具を開けるか）が軽くなる
+ */
+export const CONSULT_TOOL_STEP_OUTPUT_TOKENS = 2048;
+/** 道具の結果 1 件の大きさの上限（UTF-8 のバイト数）。超える結果は中身を減らす（囲みは壊さない）。見積りにも使う */
+export const CONSULT_TOOL_RESULT_MAX_BYTES = 32 * 1024;
+/** web_fetch の本文のバイト数の上限（文字数の上限と両方を守る） */
+const FETCH_MAX_BYTES = 24_000;
+/** tools_used.calls に残す呼び出しの件数の上限（超えたら calls_truncated） */
+export const CONSULT_MAX_RECORDED_CALLS = 20;
+/** 前の歩の cacheRead を次の歩でも読める前提にする時間（agent の CACHE_READ_TRUST_MS と同じ 4 分） */
+const CACHE_READ_TRUST_MS = 4 * 60_000;
 /** AgentDO が system の前に付ける固定の安全の節などの分（見積りの余裕） */
 const SAFETY_MARGIN_TOKENS = 2048;
 /** tools_used に残すクエリ・URL の長さの上限 */
@@ -81,6 +94,8 @@ export type ToolsUsed = {
     | { tool: "web_fetch"; url: string }
     | { tool: string }
   )[];
+  /** calls を CONSULT_MAX_RECORDED_CALLS 件で打ち切った */
+  calls_truncated?: true;
 };
 
 const TOOL_DEFS: Readonly<Record<ConsultToolName, ConsultToolDef>> = {
@@ -118,6 +133,65 @@ const CLOSED_NOTICE: Readonly<Record<ToolsClosed, string>> = {
 
 function closedNotice(reason: ToolsClosed): string {
   return `[rovo] The tools are now closed (${CLOSED_NOTICE[reason]}). Do not call any tools. Answer the user's last question now with the information above, and say which points you could not verify.`;
+}
+
+const BYTES_LIMIT = (tool: string) =>
+  `[${tool}] failed (limit): the result size limit of this consult was reached, so this call was not run. Answer with the information you already have.`;
+const DROPPED = "(dropped: this result was removed so that the answer fits in the consult budget)";
+
+/** UTF-8 で maxBytes 以内に切り詰める（文字の途中で切らない） */
+function truncateUtf8(text: string, maxBytes: number): string {
+  if (utf8(text) <= maxBytes) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (utf8(text.slice(0, mid)) <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  // サロゲートペアの片割れで終わらないようにする
+  const code = text.charCodeAt(lo - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? lo - 1 : lo);
+}
+
+/**
+ * 道具つきの consult の「次の歩 + 最後のたたみの歩」の最悪の費用（USD）と、残りの web の費用の合計。
+ * 入力は、実際の途中の会話の大きさ（baseTokens）に、次の歩で増えうる分（残りの呼び出し × 1 件の上限。ただし 1 歩の中の
+ * 打ち切りがあるので「累計の上限の残り + 1 件」まで）を足す。前の歩の cacheRead（cachedTokens）はキャッシュの単価で見る。
+ * 費用の上限の守り（AgentDO の maxOutputTokensWithin・予約額での打ち切り）は別にあり、ここは道具を開くかの判断だけに使う
+ */
+export function consultToolsBudgetNeed(a: {
+  price: ModelPrice;
+  /** 次の歩の入力（system・messages・途中の会話・道具の定義・枠の余裕）のトークン数の見積り */
+  baseTokens: number;
+  /** ここまでの道具の結果の累計（バイト） */
+  toolBytes: number;
+  /** ここまでに使った道具の呼び出しの数 */
+  callsUsed: number;
+  webPrices: { searchUsdPer1k: number; fetchUsdPer1k: number };
+  /** client の max_output_tokens */
+  clientMaxOutput?: number;
+  /** 前の歩でキャッシュから読まれたトークン数（次の歩でも読める前提の分） */
+  cachedTokens?: number;
+}): number {
+  const toolOut = Math.min(CONSULT_TOOL_STEP_OUTPUT_TOKENS, a.clientMaxOutput ?? Infinity);
+  const finalOut = a.clientMaxOutput ?? FINAL_OUTPUT_TOKENS;
+  const left = Math.max(0, CONSULT_MAX_TOOL_CALLS - a.callsUsed);
+  const growth = Math.min(
+    left * CONSULT_TOOL_RESULT_MAX_BYTES,
+    Math.max(0, CONSULT_TOOL_RESULT_TOTAL_MAX_BYTES - a.toolBytes) + CONSULT_TOOL_RESULT_MAX_BYTES,
+  );
+  const cached = Math.max(0, Math.min(a.cachedTokens ?? 0, a.baseTokens));
+  const next = estimateCallCostUsd(a.price, a.baseTokens, toolOut, cached);
+  // 最後の歩: 次の歩の入力 + その出力 + 増えうる結果 + 道具を閉じた旨の固定文
+  const last = estimateCallCostUsd(
+    a.price,
+    a.baseTokens + toolOut + growth + 1024,
+    finalOut,
+    cached,
+  );
+  const web = (left * Math.max(a.webPrices.searchUsdPer1k, a.webPrices.fetchUsdPer1k)) / 1000;
+  return next + last + web;
 }
 
 const TOO_MANY = (tool: string) =>
@@ -251,7 +325,13 @@ export async function runConsultTools(
   const reserved = request.budgetUsd;
   const defs = tools.map((t) => TOOL_DEFS[t]);
   const price: ModelPrice | undefined = modelInfo(request.model)?.price;
-  const outTokens = request.maxOutputTokens ?? STEP_OUTPUT_TOKENS;
+  const toolOutTokens = Math.min(
+    CONSULT_TOOL_STEP_OUTPUT_TOKENS,
+    request.maxOutputTokens ?? CONSULT_TOOL_STEP_OUTPUT_TOKENS,
+  );
+  let callsTruncated = false;
+  /** 最後の歩が入力過大で断られたときの、結果を落とした再試行（1 回だけ） */
+  let retriedLast = false;
   const transcript: ConsultTranscriptMessage[] = [];
   const usage: ConsultUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const recorded: ToolsUsed["calls"] = [];
@@ -277,7 +357,14 @@ export async function runConsultTools(
     webSearch: searches,
     webFetch: fetches,
     ...(recorded.length > 0
-      ? { toolsUsed: { web_search: searches, web_fetch: fetches, calls: recorded } }
+      ? {
+          toolsUsed: {
+            web_search: searches,
+            web_fetch: fetches,
+            calls: recorded,
+            ...(callsTruncated ? { calls_truncated: true as const } : {}),
+          },
+        }
       : {}),
     ...(closed !== undefined ? { toolsClosed: closed } : {}),
   });
@@ -293,10 +380,12 @@ export async function runConsultTools(
       ...(estimated || stepEstimated ? { costEstimated: true as const } : {}),
     });
 
-  /** 道具を開いた歩と、そのあとの最後の歩が、予約額に収まるか（最悪の単価の見積り） */
+  /** 前の歩でキャッシュから読まれたトークン数と、その応答の時刻（Date.now()） */
+  let prevCache: { tokens: number; at: number } | undefined;
+  /** 道具を開いた次の歩と、そのあとの最後の歩が、予約額に収まるか（最悪の単価の見積り） */
   const budgetFits = (): boolean => {
     if (!price) return true;
-    const base =
+    const baseTokens =
       estimateTokens(
         JSON.stringify({
           system: request.system ?? "",
@@ -307,15 +396,20 @@ export async function runConsultTools(
       ) +
       REQUEST_OVERHEAD_TOKENS +
       SAFETY_MARGIN_TOKENS;
-    const thisStep = estimateCallCostUsd(price, base, outTokens);
-    const lastInput =
-      base + outTokens + Math.max(0, CONSULT_TOOL_RESULT_TOTAL_MAX_BYTES - toolBytes) + 1024;
-    const lastStep = estimateCallCostUsd(price, lastInput, outTokens);
-    const webMax =
-      ((CONSULT_MAX_TOOL_CALLS - calls) *
-        Math.max(deps.webPrices.searchUsdPer1k, deps.webPrices.fetchUsdPer1k)) /
-      1000;
-    return spent() + thisStep + lastStep + webMax <= reserved;
+    const cachedTokens =
+      prevCache && Date.now() - prevCache.at <= CACHE_READ_TRUST_MS ? prevCache.tokens : 0;
+    const need = consultToolsBudgetNeed({
+      price,
+      baseTokens,
+      toolBytes,
+      callsUsed: calls,
+      webPrices: deps.webPrices,
+      ...(request.maxOutputTokens !== undefined
+        ? { clientMaxOutput: request.maxOutputTokens }
+        : {}),
+      cachedTokens,
+    });
+    return spent() + need <= reserved;
   };
 
   const runTool = async (call: ConsultToolCall): Promise<WebToolResult> => {
@@ -347,23 +441,32 @@ export async function runConsultTools(
       const r = await callWebWithQuota(quota, () => web.search({ ...ids, query: args.query }));
       if (!r.ok && r.reason === "quota") return exhaust(r.limit);
       searches++;
-      return r.ok ? formatWebSearch(r.value) : formatWebError(tool, r.error);
+      if (!r.ok) return formatWebError(tool, r.error);
+      // 1 件の上限を超えるなら、後ろの検索結果から落とす（囲みは整形し直すので壊れない）
+      let results = r.value.results;
+      let out = formatWebSearch(r.value);
+      while (utf8(out.text) > CONSULT_TOOL_RESULT_MAX_BYTES && results.length > 0) {
+        results = results.slice(0, -1);
+        out = formatWebSearch({ ...r.value, results });
+      }
+      return out;
     }
     const r = await callWebWithQuota(quota, () => web.fetchUrl({ ...ids, url: args.url }));
     if (!r.ok && r.reason === "quota") return exhaust(r.limit);
     fetches++;
     if (!r.ok) return formatWebError(tool, r.error);
     const page = r.value;
-    const long = page.content !== null && page.content.length > CONSULT_FETCH_MAX_CHARS;
-    return formatWebFetch(
-      long
-        ? {
-            ...page,
-            content: (page.content ?? "").slice(0, CONSULT_FETCH_MAX_CHARS),
-            truncated: true,
-          }
-        : page,
-    );
+    // 本文は約 20,000 文字かつ 24,000 バイトまで
+    const content =
+      page.content === null
+        ? null
+        : truncateUtf8(page.content.slice(0, CONSULT_FETCH_MAX_CHARS), FETCH_MAX_BYTES);
+    const cut = content !== page.content;
+    const out = formatWebFetch(cut ? { ...page, content, truncated: true } : page);
+    // それでも 1 件の上限を超える（長い URL・タイトル）なら本文を外す
+    return utf8(out.text) <= CONSULT_TOOL_RESULT_MAX_BYTES
+      ? out
+      : formatWebFetch({ ...page, content: null, title: "", truncated: true });
   };
 
   for (let stepNo = 0; ; stepNo++) {
@@ -384,6 +487,23 @@ export async function runConsultTools(
     const open = closed === undefined;
     const remaining = reserved - spent();
     if (!(remaining > 0)) {
+      // 予約を使い切った。モデルが道具の歩で答えを書いていれば、それを答えにする（failed にしない）
+      const said = [...transcript]
+        .reverse()
+        .find((m) => m.role === "assistant" && m.content.trim() !== "");
+      if (said && said.role === "assistant") {
+        closed ??= "budget";
+        return outcome({
+          ok: true,
+          text: said.content,
+          model: request.model,
+          usage: { ...usage },
+          costUsd: Math.min(reserved, spent()),
+          ...(effort !== undefined ? { effort } : {}),
+          ...(usageMissing ? { usageMissing: true as const } : {}),
+          ...(estimated ? { costEstimated: true as const } : {}),
+        });
+      }
       return failed(
         {
           ok: false,
@@ -407,9 +527,16 @@ export async function runConsultTools(
         stepTranscript = folded;
       }
     }
+    // 道具を開いた歩の出力は小さく、最後の歩は client の値（無ければ AgentDO の既定）
+    const { maxOutputTokens: _clientMax, ...rest } = request;
     const req: ConsultRequest = {
-      ...request,
+      ...rest,
       budgetUsd: remaining,
+      ...(open
+        ? { maxOutputTokens: toolOutTokens }
+        : request.maxOutputTokens !== undefined
+          ? { maxOutputTokens: request.maxOutputTokens }
+          : {}),
       ...(open ? { tools: defs } : {}),
       ...(stepTranscript ? { transcript: stepTranscript } : {}),
     };
@@ -439,6 +566,19 @@ export async function runConsultTools(
         closed = "budget";
         continue;
       }
+      // 道具を閉じた最後の歩が入力過大: 道具の結果を後ろから落として（合計が半分以下になるまで）1 回だけ再試行する
+      if (r.code === "input_too_large" && !open && transcript.length > 0 && !retriedLast) {
+        retriedLast = true;
+        const results = transcript.filter((m) => m.role === "toolResult");
+        let total = results.reduce((n, m) => n + utf8(m.content), 0);
+        const target = total / 2;
+        for (const m of [...results].reverse()) {
+          if (total <= target) break;
+          total -= utf8(m.content) - utf8(DROPPED);
+          m.content = DROPPED;
+        }
+        continue;
+      }
       return failed(r, Math.min(r.costUsd, remaining), r.costEstimated === true);
     }
     modelCalls++;
@@ -450,6 +590,7 @@ export async function runConsultTools(
     usage.output += r.usage.output;
     usage.cacheRead += r.usage.cacheRead;
     usage.cacheWrite += r.usage.cacheWrite;
+    prevCache = { tokens: r.usage.cacheRead, at: Date.now() };
 
     const requested = open && r.truncated !== true ? (r.toolCalls ?? []) : [];
     if (requested.length === 0) {
@@ -472,10 +613,14 @@ export async function runConsultTools(
       ...(typeof r.assistantJson === "string" ? { assistantJson: r.assistantJson } : {}),
     });
     for (const c of requested) {
-      recorded.push(recordOf(c, tools));
+      if (recorded.length < CONSULT_MAX_RECORDED_CALLS) recorded.push(recordOf(c, tools));
+      else callsTruncated = true;
       let res: WebToolResult;
       if (calls >= CONSULT_MAX_TOOL_CALLS || deps.stopped()) {
         res = { text: TOO_MANY(c.name.slice(0, 64)), isError: true };
+      } else if (toolBytes > CONSULT_TOOL_RESULT_TOTAL_MAX_BYTES) {
+        // 1 歩の中で結果の累計が上限を超えた: 以降の呼び出しは実行しない（呼び出しの数にも数えない）
+        res = { text: BYTES_LIMIT(c.name.slice(0, 64)), isError: true };
       } else {
         calls++;
         res = await runTool(c);

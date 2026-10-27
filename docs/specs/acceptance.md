@@ -107,7 +107,7 @@ Phase 1 のコードが揃った後に、利用者と一緒に実施して結果
 - [ ] App を対象 org / リポジトリに Install した（push できるリポジトリを 1 つ以上）
 - [ ] Worker をデプロイした（`PUBLIC_BASE_URL` は実 URL。`ENVIRONMENT` は `production`）
 - [ ] Secret を設定した: `GITHUB_APP_CLIENT_SECRET`、`TOKEN_ENC_KEY`
-- [ ] 変数を設定した: `GITHUB_APP_CLIENT_ID`、`ALLOWED_ORG`、`ALLOWED_TEAM`
+- [ ] 変数を設定した: `GITHUB_APP_CLIENT_ID`、`ALLOWED_ORG`（org の全員を許すならこれだけ。team で絞るときは `ALLOWED_TEAM` も）
 - [ ] MCP Server Portal に本 Worker の `/mcp` を登録した
   - Portal と Access の設定は、このリポジトリではなく IaC のリポジトリ（Terraform）で管理する。登録もそちらから行う。
   - 登録に必要な情報: MCP の URL `https://<PUBLIC_BASE_URL>/mcp`、ユーザーごとの OAuth（Portal の「Require user auth」を有効にする）。DCR は `/oauth/register`、認可は `/authorize`、トークンは `/oauth/token`。protected resource metadata は Worker が公開する。
@@ -119,8 +119,8 @@ Phase 1 のコードが揃った後に、利用者と一緒に実施して結果
 - [ ] 同意画面で拒否すると、元のクライアントに `access_denied` で戻る
 - [ ] Chrome で、承認と拒否のどちらのリダイレクトも CSP に妨げられない
 - [ ] Cowork から Portal 経由で接続しても同様に使える
-- [ ] 許可した team に所属しないアカウントではログインできない（`access_denied` で終わる）
-- [ ] `ALLOWED_USER_IDS` だけで認可する構成（`ALLOWED_ORG` / `ALLOWED_TEAM` は空）で、リストにある ID のアカウントはログインでき、ツールが呼べる。リストに無いアカウントは `access_denied` で終わり、監査に `authz_denied`（`not_team_member`）が出る。`ALLOWED_USER_IDS` に不正な要素を入れる、または `ALLOWED_ORG` だけを設定すると、ログインできない
+- [ ] `ALLOWED_ORG` だけを設定した構成で、その org の active メンバーはログインでき、メンバーでない（招待中を含む）アカウントは `access_denied` で終わる。`ALLOWED_TEAM` も設定すると、その team に所属しないアカウントはログインできない（`access_denied` で終わる）。`ALLOWED_TEAM` だけ（`ALLOWED_ORG` なし）は設定の誤りとしてログインできない
+- [ ] `ALLOWED_USER_IDS` だけで認可する構成（`ALLOWED_ORG` / `ALLOWED_TEAM` は空）で、リストにある ID のアカウントはログインでき、ツールが呼べる。リストに無いアカウントは `access_denied` で終わり、監査に `authz_denied`（`not_team_member`）が出る。`ALLOWED_USER_IDS` に不正な要素を入れる、または `ALLOWED_TEAM` だけ（`ALLOWED_ORG` なし）を設定すると、ログインできない
 - [ ] 2 回目以降の接続では GitHub 側の再承認が不要（または想定どおりの挙動）
 
 ## 2. ツール（Claude Code / Cowork の両方）

@@ -277,7 +277,7 @@ E2E が失敗したときは `E2E_DEBUG=1 mise run test:e2e` で `wrangler dev` 
 | `ENVIRONMENT` | `production`（既定）。`test` のときだけ `GITHUB_OAUTH_BASE` / `GITHUB_API_BASE` の上書きを許す。**本番で `test` にしないこと**（本番で上書きを指定すると起動時に拒否される） |
 | `PUBLIC_BASE_URL` | 公開 URL。OAuth の issuer と `/mcp` の resource、GitHub のコールバック URL（`<PUBLIC_BASE_URL>/callback`）になる。本番は `https`、ローカルのみ loopback の `http` が許される |
 | `GITHUB_APP_CLIENT_ID` | GitHub App の Client ID（秘密ではない） |
-| `ALLOWED_ORG` / `ALLOWED_TEAM` | ログインと全ツール呼び出しを許す org と team の slug。ワーカー team のメンバーも許可される。対で設定する（片方だけだとログインできない）。`ALLOWED_USER_IDS` のどちらかが必須 |
+| `ALLOWED_ORG` / `ALLOWED_TEAM` | `ALLOWED_ORG` はログインと全ツール呼び出しを許す org の slug。これだけなら org の active メンバー全員を許可する（招待中・外部コラボレーターは不可）。`ALLOWED_TEAM` を足すと、その team のメンバーだけを許可する（ワーカー team のメンバーも許可される）。`ALLOWED_TEAM` だけ（`ALLOWED_ORG` なし）は不正でログインできない。`ALLOWED_ORG` か `ALLOWED_USER_IDS` のどちらかが必須 |
 | `ALLOWED_USER_IDS` | ログインと全ツール呼び出しを許す GitHub の数値の user ID（カンマ区切り。`gh api user --jq .id` で分かる）。team の無い個人アカウントで使うときはこちらを使う。org/team と両方を設定した場合は、どちらかを満たせば許可する。不正な要素が 1 つでもあれば全体が不正になり、ログインできない（fail closed） |
 | `GITHUB_APP_ID` | GitHub App の App ID（秘密ではない）。Installation Access Token の発行（JWT の `iss`）に使う。未設定だとタスクは `github_app_not_configured` で FAILED になる（fail closed） |
 | `DRAFT_PR_FALLBACK` | Draft PR を作れないリポジトリ（Free プランの private リポジトリなど）での扱い。`fail`（既定。タスクを `draft_pr_unsupported` で FAILED にする）/ `ready`（`[WIP]` を付けた通常の PR を作り、本文冒頭に注記し、警告 `draft_pr_unavailable` を付ける）。**不正な値は `fail` として扱う**。判定は Draft に関する 422 のときだけ |
@@ -402,7 +402,7 @@ GitHub の Settings > Developer settings > GitHub Apps で作る（OAuth App は
   - Checks: Read-only（任意。あると `task_pr_merge` が CI の結果を確かめる。無いと `checks_unreadable` の警告つきでマージする）
   - Commit statuses: Read-only（任意。同上）
 - **Organization permissions**
-  - Members: Read-only（team 所属の確認に使う）
+  - Members: Read-only（org / team 所属の確認に使う）
 - App を対象の org / リポジトリに **Install** する。`task_start` は、利用者のトークンで見える Installation に対象リポジトリが含まれ、利用者に push 権限があるときだけ成功する（公開リポジトリでも App が未導入なら `forbidden`）
 
 ### ローカル開発

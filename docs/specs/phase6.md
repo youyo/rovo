@@ -134,7 +134,7 @@
 | event | 出す場所 | reason（固定コード）の例 | events にも積む |
 |---|---|---|---|
 | `auth_failed` | gateway | OAuth の state / code の不正（`invalid_state` / `missing_code` / `github_denied` / `code_exchange_rejected` / `consent_rejected`）、提示されたトークンの拒否（`token_rejected`）、`/oauth/token` の拒否（`token_request_rejected`）、MCP の認証情報が無い（`auth_context_missing`）。トークンを提示していない `/mcp` の 401（MCP クライアントの最初の探索）は失敗ではないので出さない。GitHub の一時的な障害（upstream_unavailable）も出さない | しない（タスクが無い） |
-| `authz_denied` | gateway | team 不所属（ログイン時は `not_team_member`、ツール呼び出し時は `forbidden`）、資格が無い（`reauth_required`）、push 権限が無い・App が Installation に入っていない（`forbidden`）、owner でない（`not_owner`。TaskDO が行を持つのに owner が違うとき。応答は `not_found` のまま） | しない |
+| `authz_denied` | gateway | org / team 不所属（ログイン時は `not_team_member`、ツール呼び出し時は `forbidden`）、資格が無い（`reauth_required`）、push 権限が無い・App が Installation に入っていない（`forbidden`）、owner でない（`not_owner`。TaskDO が行を持つのに owner が違うとき。応答は `not_found` のまま） | しない |
 | `credential_issued` / `credential_revoked` | gateway（TaskDO） | `kind`: start / refresh / final（トークンそのものは出さない）。revoked の reason: `revoked` / `already_expired`（期限切れで API を呼ばずに閉じた） | する（`audit`） |
 | `credential_issue_failed` | gateway（TaskDO） | 発行の失敗。`kind` と reason（`github_error_<status>`、`github_app_not_configured` など）。再試行のたびに出る | しない（再試行で増える。FAILED になれば `status_changed` の reason が残る） |
 | `credential_revoke_given_up` | gateway（TaskDO） | 失効を諦めた。reason: `attempts_exhausted`（`REVOKE_MAX_ATTEMPTS`）/ `not_retryable`（403 など）/ `setup_failure`（App の設定が失われた・復号できない） | する（`attempts_exhausted` と `not_retryable` は既存の `warning`: `token_revoke_failed`。`setup_failure` は warning が無い経路なので `audit`） |

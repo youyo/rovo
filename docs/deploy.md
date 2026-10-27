@@ -461,7 +461,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
 1. 3 つの Worker が、web → agent → gateway の順にデプロイできた。
 2. `<PUBLIC_BASE_URL>/mcp` が、認証なしで 401 を返す（protected resource metadata が参照できる）。
 3. Portal 経由で Claude Code から接続し、同意画面 → GitHub のログイン → ツールの一覧（`task_start` / `task_status` / `task_wait` / `task_result` / `task_cancel` / `task_answer` / `task_steer` / `task_pr_ready` / `task_pr_merge` / `web_search` / `web_fetch`。`web_browse` は有効にした場合だけ）が出る。
-4. 許可した team のメンバーで `task_start` → Draft PR ができ、`task_result` が返る。
+4. 許可した org（`ALLOWED_TEAM` を設定したときはその team）のメンバーで `task_start` → Draft PR ができ、`task_result` が返る。
 
 詳しい受入は [acceptance.md](specs/acceptance.md)。
 

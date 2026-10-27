@@ -26,12 +26,13 @@ export function consultBudgetUsd(env: { CONSULT_BUDGET_USD?: string }): number {
 }
 
 /**
- * 道具（web_search / web_fetch。#135）を使う consult 1 回に予約する予算（USD）。env の CONSULT_TOOLS_BUDGET_USD（既定 1）。
+ * 道具（web_search / web_fetch。#135）を使う consult 1 回に予約する予算（USD）。env の CONSULT_TOOLS_BUDGET_USD（既定 2.5）。
  * 道具なしの consult は CONSULT_BUDGET_USD のまま。道具の往復は 1 回の consult でモデルを複数回呼び、web の費用もかかるので別の額にする。
  * UserDO の予約と、往復の各歩で AgentDO に渡す上限（予約額 − それまでの費用）は、必ずこの値から作る。
- * 未設定・数でない・0 以下は既定に戻す。
+ * 未設定・数でない・0 以下は既定に戻す。既定の 2.5 は、最悪の単価の見積りで fable の最初の歩が開く額
+ * （予約額は実費で精算するので、道具を使わない・少ししか使わない consult の費用は増えない）。
  */
-export const DEFAULT_CONSULT_TOOLS_BUDGET_USD = 1;
+export const DEFAULT_CONSULT_TOOLS_BUDGET_USD = 2.5;
 
 export function consultToolsBudgetUsd(env: { CONSULT_TOOLS_BUDGET_USD?: string }): number {
   const raw = env.CONSULT_TOOLS_BUDGET_USD;

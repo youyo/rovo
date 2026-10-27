@@ -1849,7 +1849,7 @@ describe("D10: models_list / budget_status / consult / task_start の model", ()
       remaining_usd: 100,
       task_budget_usd: 10,
       consult_budget_usd: 0.5,
-      consult_tools_budget_usd: 1,
+      consult_tools_budget_usd: 2.5,
       max_concurrent_tasks: 10,
       // 同時に実行できるタスクの上限（設定値。Unit の vitest.config.ts は 1。未設定の既定は 2 で user-concurrency.test.ts が見る）
       concurrency_limit: 1,

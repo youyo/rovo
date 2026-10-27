@@ -70,7 +70,7 @@ describe("consult: tools（#135）", () => {
     ).toMatchObject({ ok: true });
   });
 
-  it("tools を渡すと CONSULT_TOOLS_BUDGET_USD（既定 1）を予約し、AgentDO に道具の定義を渡す。道具を呼ばなければ答えは従来の形", async () => {
+  it("tools を渡すと CONSULT_TOOLS_BUDGET_USD（既定 2.5）を予約し、AgentDO に道具の定義を渡す。道具を呼ばなければ答えは従来の形", async () => {
     const fx = fakeAgent([okResult({ text: "no tools needed", costUsd: 0.002 })]);
     const svc = consultServiceWith(env, fx.agent);
     const p = principal();
@@ -78,7 +78,7 @@ describe("consult: tools（#135）", () => {
     expect(r).toMatchObject({ ok: true, value: { text: "no tools needed", cost_usd: 0.002 } });
     if (!r.ok) throw new Error("not ok");
     expect(r.value).not.toHaveProperty("tools_used");
-    expect(fx.requests[0]?.budgetUsd).toBe(1);
+    expect(fx.requests[0]?.budgetUsd).toBe(2.5);
     expect(fx.requests[0]?.tools?.map((t) => t.name)).toEqual(["web_search"]);
     expect((await userStub(p.githubUserId).budgetStatus()).spent_usd).toBeCloseTo(0.002, 9);
   });

@@ -214,7 +214,7 @@ export type BudgetStatus = {
   remaining_usd: number;
   task_budget_usd: number;
   consult_budget_usd: number;
-  /** 道具（tools）を使う consult 1 回が予約する額（CONSULT_TOOLS_BUDGET_USD。既定 1）。#135 */
+  /** 道具（tools）を使う consult 1 回が予約する額（CONSULT_TOOLS_BUDGET_USD。既定 2.5）。#135 */
   consult_tools_budget_usd: number;
   /** 残りの月額予算で、タスクの予約額（task_budget_usd）を何件分予約できるかの見積もり。同時実行の上限ではない（上限は concurrency_limit） */
   max_concurrent_tasks: number;

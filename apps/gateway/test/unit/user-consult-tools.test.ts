@@ -218,7 +218,7 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
     const { id, done } = await f.run();
     const value = doneValue(done);
 
-    // 1 歩目: 道具の定義を渡し、途中の会話は無い。予算は予約額（CONSULT_TOOLS_BUDGET_USD = 1）
+    // 1 歩目: 道具の定義を渡し、途中の会話は無い。予算は予約額（CONSULT_TOOLS_BUDGET_USD = 2.5）
     expect(f.agent.calls).toHaveLength(2);
     const first = f.agent.calls[0];
     expect(first?.tools?.map((t) => t.name)).toEqual(["web_search", "web_fetch"]);
@@ -227,7 +227,7 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
       required: ["query"],
     });
     expect(first?.transcript).toBeUndefined();
-    expect(first?.budgetUsd).toBe(1);
+    expect(first?.budgetUsd).toBe(2.5);
     // web は caller parent の WEB を、taskId = consultId で呼ぶ
     expect(f.web.searches).toEqual([
       { userId: String(f.uid), taskId: id, query: "rovo 2.0 release" },
@@ -251,7 +251,7 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
     expect(resultText.startsWith("[web_search] verdict: allow.")).toBe(true);
     expect(resultText).toContain("<<<BEGIN_UNTRUSTED_OUTPUT>>>");
     expect(resultText).toContain("rovo 2.0 was released");
-    expect(second?.budgetUsd).toBeCloseTo(1 - 0.01 - 0.005, 9);
+    expect(second?.budgetUsd).toBeCloseTo(2.5 - 0.01 - 0.005, 9);
 
     // 答え: 道具を使ったので本文は囲む。tools_used に回数と呼び出し
     expect(value.text).toBe(
@@ -442,8 +442,8 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
     const { done } = await f.run();
     expect(done).toMatchObject({ status: "failed", error: { code: "upstream_unavailable" } });
     if (!(done.ok && done.status === "failed")) throw new Error("not failed");
-    expect(done.cost_usd).toBeCloseTo(1, 9);
-    expect((await f.stub.budgetStatus()).estimated_usd).toBeCloseTo(1, 9);
+    expect(done.cost_usd).toBeCloseTo(2.5, 9);
+    expect((await f.stub.budgetStatus()).estimated_usd).toBeCloseTo(2.5, 9);
   });
 
   it("予約額に最後の歩まで収まらなければ、道具を渡さずに（budget で閉じて）答えさせる", async () => {
@@ -578,7 +578,7 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
     const value = doneValue((await f.run()).done);
     expect(value.text).toContain("partial answer");
     expect(value.tools_closed).toBe("budget");
-    expect(value.cost_usd).toBeCloseTo(1, 9);
+    expect(value.cost_usd).toBeCloseTo(2.5, 9);
   });
 
   it("道具を開いた歩の出力の上限は 2048（client の max_output_tokens が小さければそちら）、最後の歩は client の値（無ければ AgentDO の既定）", async () => {
@@ -643,10 +643,10 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
     await stub.reserveConsult(plain, MODEL, { id: uid, login: "a" });
     clock.t = T0 + 11 * MIN;
     // 道具なしは閉じ（予約額で精算）、道具つきは開いたまま
-    expect(await stub.budgetStatus()).toMatchObject({ pending_consults: 1, reserved_usd: 1 });
+    expect(await stub.budgetStatus()).toMatchObject({ pending_consults: 1, reserved_usd: 2.5 });
     clock.t = T0 + 15 * MIN;
     expect(await stub.budgetStatus()).toMatchObject({ pending_consults: 0, reserved_usd: 0 });
-    expect((await stub.budgetStatus()).spent_usd).toBeCloseTo(1.5, 9);
+    expect((await stub.budgetStatus()).spent_usd).toBeCloseTo(3, 9);
   });
 
   it("道具つきで期限切れに閉じた consult は、費用の確定（AI Gateway のログ）をしない（歩の数と web の費用が分からないので予約額のまま）", async () => {

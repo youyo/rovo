@@ -314,8 +314,8 @@ describe("既定値", () => {
     assert.equal(g.vars.MONTHLY_BUDGET_USD, "100");
     assert.equal(g.vars.TASK_BUDGET_USD, "10");
     assert.equal(g.vars.CONSULT_BUDGET_USD, "0.5");
-    // 道具つきの consult（#135）の予約額。既定 1
-    assert.equal(g.vars.CONSULT_TOOLS_BUDGET_USD, "1");
+    // 道具つきの consult（#135）の予約額。既定 2.5
+    assert.equal(g.vars.CONSULT_TOOLS_BUDGET_USD, "2.5");
     assert.equal(g.vars.MAX_CONCURRENT_TASKS, "2");
     assert.equal(g.vars.WEB_BROWSE_ENABLED, "false");
     assert.equal(g.vars.ALLOWED_ORG, "");

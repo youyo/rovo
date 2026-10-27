@@ -33,14 +33,14 @@ describe("consultInputSchema の tools", () => {
 });
 
 describe("consultToolsBudgetUsd（env の CONSULT_TOOLS_BUDGET_USD）", () => {
-  it("既定 1。未設定・数でない・0 以下は既定に戻す", () => {
-    expect(DEFAULT_CONSULT_TOOLS_BUDGET_USD).toBe(1);
-    expect(consultToolsBudgetUsd({})).toBe(1);
-    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "" })).toBe(1);
-    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "abc" })).toBe(1);
-    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "0" })).toBe(1);
-    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "-2" })).toBe(1);
-    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "Infinity" })).toBe(1);
-    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "2.5" })).toBe(2.5);
+  it("既定 2.5。未設定・数でない・0 以下は既定に戻す", () => {
+    expect(DEFAULT_CONSULT_TOOLS_BUDGET_USD).toBe(2.5);
+    expect(consultToolsBudgetUsd({})).toBe(2.5);
+    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "" })).toBe(2.5);
+    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "abc" })).toBe(2.5);
+    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "0" })).toBe(2.5);
+    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "-2" })).toBe(2.5);
+    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "Infinity" })).toBe(2.5);
+    expect(consultToolsBudgetUsd({ CONSULT_TOOLS_BUDGET_USD: "3" })).toBe(3);
   });
 });

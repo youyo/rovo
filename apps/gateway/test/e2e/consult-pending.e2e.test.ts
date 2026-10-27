@@ -347,7 +347,7 @@ describe("consult の tools（#135。E2E）", () => {
       expect(after).toMatchObject({
         reserved_usd: 0,
         pending_consults: 0,
-        consult_tools_budget_usd: 1,
+        consult_tools_budget_usd: 2.5,
       });
       expect(after.spent_usd).toBeCloseTo(0.0083, 9);
       const finished = await waitForAudit(
@@ -363,7 +363,7 @@ describe("consult の tools（#135。E2E）", () => {
     }
   });
 
-  it("道具つきでも pending → consult_result の done に tools_used が付く。pending の間は道具つきの予約額（1）が reserved に出る", async () => {
+  it("道具つきでも pending → consult_result の done に tools_used が付く。pending の間は道具つきの予約額（2.5）が reserved に出る", async () => {
     const { user, client } = await memberClient("toolsslow");
     try {
       const q = `consult tools slow e2e ${user.id}`;
@@ -378,7 +378,7 @@ describe("consult の tools（#135。E2E）", () => {
       ]);
       const pending = bodyOf(await ask(client, q, { tools: ["web_fetch"] }));
       expect(pending).toMatchObject({ status: "pending" });
-      expect(await budget(client)).toMatchObject({ reserved_usd: 1, pending_consults: 1 });
+      expect(await budget(client)).toMatchObject({ reserved_usd: 2.5, pending_consults: 1 });
       const done = bodyOf(await result(client, String(pending.consult_id)));
       expect(done).toMatchObject({
         status: "done",

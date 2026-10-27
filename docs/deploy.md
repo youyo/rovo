@@ -129,7 +129,7 @@ AI Gateway にプロバイダーのキーを、エイリアス `default` で登�
 |---|---|---|---|
 | `accountId` | 必須 | | Cloudflare のアカウント ID（32 桁の 16 進数）。Terraform の `account_id` と gateway の `CLOUDFLARE_ACCOUNT_ID` になる |
 | `namePrefix` | | `rovo` | Terraform のリソース名の接頭辞（R2 バケット・KV・AI Gateway） |
-| `workerNames` | | `rovo-gateway` / `rovo-agent` / `rovo-web` | Worker の名前。各 wrangler 設定の `name`、gateway の `script_name` と `services`、Terraform の `worker_names`（Logpush の filter）に、1 か所から反映される |
+| `workerNames` | | `rovo-gateway` / `rovo-agent` / `rovo-web` | Worker の名前（小文字・数字・ハイフン。両端はハイフン以外、63 文字以下。workers.dev の URL の DNS ラベルの上限で、`deploy:config` が生成の前に確かめる）。各 wrangler 設定の `name`、gateway の `script_name` と `services`、Terraform の `worker_names`（Logpush の filter）に、1 か所から反映される |
 | `publicBaseUrl` | 必須（`customDomain` があれば省略可） | `https://<customDomain>` | gateway の公開 URL（`https`）。`PUBLIC_BASE_URL`。`customDomain` と両方書くときはホストを一致させる（違えばエラー） |
 | `customDomain` | | なし（workers.dev のまま） | 任意の独自ドメイン（ホスト名だけ。小文字で、スキーム・パス・ポート・末尾のドットなし、ドットを 1 つ以上含む。例 `rovo.example.com`）。gateway の `routes` に `[{ "pattern": "<host>", "custom_domain": true }]` が出る（未設定は `[]`）。既定では workers.dev の URL も使える（止めるなら `workersDev`）。agent・web には出ない。手順は下の「独自ドメインを使う」 |
 | `workersDev` | | `true` | gateway の workers.dev の URL（と preview / version の URL）を有効にするか（boolean）。`false` で gateway の `workers_dev` と `preview_urls` が `false` になる。`false` には `customDomain` が要る（無いとエラー。gateway に届く URL が無くなるため）。agent・web は常に `false` で変わらない。手順は下の「独自ドメインを使う」 |

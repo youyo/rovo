@@ -564,6 +564,28 @@ describe("入力の検証", () => {
       ),
     );
   });
+  it("workerNames: 64 文字以上は長さを示して拒否する（63 文字までは通る）", () => {
+    const names = (n) => ({ gateway: "g".repeat(n), agent: "a".repeat(n), web: "w".repeat(n) });
+    for (const n of [64, 100]) {
+      const errs = bad({ workerNames: names(n) });
+      assert.ok(
+        errs.some((e) => e.includes("workerNames.gateway") && e.includes("63")),
+        `${n}: ${errs.join(" / ")}`,
+      );
+    }
+    assert.deepEqual(bad({ workerNames: { ...names(60), gateway: "g".repeat(64) } }).length, 1);
+    assert.deepEqual(bad({ workerNames: names(63) }), []);
+  });
+  it("workerNames: 使えない文字（アンダースコア・大文字・両端のハイフン・ドット）は拒否する", () => {
+    for (const v of ["a_b", "Abc", "-abc", "abc-", "a.b", "a b"]) {
+      assert.ok(
+        bad({ workerNames: { gateway: v, agent: "a", web: "b" } }).some((e) =>
+          e.includes("workerNames.gateway"),
+        ),
+        v,
+      );
+    }
+  });
   it("雛形に無い vars のキーは拒否する（誤記で黙って無視しない）", () => {
     assert.ok(
       bad({ vars: { gateway: { NO_SUCH_VAR: "1" } } }).some((e) => e.includes("NO_SUCH_VAR")),

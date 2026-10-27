@@ -16,6 +16,9 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+const WORKER_NAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+const WORKER_NAME_MAX = 63;
+
 export const APPS = ["gateway", "agent", "web"];
 
 /** 雛形の既定値（config で省略したとき）。deploy.example/ に以前書いてあった値と同じ。 */
@@ -175,9 +178,25 @@ export function validateConfig(raw, templates = loadTemplates()) {
     if (!APPS.includes(k)) errors.push(`workerNames.${k}: 未知のキー（gateway / agent / web）`);
   }
   const names = APPS.map((a) => wn[a]);
-  if (names.some((n) => !isStr(n) || !/^[a-z0-9][a-z0-9_-]*$/.test(n))) {
-    errors.push("workerNames: 空でない小文字・数字・ハイフン・アンダースコアの名前にする");
-  } else if (new Set(names).size !== 3) {
+  // Cloudflare の文書（Workers の workers.dev の Limitations / wrangler の name）: 英数字とハイフンだけ、
+  // 両端はハイフン不可、workers.dev を使うなら 63 文字以下（DNS ラベルの上限）。Version URL の alias も同じ上限。
+  // 生成器は Worker 名に接頭辞・接尾辞を足さず、script_name・services・WORKER_NAMES にそのまま入れる
+  let namesOk = true;
+  for (const a of APPS) {
+    const n = wn[a];
+    if (!isStr(n) || !WORKER_NAME.test(n)) {
+      namesOk = false;
+      errors.push(
+        `workerNames.${a}: 空でない小文字・数字・ハイフンの名前にする（両端はハイフン以外。アンダースコア・ドットは使えない）`,
+      );
+    } else if (n.length > WORKER_NAME_MAX) {
+      namesOk = false;
+      errors.push(
+        `workerNames.${a}: ${WORKER_NAME_MAX} 文字以下にする（${n.length} 文字ある。workers.dev の URL の DNS ラベルの上限）`,
+      );
+    }
+  }
+  if (namesOk && new Set(names).size !== 3) {
     errors.push("workerNames: 3 つの名前は互いに異なる必要がある");
   }
 

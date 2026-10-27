@@ -33,12 +33,12 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
 - 上流の認証は **GitHub App のユーザー認可（user-to-server トークン）** を使う。OAuth App は使わない。
   - 理由: このトークンで利用者の push 権限と App の Installation の両方を確かめられ、OAuth App の `repo` scope のような強い権限が不要になる。
   - 注意: user-to-server トークンでも公開リポジトリは読めてしまう。そのため `GET /repos/...` が 200 を返しても、Installation の証明にはならない。
-  - GitHub App 側には org の Members: Read 権限を付け、team 所属の確認に使う。
+  - GitHub App 側には org の Members: Read 権限を付け、org の active メンバー（`ALLOWED_ORG` だけのとき）または team 所属（`ALLOWED_TEAM` も設定したとき）の確認に使う。（#124、2026-10-27 で、当初の「org と team の対」から org だけの許可にも対応）
 - callback では次を行う。
   1. state を検証する（不一致や再利用は拒否）。
   2. code をトークンに交換する。
   3. `GET /user` で id と login を得る。
-  4. 指定 org・指定 team への所属を `GET /orgs/{org}/teams/{team_slug}/memberships/{username}` で確かめる。`state == "active"` だけを許可する。
+  4. 指定 org・指定 team への所属を `GET /orgs/{org}/teams/{team_slug}/memberships/{username}` で確かめる。`state == "active"` だけを許可する。（#124、2026-10-27 で追記: `ALLOWED_TEAM` を設定しないときは、`GET /user/memberships/orgs/{org}` で org の active メンバーかを確かめる。）
 - props には `githubUserId` と `login` だけを入れる。
   - GitHub のトークンは UserDO に保存する（後述）。
   - トークンはログに出さない。
@@ -59,9 +59,9 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - 再ログイン（新しい GitHub 認可）で得た資格は、UserDO の資格を上書きする（新しいものが勝つ）。
   - MCP トークンの期限と GitHub 資格の期限は別物として扱う。MCP トークンが有効でも、GitHub 資格を回復できなければ `reauth_required` になる。
   - 期限は、トークン応答の `expires_in` / `refresh_token_expires_in` から計算する。期限切れにならないトークン（App の設定で期限を無効にした場合）にも対応する。
-- team 所属の再検証
+- org / team 所属の再検証
   - ログイン時だけでなく、全ツールの呼び出しで確かめる。
-  - 結果は UserDO に短時間（TTL 5分）キャッシュする。team から外れてから使えなくなるまでの遅れは最大5分。
+  - 結果は UserDO に短時間（TTL 5分）キャッシュする。org / team から外れてから使えなくなるまでの遅れは最大5分。キャッシュは org/team の設定の指紋で区別し、設定を変えると古い結果は使わない（#124）。
   - GitHub API の障害時は拒否する（fail-closed）。
   - 401 は `reauth_required`、403 / 404 は `forbidden`、429 / 5xx は `upstream_unavailable` に分けて返す。
   - team API はワーカー team への所属も含めて判定するので、ワーカー team のメンバーも許可される（仕様として明記する）。
@@ -82,7 +82,7 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - 実装には workers-oauth-provider の `beginUpstream` / `finishUpstream` を使う。
   - 逐次の再使用は拒否される。ただし KV の get と delete は原子的でないため、同じブラウザから同じ state で並行して callback すると、両方が通る可能性がある。
   - その場合でも GitHub の認可コードは1回しか交換できないので、二重の grant にはならないと判断し、許容する。
-- 設定値（env）: `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET`（secret）、`ALLOWED_ORG`、`ALLOWED_TEAM`。
+- 設定値（env）: `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET`（secret）、`ALLOWED_ORG`、`ALLOWED_TEAM`（任意。無ければ org の全員を許可。team だけは不正）。
 - GitHub の URL（`GITHUB_OAUTH_BASE` / `GITHUB_API_BASE`）は E2E でだけ差し替えられるようにする。
   - 本番では既定値（`https://github.com` / `https://api.github.com`）以外を拒否する。たとえば `ENVIRONMENT=test` のときだけ上書きを許す。
 
@@ -228,7 +228,7 @@ Claude Code / Cowork から Remote MCP 経由でタスクを作成・状態確�
   - owner の不一致は not_found
   - 公開リポジトリだが App が未導入、導入済みだが選択対象外、push 権限がない、のいずれも forbidden
   - GitHub が 401 なら reauth_required、403 なら forbidden、429 / 5xx なら upstream_unavailable
-  - team に所属していない、または `state=pending` なら拒否
+  - team に所属していない、または `state=pending` なら拒否（`ALLOWED_ORG` だけのときは、org の active メンバーでない、または `state=pending` なら拒否。#124）
   - ログイン後に team から外された場合、TTL が切れた後の呼び出しで拒否される
   - GitHub 資格の期限切れ
     - refresh token が有効なら、自動でリフレッシュして成功する

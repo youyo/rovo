@@ -277,7 +277,7 @@ The complete list of values to prepare at deploy time is in section 5 of [docs/d
 | `ENVIRONMENT` | `production` (default). Only when it is `test` are overrides of `GITHUB_OAUTH_BASE` / `GITHUB_API_BASE` allowed. **Never set it to `test` in production** (specifying an override in production is rejected at startup) |
 | `PUBLIC_BASE_URL` | The public URL. It becomes the OAuth issuer, the `/mcp` resource, and the GitHub callback URL (`<PUBLIC_BASE_URL>/callback`). Production must use `https`; only loopback `http` is allowed locally |
 | `GITHUB_APP_CLIENT_ID` | The GitHub App's Client ID (not a secret) |
-| `ALLOWED_ORG` / `ALLOWED_TEAM` | The slugs of the org and team allowed to log in and call all tools. Members of child teams are also allowed. Set them as a pair (with only one, login is impossible). Either this pair or `ALLOWED_USER_IDS` is required |
+| `ALLOWED_ORG` / `ALLOWED_TEAM` | `ALLOWED_ORG` is the slug of the org allowed to log in and call all tools: with it alone, every active member of the org is allowed (pending invitations and outside collaborators are not). Add `ALLOWED_TEAM` to allow only that team's members (members of child teams are also allowed). `ALLOWED_TEAM` without `ALLOWED_ORG` is invalid and login is impossible. Either `ALLOWED_ORG` or `ALLOWED_USER_IDS` is required |
 | `ALLOWED_USER_IDS` | Numeric GitHub user IDs allowed to log in and call all tools (comma-separated; you can find yours with `gh api user --jq .id`). Use this for a personal account without a team. If you set both org/team and this, satisfying either one is enough. If even one element is invalid, the whole value is invalid and login is impossible (fail closed) |
 | `GITHUB_APP_ID` | The GitHub App's App ID (not a secret). Used to issue Installation Access Tokens (the JWT's `iss`). If unset, tasks end in FAILED with `github_app_not_configured` (fail closed) |
 | `DRAFT_PR_FALLBACK` | What to do for repositories where Draft PRs cannot be created (such as private repositories on the Free plan). `fail` (default; the task goes to FAILED with `draft_pr_unsupported`) / `ready` (creates a normal PR prefixed with `[WIP]`, adds a note at the top of the body, and attaches the warning `draft_pr_unavailable`). **Invalid values are treated as `fail`**. The decision is made only on a 422 about Drafts |
@@ -402,7 +402,7 @@ Create it under GitHub's Settings > Developer settings > GitHub Apps (do not use
   - Checks: Read-only (optional; lets `task_pr_merge` check CI results. Without it the merge goes ahead with a `checks_unreadable` warning)
   - Commit statuses: Read-only (optional; same as above)
 - **Organization permissions**
-  - Members: Read-only (used to check team membership)
+  - Members: Read-only (used to check org / team membership)
 - **Install** the App on the target org / repositories. `task_start` succeeds only when the target repository is included in an Installation visible with the user's token and the user has push permission (even for a public repository, if the App is not installed, you get `forbidden`)
 
 ### Local development

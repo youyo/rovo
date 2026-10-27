@@ -13,6 +13,7 @@ import {
   sanitizeText,
   shortModel,
   singleLine,
+  startableView,
 } from "../src/format";
 import { tEn, tJa } from "./lang";
 
@@ -186,5 +187,55 @@ describe("formatDurationShort（狭い幅のレール）", () => {
     expect(formatDurationShort(0)).toBe("0s");
     expect(formatDurationShort(-5)).toBe("0s");
     expect(formatDurationShort(Number.NaN)).toBe("0s");
+  });
+});
+
+describe("startableView（あと何件始められるか。画面ごとに判定を書かない）", () => {
+  const b = (max: number, limit: number, running: number, startable: number) => ({
+    max_concurrent_tasks: max,
+    concurrency_limit: limit,
+    running_slots: running,
+    startable,
+  });
+
+  it("b >= h: 同時実行の上限が決めている（kind=concurrency）。n はサーバーの値、m は予算の件数", () => {
+    expect(startableView(b(19, 2, 0, 2))).toEqual({
+      n: 2,
+      budgetCount: 19,
+      byBudget: false,
+      kind: "concurrency",
+    });
+  });
+
+  it("境界 b = h: 予算は決めていない", () => {
+    const v = startableView(b(2, 2, 0, 2));
+    expect(v.byBudget).toBe(false);
+    expect(v.kind).toBe("concurrency");
+  });
+
+  it("b < h かつ b > 0: 予算が決めている（kind=budget）。n はサーバーの値のまま", () => {
+    expect(startableView(b(1, 10, 2, 1))).toEqual({
+      n: 1,
+      budgetCount: 1,
+      byBudget: true,
+      kind: "budget",
+    });
+  });
+
+  it("b = 0 かつ h > 0: 予算の残りが足りない（kind=none）", () => {
+    const v = startableView(b(0, 2, 0, 0));
+    expect(v.kind).toBe("none");
+    expect(v.byBudget).toBe(true);
+    expect(v.n).toBe(0);
+  });
+
+  it("h = 0（実行中の枠が上限）: 予算が多ければ concurrency で n = 0", () => {
+    const v = startableView(b(5, 2, 2, 0));
+    expect(v).toEqual({ n: 0, budgetCount: 5, byBudget: false, kind: "concurrency" });
+  });
+
+  it("h = 0 かつ b = 0: 予算が足りないことを伝える（none）。実行中が上限を超えても h は 0 で止める", () => {
+    expect(startableView(b(0, 2, 2, 0)).kind).toBe("none");
+    expect(startableView(b(3, 2, 4, 0)).kind).toBe("concurrency");
   });
 });

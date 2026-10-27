@@ -69,16 +69,74 @@ describe("予算の欄（自分の予算と全員の実績を 1 つの欄にま�
     expect(dl.querySelectorAll(":scope > div > dd")).toHaveLength(4);
   });
 
-  it("「同時に N 件始められます」を残す", () => {
+  it("ふだん（b >= h）は同時の件数と予算の件数を並べる", () => {
     const c = mount();
     expect(c.querySelector("[data-budget-startable]")?.textContent).toBe(
-      "同時に 2 件始められます。",
+      "同時に 2 件始められます（予算では 19 件分）。",
     );
     const zero = mount({
       ...overviewFixture,
-      budget: { ...overviewFixture.budget, startable: 0 },
+      budget: { ...overviewFixture.budget, startable: 0, running_slots: 2 },
     });
-    expect(zero.textContent).toContain("同時に 0 件始められます。");
+    expect(zero.textContent).toContain("同時に 0 件始められます（予算では 19 件分）。");
+  });
+
+  it("予算が件数を決めているとき（b < h かつ n > 0）: 予算の残りで、あと N 件", () => {
+    const c = mount({
+      ...overviewFixture,
+      budget: {
+        ...overviewFixture.budget,
+        max_concurrent_tasks: 1,
+        concurrency_limit: 10,
+        running_slots: 0,
+        startable: 1,
+      },
+    });
+    const el = c.querySelector("[data-budget-startable]");
+    expect(el?.textContent).toBe("予算の残りで、あと 1 件始められます。");
+    expect(el?.getAttribute("data-budget-startable")).toBe("budget");
+  });
+
+  it("b = 0: 予算の残りが足りないため、新しいタスクは始められません", () => {
+    const c = mount({
+      ...overviewFixture,
+      budget: { ...overviewFixture.budget, max_concurrent_tasks: 0, startable: 0 },
+    });
+    expect(c.querySelector("[data-budget-startable]")?.textContent).toBe(
+      "予算の残りが足りないため、新しいタスクは始められません。",
+    );
+  });
+
+  it("英語: 3 つの分岐と単数・複数", () => {
+    const mountEn = (budget: Partial<OverviewDto["budget"]>) => {
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      act(() => {
+        root.render(
+          inEn(
+            createElement(BudgetPanel, {
+              data: { ...overviewFixture, budget: { ...overviewFixture.budget, ...budget } },
+            }),
+          ),
+        );
+      });
+      return container.querySelector("[data-budget-startable]")?.textContent;
+    };
+    expect(mountEn({})).toBe("You can start 2 more tasks at once (budget covers 19 more).");
+    expect(mountEn({ startable: 1, running_slots: 1, max_concurrent_tasks: 3 })).toBe(
+      "You can start 1 more task at once (budget covers 3 more).",
+    );
+    expect(mountEn({ max_concurrent_tasks: 1, concurrency_limit: 10, startable: 1 })).toBe(
+      "Your remaining budget covers 1 more task.",
+    );
+    expect(mountEn({ max_concurrent_tasks: 3, concurrency_limit: 10, startable: 3 })).toBe(
+      "Your remaining budget covers 3 more tasks.",
+    );
+    expect(mountEn({ max_concurrent_tasks: 0, startable: 0 })).toBe(
+      "Not enough budget left to start a new task.",
+    );
   });
 
   it("上限は契約の monthly_budget_usd。残りが 0 でも出る", () => {

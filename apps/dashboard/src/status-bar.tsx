@@ -2,7 +2,14 @@ import type { BudgetMeDto, CloudflareSummaryDto, OverviewDto } from "@rovo/dashb
 import { useId, useState } from "react";
 import { cloudflareRows } from "./cloudflare";
 import { CloudflarePanel } from "./cloudflare-panel";
-import { formatClock, formatCount, formatUsd, modelFamily, shortModel } from "./format";
+import {
+  formatClock,
+  formatCount,
+  formatUsd,
+  modelFamily,
+  shortModel,
+  startableView,
+} from "./format";
 import type { T } from "./i18n";
 import { useT } from "./lang";
 import { budgetLimit } from "./rail";
@@ -12,6 +19,15 @@ import { Legend } from "./timeline-view";
 import type { CloudflareState } from "./use-cloudflare";
 
 /** tmux 風のステータスバー（今月の自分・全員・モデル別・Cloudflare の要約）と、「内訳」の引き出し。 */
+
+/** 「残り $x  あと N 件」。予算が件数を決めているときだけ「予算で」に変える。 */
+function leftText(budget: BudgetMeDto, t: T): string {
+  const v = startableView(budget);
+  return t(v.byBudget ? "bar.leftByBudget" : "bar.left", {
+    remaining: formatUsd(budget.remaining_usd, t),
+    n: v.n,
+  });
+}
 
 function cloudflareData(state: CloudflareState | undefined): CloudflareSummaryDto | null {
   if (!state) return null;
@@ -180,10 +196,7 @@ export function StatusBar(props: {
         </Sb>
         <Meter spent={data.budget.spent_usd} limit={limit} />
         <Sb k="budget-left" alt>
-          {t("bar.left", {
-            remaining: formatUsd(data.budget.remaining_usd, t),
-            n: data.budget.startable,
-          })}
+          {leftText(data.budget, t)}
         </Sb>
         <Sb k="budget-all">
           {t("bar.all", { amount: formatUsd(data.month.budget_actual.spent_usd, t) })}
@@ -239,9 +252,7 @@ export function PendingStatusBar(props: {
         </Sb>
         {budget ? <Meter spent={budget.spent_usd} limit={limit} /> : null}
         <Sb k="budget-left" alt>
-          {budget
-            ? t("bar.left", { remaining: formatUsd(budget.remaining_usd, t), n: budget.startable })
-            : t("bar.leftLoading")}
+          {budget ? leftText(budget, t) : t("bar.leftLoading")}
         </Sb>
         <Sb k="budget-all">{t("bar.allLoading")}</Sb>
         <Sb k="models" alt>

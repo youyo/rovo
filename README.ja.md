@@ -19,16 +19,9 @@ Rovo は、Claude Code / Cowork から Remote MCP 経由でコーディングタ
 
 *ダッシュボード（読み取り専用。OS の Light / Dark の設定に合わせて切り替わる。画面の文字は英語の表示）。*
 
-<p align="center">
-  <a href="docs/assets/videos/rovo-standard-dark-ja.mp4">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/videos/rovo-standard-dark-ja-poster.png">
-      <img src="docs/assets/videos/rovo-standard-light-ja-poster.png" alt="処理の流れの動画。Claude が Remote MCP で依頼し、Sandbox のワーカーが AI Gateway 経由でコーディング、Clef の安全判定つきでウェブを調べ、スケールアップしてテストとレビューを回し、PR が Claude に戻ってマージされる" width="860">
-    </picture>
-  </a>
-</p>
+https://github.com/user-attachments/assets/d79c6b59-ac49-4d2f-a70d-30b81bea6afe
 
-*`task_start` からマージまでの流れ（78 秒の動画。クリックで再生）。英語版・Light / Dark・短い版と詳しい版は [docs/assets/videos](docs/assets/videos/) にある。*
+*`task_start` からマージまでの流れ（78 秒）。英語版・Light / Dark・短い版と詳しい版は [docs/assets/videos](docs/assets/videos/) にある。*
 
 ## クイックスタート
 

@@ -48,6 +48,16 @@ export function ciSummaryText(state: ChecksState, t: T): string {
   return parts.join(t("common.sep"));
 }
 
+/** CI のタブの見出しの失敗の印（要約チップと同じ赤い ✗ の丸 + 数）。読み上げはタブの aria-label */
+export function CiTabFailed(props: { n: number }) {
+  return (
+    <span className="ci-n ci-tab-n" data-n="" data-kind="fail" aria-hidden="true">
+      <CheckSymbol cls="fail" />
+      {props.n}
+    </span>
+  );
+}
+
 /** 失敗の数（CI のタブの見出しに出す）。取れていない・読めないときは 0 */
 export function ciFailedCount(state: ChecksState | null): number {
   if (state === null || state.phase !== "ready" || state.data.state === "unreadable") return 0;

@@ -172,6 +172,63 @@ describe("CiPane（CI のペインの中身）", () => {
     ]);
   });
 
+  it("細い帯: 24 件までは 1 件 1 区画、超えたら状態ごとの区画（失敗 → 実行中 → 待ち → 成功 → skipped）で、件数に比例した幅", () => {
+    const base = checksFixture.checks[0] as ChecksDto["checks"][number];
+    const mk = (
+      n: number,
+      status: "completed" | "in_progress" | "queued",
+      conclusion: string | null,
+    ) =>
+      Array.from({ length: n }, (_, i) => ({
+        ...base,
+        name: `${status}-${conclusion}-${i}`,
+        status,
+        conclusion,
+      }));
+    const few = mountPane(
+      ready({
+        ...checksFixture,
+        checks: [...mk(20, "completed", "success"), ...mk(4, "completed", "failure")],
+      }),
+    );
+    const fewStrip = few.querySelector(".ci-strip") as HTMLElement;
+    expect(fewStrip.hasAttribute("data-grouped")).toBe(false);
+    expect(fewStrip.querySelectorAll(".ci-seg")).toHaveLength(24);
+
+    const many = mountPane(
+      ready({
+        ...checksFixture,
+        checks: [
+          ...mk(30, "completed", "success"),
+          ...mk(2, "completed", "skipped"),
+          ...mk(1, "queued", null),
+          ...mk(6, "completed", "failure"),
+          ...mk(1, "in_progress", null),
+        ],
+      }),
+    );
+    const strip = many.querySelector(".ci-strip") as HTMLElement;
+    expect(strip.getAttribute("aria-hidden")).toBe("true");
+    expect(strip.hasAttribute("data-grouped")).toBe(true);
+    const segs = [...strip.querySelectorAll(".ci-seg")];
+    expect(segs.map((e) => e.getAttribute("data-class"))).toEqual([
+      "fail",
+      "run",
+      "queued",
+      "ok",
+      "skip",
+    ]);
+    expect(segs.map((e) => e.getAttribute("data-count"))).toEqual(["6", "1", "1", "30", "2"]);
+    // 幅は件数に比例（1 件でも見える最小幅あり）
+    const w = segs.map((e) => Number(e.getAttribute("width")));
+    expect(w[3]).toBeGreaterThan(w[0] ?? 0);
+    expect(w[0]).toBeGreaterThan(w[1] ?? 0);
+    expect(Math.min(...w)).toBeGreaterThan(0);
+    // 0 件の状態は出さない
+    const only = mountPane(ready({ ...checksFixture, checks: mk(30, "completed", "success") }));
+    expect(only.querySelectorAll(".ci-strip .ci-seg")).toHaveLength(1);
+  });
+
   it("リンクは url があるときだけ。新しいタブ・noopener noreferrer。github.com 以外は画面でもリンクにしない", () => {
     const data: ChecksDto = {
       ...checksFixture,

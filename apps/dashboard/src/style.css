@@ -1541,6 +1541,27 @@ summary.step-row:hover {
 .ci-seg[data-class="skip"] {
   background: var(--skip);
 }
+/* 多いとき（状態ごとの区画）。幅は SVG の属性、色は fill */
+svg.ci-strip {
+  display: block;
+  flex: none;
+  width: 100%;
+}
+svg.ci-strip .ci-seg {
+  fill: var(--line);
+}
+svg.ci-strip .ci-seg[data-class="fail"] {
+  fill: var(--fail);
+}
+svg.ci-strip .ci-seg[data-class="run"] {
+  fill: var(--run-ring);
+}
+svg.ci-strip .ci-seg[data-class="ok"] {
+  fill: var(--ok);
+}
+svg.ci-strip .ci-seg[data-class="skip"] {
+  fill: var(--skip);
+}
 .ci-note {
   margin-top: 8px;
   font-size: var(--fs-small);

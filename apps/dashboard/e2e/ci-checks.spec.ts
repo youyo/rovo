@@ -102,9 +102,14 @@ test("(CI1) 1440px: 左はログ（残りの幅すべて）、右は細い固定
 
 const many: ChecksBody = {
   ...failing,
-  checks: Array.from({ length: 40 }, (_, i) =>
-    run(`check-${String(i).padStart(2, "0")}`, "completed", "success"),
-  ),
+  checks: [
+    run("unit", "completed", "failure"),
+    run("e2e", "in_progress", null),
+    run("deploy-preview", "queued", null),
+    ...Array.from({ length: 37 }, (_, i) =>
+      run(`check-${String(i).padStart(2, "0")}`, "completed", "success"),
+    ),
+  ],
 };
 
 /** ペインの上端・下端とログの列の差（px）。フォントやログの読み込みで揺れるので、呼ぶ側は expect.poll で待つ */
@@ -153,6 +158,16 @@ test("(CI1d) 1440px: check が多いとき、ペインの高さはログの列�
   // 見出しと帯は上に残る
   await expect(page.locator(".ci-pane h2")).toBeInViewport();
   await expect(page.locator(".ci-strip")).toBeInViewport();
+  // 40 件は状態ごとの区画（失敗 → 実行中 → 待ち → 成功 の順、0 件の状態は無し）で、成功の区画が幅の大半を占める
+  await expect(page.locator(".ci-strip .ci-seg")).toHaveCount(4);
+  const segs = await page
+    .locator(".ci-strip .ci-seg")
+    .evaluateAll((els) =>
+      els.map((e) => ({ c: e.getAttribute("data-class"), w: e.getBoundingClientRect().width })),
+    );
+  expect(segs.map((x) => x.c)).toEqual(["fail", "run", "queued", "ok"]);
+  expect(segs[3]?.w).toBeGreaterThan(150);
+  expect(Math.min(...segs.map((x) => x.w))).toBeGreaterThanOrEqual(2);
 });
 
 test("(CI1e) 回帰: PR が無いタスク（1440px）でも、ログの枠はフッターの近くまで伸びる", async ({

@@ -19,6 +19,17 @@ Rovo lets Claude Code / Cowork hand coding tasks to workers over Remote MCP. Eac
 
 *The dashboard (read-only; it follows the system's light / dark setting).*
 
+<p align="center">
+  <a href="docs/assets/videos/rovo-standard-dark-en.mp4">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/videos/rovo-standard-dark-en-poster.png">
+      <img src="docs/assets/videos/rovo-standard-light-en-poster.png" alt="Video of the request flow: Claude hands off a task over Remote MCP, the Sandbox worker codes through AI Gateway, searches the web with Clef's safety check, scales up, tests and reviews, and the PR comes back to Claude to merge" width="860">
+    </picture>
+  </a>
+</p>
+
+*How a task flows, from `task_start` to the merge (78-second video; click to play). Other versions, in Japanese, light / dark and shorter or more detailed: [docs/assets/videos](docs/assets/videos/).*
+
 ## Quick start
 
 Deploy Rovo to your own Cloudflare account, connect it to Claude Code, and run your first task.

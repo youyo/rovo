@@ -19,6 +19,10 @@ Rovo は、Claude Code / Cowork から Remote MCP 経由でコーディングタ
 
 *ダッシュボード（読み取り専用。OS の Light / Dark の設定に合わせて切り替わる。画面の文字は英語の表示）。*
 
+https://github.com/user-attachments/assets/00bf3a07-6874-4c6a-aa76-4857f96f6dcb
+
+*`task_start` からマージまでの流れ。英語版・Light / Dark・短い版と詳しい版は [docs/assets/videos](docs/assets/videos/) にある。*
+
 ## クイックスタート
 
 自分の Cloudflare アカウントにデプロイし、Claude Code につないで、最初のタスクを動かすまで。

@@ -245,3 +245,35 @@ describe("createPoller（D15）", () => {
     expect(env.pending()).toEqual([10_000]);
   });
 });
+
+describe("createPoller: 間隔を関数で渡す（PR の CI。実行中は短く、終わったら長く）", () => {
+  it("次の予約のたびに関数を呼び直し、その値で待つ", async () => {
+    const env = makeEnv();
+    const c = controllable();
+    let ms = 10_000;
+    const p = createPoller({ run: c.run, deps: env.deps, intervalMs: () => ms });
+    p.start();
+    await c.resolve(0, "ok");
+    expect(env.pending()).toEqual([10_000]);
+    ms = 60_000;
+    await env.fire();
+    await c.resolve(1, "ok");
+    expect(env.pending()).toEqual([60_000]);
+  });
+
+  it("失敗の backoff は関数の値を基準にする（最大 60 秒）", async () => {
+    const env = makeEnv();
+    const c = controllable();
+    const p = createPoller({ run: c.run, deps: env.deps, intervalMs: () => 10_000 });
+    p.start();
+    await c.resolve(0, "error");
+    expect(env.pending()).toEqual([20_000]);
+    await env.fire();
+    await c.resolve(1, "error");
+    expect(env.pending()).toEqual([40_000]);
+    await env.fire();
+    await c.resolve(2, "error");
+    expect(env.pending()).toEqual([60_000]);
+    p.stop();
+  });
+});

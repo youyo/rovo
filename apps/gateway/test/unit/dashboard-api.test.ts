@@ -2,6 +2,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import {
   BudgetMeDtoSchema,
+  ChecksDtoSchema,
   CloudflareSummaryDtoSchema,
   ErrorDtoSchema,
   OverviewDtoSchema,
@@ -58,6 +59,10 @@ interface Viewer {
   pullStates:
     | Record<string, string>
     | ((refs: { repository: string; number: number }[]) => unknown | Promise<unknown>);
+  /** dashboardChecks に渡された呼び出し */
+  checksCalls: { uid: number; ref: { repository: string; number: number } }[];
+  /** dashboardChecks の応答。関数なら任意の戻り値・例外にできる */
+  checks: unknown | ((ref: { repository: string; number: number }) => unknown | Promise<unknown>);
   /** 他の利用者の台帳（キーは uid）。無い利用者は 0。"throw" なら dashboardMonthSpent が例外になる */
   ledgers: Record<number, { spent_usd: number; estimated_usd: number } | "throw">;
   /** 他の利用者の dashboardMonthSpent の呼び出し（uid）。閲覧者本人の分は数えない */
@@ -91,6 +96,14 @@ function newViewer(visibleIds: number[] = []): Viewer {
     visibleCalls: [],
     pullCalls: [],
     pullStates: {},
+    checksCalls: [],
+    checks: {
+      head_sha: "a".repeat(40),
+      state: "passing",
+      checks: [],
+      truncated: false,
+      partial: false,
+    },
     ledgers: {},
     ledgerCalls: [],
   };
@@ -131,6 +144,14 @@ function envFor(viewer: Viewer): Env {
         },
         async dashboardBudget() {
           return viewer.budget;
+        },
+        async dashboardChecks(
+          uid: number,
+          ref: { repository: string; number: number },
+        ): Promise<unknown> {
+          viewer.checksCalls.push({ uid, ref });
+          const src = viewer.checks;
+          return typeof src === "function" ? src(ref) : src;
         },
         async dashboardPullStates(
           uid: number,
@@ -1976,5 +1997,127 @@ describe("overview: 成果の推移（flow）", () => {
     expect(OverviewDtoSchema.parse(await res.json()).flow).toBeUndefined();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe("tasks/:id/checks（PR の CI。閲覧者のトークンで GitHub から読む）", () => {
+  /** 偽 GitHub の PR の URL は github.test。契約の URL（github.com）に直して、画面に出る PR にする */
+  async function withPr() {
+    const t = await runToCompleted({ repository_id: 4242 });
+    await runInDurableObject(t.stub, (_i, state) => {
+      state.storage.sql.exec(
+        "UPDATE github_link SET pr_url = 'https://github.com/acme/widgets/pull/' || pr_number",
+      );
+    });
+    const detail = TaskDetailDtoSchema.parse(
+      (await api(newViewer([4242]), `/tasks/${t.id}`)).json(),
+    );
+    return { ...t, prNumber: (detail.task.pr as { number: number }).number };
+  }
+  const CHECK = {
+    name: "build",
+    kind: "check_run",
+    status: "completed",
+    conclusion: "success",
+    started_at: "2026-10-21T05:00:00Z",
+    completed_at: "2026-10-21T05:01:00Z",
+    url: "https://github.com/acme/widgets/actions/runs/1",
+  };
+
+  it("見えるタスクの PR は、閲覧者の uid・タスクの repository・PR の番号で UserDO に聞き、ChecksDto を返す", async () => {
+    const v = newViewer([4242]);
+    const t = await withPr();
+    v.checks = {
+      head_sha: "c".repeat(40),
+      state: "passing",
+      checks: [CHECK],
+      truncated: false,
+      partial: false,
+    };
+    const r = await api(v, `/tasks/${t.id}/checks`);
+    expect(r.status).toBe(200);
+    expect(ChecksDtoSchema.parse(r.json()).checks).toEqual([CHECK]);
+    expect(v.checksCalls).toEqual([
+      { uid: v.uid, ref: { repository: "acme/widgets", number: t.prNumber } },
+    ]);
+    // 詳細と同じ no-store・nosniff
+    expect(r.res.headers.get("cache-control")).toContain("no-store");
+    expect(r.res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("権限のないタスク・存在しないタスクは 404（本文も同じ）で、GitHub を呼ばない。未ログインは 401、GET 以外は 405", async () => {
+    const t = await withPr();
+    const outsider = newViewer([newRepoId()]);
+    const denied = await api(outsider, `/tasks/${t.id}/checks`);
+    const missing = await api(outsider, "/tasks/01JZ0000000000000000000099/checks");
+    expect(denied.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(denied.text).toBe(missing.text);
+    expect(outsider.checksCalls).toEqual([]);
+    const v = newViewer([4242]);
+    expect((await api(v, `/tasks/${t.id}/checks`, { noCookie: true })).status).toBe(401);
+    expect((await api(v, `/tasks/${t.id}/checks`, { method: "POST" })).status).toBe(405);
+    expect(v.checksCalls).toEqual([]);
+  });
+
+  it("PR の無いタスクは none（head_sha は null・checks は空）で、GitHub を呼ばない", async () => {
+    const v = newViewer([4242]);
+    const t = await createTask({ repository_id: 4242 }, 4_001);
+    const r = await api(v, `/tasks/${t.id}/checks`);
+    expect(r.status).toBe(200);
+    expect(ChecksDtoSchema.parse(r.json())).toEqual({
+      head_sha: null,
+      state: "none",
+      checks: [],
+      truncated: false,
+      partial: false,
+    });
+    expect(v.checksCalls).toEqual([]);
+  });
+
+  it("fail-soft: UserDO の例外・時間切れは 200 で unreadable（checks は空）。トークンは出ず、ログには名前とマスクしたメッセージだけ", async () => {
+    const v = newViewer([4242]);
+    const t = await withPr();
+    const token = ["gh", "u", "_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"].join("");
+    v.checks = () => {
+      throw new Error(`UserDO down: ${token}`);
+    };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await api(v, `/tasks/${t.id}/checks`);
+      expect(r.status).toBe(200);
+      expect(r.text).not.toContain(token);
+      expect(ChecksDtoSchema.parse(r.json())).toMatchObject({ state: "unreadable", checks: [] });
+      const call = spy.mock.calls.find((c) => c[0] === "dashboard_checks_error");
+      expect(call?.[1]).toBe("Error");
+      expect(JSON.stringify(spy.mock.calls)).not.toContain(token);
+    } finally {
+      spy.mockRestore();
+    }
+    v.checks = () => new Promise(() => {});
+    const original = readApiTuning.checksDeadlineMs;
+    readApiTuning.checksDeadlineMs = 50;
+    try {
+      const slow = await api(v, `/tasks/${t.id}/checks`);
+      expect(slow.status).toBe(200);
+      expect(ChecksDtoSchema.parse(slow.json()).state).toBe("unreadable");
+    } finally {
+      readApiTuning.checksDeadlineMs = original;
+    }
+  });
+
+  it("UserDO の応答が契約に合わない（外部のリンクが紛れた・未知の項目）ときは、中身を返さず 503", async () => {
+    const v = newViewer([4242]);
+    const t = await withPr();
+    v.checks = {
+      head_sha: "a".repeat(40),
+      state: "passing",
+      checks: [{ ...CHECK, url: "https://evil.example/x" }],
+      truncated: false,
+      partial: false,
+    };
+    const r = await api(v, `/tasks/${t.id}/checks`);
+    expect(r.status).toBe(503);
+    expect(r.text).not.toContain("evil.example");
   });
 });

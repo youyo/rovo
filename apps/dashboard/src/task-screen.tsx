@@ -5,6 +5,7 @@ import { useT } from "./lang";
 import { loadAutoRefresh, saveAutoRefresh } from "./prefs";
 import { TaskPreview, TaskView } from "./task-view";
 import { useNarrow } from "./use-narrow";
+import { type TaskChecksDeps, useTaskChecks } from "./use-task-checks";
 import { type TaskDetailDeps, useTaskDetail } from "./use-task-detail";
 
 const BACK = "/dashboard/";
@@ -17,6 +18,8 @@ export function TaskScreen(props: {
   id: string;
   onUnauthorized: () => void;
   deps?: TaskDetailDeps;
+  /** PR の CI の取得の差し替え（テスト用。ポーリングは詳細とは別なので、タイマーも別に差し替える）。fetchImpl は deps のものを引き継ぐ */
+  checksDeps?: TaskChecksDeps;
   /** 開いたことのあるタスクの最後の詳細（メモリ上）。無ければキャッシュしない */
   cache?: DetailCache;
   /** 最初の取得に ?fresh=1 を付けるか（既定 true）。URL を直接開いたときだけ true、画面の中での切り替えは false */
@@ -40,6 +43,12 @@ export function TaskScreen(props: {
     ...(props.cache === undefined ? {} : { cache: props.cache }),
     ...(props.fresh === undefined ? {} : { fresh: props.fresh }),
   });
+  // PR があるタスクだけ、その CI を別のポーリングで取る（PR が無ければ取りに行かず、CI の表示も出さない）
+  const hasPr = state.phase === "ready" && state.detail.task.pr !== null;
+  const checks = useTaskChecks(props.id, hasPr, autoRefresh, {
+    ...(props.deps?.fetchImpl === undefined ? {} : { fetchImpl: props.deps.fetchImpl }),
+    ...props.checksDeps,
+  });
   const { onUnauthorized, onSettled } = props;
   const settledRef = useRef(false);
 
@@ -62,10 +71,12 @@ export function TaskScreen(props: {
     },
     [notifyAutoRefresh],
   );
+  const refreshChecks = checks.refresh;
   const onRefresh = useCallback(() => {
     refresh();
+    refreshChecks();
     onRefreshAlso?.();
-  }, [refresh, onRefreshAlso]);
+  }, [refresh, refreshChecks, onRefreshAlso]);
 
   switch (state.phase) {
     case "loading":
@@ -119,6 +130,7 @@ export function TaskScreen(props: {
           onAutoRefreshChange={onAutoRefreshChange}
           onRefresh={onRefresh}
           onLoadOlder={() => void loadOlder()}
+          checks={checks.state}
         />
       );
   }

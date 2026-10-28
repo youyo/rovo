@@ -122,7 +122,8 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 summary:focus-visible,
-.screen:focus-visible {
+.screen:focus-visible,
+.ci-pane:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -1397,6 +1398,184 @@ summary.step-row:hover {
 }
 .con-foot .link-button {
   min-height: 28px;
+}
+
+/* PR の CI（check run と commit status）。幅が足りれば（1280px 以上）ログの右、足りなければ「コンソール / CI」のタブの中。
+   目を引くのは細い区切りの帯だけで、あとは静かにする。色は状態のトークンだけ、影・グラデーションなし */
+.ci-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-family: var(--mono);
+  font-size: var(--fs-small);
+  font-weight: 700;
+  cursor: pointer;
+}
+.ci-chip-label {
+  color: var(--dim);
+}
+.ci-n {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.ci-tabs {
+  display: flex;
+  align-self: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.ci-tabs button {
+  min-height: 28px;
+  padding: 3px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+.ci-tabs button[aria-selected="true"] {
+  background: var(--fg);
+  color: var(--panel);
+}
+.ci-tabs button:focus-visible {
+  outline-offset: -3px;
+}
+.con-split {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.con-split[data-wide="true"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
+}
+.con-main {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.con-main[hidden],
+.ci-pane[hidden] {
+  display: none;
+}
+.ci-pane {
+  min-width: 0;
+  padding: 16px 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.ci-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.ci-head h2 {
+  font-size: 14px;
+  font-weight: 700;
+}
+.ci-sha {
+  font-family: var(--mono);
+  font-size: var(--fs-small);
+  color: var(--dim);
+}
+.ci-strip {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+.ci-seg {
+  flex: 1 1 0;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--line);
+}
+.ci-seg[data-class="fail"] {
+  background: var(--fail);
+}
+.ci-seg[data-class="run"] {
+  background: var(--run-ring);
+}
+.ci-seg[data-class="ok"] {
+  background: var(--ok);
+}
+.ci-seg[data-class="skip"] {
+  background: var(--skip);
+}
+.ci-note {
+  margin-top: 8px;
+  font-size: var(--fs-small);
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+.ci-list {
+  max-height: clamp(240px, 60vh, 640px);
+  margin: 4px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  font-size: var(--fs-small);
+}
+.ci-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+.ci-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ci-row[data-class="fail"] .ci-name {
+  font-weight: 700;
+}
+.ci-dur {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--dim);
+}
+.ci-link {
+  min-width: 3.5em;
+  text-align: right;
+}
+@media (pointer: coarse) {
+  .ci-tabs button {
+    min-height: 44px;
+  }
+  .ci-chip {
+    min-height: 32px;
+  }
+}
+@media (max-width: 720px) {
+  .ci-pane {
+    padding: 14px 16px;
+  }
 }
 
 /* ステータスバー（下に 1 行。メーター付き）と内訳の引き出し */

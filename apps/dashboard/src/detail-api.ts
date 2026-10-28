@@ -1,4 +1,5 @@
-import type { TaskDetailDto, TaskEventsPageDto } from "@rovo/dashboard-contract";
+import type { ChecksDto, TaskDetailDto, TaskEventsPageDto } from "@rovo/dashboard-contract";
+import { isAllowedCheckUrl } from "./format";
 
 /** 詳細・events の読み取り API の呼び出し（同一オリジン・Cookie）。契約は型だけ取り込む。 */
 
@@ -10,6 +11,12 @@ export type DetailResult =
 
 export type EventsResult =
   | { kind: "ok"; data: TaskEventsPageDto }
+  | { kind: "unauthorized" }
+  | { kind: "not_found" }
+  | { kind: "error" };
+
+export type ChecksResult =
+  | { kind: "ok"; data: ChecksDto }
   | { kind: "unauthorized" }
   | { kind: "not_found" }
   | { kind: "error" };
@@ -52,6 +59,40 @@ function looksLikeEvents(b: unknown): b is TaskEventsPageDto {
     Array.isArray(b.events) &&
     b.events.every((e) => obj(e) && isSeq(e.seq) && typeof e.type === "string") &&
     typeof b.has_older === "boolean"
+  );
+}
+
+const CHECKS_STATES: ReadonlySet<string> = new Set([
+  "none",
+  "passing",
+  "failing",
+  "pending",
+  "unreadable",
+]);
+const CHECK_STATUSES: ReadonlySet<string> = new Set(["queued", "in_progress", "completed"]);
+const orNull = (v: unknown): boolean => v === null || typeof v === "string";
+
+function looksLikeChecks(b: unknown): b is ChecksDto {
+  return (
+    obj(b) &&
+    (b.head_sha === null || typeof b.head_sha === "string") &&
+    typeof b.state === "string" &&
+    CHECKS_STATES.has(b.state) &&
+    typeof b.truncated === "boolean" &&
+    typeof b.partial === "boolean" &&
+    Array.isArray(b.checks) &&
+    b.checks.every(
+      (c) =>
+        obj(c) &&
+        typeof c.name === "string" &&
+        (c.kind === "check_run" || c.kind === "status") &&
+        typeof c.status === "string" &&
+        CHECK_STATUSES.has(c.status) &&
+        orNull(c.conclusion) &&
+        orNull(c.started_at) &&
+        orNull(c.completed_at) &&
+        orNull(c.url),
+    )
   );
 }
 
@@ -101,4 +142,24 @@ export function fetchTaskEvents(
   signal?: AbortSignal,
 ): Promise<EventsResult> {
   return get(eventsUrl(id, q), looksLikeEvents, fetchImpl, signal);
+}
+
+/**
+ * PR の CI。リンクは https://github.com/ で始まるものだけ残す（gateway も落としているが、外部が書ける値なので画面でも確かめる）。
+ * 壊れた応答は error（画面を落とさない）。
+ */
+export async function fetchTaskChecks(
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<ChecksResult> {
+  const r = await get(`${base(id)}/checks`, looksLikeChecks, fetchImpl, signal);
+  if (r.kind !== "ok") return r;
+  return {
+    kind: "ok",
+    data: {
+      ...r.data,
+      checks: r.data.checks.map((c) => ({ ...c, url: isAllowedCheckUrl(c.url) ? c.url : null })),
+    },
+  };
 }

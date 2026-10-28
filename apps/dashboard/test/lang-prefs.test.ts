@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { LANG_KEY, loadLang, saveLang } from "../src/prefs";
+import {
+  CONSOLE_TAB_KEY,
+  LANG_KEY,
+  loadConsoleTab,
+  loadLang,
+  saveConsoleTab,
+  saveLang,
+} from "../src/prefs";
 
 const memory = (init: Record<string, string> = {}) => {
   const m = new Map(Object.entries(init));
@@ -51,5 +58,26 @@ describe("言語の保存（localStorage rovo.dashboard.lang）", () => {
     expect(s.m.get(LANG_KEY)).toBe("en");
     expect(() => saveLang("ja", throwing)).not.toThrow();
     expect(() => saveLang("ja", undefined)).not.toThrow();
+  });
+});
+
+describe("コンソールのタブの保存（localStorage rovo.dashboard.consoleTab）", () => {
+  it("キー名と既定（コンソール）。保存は console / ci だけ", () => {
+    expect(CONSOLE_TAB_KEY).toBe("rovo.dashboard.consoleTab");
+    expect(loadConsoleTab(memory())).toBe("console");
+    expect(loadConsoleTab(undefined)).toBe("console");
+    expect(loadConsoleTab(memory({ [CONSOLE_TAB_KEY]: "ci" }))).toBe("ci");
+    expect(loadConsoleTab(memory({ [CONSOLE_TAB_KEY]: "console" }))).toBe("console");
+    for (const v of ["", "CI", "log", "__proto__"]) {
+      expect(loadConsoleTab(memory({ [CONSOLE_TAB_KEY]: v })), v).toBe("console");
+    }
+  });
+  it("保存して読み戻せる。localStorage が使えなくても投げない", () => {
+    const m = memory();
+    saveConsoleTab("ci", m);
+    expect(m.m.get(CONSOLE_TAB_KEY)).toBe("ci");
+    expect(loadConsoleTab(m)).toBe("ci");
+    expect(() => saveConsoleTab("ci", throwing)).not.toThrow();
+    expect(loadConsoleTab(throwing)).toBe("console");
   });
 });

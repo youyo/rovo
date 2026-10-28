@@ -396,6 +396,40 @@ const en = {
   "screen.empty": "No progress yet.",
   "foot.updated": "Updated at {time}.",
   "foot.jumpToEnd": "Jump to end",
+
+  // --- PR の CI（check run と commit status）
+  "ci.heading": "CI",
+  "ci.paneLabel": "CI checks of the pull request",
+  "ci.tabsLabel": "Console view",
+  "ci.tabConsole": "Console",
+  "ci.tabCi": "CI",
+  "ci.tabCiFailed": "CI ✗{n}",
+  "ci.tabCiFailedAria": "CI, {n} failed",
+  "ci.chipAria": "CI: {list}. Show the CI checks",
+  "ci.sumOk": "{n} passed",
+  "ci.sumFail": "{n} failed",
+  "ci.sumPending": "{n} running or waiting",
+  "ci.stateNone": "none yet",
+  "ci.stateUnreadable": "cannot be read",
+  "ci.stateLoading": "loading",
+  "ci.stateError": "could not be loaded",
+  "ci.headSha": "Head commit {sha}",
+  "ci.listLabel": "Checks",
+  "ci.status.fail": "Failed",
+  "ci.status.run": "Running",
+  "ci.status.queued": "Waiting",
+  "ci.status.ok": "Passed",
+  "ci.status.skip": "Skipped",
+  "ci.open": "GitHub",
+  "ci.openNamed": "Open {name} on GitHub",
+  "ci.none": "This PR has no CI yet.",
+  "ci.unreadable":
+    "Cannot read CI. The GitHub App needs read access to Checks and Commit statuses.",
+  "ci.error": "Could not load CI. It will be retried.",
+  "ci.partial":
+    "Only part of the CI could be read. The GitHub App may lack read access to Checks or Commit statuses.",
+  "ci.truncated": "Showing only the first {n} checks.",
+  "ci.stale": "Could not refresh CI. Showing the last result.",
 } as const;
 
 export type Key = keyof typeof en;
@@ -758,6 +792,40 @@ const ja: Record<Key, string> = {
   "screen.empty": "進み具合はまだありません。",
   "foot.updated": "{time} に更新。",
   "foot.jumpToEnd": "末尾へ",
+
+  // --- PR の CI（check run と commit status）
+  "ci.heading": "CI",
+  "ci.paneLabel": "PR の CI",
+  "ci.tabsLabel": "コンソールの表示",
+  "ci.tabConsole": "コンソール",
+  "ci.tabCi": "CI",
+  "ci.tabCiFailed": "CI ✗{n}",
+  "ci.tabCiFailedAria": "CI、失敗 {n} 件",
+  "ci.chipAria": "CI: {list}。CI を表示する",
+  "ci.sumOk": "成功 {n}",
+  "ci.sumFail": "失敗 {n}",
+  "ci.sumPending": "実行中・待ち {n}",
+  "ci.stateNone": "まだありません",
+  "ci.stateUnreadable": "読めません",
+  "ci.stateLoading": "読み込み中",
+  "ci.stateError": "取得できません",
+  "ci.headSha": "head のコミット {sha}",
+  "ci.listLabel": "チェック",
+  "ci.status.fail": "失敗",
+  "ci.status.run": "実行中",
+  "ci.status.queued": "待ち",
+  "ci.status.ok": "成功",
+  "ci.status.skip": "スキップ",
+  "ci.open": "GitHub",
+  "ci.openNamed": "{name} を GitHub で開く",
+  "ci.none": "この PR にはまだ CI がありません。",
+  "ci.unreadable":
+    "CI を読めません。GitHub App に Checks と Commit statuses の読み取りの権限が要ります。",
+  "ci.error": "CI を取得できませんでした。自動で再試行します。",
+  "ci.partial":
+    "CI の一部しか読めていません。GitHub App に Checks か Commit statuses の読み取りの権限が無いかもしれません。",
+  "ci.truncated": "最初の {n} 件だけを表示しています。",
+  "ci.stale": "CI を更新できませんでした。前の結果を表示しています。",
 };
 
 export const DICTS: Record<Lang, Record<Key, string>> = { en, ja };

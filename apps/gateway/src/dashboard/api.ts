@@ -1,6 +1,8 @@
 import {
   type BudgetMeDto,
   BudgetMeDtoSchema,
+  type ChecksDto,
+  ChecksDtoSchema,
   CloudflareSummaryDtoSchema,
   type ErrorDto,
   LIMITS,
@@ -61,6 +63,8 @@ const OTHER_MODEL = "other";
 export const readApiTuning = {
   /** PR の状態の照会を待つ上限（ms）。超えたら state を unknown のまま返す（画面の応答を GitHub の遅れに付き合わせない） */
   pullStateDeadlineMs: 5_000,
+  /** PR の CI の照会を待つ上限（ms）。超えたら unreadable で返す */
+  checksDeadlineMs: 10_000,
 };
 /** 1 回の応答で GitHub に聞く PR の上限（重複を除く）。超える分は unknown */
 const MAX_PR_LOOKUPS = 200;
@@ -781,6 +785,54 @@ async function handleBudget(request: Request, env: Env): Promise<Response> {
   return validated(BudgetMeDtoSchema, "BudgetMeDto", budget);
 }
 
+const NO_CHECKS: ChecksDto = {
+  head_sha: null,
+  state: "none",
+  checks: [],
+  truncated: false,
+  partial: false,
+};
+const UNREADABLE_CHECKS: ChecksDto = { ...NO_CHECKS, state: "unreadable" };
+
+/**
+ * タスクの PR の今の head に付いた CI（check run と commit status）。認可は詳細と同じ（authenticate → readAuthorizedTask。
+ * 見えないタスクは 404）。PR が無ければ GitHub を呼ばず none。GitHub は閲覧者本人のトークン（UserDO。8 秒のキャッシュあり）で読み、
+ * 権限が無い・時間切れ・障害・例外は 200 の unreadable にする（fail-soft。画面の他の部分を壊さない）。
+ * UserDO の結果も契約の zod を通す（通らなければ 503。外部のリンクを画面に流さない）。
+ */
+async function handleTaskChecks(request: Request, env: Env, taskId: string): Promise<Response> {
+  const auth = await authenticate(request, env);
+  if (!auth.ok) return auth.response;
+  const read = await readAuthorizedTask(env, auth.session, taskId, { fresh: false });
+  if (!read.ok) return read.response;
+  const task = snapshotToVisibleTask(read.detail.view);
+  if (task.pr === null) return validated(ChecksDtoSchema, "ChecksDto", NO_CHECKS);
+  const { uid } = auth.session;
+  const ref = { repository: task.repository, number: task.pr.number };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let dto: unknown = UNREADABLE_CHECKS;
+  try {
+    const call = Promise.resolve(env.USER_DO.getByName(String(uid)).dashboardChecks(uid, ref));
+    call.catch(() => {}); // 時間切れのあとに失敗しても、未処理の拒否にしない
+    const result = await Promise.race([
+      call,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), readApiTuning.checksDeadlineMs);
+      }),
+    ]);
+    if (result !== null) dto = result;
+  } catch (e) {
+    console.error(
+      "dashboard_checks_error",
+      e instanceof Error ? e.name : typeof e,
+      errorMessageForLog(e),
+    );
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  return validated(ChecksDtoSchema, "ChecksDto", dto);
+}
+
 /**
  * Cloudflare の概要（M9 / D13）。閲覧者に依らない集計なので、見えるリポジトリの集合は使わない（ログインだけ必須）。
  * range は 1h / 24h / 7d の列挙だけ（既定 24h）。GraphQL・ID・期間の式はクライアントから受けない。
@@ -809,7 +861,7 @@ export async function handleReadApi(
 ): Promise<Response | null> {
   if (!pathname.startsWith(`${PREFIX}/`)) return null;
   const rest = pathname.slice(PREFIX.length);
-  const task = /^\/tasks\/([^/]+)(\/events)?$/.exec(rest);
+  const task = /^\/tasks\/([^/]+)(\/events|\/checks)?$/.exec(rest);
   const known =
     rest === "/overview" ||
     rest === "/waiting" ||
@@ -827,9 +879,9 @@ export async function handleReadApi(
   if (rest === "/budget") return handleBudget(request, env);
   if (rest === "/cloudflare") return handleCloudflare(request, env, deps);
   const taskId = task?.[1] ?? "";
-  return task?.[2] === "/events"
-    ? handleTaskEvents(request, env, taskId)
-    : handleTaskDetail(request, env, taskId);
+  if (task?.[2] === "/events") return handleTaskEvents(request, env, taskId);
+  if (task?.[2] === "/checks") return handleTaskChecks(request, env, taskId);
+  return handleTaskDetail(request, env, taskId);
 }
 
 export { stoppedPhaseOf };

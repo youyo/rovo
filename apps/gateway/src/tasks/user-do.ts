@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import type { ChecksDto } from "@rovo/dashboard-contract";
 import type { AgentRpc, ConsultRequest, ConsultResult } from "../agent/contract";
 import { auditFromWorker } from "../audit-sink";
 import { isUserIdAllowed, loadAllowRules } from "../auth/allowlist";
@@ -92,6 +93,10 @@ export const PR_STATE_FINAL_TTL_MS = 10 * 60 * 1000;
 export const PR_STATE_FAILURE_TTL_MS = 10 * 1000;
 /** 1 回の dashboardPullStates で問い合わせる PR の上限。超える分は問い合わせず unknown */
 export const MAX_PR_STATE_REFS = 200;
+/** PR の CI（check run と commit status）のキャッシュ時間。複数タブで開いても GitHub を叩きすぎない。失敗（unreadable）も同じ時間 */
+export const CHECKS_CACHE_TTL_MS = 8 * 1000;
+/** PR の CI のキャッシュの最大件数（メモリのみ） */
+const CHECKS_CACHE_MAX = 500;
 /** GraphQL の問い合わせを同時に進める本数 */
 const PR_STATE_CONCURRENCY = 3;
 /** PR の状態のキャッシュの最大件数（メモリのみ） */
@@ -424,6 +429,12 @@ export class UserDO extends DurableObject<Env> {
   private prStateCache = new Map<string, { state: PullStateValue; at: number; ttl: number }>();
   /** 進行中の PR の状態の問い合わせ（キー別）。同じ PR の同時の呼び出しを 1 本に束ねる */
   private prStateInflight = new Map<string, Promise<PullStateValue>>();
+  /** PR の CI のキャッシュ（メモリのみ。キーは "owner/name#番号" の小文字）。閲覧者のトークンで取った値で、この利用者の DO の中だけで使う */
+  private checksCache = new Map<string, { value: ChecksDto; at: number }>();
+  /** 進行中の PR の CI の問い合わせ（キー別）。同じ PR の同時の呼び出しを 1 本に束ねる */
+  private checksInflight = new Map<string, Promise<ChecksDto>>();
+  /** PR の CI のキャッシュの上限。テストで変える。 */
+  maxChecksCacheEntries = CHECKS_CACHE_MAX;
   /** 再試行間隔のジッター用の乱数（[0, 1)）。テストで差し替える。 */
   protected random: () => number = Math.random;
   /** 索引の配送を始める alarm が要るか（同期区間の中で立て、区間の後に requestConsultAlarm が消す） */
@@ -843,6 +854,90 @@ export class UserDO extends DurableObject<Env> {
       this.trimPrStateCache(at);
     }
     return states;
+  }
+
+  /**
+   * ダッシュボードのタスク詳細に出す、PR の今の head の CI（check run と commit status）を、閲覧者のユーザートークンで GitHub から取る。
+   * 呼び出し側（gateway の読み取り API）は、**閲覧権限の判定に通ったタスクの PR だけ**を渡す。
+   *
+   * - 許可ルールを満たさない・資格が無い利用者は、GitHub を呼ばず unreadable（キャッシュも返さない）
+   * - キャッシュ（メモリのみ）: 8 秒（失敗も）。同じ PR の同時の呼び出しは 1 本に束ねる
+   * - fail-soft: 401・403・404・レート制限・5xx・タイムアウト・不正な応答は例外にせず unreadable（checks は空）。
+   *   check run か commit status の片方だけ読めたときは、読めた分を返して partial
+   */
+  async dashboardChecks(githubUserId: number, ref: PullRef): Promise<ChecksDto> {
+    const unreadable: ChecksDto = {
+      head_sha: null,
+      state: "unreadable",
+      checks: [],
+      truncated: false,
+      partial: false,
+    };
+    if (
+      !/^[^/\s]+\/[^/\s]+$/.test(String(ref?.repository)) ||
+      !Number.isSafeInteger(ref?.number) ||
+      ref.number <= 0
+    ) {
+      return unreadable;
+    }
+    const allowed = await this.dashboardAllowed(githubUserId);
+    if (allowed !== "allowed") {
+      this.checksCache.clear();
+      return unreadable;
+    }
+    const key = `${ref.repository.toLowerCase()}#${ref.number}`;
+    const now = this.now();
+    const hit = this.checksCache.get(key);
+    if (hit && now - hit.at >= 0 && now - hit.at < CHECKS_CACHE_TTL_MS) return hit.value;
+    const running = this.checksInflight.get(key);
+    if (running) return running;
+    const epoch = this.loginEpoch;
+    const p: Promise<ChecksDto> = this.fetchChecks(epoch, key, ref).finally(() => {
+      if (this.checksInflight.get(key) === p) this.checksInflight.delete(key);
+    });
+    this.checksInflight.set(key, p);
+    return p;
+  }
+
+  private async fetchChecks(epoch: number, key: string, ref: PullRef): Promise<ChecksDto> {
+    let value: ChecksDto;
+    try {
+      const { client, credentials } = this.github();
+      const out = await credentials.withToken((tok) =>
+        client.listChecks(tok, ref.repository, ref.number),
+      );
+      value = {
+        head_sha: out.headSha,
+        state: out.state,
+        checks: out.checks,
+        truncated: out.truncated,
+        partial: out.partial,
+      };
+    } catch (e) {
+      console.error(
+        "user_do_checks_error",
+        e instanceof GitHubError ? e.code : e instanceof Error ? e.name : typeof e,
+        errorMessageForLog(e),
+      );
+      value = { head_sha: null, state: "unreadable", checks: [], truncated: false, partial: false };
+    }
+    if (epoch === this.loginEpoch) {
+      this.checksCache.delete(key); // 挿入順を新しく保つ（古い順に捨てるため）
+      this.checksCache.set(key, { value, at: this.now() });
+      this.trimChecksCache(this.now());
+    }
+    return value;
+  }
+
+  private trimChecksCache(now: number): void {
+    if (this.checksCache.size <= this.maxChecksCacheEntries) return;
+    for (const [k, c] of this.checksCache) {
+      if (now - c.at >= CHECKS_CACHE_TTL_MS || now - c.at < 0) this.checksCache.delete(k);
+    }
+    for (const k of this.checksCache.keys()) {
+      if (this.checksCache.size <= this.maxChecksCacheEntries) break;
+      this.checksCache.delete(k);
+    }
   }
 
   private trimPrStateCache(now: number): void {
@@ -2231,6 +2326,8 @@ export class UserDO extends DurableObject<Env> {
     this.dropVisible();
     this.prStateCache.clear();
     this.prStateInflight.clear();
+    this.checksCache.clear();
+    this.checksInflight.clear();
     this.ctx.storage.sql.exec("DELETE FROM membership_cache");
   }
 

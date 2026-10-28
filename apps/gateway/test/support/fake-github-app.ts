@@ -57,12 +57,19 @@ export interface FakeCheckRun {
   status: "queued" | "in_progress" | "completed";
   /** status が completed のときだけ */
   conclusion?: string;
+  /** 省略時は応答に含めない（ダッシュボードの CI の表示のテスト用） */
+  html_url?: string;
+  details_url?: string;
+  started_at?: string;
+  completed_at?: string;
 }
 
 /** コミットに付く commit status（GET /commits/:sha/status）。 */
 export interface FakeCommitStatus {
   context: string;
   state: "success" | "failure" | "error" | "pending";
+  target_url?: string;
+  updated_at?: string;
 }
 
 export interface FakeCommit {
@@ -1045,6 +1052,10 @@ export class FakeGitHubApp {
           name: c.name,
           status: c.status,
           conclusion: c.conclusion ?? null,
+          ...(c.html_url !== undefined ? { html_url: c.html_url } : {}),
+          ...(c.details_url !== undefined ? { details_url: c.details_url } : {}),
+          ...(c.started_at !== undefined ? { started_at: c.started_at } : {}),
+          ...(c.completed_at !== undefined ? { completed_at: c.completed_at } : {}),
         })),
       });
     }
@@ -1066,7 +1077,12 @@ export class FakeGitHubApp {
         state,
         sha,
         total_count: list.length,
-        statuses: list.map((x) => ({ context: x.context, state: x.state })),
+        statuses: list.map((x) => ({
+          context: x.context,
+          state: x.state,
+          ...(x.target_url !== undefined ? { target_url: x.target_url } : {}),
+          ...(x.updated_at !== undefined ? { updated_at: x.updated_at } : {}),
+        })),
       });
     }
 

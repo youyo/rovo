@@ -357,3 +357,275 @@ describe("getCheckState（PR の head に付いた check と status）", () => {
     expect(e.code).toBe("forbidden");
   });
 });
+
+describe("listChecks（PR の今の head に付いた check の一覧。ダッシュボード）", () => {
+  const SHA = "b".repeat(40);
+  const PULL_PATH = "GET /repos/acme/widgets/pulls/7";
+  const RUNS = `GET /repos/acme/widgets/commits/${SHA}/check-runs`;
+  const STATUS = `GET /repos/acme/widgets/commits/${SHA}/status`;
+  const pull = () => json({ ...PULL, head: { ...PULL.head, sha: SHA } });
+  const run = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    name: "build",
+    status: "completed",
+    conclusion: "success",
+    started_at: "2026-10-21T05:00:00Z",
+    completed_at: "2026-10-21T05:01:30Z",
+    html_url: "https://github.com/acme/widgets/runs/1",
+    details_url: "https://example.invalid/details",
+    ...over,
+  });
+  const runs = (items: unknown[], total = items.length) =>
+    json({ total_count: total, check_runs: items });
+  const statuses = (items: unknown[], total = items.length) =>
+    json({ state: "success", sha: SHA, total_count: total, statuses: items });
+  const list = (routes: Parameters<typeof routerFetch>[0]) =>
+    make({ [PULL_PATH]: pull, ...routes }).client.listChecks("tok", "acme/widgets", 7);
+
+  it("PR の head を pulls/{n} から読み、check run と commit status を写す", async () => {
+    const { client, calls } = make({
+      [PULL_PATH]: pull,
+      [RUNS]: () => runs([run()]),
+      [STATUS]: () =>
+        statuses([
+          {
+            context: "ci/preview",
+            state: "success",
+            target_url: "https://github.com/acme/widgets/deployments/1",
+            updated_at: "2026-10-21T05:02:00Z",
+          },
+        ]),
+    });
+    const out = await client.listChecks("tok", "acme/widgets", 7);
+    expect(out).toEqual({
+      headSha: SHA,
+      state: "passing",
+      truncated: false,
+      partial: false,
+      checks: [
+        {
+          name: "build",
+          kind: "check_run",
+          status: "completed",
+          conclusion: "success",
+          started_at: "2026-10-21T05:00:00Z",
+          completed_at: "2026-10-21T05:01:30Z",
+          url: "https://github.com/acme/widgets/runs/1",
+        },
+        {
+          name: "ci/preview",
+          kind: "status",
+          status: "completed",
+          conclusion: "success",
+          started_at: null,
+          completed_at: null,
+          url: "https://github.com/acme/widgets/deployments/1",
+        },
+      ],
+    });
+    // 利用者のトークンで、pulls → check-runs → status の順に読む
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
+      "/repos/acme/widgets/pulls/7",
+      `/repos/acme/widgets/commits/${SHA}/check-runs`,
+      `/repos/acme/widgets/commits/${SHA}/status`,
+    ]);
+    expect(calls.every((c) => c.headers.get("authorization") === "Bearer tok")).toBe(true);
+  });
+
+  it("リンクは https://github.com/ で始まるものだけ（html_url が外部なら details_url、どちらも外部なら null）", async () => {
+    const out = await list({
+      [RUNS]: () =>
+        runs([
+          run({
+            name: "a",
+            html_url: "https://evil.example/x",
+            details_url: "https://github.com/acme/widgets/runs/9",
+          }),
+          run({
+            name: "b",
+            html_url: "javascript:alert(1)",
+            details_url: "https://evil.example/y",
+          }),
+          run({ name: "c", html_url: null, details_url: "http://github.com/x" }),
+          run({ name: "d", html_url: "https://github.com@evil.example/x", details_url: undefined }),
+          run({
+            name: "e",
+            html_url: "https://github.com/acme/widgets/runs/1 x",
+            details_url: undefined,
+          }),
+          run({
+            name: "f",
+            html_url: `https://github.com/${"a".repeat(400)}`,
+            details_url: undefined,
+          }),
+        ]),
+      [STATUS]: () =>
+        statuses([
+          { context: "s1", state: "success", target_url: "https://evil.example/z" },
+          { context: "s2", state: "success", target_url: "data:text/html,x" },
+          { context: "s3", state: "success", target_url: null },
+        ]),
+    });
+    expect(out.checks.map((c) => [c.name, c.url])).toEqual([
+      ["a", "https://github.com/acme/widgets/runs/9"],
+      ["b", null],
+      ["c", null],
+      ["d", null],
+      ["e", null],
+      ["f", null],
+      ["s1", null],
+      ["s2", null],
+      ["s3", null],
+    ]);
+  });
+
+  it("名前は 200 文字で切り、名前の無い check は捨てる。不正な時刻は null", async () => {
+    const out = await list({
+      [RUNS]: () =>
+        runs([
+          run({ name: "n".repeat(500), started_at: "yesterday", completed_at: 5 }),
+          run({ name: "" }),
+          run({ name: undefined }),
+        ]),
+      [STATUS]: () => statuses([]),
+    });
+    expect(out.checks).toHaveLength(1);
+    expect(out.checks[0]?.name).toBe("n".repeat(200));
+    expect(out.checks[0]?.started_at).toBeNull();
+    expect(out.checks[0]?.completed_at).toBeNull();
+  });
+
+  it("check run の status は queued / in_progress / completed に寄せ、commit status の pending は in_progress", async () => {
+    const out = await list({
+      [RUNS]: () =>
+        runs([
+          run({ name: "q", status: "queued", conclusion: null }),
+          run({ name: "w", status: "waiting", conclusion: null }),
+          run({ name: "p", status: "in_progress", conclusion: null }),
+        ]),
+      [STATUS]: () =>
+        statuses([
+          { context: "s-pending", state: "pending" },
+          { context: "s-fail", state: "failure" },
+          { context: "s-err", state: "error" },
+        ]),
+    });
+    expect(out.checks.map((c) => [c.name, c.status, c.conclusion])).toEqual([
+      ["q", "queued", null],
+      ["w", "queued", null],
+      ["p", "in_progress", null],
+      ["s-pending", "in_progress", null],
+      ["s-fail", "completed", "failure"],
+      ["s-err", "completed", "error"],
+    ]);
+  });
+
+  const stateOf = async (runItems: unknown[], statusItems: unknown[] = []): Promise<string> =>
+    (await list({ [RUNS]: () => runs(runItems), [STATUS]: () => statuses(statusItems) })).state;
+
+  it("集約: 無ければ none、success / skipped / neutral だけなら passing", async () => {
+    expect(await stateOf([])).toBe("none");
+    expect(
+      await stateOf([
+        run({ conclusion: "success" }),
+        run({ conclusion: "skipped" }),
+        run({ conclusion: "neutral" }),
+      ]),
+    ).toBe("passing");
+    expect(await stateOf([], [{ context: "s", state: "success" }])).toBe("passing");
+  });
+
+  it("集約: 失敗（failure・cancelled・timed_out・action_required・stale・commit status の failure / error）があれば failing、実行中より優先", async () => {
+    for (const conclusion of ["failure", "cancelled", "timed_out", "action_required", "stale"]) {
+      expect(
+        await stateOf([run({ conclusion }), run({ status: "in_progress", conclusion: null })]),
+      ).toBe("failing");
+    }
+    expect(await stateOf([], [{ context: "s", state: "failure" }])).toBe("failing");
+    expect(await stateOf([], [{ context: "s", state: "error" }])).toBe("failing");
+  });
+
+  it("集約: 失敗が無く、完了していない check run か pending の commit status があれば pending", async () => {
+    expect(await stateOf([run(), run({ status: "queued", conclusion: null })])).toBe("pending");
+    expect(await stateOf([run({ status: "in_progress", conclusion: null })])).toBe("pending");
+    expect(await stateOf([], [{ context: "s", state: "pending" }])).toBe("pending");
+  });
+
+  it("total_count が返した件数より多ければ truncated（check run は 1 ページ 100 件だけ読む）", async () => {
+    const { client, calls } = make({
+      [PULL_PATH]: pull,
+      [RUNS]: () => runs([run()], 150),
+      [STATUS]: () => statuses([]),
+    });
+    const out = await client.listChecks("tok", "acme/widgets", 7);
+    expect(out.truncated).toBe(true);
+    expect(out.checks).toHaveLength(1);
+    expect(calls.map((c) => new URL(c.url).search)).toContain("?per_page=100");
+    const st = await list({
+      [RUNS]: () => runs([]),
+      [STATUS]: () => statuses([{ context: "s", state: "success" }], 101),
+    });
+    expect(st.truncated).toBe(true);
+  });
+
+  it("check-runs だけ 403 なら commit status の分を返し partial（権限が片方だけの App）", async () => {
+    const out = await list({
+      [RUNS]: () => json({ message: "Resource not accessible by integration" }, 403),
+      [STATUS]: () => statuses([{ context: "s", state: "success" }]),
+    });
+    expect(out.partial).toBe(true);
+    expect(out.state).toBe("passing");
+    expect(out.checks.map((c) => c.name)).toEqual(["s"]);
+  });
+
+  it("status だけ 404 なら check run の分を返し partial", async () => {
+    const out = await list({
+      [RUNS]: () => runs([run()]),
+      [STATUS]: () => json({ message: "Not Found" }, 404),
+    });
+    expect(out.partial).toBe(true);
+    expect(out.checks.map((c) => c.name)).toEqual(["build"]);
+  });
+
+  it("両方読めなければ GitHubError（forbidden）。pulls が読めなくても同じ", async () => {
+    const e = await errOf(
+      list({
+        [RUNS]: () => json({ message: "no" }, 403),
+        [STATUS]: () => json({ message: "no" }, 403),
+      }),
+    );
+    expect(e.code).toBe("forbidden");
+    const e2 = await errOf(
+      make({ [PULL_PATH]: () => json({ message: "Not Found" }, 404) }).client.listChecks(
+        "tok",
+        "acme/widgets",
+        7,
+      ),
+    );
+    expect(e2.code).toBe("forbidden");
+  });
+
+  it("5xx は片方だけなら partial、両方なら upstream_unavailable", async () => {
+    const out = await list({
+      [RUNS]: () => json({}, 502),
+      [STATUS]: () => statuses([{ context: "s", state: "success" }]),
+    });
+    expect(out.partial).toBe(true);
+    const e = await errOf(list({ [RUNS]: () => json({}, 502), [STATUS]: () => json({}, 500) }));
+    expect(e.code).toBe("upstream_unavailable");
+  });
+
+  it("401 は片方でも reauth_required を投げる（partial にしない）", async () => {
+    const e = await errOf(list({ [RUNS]: () => json({}, 401), [STATUS]: () => statuses([]) }));
+    expect(e.code).toBe("reauth_required");
+  });
+
+  it("head の sha が 40 桁でない応答は upstream_unavailable", async () => {
+    const e = await errOf(
+      make({
+        [PULL_PATH]: () => json({ ...PULL, head: { ...PULL.head, sha: "zz" } }),
+      }).client.listChecks("tok", "acme/widgets", 7),
+    );
+    expect(e.code).toBe("upstream_unavailable");
+  });
+});

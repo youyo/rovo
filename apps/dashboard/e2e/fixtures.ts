@@ -135,3 +135,72 @@ export async function withBudgetBinding(
     rewrite(() => patch),
   );
 }
+
+/** 偽 GitHub の PR の URL は github.com の形でないため、gateway の応答ではタスクの pr が落ちる（契約は GitHub の PR の URL だけを許す）。 */
+export const FAKE_PR = {
+  number: 4242,
+  url: "https://github.com/example-org/widgets/pull/4242",
+  draft: false,
+  merged: false,
+  state: "open",
+};
+
+/** タスクの詳細の応答にだけ、PR を足す（PR のあるタスクとして描かせる）。loginAs の前に呼ぶ。 */
+export async function withPr(page: Page, taskId: string): Promise<void> {
+  await page.route(new RegExp(`/dashboard/api/tasks/${taskId}(\\?.*)?$`), async (route) => {
+    const res = await route.fetch({
+      headers: { ...route.request().headers(), "sec-fetch-site": "same-origin" },
+    });
+    if (res.status() !== 200) {
+      await route.fulfill({ response: res });
+      return;
+    }
+    const body = (await res.json()) as { task: { pr: unknown } };
+    body.task.pr = FAKE_PR;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+}
+
+export interface ChecksBody {
+  head_sha: string | null;
+  state: "none" | "passing" | "failing" | "pending" | "unreadable";
+  checks: {
+    name: string;
+    kind: "check_run" | "status";
+    status: "queued" | "in_progress" | "completed";
+    conclusion: string | null;
+    started_at: string | null;
+    completed_at: string | null;
+    url: string | null;
+  }[];
+  truncated: boolean;
+  partial: boolean;
+}
+
+/**
+ * タスクの CI（/checks）の応答を差し替える。偽 GitHub の PR は github.com の URL を持たないので、
+ * 画面の挙動（並び・タブ・リンク・文言・更新の間隔）はこの応答で確かめる（gateway 側は Unit が確かめる）。
+ * loginAs の前に呼ぶ。set で応答を変えられ、calls は取りに来た回数。
+ */
+export async function mockChecks(page: Page, taskId: string, initial: ChecksBody) {
+  let body = initial;
+  const ctl = {
+    calls: 0,
+    set(next: ChecksBody) {
+      body = next;
+    },
+  };
+  await page.route(new RegExp(`/dashboard/api/tasks/${taskId}/checks$`), async (route) => {
+    ctl.calls++;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+  return ctl;
+}

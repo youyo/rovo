@@ -4,7 +4,8 @@ import type {
   TaskStatusDto,
   VisibleTaskDto,
 } from "@rovo/dashboard-contract";
-import type { ReactNode } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { CiChip, CiPane, ciFailedCount } from "./ci-pane";
 import {
   formatClockSeconds,
   formatCount,
@@ -18,6 +19,7 @@ import {
 } from "./format";
 import type { T } from "./i18n";
 import { useT } from "./lang";
+import { type ConsoleTab, loadConsoleTab, saveConsoleTab } from "./prefs";
 import {
   completedKind,
   isTerminal,
@@ -39,6 +41,8 @@ import {
   stepTimings,
 } from "./steps";
 import { useStickToBottom } from "./use-stick-to-bottom";
+import type { ChecksState } from "./use-task-checks";
+import { useWide } from "./use-wide";
 
 /**
  * コンソール（詳細の本体。純粋な表示。データ取得は use-task-detail）。GitHub Actions の run の形:
@@ -336,6 +340,8 @@ function ConMeta(props: {
   generatedAt: number;
   /** 詳細の設定にだけある（一覧の行には無い） */
   modelSelection?: NonNullable<TaskDetailDto["settings"]["model_selection"]>;
+  /** PR の隣に出す CI の要約チップ（PR があるときだけ） */
+  ci?: ReactNode;
 }) {
   const { task } = props;
   const t = useT();
@@ -363,6 +369,7 @@ function ConMeta(props: {
       )}
       <MetaItem k={t("meta.pr")}>
         <PrInline task={task} />
+        {props.ci}
       </MetaItem>
     </dl>
   );
@@ -408,9 +415,51 @@ export function TaskView(props: {
   onAutoRefreshChange: (on: boolean) => void;
   onRefresh: () => void;
   onLoadOlder: () => void;
+  /** PR の CI。PR が無い（取りに行かない）ときは null / 未指定。あれば、チップ・タブ（または並びのペイン）を出す */
+  checks?: ChecksState | null;
 }) {
   const { detail, events } = props;
   const t = useT();
+  const checks = props.checks ?? null;
+  const wide = useWide();
+  const [tab, setTab] = useState<ConsoleTab>(() => loadConsoleTab());
+  const ciRef = useRef<HTMLElement | null>(null);
+  const focusCi = useRef(false);
+  useEffect(() => {
+    // タブを切り替えた直後の焦点（隠れていた CI のパネルが見えてから移す）
+    if (focusCi.current && (wide || tab === "ci")) {
+      focusCi.current = false;
+      ciRef.current?.focus();
+    }
+  }, [tab, wide]);
+  const chooseTab = (next: ConsoleTab) => {
+    setTab(next);
+    saveConsoleTab(next);
+  };
+  /** チップ: 並びの時は CI のペインへ焦点とスクロール、タブの時は CI のタブへ */
+  const showCi = () => {
+    const pane = ciRef.current;
+    if (wide) {
+      pane?.focus({ preventScroll: true });
+      const calm =
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      pane?.scrollIntoView?.({ block: "nearest", behavior: calm ? "auto" : "smooth" });
+      return;
+    }
+    focusCi.current = true;
+    if (tab === "ci") ciRef.current?.focus();
+    else chooseTab("ci");
+  };
+  const onTabKey = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const next: ConsoleTab = tab === "console" ? "ci" : "console";
+    chooseTab(next);
+    document.getElementById(`con-tab-${next}`)?.focus();
+  };
+  const failed = ciFailedCount(checks);
   const { task, settings, output } = detail;
   const generatedAt = Date.parse(detail.generated_at);
   const active = !isTerminal(task.status);
@@ -465,27 +514,8 @@ export function TaskView(props: {
     </div>
   );
 
-  return (
-    <section className="console" aria-labelledby="task-h">
-      {props.stale ? (
-        <p className="notice" role="status">
-          {t("console.stale")}
-        </p>
-      ) : null}
-
-      <div className="con-head">
-        <ConTitle task={task} />
-        <ConMeta task={task} generatedAt={generatedAt} modelSelection={settings.model_selection} />
-        <p className="now-line" data-active={String(active)}>
-          {now.before}
-          {now.prompt === undefined ? null : (
-            <span className="prompt now-prompt">{now.prompt}</span>
-          )}
-          {now.target === "" ? null : <strong>{now.target}</strong>}
-          {now.after}
-        </p>
-      </div>
-
+  const consoleBody = (
+    <>
       <Band band={band} timings={phases} />
 
       <div className="logbox">
@@ -608,6 +638,89 @@ export function TaskView(props: {
           ) : null}
         </section>
       </div>
+    </>
+  );
+
+  return (
+    <section className="console" aria-labelledby="task-h">
+      {props.stale ? (
+        <p className="notice" role="status">
+          {t("console.stale")}
+        </p>
+      ) : null}
+
+      <div className="con-head">
+        <ConTitle task={task} />
+        <ConMeta
+          task={task}
+          generatedAt={generatedAt}
+          modelSelection={settings.model_selection}
+          {...(checks === null ? {} : { ci: <CiChip state={checks} onClick={showCi} /> })}
+        />
+        <p className="now-line" data-active={String(active)}>
+          {now.before}
+          {now.prompt === undefined ? null : (
+            <span className="prompt now-prompt">{now.prompt}</span>
+          )}
+          {now.target === "" ? null : <strong>{now.target}</strong>}
+          {now.after}
+        </p>
+      </div>
+
+      {checks === null ? (
+        consoleBody
+      ) : (
+        <>
+          {wide ? null : (
+            <div className="ci-tabs" role="tablist" aria-label={t("ci.tabsLabel")}>
+              <button
+                type="button"
+                role="tab"
+                id="con-tab-console"
+                aria-selected={tab === "console"}
+                aria-controls="con-panel-console"
+                tabIndex={tab === "console" ? 0 : -1}
+                onClick={() => chooseTab("console")}
+                onKeyDown={onTabKey}
+              >
+                {t("ci.tabConsole")}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id="con-tab-ci"
+                aria-selected={tab === "ci"}
+                aria-controls="con-panel-ci"
+                tabIndex={tab === "ci" ? 0 : -1}
+                onClick={() => chooseTab("ci")}
+                onKeyDown={onTabKey}
+                {...(failed > 0 ? { "aria-label": t("ci.tabCiFailedAria", { n: failed }) } : {})}
+              >
+                {failed > 0 ? t("ci.tabCiFailed", { n: failed }) : t("ci.tabCi")}
+              </button>
+            </div>
+          )}
+          <div className="con-split" data-wide={String(wide)}>
+            <div
+              className="con-main"
+              id="con-panel-console"
+              {...(wide ? {} : { role: "tabpanel", "aria-labelledby": "con-tab-console" })}
+              hidden={!wide && tab !== "console"}
+            >
+              {consoleBody}
+            </div>
+            <CiPane
+              state={checks}
+              now={Date.now()}
+              id="con-panel-ci"
+              headingId="ci-h"
+              paneRef={ciRef}
+              hidden={!wide && tab !== "ci"}
+              {...(wide ? {} : { role: "tabpanel" as const, labelledBy: "con-tab-ci" })}
+            />
+          </div>
+        </>
+      )}
 
       <div className="con-foot">
         <span className="soft">

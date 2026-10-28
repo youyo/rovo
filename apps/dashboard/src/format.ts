@@ -47,6 +47,21 @@ export function isAllowedPrUrl(url: unknown): url is string {
 }
 
 /**
+ * check のリンクにしてよい URL（check run の details_url / html_url、commit status の target_url は外部が任意に書ける）。
+ * https://github.com/ で始まるものだけ。空白・制御文字・バックスラッシュを含まず、ホストが github.com そのもの（userinfo・ポートなし）。
+ * gateway も同じ規則で落としているが、画面でも確かめる（二重に守る）。
+ */
+const CHECK_URL = /^https:\/\/github\.com\/[^\s\\\p{Cc}]*$/u;
+export function isAllowedCheckUrl(url: unknown): url is string {
+  if (typeof url !== "string" || url.length > 300 || !CHECK_URL.test(url)) return false;
+  try {
+    return new URL(url).host === "github.com";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Cloudflare のダッシュボードを開くリンク。許すのはトップと、アカウントを書かない深いリンク
  * （`?to=/:account/<パス>`。Cloudflare の公式文書にある形）だけ。アカウント ID は含めない。
  * gateway の open_url は使わない（アカウント ID を含みうる）。

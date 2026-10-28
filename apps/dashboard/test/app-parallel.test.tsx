@@ -154,7 +154,12 @@ describe("タスクの URL: 詳細の取得は 1 回で、画面全体を止め�
     const { f } = await mount(`/dashboard/tasks/${ID}`);
     const detailCalls = f.mock.calls
       .map((x) => String(x[0]))
-      .filter((u) => u.startsWith(`/dashboard/api/tasks/${ID}`) && !u.includes("/events"));
+      .filter(
+        (u) =>
+          u.startsWith(`/dashboard/api/tasks/${ID}`) &&
+          !u.includes("/events") &&
+          !u.includes("/checks"), // PR の CI は別のポーリング
+      );
     expect(detailCalls).toEqual([`/dashboard/api/tasks/${ID}?fresh=1`]);
   });
 

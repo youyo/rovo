@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  checksFailingFixture,
+  checksFixture,
+  checksNoneFixture,
+  checksUnreadableFixture,
   cloudflareSummaryFixture,
   cloudflareSummaryWithEstimateFixture,
   overviewFixture,
@@ -8,6 +12,7 @@ import {
   taskEventsFixture,
 } from "../src/fixtures";
 import {
+  ChecksDtoSchema,
   CloudflareSummaryDtoSchema,
   ErrorDtoSchema,
   HiddenTasksDtoSchema,
@@ -585,5 +590,79 @@ describe("詳細・Cloudflare・エラー", () => {
       ok(ErrorDtoSchema, { error: "not_found", message: "task X exists but you cannot see it" }),
     ).toBe(false);
     expect(ok(ErrorDtoSchema, { error: "forbidden_repo_name" })).toBe(false);
+  });
+});
+
+describe("ChecksDto（PR の CI）", () => {
+  const run = {
+    name: "build",
+    kind: "check_run" as const,
+    status: "completed" as const,
+    conclusion: "success",
+    started_at: at,
+    completed_at: at,
+    url: "https://github.com/example-org/web-app/actions/runs/1",
+  };
+  const base = {
+    head_sha: "a".repeat(40),
+    state: "passing" as const,
+    checks: [run],
+    truncated: false,
+    partial: false,
+  };
+
+  it("fixtures はスキーマを通る", () => {
+    for (const f of [
+      checksFixture,
+      checksFailingFixture,
+      checksNoneFixture,
+      checksUnreadableFixture,
+    ]) {
+      expect(ok(ChecksDtoSchema, f)).toBe(true);
+    }
+  });
+  it("最小の形を通し、未知の項目は弾く", () => {
+    expect(ok(ChecksDtoSchema, base)).toBe(true);
+    expect(ok(ChecksDtoSchema, { ...base, extra: 1 })).toBe(false);
+    expect(ok(ChecksDtoSchema, { ...base, checks: [{ ...run, extra: 1 }] })).toBe(false);
+  });
+  it("PR が無い（none・head_sha は null・checks は空）", () => {
+    expect(ok(ChecksDtoSchema, { ...base, head_sha: null, state: "none", checks: [] })).toBe(true);
+  });
+  it("state / kind / status の列挙の外は弾く", () => {
+    expect(ok(ChecksDtoSchema, { ...base, state: "ok" })).toBe(false);
+    expect(ok(ChecksDtoSchema, { ...base, checks: [{ ...run, kind: "app" }] })).toBe(false);
+    expect(ok(ChecksDtoSchema, { ...base, checks: [{ ...run, status: "done" }] })).toBe(false);
+  });
+  it("url は https://github.com/ の外を通さない（javascript: ・他ホスト・userinfo・空白）", () => {
+    for (const url of [
+      "javascript:alert(1)",
+      "http://github.com/a/b",
+      "https://evil.example/x",
+      "https://github.com.evil.example/x",
+      "https://github.com@evil.example/x",
+      "https://github.com/a b",
+      "//github.com/a",
+    ]) {
+      expect(ok(ChecksDtoSchema, { ...base, checks: [{ ...run, url }] })).toBe(false);
+    }
+    expect(ok(ChecksDtoSchema, { ...base, checks: [{ ...run, url: null }] })).toBe(true);
+  });
+  it("head_sha は 40 桁の小文字 16 進だけ、時刻は UTC の ISO だけ", () => {
+    expect(ok(ChecksDtoSchema, { ...base, head_sha: "xyz" })).toBe(false);
+    expect(ok(ChecksDtoSchema, { ...base, checks: [{ ...run, started_at: "yesterday" }] })).toBe(
+      false,
+    );
+  });
+  it("名前は 200 文字まで、checks は 200 件まで", () => {
+    expect(ok(ChecksDtoSchema, { ...base, checks: [{ ...run, name: "n".repeat(201) }] })).toBe(
+      false,
+    );
+    expect(ok(ChecksDtoSchema, { ...base, checks: Array.from({ length: 201 }, () => run) })).toBe(
+      false,
+    );
+    expect(ok(ChecksDtoSchema, { ...base, checks: Array.from({ length: 200 }, () => run) })).toBe(
+      true,
+    );
   });
 });

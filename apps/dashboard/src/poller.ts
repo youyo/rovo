@@ -42,12 +42,16 @@ export type Poller = {
 
 export function createPoller(opts: {
   run: () => Promise<PollOutcome>;
-  intervalMs?: number;
+  /** 次の取得までの間隔。関数なら予約のたびに呼び直す（PR の CI は、実行中は短く、終わったら長くする） */
+  intervalMs?: number | (() => number);
   autoRefresh?: boolean;
   deps?: PollerDeps;
 }): Poller {
   const deps = opts.deps ?? browserDeps;
-  const interval = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
+  const intervalOf = (): number => {
+    const v = opts.intervalMs;
+    return (typeof v === "function" ? v() : v) ?? DEFAULT_INTERVAL_MS;
+  };
   let auto = opts.autoRefresh ?? true;
   let started = false;
   let inflight = false;
@@ -67,6 +71,7 @@ export function createPoller(opts: {
   const schedule = () => {
     clear();
     if (!started || !auto || terminal || deps.isHidden()) return;
+    const interval = intervalOf();
     const delay = failures === 0 ? interval : Math.min(interval * 2 ** failures, MAX_BACKOFF_MS);
     timer = deps.setTimer(() => {
       timer = null;

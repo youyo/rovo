@@ -1,6 +1,10 @@
-import { taskDetailRunningFixture, taskEventsFixture } from "@rovo/dashboard-contract/fixtures";
+import {
+  checksFixture,
+  taskDetailRunningFixture,
+  taskEventsFixture,
+} from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it, vi } from "vitest";
-import { eventsUrl, fetchTaskDetail, fetchTaskEvents } from "../src/detail-api";
+import { eventsUrl, fetchTaskChecks, fetchTaskDetail, fetchTaskEvents } from "../src/detail-api";
 
 const ID = "01K8ZF00000000000000000004";
 const json = (status: number, body: unknown) =>
@@ -179,5 +183,93 @@ describe("fetchTaskEvents", () => {
         )
       ).kind,
     ).toBe("error");
+  });
+});
+
+describe("fetchTaskChecks（PR の CI）", () => {
+  it("200 で ok。/checks を same-origin の Cookie で取る", async () => {
+    const fetchImpl = f(() => json(200, checksFixture));
+    const r = await fetchTaskChecks(ID, fetchImpl);
+    expect(r).toEqual({ kind: "ok", data: checksFixture });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`/dashboard/api/tasks/${ID}/checks`);
+    expect(init.credentials).toBe("same-origin");
+  });
+  it("401 / 404 / その他の状態 / 壊れた本文 / 通信の失敗", async () => {
+    expect(
+      await fetchTaskChecks(
+        ID,
+        f(() => json(401, {})),
+      ),
+    ).toEqual({ kind: "unauthorized" });
+    expect(
+      await fetchTaskChecks(
+        ID,
+        f(() => json(404, {})),
+      ),
+    ).toEqual({ kind: "not_found" });
+    expect(
+      await fetchTaskChecks(
+        ID,
+        f(() => json(503, {})),
+      ),
+    ).toEqual({ kind: "error" });
+    expect(
+      await fetchTaskChecks(
+        ID,
+        f(() => json(200, { state: "passing" })),
+      ),
+    ).toEqual({ kind: "error" });
+    expect(
+      await fetchTaskChecks(
+        ID,
+        f(() => json(200, { ...checksFixture, state: "weird" })),
+      ),
+    ).toEqual({
+      kind: "error",
+    });
+    expect(
+      await fetchTaskChecks(
+        ID,
+        f(() => json(200, { ...checksFixture, checks: [{ name: 1 }] })),
+      ),
+    ).toEqual({ kind: "error" });
+    expect(
+      await fetchTaskChecks(
+        ID,
+        f(() => new Response("<html>", { status: 200 })),
+      ),
+    ).toEqual({
+      kind: "error",
+    });
+    const boom = vi.fn(async () => {
+      throw new TypeError("network");
+    });
+    expect(await fetchTaskChecks(ID, boom)).toEqual({ kind: "error" });
+  });
+  it("リンクは https://github.com/ のものだけ残す（gateway が落としていても、画面でも確かめる）", async () => {
+    const dirty = {
+      ...checksFixture,
+      checks: checksFixture.checks.map((c, i) => ({
+        ...c,
+        url:
+          ["javascript:alert(1)", "https://evil.example/x", "https://github.com/o/r/runs/1", null][
+            i
+          ] ?? null,
+      })),
+    };
+    const r = await fetchTaskChecks(
+      ID,
+      f(() => json(200, dirty)),
+    );
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.data.checks.map((c) => c.url)).toEqual([
+        null,
+        null,
+        "https://github.com/o/r/runs/1",
+        null,
+      ]);
+    }
   });
 });

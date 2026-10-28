@@ -88,6 +88,31 @@ export const MAX_PULL_STATE_BATCH = 40;
 /** PR の状態の 1 回の問い合わせを待つ上限（ms）。ダッシュボードの応答を遅らせないよう短くする */
 const PULL_STATE_TIMEOUT_MS = 8_000;
 
+/** ダッシュボードに出す check 1 件（check run または commit status）。url は https://github.com/ で始まるものだけ。 */
+export interface PullCheck {
+  name: string;
+  kind: "check_run" | "status";
+  status: "queued" | "in_progress" | "completed";
+  conclusion: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  url: string | null;
+}
+export interface PullChecks {
+  headSha: string;
+  state: "none" | "passing" | "failing" | "pending";
+  checks: PullCheck[];
+  /** check run 100 件・commit status 100 件の上限を超えて、一部だけを返した */
+  truncated: boolean;
+  /** check run か commit status の片方だけ読めた（権限が片方だけ・片方の障害） */
+  partial: boolean;
+}
+/** listChecks が 1 回の呼び出し（pulls・check-runs・status）を待つ上限（ms） */
+const CHECKS_TIMEOUT_MS = 8_000;
+const CHECKS_PER_SOURCE_MAX = 100;
+const CHECK_NAME_MAX = 200;
+const CHECK_URL_MAX = 300;
+
 /** GitHub のエラーメッセージを呼び出し元に返すときの上限。 */
 const MAX_GITHUB_MESSAGE = 300;
 
@@ -460,6 +485,93 @@ export class GitHubClient {
     }
   }
 
+  /**
+   * PR の**今の head**（pulls/{n} の head.sha）に付いた check run と commit status の一覧（ダッシュボード。閲覧者のトークン）。
+   * check run は 1 ページ（100 件）、commit status は combined status の 100 件（同じ context は最新だけ）。超える分は truncated。
+   * check run と commit status は片方が読めなくても（403 / 404 / 5xx）読めた分を返し、partial にする。両方読めなければ、
+   * check run の側のエラーを投げる。401 は partial にせず reauth_required を投げる。pulls が読めないときも投げる。
+   * リンクは https://github.com/ で始まるものだけを残す（check の URL は外部が任意に書ける）。
+   */
+  async listChecks(accessToken: string, repository: string, number: number): Promise<PullChecks> {
+    const signal = () => AbortSignal.timeout(CHECKS_TIMEOUT_MS);
+    const pullRes = await this.api(accessToken, this.pullPath(repository, number), signal());
+    const head = ((await this.json(pullRes)) as { head?: { sha?: unknown } } | null)?.head?.sha;
+    if (typeof head !== "string" || !/^[0-9a-f]{40}$/.test(head)) {
+      throw new GitHubError("upstream_unavailable", "unexpected pull response: head sha");
+    }
+    const base = `${this.repoPath(repository)}/commits/${head}`;
+    const settle = async <T>(
+      fn: () => Promise<T>,
+    ): Promise<{ ok: true; v: T } | { ok: false; e: unknown }> => {
+      try {
+        return { ok: true, v: await fn() };
+      } catch (e) {
+        return { ok: false, e };
+      }
+    };
+    const [runsOut, statusOut] = await Promise.all([
+      settle(async () => {
+        const res = await this.api(
+          accessToken,
+          `${base}/check-runs?per_page=${CHECKS_PER_SOURCE_MAX}`,
+          signal(),
+        );
+        const body = (await this.json(res)) as {
+          total_count?: unknown;
+          check_runs?: unknown;
+        } | null;
+        if (!Array.isArray(body?.check_runs)) {
+          throw new GitHubError("upstream_unavailable", "unexpected response: missing check_runs");
+        }
+        return { items: body.check_runs as unknown[], total: body.total_count };
+      }),
+      settle(async () => {
+        const res = await this.api(
+          accessToken,
+          `${base}/status?per_page=${CHECKS_PER_SOURCE_MAX}`,
+          signal(),
+        );
+        const body = (await this.json(res)) as { total_count?: unknown; statuses?: unknown } | null;
+        if (!Array.isArray(body?.statuses)) {
+          throw new GitHubError("upstream_unavailable", "unexpected response: missing statuses");
+        }
+        return { items: body.statuses as unknown[], total: body.total_count };
+      }),
+    ]);
+    for (const out of [runsOut, statusOut]) {
+      if (!out.ok && out.e instanceof GitHubError && out.e.code === "reauth_required") throw out.e;
+    }
+    if (!runsOut.ok && !statusOut.ok) throw runsOut.e;
+
+    const checks: PullCheck[] = [];
+    let truncated = false;
+    if (runsOut.ok) {
+      for (const raw of runsOut.v.items.slice(0, CHECKS_PER_SOURCE_MAX)) {
+        const c = toCheckRun(raw);
+        if (c) checks.push(c);
+      }
+      if (typeof runsOut.v.total === "number" && runsOut.v.total > runsOut.v.items.length) {
+        truncated = true;
+      }
+    }
+    if (statusOut.ok) {
+      for (const raw of statusOut.v.items.slice(0, CHECKS_PER_SOURCE_MAX)) {
+        const c = toCommitStatus(raw);
+        if (c) checks.push(c);
+      }
+      if (typeof statusOut.v.total === "number" && statusOut.v.total > statusOut.v.items.length) {
+        truncated = true;
+      }
+    }
+    return {
+      headSha: head,
+      state: aggregateChecks(checks),
+      checks,
+      truncated,
+      partial: !runsOut.ok || !statusOut.ok,
+    };
+  }
+
   private async readCheckState(
     accessToken: string,
     repository: string,
@@ -630,10 +742,15 @@ export class GitHubClient {
     };
   }
 
-  private async rawApi(accessToken: string, pathOrUrl: string): Promise<Response> {
+  private async rawApi(
+    accessToken: string,
+    pathOrUrl: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${this.apiBase}${pathOrUrl}`;
     try {
       return await this.fetchImpl(url, {
+        ...(signal ? { signal } : {}),
         headers: {
           accept: "application/vnd.github+json",
           authorization: `Bearer ${accessToken}`,
@@ -646,8 +763,12 @@ export class GitHubClient {
     }
   }
 
-  private async api(accessToken: string, pathOrUrl: string): Promise<Response> {
-    const res = await this.rawApi(accessToken, pathOrUrl);
+  private async api(
+    accessToken: string,
+    pathOrUrl: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const res = await this.rawApi(accessToken, pathOrUrl, signal);
     this.throwIfError(res);
     return res;
   }
@@ -703,6 +824,82 @@ export class GitHubClient {
 
 /** 成功とみなす check run の conclusion（それ以外は失敗） */
 const CHECK_OK_CONCLUSIONS: ReadonlySet<string> = new Set(["success", "skipped", "neutral"]);
+
+/** リンクにしてよい URL: https://github.com/ で始まり、空白・制御文字・バックスラッシュを含まず、長すぎないもの。 */
+export function githubLinkOrNull(v: unknown): string | null {
+  if (typeof v !== "string" || v.length > CHECK_URL_MAX) return null;
+  if (!/^https:\/\/github\.com\/[^\s\\\p{Cc}]*$/u.test(v)) return null;
+  try {
+    return new URL(v).host === "github.com" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function isoOrNull(v: unknown): string | null {
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(v))
+    return null;
+  return Number.isNaN(Date.parse(v)) ? null : v;
+}
+
+function checkName(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const name = [...v.slice(0, CHECK_NAME_MAX)]
+    .map((ch) => (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f ? " " : ch))
+    .join("")
+    .trim();
+  return name === "" ? null : name;
+}
+
+function toCheckRun(raw: unknown): PullCheck | null {
+  const r = raw as Record<string, unknown> | null;
+  if (typeof r !== "object" || r === null) return null;
+  const name = checkName(r.name);
+  if (name === null) return null;
+  const status =
+    r.status === "completed" ? "completed" : r.status === "in_progress" ? "in_progress" : "queued";
+  return {
+    name,
+    kind: "check_run",
+    status,
+    conclusion:
+      status === "completed" && typeof r.conclusion === "string" ? r.conclusion.slice(0, 40) : null,
+    started_at: isoOrNull(r.started_at),
+    completed_at: isoOrNull(r.completed_at),
+    url: githubLinkOrNull(r.html_url) ?? githubLinkOrNull(r.details_url),
+  };
+}
+
+function toCommitStatus(raw: unknown): PullCheck | null {
+  const r = raw as Record<string, unknown> | null;
+  if (typeof r !== "object" || r === null) return null;
+  const name = checkName(r.context);
+  if (name === null) return null;
+  const state = typeof r.state === "string" ? r.state.slice(0, 40) : "pending";
+  const pending = state !== "success" && state !== "failure" && state !== "error";
+  return {
+    name,
+    kind: "status",
+    status: pending ? "in_progress" : "completed",
+    conclusion: pending ? null : state,
+    started_at: null,
+    completed_at: null,
+    url: githubLinkOrNull(r.target_url),
+  };
+}
+
+/** check の集約（getCheckState と同じ規則）: 失敗 > 実行中 > 成功。1 件も無ければ none。 */
+export function aggregateChecks(checks: PullCheck[]): PullChecks["state"] {
+  if (checks.length === 0) return "none";
+  let pending = false;
+  for (const c of checks) {
+    if (c.status !== "completed") pending = true;
+    else if (c.kind === "status") {
+      if (c.conclusion !== "success") return "failing";
+    } else if (!CHECK_OK_CONCLUSIONS.has(String(c.conclusion))) return "failing";
+  }
+  return pending ? "pending" : "passing";
+}
 
 /** GitHub のメッセージを返せる形にする: 制御文字を空白にし、前後の空白を落として 300 文字で切る。 */
 function cleanMessage(v: unknown): string {

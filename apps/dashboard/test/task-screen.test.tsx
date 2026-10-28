@@ -1,5 +1,6 @@
 import type { TaskDetailDto, TaskEventDto, TaskEventsPageDto } from "@rovo/dashboard-contract";
 import {
+  checksFixture,
   legacyTaskEventsFixture,
   taskDetailFailedSetupFixture,
   taskDetailRunningFixture,
@@ -69,16 +70,25 @@ const settle = async () => {
 type Script = {
   detail: (n: number) => Response;
   events: (url: URL, n: number) => Response;
+  /** PR の CI（/checks）。既定は実行中ありの CI */
+  checks: (n: number) => Response;
 };
 
 function server(script: Partial<Script> = {}) {
   let detailN = 0;
   let eventsN = 0;
+  let checksN = 0;
   const calls: string[] = [];
+  /** /checks の要求（detail・events とは別のポーリングなので、calls とは分けて数える） */
+  const checkCalls: string[] = [];
   let inflight = 0;
   let maxInflight = 0;
   const fn = vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
+    if (url.pathname === `/dashboard/api/tasks/${ID}/checks`) {
+      checkCalls.push(url.pathname);
+      return (script.checks ?? (() => json(200, checksFixture)))(checksN++);
+    }
     calls.push(url.pathname.replace(`/dashboard/api/tasks/${ID}`, "") + url.search);
     inflight++;
     maxInflight = Math.max(maxInflight, inflight);
@@ -92,7 +102,7 @@ function server(script: Partial<Script> = {}) {
     }
     return json(404, { error: "not_found" });
   });
-  return { fn, calls, maxInflight: () => maxInflight };
+  return { fn, calls, checkCalls, maxInflight: () => maxInflight };
 }
 
 const roots: { unmount: () => void }[] = [];
@@ -117,6 +127,8 @@ async function mount(
   onUnauthorized: () => void = () => {},
   extra: Partial<Parameters<typeof TaskScreen>[0]> = {},
 ) {
+  // PR の CI のポーリングは詳細とは別（タイマーも別に持つ）。env は詳細のもの、checksEnv は CI のもの
+  const checksEnv = makeEnv();
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -128,13 +140,14 @@ async function mount(
           id: ID,
           onUnauthorized,
           deps: { fetchImpl: s.fn as unknown as typeof fetch, pollerDeps: env.deps },
+          checksDeps: { pollerDeps: checksEnv.deps },
           ...extra,
         }),
       ),
     );
     await settle();
   });
-  return { c: container, env };
+  return { c: container, env, checksEnv };
 }
 
 const text = (c: HTMLElement) => c.textContent ?? "";
@@ -243,7 +256,12 @@ describe("タスク詳細（実行中。値のある now / output）", () => {
     const { c } = await mount(server());
     expect(c.querySelector("img, script, iframe")).toBeNull();
     const external = [...c.querySelectorAll("a")].filter((a) => /^https?:/.test(a.href));
-    expect(external).toHaveLength(1);
+    // PR のリンク 1 つと、PR の CI の github.com へのリンク（url のある check の分だけ）
+    expect(external).toHaveLength(1 + checksFixture.checks.filter((k) => k.url !== null).length);
+    expect(external.every((a) => a.href.startsWith("https://github.com/"))).toBe(true);
+    expect(external.every((a) => a.rel === "noopener noreferrer" && a.target === "_blank")).toBe(
+      true,
+    );
   });
 });
 
@@ -595,6 +613,23 @@ describe("自動更新（D15）", () => {
     });
     expect(s.calls.length).toBe(before + 2);
   });
+
+  it("「今すぐ更新」は PR の CI も取り直す（自動更新を切っていても）。CI の取得は detail・events の列に入れない", async () => {
+    const s = server();
+    const { c } = await mount(s);
+    const box = c.querySelector("input[type='checkbox']") as HTMLInputElement;
+    await act(async () => {
+      box.click();
+      await settle();
+    });
+    const before = s.checkCalls.length;
+    const btn = [...c.querySelectorAll("button")].find((b) => b.textContent === "今すぐ更新");
+    await act(async () => {
+      btn?.click();
+      await settle();
+    });
+    expect(s.checkCalls.length).toBe(before + 1);
+  });
 });
 
 describe("さらに読む（before で遡る）", () => {
@@ -870,6 +905,7 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
     // 詳細が返らない間の表示を見る（events は返る）
     const hold = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input).includes("/events")) return json(200, legacyTailEvents);
+      if (String(input).includes("/checks")) return json(200, checksFixture);
       return never();
     });
     const { c } = await mount({ ...server(), fn: hold }, makeEnv(), () => {}, {
@@ -977,5 +1013,78 @@ describe("画面の中での切り替え（fresh を付けない・キャッシ�
     expect(signals[0]?.aborted).toBe(false);
     act(() => roots.pop()?.unmount());
     expect(signals[0]?.aborted).toBe(true);
+  });
+});
+
+describe("PR の CI（別のポーリング）", () => {
+  const noPr: TaskDetailDto = {
+    ...taskDetailRunningFixture,
+    task: { ...taskDetailRunningFixture.task, pr: null },
+  };
+
+  it("PR のあるタスクは /checks を取り、見出しにチップが出る。詳細の 5 秒とは別に、実行中があれば 10 秒で取り直す", async () => {
+    const s = server();
+    const { c, env, checksEnv } = await mount(s);
+    expect(s.checkCalls).toHaveLength(1);
+    expect(c.querySelector(".con-head .ci-chip")?.getAttribute("aria-label")).toBe(
+      "CI: 成功 3、実行中・待ち 1。CI を表示する",
+    );
+    expect(env.pending()).toEqual([5000]);
+    expect(checksEnv.pending()).toEqual([10_000]);
+    await checksEnv.fire();
+    expect(s.checkCalls).toHaveLength(2);
+  });
+
+  it("CI が全部終わっていたら 60 秒間隔", async () => {
+    const done = { ...checksFixture, checks: checksFixture.checks.slice(0, 2), state: "passing" };
+    const s = server({ checks: () => json(200, done) });
+    const { checksEnv } = await mount(s);
+    expect(checksEnv.pending()).toEqual([60_000]);
+  });
+
+  it("PR が無いタスクは /checks を取りに行かず、チップもタブもペインも出さない", async () => {
+    const s = server({ detail: () => json(200, noPr) });
+    const { c, checksEnv } = await mount(s);
+    expect(s.checkCalls).toHaveLength(0);
+    expect(checksEnv.pending()).toEqual([]);
+    expect(c.querySelector(".ci-chip, [role=tablist], .ci-pane, .con-split")).toBeNull();
+  });
+
+  it("タスクが終端で詳細の更新が止まっても、PR の CI は後からの push を拾うため取り続ける", async () => {
+    const d: TaskDetailDto = {
+      ...taskDetailRunningFixture,
+      generated_at: "2026-10-21T06:00:00Z",
+      task: {
+        ...taskDetailRunningFixture.task,
+        status: "FAILED",
+        ended_at: "2026-10-21T05:00:00Z",
+      },
+      phase: "done",
+    };
+    const done = { ...checksFixture, checks: checksFixture.checks.slice(0, 2), state: "passing" };
+    const s = server({ detail: () => json(200, d), checks: () => json(200, done) });
+    const { env, checksEnv } = await mount(s);
+    expect(env.pending()).toHaveLength(0);
+    expect(checksEnv.pending()).toEqual([60_000]);
+  });
+
+  it("CI を読めないとき（unreadable）は、権限の案内がペインに出て、チップは「読めません」", async () => {
+    const s = server({
+      checks: () =>
+        json(200, {
+          head_sha: null,
+          state: "unreadable",
+          checks: [],
+          truncated: false,
+          partial: false,
+        }),
+    });
+    const { c } = await mount(s);
+    expect(c.querySelector(".ci-chip")?.getAttribute("aria-label")).toBe(
+      "CI: 読めません。CI を表示する",
+    );
+    expect(text(c.querySelector(".ci-pane") as HTMLElement)).toContain(
+      "GitHub App に Checks と Commit statuses の読み取りの権限が要ります",
+    );
   });
 });

@@ -1,6 +1,7 @@
 // 画面と Unit が使う fixtures。見本に合わせた「今日」（2026-10-21 UTC）のデータ。
 // 公開リポジトリなので、値はすべて架空（owner は example-org、人は *-example、ID は手で作った ULID 形）。
 // 実在のリポジトリ名・ユーザー名・アカウント ID・トークンの形の文字列を入れない。
+import type { ChecksDto } from "./checks";
 import type { CloudflareSummaryDto } from "./cloudflare";
 import type { TaskDetailDto } from "./detail";
 import type { ErrorDto } from "./error";
@@ -488,4 +489,75 @@ export const waitingEmptyFixture: WaitingDto = {
   ...waitingFixture,
   tasks: [],
   hidden_count: 0,
+};
+
+const GH = "https://github.com/example-org/web-app";
+const checkRun = (
+  name: string,
+  status: "queued" | "in_progress" | "completed",
+  conclusion: string | null,
+  startedAt: string | null,
+  completedAt: string | null,
+  id: number,
+): ChecksDto["checks"][number] => ({
+  name,
+  kind: "check_run",
+  status,
+  conclusion,
+  started_at: startedAt,
+  completed_at: completedAt,
+  url: `${GH}/actions/runs/${id}`,
+});
+
+/** PR の CI（成功 2・実行中 1・commit status 1） */
+export const checksFixture: ChecksDto = {
+  head_sha: SHA,
+  state: "pending",
+  checks: [
+    checkRun("lint", "completed", "success", "2026-10-21T05:00:00Z", "2026-10-21T05:00:40Z", 1),
+    checkRun("unit", "completed", "success", "2026-10-21T05:00:00Z", "2026-10-21T05:02:05Z", 2),
+    checkRun("e2e", "in_progress", null, "2026-10-21T05:01:00Z", null, 3),
+    {
+      name: "ci/deploy-preview",
+      kind: "status",
+      status: "completed",
+      conclusion: "success",
+      started_at: null,
+      completed_at: null,
+      url: null,
+    },
+  ],
+  truncated: false,
+  partial: false,
+};
+
+/** PR の CI（失敗あり） */
+export const checksFailingFixture: ChecksDto = {
+  head_sha: SHA,
+  state: "failing",
+  checks: [
+    checkRun("lint", "completed", "success", "2026-10-21T05:00:00Z", "2026-10-21T05:00:40Z", 1),
+    checkRun("unit", "completed", "failure", "2026-10-21T05:00:00Z", "2026-10-21T05:02:05Z", 2),
+    checkRun("e2e", "queued", null, null, null, 3),
+  ],
+  truncated: false,
+  partial: false,
+};
+
+/** PR が無い、または PR にまだ CI が無い */
+export const checksNoneFixture: ChecksDto = {
+  head_sha: null,
+  state: "none",
+  checks: [],
+  truncated: false,
+  partial: false,
+};
+
+/** 権限・時間切れ・障害で読めない */
+export const checksUnreadableFixture: ChecksDto = {
+  head_sha: SHA,
+  state: "unreadable",
+  checks: [],
+  truncated: false,
+  partial: false,
 };

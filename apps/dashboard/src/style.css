@@ -1471,7 +1471,14 @@ summary.step-row:hover {
 .con-split[data-wide="true"] {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
-  align-items: start;
+  align-items: stretch;
+}
+/* ペインの中身の高さを行の高さに数えない（check が多くても、ログの列より高くならず、一覧が中でスクロールする） */
+.con-split[data-wide="true"] > .ci-pane {
+  contain: size;
+}
+.con-split[data-wide="true"] .ci-list {
+  max-height: none;
 }
 .con-main {
   display: flex;
@@ -1485,6 +1492,9 @@ summary.step-row:hover {
   display: none;
 }
 .ci-pane {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
   min-width: 0;
   padding: 16px 20px;
   background: var(--panel);
@@ -1531,6 +1541,27 @@ summary.step-row:hover {
 .ci-seg[data-class="skip"] {
   background: var(--skip);
 }
+/* 多いとき（状態ごとの区画）。幅は SVG の属性、色は fill */
+svg.ci-strip {
+  display: block;
+  flex: none;
+  width: 100%;
+}
+svg.ci-strip .ci-seg {
+  fill: var(--line);
+}
+svg.ci-strip .ci-seg[data-class="fail"] {
+  fill: var(--fail);
+}
+svg.ci-strip .ci-seg[data-class="run"] {
+  fill: var(--run-ring);
+}
+svg.ci-strip .ci-seg[data-class="ok"] {
+  fill: var(--ok);
+}
+svg.ci-strip .ci-seg[data-class="skip"] {
+  fill: var(--skip);
+}
 .ci-note {
   margin-top: 8px;
   font-size: var(--fs-small);
@@ -1538,6 +1569,8 @@ summary.step-row:hover {
   overflow-wrap: anywhere;
 }
 .ci-list {
+  flex: 0 1 auto;
+  min-height: 0;
   max-height: clamp(240px, 60vh, 640px);
   margin: 4px 0 0;
   padding: 0;

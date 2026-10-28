@@ -150,6 +150,68 @@ function CheckRow(props: { check: Check; now: number }) {
   );
 }
 
+/** 帯を 1 件 1 マスで描ける最大の件数。300px の列（内側 258px）に、1 マス 8px 以上 + 隙間 2px で並ぶ 24 件まで */
+export const CI_STRIP_MAX_CELLS = 24;
+const STRIP_W = 100;
+const STRIP_GAP = 1;
+const STRIP_MIN = 1.5;
+
+/**
+ * 細い区切りの帯（装飾。読み上げない）。多いときは状態ごとの区画にし、幅を件数に比例させる。
+ * 幅は CSP（style 属性なし）のため SVG の属性で持つ。checks は並べ替え済み（同じ状態が連続する）。
+ */
+function CiStrip(props: { checks: readonly Check[] }) {
+  const { checks } = props;
+  if (checks.length <= CI_STRIP_MAX_CELLS) {
+    return (
+      <ol className="ci-strip" aria-hidden="true">
+        {checks.map((c, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: check の名前は重複しうる。並びが全てで並べ替えない
+          <li key={i} className="ci-seg" data-class={checkClass(c)} />
+        ))}
+      </ol>
+    );
+  }
+  const groups: { cls: CheckClass; n: number }[] = [];
+  for (const c of checks) {
+    const cls = checkClass(c);
+    const last = groups[groups.length - 1];
+    if (last?.cls === cls) last.n += 1;
+    else groups.push({ cls, n: 1 });
+  }
+  const room = STRIP_W - STRIP_GAP * (groups.length - 1);
+  const raw = groups.map((g) => Math.max(STRIP_MIN, (g.n / checks.length) * room));
+  const scale = room / raw.reduce((a, b) => a + b, 0);
+  let x = 0;
+  return (
+    <svg
+      className="ci-strip"
+      data-grouped=""
+      aria-hidden="true"
+      viewBox={`0 0 ${STRIP_W} 6`}
+      preserveAspectRatio="none"
+    >
+      {groups.map((g, i) => {
+        const w = (raw[i] ?? 0) * scale;
+        const rect = (
+          <rect
+            key={g.cls}
+            className="ci-seg"
+            data-class={g.cls}
+            data-count={g.n}
+            x={x}
+            y={0}
+            width={w}
+            height={6}
+          />
+        );
+        x += w + STRIP_GAP;
+        return rect;
+      })}
+    </svg>
+  );
+}
+
 /**
  * CI のペイン。見出し「CI」と head の短い SHA → 細い区切りの帯（check 1 つが 1 区画。唯一の目を引く要素）→ 一覧。
  * 並びは 失敗 → 実行中 → 待ち → 成功 → skipped / neutral。
@@ -193,14 +255,7 @@ export function CiPane(props: {
           </code>
         ) : null}
       </div>
-      {checks.length > 0 ? (
-        <ol className="ci-strip" aria-hidden="true">
-          {checks.map((c, i) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: check の名前は重複しうる。並びが全てで並べ替えない
-            <li key={i} className="ci-seg" data-class={checkClass(c)} />
-          ))}
-        </ol>
-      ) : null}
+      {checks.length > 0 ? <CiStrip checks={checks} /> : null}
       {message === null ? null : (
         <p className="ci-note" role={state.phase === "loading" ? "status" : undefined}>
           {message}

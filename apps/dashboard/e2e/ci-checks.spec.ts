@@ -100,14 +100,95 @@ test("(CI1) 1440px: 左はログ（残りの幅すべて）、右は細い固定
   await expect(page.locator(".ci-row").nth(3).locator(".ci-dur")).toHaveText("1 分 30 秒");
 });
 
-test("(CI1b) 1440px: check が少ないとき、ペインの高さは中身に合わせ、ログの高さに引き伸ばされない", async ({
+const many: ChecksBody = {
+  ...failing,
+  checks: [
+    run("unit", "completed", "failure"),
+    run("e2e", "in_progress", null),
+    run("deploy-preview", "queued", null),
+    ...Array.from({ length: 37 }, (_, i) =>
+      run(`check-${String(i).padStart(2, "0")}`, "completed", "success"),
+    ),
+  ],
+};
+
+/** ペインの上端・下端とログの列の差（px）。フォントやログの読み込みで揺れるので、呼ぶ側は expect.poll で待つ */
+const paneOffsets = async (page: Page) => {
+  const main = await box(page, ".con-split > .con-main");
+  const pane = await box(page, ".con-split > .ci-pane");
+  return {
+    top: Math.abs(pane.y - main.y),
+    bottom: Math.abs(pane.y + pane.height - (main.y + main.height)),
+    over: pane.height - main.height,
+  };
+};
+
+/** 要素の下端から .con-foot の上端までの距離 */
+const gapToFoot = async (page: Page, selector: string) => {
+  const el = await box(page, selector);
+  const foot = await box(page, ".con-foot");
+  return foot.y - (el.y + el.height);
+};
+
+test("(CI1b) 1440px: check が少なくても、ログの枠はフッターの近くまで伸び、CI のペインは上端・下端をログの列にそろえる", async ({
   page,
 }) => {
   await open(page, passing, 1440);
-  const main = await box(page, ".con-split > .con-main");
-  const pane = await box(page, ".con-split > .ci-pane");
-  expect(pane.height).toBeLessThan(main.height - 40);
-  expect(Math.abs(pane.y - main.y)).toBeLessThanOrEqual(2);
+  // ログの枠の下端とフッターの上端の間は、レイアウトの余白（16px）程度
+  await expect.poll(() => gapToFoot(page, ".con-main .logbox")).toBeLessThanOrEqual(32);
+  // ペインは上端・下端ともログの列にそろう（中身の高さで止まらない）
+  await expect.poll(async () => (await paneOffsets(page)).top).toBeLessThanOrEqual(3);
+  await expect.poll(async () => (await paneOffsets(page)).bottom).toBeLessThanOrEqual(3);
+});
+
+test("(CI1d) 1440px: check が多いとき、ペインの高さはログの列を超えず、一覧が中でスクロールする（見出しは残る）", async ({
+  page,
+}) => {
+  await open(page, many, 1440);
+  await expect(page.locator(".ci-row")).toHaveCount(40);
+  await expect.poll(async () => (await paneOffsets(page)).over).toBeLessThanOrEqual(3);
+  await expect.poll(async () => (await paneOffsets(page)).top).toBeLessThanOrEqual(3);
+  await expect.poll(async () => (await paneOffsets(page)).bottom).toBeLessThanOrEqual(3);
+  await expect.poll(() => gapToFoot(page, ".con-split > .ci-pane")).toBeLessThanOrEqual(32);
+  const list = await page.locator(".ci-list").evaluate((el) => ({
+    sh: el.scrollHeight,
+    ch: el.clientHeight,
+  }));
+  expect(list.sh).toBeGreaterThan(list.ch);
+  // 見出しと帯は上に残る
+  await expect(page.locator(".ci-pane h2")).toBeInViewport();
+  await expect(page.locator(".ci-strip")).toBeInViewport();
+  // 40 件は状態ごとの区画（失敗 → 実行中 → 待ち → 成功 の順、0 件の状態は無し）で、成功の区画が幅の大半を占める
+  await expect(page.locator(".ci-strip .ci-seg")).toHaveCount(4);
+  const segs = await page
+    .locator(".ci-strip .ci-seg")
+    .evaluateAll((els) =>
+      els.map((e) => ({ c: e.getAttribute("data-class"), w: e.getBoundingClientRect().width })),
+    );
+  expect(segs.map((x) => x.c)).toEqual(["fail", "run", "queued", "ok"]);
+  expect(segs[3]?.w).toBeGreaterThan(150);
+  expect(Math.min(...segs.map((x) => x.w))).toBeGreaterThanOrEqual(2);
+});
+
+test("(CI1e) 回帰: PR が無いタスク（1440px）でも、ログの枠はフッターの近くまで伸びる", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await loginAs(page, s.users.alice, taskPath(id("done")));
+  await expect(page.getByRole("heading", { level: 1, name: "完了したタスク" })).toBeVisible();
+  await expect(page.locator(".console > .logbox")).toBeVisible();
+  await expect.poll(() => gapToFoot(page, ".console > .logbox")).toBeLessThanOrEqual(32);
+});
+
+test("(CI1f) 回帰: 1100px のタブ表示では、コンソールのタブのログも CI のタブのペインも、フッターの近くまで伸びる", async ({
+  page,
+}) => {
+  await open(page, passing, 1100);
+  await expect(page.locator("[role=tablist]")).toHaveCount(1);
+  await expect.poll(() => gapToFoot(page, ".con-main .logbox")).toBeLessThanOrEqual(32);
+  await page.getByRole("tab", { name: /^CI/ }).click();
+  await expect(page.locator(".ci-pane")).toBeVisible();
+  await expect.poll(() => gapToFoot(page, ".ci-pane")).toBeLessThanOrEqual(32);
 });
 
 test("(CI1c) CI の行は 2 段: 1 段目に記号と名前、2 段目に所要時間と GitHub のリンクが名前の下にある（1440px / 390px）", async ({

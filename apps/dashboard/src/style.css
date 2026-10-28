@@ -1449,6 +1449,15 @@ summary.step-row:hover {
   background: var(--fg);
   color: var(--panel);
 }
+.ci-tabs button .ci-tab-n {
+  margin-left: 6px;
+  vertical-align: middle;
+  font-family: var(--mono);
+  font-weight: 700;
+}
+.ci-tabs button[aria-selected="true"] .ci-tab-n {
+  color: inherit;
+}
 .ci-tabs button:focus-visible {
   outline-offset: -3px;
 }
@@ -1461,8 +1470,8 @@ summary.step-row:hover {
 }
 .con-split[data-wide="true"] {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  align-items: stretch;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: start;
 }
 .con-main {
   display: flex;
@@ -1539,13 +1548,19 @@ summary.step-row:hover {
 .ci-row {
   position: relative;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 4px 8px;
+  gap: 2px 8px;
   padding: 6px 0;
   border-top: 1px solid var(--line);
 }
+.ci-row > .mark-sym {
+  grid-column: 1;
+  grid-row: 1;
+}
 .ci-name {
+  grid-column: 2 / 4;
+  grid-row: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1555,13 +1570,16 @@ summary.step-row:hover {
   font-weight: 700;
 }
 .ci-dur {
+  grid-column: 2;
+  grid-row: 2;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   color: var(--dim);
 }
 .ci-link {
-  min-width: 3.5em;
+  grid-column: 3;
+  grid-row: 2;
   text-align: right;
 }
 @media (pointer: coarse) {

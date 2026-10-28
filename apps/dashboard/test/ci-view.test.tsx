@@ -298,7 +298,9 @@ describe("TaskView と CI（PR があるときだけ）", () => {
     setWide(false);
     const c = mountView(ready(checksFailingFixture));
     const tabs = [...c.querySelectorAll("[role=tablist] [role=tab]")];
-    expect(tabs.map((t) => t.textContent)).toEqual(["コンソール", "CI ✗1"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["コンソール", "CI1"]);
+    // 「✗」の文字ではなく、要約チップと同じ失敗の記号
+    expect(tabs[1]?.querySelector("svg.mark-sym--bad[data-shape='cross']")).not.toBeNull();
     expect(tabs[1]?.getAttribute("aria-label")).toBe("CI、失敗 1 件");
     expect(tabs.map((t) => t.getAttribute("aria-selected"))).toEqual(["true", "false"]);
     const consolePanel = c.querySelector("#con-panel-console") as HTMLElement;

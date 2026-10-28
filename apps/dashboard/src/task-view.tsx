@@ -5,7 +5,7 @@ import type {
   VisibleTaskDto,
 } from "@rovo/dashboard-contract";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import { CiChip, CiPane, ciFailedCount } from "./ci-pane";
+import { CiChip, CiPane, CiTabFailed, ciFailedCount } from "./ci-pane";
 import {
   formatClockSeconds,
   formatCount,
@@ -696,7 +696,8 @@ export function TaskView(props: {
                 onKeyDown={onTabKey}
                 {...(failed > 0 ? { "aria-label": t("ci.tabCiFailedAria", { n: failed }) } : {})}
               >
-                {failed > 0 ? t("ci.tabCiFailed", { n: failed }) : t("ci.tabCi")}
+                {t("ci.tabCi")}
+                {failed > 0 ? <CiTabFailed n={failed} /> : null}
               </button>
             </div>
           )}

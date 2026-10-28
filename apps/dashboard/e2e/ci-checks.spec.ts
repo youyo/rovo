@@ -66,7 +66,7 @@ const box = async (page: Page, selector: string) => {
   return b as { x: number; y: number; width: number; height: number };
 };
 
-test("(CI1) 1440px: コンソールの中身が左右半分ずつ。左はログ、右は CI のペイン。タブは出ない", async ({
+test("(CI1) 1440px: 左はログ（残りの幅すべて）、右は細い固定幅の CI のペイン。タブは出ない", async ({
   page,
 }) => {
   await open(page, failing, 1440);
@@ -74,7 +74,10 @@ test("(CI1) 1440px: コンソールの中身が左右半分ずつ。左はログ
   const main = await box(page, ".con-split > .con-main");
   const pane = await box(page, ".con-split > .ci-pane");
   expect(main.x + main.width).toBeLessThanOrEqual(pane.x + 1);
-  expect(Math.abs(main.width - pane.width)).toBeLessThanOrEqual(2);
+  // CI の列は 260〜320px の固定幅。ログはそれより広く、残りの幅を使う
+  expect(pane.width).toBeGreaterThanOrEqual(260);
+  expect(pane.width).toBeLessThanOrEqual(320);
+  expect(main.width).toBeGreaterThan(pane.width * 2);
   // 左: 段階の帯とログ。右: CI
   await expect(page.locator(".con-main [data-band]")).toBeVisible();
   await expect(page.locator(".con-main .logbox")).toBeVisible();
@@ -97,6 +100,49 @@ test("(CI1) 1440px: コンソールの中身が左右半分ずつ。左はログ
   await expect(page.locator(".ci-row").nth(3).locator(".ci-dur")).toHaveText("1 分 30 秒");
 });
 
+test("(CI1b) 1440px: check が少ないとき、ペインの高さは中身に合わせ、ログの高さに引き伸ばされない", async ({
+  page,
+}) => {
+  await open(page, passing, 1440);
+  const main = await box(page, ".con-split > .con-main");
+  const pane = await box(page, ".con-split > .ci-pane");
+  expect(pane.height).toBeLessThan(main.height - 40);
+  expect(Math.abs(pane.y - main.y)).toBeLessThanOrEqual(2);
+});
+
+test("(CI1c) CI の行は 2 段: 1 段目に記号と名前、2 段目に所要時間と GitHub のリンクが名前の下にある（1440px / 390px）", async ({
+  page,
+}) => {
+  for (const [w, h] of [
+    [1440, 900],
+    [390, 844],
+  ] as const) {
+    await page.setViewportSize({ width: w, height: h });
+    if (w === 390) {
+      await page.getByRole("tab", { name: /^CI/ }).click();
+    } else {
+      await open(page, failing, w, h);
+    }
+    if (w === 390) await expect(page.locator(".ci-pane")).toBeVisible();
+    const row = page.locator(".ci-row").nth(3); // lint（成功・時間とリンクあり）
+    const sym = await box(page, ".ci-row:nth-child(4) .mark-sym");
+    const name = await row.locator(".ci-name").boundingBox();
+    const dur = await row.locator(".ci-dur").boundingBox();
+    const link = await row.locator(".ci-link").boundingBox();
+    expect(name && dur && link).toBeTruthy();
+    const n = name as { x: number; y: number; width: number; height: number };
+    const d = dur as { x: number; y: number; width: number; height: number };
+    const l = link as { x: number; y: number; width: number; height: number };
+    // 記号は名前と同じ段
+    expect(Math.abs(sym.y + sym.height / 2 - (n.y + n.height / 2))).toBeLessThanOrEqual(4);
+    // 時間とリンクは名前の下の段。時間は名前の左端に揃い、リンクは右側
+    expect(d.y).toBeGreaterThanOrEqual(n.y + n.height - 1);
+    expect(l.y).toBeGreaterThanOrEqual(n.y + n.height - 1);
+    expect(Math.abs(d.x - n.x)).toBeLessThanOrEqual(2);
+    expect(l.x).toBeGreaterThan(d.x);
+  }
+});
+
 test("(CI2) 並びの時にチップを押すと CI のペインに焦点が移る。キーボードでも押せて、焦点が見える", async ({
   page,
 }) => {
@@ -113,7 +159,12 @@ test("(CI3) 1100px: 「コンソール / CI」のタブ。既定はコンソー�
 }) => {
   await open(page, failing, 1100);
   const tabs = page.getByRole("tab");
-  await expect(tabs).toHaveText(["コンソール", "CI ✗1"]);
+  await expect(tabs).toHaveText(["コンソール", "CI1"]);
+  // 「×」の文字ではなく、見出しの要約チップと同じ失敗の記号（赤い ✗ の丸）。読み上げは aria-label
+  const ciTab = page.getByRole("tab", { name: /^CI/ });
+  await expect(ciTab).toHaveAttribute("aria-label", "CI、失敗 1 件");
+  await expect(ciTab.locator("svg.mark-sym--bad[data-shape='cross']")).toHaveCount(1);
+  await expect(ciTab).not.toContainText("✗");
   await expect(page.getByRole("tab", { name: "コンソール" })).toHaveAttribute(
     "aria-selected",
     "true",

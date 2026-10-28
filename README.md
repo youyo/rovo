@@ -19,9 +19,9 @@ Rovo lets Claude Code / Cowork hand coding tasks to workers over Remote MCP. Eac
 
 *The dashboard (read-only; it follows the system's light / dark setting).*
 
-https://github.com/user-attachments/assets/b92bdaeb-4dc8-4c43-a7d4-eff51bc2ae2b
+https://github.com/user-attachments/assets/9e0d0914-1947-4c8f-89e2-79315b8d283d
 
-*How a task flows, from `task_start` to the merge (78 seconds). Other versions, in Japanese, light / dark and shorter or more detailed: [docs/assets/videos](docs/assets/videos/).*
+*How a task flows, from `task_start` to the merge. Other versions, in Japanese, light / dark and shorter or more detailed: [docs/assets/videos](docs/assets/videos/).*
 
 ## Quick start
 

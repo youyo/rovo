@@ -82,6 +82,13 @@ const COLOR_TOKENS = [
   "log-bad",
   "log-run",
   "log-info",
+  "person-0",
+  "person-1",
+  "person-2",
+  "person-3",
+  "person-4",
+  "person-5",
+  "on-person",
 ];
 
 describe("配色のトークン", () => {
@@ -170,6 +177,20 @@ describe("配色のトークン", () => {
       }
     });
 
+    it(`${theme}: 工場の帯の人の色（--person-0〜5）の上の頭文字（--on-person）は 4.5:1 以上`, () => {
+      for (let i = 0; i < 6; i++) {
+        const r = contrast(t["on-person"] as string, t[`person-${i}`] as string);
+        expect(r, `${theme} --on-person on --person-${i} = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(
+          4.5,
+        );
+      }
+    });
+
+    it(`${theme}: 人の色は 6 色とも違う`, () => {
+      const colors = Array.from({ length: 6 }, (_, i) => t[`person-${i}`]?.toLowerCase());
+      expect(new Set(colors).size).toBe(6);
+    });
+
     it(`${theme}: 状態の丸（塗り）の中の記号（--on-mark）は、丸の色の上で 3:1 以上（記号は文字ではなく図形）`, () => {
       for (const fill of ["ok", "fail", "wait", "run-ring", "skip"]) {
         const r = contrast(t["on-mark"] as string, t[fill] as string);
@@ -225,5 +246,46 @@ describe("動きの抑制", () => {
       expect(base, `${sel} の元の指定`).toBeGreaterThanOrEqual(0);
       expect(at, `${sel} より後ろ`).toBeGreaterThan(base);
     }
+  });
+});
+
+describe("工場の断面図の CSS（factory-scene.css。遅延読み込みの別チャンク）", () => {
+  const fx = readFileSync(join(SRC, "factory-scene.css"), "utf8");
+  const fxDark = blockAfter(fx, /@media\s*\(prefers-color-scheme:\s*dark\)\s*\{/);
+  const fxLight = tokens(blockAfter(fx, /(^|\n):root\s*\{/));
+  const fxNight = tokens(blockAfter(fxDark, /:root\s*\{/));
+
+  it("色はトークン（:root の --fx-*）の定義の中だけ。夜の工場は prefers-color-scheme: dark の :root で上書き", () => {
+    const HEX_OR_FN = /#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla|oklch|oklab)\(/;
+    const stripped = fx
+      .replace(fxDark, "")
+      .replace(/(^|\n):root\s*\{[^}]*\}/, "")
+      .replace(/\/\*[\s\S]*?\*\//g, "");
+    const hit = stripped.split("\n").filter((l) => HEX_OR_FN.test(l));
+    expect(hit, `直書きの色: ${hit.join(" | ")}`).toEqual([]);
+    expect(Object.keys(fxLight).length).toBeGreaterThan(20);
+    for (const name of Object.keys(fxLight)) expect(name).toMatch(/^fx-/);
+    for (const name of Object.keys(fxNight)) expect(fxLight[name], `--${name}`).toBeDefined();
+  });
+
+  it("夜の工場: 空は暗く、窓とランプの明かりは明るい", () => {
+    for (const name of ["fx-sky1", "fx-sky2"]) {
+      expect(luminance(fxNight[name] as string), name).toBeLessThan(0.05);
+      expect(luminance(fxLight[name] as string), name).toBeGreaterThan(0.5);
+    }
+    for (const name of ["fx-cwin", "fx-gl1", "fx-beam"])
+      expect(luminance(fxNight[name] as string), name).toBeGreaterThan(0.4);
+  });
+
+  it("使っている --fx-* のトークンはすべて定義がある", () => {
+    for (const m of fx.matchAll(/var\(--(fx-[a-z0-9]+)\)/g))
+      expect(fxLight[m[1] as string], `--${m[1]}`).toBeDefined();
+  });
+
+  it("動き（animation）は prefers-reduced-motion: no-preference の中だけ（reduce ではすべて止まる）", () => {
+    const motion = blockAfter(fx, /@media\s*\(prefers-reduced-motion:\s*no-preference\)\s*\{/);
+    expect(motion).toMatch(/animation:/);
+    expect(fx.replace(motion, "")).not.toMatch(/animation(-[a-z]+)?:/);
+    expect(fx.replace(motion, "")).not.toMatch(/@keyframes/);
   });
 });

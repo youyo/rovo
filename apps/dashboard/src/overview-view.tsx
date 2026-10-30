@@ -1,5 +1,6 @@
 import type { BudgetMeDto, OverviewDto } from "@rovo/dashboard-contract";
 import type { ReactNode } from "react";
+import { FactoryBand } from "./factory-band";
 import { useT } from "./lang";
 import { TaskRail } from "./rail-view";
 import { PendingStatusBar, StatusBar } from "./status-bar";
@@ -13,7 +14,7 @@ export type RailTab = "day" | "waiting";
 
 /**
  * 骨格の本体（純粋な表示。データ取得は use-overview）。
- * 細いタイムライン帯 → 左のレール + 中央のコンソール（console は呼び出し側が渡す）→ 下のステータスバー。
+ * 帯（今日は工場、過去の日はチームのときだけ細いタイムライン）→ 左のレール + 中央のコンソール（console は呼び出し側が渡す）→ 下のステータスバー。
  * data が null（一覧をまだ取れていない）のときは、帯を出さず、レールに railNote を、ステータスバーには予算と Cloudflare だけを出す。
  * 要素の並びは data の有無で変えない（中央のコンソールを作り直さない）。
  */
@@ -57,7 +58,10 @@ export function OverviewView(props: {
   let band: ReactNode = null;
   // 更新時刻（引き出しの表示）。タイムラインの「いま」は今日のときだけ使う
   const nowMs = data ? Date.parse(data.generated_at) : 0;
-  if (data && data.scope === "all" && mode !== "detail") {
+  if (data && props.isToday && mode !== "detail") {
+    // 今日は工場の帯（マイタスクでも。API が自分の分しか返さないので自分の Rovo だけ）
+    band = <FactoryBand data={data} onSelect={props.onSelectTask} />;
+  } else if (data && data.scope === "all" && mode !== "detail") {
     const dayStart = Date.parse(data.range.from);
     const domain = timelineDomain({
       starts: [...data.tasks.map(taskTime), ...data.consults.map((c) => Date.parse(c.at))],

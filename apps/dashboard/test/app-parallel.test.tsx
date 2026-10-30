@@ -101,6 +101,7 @@ describe("一覧・詳細・Cloudflare は互いに待たない", () => {
     const { c } = await mount("/dashboard/", { detail: never });
     expect(c.querySelectorAll("a.rail-row").length).toBeGreaterThan(0);
     expect(c.querySelector(".tlband")).toBeNull();
+    expect(c.querySelector("section[data-factory]")).not.toBeNull();
     expect(c.querySelector(".statusbar")).not.toBeNull();
     expect(text(c.querySelector(".console-col"))).toContain("読み込み中");
     expect(text(c.querySelector("nav.rail"))).not.toContain("読み込み中");

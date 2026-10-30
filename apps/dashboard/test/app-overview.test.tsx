@@ -73,6 +73,16 @@ async function mount(f: ReturnType<typeof router>) {
 
 const lanesOf = (c: HTMLElement) =>
   [...c.querySelectorAll("[data-lane]")].map((e) => e.getAttribute("data-lane"));
+/** 今日の工場の帯にいる Rovo（断面図は遅延読み込みなので、描かれるまで待つ）の持ち主 */
+async function rovoOwners(c: HTMLElement, data: typeof overviewFixture): Promise<string[]> {
+  for (let i = 0; i < 20; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)));
+  const ids = [...c.querySelectorAll("section[data-factory] a[data-task]")].map((a) =>
+    a.getAttribute("data-task"),
+  );
+  return [
+    ...new Set(ids.map((id) => data.tasks.find((t) => t.task_id === id)?.owner_login ?? "?")),
+  ].sort();
+}
 const overviewCalls = (f: ReturnType<typeof router>) =>
   f.mock.calls
     .map((c) => new URL(String(c[0]), "http://localhost"))
@@ -98,23 +108,30 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
     ]);
   });
 
-  it("最初は「マイタスク」。「チーム」にすると scope=all で取り直し、他の人のレーンも出る。「マイタスク」で戻る", async () => {
+  it("最初は「マイタスク」。「チーム」にすると scope=all で取り直し、工場に他の人の Rovo も出る。「マイタスク」で戻る", async () => {
     const f = router(scoped);
     const c = await mount(f);
     const btn = (label: string) =>
       [...c.querySelectorAll("button")].find((b) => b.textContent === label) as HTMLButtonElement;
     expect(btn("マイタスク").getAttribute("aria-pressed")).toBe("true");
     expect(lanesOf(c)).toEqual([]);
+    expect(await rovoOwners(c, overviewMeFixture)).toEqual(["alice-example"]);
     await act(async () => {
       btn("チーム").click();
     });
     expect(btn("チーム").getAttribute("aria-pressed")).toBe("true");
     expect(overviewCalls(f).at(-1)?.searchParams.get("scope")).toBe("all");
-    expect(lanesOf(c)).toHaveLength(3);
+    // 今日はタイムラインのレーンではなく工場（失敗した bob のタスクは工場に出ないが、実行中の bob の Rovo はいる）
+    expect(lanesOf(c)).toEqual([]);
+    expect(await rovoOwners(c, overviewFixture)).toEqual([
+      "alice-example",
+      "bob-example",
+      "carol-example",
+    ]);
     await act(async () => {
       btn("マイタスク").click();
     });
-    expect(lanesOf(c)).toEqual([]);
+    expect(await rovoOwners(c, overviewMeFixture)).toEqual(["alice-example"]);
   });
 
   it("切り替えた直後は、新しい応答が来るまで前のスコープのデータを出さない（読み込み中に戻る）", async () => {
@@ -128,6 +145,7 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
       all?.click();
     });
     expect(lanesOf(c)).toHaveLength(0);
+    expect(c.querySelector("section[data-factory]")).toBeNull();
     expect(c.querySelector("a.rail-row")).toBeNull();
     expect(c.textContent).toContain("読み込み中");
   });

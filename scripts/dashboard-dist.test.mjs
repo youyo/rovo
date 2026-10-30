@@ -22,6 +22,11 @@ const html = readFileSync(join(dist, "index.html"), "utf8");
 const MAX_APP_BYTES = 400 * 1024;
 const MAX_FONT_BYTES = 6 * 1024 * 1024;
 const isFont = (f) => /\.(woff2?|ttf|otf)$/i.test(f);
+// 工場の帯の断面図（factory-scene.tsx と factory-scene.css）は遅延読み込みの別チャンク。今日の一覧を広げたときだけ読む。
+// アプリ本体の上限とは別枠にする（本体の上限は据え置き）。実測（JS 約 51KB + CSS 約 13KB）に 15% 程度の余裕
+const MAX_FACTORY_BYTES = 75 * 1024;
+const isFactoryChunk = (f) =>
+  /^assets\/factory-scene-[A-Za-z0-9_-]+\.(js|css)$/.test(relative(dist, f));
 
 test("index.html が dist 直下にある（assets のパスは dist 直下から。Worker が /dashboard を剥がして渡す）", () => {
   assert.ok(statSync(join(dist, "index.html")).isFile());
@@ -105,9 +110,42 @@ const fontFaceBytes = files
   );
 const fileBytes = (list) => list.reduce((n, f) => n + statSync(f).size, 0);
 
-test("書体以外の容量が上限以内（書体と @font-face は別枠）", () => {
-  const total = fileBytes(files.filter((f) => !isFont(f))) - fontFaceBytes;
+test("書体以外の容量が上限以内（書体と @font-face、工場の断面図のチャンクは別枠）", () => {
+  const total = fileBytes(files.filter((f) => !isFont(f) && !isFactoryChunk(f))) - fontFaceBytes;
   assert.ok(total <= MAX_APP_BYTES, `書体以外が ${total} バイト（上限 ${MAX_APP_BYTES}）`);
+});
+
+test("工場の断面図のチャンク（JS と CSS）が dist にあり、別枠の上限以内", () => {
+  const chunk = files.filter(isFactoryChunk);
+  // 名前の取り違えで別枠の計算から逃げないよう、JS と CSS が 1 つずつあることを確かめる
+  assert.equal(chunk.filter((f) => f.endsWith(".js")).length, 1, "工場の JS のチャンクが無い");
+  assert.equal(chunk.filter((f) => f.endsWith(".css")).length, 1, "工場の CSS のチャンクが無い");
+  // 本体の JS が工場のチャンクを遅延読み込みで参照している（本体に混ざっていない）
+  const main = files.filter((f) => f.endsWith(".js") && !isFactoryChunk(f));
+  const js = main.map((f) => readFileSync(f, "utf8")).join("\n");
+  for (const f of chunk.filter((f) => f.endsWith(".js")))
+    assert.ok(
+      js.includes(relative(join(dist, "assets"), f)),
+      `本体が ${relative(dist, f)} を参照していない`,
+    );
+  assert.doesNotMatch(js, /fx-rvBody/, "断面図の SVG が本体の JS に混ざっている");
+  const total = fileBytes(chunk);
+  assert.ok(
+    total <= MAX_FACTORY_BYTES,
+    `工場のチャンクが ${total} バイト（上限 ${MAX_FACTORY_BYTES}）`,
+  );
+});
+
+test("工場の断面図の CSS は本体の CSS に混ざっていない", () => {
+  const mainCss = files
+    .filter((f) => f.endsWith(".css") && !isFactoryChunk(f))
+    .map((f) => readFileSync(f, "utf8"))
+    .join("\n");
+  assert.doesNotMatch(
+    mainCss,
+    /--fx-|\.fxa-|@keyframes fx-/,
+    "工場の CSS が本体の CSS に入っている",
+  );
 });
 
 test("書体の容量（woff2 と @font-face）が別枠の上限以内", () => {

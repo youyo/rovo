@@ -77,3 +77,26 @@ export function saveConsoleTab(
     // 保存できなくても動く
   }
 }
+
+/** 工場の帯をたたんだか（今日の一覧の上部の帯）の保存先 */
+export const FACTORY_COLLAPSED_KEY = "rovo.dashboard.factoryCollapsed";
+
+/** 既定は広げる。保存された値が "1" のときだけたたむ。 */
+export function loadFactoryCollapsed(storage: Storage | undefined = defaultStorage()): boolean {
+  try {
+    return storage?.getItem(FACTORY_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveFactoryCollapsed(
+  collapsed: boolean,
+  storage: Storage | undefined = defaultStorage(),
+): void {
+  try {
+    storage?.setItem(FACTORY_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    // 保存できなくても動く
+  }
+}

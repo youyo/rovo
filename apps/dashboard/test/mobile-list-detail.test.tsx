@@ -140,14 +140,14 @@ describe("モバイル幅: 一覧と詳細の切り替え", () => {
     expect(location.pathname).toBe(`/dashboard/tasks/${RUNNING_ID}`);
     expect(text(c.querySelector(".console h1"))).toBe(taskDetailRunningFixture.task.title);
     expect(c.querySelector("nav.rail")).toBeNull();
-    expect(c.querySelector(".tlband")).toBeNull();
+    expect(c.querySelector(".tlband, section[data-factory]")).toBeNull();
     expect(text(c.querySelector("button.back-to-list"))).toBe("← 一覧");
   });
 
   it("タスクの URL を直接開いても詳細だけ", async () => {
     const { c } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
     expect(c.querySelector("nav.rail")).toBeNull();
-    expect(c.querySelector(".tlband")).toBeNull();
+    expect(c.querySelector(".tlband, section[data-factory]")).toBeNull();
     expect(c.querySelector("button.back-to-list")).not.toBeNull();
   });
 

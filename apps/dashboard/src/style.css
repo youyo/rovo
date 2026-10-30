@@ -47,6 +47,14 @@
   --bar: #ffffff;
   --bar2: #f6f8fa;
   --on-bar: #1f2328;
+  /* 工場の帯の人の色（アンテナの電球・足元の明かり・頭文字のバッジ）と、その上の頭文字 */
+  --person-0: #f76707;
+  --person-1: #4dabf7;
+  --person-2: #9775fa;
+  --person-3: #12b886;
+  --person-4: #f06595;
+  --person-5: #fab005;
+  --on-person: #1f2328;
 
   /* 文字 */
   --font: "IBM Plex Sans JP", system-ui, sans-serif;
@@ -93,6 +101,13 @@
     --bar: #161b22;
     --bar2: #0d1117;
     --on-bar: #e6edf3;
+    --person-0: #ff922b;
+    --person-1: #74c0fc;
+    --person-2: #b197fc;
+    --person-3: #38d9a9;
+    --person-4: #faa2c1;
+    --person-5: #ffd43b;
+    --on-person: #0d1117;
   }
 }
 

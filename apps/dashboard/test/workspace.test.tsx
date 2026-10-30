@@ -199,7 +199,9 @@ describe("/dashboard/tasks/:id は一覧でそのタスクを選んだ状態（�
   it("タイムライン帯・レール・コンソール・ステータスバーが出る。選んだタスクが選択中。「詳細を開く」は出さない", async () => {
     const { c, f } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
     expect(paths(f)).toContain("/dashboard/api/overview");
-    expect(c.querySelector(".tlband")).toBeNull();
+    // タスクの日（過去の日）を開くので工場ではなくタイムラインの出し分け。マイタスクなのでタイムラインの帯も出ない
+    expect(c.querySelector(".day-today")).not.toBeNull();
+    expect(c.querySelector(".tlband, section[data-factory]")).toBeNull();
     expect(c.querySelector("nav.rail")).not.toBeNull();
     expect(text(c.querySelector(".console h1"))).toBe(taskDetailRunningFixture.task.title);
     expect(c.querySelector(".statusbar")).not.toBeNull();
@@ -392,7 +394,7 @@ describe("チームで何も選んでいないときはチームボード", () =
     await clickScope(c, "チーム");
     expect(c.querySelector("[data-teamboard]")).not.toBeNull();
     expect(c.querySelector(".console h1")).toBeNull();
-    expect(c.querySelector(".tlband")).not.toBeNull();
+    expect(c.querySelector("section[data-factory]")).not.toBeNull();
     expect(c.querySelector("nav.rail")).not.toBeNull();
     expect(c.querySelector(".statusbar")).not.toBeNull();
     expect(c.querySelector("a.rail-row[aria-current='true']")).toBeNull();

@@ -1,0 +1,1033 @@
+/*
+ * 工場の断面図（factory-scene.tsx）だけが使う CSS。遅延読み込みの別チャンクに入り、アプリ本体の CSS に混ぜない。
+ * 色は下の :root の --fx-* トークンだけに置く（夜の工場は prefers-color-scheme: dark の :root で上書き）。
+ * 人の色（--person-0〜5）と頭文字の文字色（--on-person）は本体の style.css のトークン。
+ * 動き（待機の動作・背景の部品）は prefers-reduced-motion: no-preference のときだけ付ける（reduce ではすべて止まる）。
+ * 見本 Factory2 の色を、近い色どうしまとめてトークンにした。
+ */
+:root {
+  --fx-ol: #0b0d16;
+  --fx-m1: #1f2328;
+  --fx-m2: #2d333b;
+  --fx-m3: #3d454e;
+  --fx-m4: #4b545e;
+  --fx-m5: #57606a;
+  --fx-m6: #6e7781;
+  --fx-m7: #8c959f;
+  --fx-m8: #9aa5b1;
+  --fx-m8b: #a9b7c5;
+  --fx-m9: #b6bec7;
+  --fx-m10: #c9d1d9;
+  --fx-m11: #d3d9e0;
+  --fx-m12: #d9dee4;
+  --fx-m13: #e6eaee;
+  --fx-m14: #f2f4f6;
+  --fx-wh: #ffffff;
+  --fx-cloud: #ffffff;
+  --fx-sky1: #cfe2f3;
+  --fx-sky2: #eef3f7;
+  --fx-hill: #c3d2df;
+  --fx-city: #b3c2d0;
+  --fx-cwin: #d3dde6;
+  --fx-tree: #8fb39a;
+  --fx-tree2: #7ea98b;
+  --fx-trunk: #7a5c45;
+  --fx-gl1: #e4f2fd;
+  --fx-gl2: #9cc6ea;
+  --fx-roof2: #a3adb8;
+  --fx-beam: #fff6cf;
+  --fx-cone: #fff2b8;
+  --fx-brick: #b8644a;
+  --fx-mortar: #d9c7b8;
+  --fx-bredge: #7a3f2c;
+  --fx-shine: #fff3c2;
+  --fx-y1: #ffd54a;
+  --fx-y2: #fbb52c;
+  --fx-y3: #f08c16;
+  --fx-o1: #f7a41f;
+  --fx-o2: #d9700e;
+  --fx-o3: #e2780f;
+  --fx-hz: #f2c230;
+  --fx-hz2: #c9a227;
+  --fx-amb: #f59f00;
+  --fx-olv: #8a6d0b;
+  --fx-oink: #5c4300;
+  --fx-gold: #bf8700;
+  --fx-sdot: #ffe9a6;
+  --fx-box: #e8c48a;
+  --fx-boxl: #c9a46a;
+  --fx-wood: #a07a5a;
+  --fx-wood2: #6e5440;
+  --fx-clay: #a0603d;
+  --fx-cop: #c98f6b;
+  --fx-cop2: #e8956b;
+  --fx-sand: #c9b8a6;
+  --fx-strip: #b8c7d6;
+  --fx-tower: #8a7563;
+  --fx-ok: #1a7f37;
+  --fx-led: #3fb950;
+  --fx-g1: #1f5133;
+  --fx-g2: #2f7a4a;
+  --fx-g3: #5f8f73;
+  --fx-g4: #74a888;
+  --fx-teal: #12b886;
+  --fx-l1: #e9fff6;
+  --fx-l2: #9ef0c9;
+  --fx-l3: #2fae98;
+  --fx-l4: #11465a;
+  --fx-rg1: #d9dfe6;
+  --fx-rg2: #7d8894;
+  --fx-rg3: #3f4852;
+  --fx-pp1: #6c7682;
+  --fx-pp2: #c4ccd4;
+  --fx-pp3: #5a636e;
+  --fx-red: #cf222e;
+  --fx-red2: #ff7b72;
+  --fx-red3: #7a1a1f;
+  --fx-flame: #f76707;
+  --fx-blue: #79c0ff;
+  --fx-blue2: #4dabf7;
+  --fx-navy: #1b4a7a;
+  --fx-pblue: #8fb0cc;
+  --fx-sol: #1e3a5f;
+  --fx-sol2: #5b7fa6;
+  --fx-sol3: #9ec1e6;
+  --fx-pale: #cfe4f7;
+  --fx-vio: #845ef7;
+  --fx-pink: #e64980;
+  --fx-s0: #0d1117;
+  --fx-s1: #161b22;
+  --fx-s2: #21262d;
+  --fx-s3: #30363d;
+  --fx-sfg: #e6edf3;
+  --fx-ambd: #6b4f12;
+  --fx-tw: #ffffff;
+  --fx-tk: #1f2328;
+  --fx-tg: #57606a;
+  --fx-tl: #c9d1d9;
+  --fx-td: #8d96a0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fx-ol: #05070c;
+    --fx-m3: #39414b;
+    --fx-m4: #444c56;
+    --fx-m5: #545d68;
+    --fx-m6: #626b75;
+    --fx-m7: #6e7781;
+    --fx-m8: #76818d;
+    --fx-m8b: #4b5664;
+    --fx-m9: #4b545e;
+    --fx-m10: #69737e;
+    --fx-m11: #353c46;
+    --fx-m12: #56606b;
+    --fx-m13: #3a414b;
+    --fx-m14: #2b3038;
+    --fx-wh: #c9d1d9;
+    --fx-cloud: #2a3a58;
+    --fx-sky1: #0a1324;
+    --fx-sky2: #1d2b45;
+    --fx-hill: #142037;
+    --fx-city: #1a2740;
+    --fx-cwin: #ffd56a;
+    --fx-tree: #1d3a30;
+    --fx-tree2: #23463a;
+    --fx-trunk: #3a2c22;
+    --fx-gl1: #ffe9a8;
+    --fx-gl2: #e0a63a;
+    --fx-roof2: #3a434f;
+    --fx-beam: #ffd77a;
+    --fx-cone: #ffe08a;
+    --fx-brick: #6b3324;
+    --fx-mortar: #4a332b;
+    --fx-bredge: #3a1b12;
+    --fx-hz: #d9a92a;
+    --fx-hz2: #9c7c1c;
+    --fx-gold: #d29922;
+    --fx-box: #d9b06e;
+    --fx-boxl: #a9844c;
+    --fx-wood: #7a5a40;
+    --fx-wood2: #4e3a2c;
+    --fx-clay: #7a442a;
+    --fx-cop: #8f5e42;
+    --fx-sand: #4a3f36;
+    --fx-strip: #2a3a4f;
+    --fx-tower: #4a3c30;
+    --fx-ok: #2ea043;
+    --fx-g3: #2f5a44;
+    --fx-g4: #3a6b52;
+    --fx-red: #da3633;
+    --fx-pblue: #3d5a75;
+    --fx-sol: #16263d;
+    --fx-sol2: #2f4a6b;
+    --fx-sol3: #3d5a80;
+    --fx-pale: #b9d3ea;
+  }
+}
+
+.fx .c-beam {
+  stop-color: var(--fx-beam);
+}
+.fx .c-cone {
+  stop-color: var(--fx-cone);
+}
+.fx .c-gl1 {
+  stop-color: var(--fx-gl1);
+}
+.fx .c-gl2 {
+  stop-color: var(--fx-gl2);
+}
+.fx .c-l1 {
+  stop-color: var(--fx-l1);
+}
+.fx .c-l2 {
+  stop-color: var(--fx-l2);
+}
+.fx .c-l3 {
+  stop-color: var(--fx-l3);
+}
+.fx .c-l4 {
+  stop-color: var(--fx-l4);
+}
+.fx .c-m13 {
+  stop-color: var(--fx-m13);
+}
+.fx .c-m14 {
+  stop-color: var(--fx-m14);
+}
+.fx .c-o1 {
+  stop-color: var(--fx-o1);
+}
+.fx .c-o2 {
+  stop-color: var(--fx-o2);
+}
+.fx .c-pp1 {
+  stop-color: var(--fx-pp1);
+}
+.fx .c-pp2 {
+  stop-color: var(--fx-pp2);
+}
+.fx .c-pp3 {
+  stop-color: var(--fx-pp3);
+}
+.fx .c-rg1 {
+  stop-color: var(--fx-rg1);
+}
+.fx .c-rg2 {
+  stop-color: var(--fx-rg2);
+}
+.fx .c-rg3 {
+  stop-color: var(--fx-rg3);
+}
+.fx .c-roof2 {
+  stop-color: var(--fx-roof2);
+}
+.fx .c-sky1 {
+  stop-color: var(--fx-sky1);
+}
+.fx .c-sky2 {
+  stop-color: var(--fx-sky2);
+}
+.fx .c-y1 {
+  stop-color: var(--fx-y1);
+}
+.fx .c-y2 {
+  stop-color: var(--fx-y2);
+}
+.fx .c-y3 {
+  stop-color: var(--fx-y3);
+}
+.fx .f-amb {
+  fill: var(--fx-amb);
+}
+.fx .f-ambd {
+  fill: var(--fx-ambd);
+}
+.fx .f-blue {
+  fill: var(--fx-blue);
+}
+.fx .f-blue2 {
+  fill: var(--fx-blue2);
+}
+.fx .f-box {
+  fill: var(--fx-box);
+}
+.fx .f-brick {
+  fill: var(--fx-brick);
+}
+.fx .f-city {
+  fill: var(--fx-city);
+}
+.fx .f-clay {
+  fill: var(--fx-clay);
+}
+.fx .f-cloud {
+  fill: var(--fx-cloud);
+}
+.fx .f-cop {
+  fill: var(--fx-cop);
+}
+.fx .f-cwin {
+  fill: var(--fx-cwin);
+}
+.fx .f-flame {
+  fill: var(--fx-flame);
+}
+.fx .f-g1 {
+  fill: var(--fx-g1);
+}
+.fx .f-g2 {
+  fill: var(--fx-g2);
+}
+.fx .f-g3 {
+  fill: var(--fx-g3);
+}
+.fx .f-g4 {
+  fill: var(--fx-g4);
+}
+.fx .f-gold {
+  fill: var(--fx-gold);
+}
+.fx .f-hill {
+  fill: var(--fx-hill);
+}
+.fx .f-hz {
+  fill: var(--fx-hz);
+}
+.fx .f-led {
+  fill: var(--fx-led);
+}
+.fx .f-m1 {
+  fill: var(--fx-m1);
+}
+.fx .f-m10 {
+  fill: var(--fx-m10);
+}
+.fx .f-m11 {
+  fill: var(--fx-m11);
+}
+.fx .f-m12 {
+  fill: var(--fx-m12);
+}
+.fx .f-m13 {
+  fill: var(--fx-m13);
+}
+.fx .f-m14 {
+  fill: var(--fx-m14);
+}
+.fx .f-m2 {
+  fill: var(--fx-m2);
+}
+.fx .f-m3 {
+  fill: var(--fx-m3);
+}
+.fx .f-m4 {
+  fill: var(--fx-m4);
+}
+.fx .f-m5 {
+  fill: var(--fx-m5);
+}
+.fx .f-m6 {
+  fill: var(--fx-m6);
+}
+.fx .f-m7 {
+  fill: var(--fx-m7);
+}
+.fx .f-m8 {
+  fill: var(--fx-m8);
+}
+.fx .f-m8b {
+  fill: var(--fx-m8b);
+}
+.fx .f-m9 {
+  fill: var(--fx-m9);
+}
+.fx .f-navy {
+  fill: var(--fx-navy);
+}
+.fx .f-o3 {
+  fill: var(--fx-o3);
+}
+.fx .f-oink {
+  fill: var(--fx-oink);
+}
+.fx .f-ok {
+  fill: var(--fx-ok);
+}
+.fx .f-ol {
+  fill: var(--fx-ol);
+}
+.fx .f-olv {
+  fill: var(--fx-olv);
+}
+.fx .f-pale {
+  fill: var(--fx-pale);
+}
+.fx .f-pblue {
+  fill: var(--fx-pblue);
+}
+.fx .f-pink {
+  fill: var(--fx-pink);
+}
+.fx .f-red {
+  fill: var(--fx-red);
+}
+.fx .f-red2 {
+  fill: var(--fx-red2);
+}
+.fx .f-rg2 {
+  fill: var(--fx-rg2);
+}
+.fx .f-s0 {
+  fill: var(--fx-s0);
+}
+.fx .f-s1 {
+  fill: var(--fx-s1);
+}
+.fx .f-s2 {
+  fill: var(--fx-s2);
+}
+.fx .f-s3 {
+  fill: var(--fx-s3);
+}
+.fx .f-sand {
+  fill: var(--fx-sand);
+}
+.fx .f-sdot {
+  fill: var(--fx-sdot);
+}
+.fx .f-sfg {
+  fill: var(--fx-sfg);
+}
+.fx .f-strip {
+  fill: var(--fx-strip);
+}
+.fx .f-td {
+  fill: var(--fx-td);
+}
+.fx .f-teal {
+  fill: var(--fx-teal);
+}
+.fx .f-tg {
+  fill: var(--fx-tg);
+}
+.fx .f-tk {
+  fill: var(--fx-tk);
+}
+.fx .f-tl {
+  fill: var(--fx-tl);
+}
+.fx .f-tower {
+  fill: var(--fx-tower);
+}
+.fx .f-tree {
+  fill: var(--fx-tree);
+}
+.fx .f-tree2 {
+  fill: var(--fx-tree2);
+}
+.fx .f-trunk {
+  fill: var(--fx-trunk);
+}
+.fx .f-tw {
+  fill: var(--fx-tw);
+}
+.fx .f-vio {
+  fill: var(--fx-vio);
+}
+.fx .f-wh {
+  fill: var(--fx-wh);
+}
+.fx .f-wood {
+  fill: var(--fx-wood);
+}
+.fx .f-wood2 {
+  fill: var(--fx-wood2);
+}
+.fx .f-y1 {
+  fill: var(--fx-y1);
+}
+.fx .s-blue {
+  stroke: var(--fx-blue);
+}
+.fx .s-boxl {
+  stroke: var(--fx-boxl);
+}
+.fx .s-bredge {
+  stroke: var(--fx-bredge);
+}
+.fx .s-cop2 {
+  stroke: var(--fx-cop2);
+}
+.fx .s-g2 {
+  stroke: var(--fx-g2);
+}
+.fx .s-gold {
+  stroke: var(--fx-gold);
+}
+.fx .s-hz {
+  stroke: var(--fx-hz);
+}
+.fx .s-hz2 {
+  stroke: var(--fx-hz2);
+}
+.fx .s-led {
+  stroke: var(--fx-led);
+}
+.fx .s-m10 {
+  stroke: var(--fx-m10);
+}
+.fx .s-m11 {
+  stroke: var(--fx-m11);
+}
+.fx .s-m14 {
+  stroke: var(--fx-m14);
+}
+.fx .s-m2 {
+  stroke: var(--fx-m2);
+}
+.fx .s-m4 {
+  stroke: var(--fx-m4);
+}
+.fx .s-m5 {
+  stroke: var(--fx-m5);
+}
+.fx .s-m6 {
+  stroke: var(--fx-m6);
+}
+.fx .s-m7 {
+  stroke: var(--fx-m7);
+}
+.fx .s-m8 {
+  stroke: var(--fx-m8);
+}
+.fx .s-m9 {
+  stroke: var(--fx-m9);
+}
+.fx .s-mortar {
+  stroke: var(--fx-mortar);
+}
+.fx .s-o1 {
+  stroke: var(--fx-o1);
+}
+.fx .s-ok {
+  stroke: var(--fx-ok);
+}
+.fx .s-ol {
+  stroke: var(--fx-ol);
+}
+.fx .s-olv {
+  stroke: var(--fx-olv);
+}
+.fx .s-red {
+  stroke: var(--fx-red);
+}
+.fx .s-red2 {
+  stroke: var(--fx-red2);
+}
+.fx .s-red3 {
+  stroke: var(--fx-red3);
+}
+.fx .s-s3 {
+  stroke: var(--fx-s3);
+}
+.fx .s-shine {
+  stroke: var(--fx-shine);
+}
+.fx .s-sol {
+  stroke: var(--fx-sol);
+}
+.fx .s-sol2 {
+  stroke: var(--fx-sol2);
+}
+.fx .s-sol3 {
+  stroke: var(--fx-sol3);
+}
+.fx .s-wh {
+  stroke: var(--fx-wh);
+}
+.fx .s-wood2 {
+  stroke: var(--fx-wood2);
+}
+
+.fx-stage {
+  height: 300px;
+  background: linear-gradient(to bottom, var(--fx-sky1), var(--fx-sky2) 97%, var(--fx-m11) 97%);
+}
+.fx-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.fx-mono {
+  font-family: var(--mono);
+}
+.fx-sans {
+  font-family: var(--font);
+}
+.fxp {
+  transform-box: fill-box;
+}
+.fx-art {
+  opacity: 0.95;
+}
+.fx-link {
+  cursor: pointer;
+}
+.fx-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.fx-link:hover .fx-bot {
+  filter: brightness(1.08);
+}
+.fx-foot,
+.fx-tag {
+  display: none;
+}
+.fx-walking .fx-foot,
+.fx-walking .fx-tag {
+  display: inline;
+}
+.fx-walking .fx-prop,
+.fx-walking .fx-badge {
+  display: none;
+}
+.fx .f-led.fx-glow {
+  filter: drop-shadow(0 0 3px var(--fx-led));
+}
+
+/* 人の色（アンテナの電球・足元の明かり・頭文字のバッジ・+n の割合の帯・出荷の箱） */
+.p0 .fx-pc,
+.fx-pc.p0 {
+  fill: var(--person-0);
+}
+.p1 .fx-pc,
+.fx-pc.p1 {
+  fill: var(--person-1);
+}
+.p2 .fx-pc,
+.fx-pc.p2 {
+  fill: var(--person-2);
+}
+.p3 .fx-pc,
+.fx-pc.p3 {
+  fill: var(--person-3);
+}
+.p4 .fx-pc,
+.fx-pc.p4 {
+  fill: var(--person-4);
+}
+.p5 .fx-pc,
+.fx-pc.p5 {
+  fill: var(--person-5);
+}
+.p0 .fx-ps {
+  stroke: var(--person-0);
+}
+.p1 .fx-ps {
+  stroke: var(--person-1);
+}
+.p2 .fx-ps {
+  stroke: var(--person-2);
+}
+.p3 .fx-ps {
+  stroke: var(--person-3);
+}
+.p4 .fx-ps {
+  stroke: var(--person-4);
+}
+.p5 .fx-ps {
+  stroke: var(--person-5);
+}
+.fx .fx-pi {
+  fill: var(--on-person);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes fx-tapL {
+    from {
+      transform: rotate(-14deg);
+    }
+    to {
+      transform: rotate(10deg);
+    }
+  }
+  @keyframes fx-tapR {
+    from {
+      transform: rotate(12deg);
+    }
+    to {
+      transform: rotate(-12deg);
+    }
+  }
+  @keyframes fx-nod {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(2px);
+    }
+  }
+  @keyframes fx-hop {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-6px);
+    }
+  }
+  @keyframes fx-sweep {
+    0%,
+    100% {
+      transform: rotate(-18deg);
+    }
+    50% {
+      transform: rotate(16deg);
+    }
+  }
+  @keyframes fx-press {
+    0%,
+    60%,
+    100% {
+      transform: translateY(0);
+    }
+    30% {
+      transform: translateY(9px);
+    }
+  }
+  @keyframes fx-flash {
+    0%,
+    100% {
+      fill: var(--fx-ok);
+    }
+    50% {
+      fill: var(--fx-red);
+    }
+  }
+  @keyframes fx-wave {
+    0%,
+    100% {
+      transform: rotate(-8deg);
+    }
+    50% {
+      transform: rotate(8deg);
+    }
+  }
+  @keyframes fx-puff {
+    0% {
+      transform: translate(0, 0) scale(0.5);
+      opacity: 0.85;
+    }
+    100% {
+      transform: translate(14px, -30px) scale(1.6);
+      opacity: 0;
+    }
+  }
+  @keyframes fx-glow {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 0.85;
+    }
+  }
+  @keyframes fx-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes fx-sky {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(60px);
+    }
+  }
+  @keyframes fx-crane {
+    to {
+      transform: translateX(1060px);
+    }
+  }
+  @keyframes fx-waddle {
+    from {
+      transform: rotate(-6deg) translateY(0);
+    }
+    to {
+      transform: rotate(6deg) translateY(-4px);
+    }
+  }
+  @keyframes fx-swing {
+    from {
+      transform: rotate(-24deg);
+    }
+    to {
+      transform: rotate(24deg);
+    }
+  }
+  @keyframes fx-step {
+    from {
+      transform: translateY(0);
+    }
+    to {
+      transform: translateY(-7px);
+    }
+  }
+  @keyframes fx-dash {
+    to {
+      stroke-dashoffset: -20;
+    }
+  }
+  @keyframes fx-belt {
+    to {
+      stroke-dashoffset: -32;
+    }
+  }
+  @keyframes fx-onoff {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.25;
+    }
+  }
+  @keyframes fx-wob {
+    0%,
+    100% {
+      transform: rotate(-30deg);
+    }
+    50% {
+      transform: rotate(20deg);
+    }
+  }
+  @keyframes fx-trolley {
+    to {
+      transform: translateX(-40px);
+    }
+  }
+  @keyframes fx-hookY {
+    to {
+      transform: translateY(-6px);
+    }
+  }
+  @keyframes fx-prog {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: scaleX(1);
+    }
+  }
+  @keyframes fx-beamX {
+    to {
+      transform: translateX(72px);
+    }
+  }
+  @keyframes fx-seq {
+    0% {
+      opacity: 1;
+    }
+    33% {
+      opacity: 0.3;
+    }
+  }
+  @keyframes fx-lift {
+    0%,
+    25% {
+      transform: translateY(0);
+    }
+    38%,
+    55% {
+      transform: translateY(-342px);
+    }
+    68%,
+    100% {
+      transform: translateY(0);
+    }
+  }
+  @keyframes fx-wob2 {
+    0%,
+    100% {
+      transform: rotate(-2deg);
+    }
+    50% {
+      transform: rotate(2deg);
+    }
+  }
+
+  /* 背景の部品（小さく遅く控えめに） */
+  .fxa-cloud {
+    animation: fx-sky 40s linear infinite alternate;
+  }
+  .fxa-crane {
+    animation: fx-crane 34s ease-in-out infinite alternate;
+  }
+  .fxa-flow {
+    animation: fx-dash 1.8s linear infinite;
+  }
+  .fxa-belt {
+    animation: fx-belt 1.1s linear infinite;
+  }
+  .fxa-needle {
+    transform-box: fill-box;
+    transform-origin: 50% 100%;
+    animation: fx-wob 5s ease-in-out infinite;
+  }
+  .fxa-led {
+    animation: fx-onoff 1.1s steps(1) infinite;
+  }
+  .fxa-led.fxa-l2 {
+    animation-duration: 1.7s;
+  }
+  .fxa-cur {
+    animation: fx-onoff 1s steps(1) infinite;
+  }
+  .fxa-trolley {
+    animation: fx-trolley 6s ease-in-out infinite alternate;
+  }
+  .fxa-hook {
+    animation: fx-hookY 2.4s ease-in-out infinite alternate;
+  }
+  .fxa-prog {
+    transform-box: fill-box;
+    transform-origin: 0 50%;
+    animation: fx-prog 4s linear infinite;
+  }
+  .fxa-gear,
+  .fxa-fan,
+  .fxa-roll {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: fx-spin 4s linear infinite;
+  }
+  .fxa-gear.fxa-rev {
+    animation-direction: reverse;
+  }
+  .fxa-fan {
+    animation-duration: 3s;
+  }
+  .fxa-roll {
+    animation-duration: 1.2s;
+  }
+  .fxa-beam {
+    animation: fx-beamX 3.5s ease-in-out infinite alternate;
+  }
+  .fxa-seq {
+    opacity: 0.3;
+    animation: fx-seq 3s steps(1) infinite;
+  }
+  .fxa-seq.fxa-s2 {
+    animation-delay: -2s;
+  }
+  .fxa-seq.fxa-s3 {
+    animation-delay: -1s;
+  }
+  .fxa-halo {
+    animation: fx-glow 1.6s ease-in-out infinite;
+  }
+  .fxa-smoke circle,
+  .fxa-stack {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: fx-puff 2.2s ease-out infinite;
+  }
+  .fxa-smoke circle + circle {
+    animation-delay: -1.1s;
+  }
+  .fx-rest .fxa-smoke circle {
+    animation-duration: 4.4s;
+  }
+  .fxa-stack {
+    animation-duration: 4s;
+  }
+  .fxa-stack.fxa-s2 {
+    animation-delay: -2s;
+  }
+  .fxa-lift {
+    animation: fx-lift 20s ease-in-out infinite;
+  }
+  .fxa-wob2 {
+    transform-box: view-box;
+    transform-origin: 40px 44px;
+    animation: fx-wob2 3s ease-in-out infinite;
+  }
+  .fxdm2 {
+    animation-delay: -2s;
+  }
+  .fxdm_5 {
+    animation-delay: -0.5s;
+  }
+
+  /* 工程ごとの待機の動作 */
+  .fx-type .fx-armL {
+    transform-origin: 100% 0;
+    animation: fx-tapL 0.32s ease-in-out infinite alternate;
+  }
+  .fx-type .fx-armR {
+    transform-origin: 0 0;
+    animation: fx-tapR 0.32s ease-in-out infinite alternate;
+  }
+  .fx-type .fx-body {
+    animation: fx-nod 0.64s ease-in-out infinite;
+  }
+  .fx-carry .fx-body,
+  .fx-carry .fxa-load {
+    animation: fx-hop 0.7s ease-in-out infinite;
+  }
+  .fx-scan .fx-tool {
+    transform-origin: 0 100%;
+    animation: fx-sweep 1.8s ease-in-out infinite;
+  }
+  .fx-scan .fx-body {
+    animation: fx-nod 1.8s ease-in-out infinite;
+  }
+  .fx-press .fx-armR {
+    transform-origin: 0 0;
+    animation: fx-press 1s ease-in-out infinite;
+  }
+  .fx-press .fxa-lamp {
+    animation: fx-flash 2s steps(1) infinite;
+  }
+  .fx-ask .fx-sign {
+    transform-origin: 50% 100%;
+    animation: fx-wave 1.4s ease-in-out infinite;
+  }
+  .fxd1 .fx-body,
+  .fxd1 .fx-armL,
+  .fxd1 .fx-tool,
+  .fxd1 .fx-sign {
+    animation-delay: -0.25s;
+  }
+  .fxd2 .fx-body,
+  .fxd2 .fx-armL,
+  .fxd2 .fx-tool,
+  .fxd2 .fx-sign {
+    animation-delay: -0.5s;
+  }
+
+  /* 歩く（工程が変わって部屋を移るあいだ。移動そのものは element.animate） */
+  .fx-walking .fx-body {
+    transform-origin: 50% 100%;
+    animation: fx-waddle 0.45s ease-in-out infinite alternate;
+  }
+  .fx-walking .fx-armL {
+    transform-origin: 100% 0;
+    animation: fx-swing 0.45s ease-in-out infinite alternate;
+  }
+  .fx-walking .fx-armR {
+    transform-origin: 0 0;
+    animation: fx-swing 0.45s ease-in-out infinite alternate-reverse;
+  }
+  .fx-walking .fx-footL {
+    animation: fx-step 0.45s ease-in-out infinite alternate;
+  }
+  .fx-walking .fx-footR {
+    animation: fx-step 0.45s ease-in-out infinite alternate-reverse;
+  }
+}

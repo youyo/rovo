@@ -587,6 +587,8 @@ type LinkRow = {
   /** 配送の連続失敗の回数と、この時刻（epoch ms）までは再試行しない */
   index_attempts: number;
   index_retry_at: number;
+  /** 前回の取り込みで導出した作業の段（変わったときだけ索引の revision を上げるために覚える。review は null） */
+  index_work_stage: string | null;
 };
 
 export type GetStatusResult = { ok: true; task: TaskView } | { ok: false; code: "not_found" };
@@ -616,6 +618,9 @@ const INDEX_STAGE_EVENTS: ReadonlySet<string> = new Set([
   "review_started",
   "review_commands_finished",
 ]);
+
+/** 調査系のツール（最後のツールがこれなら作業の段は research） */
+const RESEARCH_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch", "web_browse"]);
 
 const STEERABLE: ReadonlySet<TaskStatus> = new Set(["RUNNING", "VERIFYING", "INPUT_REQUIRED"]);
 
@@ -960,6 +965,8 @@ export class TaskDO extends DurableObject<Env> {
     ]) {
       addColumnIfMissing(this.ctx.storage.sql, "agent_link", column, "INTEGER NOT NULL DEFAULT 0");
     }
+    // 作業の段の前回値（stage の索引。NULL = 未導出）
+    addColumnIfMissing(this.ctx.storage.sql, "agent_link", "index_work_stage", "TEXT");
     // Phase 3: Draft PR・Installation Token・終端処理の進み具合（1 行）。Phase 2 で作られたタスクには無い。
     sql.exec(`CREATE TABLE IF NOT EXISTS github_link (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -3026,6 +3033,15 @@ export class TaskDO extends DurableObject<Env> {
         }
         cursor = e.seq;
       }
+      // 作業の段が前回と変わったときだけ索引の revision を上げる（同じ段の tool_start などでは上げない）
+      const workStage = this.deriveWorkStage();
+      if (workStage !== link.index_work_stage) {
+        this.ctx.storage.sql.exec(
+          "UPDATE agent_link SET index_work_stage = ? WHERE singleton = 1",
+          workStage,
+        );
+        this.bumpIndexRevision();
+      }
       const usagePublicJson = JSON.stringify(usagePublic);
       this.ctx.storage.sql.exec(
         "UPDATE agent_link SET ingest_cursor = ?, usage_seq = ?, usage_micro = ?, usage_public = ?, model_calls = ? WHERE singleton = 1",
@@ -4683,6 +4699,33 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /**
+   * 作業の段（docs/specs/dashboard-factory.md「stage（契約）」）。kind = review は null。
+   * 優先順位: VERIFYING（verify）> worker_review の段（commands / reviewing → review、fixing → code、rechecking → verify）
+   * > 最後のツールの種類（web_* → research、それ以外 → code）> ツールの実行が無い（prep）。CREATING は prep。
+   */
+  private deriveWorkStage(): "prep" | "code" | "research" | "verify" | "review" | null {
+    const row = this.getRow();
+    if (!row || this.isReview(row)) return null;
+    const status = this.statusOf(row);
+    if (status === "CREATING") return "prep";
+    if (status === "VERIFYING") return "verify";
+    const wr = this.getWorkerReview();
+    if (wr) {
+      const stage = this.workerReviewStage(row, wr);
+      if (stage === "commands" || stage === "reviewing") return "review";
+      if (stage === "fixing") return "code";
+      if (stage === "rechecking") return "verify";
+    }
+    const last = this.ctx.storage.sql
+      .exec<{ name: string | null }>(
+        "SELECT json_extract(payload, '$.name') AS name FROM events WHERE type = 'tool_start' ORDER BY seq DESC LIMIT 1",
+      )
+      .toArray()[0];
+    if (!last) return "prep";
+    return typeof last.name === "string" && RESEARCH_TOOLS.has(last.name) ? "research" : "code";
+  }
+
+  /**
    * task_list の stage に要る値（kind・review の段・検証に入ったか・検証の試行回数・review の対象 PR）。
    * review の段は、終端でも途中の段を残す（失敗したレビューの止まった段が分かる）。COMPLETED は投稿が済んだか（posting / done）。
    */
@@ -4697,6 +4740,7 @@ export class TaskDO extends DurableObject<Env> {
     | "verify_attempt"
     | "target_pr_number"
     | "target_pr_url"
+    | "work_stage"
   > {
     const sql = this.ctx.storage.sql;
     const reachedVerifying = this.reachedStatuses().verifying;
@@ -4726,6 +4770,7 @@ export class TaskDO extends DurableObject<Env> {
         // URL は切り詰めると壊れるので、上限を超えたら入れない
         target_pr_url:
           rl?.pull_url != null && rl.pull_url.length <= INDEX_LIMITS.url ? rl.pull_url : null,
+        work_stage: null,
       };
     }
     const last = sql
@@ -4740,6 +4785,7 @@ export class TaskDO extends DurableObject<Env> {
       verify_attempt: typeof last === "number" && Number.isInteger(last) && last > 0 ? last : null,
       target_pr_number: null,
       target_pr_url: null,
+      work_stage: this.deriveWorkStage(),
     };
   }
 

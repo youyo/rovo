@@ -146,6 +146,25 @@ describe("文字列の上限と形式", () => {
     expect(ok(VisibleTaskDtoSchema, { ...row, kind: "review" })).toBe(true);
     expect(ok(VisibleTaskDtoSchema, { ...row, kind: "other" })).toBe(false);
   });
+  it("stage は仕様の 9 値だけ。無くてもよい（古い応答）。未知の値は落ちる", () => {
+    expect(ok(VisibleTaskDtoSchema, row)).toBe(true);
+    for (const stage of [
+      "prep",
+      "code",
+      "research",
+      "verify",
+      "review",
+      "wait",
+      "ready",
+      "merged",
+      "done",
+    ]) {
+      expect(ok(VisibleTaskDtoSchema, { ...row, stage }), stage).toBe(true);
+    }
+    for (const bad of ["running", "", "CODE", null, 1]) {
+      expect(ok(VisibleTaskDtoSchema, { ...row, stage: bad }), String(bad)).toBe(false);
+    }
+  });
   it("title・repository・owner_login・model の上限", () => {
     expect(ok(VisibleTaskDtoSchema, { ...row, title: "あ".repeat(LIMITS.title) })).toBe(true);
     expect(ok(VisibleTaskDtoSchema, { ...row, title: "あ".repeat(LIMITS.title + 1) })).toBe(false);

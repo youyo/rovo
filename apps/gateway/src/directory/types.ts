@@ -49,6 +49,8 @@ export const TaskIndexSnapshotSchema = z.strictObject({
   /** review の対象の PR */
   target_pr_number: z.number().int().nullable().optional(),
   target_pr_url: z.string().max(500).nullable().optional(),
+  /** 作業の段（kind = review の行には書かない。古い snapshot には無い） */
+  work_stage: z.enum(["prep", "code", "research", "verify", "review"]).nullable().optional(),
 });
 export type TaskIndexSnapshot = z.infer<typeof TaskIndexSnapshotSchema>;
 

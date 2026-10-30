@@ -11,6 +11,7 @@ import {
   PR_STATES,
   type PrDto,
   SCOPES,
+  type Stage,
   type TaskDetailDto,
   TaskDetailDtoSchema,
   type TaskEventsPageDto,
@@ -115,6 +116,43 @@ function clipText(text: string, max: number): string {
  * PR は番号と GitHub の PR の URL が揃うときだけ・題名は上限で切る）。必須の項目（login・repository・model など）が
  * 契約に合わないときは直さず、最後の検証で全体を 503 にする（見える行を黙って落とさない・不正な値を出さない）。
  */
+/**
+ * 最終の stage（docs/specs/dashboard-factory.md「stage（契約）」）。kind = review は付けない（undefined）。
+ * 終端は PR の状態で決め、INPUT_REQUIRED は wait、それ以外は索引の作業の段（無ければ status から）。
+ */
+export function deriveStage(
+  t: Pick<VisibleTaskDto, "status" | "pr" | "kind">,
+  workStage: string | null | undefined,
+): Stage | undefined {
+  if (t.kind === "review") return undefined;
+  switch (t.status) {
+    case "INPUT_REQUIRED":
+      return "wait";
+    case "COMPLETED":
+      if (t.pr === null) return "done";
+      if (t.pr.merged || t.pr.state === "merged") return "merged";
+      if (t.pr.state === "closed") return "done";
+      return "ready";
+    case "FAILED":
+    case "CANCELLED":
+    case "BUDGET_EXCEEDED":
+      return t.pr !== null && (t.pr.merged || t.pr.state === "merged") ? "merged" : "done";
+    default:
+  }
+  if (
+    workStage === "prep" ||
+    workStage === "code" ||
+    workStage === "research" ||
+    workStage === "verify" ||
+    workStage === "review"
+  ) {
+    return workStage;
+  }
+  if (t.status === "CREATING") return "prep";
+  if (t.status === "VERIFYING") return "verify";
+  return "code";
+}
+
 export function snapshotToVisibleTask(s: TaskIndexSnapshot | TaskIndexRow): VisibleTaskDto {
   const pr =
     s.pr_number !== null && s.pr_url !== null && PR_URL_RE.test(s.pr_url)
@@ -127,6 +165,11 @@ export function snapshotToVisibleTask(s: TaskIndexSnapshot | TaskIndexRow): Visi
           state: s.pr_merged ? ("merged" as const) : ("unknown" as const),
         }
       : null;
+  const kind = s.kind === "task" || s.kind === "review" ? s.kind : undefined;
+  const stage = deriveStage(
+    { status: s.status as VisibleTaskDto["status"], pr, kind },
+    s.work_stage,
+  );
   return {
     task_id: s.task_id,
     owner_login: s.owner_login,
@@ -152,7 +195,8 @@ export function snapshotToVisibleTask(s: TaskIndexSnapshot | TaskIndexRow): Visi
       : {}),
     ...(s.failure_phase === "setup" ? { failure_phase: "setup" as const } : {}),
     // 索引に kind が無い古い行では付けない（画面は task として扱う）
-    ...(s.kind === "task" || s.kind === "review" ? { kind: s.kind } : {}),
+    ...(kind !== undefined ? { kind } : {}),
+    ...(stage !== undefined ? { stage } : {}),
   };
 }
 
@@ -199,6 +243,9 @@ async function attachPrStates(env: Env, uid: number, tasks: VisibleTaskDto[]): P
     for (const t of targets) {
       const pr = t.pr as PrDto;
       pr.state = byKey.get(keyOf(t.repository, pr.number)) ?? pr.state;
+      // GitHub の状態（merged / closed）で、終端の stage を決め直す
+      const stage = deriveStage(t, undefined);
+      if (stage !== undefined) t.stage = stage;
     }
   } catch (e) {
     // 名前と、マスクして 200 文字に切ったメッセージを記録する（トークンが入りうるので、そのままは出さない）

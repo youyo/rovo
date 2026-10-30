@@ -43,6 +43,29 @@ function snap(id: string, over: Partial<TaskIndexSnapshot> = {}): TaskIndexSnaps
 
 const range = { from: T0 - HOUR, to: T0 + 24 * HOUR };
 
+describe("DirectoryDO.upsertTask（work_stage）", () => {
+  it("work_stage の有る snapshot も無い snapshot も受け、listTasks で読み戻せる。未知の値は invalid_input", async () => {
+    const d = dir();
+    expect(await d.upsertTask(snap("A", { work_stage: "research" }), 1)).toMatchObject({
+      ok: true,
+      applied: true,
+    });
+    expect(await d.upsertTask(snap("B"), 1)).toMatchObject({ ok: true, applied: true });
+    expect(await d.upsertTask(snap("C", { work_stage: null }), 1)).toMatchObject({ ok: true });
+    expect(await d.upsertTask(snap("D", { work_stage: "wait" as never }), 1)).toEqual({
+      ok: false,
+      code: "invalid_input",
+    });
+    const list = await d.listTasks({ repoIds: [100], ...range, limit: 10, offset: 0 });
+    if (!list.ok) throw new Error("list failed");
+    const by = new Map(list.rows.map((r) => [r.task_id, r]));
+    expect(by.get("A")?.work_stage).toBe("research");
+    expect(by.get("B")).not.toHaveProperty("work_stage");
+    expect(by.get("C")).not.toHaveProperty("work_stage");
+    expect(by.has("D")).toBe(false);
+  });
+});
+
 describe("DirectoryDO.upsertTask（revision）", () => {
   it("新しい revision は反映し、古い・同じ revision は無視する（順序の逆転・重複で逆戻りしない）", async () => {
     const d = dir();

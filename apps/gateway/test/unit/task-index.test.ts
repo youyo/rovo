@@ -413,3 +413,78 @@ describe("outbox: 移行と、実 Directory との収束", () => {
     });
   });
 });
+
+describe("作業の段（work_stage）: 変わったときだけ revision を上げる", () => {
+  const snapshotOf = (stub: TaskStub) =>
+    runInDurableObject(stub, (i) => {
+      const o = i as unknown as {
+        getRow(): unknown;
+        getLink(): unknown;
+        buildIndexSnapshot(r: unknown, l: unknown): TaskIndexSnapshot;
+      };
+      return o.buildIndexSnapshot(o.getRow(), o.getLink());
+    });
+  const tool = (name: string, callId: string) =>
+    ({ callId, name, summary: "x" }) as Record<string, unknown>;
+
+  it("ツールの実行が無ければ prep。web_search → research、edit_file → code。同じ段の tool_start では上がらない", async () => {
+    const t = await createTask({}, OWNER);
+    await t.stub.advance(); // RUNNING
+    expect((await snapshotOf(t.stub)).work_stage).toBe("prep");
+
+    await t.agent.emit("tool_start", tool("web_search", "c1"));
+    await t.stub.advance();
+    expect((await snapshotOf(t.stub)).work_stage).toBe("research");
+    const r1 = await revision(t.stub);
+
+    // 同じ段（research）のまま: tool_start / tool_end では上がらない
+    await t.agent.emit("tool_end", { ...tool("web_search", "c1"), isError: false });
+    await t.agent.emit("tool_start", tool("web_fetch", "c2"));
+    await t.stub.advance();
+    expect(await revision(t.stub)).toBe(r1);
+
+    await t.agent.emit("tool_start", tool("edit_file", "c3"));
+    await t.stub.advance();
+    expect((await snapshotOf(t.stub)).work_stage).toBe("code");
+    const r2 = await revision(t.stub);
+    expect(r2).toBeGreaterThan(r1);
+
+    await t.agent.emit("tool_start", tool("bash", "c4"));
+    await t.stub.advance();
+    expect(await revision(t.stub)).toBe(r2);
+  });
+
+  it("VERIFYING は verify（ツールの種類より優先）", async () => {
+    const t = await createTask({}, OWNER);
+    await t.stub.advance();
+    await t.agent.emit("tool_start", tool("edit_file", "c1"));
+    await t.stub.advance();
+    await t.agent.setPhase("verifying");
+    await t.stub.advance();
+    expect((await snapshotOf(t.stub)).work_stage).toBe("verify");
+  });
+
+  it("worker_review の reviewing は review", async () => {
+    const t = await createTask(
+      {
+        review_policy: "worker_review",
+        review_model: "anthropic/claude-sonnet-5-5",
+        review_commands: [{ argv: ["pnpm", "test"], cwd: "apps/x", timeout_seconds: 900 }],
+      },
+      OWNER,
+    );
+    await t.stub.advance();
+    await t.agent.emit("tool_start", tool("edit_file", "c1"));
+    await t.stub.advance();
+    expect((await snapshotOf(t.stub)).work_stage).toBe("code");
+    const before = await revision(t.stub);
+    await t.agent.emit("review_started", {
+      model: "anthropic/claude-sonnet-5-5",
+      commands: 1,
+    });
+    await t.agent.emit("review_commands_finished", { passed: 1, failed: 0, timed_out: 0 });
+    await t.stub.advance();
+    expect((await snapshotOf(t.stub)).work_stage).toBe("review");
+    expect(await revision(t.stub)).toBeGreaterThan(before);
+  });
+});

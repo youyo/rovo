@@ -14,7 +14,7 @@ import { inJa } from "./lang";
 const roots: { unmount: () => void }[] = [];
 beforeEach(() => {
   localStorage.clear();
-  screenSize(1440, 1200);
+  screenSize(1440, 1600);
 });
 afterEach(() => {
   for (const r of roots.splice(0)) act(() => r.unmount());
@@ -82,12 +82,12 @@ describe("FactoryBand の読み込み中の枠（帯の下を動かさない）"
       return container.querySelector("section[data-factory] .fxband-wait");
     };
     expect(one(1280, 720)?.classList.contains("fxband-wait--open")).toBe(false);
-    expect(one(1440, 1200)?.classList.contains("fxband-wait--open")).toBe(true);
+    expect(one(1440, 1600)?.classList.contains("fxband-wait--open")).toBe(true);
     saveFactoryPref("collapsed");
-    expect(one(1440, 1200)?.classList.contains("fxband-wait--open")).toBe(false);
+    expect(one(1440, 1600)?.classList.contains("fxband-wait--open")).toBe(false);
     stubNarrow(true);
     saveFactoryPref("expanded");
-    expect(one(1440, 1200)?.classList.contains("fxband-wait--open")).toBe(false);
+    expect(one(1440, 1600)?.classList.contains("fxband-wait--open")).toBe(false);
   });
 });
 
@@ -122,7 +122,7 @@ describe("FactoryPanel（帯の中身）", () => {
     saveFactoryPref("expanded");
     expect(toggle(mount()).getAttribute("aria-expanded")).toBe("true");
     document.body.innerHTML = "";
-    screenSize(1440, 1200);
+    screenSize(1440, 1600);
     saveFactoryPref("collapsed");
     expect(toggle(mount()).getAttribute("aria-expanded")).toBe("false");
   });

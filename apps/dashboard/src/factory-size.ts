@@ -15,11 +15,12 @@ export function stageHeight(width: number): number {
 }
 
 /**
- * 保存した好みが無いとき、最初から広げるか。広げてもレールとコンソール（.main）に 700px が残る画面だけ広げる
- * （ヘッダ 51 + 帯の見出し 34 + ステータスバー 42 + .main 700 = 827）。それより低い画面は最初は人数の 1 行
+ * 保存した好みが無いとき、最初から広げるか。広げてもコンソールのログの画面（.screen）に 700px が残る画面だけ広げる。
+ * .screen は .main からコンソールの見出し・段階の図など約 410px を引いた残りなので、.main に 1110px 要る
+ * （ヘッダ 51 + 帯の見出し 35 + ステータスバー 42 + .main 1110 = 1238）。それより低い画面は最初は人数の 1 行
  */
 export function expandsByDefault(width: number, height: number): boolean {
-  return height - stageHeight(width) >= 827;
+  return height - stageHeight(width) >= 1238;
 }
 
 /** 帯を最初にたたむか（保存した好みが優先。無ければ画面の大きさ） */

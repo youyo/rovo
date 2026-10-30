@@ -59,7 +59,7 @@ let setItem: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   // 背の高い画面（今日の工場の帯を既定で広げる。Rovo を押して切り替えるテストがある）
   vi.stubGlobal("innerWidth", 1440);
-  vi.stubGlobal("innerHeight", 1200);
+  vi.stubGlobal("innerHeight", 1600);
   setItem = vi.fn();
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => (k === LANG_KEY ? "ja" : null),

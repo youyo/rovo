@@ -240,19 +240,22 @@ describe("背の低い画面では最初はたたむ（広げてもコンソー�
     expect(stageHeight(4000)).toBeLessThanOrEqual(310);
   });
 
-  it("広げても .main に 700px 前後が残る高さのときだけ、既定で広げる", () => {
+  it("広げてもコンソールの画面（.screen）に 700px 前後が残る高さ（.main ≥ 1110）のときだけ、既定で広げる", () => {
     expect(expandsByDefault(1280, 720)).toBe(false);
     expect(expandsByDefault(1440, 900)).toBe(false);
     expect(expandsByDefault(1280, 1000)).toBe(false);
-    expect(expandsByDefault(1440, 1000)).toBe(false);
-    expect(expandsByDefault(1440, 1200)).toBe(true);
-    expect(expandsByDefault(1920, 1200)).toBe(true);
+    expect(expandsByDefault(1440, 1200)).toBe(false);
+    expect(expandsByDefault(1920, 1200)).toBe(false);
+    // layout (23) の 1280 × 1400 は .screen に 700px 超が要るので、たたむ
+    expect(expandsByDefault(1280, 1400)).toBe(false);
+    expect(expandsByDefault(1440, 1600)).toBe(true);
+    expect(expandsByDefault(2560, 1600)).toBe(true);
     for (const [w, h] of [
-      [1280, 1100],
-      [1440, 1200],
-      [2560, 1440],
+      [1280, 1600],
+      [1440, 1600],
+      [2560, 1600],
     ] as const) {
-      if (expandsByDefault(w, h)) expect(h - stageHeight(w)).toBeGreaterThanOrEqual(820);
+      if (expandsByDefault(w, h)) expect(h - stageHeight(w)).toBeGreaterThanOrEqual(1238);
     }
   });
 });

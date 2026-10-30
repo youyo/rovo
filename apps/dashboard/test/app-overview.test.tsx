@@ -47,7 +47,7 @@ let store: Map<string, string>;
 beforeEach(() => {
   // 背の高い画面（今日の工場の帯を既定で広げる）
   vi.stubGlobal("innerWidth", 1440);
-  vi.stubGlobal("innerHeight", 1200);
+  vi.stubGlobal("innerHeight", 1600);
   store = new Map([[LANG_KEY, "ja"]]);
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => store.get(k) ?? null,

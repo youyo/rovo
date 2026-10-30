@@ -52,11 +52,11 @@ export const test = base.extend<{ net: NetworkLog; lang: "ja" | "en" | null }>({
 });
 
 /**
- * 背の高い画面（1440 × 1200）。今日の工場の帯を既定で広げる高さ（背の低い画面は最初はたたんだ人数の 1 行）。
+ * 背の高い画面（1440 × 1600）。今日の工場の帯を既定で広げる高さ（背の低い画面は最初はたたんだ人数の 1 行）。
  * 工場の Rovo を押す・見るテストはログインの前にこれを呼ぶ
  */
 export async function tallScreen(page: Page): Promise<void> {
-  await page.setViewportSize({ width: 1440, height: 1200 });
+  await page.setViewportSize({ width: 1440, height: 1600 });
 }
 
 /** 偽 GitHub の「現在のユーザー」を切り替える（ログインする人）。 */

@@ -197,7 +197,7 @@ const mainTop = (page: Page) =>
 
 for (const [label, w, h] of [
   ["背の低い画面（たたむ既定）", 1440, 900],
-  ["背の高い画面（広げる既定）", 1440, 1200],
+  ["背の高い画面（広げる既定）", 1440, 1600],
 ] as const) {
   test(`(F9) ${label}: 一覧と工場のチャンクの読み込みが遅れても、帯の下（.main）の位置は読み込みの前後で動かない`, async ({
     page,
@@ -230,7 +230,7 @@ for (const [label, w, h] of [
     expect(await mainTop(page), "一覧が届いた後（チャンクはまだ）").toBe(before);
     releaseChunk();
     await expect(page.locator("[data-factory-toggle]")).toBeVisible();
-    if (h >= 1200) await expect(page.locator(".fx-stage svg.fx-svg")).toBeVisible();
+    if (h >= 1600) await expect(page.locator(".fx-stage svg.fx-svg")).toBeVisible();
     else await expect(page.locator("[data-factory-summary]")).toBeVisible();
     expect(await mainTop(page), "チャンクが届いた後").toBe(before);
   });

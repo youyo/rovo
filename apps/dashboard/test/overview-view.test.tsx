@@ -10,6 +10,9 @@ import { inJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// 工場の帯の中身（遅延チャンク）を先に読み込み、React.lazy の解決が CI の遅さに左右されないようにする
+await import("../src/factory-panel");
+
 const roots: { unmount: () => void }[] = [];
 beforeEach(() => {
   // 背の高い画面（今日の工場の帯を既定で広げる）

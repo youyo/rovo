@@ -12,6 +12,9 @@ import { LANG_KEY } from "../src/prefs";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// 工場の帯の中身（遅延チャンク）を先に読み込み、React.lazy の解決が CI の遅さに左右されないようにする
+await import("../src/factory-panel");
+
 // 一覧・詳細・Cloudflare・予算は互いに待たない。遅い（または失敗する）部分があっても、届いたものから描く。
 
 const ID = taskDetailRunningFixture.task.task_id;

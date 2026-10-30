@@ -692,9 +692,14 @@ const track = async (
   await mutate($, (list) => [...list.filter((x) => taskKey(x) !== taskKey(added)), added]);
   await update($, creatingAtom, () => null);
   if (isNew) {
-    // 新しいタスクを拾うたびに開く。狭い端末では待ちになるので、トーストで知らせる。
-    const isPlaced = await openPane($);
-    if (!isPlaced) $.ui.toast("rovo のタスクを始めました。/rovo-console で開けます");
+    // ペインは自動では開かない（利用者が /rovo-console で開く）。代わりに、見えていなければトーストで案内する。
+    let isShown = false;
+    try {
+      isShown = (await $.ui.panes()).some((p) => p.id === PANE_ID && p.isShown);
+    } catch {
+      // 分からなければ案内を出す側に倒す。
+    }
+    if (!isShown) $.ui.toast("rovo のタスクを始めました。/rovo-console で開けます");
   }
 };
 

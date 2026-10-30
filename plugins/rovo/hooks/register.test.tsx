@@ -296,7 +296,9 @@ test("/rovo-console opens a closed pane, closes a shown one, and brings a hidden
   expect(f.text).toContain("開き");
 });
 
-test("the pane opens at each new task, not again for the same task, and by /rovo-console", async ($, on) => {
+const START_TOAST = "rovo のタスクを始めました。/rovo-console で開けます";
+
+test("a new task from task_start never opens the pane; only /rovo-console does", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
   on("command.run", () => ({ text: "engine" }));
@@ -305,53 +307,59 @@ test("the pane opens at each new task, not again for the same task, and by /rovo
 
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
   await $.tool.call({ tool: START, title: "A again", repository: "o/r" });
-  expect(r.opened).toEqual(["rovo"]);
   r.answers.set(START, startAnswer("t2"));
   await $.tool.call({ tool: START, title: "B", repository: "o/r" });
-  expect(r.opened).toEqual(["rovo", "rovo"]);
+  expect(r.opened).toEqual([]);
 
-  r.pane.open = false; // 利用者が閉じた
   const out = await $.command.run({ command: "rovo-console", args: "" } as never);
-  expect(r.opened).toEqual(["rovo", "rovo", "rovo"]);
+  expect(r.opened).toEqual(["rovo"]);
   expect(out.text).toBeDefined();
 });
 
-test("a new task after /rovo-console closes and opens the pane again", async ($, on) => {
+test("a new task after /rovo-console closes the pane still does not open it again", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
   on("command.run", () => ({ text: "engine" }));
   await startSession($);
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
 
-  const out = await $.command.run({ command: "rovo-console", args: "" } as never);
+  await $.command.run({ command: "rovo-console", args: "" } as never); // opens
+  const out = await $.command.run({ command: "rovo-console", args: "" } as never); // closes
   expect(r.closed).toEqual(["rovo"]);
   expect(r.opened).toEqual(["rovo"]);
   expect(out.text).toContain("閉じ");
 
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" }); // same task
-  expect(r.opened).toEqual(["rovo"]);
   r.answers.set(START, startAnswer("t2"));
   await $.tool.call({ tool: START, title: "B", repository: "o/r" });
-  expect(r.opened).toEqual(["rovo", "rovo"]);
+  expect(r.opened).toEqual(["rovo"]);
 });
 
-test("a pane that is not drawn (narrow terminal) toasts how to open it", async ($, on) => {
+test("a new task toasts how to open the pane, once per task, when the pane is not shown", async ($, on) => {
   const r = rig(on);
-  r.placed.value = false;
   r.answers.set(START, startAnswer("t1"));
   await startSession($);
 
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await $.tool.call({ tool: START, title: "A again", repository: "o/r" });
+  expect(r.toasts).toEqual([START_TOAST]);
 
-  expect(r.toasts).toEqual(["rovo のタスクを始めました。/rovo-console で開けます"]);
+  r.pane.open = true;
+  r.pane.behind = true; // 他のタブの裏で見えていない
+  r.answers.set(START, startAnswer("t2"));
+  await $.tool.call({ tool: START, title: "B", repository: "o/r" });
+  expect(r.toasts).toEqual([START_TOAST, START_TOAST]);
+  expect(r.opened).toEqual([]);
 });
 
-test("a drawn pane gives no start toast", async ($, on) => {
+test("a new task gives no start toast while the pane is open and shown", async ($, on) => {
   const r = rig(on);
   r.answers.set(START, startAnswer("t1"));
   await startSession($);
+  r.pane.open = true;
+  r.pane.behind = false;
   await $.tool.call({ tool: START, title: "A", repository: "o/r" });
   expect(r.toasts).toEqual([]);
+  expect(r.opened).toEqual([]);
 });
 
 test('/rovo:create-task opens the pane, shows "creating", and lets the command run on', async ($, on) => {
@@ -570,6 +578,7 @@ test("after 10 minutes of creating, the previous task is shown again", async ($,
 
 test("polls task_console every 4 seconds with the right server and prefix", async ($, on) => {
   const r = rig(on);
+  r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
   r.answers.set(START, startAnswer("t1"));
   r.answers.set(START_HUB, startAnswer("t2"));
   await startSession($);
@@ -644,6 +653,7 @@ test("several tasks are fetched one after another, not together", async ($, on) 
 
 test("the timer stops when every task is terminal, and restarts for a new one", async ($, on) => {
   const r = rig(on);
+  r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
   r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(consoleBody(String(call.args.task_id), { status: "COMPLETED", phase: "done" })),
@@ -705,6 +715,7 @@ test("without task_console it falls back to task_status and says output is unsup
 
 test("task_status carries the terminal state when the console is missing", async ($, on) => {
   const r = rig(on);
+  r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
   r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     call.tool === "task_console" ? err("unknown tool") : ok({ task_id: "t1", status: "FAILED" }),
@@ -747,6 +758,7 @@ test("the status line counts running tasks and clears when none are left", async
 
 test("a terminal task toasts exactly once, with words per state", async ($, on) => {
   const r = rig(on);
+  r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
   await startSession($);
   const states: Record<string, string> = {
     t1: "COMPLETED",
@@ -796,6 +808,7 @@ const startOne = async ($: Parameters<typeof startSession>[0], r: Rig, title = "
 
 test("awaiting budget_extension toasts once, and again after it cleared and came back", async ($, on) => {
   const r = rig(on);
+  r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
   await startOne($, r);
   const awaiting = (v: unknown) =>
     ok(
@@ -819,6 +832,7 @@ test("awaiting budget_extension toasts once, and again after it cleared and came
 
 test("the pane says 予算の承認待ち for awaiting, the question note otherwise, and ignores unknown values", async ($, on) => {
   const r = rig(on);
+  r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
   await startOne($, r);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   const textsOf = async () => {

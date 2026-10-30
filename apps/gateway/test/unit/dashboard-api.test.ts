@@ -15,6 +15,7 @@ import {
   LEDGER_CACHE_TTL_MS,
   readApiTuning,
   resetLedgerCache,
+  deriveStage,
   snapshotToVisibleTask,
 } from "../../src/dashboard/api";
 import { handleDashboard } from "../../src/dashboard/serve";
@@ -1709,6 +1710,46 @@ describe("snapshotToVisibleTask（索引・TaskDO の値を契約の形に整え
     failure_phase: null,
     deps_cache: null,
     sandbox_runtime_ms: null,
+  });
+
+  describe("stage", () => {
+    const stageOf = (over: Partial<TaskIndexSnapshot>) =>
+      snapshotToVisibleTask({ ...base(), ...over }).stage;
+    it("INPUT_REQUIRED は wait", () => {
+      expect(stageOf({ status: "INPUT_REQUIRED", work_stage: "code" })).toBe("wait");
+    });
+    it("COMPLETED: PR が unknown（open か不明）は ready、マージ済みは merged、PR 無しは done", () => {
+      expect(stageOf({ status: "COMPLETED" })).toBe("ready");
+      expect(stageOf({ status: "COMPLETED", pr_merged: true })).toBe("merged");
+      expect(stageOf({ status: "COMPLETED", pr_number: null })).toBe("done");
+    });
+    it("FAILED / CANCELLED / BUDGET_EXCEEDED は done", () => {
+      for (const status of ["FAILED", "CANCELLED", "BUDGET_EXCEEDED"]) {
+        expect(stageOf({ status, work_stage: "code" }), status).toBe("done");
+      }
+    });
+    it("実行中は work_stage。無ければ status から", () => {
+      expect(stageOf({ status: "RUNNING", work_stage: "research" })).toBe("research");
+      expect(stageOf({ status: "RUNNING", work_stage: "review" })).toBe("review");
+      expect(stageOf({ status: "CREATING" })).toBe("prep");
+      expect(stageOf({ status: "VERIFYING" })).toBe("verify");
+      expect(stageOf({ status: "RUNNING" })).toBe("code");
+      expect(stageOf({ status: "RECOVERING" })).toBe("code");
+    });
+    it("kind = review には付けない", () => {
+      for (const status of ["RUNNING", "COMPLETED", "INPUT_REQUIRED", "FAILED"]) {
+        const dto = snapshotToVisibleTask({ ...base(), status, kind: "review" });
+        expect(dto, status).not.toHaveProperty("stage");
+      }
+    });
+    it("PR の状態を GitHub から重ねたあとの stage（closed → done、merged → merged）", () => {
+      const merged = { number: 7, url: "u", draft: false, merged: false, state: "merged" as const };
+      const closed = { ...merged, state: "closed" as const };
+      const open = { ...merged, state: "open" as const };
+      expect(deriveStage({ status: "COMPLETED", pr: merged, kind: "task" }, null)).toBe("merged");
+      expect(deriveStage({ status: "COMPLETED", pr: closed, kind: "task" }, null)).toBe("done");
+      expect(deriveStage({ status: "COMPLETED", pr: open, kind: "task" }, null)).toBe("ready");
+    });
   });
 
   it("時刻は ISO、費用は USD。PR は番号と URL が揃っているときだけ", () => {

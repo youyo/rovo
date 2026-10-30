@@ -1,9 +1,10 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
 import { useState } from "react";
-import { expandsByDefault, type FACTORY_ROOMS, groupFactory, personIndex } from "./factory";
+import { type FACTORY_ROOMS, groupFactory, personIndex } from "./factory";
 import { type FactoryKey, useFactoryT } from "./factory-i18n";
-import { loadFactoryPref, saveFactoryPref } from "./factory-prefs";
+import { saveFactoryPref } from "./factory-prefs";
 import FactoryScene from "./factory-scene";
+import { initialCollapsed } from "./factory-size";
 import type { Key } from "./i18n";
 import { useNarrow } from "./use-narrow";
 
@@ -20,14 +21,6 @@ const SUMMARY: { id: (typeof FACTORY_ROOMS)[number]["id"] | "shipped"; key: Key 
 ];
 /** 1 部屋に並べる人の色の点の上限（残りは数字で分かる） */
 const DOTS = 6;
-
-/** 保存した好みが無いときの既定（広げてもコンソールに高さが残る画面だけ広げる） */
-function initialCollapsed(): boolean {
-  const pref = loadFactoryPref();
-  if (pref !== null) return pref === "collapsed";
-  if (typeof window === "undefined") return true;
-  return !expandsByDefault(window.innerWidth, window.innerHeight);
-}
 
 /**
  * 工場の帯の中身（docs/specs/dashboard-factory.md）。遅延読み込みのチャンク（本体は枠の section だけ）。

@@ -466,6 +466,10 @@ fieldset {
 .fxband-wait {
   height: 34px;
 }
+/* 広げる既定の画面: 見出しの 1 行 + 断面図（帯の幅 × 280 / 1440。1540px で頭打ち）。factory-size.ts の stageHeight と同じ */
+.fxband-wait--open {
+  height: calc(34px + min(100vw, 1540px) * 280 / 1440);
+}
 
 /* タイムライン（ヘッダの下の細い帯） */
 .tlband {

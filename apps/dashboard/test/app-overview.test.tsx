@@ -148,7 +148,9 @@ describe("App: 一覧を実 API の形（fetch）につなぐ", () => {
       all?.click();
     });
     expect(lanesOf(c)).toHaveLength(0);
-    expect(c.querySelector("section[data-factory]")).toBeNull();
+    // 工場の帯は枠だけ（読み込み中の高さを確保した空の枠。前のスコープの Rovo も人数も出さない）
+    expect(c.querySelector("section[data-factory] .fxband-wait")).not.toBeNull();
+    expect(c.querySelector("section[data-factory] [data-task], [data-factory-summary]")).toBeNull();
     expect(c.querySelector("a.rail-row")).toBeNull();
     expect(c.textContent).toContain("読み込み中");
   });

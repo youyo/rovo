@@ -69,6 +69,28 @@ describe("FactoryBand（本体の枠。中身は遅延読み込み）", () => {
   });
 });
 
+describe("FactoryBand の読み込み中の枠（帯の下を動かさない）", () => {
+  it("一覧がまだ（data が null）でも枠を出す。高さは既定の状態に合わせる（たたむ既定は 1 行、広げる既定は断面図の分も）", () => {
+    const one = (w: number, h: number) => {
+      document.body.innerHTML = "";
+      screenSize(w, h);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      act(() => root.render(inJa(createElement(FactoryBand, { data: null }))));
+      return container.querySelector("section[data-factory] .fxband-wait");
+    };
+    expect(one(1280, 720)?.classList.contains("fxband-wait--open")).toBe(false);
+    expect(one(1440, 1200)?.classList.contains("fxband-wait--open")).toBe(true);
+    saveFactoryPref("collapsed");
+    expect(one(1440, 1200)?.classList.contains("fxband-wait--open")).toBe(false);
+    stubNarrow(true);
+    saveFactoryPref("expanded");
+    expect(one(1440, 1200)?.classList.contains("fxband-wait--open")).toBe(false);
+  });
+});
+
 describe("FactoryPanel（帯の中身）", () => {
   it("背の高い画面（広げても .main に高さが残る）では、既定で断面図を広げる", () => {
     const c = mount();

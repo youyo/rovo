@@ -190,3 +190,48 @@ for (const scheme of ["light", "dark"] as const) {
     await page.screenshot({ path: join(dir, `${scheme}-1280x720-default.png`) });
   });
 }
+
+/** 帯の下（.main）の上端の位置 */
+const mainTop = (page: Page) =>
+  page.locator(".main").evaluate((el) => Math.round(el.getBoundingClientRect().top));
+
+for (const [label, w, h] of [
+  ["背の低い画面（たたむ既定）", 1440, 900],
+  ["背の高い画面（広げる既定）", 1440, 1200],
+] as const) {
+  test(`(F9) ${label}: 一覧と工場のチャンクの読み込みが遅れても、帯の下（.main）の位置は読み込みの前後で動かない`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: w, height: h });
+    await loginAs(page, s.users.alice);
+    await expect(page.locator("[data-factory-toggle]")).toBeVisible();
+    // 一覧の応答と工場のチャンクを遅らせて開き直す
+    let releaseOverview = () => {};
+    let releaseChunk = () => {};
+    const overviewHeld = new Promise<void>((r) => {
+      releaseOverview = r;
+    });
+    const chunkHeld = new Promise<void>((r) => {
+      releaseChunk = r;
+    });
+    await page.route(/\/dashboard\/api\/overview/, async (route) => {
+      await overviewHeld;
+      await route.continue();
+    });
+    await page.route(/\/dashboard\/assets\/factory-panel-.+\.(js|css)$/, async (route) => {
+      await chunkHeld;
+      await route.continue();
+    });
+    await page.reload();
+    await expect(page.locator(".main")).toBeVisible();
+    const before = await mainTop(page);
+    releaseOverview();
+    await expect(page.locator("a.rail-row").first()).toBeVisible();
+    expect(await mainTop(page), "一覧が届いた後（チャンクはまだ）").toBe(before);
+    releaseChunk();
+    await expect(page.locator("[data-factory-toggle]")).toBeVisible();
+    if (h >= 1200) await expect(page.locator(".fx-stage svg.fx-svg")).toBeVisible();
+    else await expect(page.locator("[data-factory-summary]")).toBeVisible();
+    expect(await mainTop(page), "チャンクが届いた後").toBe(before);
+  });
+}

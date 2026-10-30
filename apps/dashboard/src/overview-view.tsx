@@ -58,8 +58,9 @@ export function OverviewView(props: {
   let band: ReactNode = null;
   // 更新時刻（引き出しの表示）。タイムラインの「いま」は今日のときだけ使う
   const nowMs = data ? Date.parse(data.generated_at) : 0;
-  if (data && props.isToday && mode !== "detail") {
-    // 今日は工場の帯（マイタスクでも。API が自分の分しか返さないので自分の Rovo だけ）
+  if (props.isToday && mode !== "detail") {
+    // 今日は工場の帯（マイタスクでも。API が自分の分しか返さないので自分の Rovo だけ）。
+    // 一覧がまだ（data が null）でも枠だけは出し、届いたときに帯の下を動かさない
     band = <FactoryBand data={data} onSelect={props.onSelectTask} />;
   } else if (data && data.scope === "all" && mode !== "detail") {
     const dayStart = Date.parse(data.range.from);

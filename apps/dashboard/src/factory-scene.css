@@ -552,7 +552,6 @@
 }
 
 .fx-stage {
-  height: 300px;
   background: linear-gradient(to bottom, var(--fx-sky1), var(--fx-sky2) 97%, var(--fx-m11) 97%);
 }
 .fx-svg {
@@ -1030,4 +1029,7 @@
   .fx-walking .fx-footR {
     animation: fx-step 0.45s ease-in-out infinite alternate-reverse;
   }
+}
+.fx-hit {
+  fill: transparent;
 }

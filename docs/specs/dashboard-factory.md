@@ -20,7 +20,7 @@
 
 - **今日 = 工場の帯、過去の日 = 今のタイムラインの帯**（タイムラインの実装は残す）。
 - マイタスク（`scope=me`）でも工場を出す。API が自分のタスクしか返さないので、工場にいるのは自分の Rovo だけ。チーム（`scope=all`）は全員。
-- 見えないタスク（`HiddenTasksDto`）は工場に入れず、件数だけを出す。DOM（`data-task` など）にも出さない。
+- 見えないタスク（`HiddenTasksDto`）は工場に入れず、件数だけを出す。DOM（`data-task` など）にも出さない。件数は一覧の応答にある今月の分（`month.hidden_tasks.count`。日ごとの件数は応答に無い）で、「見えない n 件」と出し、`title` で今月の分だと説明する。
 - 帯の高さは上限 300px 前後で、幅に合わせて縮小する（拡大はしない）。帯の端のボタンで**たためる**。たたむと「部屋ごとの人数」の 1 行になり、その状態はブラウザに覚えておく（`prefs.ts`）。
 - 狭い幅（720px 以下）では断面図を出さず、たたんだときと同じ「部屋ごとの人の色の点と人数」の簡略版にする。
 - Rovo を押すと、そのタスクを選ぶ（レール・タイムラインの棒と同じ `href` と `pushState` の流儀）。
@@ -40,7 +40,7 @@
 | `code` | コーディング | RUNNING / RECOVERING で、最後のツールが編集・コマンド・commit 系（`edit_file` `write_file` `bash` `git_commit` など。調査系以外） |
 | `research` | 調査 | RUNNING / RECOVERING で、最後のツールが `web_search` `web_fetch` `web_browse` |
 | `verify` | 検証 | VERIFYING（worker_review の再検証 rechecking を含む） |
-| `review` | レビュー | worker_review のレビューの段（commands / reviewing）。kind = review のタスクの実行中もここ |
+| `review` | レビュー | worker_review のレビューの段（commands / reviewing） |
 | `wait` | 返事待ち | INPUT_REQUIRED |
 | `ready` | 確認待ち | COMPLETED で、PR がマージも閉じもされていない |
 | `merged` | 出荷済み | PR がマージ済み（`pr.merged` または `pr.state = merged`） |

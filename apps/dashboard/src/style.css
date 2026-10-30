@@ -458,6 +458,82 @@ fieldset {
   }
 }
 
+/* 工場の帯（今日）。断面図の見た目は factory-scene.css（遅延読み込みのチャンク）。
+   断面図の高さは上限 300px で、背の低い画面ではレールとコンソール（.main の min-height）を残すよう縮める */
+.fxband {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.fxband-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  min-height: 34px;
+  padding: 4px 20px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.fxband-title {
+  font-weight: 700;
+  color: var(--fg);
+}
+.fxband-toggle {
+  margin-left: auto;
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.fxband-wait,
+.fx-stage {
+  height: clamp(120px, calc(100dvh - 620px), 300px);
+}
+.fxs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fxs li,
+.fxs-dots {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.fxs-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.fxs-dot.p0 {
+  background: var(--person-0);
+}
+.fxs-dot.p1 {
+  background: var(--person-1);
+}
+.fxs-dot.p2 {
+  background: var(--person-2);
+}
+.fxs-dot.p3 {
+  background: var(--person-3);
+}
+.fxs-dot.p4 {
+  background: var(--person-4);
+}
+.fxs-dot.p5 {
+  background: var(--person-5);
+}
+.fxs-n {
+  font-family: var(--mono);
+  color: var(--fg);
+}
+
 /* タイムライン（ヘッダの下の細い帯） */
 .tlband {
   max-height: 56px;

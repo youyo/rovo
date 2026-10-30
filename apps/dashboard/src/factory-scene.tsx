@@ -1748,6 +1748,12 @@ export default function FactoryScene(props: {
                     />
                   )}
                 </g>
+                {/* 押す場所（上に重ねた動かない当たり判定。Rovo は待機の動作で動き続ける） */}
+                <rect
+                  className="fx-hit"
+                  width={b.place === "shipped" ? 14 : BOT_W}
+                  height={b.place === "shipped" ? 14 : BOT_H}
+                />
               </g>
             </a>
           );

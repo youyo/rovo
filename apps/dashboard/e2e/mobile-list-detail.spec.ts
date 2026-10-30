@@ -35,7 +35,8 @@ test("(L2) 390px: 行を押すと詳細だけになり「← 一覧」がある�
   await expect(page).toHaveURL(new RegExp(`/dashboard/tasks/${id("running")}`));
   await expect(page.locator(".console h1")).toBeVisible();
   await expect(page.locator("nav.rail")).toHaveCount(0);
-  await expect(page.locator(".tlband")).toHaveCount(0);
+  // 詳細だけの画面は帯（工場の 1 行もタイムラインも）を出さない
+  await expect(page.locator(".tlband, section[data-factory]")).toHaveCount(0);
   const back = page.getByRole("button", { name: "← 一覧" });
   await expect(back).toBeVisible();
   const lengthWithDetail = await page.evaluate(() => history.length);

@@ -53,13 +53,27 @@ test("(sw-1) レールで別のタスクを押すと、ページを読み直さ�
   expect(await marker(page)).toBe(1);
 });
 
-test("(sw-2) タイムラインの棒でも、ページを読み直さずに切り替わる", async ({ page }) => {
-  const done = s.tasks.done as string;
+test("(sw-2) 工場の Rovo（今日）でも、ページを読み直さずに切り替わる", async ({ page }) => {
+  const running = s.tasks.running as string;
   await loginAs(page, s.users.alice);
   await page.getByRole("button", { name: "チーム" }).click();
   await setMarker(page);
-  await page.locator(`a[data-task="${done}"]`).click();
-  await expect(page).toHaveURL(new RegExp(`${taskPath(done)}$`));
+  await page.locator(`section[data-factory] a[data-task="${running}"] .fx-hit`).click();
+  await expect(page).toHaveURL(new RegExp(`${taskPath(running)}$`));
+  await expect(page.getByRole("heading", { level: 1, name: "実行中のタスク" })).toBeVisible();
+  expect(await marker(page)).toBe(1);
+});
+
+test("(sw-2b) 過去の日のタイムラインの棒でも、ページを読み直さずに切り替わる", async ({ page }) => {
+  const done = s.tasks.done as string;
+  // ブラウザだけ 1 日先の時計にする → テストのタスクは「前の日」になる
+  await page.clock.setFixedTime(Date.now() + 24 * 3_600_000);
+  await loginAs(page, s.users.alice);
+  await page.getByRole("button", { name: "チーム" }).click();
+  await page.getByRole("button", { name: "前の日" }).click();
+  await setMarker(page);
+  await page.locator(`.tlband a[data-task="${done}"]`).click();
+  await expect(page).toHaveURL(new RegExp(`${taskPath(done)}\\?day=`));
   await expect(page.getByRole("heading", { level: 1, name: "完了したタスク" })).toBeVisible();
   expect(await marker(page)).toBe(1);
 });

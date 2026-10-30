@@ -73,6 +73,7 @@ const COLUMNS = [
   "verify_attempt",
   "target_pr_number",
   "target_pr_url",
+  "work_stage",
 ] as const;
 
 /** 後から足した列（既存の索引には ALTER TABLE で足す。値の無い行は NULL） */
@@ -83,6 +84,7 @@ const ADDED_COLUMNS = [
   ["verify_attempt", "INTEGER"],
   ["target_pr_number", "INTEGER"],
   ["target_pr_url", "TEXT"],
+  ["work_stage", "TEXT"],
 ] as const;
 
 /**
@@ -364,6 +366,7 @@ export class DirectoryDO extends DurableObject<Env> {
         s.verify_attempt ?? null,
         s.target_pr_number ?? null,
         s.target_pr_url ?? null,
+        s.work_stage ?? null,
       ];
       sql.exec(
         `INSERT OR REPLACE INTO task_index (${COLUMNS.join(", ")}, revision)
@@ -720,6 +723,7 @@ function toRow(r: DbRow): TaskIndexRow {
     "verify_attempt",
     "target_pr_number",
     "target_pr_url",
+    "work_stage",
   ] as const) {
     if (row[k] === null) delete row[k];
   }

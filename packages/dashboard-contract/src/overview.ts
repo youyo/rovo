@@ -52,6 +52,19 @@ export const PrDtoSchema = z.strictObject({
 });
 export type PrDto = z.infer<typeof PrDtoSchema>;
 
+export const STAGES = [
+  "prep",
+  "code",
+  "research",
+  "verify",
+  "review",
+  "wait",
+  "ready",
+  "merged",
+  "done",
+] as const;
+export type Stage = (typeof STAGES)[number];
+
 /**
  * **閲覧者に見えるタスク 1 件**。task_id・owner_login・repository・pr_url・model・title を持つのはこの型だけで、
  * 閲覧権限の無いタスクにはこの型を使わない（個別の行を作らず、`HiddenTasksDto` の件数と合計だけにする。D7）。
@@ -79,6 +92,8 @@ export const VisibleTaskDtoSchema = z.strictObject({
    * 古い gateway の応答・索引に無い行では省く（省いた行は "task" として扱う）。
    */
   kind: z.enum(["task", "review"]).optional(),
+  /** 工場の段（docs/specs/dashboard-factory.md）。古い gateway の応答では省く */
+  stage: z.enum(STAGES).optional(),
 });
 export type VisibleTaskDto = z.infer<typeof VisibleTaskDtoSchema>;
 

@@ -2,7 +2,7 @@ import type { OverviewDto } from "@rovo/dashboard-contract";
 import { overviewFixture, overviewMeFixture } from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverviewView } from "../src/overview-view";
 import { TL_AXIS_H, TL_BAND_H, TL_MIN_LANE_H } from "../src/timeline-view";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
@@ -11,7 +11,14 @@ import { inJa } from "./lang";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const roots: { unmount: () => void }[] = [];
+beforeEach(() => {
+  // 背の高い画面（今日の工場の帯を既定で広げる）
+  vi.stubGlobal("innerWidth", 1440);
+  vi.stubGlobal("innerHeight", 1200);
+  localStorage.clear();
+});
 afterEach(() => {
+  vi.unstubAllGlobals();
   for (const r of roots.splice(0)) act(() => r.unmount());
   document.body.innerHTML = "";
 });

@@ -13,9 +13,7 @@
   --fx-m4: #4b545e;
   --fx-m5: #57606a;
   --fx-m6: #6e7781;
-  --fx-m7: #8c959f;
   --fx-m8: #9aa5b1;
-  --fx-m8b: #a9b7c5;
   --fx-m9: #b6bec7;
   --fx-m10: #c9d1d9;
   --fx-m11: #d3d9e0;
@@ -30,7 +28,6 @@
   --fx-city: #b3c2d0;
   --fx-cwin: #d3dde6;
   --fx-tree: #8fb39a;
-  --fx-tree2: #7ea98b;
   --fx-trunk: #7a5c45;
   --fx-gl1: #e4f2fd;
   --fx-gl2: #9cc6ea;
@@ -48,12 +45,10 @@
   --fx-o2: #d9700e;
   --fx-o3: #e2780f;
   --fx-hz: #f2c230;
-  --fx-hz2: #c9a227;
   --fx-amb: #f59f00;
   --fx-olv: #8a6d0b;
   --fx-oink: #5c4300;
   --fx-gold: #bf8700;
-  --fx-sdot: #ffe9a6;
   --fx-box: #e8c48a;
   --fx-boxl: #c9a46a;
   --fx-wood: #a07a5a;
@@ -61,9 +56,6 @@
   --fx-clay: #a0603d;
   --fx-cop: #c98f6b;
   --fx-cop2: #e8956b;
-  --fx-sand: #c9b8a6;
-  --fx-strip: #b8c7d6;
-  --fx-tower: #8a7563;
   --fx-ok: #1a7f37;
   --fx-led: #3fb950;
   --fx-g1: #1f5133;
@@ -83,15 +75,11 @@
   --fx-pp3: #5a636e;
   --fx-red: #cf222e;
   --fx-red2: #ff7b72;
-  --fx-red3: #7a1a1f;
   --fx-flame: #f76707;
   --fx-blue: #79c0ff;
   --fx-blue2: #4dabf7;
   --fx-navy: #1b4a7a;
   --fx-pblue: #8fb0cc;
-  --fx-sol: #1e3a5f;
-  --fx-sol2: #5b7fa6;
-  --fx-sol3: #9ec1e6;
   --fx-pale: #cfe4f7;
   --fx-vio: #845ef7;
   --fx-pink: #e64980;
@@ -115,9 +103,7 @@
     --fx-m4: #444c56;
     --fx-m5: #545d68;
     --fx-m6: #626b75;
-    --fx-m7: #6e7781;
     --fx-m8: #76818d;
-    --fx-m8b: #4b5664;
     --fx-m9: #4b545e;
     --fx-m10: #69737e;
     --fx-m11: #353c46;
@@ -132,7 +118,6 @@
     --fx-city: #1a2740;
     --fx-cwin: #ffd56a;
     --fx-tree: #1d3a30;
-    --fx-tree2: #23463a;
     --fx-trunk: #3a2c22;
     --fx-gl1: #ffe9a8;
     --fx-gl2: #e0a63a;
@@ -143,7 +128,6 @@
     --fx-mortar: #4a332b;
     --fx-bredge: #3a1b12;
     --fx-hz: #d9a92a;
-    --fx-hz2: #9c7c1c;
     --fx-gold: #d29922;
     --fx-box: #d9b06e;
     --fx-boxl: #a9844c;
@@ -151,17 +135,11 @@
     --fx-wood2: #4e3a2c;
     --fx-clay: #7a442a;
     --fx-cop: #8f5e42;
-    --fx-sand: #4a3f36;
-    --fx-strip: #2a3a4f;
-    --fx-tower: #4a3c30;
     --fx-ok: #2ea043;
     --fx-g3: #2f5a44;
     --fx-g4: #3a6b52;
     --fx-red: #da3633;
     --fx-pblue: #3d5a75;
-    --fx-sol: #16263d;
-    --fx-sol2: #2f4a6b;
-    --fx-sol3: #3d5a80;
     --fx-pale: #b9d3ea;
   }
 }
@@ -331,14 +309,8 @@
 .fx .f-m6 {
   fill: var(--fx-m6);
 }
-.fx .f-m7 {
-  fill: var(--fx-m7);
-}
 .fx .f-m8 {
   fill: var(--fx-m8);
-}
-.fx .f-m8b {
-  fill: var(--fx-m8b);
 }
 .fx .f-m9 {
   fill: var(--fx-m9);
@@ -355,9 +327,6 @@
 .fx .f-ok {
   fill: var(--fx-ok);
 }
-.fx .f-ol {
-  fill: var(--fx-ol);
-}
 .fx .f-olv {
   fill: var(--fx-olv);
 }
@@ -372,9 +341,6 @@
 }
 .fx .f-red {
   fill: var(--fx-red);
-}
-.fx .f-red2 {
-  fill: var(--fx-red2);
 }
 .fx .f-rg2 {
   fill: var(--fx-rg2);
@@ -391,17 +357,8 @@
 .fx .f-s3 {
   fill: var(--fx-s3);
 }
-.fx .f-sand {
-  fill: var(--fx-sand);
-}
-.fx .f-sdot {
-  fill: var(--fx-sdot);
-}
 .fx .f-sfg {
   fill: var(--fx-sfg);
-}
-.fx .f-strip {
-  fill: var(--fx-strip);
 }
 .fx .f-td {
   fill: var(--fx-td);
@@ -418,14 +375,8 @@
 .fx .f-tl {
   fill: var(--fx-tl);
 }
-.fx .f-tower {
-  fill: var(--fx-tower);
-}
 .fx .f-tree {
   fill: var(--fx-tree);
-}
-.fx .f-tree2 {
-  fill: var(--fx-tree2);
 }
 .fx .f-trunk {
   fill: var(--fx-trunk);
@@ -469,9 +420,6 @@
 .fx .s-hz {
   stroke: var(--fx-hz);
 }
-.fx .s-hz2 {
-  stroke: var(--fx-hz2);
-}
 .fx .s-led {
   stroke: var(--fx-led);
 }
@@ -480,9 +428,6 @@
 }
 .fx .s-m11 {
   stroke: var(--fx-m11);
-}
-.fx .s-m14 {
-  stroke: var(--fx-m14);
 }
 .fx .s-m2 {
   stroke: var(--fx-m2);
@@ -495,9 +440,6 @@
 }
 .fx .s-m6 {
   stroke: var(--fx-m6);
-}
-.fx .s-m7 {
-  stroke: var(--fx-m7);
 }
 .fx .s-m8 {
   stroke: var(--fx-m8);
@@ -526,23 +468,11 @@
 .fx .s-red2 {
   stroke: var(--fx-red2);
 }
-.fx .s-red3 {
-  stroke: var(--fx-red3);
-}
 .fx .s-s3 {
   stroke: var(--fx-s3);
 }
 .fx .s-shine {
   stroke: var(--fx-shine);
-}
-.fx .s-sol {
-  stroke: var(--fx-sol);
-}
-.fx .s-sol2 {
-  stroke: var(--fx-sol2);
-}
-.fx .s-sol3 {
-  stroke: var(--fx-sol3);
 }
 .fx .s-wh {
   stroke: var(--fx-wh);
@@ -551,13 +481,83 @@
   stroke: var(--fx-wood2);
 }
 
+/* 帯の見出しの 1 行と、たたんだとき・狭い幅の「部屋ごとの人数」の 1 行 */
+.fxband-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  min-height: 34px;
+  padding: 4px 20px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.fxband-title {
+  font-weight: 700;
+  color: var(--fg);
+}
+.fxband-toggle {
+  margin-left: auto;
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.fxs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fxs li,
+.fxs-dots {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.fxs-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.fxs-dot.p0 {
+  background: var(--person-0);
+}
+.fxs-dot.p1 {
+  background: var(--person-1);
+}
+.fxs-dot.p2 {
+  background: var(--person-2);
+}
+.fxs-dot.p3 {
+  background: var(--person-3);
+}
+.fxs-dot.p4 {
+  background: var(--person-4);
+}
+.fxs-dot.p5 {
+  background: var(--person-5);
+}
+.fxs-n {
+  font-family: var(--mono);
+  color: var(--fg);
+}
+
+/* 断面図は横長（1440 × 280）。幅に合わせて縮め、最大幅（1540px）より広い画面では中央に置いて、左右は空と地面が続く */
 .fx-stage {
-  background: linear-gradient(to bottom, var(--fx-sky1), var(--fx-sky2) 97%, var(--fx-m11) 97%);
+  background: linear-gradient(to bottom, var(--fx-sky1), var(--fx-sky2) 93.6%, var(--fx-m11) 93.6%);
 }
 .fx-svg {
   display: block;
   width: 100%;
-  height: 100%;
+  max-width: 1540px;
+  height: auto;
+  margin: 0 auto;
 }
 .fx-mono {
   font-family: var(--mono);
@@ -843,7 +843,7 @@
     }
     38%,
     55% {
-      transform: translateY(-342px);
+      transform: translateY(-110px);
     }
     68%,
     100% {

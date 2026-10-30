@@ -32,10 +32,12 @@ test("(L1) 詳細の応答が遅くても、一覧（レール・帯・ステー
   await expect(page.locator(".console[data-preview] h1")).toBeVisible();
   await expect(page.locator(".console .now-line")).toHaveCount(0);
   // 今日はマイタスクでも工場の帯が、詳細を待たずに出る（断面図も描かれる）。チームに切り替えても帯とボードが先に出る
-  await expect(page.locator("section[data-factory] .fx-stage svg.fx-svg")).toBeVisible();
+  await expect(page.locator("section[data-factory] [data-factory-summary]")).toBeVisible();
   await expect(page.locator(".tlband")).toHaveCount(0);
   await page.getByRole("button", { name: "チーム" }).click();
-  await expect(page.locator("section[data-factory] a[data-task]").first()).toBeVisible();
+  await expect(
+    page.locator('section[data-factory] [data-factory-summary] [data-room="prep"]'),
+  ).not.toHaveAttribute("data-n", "0");
   await expect(page.locator(".statusbar [data-sb='budget-me']")).toContainText("今月");
   await expect(page.locator("[data-teamboard]")).toBeVisible();
   await expect(page.locator(".console-col")).not.toContainText("読み込み中");

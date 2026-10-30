@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, loginAs, openDrawer, rail, taskPath, test } from "./fixtures";
+import { expect, loginAs, openDrawer, rail, tallScreen, taskPath, test } from "./fixtures";
 import { readState } from "./state";
 
 const s = readState();
@@ -32,6 +32,7 @@ function collectApi(page: Page): ApiResponse[] {
 
 test("(6) 権限の無いタスクは、一覧の画面にもネットワーク応答にも出ない", async ({ page }) => {
   const api = collectApi(page);
+  await tallScreen(page);
   await loginAs(page, s.users.bob);
   await expect(rail(page, s.tasks.bob as string)).toBeVisible();
   // 既定は「マイタスク」。他人のタスクの権限を確かめるので「チーム」にする

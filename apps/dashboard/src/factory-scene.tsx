@@ -1,5 +1,5 @@
 import type { OverviewDto, VisibleTaskDto } from "@rovo/dashboard-contract";
-import { type ReactNode, useLayoutEffect, useRef } from "react";
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { isPlainLeftClick } from "./click";
 import {
   BOT_GAP,
@@ -15,11 +15,11 @@ import {
   type MoreShare,
   moveOf,
   type Place,
-  perRow,
   personIndex,
   type RoomGeom,
   type RoomId,
   roomCapacity,
+  SCENE,
 } from "./factory";
 import "./factory-scene.css";
 import { type FT, useFactoryT } from "./factory-i18n";
@@ -30,18 +30,9 @@ import { taskPath } from "./route";
 /**
  * 工場の断面図（docs/specs/dashboard-factory.md。見本 Factory2 の案 A v5 を写したもの）。遅延読み込みの別チャンク。
  * 見本は位置と色をインラインの style で組んでいたが、ここでは位置を SVG の属性、色を factory-scene.css のクラス（トークン）で渡す
- * （CSP の style-src 'self'。style 属性と <style> 要素は作らない）。座標は見本の 1440 × 1000 の座標系のまま。
+ * （CSP の style-src 'self'。style 属性と <style> 要素は作らない）。帯に合わせて横長の 2 階建て（1440 × 280）に組み直した。
  * 待機の動作と背景の部品は CSS のアニメーション、工程が変わった Rovo の移動は Web Animations API（element.animate）。
  */
-
-/** 断面図の見せる範囲（看板の上から地面まで） */
-const VIEW = { x: 0, y: 36, w: 1440, h: 754 } as const;
-/** 歩く通路の高さ（Rovo の枠の上端）。1 階と 2 階 */
-const CORRIDOR: Record<1 | 2, number> = { 1: 654, 2: 312 };
-/** エレベーターのかごの中の Rovo の左端 */
-const LIFT_X = 1138;
-/** 歩く速さ（座標 / ミリ秒） */
-const SPEED = 0.22;
 
 type Pose = "carry" | "type" | "press" | "scan" | "ask" | "rest";
 const POSE: Record<RoomId, Pose> = {
@@ -97,30 +88,29 @@ type Spot = { x: number; y: number };
 type Placed = { task: VisibleTaskDto; place: Place; at: Spot; pose: Pose | null; i: number };
 type Tile = { room: RoomId; at: Spot; more: number; shares: MoreShare[]; rest: VisibleTaskDto[] };
 
-/** 部屋の床に Rovo を並べる（下の段から詰め、各段は中央寄せ。見本の flex-wrap + align-content: flex-end と同じ） */
+/** 歩く通路の高さ（Rovo の枠の上端。床に立つ高さ）。1 階と 2 階 */
+const CORRIDOR: Record<1 | 2, number> = { 1: 256 - 3 - BOT_H, 2: 146 - 3 - BOT_H };
+/** エレベーターのかごの中の Rovo の左端 */
+const LIFT_X = 1239;
+/** 歩く速さ（座標 / ミリ秒） */
+const SPEED = 0.12;
+/** Rovo とタイルの絵（見本の 60 × 68 の枠で描いたもの）を帯の大きさに縮める倍率 */
+const BOT_SCALE = 0.9;
+
+/** 部屋の床に Rovo を 1 段で並べる（中央寄せ） */
 function floorSpots(r: RoomGeom, count: number): Spot[] {
-  const n = perRow(r.id);
-  const lines = Math.ceil(count / n);
-  const bottom = r.y + r.h - 9;
-  const inner = r.w - 16;
-  const out: Spot[] = [];
-  for (let i = 0; i < count; i++) {
-    const line = Math.floor(i / n);
-    const inLine = Math.min(n, count - line * n);
-    const width = inLine * BOT_W + (inLine - 1) * BOT_GAP;
-    const col = i % n;
-    out.push({
-      x: r.x + 8 + (inner - width) / 2 + col * (BOT_W + BOT_GAP),
-      y: bottom - (lines - line) * BOT_H,
-    });
-  }
-  return out;
+  const width = count * BOT_W + Math.max(0, count - 1) * BOT_GAP;
+  const x0 = r.x + (r.w - width) / 2;
+  return Array.from({ length: count }, (_, i) => ({
+    x: x0 + i * (BOT_W + BOT_GAP),
+    y: CORRIDOR[r.floor],
+  }));
 }
 
 /** 出荷口の箱の位置（トラックの荷台に 5 個ずつ 2 段） */
 const SHIP_MAX = 10;
 function shipSpot(i: number): Spot {
-  return { x: 1262 + (i % 5) * 18, y: 646 + Math.floor(i / 5) * 18 };
+  return { x: 1316 + (i % 5) * 15, y: 204 + Math.floor(i / 5) * 15 };
 }
 
 export function placeFactory(tasks: readonly VisibleTaskDto[]): { bots: Placed[]; tiles: Tile[] } {
@@ -156,7 +146,7 @@ export function walkPath(from: Spot, to: Spot, fromPlace: Place, toPlace: Place)
   return pts;
 }
 
-function walk(el: Element, pts: Spot[], to: Spot): void {
+function walk(el: Element, pts: Spot[], to: Spot): Animation | null {
   let total = 0;
   const dist = [0];
   for (let i = 1; i < pts.length; i++) {
@@ -165,18 +155,15 @@ function walk(el: Element, pts: Spot[], to: Spot): void {
     total += Math.abs(p.x - q.x) + Math.abs(p.y - q.y);
     dist.push(total);
   }
-  if (total === 0) return;
+  if (total === 0) return null;
   const frames = pts.map((p, i) => ({
     transform: `translate(${p.x - to.x}px, ${p.y - to.y}px)`,
     offset: (dist[i] as number) / total,
   }));
-  el.classList.add("fx-walking");
-  const anim = el.animate(frames, {
+  return el.animate(frames, {
     duration: Math.min(9000, Math.max(1500, total / SPEED)),
     easing: "linear",
   });
-  anim.onfinish = () => el.classList.remove("fx-walking");
-  anim.oncancel = anim.onfinish;
 }
 
 function reducedMotion(): boolean {
@@ -187,13 +174,20 @@ function reducedMotion(): boolean {
   );
 }
 
-/** 前回の場所を覚えて、場所が変わった Rovo だけ歩かせる（FLIP） */
+/**
+ * 前回の場所を覚えて、場所が変わった Rovo だけ歩かせる（FLIP）。歩いている Rovo は state に持ち、
+ * 歩く姿（fx-walking）は className に入れる（ポーリングで並びが変わって className が書き直されても消えない）。
+ * 歩き途中にまた場所が変わったら、前の歩きを止めて今の場所から歩き直す。
+ */
 function useWalks(bots: Placed[]) {
   const prev = useRef(new Map<string, { place: Place; at: Spot }>());
   const nodes = useRef(new Map<string, Element>());
+  const anims = useRef(new Map<string, Animation>());
+  const [walking, setWalking] = useState<ReadonlySet<string>>(() => new Set());
   useLayoutEffect(() => {
     const motion = !reducedMotion();
     const next = new Map<string, { place: Place; at: Spot }>();
+    const started: string[] = [];
     for (const b of bots) {
       const id = b.task.task_id;
       next.set(id, { place: b.place, at: b.at });
@@ -202,14 +196,31 @@ function useWalks(bots: Placed[]) {
       const el = nodes.current.get(id);
       if (!motion || old === undefined || move === null || el === undefined) continue;
       if (typeof el.animate !== "function") continue;
-      walk(el, walkPath(old.at, b.at, move.from, move.to), b.at);
+      anims.current.get(id)?.cancel();
+      const anim = walk(el, walkPath(old.at, b.at, move.from, move.to), b.at);
+      if (anim === null) continue;
+      anims.current.set(id, anim);
+      const done = () => {
+        if (anims.current.get(id) !== anim) return;
+        anims.current.delete(id);
+        setWalking((s) => {
+          const n = new Set(s);
+          n.delete(id);
+          return n;
+        });
+      };
+      anim.onfinish = done;
+      anim.oncancel = done;
+      started.push(id);
     }
     prev.current = next;
+    if (started.length > 0) setWalking((s) => new Set([...s, ...started]));
   });
-  return (id: string) => (el: Element | null) => {
+  const ref = (id: string) => (el: Element | null) => {
     if (el) nodes.current.set(id, el);
     else nodes.current.delete(id);
   };
+  return { ref, walking };
 }
 
 function botLabel(task: VisibleTaskDto, place: Place, t: FT): string {
@@ -371,34 +382,493 @@ function Bot(props: { pose: Pose; login: string; dest: string }) {
   );
 }
 
-/** 部屋の名前の札（名前・補足・人数） */
-function Plate(props: { cx: number; y: number; name: string; sub: string; n: string }) {
-  const nameW = textWidth(props.name, 20);
-  const subW = textWidth(props.sub, 14);
-  const nW = Math.max(26, textWidth(props.n, 16) + 14);
-  const w = 16 + nameW + 10 + subW + 10 + nW + 12;
-  const x = props.cx - w / 2;
+/** 部屋の名前の札（名前・補足・人数）。部屋の左上に置き、幅を返す */
+function plateWidth(name: string, sub: string, n: string): number {
+  return (
+    8 + textWidth(name, 13) + 6 + textWidth(sub, 10) + 6 + Math.max(18, textWidth(n, 11) + 10) + 6
+  );
+}
+function Plate(props: { x: number; y: number; name: string; sub: string; n: string }) {
+  const { x, y } = props;
+  const nameW = textWidth(props.name, 13);
+  const subW = textWidth(props.sub, 10);
+  const nW = Math.max(18, textWidth(props.n, 11) + 10);
+  const w = plateWidth(props.name, props.sub, props.n);
   return (
     <g className="fx-plate">
-      <rect className="f-m2" x={x} y={props.y} width={w} height={32} rx={6} />
-      <rect className="f-ol" x={x} y={props.y + 32} width={w} height={3} rx={1.5} />
-      <text className="fx-sans f-tw" x={x + 16} y={props.y + 23} fontSize={20} fontWeight={700}>
+      <rect className="f-m2" x={x} y={y} width={w} height={20} rx={4} />
+      <text className="fx-sans f-tw" x={x + 8} y={y + 14.5} fontSize={13} fontWeight={700}>
         {props.name}
       </text>
-      <text className="fx-sans f-tl" x={x + 16 + nameW + 10} y={props.y + 22} fontSize={14}>
+      <text className="fx-sans f-tl" x={x + 8 + nameW + 6} y={y + 14} fontSize={10}>
         {props.sub}
       </text>
-      <rect className="f-y1" x={x + w - 12 - nW} y={props.y + 6} width={nW} height={20} rx={10} />
+      <rect
+        className="f-y1"
+        x={x + 8 + nameW + 6 + subW + 6}
+        y={y + 3}
+        width={nW}
+        height={14}
+        rx={7}
+      />
       <text
         className="fx-mono f-tk"
-        x={x + w - 12 - nW / 2}
-        y={props.y + 22}
+        x={x + 8 + nameW + 6 + subW + 6 + nW / 2}
+        y={y + 14}
         textAnchor="middle"
-        fontSize={16}
+        fontSize={11}
         fontWeight={700}
       >
         {props.n}
       </text>
+    </g>
+  );
+}
+
+/** 背景（空・山・街・のこぎり屋根と天窓・看板・煙突・レンガ・床・配管・照明・クレーン・竪穴・出荷口）。帯用に横長に描き直したもの */
+const TEETH = Array.from({ length: 12 }, (_, i) => 8 + i * 102.33);
+const ROLLERS = Array.from({ length: 36 }, (_, i) => 16 + i * 40);
+function Backdrop(props: { t: FT }) {
+  const { t } = props;
+  return (
+    <>
+      <rect x={0} y={0} width={1440} height={280} fill="url(#fx-skyG)" />
+      <g className="fxa-cloud f-cloud" opacity=".8">
+        <ellipse cx={150} cy={12} rx={60} ry={8} />
+        <ellipse cx={760} cy={8} rx={46} ry={6} />
+        <ellipse cx={1330} cy={30} rx={56} ry={9} />
+      </g>
+      <path
+        className="f-hill"
+        d="M1236 110 L1290 86 L1336 100 L1384 80 L1420 96 L1440 108 V262 H1236 Z"
+      />
+      <g className="f-city">
+        <rect x={1306} y={100} width={22} height={90} />
+        <rect x={1332} y={82} width={18} height={108} />
+        <rect x={1354} y={110} width={26} height={80} />
+        <rect x={1384} y={92} width={16} height={98} />
+        <rect x={1404} y={116} width={30} height={74} />
+      </g>
+      <g className="f-cwin">
+        <rect x={1336} y={92} width={4} height={4} />
+        <rect x={1342} y={92} width={4} height={4} />
+        <rect x={1336} y={102} width={4} height={4} />
+        <rect x={1388} y={102} width={4} height={4} />
+        <rect x={1310} y={110} width={4} height={4} />
+        <rect x={1410} y={124} width={4} height={4} />
+      </g>
+      <g>
+        <circle className="f-tree" cx={1424} cy={178} r={14} />
+        <rect className="f-trunk" x={1422} y={188} width={4} height={18} />
+      </g>
+      <rect className="f-m11" x={0} y={262} width={1440} height={18} />
+      <rect className="f-m9" x={0} y={262} width={1440} height={3} />
+      {/* 給水塔・看板・煙突・換気扇 */}
+      <g>
+        <rect className="f-m6" x={44} y={14} width={4} height={18} />
+        <rect className="f-m6" x={72} y={14} width={4} height={18} />
+        <rect className="f-m8 s-m5" x={36} y={0} width={48} height={16} rx={3} strokeWidth="1.5" />
+        <text
+          className="fx-mono f-tw"
+          x={60}
+          y={11}
+          textAnchor="middle"
+          fontSize={8}
+          fontWeight={700}
+        >
+          H2O
+        </text>
+      </g>
+      <g>
+        <rect className="f-m5" x={590} y={16} width={4} height={16} />
+        <rect className="f-m5" x={706} y={16} width={4} height={16} />
+        <rect
+          className="f-m1 s-ol"
+          x={570}
+          y={0}
+          width={160}
+          height={18}
+          rx={3}
+          strokeWidth="1.5"
+        />
+        <text
+          className="fx-mono f-y1"
+          x={650}
+          y={13.5}
+          textAnchor="middle"
+          fontSize={12}
+          fontWeight={700}
+          letterSpacing={3}
+        >
+          ROVO WORKS
+        </text>
+      </g>
+      <g>
+        <rect
+          className="s-bredge"
+          x={1130}
+          y={0}
+          width={14}
+          height={34}
+          fill="url(#fx-brick)"
+          strokeWidth="1.5"
+        />
+        <rect
+          className="s-bredge"
+          x={1152}
+          y={8}
+          width={12}
+          height={26}
+          fill="url(#fx-brick)"
+          strokeWidth="1.5"
+        />
+        <circle className="fxa-stack f-m12" cx={1137} cy={0} r={6} />
+        <circle className="fxa-stack fxa-s2 f-m13" cx={1158} cy={4} r={5} />
+      </g>
+      {/* のこぎり屋根と天窓 */}
+      <path
+        className="s-m4"
+        fill="url(#fx-roofG)"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        d={`M8 36 ${TEETH.map((x) => `L${x} 30 L${x + 102.33} 14 L${x + 102.33} 30`).join(" ")} L1236 36 Z`}
+      />
+      <g className="s-m4" fill="url(#fx-glassG)" strokeWidth="1">
+        {TEETH.map((x) => (
+          <rect key={x} x={x + 96.33} y={15} width={6} height={15} />
+        ))}
+      </g>
+      <g>
+        <circle className="f-m8 s-m5" cx={300} cy={24} r={6} strokeWidth="1.5" />
+        <g className="fxa-fan">
+          <path
+            className="f-m5"
+            d="M300 19 L301 24 L300 29 L299 24 Z M295 24 L300 23 L305 24 L300 25 Z"
+          />
+        </g>
+        <circle className="f-m8 s-m5" cx={900} cy={24} r={6} strokeWidth="1.5" />
+        <g className="fxa-fan">
+          <path
+            className="f-m5"
+            d="M900 19 L901 24 L900 29 L899 24 Z M895 24 L900 23 L905 24 L900 25 Z"
+          />
+        </g>
+      </g>
+      <rect className="f-wh s-m4" x={4} y={34} width={1236} height={10} strokeWidth="1.5" />
+      <rect className="f-m11" x={4} y={40} width={1236} height={4} />
+      {/* 建物（レンガの外壁・2 階と 1 階の床・床の間の梁） */}
+      <rect
+        className="s-bredge"
+        x={8}
+        y={44}
+        width={1228}
+        height={218}
+        fill="url(#fx-brick)"
+        strokeWidth="1.5"
+      />
+      <rect x={14} y={48} width={1216} height={98} fill="url(#fx-panel)" />
+      <rect x={14} y={156} width={1216} height={100} fill="url(#fx-panel)" />
+      <rect x={8} y={146} width={1228} height={10} fill="url(#fx-rivet)" />
+      <rect className="f-m2" x={8} y={146} width={1228} height={2} />
+      {/* 配管（空気・水）と流れ */}
+      <rect className="f-pblue" x={14} y={50} width={1216} height={4} rx={2} />
+      <rect className="f-cop" x={14} y={158} width={1216} height={4} rx={2} />
+      <g
+        className="fxa-flow s-wh"
+        fill="none"
+        strokeOpacity=".45"
+        strokeWidth="1.5"
+        strokeDasharray="4 16"
+      >
+        <path d="M16 52 H1228" />
+        <path d="M16 160 H1228" />
+      </g>
+      {/* 照明の光（2 階は天井の窓から、1 階はランプから） */}
+      <g fill="url(#fx-beamG)">
+        <path d="M200 54 L222 54 L262 146 L218 146 Z" />
+        <path d="M612 54 L634 54 L674 146 L630 146 Z" />
+        <path d="M1010 54 L1032 54 L1072 146 L1028 146 Z" />
+      </g>
+      <g className="f-m3">
+        {[126, 396, 678, 910, 1124].map((x) => (
+          <path key={x} d={`M${x - 8} 170 L${x + 8} 170 L${x + 5} 164 L${x - 5} 164 Z`} />
+        ))}
+      </g>
+      <g fill="url(#fx-coneG)">
+        {[126, 396, 678, 910, 1124].map((x) => (
+          <path key={x} d={`M${x - 7} 170 L${x + 7} 170 L${x + 46} 256 L${x - 46} 256 Z`} />
+        ))}
+      </g>
+      {/* 柱（部屋の間）と床の縞 */}
+      <g className="f-m6">
+        <rect x={421} y={48} width={6} height={98} />
+        <rect x={833} y={48} width={6} height={98} />
+        <rect x={237} y={156} width={6} height={100} />
+        <rect x={549} y={156} width={6} height={100} />
+        <rect x={801} y={156} width={6} height={100} />
+        <rect x={1013} y={156} width={6} height={100} />
+      </g>
+      <rect x={8} y={256} width={1228} height={6} fill="url(#fx-hazard)" />
+      {/* 消火器 */}
+      <g className="f-red">
+        <rect x={228} y={238} width={6} height={14} rx={2} />
+        <rect x={1004} y={238} width={6} height={14} rx={2} />
+        <rect x={410} y={128} width={6} height={14} rx={2} />
+      </g>
+      {/* 安全第一の札（梁の上） */}
+      <g>
+        <rect
+          className="f-wh s-ok"
+          x={610}
+          y={143}
+          width={116}
+          height={16}
+          rx={2}
+          strokeWidth="1.5"
+        />
+        <path className="s-ok" d="M618 151 H628 M623 146 V156" strokeWidth="3" />
+        <text
+          className="fx-sans f-ok"
+          x={676}
+          y={155.5}
+          textAnchor="middle"
+          fontSize={11}
+          fontWeight={700}
+          letterSpacing={3}
+        >
+          {t("factory.safety")}
+        </text>
+      </g>
+      {/* 1 階の天井クレーン */}
+      <g className="fxa-crane">
+        <rect className="f-hz s-olv" x={30} y={162} width={36} height={9} rx={2} strokeWidth="1" />
+        <text
+          className="fx-mono f-oink"
+          x={48}
+          y={169}
+          textAnchor="middle"
+          fontSize={6}
+          fontWeight={700}
+        >
+          2t
+        </text>
+        <path className="s-m2" d="M48 171 V184" strokeWidth="1.2" />
+        <path className="s-m2" d="M44 186 Q48 192 52 186" fill="none" strokeWidth="2" />
+      </g>
+      {/* 貨物エレベーターの竪穴 */}
+      <g>
+        <rect className="f-m11" x={1236} y={44} width={60} height={218} />
+        <path
+          className="s-m10"
+          d="M1236 50 L1296 140 M1296 50 L1236 140 M1236 160 L1296 250 M1296 160 L1236 250"
+          strokeWidth="1.5"
+        />
+        <rect className="f-m6" x={1236} y={44} width={3} height={218} />
+        <rect className="f-m6" x={1293} y={44} width={3} height={218} />
+        <rect x={1236} y={144} width={60} height={3} fill="url(#fx-hazard)" />
+        <rect
+          className="f-m8 s-m4"
+          x={1246}
+          y={28}
+          width={40}
+          height={16}
+          rx={2}
+          strokeWidth="1.5"
+        />
+        <g className="fxa-fan">
+          <circle className="f-m5" cx={1266} cy={36} r={5} />
+          <path className="s-m10" d="M1266 31 V41 M1261 36 H1271" strokeWidth="1.5" />
+        </g>
+        <g className="fx-mono" fontSize={9} fontWeight={700}>
+          <rect className="f-m1" x={1240} y={52} width={20} height={12} rx={2} />
+          <text className="f-y1" x={1250} y={61} textAnchor="middle">
+            2F
+          </text>
+          <rect className="f-m1" x={1240} y={160} width={20} height={12} rx={2} />
+          <text className="f-y1" x={1250} y={169} textAnchor="middle">
+            1F
+          </text>
+        </g>
+      </g>
+      {/* GitHub 出荷口（看板・荷台・トラック） */}
+      <g>
+        <rect className="f-m9" x={1296} y={248} width={144} height={14} />
+        <rect className="f-hz" x={1296} y={248} width={144} height={3} />
+        <rect className="f-m5" x={1316} y={140} width={3} height={52} />
+        <rect className="f-m5" x={1420} y={140} width={3} height={52} />
+        <rect className="f-m1" x={1304} y={118} width={132} height={24} rx={4} />
+        <text
+          className="fx-sans f-tw"
+          x={1370}
+          y={135}
+          textAnchor="middle"
+          fontSize={12}
+          fontWeight={700}
+        >
+          {t("factory.dock")}
+        </text>
+        <rect
+          className="f-m14 s-m5"
+          x={1306}
+          y={196}
+          width={86}
+          height={50}
+          rx={3}
+          strokeWidth="2"
+        />
+        <rect className="f-m2" x={1308} y={198} width={6} height={46} />
+        <path
+          className="f-m12 s-m5"
+          d="M1392 210 L1412 210 L1430 228 L1430 246 L1392 246 Z"
+          strokeWidth="2"
+        />
+        <rect className="f-pale s-m5" x={1398} y={214} width={14} height={12} strokeWidth="1" />
+        <circle className="f-m1" cx={1330} cy={248} r={8} />
+        <circle className="f-m8" cx={1330} cy={248} r={3} />
+        <circle className="f-m1" cx={1414} cy={248} r={8} />
+        <circle className="f-m8" cx={1414} cy={248} r={3} />
+      </g>
+      {/* 手前のベルトコンベア */}
+      <rect className="f-m3" x={12} y={265} width={1416} height={8} rx={4} />
+      <path className="s-m5 fxa-belt" d="M16 269 H1424" strokeWidth="6" strokeDasharray="16 16" />
+      {ROLLERS.map((x) => (
+        <g key={x} transform={`translate(${x} 273)`}>
+          <g className="fxa-roll fxp">
+            <circle className="f-m8 s-m5" cx={3.5} cy={3.5} r={3.5} />
+            <path className="s-m5" d="M3.5 0.5 V6.5 M0.5 3.5 H6.5" />
+          </g>
+        </g>
+      ))}
+    </>
+  );
+}
+
+const MAP_ORDER: Place[] = [
+  "prep",
+  "code",
+  "verify",
+  "review",
+  "ready",
+  "wait",
+  "research",
+  "shipped",
+];
+
+/** 管制室（フロアマップ・今月の予算のゲージ・Sandbox の枠）。読める大きさを優先し、見本の細部（机の計器など）は省いた */
+function Control(props: { data: OverviewDto; t: FT }) {
+  const { data, t } = props;
+  const counts = floorMap(data.tasks);
+  const { x, y } = CONTROL_ROOM;
+  const running = data.budget.running_slots;
+  const limit = data.budget.concurrency_limit;
+  const slots = Array.from({ length: Math.min(limit, 10) }, (_, i) => i);
+  const cap = budgetLimit(data.budget);
+  const spent = data.budget.spent_usd + data.budget.reserved_usd;
+  const ratio = cap === null || cap <= 0 ? 0 : Math.min(1, spent / cap);
+  return (
+    <g data-factory-control="">
+      <g transform={`translate(${x + 6} ${y + 26})`}>
+        <rect className="f-s0 s-m2" x={0} y={0} width={238} height={66} rx={4} strokeWidth="2" />
+        <text className="fx-mono f-blue" x={6} y={10} fontSize={8}>
+          FLOOR MAP
+        </text>
+        <text className="fx-mono f-led fxa-cur" x={232} y={10} fontSize={8} textAnchor="end">
+          ● LIVE
+        </text>
+        {MAP_ORDER.map((p, i) => {
+          const n = counts[p];
+          const hot = p === "wait" || p === "ready";
+          const tone =
+            p === "shipped"
+              ? "f-navy"
+              : n === 0
+                ? "f-s2"
+                : hot
+                  ? "f-ambd"
+                  : n >= 3
+                    ? "f-g2"
+                    : "f-g1";
+          const cx = 4 + (i % 4) * 58;
+          const cy = 15 + Math.floor(i / 4) * 25;
+          return (
+            <g key={p} data-map={p} data-n={n}>
+              <rect className={tone} x={cx} y={cy} width={56} height={22} rx={2} />
+              <text className="fx-sans f-sfg" x={cx + 4} y={cy + 15} fontSize={9}>
+                {t(MAP_KEY[p])}
+              </text>
+              <text
+                className="fx-mono f-sfg"
+                x={cx + 52}
+                y={cy + 16}
+                fontSize={13}
+                fontWeight={700}
+                textAnchor="end"
+              >
+                {n}
+              </text>
+            </g>
+          );
+        })}
+      </g>
+      <g transform={`translate(${x + 250} ${y + 6})`}>
+        <rect className="f-s1 s-m2" x={0} y={0} width={132} height={86} rx={4} strokeWidth="2" />
+        <svg
+          x={4}
+          y={6}
+          width={64}
+          height={38}
+          viewBox="0 0 80 48"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path className="s-s3" d="M8 44 A32 32 0 0 1 72 44" fill="none" strokeWidth="8" />
+          <path className="s-g2" d="M8 44 A32 32 0 0 1 49.9 13.6" fill="none" strokeWidth="5" />
+          <path
+            className="s-gold"
+            d="M49.9 13.6 A32 32 0 0 1 65.9 25.2"
+            fill="none"
+            strokeWidth="5"
+          />
+          <path className="s-red" d="M65.9 25.2 A32 32 0 0 1 72 44" fill="none" strokeWidth="5" />
+          <g transform={`rotate(${((ratio - 0.5) * 180).toFixed(1)} 40 44)`}>
+            <g className="fxa-wob2">
+              <path className="s-red2" d="M40 44 L40 16" strokeWidth="2.5" strokeLinecap="round" />
+            </g>
+          </g>
+          <circle className="f-m10 s-s3" cx={40} cy={44} r={4} strokeWidth="1.5" />
+        </svg>
+        <text className="fx-mono f-sfg" x={70} y={24} fontSize={11} fontWeight={700}>
+          {cap === null ? `$${Math.round(spent)}` : `$${Math.round(spent)}/$${Math.round(cap)}`}
+        </text>
+        <text className="fx-sans f-td" x={70} y={38} fontSize={10}>
+          {t("factory.budget")}
+        </text>
+        <text className="fx-mono f-td" x={6} y={60} fontSize={9}>
+          SANDBOX
+        </text>
+        <text
+          className="fx-mono f-sfg"
+          x={126}
+          y={62}
+          fontSize={13}
+          fontWeight={700}
+          textAnchor="end"
+          data-factory-slots=""
+        >
+          {`${running}/${limit}`}
+        </text>
+        {slots.map((i) => (
+          <rect
+            key={i}
+            className={i < running ? "f-led fx-glow" : "f-s3"}
+            x={6 + i * 11}
+            y={68}
+            width={8}
+            height={8}
+            rx={1.5}
+          />
+        ))}
+      </g>
     </g>
   );
 }
@@ -654,747 +1124,15 @@ function RoomArt(props: { id: RoomId; t: FT }) {
   return <>{ART[id].el}</>;
 }
 
-/** 背景（空・山・街・屋根・レンガ・床・配管・クレーン・エレベーターの竪穴・出荷口・看板）。見本の静的な SVG */
-function Backdrop(props: { t: FT }) {
-  const { t } = props;
-  return (
-    <>
-      <rect x={0} y={0} width={1440} height={1000} fill="url(#fx-skyG)" />
-      <g className="fxa-cloud f-cloud" opacity=".8">
-        <ellipse cx={180} cy={104} rx={70} ry={16} />
-        <ellipse cx={225} cy={94} rx={40} ry={14} />
-        <ellipse cx={1290} cy={150} rx={80} ry={18} />
-        <ellipse cx={1335} cy={138} rx={44} ry={15} />
-        <ellipse cx={870} cy={84} rx={54} ry={12} />
-      </g>
-      <path
-        className="f-hill"
-        d="M0 230 L80 196 L170 222 L260 180 L360 214 L470 186 L560 210 L700 176 L820 206 L940 182 L1060 210 L1180 186 L1290 214 L1380 192 L1440 206 L1440 330 L0 330 Z"
-      />
-      <g className="f-city">
-        <rect x={1236} y={400} width={34} height={120} />
-        <rect x={1274} y={370} width={26} height={150} />
-        <rect x={1304} y={420} width={40} height={100} />
-        <rect x={1348} y={390} width={22} height={130} />
-        <rect x={1374} y={430} width={44} height={90} />
-      </g>
-      <g className="f-cwin">
-        <rect x={1282} y={384} width={4} height={4} />
-        <rect x={1290} y={384} width={4} height={4} />
-        <rect x={1282} y={396} width={4} height={4} />
-        <rect x={1352} y={404} width={4} height={4} />
-        <rect x={1360} y={404} width={4} height={4} />
-        <rect x={1244} y={414} width={4} height={4} />
-      </g>
-      <g>
-        <circle className="f-tree" cx={1262} cy={560} r={26} />
-        <circle className="f-tree2" cx={1288} cy={548} r={30} />
-        <rect className="f-trunk" x={1282} y={570} width={6} height={40} />
-        <circle className="f-tree" cx={1400} cy={556} r={28} />
-        <rect className="f-trunk" x={1397} y={574} width={6} height={36} />
-      </g>
-
-      <rect className="f-m11" x={0} y={776} width={1440} height={224} />
-      <rect className="f-m9" x={0} y={776} width={1440} height={8} />
-      <rect className="f-m7" x={1220} y={790} width={220} height={30} />
-      <path
-        className="s-m14"
-        d="M1230 805 H1260 M1280 805 H1310 M1330 805 H1360 M1380 805 H1410"
-        strokeWidth="3"
-      />
-
-      <g>
-        <rect className="f-m6" x={104} y={20} width={10} height={70} />
-        <rect className="f-m6" x={150} y={20} width={10} height={70} />
-        <path className="s-m6" d="M104 60 L160 40 M160 60 L104 40" strokeWidth="3" />
-        <rect className="f-m8 s-m5" x={92} y={-6} width={80} height={34} rx={6} strokeWidth="2" />
-        <path className="s-m7" d="M92 4 H172 M92 14 H172" strokeWidth="2" />
-        <text
-          className="fx-mono f-tw"
-          x={132}
-          y={18}
-          textAnchor="middle"
-          fontSize={10}
-          fontWeight={700}
-        >
-          H2O
-        </text>
-      </g>
-      <g>
-        <rect
-          className="s-bredge"
-          x={1044}
-          y={10}
-          width={26}
-          height={96}
-          fill="url(#fx-brick)"
-          strokeWidth="2"
-        />
-        <rect className="f-m13" x={1044} y={18} width={26} height={8} />
-        <rect
-          className="s-bredge"
-          x={1088}
-          y={34}
-          width={22}
-          height={72}
-          fill="url(#fx-brick)"
-          strokeWidth="2"
-        />
-        <rect className="f-m13" x={1088} y={40} width={22} height={7} />
-        <circle className="fxa-stack f-m12" cx={1060} cy={0} r={10} />
-        <circle className="fxa-stack fxa-s2 f-m13" cx={1052} cy={2} r={8} />
-        <circle className="fxa-stack f-m12" cx={1102} cy={24} r={8} />
-        <circle className="fxa-stack fxa-s2 f-m13" cx={1096} cy={26} r={6} />
-      </g>
-
-      <g>
-        <path
-          className="s-m4"
-          d="M24 164 L24 120 L124 92 L124 120 L224 92 L224 120 L324 92 L324 120 L424 92 L424 120 L524 92 L524 120 L624 92 L624 120 L724 92 L724 120 L824 92 L824 120 L924 92 L924 120 L1024 92 L1024 120 L1124 92 L1124 120 L1224 92 L1224 164 Z"
-          fill="url(#fx-roofG)"
-          strokeWidth="2"
-          strokeLinejoin="round"
-        />
-        <g className="s-m4" fill="url(#fx-glassG)" strokeWidth="1.5">
-          <rect x={116} y={94} width={8} height={26} />
-          <rect x={216} y={94} width={8} height={26} />
-          <rect x={316} y={94} width={8} height={26} />
-          <rect x={416} y={94} width={8} height={26} />
-          <rect x={516} y={94} width={8} height={26} />
-          <rect x={616} y={94} width={8} height={26} />
-          <rect x={716} y={94} width={8} height={26} />
-          <rect x={816} y={94} width={8} height={26} />
-          <rect x={916} y={94} width={8} height={26} />
-          <rect x={1016} y={94} width={8} height={26} />
-          <rect x={1116} y={94} width={8} height={26} />
-          <rect x={1216} y={94} width={8} height={26} />
-        </g>
-        <g className="s-m7" strokeWidth="1">
-          <path d="M40 116 L110 97 M60 118 L114 104 M140 116 L210 97 M160 118 L214 104 M240 116 L310 97 M340 116 L410 97 M440 116 L510 97 M540 116 L610 97 M640 116 L710 97 M740 116 L810 97 M840 116 L910 97 M940 116 L1010 97 M1040 116 L1110 97 M1140 116 L1210 97" />
-        </g>
-        <rect className="f-wh s-m4" x={18} y={120} width={1212} height={44} strokeWidth="2" />
-        <rect className="f-m11" x={18} y={156} width={1212} height={8} />
-      </g>
-      <g>
-        <circle className="f-m8 s-m5" cx={300} cy={86} r={10} strokeWidth="2" />
-        <rect className="f-m5" x={296} y={94} width={8} height={10} />
-        <g className="fxa-fan">
-          <path
-            className="f-m5"
-            d="M300 78 L302 86 L300 94 L298 86 Z M292 86 L300 84 L308 86 L300 88 Z"
-          />
-        </g>
-        <circle className="f-m8 s-m5" cx={900} cy={86} r={10} strokeWidth="2" />
-        <rect className="f-m5" x={896} y={94} width={8} height={10} />
-        <g className="fxa-fan">
-          <path
-            className="f-m5"
-            d="M900 78 L902 86 L900 94 L898 86 Z M892 86 L900 84 L908 86 L900 88 Z"
-          />
-        </g>
-      </g>
-
-      <rect
-        className="s-bredge"
-        x={24}
-        y={164}
-        width={1200}
-        height={612}
-        fill="url(#fx-brick)"
-        strokeWidth="2"
-      />
-      <rect x={38} y={172} width={1172} height={226} fill="url(#fx-panel)" />
-      <rect x={38} y={414} width={1172} height={346} fill="url(#fx-panel)" />
-      <g fill="url(#fx-beamG)">
-        <path d="M118 172 L150 172 L250 398 L190 398 Z" />
-        <path d="M418 172 L450 172 L550 398 L490 398 Z" />
-        <path d="M718 172 L750 172 L850 398 L790 398 Z" />
-        <path d="M1018 172 L1050 172 L1150 398 L1090 398 Z" />
-      </g>
-      <rect x={24} y={398} width={1200} height={16} fill="url(#fx-rivet)" />
-      <rect className="f-m2" x={24} y={398} width={1200} height={3} />
-      <g>
-        <rect className="f-pblue" x={38} y={178} width={1172} height={7} rx={3} />
-        <rect className="f-m9" x={38} y={190} width={1172} height={5} rx={2} />
-        <g className="f-m6">
-          <rect x={200} y={176} width={8} height={11} />
-          <rect x={520} y={176} width={8} height={11} />
-          <rect x={840} y={176} width={8} height={11} />
-          <rect x={1100} y={176} width={8} height={11} />
-        </g>
-        <rect className="f-cop" x={38} y={420} width={1172} height={7} rx={3} />
-        <rect className="f-m9" x={38} y={432} width={1172} height={5} rx={2} />
-        <g className="f-m6">
-          <rect x={160} y={418} width={8} height={11} />
-          <rect x={440} y={418} width={8} height={11} />
-          <rect x={760} y={418} width={8} height={11} />
-          <rect x={1080} y={418} width={8} height={11} />
-        </g>
-        <g>
-          <path
-            className="s-m5"
-            d="M150 437 V462 M420 437 V462 M660 437 V462 M870 437 V462 M1040 437 V462"
-            strokeWidth="2"
-          />
-          <g className="f-m3">
-            <path d="M138 474 L162 474 L156 462 L144 462 Z" />
-            <path d="M408 474 L432 474 L426 462 L414 462 Z" />
-            <path d="M648 474 L672 474 L666 462 L654 462 Z" />
-            <path d="M858 474 L882 474 L876 462 L864 462 Z" />
-            <path d="M1028 474 L1052 474 L1046 462 L1034 462 Z" />
-          </g>
-          <g fill="url(#fx-coneG)">
-            <path d="M140 474 L160 474 L210 700 L90 700 Z" />
-            <path d="M410 474 L430 474 L520 700 L320 700 Z" />
-            <path d="M650 474 L670 474 L740 700 L580 700 Z" />
-            <path d="M860 474 L880 474 L930 700 L810 700 Z" />
-            <path d="M1030 474 L1050 474 L1100 700 L980 700 Z" />
-          </g>
-        </g>
-      </g>
-      <rect className="f-g3" x={38} y={736} width={1172} height={24} />
-      <path className="s-hz" d="M44 758 H1206" strokeWidth="2" />
-      <g className="f-m6">
-        <rect x={405} y={172} width={8} height={226} />
-        <rect x={815} y={172} width={8} height={226} />
-        <rect x={241} y={414} width={8} height={346} />
-        <rect x={541} y={414} width={8} height={346} />
-        <rect x={781} y={414} width={8} height={346} />
-        <rect x={951} y={414} width={8} height={346} />
-      </g>
-      <g className="f-m4">
-        <rect x={403} y={172} width={12} height={4} />
-        <rect x={813} y={172} width={12} height={4} />
-        <rect x={239} y={414} width={12} height={4} />
-        <rect x={539} y={414} width={12} height={4} />
-        <rect x={779} y={414} width={12} height={4} />
-        <rect x={949} y={414} width={12} height={4} />
-      </g>
-      <g fill="url(#fx-hazard)">
-        <rect x={239} y={722} width={12} height={38} />
-        <rect x={539} y={722} width={12} height={38} />
-        <rect x={779} y={722} width={12} height={38} />
-        <rect x={949} y={722} width={12} height={38} />
-      </g>
-      <g className="f-red">
-        <circle cx={100} cy={198} r={2.5} />
-        <circle cx={260} cy={198} r={2.5} />
-        <circle cx={460} cy={198} r={2.5} />
-        <circle cx={640} cy={198} r={2.5} />
-        <circle cx={900} cy={198} r={2.5} />
-        <circle cx={1060} cy={198} r={2.5} />
-        <circle cx={300} cy={440} r={2.5} />
-        <circle cx={560} cy={440} r={2.5} />
-        <circle cx={880} cy={440} r={2.5} />
-      </g>
-      <g className="s-red" fill="none" strokeWidth="2.5">
-        <circle cx={340} cy={181} r={6} />
-        <path d="M334 181 H346 M340 175 V187" />
-        <circle cx={990} cy={423} r={6} />
-        <path d="M984 423 H996 M990 417 V429" />
-      </g>
-      <g className="fx-mono f-wh" fontSize={7}>
-        <text x={560} y={184}>
-          AIR →
-        </text>
-        <text x={660} y={426}>
-          WATER →
-        </text>
-      </g>
-      <g
-        className="fxa-flow s-wh"
-        fill="none"
-        strokeOpacity=".45"
-        strokeWidth="2"
-        strokeDasharray="4 16"
-      >
-        <path d="M40 181.5 H1208" />
-        <path d="M40 423.5 H1208" />
-      </g>
-      <g>
-        <path className="s-m5" d="M760 185 V190" strokeWidth="2" />
-        <circle className="f-wh s-m2" cx={760} cy={196} r={7} strokeWidth="2" />
-        <path className="fxa-needle s-red" d="M760 196 V191" strokeWidth="1.5" />
-        <path className="s-m5" d="M380 427 V432" strokeWidth="2" />
-        <circle className="f-wh s-m2" cx={380} cy={438} r={7} strokeWidth="2" />
-        <path className="fxa-needle s-red fxdm2" d="M380 438 V433" strokeWidth="1.5" />
-      </g>
-      <g>
-        <circle className="fxa-stack f-m10" cx={1236} cy={706} r={5} />
-        <circle className="fxa-stack fxa-s2 f-m12" cx={1234} cy={708} r={4} />
-      </g>
-      <g className="fxa-crane">
-        <rect
-          className="f-hz s-olv"
-          x={60}
-          y={414}
-          width={46}
-          height={12}
-          rx={2}
-          strokeWidth="1.5"
-        />
-        <text
-          className="fx-mono f-oink"
-          x={83}
-          y={423}
-          textAnchor="middle"
-          fontSize={7}
-          fontWeight={700}
-        >
-          2t
-        </text>
-        <path className="s-m2" d="M83 426 V486" strokeWidth="1.5" />
-        <rect className="f-m2" x={78} y={486} width={10} height={6} />
-        <path className="s-m2" d="M77 494 Q83 504 89 494" fill="none" strokeWidth="3" />
-      </g>
-      <g>
-        <rect
-          className="f-wh s-ok"
-          x={556}
-          y={398}
-          width={176}
-          height={24}
-          rx={2}
-          strokeWidth="2"
-        />
-        <path className="s-ok" d="M568 410 H584 M576 402 V418" strokeWidth="5" />
-        <text
-          className="fx-sans f-ok"
-          x={656}
-          y={416}
-          textAnchor="middle"
-          fontSize={15}
-          fontWeight={700}
-          letterSpacing={6}
-        >
-          {t("factory.safety")}
-        </text>
-      </g>
-      <g>
-        <rect className="f-red" x={230} y={702} width={9} height={20} rx={3} />
-        <rect className="f-m2" x={232} y={698} width={5} height={5} />
-        <rect className="f-red" x={770} y={702} width={9} height={20} rx={3} />
-        <rect className="f-m2" x={772} y={698} width={5} height={5} />
-        <rect className="f-red" x={396} y={370} width={8} height={18} rx={3} />
-        <rect className="f-m2" x={398} y={366} width={4} height={5} />
-      </g>
-      <g>
-        <rect className="f-sand" x={44} y={374} width={360} height={20} opacity=".6" />
-        <rect className="f-strip" x={414} y={374} width={400} height={20} opacity=".55" />
-        <rect className="f-m10" x={824} y={374} width={296} height={20} opacity=".6" />
-      </g>
-      <rect className="f-m7" x={18} y={158} width={1212} height={6} rx={2} />
-      <rect className="f-m8" x={14} y={164} width={7} height={612} />
-      <rect className="f-m6" x={12} y={300} width={11} height={4} />
-      <rect className="f-m6" x={12} y={520} width={11} height={4} />
-      <rect className="f-m8" x={1226} y={164} width={7} height={440} />
-      <rect className="f-m6" x={1224} y={300} width={11} height={4} />
-      <g className="s-sol" strokeWidth="11" strokeLinecap="butt">
-        <path d="M232 117 L316 95" />
-        <path d="M332 117 L416 95" />
-        <path d="M432 117 L516 95" />
-      </g>
-      <g className="s-sol2" strokeWidth="1">
-        <path d="M250 116 L253 102 M270 111 L273 97 M290 106 L293 92 M350 116 L353 102 M370 111 L373 97 M390 106 L393 92 M450 116 L453 102 M470 111 L473 97 M490 106 L493 92" />
-        <path
-          className="s-sol3"
-          d="M232 112 L316 90 M332 112 L416 90 M432 112 L516 90"
-          opacity=".6"
-        />
-      </g>
-      <g>
-        <rect className="f-m10 s-m5" x={944} y={62} width={64} height={40} rx={3} strokeWidth="2" />
-        <path className="s-m8" d="M950 70 H1002 M950 76 H1002 M950 82 H1002" />
-        <circle className="f-m5" cx={992} cy={90} r={9} />
-        <g className="fxa-fan">
-          <path
-            className="f-m10"
-            d="M992 82 L994 90 L992 98 L990 90 Z M984 90 L992 88 L1000 90 L992 92 Z"
-          />
-        </g>
-        <rect className="f-m5" x={952} y={102} width={6} height={8} />
-        <rect className="f-m5" x={994} y={102} width={6} height={8} />
-      </g>
-      <path className="s-m5" d="M640 40 V14" strokeWidth="2" />
-      <circle className="f-m5" cx={640} cy={13} r={2.5} />
-      <g className="f-m3">
-        <path d="M700 40 q4 -8 8 0 l6 -3 l-5 5 z" />
-        <path d="M716 40 q4 -8 8 0 l6 -3 l-5 5 z" />
-      </g>
-      <g>
-        <rect className="f-tower" x={1300} y={250} width={5} height={290} />
-        <rect className="f-tower" x={1286} y={262} width={34} height={4} />
-        <rect className="f-tower" x={1290} y={276} width={26} height={3} />
-        <path
-          className="s-m5"
-          d="M1233 300 Q1266 318 1288 264 M1318 264 Q1380 296 1440 270 M1233 312 Q1270 330 1290 278 M1316 278 Q1380 306 1440 284"
-          fill="none"
-          strokeWidth="1"
-        />
-        <g className="f-m3">
-          <path d="M1356 288 q3 -6 6 0 l4 -2 l-4 4 z" />
-          <path d="M1370 290 q3 -6 6 0 l4 -2 l-4 4 z" />
-        </g>
-      </g>
-      <g>
-        <rect className="f-m8b" x={1320} y={300} width={14} height={80} />
-        <rect className="f-m12" x={1320} y={306} width={14} height={5} />
-        <circle className="fxa-stack f-m13" cx={1327} cy={292} r={8} />
-        <circle className="fxa-stack fxa-s2 f-m14" cx={1324} cy={294} r={6} />
-      </g>
-      <use href="#fx-rvBody" x={1334} y={648} width={30} height={30} />
-      <g>
-        <path className="f-flame" d="M1236 776 L1242 760 L1248 776 Z" />
-        <rect className="f-wh" x={1239} y={767} width={6} height={2} />
-        <rect className="f-hz s-olv" x={1410} y={752} width={8} height={24} rx={3} />
-      </g>
-      <g>
-        <rect className="f-m2" x={1224} y={712} width={10} height={20} />
-      </g>
-      <rect x={24} y={760} width={1200} height={16} fill="url(#fx-hazard)" />
-      <g>
-        <rect className="f-m11" x={1126} y={172} width={84} height={588} />
-        <path
-          className="s-m10"
-          d="M1126 172 L1210 260 M1210 172 L1126 260 M1126 470 L1210 560 M1210 470 L1126 560 M1126 600 L1210 690 M1210 600 L1126 690"
-          strokeWidth="2"
-        />
-        <rect className="f-m6" x={1126} y={172} width={5} height={588} />
-        <rect className="f-m6" x={1205} y={172} width={5} height={588} />
-        <rect x={1126} y={394} width={84} height={4} fill="url(#fx-hazard)" />
-        <rect x={1126} y={736} width={84} height={4} fill="url(#fx-hazard)" />
-        <g className="fx-mono" fontSize={9} fontWeight={700}>
-          <rect className="f-m1" x={1134} y={206} width={22} height={13} rx={2} />
-          <text className="f-y1" x={1145} y={216} textAnchor="middle">
-            2F
-          </text>
-          <rect className="f-m1" x={1134} y={448} width={22} height={13} rx={2} />
-          <text className="f-y1" x={1145} y={458} textAnchor="middle">
-            1F
-          </text>
-        </g>
-        <rect className="f-m8 s-m4" x={1140} y={96} width={56} height={24} rx={3} strokeWidth="2" />
-        <g className="fxa-fan">
-          <circle className="f-m5" cx={1168} cy={108} r={8} />
-          <path className="s-m10" d="M1168 100 V116 M1160 108 H1176" strokeWidth="2" />
-        </g>
-        <text
-          className="fx-mono f-tg"
-          x={1168}
-          y={92}
-          textAnchor="middle"
-          fontSize={8}
-          fontWeight={700}
-        >
-          LIFT
-        </text>
-      </g>
-      <rect x={1210} y={630} width={14} height={130} fill="url(#fx-panel)" />
-      <g>
-        <rect className="f-m6" x={1206} y={616} width={22} height={14} />
-        <path className="s-m8" d="M1206 620 H1228 M1206 625 H1228" />
-      </g>
-
-      <rect className="f-m9" x={1224} y={700} width={200} height={76} />
-      <rect className="f-hz" x={1224} y={700} width={200} height={6} />
-      <g>
-        <rect
-          className="f-m14 s-m5"
-          x={1244}
-          y={618}
-          width={128}
-          height={78}
-          rx={4}
-          strokeWidth="2.5"
-        />
-        <rect className="f-m2" x={1246} y={620} width={10} height={74} />
-        <path
-          className="f-m12 s-m5"
-          d="M1372 640 L1398 640 L1420 664 L1420 696 L1372 696 Z"
-          strokeWidth="2.5"
-        />
-        <rect className="f-pale s-m5" x={1380} y={646} width={18} height={16} strokeWidth="1.5" />
-        <circle className="f-m1" cx={1280} cy={700} r={12} />
-        <circle className="f-m8" cx={1280} cy={700} r={5} />
-        <circle className="f-m1" cx={1396} cy={700} r={12} />
-        <circle className="f-m8" cx={1396} cy={700} r={5} />
-        <text
-          className="fx-mono f-tg"
-          x={1316}
-          y={638}
-          textAnchor="middle"
-          fontSize={11}
-          fontWeight={700}
-        >
-          merge
-        </text>
-      </g>
-      <g>
-        <rect className="f-m1" x={1240} y={540} width={170} height={40} rx={6} />
-        <text
-          className="fx-sans f-tw"
-          x={1325}
-          y={566}
-          textAnchor="middle"
-          fontSize={15}
-          fontWeight={700}
-        >
-          {t("factory.dock")}
-        </text>
-        <rect className="f-m5" x={1262} y={580} width={4} height={38} />
-        <rect className="f-m5" x={1384} y={580} width={4} height={38} />
-      </g>
-      <g>
-        <rect className="f-m5" x={1428} y={560} width={4} height={216} />
-        <path className="s-m5" d="M1430 562 Q1430 552 1418 552" strokeWidth="4" fill="none" />
-        <rect className="f-m2" x={1406} y={550} width={14} height={6} rx={2} />
-      </g>
-
-      <g>
-        <rect className="f-m1 s-ol" x={470} y={40} width={300} height={50} rx={6} strokeWidth="2" />
-        <rect className="f-m5" x={490} y={90} width={6} height={30} />
-        <rect className="f-m5" x={744} y={90} width={6} height={30} />
-        <text
-          className="fx-mono f-y1"
-          x={640}
-          y={74}
-          textAnchor="middle"
-          fontSize={22}
-          fontWeight={700}
-          letterSpacing={4}
-        >
-          ROVO WORKS
-        </text>
-        <g className="f-sdot">
-          <circle cx={480} cy={48} r={2.5} />
-          <circle cx={500} cy={48} r={2.5} />
-          <circle cx={520} cy={48} r={2.5} />
-          <circle cx={760} cy={48} r={2.5} />
-          <circle cx={740} cy={48} r={2.5} />
-          <circle cx={720} cy={48} r={2.5} />
-          <circle cx={480} cy={82} r={2.5} />
-          <circle cx={760} cy={82} r={2.5} />
-        </g>
-      </g>
-    </>
-  );
-}
-
-const ROLLERS = Array.from({ length: 34 }, (_, i) => i);
-
-const MAP_ORDER: Place[] = [
-  "prep",
-  "code",
-  "verify",
-  "review",
-  "ready",
-  "wait",
-  "research",
-  "shipped",
-];
-
-/** 管制室（フロアマップ・Sandbox の枠・今月の予算・確認待ちと返事待ちの件数） */
-function Control(props: { data: OverviewDto; t: FT }) {
-  const { data, t } = props;
-  const counts = floorMap(data.tasks);
-  const { x, y } = CONTROL_ROOM;
-  const running = data.budget.running_slots;
-  const limit = data.budget.concurrency_limit;
-  const slots = Math.min(limit, 12);
-  const cap = budgetLimit(data.budget);
-  const spent = data.budget.spent_usd + data.budget.reserved_usd;
-  const ratio = cap === null || cap <= 0 ? 0 : Math.min(1, spent / cap);
-  const readyN = counts.ready;
-  return (
-    <g data-factory-control="">
-      <g transform={`translate(${x + 8} ${y + 40})`}>
-        <rect className="f-s0 s-m2" x={0} y={0} width={186} height={98} rx={6} strokeWidth="3" />
-        <text className="fx-mono f-blue" x={8} y={13} fontSize={9}>
-          FLOOR MAP
-        </text>
-        <text className="fx-mono f-led fxa-cur" x={178} y={13} fontSize={9} textAnchor="end">
-          ● LIVE
-        </text>
-        {MAP_ORDER.map((p, i) => {
-          const n = counts[p];
-          const hot = p === "wait" || p === "ready";
-          const tone =
-            p === "shipped"
-              ? "f-navy"
-              : n === 0
-                ? "f-s2"
-                : hot
-                  ? "f-ambd"
-                  : n >= 3
-                    ? "f-g2"
-                    : "f-g1";
-          const cx = 6 + (i % 4) * 44;
-          const cy = 20 + Math.floor(i / 4) * 22;
-          return (
-            <g key={p} data-map={p} data-n={n}>
-              <rect className={tone} x={cx} y={cy} width={42} height={19} rx={2} />
-              <text className="fx-mono f-sfg" x={cx + 3} y={cy + 13} fontSize={9}>
-                {t(MAP_KEY[p])}
-              </text>
-              <text
-                className="fx-mono f-sfg"
-                x={cx + 39}
-                y={cy + 13}
-                fontSize={10}
-                fontWeight={700}
-                textAnchor="end"
-              >
-                {n}
-              </text>
-            </g>
-          );
-        })}
-        <text className="fx-mono f-td" x={8} y={86} fontSize={8}>
-          SANDBOX
-        </text>
-        {Array.from({ length: slots }, (_, i) => i).map((i) => (
-          <rect
-            key={i}
-            className={i < running ? "f-led fx-glow" : "f-s3"}
-            x={52 + i * 9}
-            y={79}
-            width={7}
-            height={7}
-            rx={1.5}
-          />
-        ))}
-        <text
-          className="fx-mono f-sfg"
-          x={180}
-          y={87}
-          fontSize={11}
-          fontWeight={700}
-          textAnchor="end"
-          data-factory-slots=""
-        >
-          {`${running}/${limit}`}
-        </text>
-      </g>
-      <g transform={`translate(${x + 200} ${y + 40})`}>
-        <rect className="f-s1 s-m2" x={0} y={0} width={88} height={98} rx={6} strokeWidth="3" />
-        <svg
-          x={4}
-          y={6}
-          width={80}
-          height={48}
-          viewBox="0 0 80 48"
-          aria-hidden="true"
-          focusable="false"
-        >
-          <path className="s-s3" d="M8 44 A32 32 0 0 1 72 44" fill="none" strokeWidth="8" />
-          <path className="s-g2" d="M8 44 A32 32 0 0 1 49.9 13.6" fill="none" strokeWidth="5" />
-          <path
-            className="s-gold"
-            d="M49.9 13.6 A32 32 0 0 1 65.9 25.2"
-            fill="none"
-            strokeWidth="5"
-          />
-          <path className="s-red" d="M65.9 25.2 A32 32 0 0 1 72 44" fill="none" strokeWidth="5" />
-          <path
-            className="s-m7"
-            d="M14 44 H18 M40 18 V22 M62 44 H66 M21.6 25.6 L24.4 28.4 M58.4 25.6 L55.6 28.4"
-            strokeWidth="1.2"
-          />
-          <g transform={`rotate(${((ratio - 0.5) * 180).toFixed(1)} 40 44)`}>
-            <g className="fxa-wob2">
-              <path className="s-red2" d="M40 44 L40 16" strokeWidth="2" strokeLinecap="round" />
-            </g>
-          </g>
-          <circle className="f-m10 s-s3" cx={40} cy={44} r={4} strokeWidth="1.5" />
-        </svg>
-        <text
-          className="fx-mono f-sfg"
-          x={44}
-          y={70}
-          fontSize={11}
-          fontWeight={700}
-          textAnchor="middle"
-        >
-          {cap === null ? `$${Math.round(spent)}` : `$${Math.round(spent)}/$${Math.round(cap)}`}
-        </text>
-        <text className="fx-sans f-td" x={44} y={86} fontSize={10} textAnchor="middle">
-          {t("factory.budget")}
-        </text>
-      </g>
-      <g transform={`translate(${x + 8} ${y + 140})`}>
-        <svg width={280} height={52} viewBox="0 0 280 52" aria-hidden="true" focusable="false">
-          <rect className="f-m1 s-m5" x={18} y={0} width={54} height={22} rx={2} strokeWidth="2" />
-          <text className="fx-mono f-td" x={45} y={9} textAnchor="middle" fontSize={6}>
-            {t("factory.readySub")}
-          </text>
-          <text
-            className="fx-mono f-gold"
-            x={45}
-            y={19}
-            textAnchor="middle"
-            fontSize={9}
-            fontWeight={700}
-          >
-            {readyN}
-          </text>
-          <rect className="f-m1 s-m5" x={76} y={0} width={54} height={22} rx={2} strokeWidth="2" />
-          <text className="fx-mono f-td" x={103} y={9} textAnchor="middle" fontSize={6}>
-            {t("factory.wait")}
-          </text>
-          <text
-            className="fx-mono f-red2"
-            x={103}
-            y={19}
-            textAnchor="middle"
-            fontSize={9}
-            fontWeight={700}
-          >
-            {counts.wait}
-          </text>
-          <rect className="f-m5" x={42} y={22} width={6} height={4} />
-          <rect className="f-m5" x={100} y={22} width={6} height={4} />
-          <path className="f-m6 s-m4" d="M0 26 L280 26 L272 36 L8 36 Z" strokeWidth="1.5" />
-          <rect className="f-m3" x={8} y={36} width={264} height={16} />
-          <path className="s-m5" d="M20 44 H60 M220 44 H260" strokeWidth="2" />
-          <rect className="f-m2" x={118} y={28} width={52} height={6} rx={1} />
-          <path className="s-m5" d="M121 31 H167" strokeWidth="2" strokeDasharray="2 1.5" />
-          <g>
-            <circle className="fxa-led f-led" cx={186} cy={31} r={2.2} />
-            <circle className="f-led" cx={194} cy={31} r={2.2} />
-            <circle className="fxa-led fxa-l2 f-gold" cx={202} cy={31} r={2.2} />
-            <circle className="f-s3" cx={210} cy={31} r={2.2} />
-            <rect className="f-red" x={216} y={28.5} width={10} height={5} rx={1} />
-          </g>
-          <g>
-            <rect
-              className="f-red s-red3"
-              x={232}
-              y={27}
-              width={16}
-              height={7}
-              rx={2}
-              strokeWidth="1"
-            />
-            <path className="s-red3" d="M234 27 Q240 20 246 27" fill="none" strokeWidth="2.5" />
-          </g>
-          <g>
-            <rect className="f-m5" x={258} y={18} width={12} height={8} rx={1} />
-            <path className="f-amb s-olv" d="M259 18 Q264 6 269 18 Z" strokeWidth="1" />
-            <circle className="fxa-halo f-y1" cx={264} cy={13} r={9} opacity=".4" />
-          </g>
-          <path className="f-m2" d="M132 52 L132 40 Q144 34 156 40 L156 52" />
-        </svg>
-      </g>
-    </g>
-  );
-}
-
 function MoreTile(props: { tile: Tile; t: FT }) {
   const { tile, t } = props;
   const total = tile.shares.reduce((n, s) => n + s.n, 0);
   let off = 0;
   return (
-    <g transform={`translate(${tile.at.x + 2} ${tile.at.y})`} data-factory-more={tile.more}>
+    <g
+      transform={`translate(${tile.at.x} ${tile.at.y}) scale(${BOT_SCALE})`}
+      data-factory-more={tile.more}
+    >
       <title>
         {tile.rest
           .map((task) => `${singleLine(task.owner_login)}: ${singleLine(task.title)}`)
@@ -1439,6 +1177,14 @@ function MoreTile(props: { tile: Tile; t: FT }) {
   );
 }
 
+/** 部屋の設備の絵を、札の右の空きに収まる大きさで右上に置く（高さは 34 まで） */
+function artPlacement(r: RoomGeom, plateW: number): { x: number; y: number; s: number } {
+  const art = ART[r.id];
+  const room = r.w - plateW - 22;
+  const s = Math.min(34 / art.h, room / art.w);
+  return { x: r.x + r.w - 6 - art.w * s, y: r.y + 4 + (34 - art.h * s), s };
+}
+
 export default function FactoryScene(props: {
   data: OverviewDto;
   onSelect?: (id: string) => void;
@@ -1446,7 +1192,7 @@ export default function FactoryScene(props: {
   const { data, onSelect } = props;
   const t = useFactoryT();
   const { bots, tiles } = placeFactory(data.tasks);
-  const ref = useWalks(bots);
+  const { ref, walking } = useWalks(bots);
   const shipped = bots.filter((b) => b.place === "shipped");
   const select = (id: string) => (e: React.MouseEvent) => {
     if (onSelect === undefined || !isPlainLeftClick(e)) return;
@@ -1458,7 +1204,7 @@ export default function FactoryScene(props: {
       {/* biome-ignore lint/a11y/useSemanticElements: SVG にはグループを表す要素が無い */}
       <svg
         className="fx fx-svg"
-        viewBox={`${VIEW.x} ${VIEW.y} ${VIEW.w} ${VIEW.h}`}
+        viewBox={`0 0 ${SCENE.w} ${SCENE.h}`}
         role="group"
         aria-label={t("factory.sceneAria")}
       >
@@ -1605,57 +1351,40 @@ export default function FactoryScene(props: {
           </symbol>
         </defs>
         <clipPath id="fx-shaftClip">
-          <rect x={1126} y={172} width={84} height={588} />
+          <rect x={1236} y={44} width={60} height={218} />
         </clipPath>
-        <svg width={1440} height={1000} overflow="visible" aria-hidden="true" focusable="false">
+        <svg
+          width={SCENE.w}
+          height={SCENE.h}
+          overflow="visible"
+          aria-hidden="true"
+          focusable="false"
+        >
           <Backdrop t={t} />
           {FACTORY_ROOMS.map((r) => {
-            const art = ART[r.id];
+            const n = String(bots.filter((b) => b.place === r.id).length);
+            const name = t(NAME_KEY[r.id]);
+            const sub = t(SUB_KEY[r.id]);
+            const at = artPlacement(r, plateWidth(name, sub, n));
             return (
               <g key={r.id} data-room={r.id}>
                 <path
-                  className="s-hz2 fx-wall"
-                  d={`M${r.x} ${r.y} V${r.y + r.h} M${r.x + r.w} ${r.y} V${r.y + r.h}`}
-                  strokeWidth="1"
-                  strokeDasharray="4 3"
-                />
-                <path
                   className="s-hz"
-                  d={`M${r.x} ${r.y + r.h - 1.5} H${r.x + r.w}`}
-                  strokeWidth="3"
+                  d={`M${r.x} ${r.y + r.h - 1} H${r.x + r.w}`}
+                  strokeWidth="2"
                 />
-                <g
-                  className="fx-art"
-                  transform={`translate(${r.x + (r.w - art.w) / 2} ${r.y + 40 + (r.art - art.h)})`}
-                >
+                <g className="fx-art" transform={`translate(${at.x} ${at.y}) scale(${at.s})`}>
                   <RoomArt id={r.id} t={t} />
                 </g>
-                <Plate
-                  cx={r.x + r.w / 2}
-                  y={r.y}
-                  name={t(NAME_KEY[r.id])}
-                  sub={t(SUB_KEY[r.id])}
-                  n={String(bots.filter((b) => b.place === r.id).length)}
-                />
+                <Plate x={r.x + 6} y={r.y + 4} name={name} sub={sub} n={n} />
               </g>
             );
           })}
           <g data-room="control">
-            <path
-              className="s-hz2 fx-wall"
-              d={`M${CONTROL_ROOM.x} ${CONTROL_ROOM.y} V${CONTROL_ROOM.y + CONTROL_ROOM.h} M${CONTROL_ROOM.x + CONTROL_ROOM.w} ${CONTROL_ROOM.y} V${CONTROL_ROOM.y + CONTROL_ROOM.h}`}
-              strokeWidth="1"
-              strokeDasharray="4 3"
-            />
-            <path
-              className="s-hz"
-              d={`M${CONTROL_ROOM.x} ${CONTROL_ROOM.y + CONTROL_ROOM.h - 1.5} H${CONTROL_ROOM.x + CONTROL_ROOM.w}`}
-              strokeWidth="3"
-            />
             <Control data={data} t={t} />
             <Plate
-              cx={CONTROL_ROOM.x + CONTROL_ROOM.w / 2}
-              y={CONTROL_ROOM.y}
+              x={CONTROL_ROOM.x + 6}
+              y={CONTROL_ROOM.y + 4}
               name={t("factory.control")}
               sub={t("factory.controlSub")}
               n="—"
@@ -1663,45 +1392,30 @@ export default function FactoryScene(props: {
           </g>
           <g clipPath="url(#fx-shaftClip)">
             <g className="fxa-lift">
-              <path className="s-m2" d="M1168 550 V-200" strokeWidth="2" />
-              <rect className="f-m5" x={1129} y={638} width={78} height={8} rx={2} />
+              <path className="s-m2" d="M1266 188 V-200" strokeWidth="1.5" />
+              <rect className="f-m5" x={1237} y={188} width={58} height={6} rx={2} />
               <rect
                 className="f-wh fx-car s-hz"
-                x={1132}
-                y={646}
-                width={72}
-                height={90}
-                rx={3}
-                strokeWidth="3"
+                x={1238}
+                y={194}
+                width={56}
+                height={62}
+                rx={2}
+                strokeWidth="2.5"
               />
               <path
-                className="s-m5 fx-car-bars"
-                d="M1144 646 V736 M1156 646 V736 M1168 646 V736 M1180 646 V736 M1192 646 V736"
-                strokeWidth="2"
+                className="s-m5"
+                d="M1250 194 V256 M1262 194 V256 M1274 194 V256 M1286 194 V256"
+                strokeWidth="1.5"
               />
-              <rect className="f-m5" x={1132} y={731} width={72} height={5} />
             </g>
           </g>
-          <rect className="f-m3" x={44} y={738} width={1340} height={14} rx={7} />
-          <path
-            className="s-m5 fxa-belt"
-            d="M50 745 H1378"
-            strokeWidth="10"
-            strokeDasharray="16 16"
-          />
-          {ROLLERS.map((i) => (
-            <g key={i} transform={`translate(${48 + i * 40} 753)`}>
-              <g className="fxa-roll fxp">
-                <circle className="f-m8 s-m5" cx={4.5} cy={4.5} r={4.5} />
-                <path className="s-m5" d="M4.5 0.5 V8.5 M0.5 4.5 H8.5" />
-              </g>
-            </g>
-          ))}
           <text
             className="fx-mono f-tg"
-            x={1262}
-            y={712}
-            fontSize={16}
+            x={1350}
+            y={242}
+            textAnchor="middle"
+            fontSize={11}
             fontWeight={700}
             data-factory-shipped={shipped.length}
           >
@@ -1717,6 +1431,7 @@ export default function FactoryScene(props: {
           const p = personIndex(b.task.owner_login);
           const label = botLabel(b.task, b.place, t);
           if (b.place === "shipped" && b.i >= SHIP_MAX) return null;
+          const ship = b.place === "shipped";
           return (
             <a
               key={id}
@@ -1730,30 +1445,31 @@ export default function FactoryScene(props: {
             >
               <title>{label}</title>
               <g transform={`translate(${b.at.x} ${b.at.y})`}>
-                <g ref={ref(id)} className={`fx-mover p${p} fxd${b.i % 3}`}>
-                  {b.place === "shipped" ? (
+                <g
+                  ref={ref(id)}
+                  className={`fx-mover p${p} fxd${b.i % 3}${walking.has(id) ? " fx-walking" : ""}`}
+                >
+                  {ship ? (
                     <rect
                       className="fx-pc fx-glow fx-ship"
                       x={0}
                       y={0}
-                      width={14}
-                      height={14}
-                      rx={3}
+                      width={12}
+                      height={12}
+                      rx={2}
                     />
                   ) : (
-                    <Bot
-                      pose={b.pose as Pose}
-                      login={b.task.owner_login}
-                      dest={t("factory.to", { room: placeName(b.place, t) })}
-                    />
+                    <g transform={`scale(${BOT_SCALE})`}>
+                      <Bot
+                        pose={b.pose as Pose}
+                        login={b.task.owner_login}
+                        dest={t("factory.to", { room: placeName(b.place, t) })}
+                      />
+                    </g>
                   )}
                 </g>
                 {/* 押す場所（上に重ねた動かない当たり判定。Rovo は待機の動作で動き続ける） */}
-                <rect
-                  className="fx-hit"
-                  width={b.place === "shipped" ? 14 : BOT_W}
-                  height={b.place === "shipped" ? 14 : BOT_H}
-                />
+                <rect className="fx-hit" width={ship ? 12 : BOT_W} height={ship ? 12 : BOT_H} />
               </g>
             </a>
           );

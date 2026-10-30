@@ -2,6 +2,10 @@ import type { VisibleTaskDto } from "@rovo/dashboard-contract";
 import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
 import { describe, expect, it } from "vitest";
 import {
+  BOT_GAP,
+  BOT_H,
+  BOT_W,
+  expandsByDefault,
   FACTORY_ROOMS,
   floorMap,
   floorOf,
@@ -10,9 +14,12 @@ import {
   layoutRoom,
   moveOf,
   PERSON_COLORS,
+  perRow,
   personIndex,
   roomCapacity,
   roomOf,
+  SCENE,
+  stageHeight,
 } from "../src/factory";
 
 const task = (over: Partial<VisibleTaskDto>): VisibleTaskDto => ({
@@ -84,9 +91,28 @@ describe("部屋と階", () => {
     expect(floorOf("wait")).toBe(2);
   });
 
-  it("定員は部屋の幅と段の数で決まる（1 階は 2 段、2 階は 1 段）", () => {
-    for (const r of FACTORY_ROOMS) expect(roomCapacity(r.id)).toBeGreaterThanOrEqual(2);
+  it("Rovo は各部屋 1 段。定員は横に並ぶ数で、部屋の幅で決まる", () => {
+    for (const r of FACTORY_ROOMS) {
+      expect(roomCapacity(r.id)).toBe(perRow(r.id));
+      expect(roomCapacity(r.id)).toBeGreaterThanOrEqual(3);
+      // 並べた Rovo が部屋の幅に収まる
+      expect(perRow(r.id) * BOT_W + (perRow(r.id) - 1) * BOT_GAP).toBeLessThanOrEqual(r.w);
+    }
     expect(roomCapacity("code")).toBeGreaterThan(roomCapacity("review"));
+  });
+
+  it("断面図は横長（縦横比 5:1 前後）。1 階と 2 階は重ならず、部屋は建物の中に収まる", () => {
+    expect(SCENE.w / SCENE.h).toBeGreaterThan(4.5);
+    expect(SCENE.w / SCENE.h).toBeLessThan(6);
+    for (const r of FACTORY_ROOMS) {
+      expect(r.x).toBeGreaterThanOrEqual(0);
+      expect(r.x + r.w).toBeLessThanOrEqual(SCENE.w);
+      expect(r.y + r.h).toBeLessThanOrEqual(SCENE.h);
+      expect(r.h).toBeGreaterThanOrEqual(BOT_H + 20);
+    }
+    const top = Math.max(...FACTORY_ROOMS.filter((r) => r.floor === 2).map((r) => r.y + r.h));
+    const bottom = Math.min(...FACTORY_ROOMS.filter((r) => r.floor === 1).map((r) => r.y));
+    expect(top).toBeLessThanOrEqual(bottom);
   });
 });
 
@@ -203,5 +229,30 @@ describe("moveOf（工程が変わった Rovo の移動。前回の部屋 → �
   it("階をまたぐ移動はエレベーター", () => {
     expect(moveOf("code", "research")).toEqual({ from: "code", to: "research", crossFloor: true });
     expect(moveOf("wait", "code")).toEqual({ from: "wait", to: "code", crossFloor: true });
+  });
+});
+
+describe("背の低い画面では最初はたたむ（広げてもコンソールに高さが残る画面だけ広げる）", () => {
+  it("断面図の高さは幅に合わせて縮み、拡大しない（上限は最大幅のとき）", () => {
+    expect(stageHeight(SCENE.w)).toBeCloseTo(SCENE.h, 0);
+    expect(stageHeight(SCENE.w / 2)).toBeCloseTo(SCENE.h / 2, 0);
+    expect(stageHeight(4000)).toBe(stageHeight(10000));
+    expect(stageHeight(4000)).toBeLessThanOrEqual(310);
+  });
+
+  it("広げても .main に 700px 前後が残る高さのときだけ、既定で広げる", () => {
+    expect(expandsByDefault(1280, 720)).toBe(false);
+    expect(expandsByDefault(1440, 900)).toBe(false);
+    expect(expandsByDefault(1280, 1000)).toBe(false);
+    expect(expandsByDefault(1440, 1000)).toBe(false);
+    expect(expandsByDefault(1440, 1200)).toBe(true);
+    expect(expandsByDefault(1920, 1200)).toBe(true);
+    for (const [w, h] of [
+      [1280, 1100],
+      [1440, 1200],
+      [2560, 1440],
+    ] as const) {
+      if (expandsByDefault(w, h)) expect(h - stageHeight(w)).toBeGreaterThanOrEqual(820);
+    }
   });
 });

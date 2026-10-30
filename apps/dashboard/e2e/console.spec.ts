@@ -62,7 +62,9 @@ test("(12) 一覧の骨格: ヘッダ → 帯（今日は工場） → レール
   await expect(page.locator(".console h1")).toHaveCount(0);
   await expect(rail(page, id("long"))).not.toHaveAttribute("aria-current", "true");
   const header = await box(page, "header.top");
-  await expect(page.locator(".fx-stage svg.fx-svg")).toBeVisible();
+  // 既定の 1280 × 720 は背の低い画面なので、工場の帯は最初はたたんだ人数の 1 行
+  await expect(page.locator("section[data-factory] [data-factory-summary]")).toBeVisible();
+  await expect(page.locator(".fx-stage")).toHaveCount(0);
   const band = await box(page, "section[data-factory]");
   const railBox = await box(page, "nav.rail");
   // 中央の領域（.console-col）。中身が高いときはこの領域の中でスクロールする
@@ -76,9 +78,9 @@ test("(12) 一覧の骨格: ヘッダ → 帯（今日は工場） → レール
   expect(bar.y).toBeGreaterThanOrEqual(consoleBox.y + consoleBox.height - 1);
   // 横の並び: レールが左、中央が右
   expect(railBox.x + railBox.width).toBeLessThanOrEqual(consoleBox.x + 1);
-  // 工場の帯は断面図の上限 300px + 見出しの 1 行。背の低い画面（既定の 720px）では、レールとコンソールを残すよう縮む
-  expect(band.height).toBeGreaterThan(150);
-  expect(band.height).toBeLessThanOrEqual(340);
+  // たたんだ帯は 1 行（細い帯）
+  expect(band.height).toBeGreaterThan(24);
+  expect(band.height).toBeLessThanOrEqual(64);
   // 広い画面はビューポートの高さいっぱいで、ページ自体は縦にスクロールしない（帯がコンソールを押し出さない）
   expect(
     await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight),

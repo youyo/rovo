@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, loginAs, rail, taskPath, test } from "./fixtures";
+import { expect, loginAs, rail, tallScreen, taskPath, test } from "./fixtures";
 import { readState } from "./state";
 
 const s = readState();
@@ -55,6 +55,7 @@ test("(sw-1) レールで別のタスクを押すと、ページを読み直さ�
 
 test("(sw-2) 工場の Rovo（今日）でも、ページを読み直さずに切り替わる", async ({ page }) => {
   const running = s.tasks.running as string;
+  await tallScreen(page);
   await loginAs(page, s.users.alice);
   await page.getByRole("button", { name: "チーム" }).click();
   await setMarker(page);

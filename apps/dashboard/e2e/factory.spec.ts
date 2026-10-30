@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
-import { expect, loginAs, rail, taskPath, test } from "./fixtures";
+import { expect, loginAs, rail, tallScreen, taskPath, test } from "./fixtures";
 import { readState } from "./state";
 
 // 今日の一覧の帯「Rovo の工場」（docs/specs/dashboard-factory.md）。断面図は遅延読み込みの別チャンク。
@@ -29,7 +29,7 @@ test("(F1) 今日は工場の帯。自分の Rovo が部屋にいて、押すと
   page,
 }) => {
   const csp = await watchCsp(page);
-  await page.setViewportSize({ width: 1440, height: 1000 });
+  await tallScreen(page);
   await loginAs(page, s.users.alice);
   await expect(band(page)).toBeVisible();
   // マイタスク（既定）でも工場を出す。タイムラインの帯は出さない
@@ -39,13 +39,17 @@ test("(F1) 今日は工場の帯。自分の Rovo が部屋にいて、押すと
   await expect(running).toHaveAttribute("data-room", /^(prep|code)$/);
   // 失敗したタスクは工場に入らない
   await expect(rovo(page, id("failed"))).toHaveCount(0);
-  // 断面図の CSS は別ファイルで読まれ、断面図の高さは上限の 300px（背の高い画面）
-  const box = await page.locator(".fx-stage").boundingBox();
-  expect(box?.height).toBe(300);
+  // 断面図は横長（1440px 幅で 280px）。CSS は別ファイルで読まれる
+  const box = await page.locator(".fx-stage svg.fx-svg").boundingBox();
+  expect(box?.width).toBeGreaterThan(1400);
+  expect(Math.round(box?.height ?? 0)).toBe(280);
+  // Rovo は 2 倍以上の大きさ（幅 40px 前後）で描かれる
+  const bot = await running.locator(".fx-hit").boundingBox();
+  expect(bot?.width).toBeGreaterThanOrEqual(40);
   const fxCss = await page.evaluate(() =>
     [...document.querySelectorAll('link[rel="stylesheet"]')].map((l) => l.getAttribute("href")),
   );
-  expect(fxCss.some((h) => /\/dashboard\/assets\/factory-scene-.+\.css$/.test(h ?? ""))).toBe(true);
+  expect(fxCss.some((h) => /\/dashboard\/assets\/factory-panel-.+\.css$/.test(h ?? ""))).toBe(true);
   // 押すとそのタスクを選ぶ（ページを読み直さない）
   // Rovo は待機の動作で動き続けるので、動かない当たり判定（.fx-hit）を押す
   await running.locator(".fx-hit").click();
@@ -69,6 +73,7 @@ test("(F2) 過去の日は今のタイムラインの帯（チームのとき）
 });
 
 test("(F3) たたむと部屋ごとの人数の 1 行になり、リロードしても保たれる", async ({ page }) => {
+  await tallScreen(page);
   await loginAs(page, s.users.alice);
   await expect(page.locator(".fx-stage svg.fx-svg")).toBeVisible();
   const toggle = page.locator("button[data-factory-toggle]");
@@ -106,6 +111,7 @@ test("(F4) 狭い幅（390px）は断面図を出さず、人数の 1 行の簡�
 });
 
 test("(F5) 見えないタスクは工場に入らず、DOM にも出ない。件数だけ", async ({ page }) => {
+  await tallScreen(page);
   await loginAs(page, s.users.bob);
   await page.getByRole("button", { name: "チーム" }).click();
   // 見えるタスクの Rovo は出ている（検査が空振りしない。準備の部屋は定員を超えるので +n のタイルもある）
@@ -119,6 +125,7 @@ test("(F5) 見えないタスクは工場に入らず、DOM にも出ない。�
 });
 
 test("(F6) prefers-reduced-motion では工場の動きが止まる（ふだんは動く）", async ({ page }) => {
+  await tallScreen(page);
   await loginAs(page, s.users.alice);
   await expect(page.locator(".fx-stage svg.fx-svg")).toBeVisible();
   const running = () =>
@@ -134,17 +141,52 @@ test("(F6) prefers-reduced-motion では工場の動きが止まる（ふだん�
   await expect.poll(running).toBe(0);
 });
 
+test("(F8) 背の低い画面（1280 × 720）は最初はたたんだ 1 行。広げられ、広げた好みはリロード後も保たれる", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await loginAs(page, s.users.alice);
+  const toggle = page.locator("button[data-factory-toggle]");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator("[data-factory-summary]")).toBeVisible();
+  await expect(page.locator(".fx-stage")).toHaveCount(0);
+  // 広げると断面図（1280px 幅に合わせて縮む）。Rovo を押してタスクを選べる
+  await toggle.click();
+  const svg = page.locator(".fx-stage svg.fx-svg");
+  await expect(svg).toBeVisible();
+  const box = await svg.boundingBox();
+  expect(Math.round(box?.height ?? 0)).toBe(Math.round((1280 * 280) / 1440));
+  await rovo(page, id("running")).locator(".fx-hit").click();
+  await expect(page.getByRole("heading", { level: 1, name: "実行中のタスク" })).toBeVisible();
+  // 保存した好み（広げる）が背の低い画面の既定より優先
+  await page.reload();
+  await expect(page.locator(".fx-stage svg.fx-svg")).toBeVisible();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+});
+
 for (const scheme of ["light", "dark"] as const) {
-  test(`(F7) スクリーンショット: ${scheme} の工場の帯（チーム）`, async ({ page }, testInfo) => {
+  test(`(F7) スクリーンショット: ${scheme} の工場の帯（1440 × 1000 で広げた帯、1280 × 720 のたたんだ既定）`, async ({
+    page,
+  }, testInfo) => {
     const dir = process.env.ROVO_SHOTS_DIR ?? testInfo.outputPath("shots");
     mkdirSync(dir, { recursive: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
     await loginAs(page, s.users.alice);
     await page.getByRole("button", { name: "チーム" }).click();
+    // 1440 × 1000 は背の低い画面の扱いなので最初はたたんでいる。広げて撮る
+    await expect(page.locator("[data-factory-summary]")).toBeVisible();
+    await page.screenshot({ path: join(dir, `${scheme}-1440x1000-default.png`) });
+    await page.locator("button[data-factory-toggle]").click();
     await expect(rovo(page, id("running"))).toBeVisible();
     await page.evaluate(() => document.fonts.ready);
     await band(page).screenshot({ path: join(dir, `${scheme}-factory.png`) });
-    await page.screenshot({ path: join(dir, `${scheme}-factory-page.png`) });
+    await page.screenshot({ path: join(dir, `${scheme}-1440x1000-expanded.png`) });
+    // 1280 × 720 のたたんだ既定（好みを消して開き直す）
+    await page.evaluate(() => localStorage.removeItem("rovo.dashboard.factoryCollapsed"));
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.reload();
+    await expect(page.locator("[data-factory-summary]")).toBeVisible();
+    await page.screenshot({ path: join(dir, `${scheme}-1280x720-default.png`) });
   });
 }

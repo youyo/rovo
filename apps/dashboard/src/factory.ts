@@ -13,32 +13,33 @@ export type Place = RoomId | "shipped";
 export type RoomGeom = {
   id: RoomId;
   floor: 1 | 2;
-  /** 断面図の座標（見本 Factory2 の 1440 × 1000 の座標系） */
+  /** 断面図の座標（帯用の横長の座標系 SCENE。1440 × 280） */
   x: number;
   y: number;
   w: number;
   h: number;
-  /** Rovo を並べる段の数 */
-  rows: number;
-  /** 部屋の設備の絵の高さ */
-  art: number;
 };
+
+/** 断面図の座標系（横長の 2 階建て。1440px の幅で 1:1） */
+export const SCENE = { w: 1440, h: 280 } as const;
+/** 断面図の最大の幅（とても広い画面では、これ以上は拡大せず中央に置く） */
+export const SCENE_MAX_W = 1540;
 
 /** 部屋の並び（1 階は左から、2 階は左から）。管制室は Rovo を入れないので別 */
 export const FACTORY_ROOMS: readonly RoomGeom[] = [
-  { id: "prep", floor: 1, x: 44, y: 444, w: 196, h: 292, rows: 2, art: 70 },
-  { id: "code", floor: 1, x: 250, y: 444, w: 290, h: 292, rows: 2, art: 70 },
-  { id: "verify", floor: 1, x: 550, y: 444, w: 230, h: 292, rows: 2, art: 70 },
-  { id: "review", floor: 1, x: 790, y: 444, w: 160, h: 292, rows: 2, art: 70 },
-  { id: "ready", floor: 1, x: 960, y: 444, w: 162, h: 292, rows: 2, art: 70 },
-  { id: "wait", floor: 2, x: 44, y: 200, w: 360, h: 194, rows: 1, art: 46 },
-  { id: "research", floor: 2, x: 414, y: 200, w: 400, h: 194, rows: 1, art: 46 },
+  { id: "prep", floor: 1, x: 16, y: 156, w: 220, h: 100 },
+  { id: "code", floor: 1, x: 244, y: 156, w: 304, h: 100 },
+  { id: "verify", floor: 1, x: 556, y: 156, w: 244, h: 100 },
+  { id: "review", floor: 1, x: 808, y: 156, w: 204, h: 100 },
+  { id: "ready", floor: 1, x: 1020, y: 156, w: 208, h: 100 },
+  { id: "wait", floor: 2, x: 16, y: 50, w: 404, h: 96 },
+  { id: "research", floor: 2, x: 428, y: 50, w: 404, h: 96 },
 ];
-export const CONTROL_ROOM = { x: 824, y: 200, w: 296, h: 194 } as const;
+export const CONTROL_ROOM = { x: 840, y: 50, w: 388, h: 96 } as const;
 
 /** Rovo 1 体の枠（幅・高さ・横の間隔） */
-export const BOT_W = 60;
-export const BOT_H = 68;
+export const BOT_W = 54;
+export const BOT_H = 62;
 export const BOT_GAP = 6;
 
 export function roomGeom(id: RoomId): RoomGeom {
@@ -48,12 +49,25 @@ export function roomGeom(id: RoomId): RoomGeom {
 /** 1 段に並ぶ数 */
 export function perRow(id: RoomId): number {
   const r = roomGeom(id);
-  return Math.max(1, Math.floor((r.w - 16 + BOT_GAP) / (BOT_W + BOT_GAP)));
+  return Math.max(1, Math.floor((r.w - 12 + BOT_GAP) / (BOT_W + BOT_GAP)));
 }
 
-/** 部屋の定員（1 段の数 × 段の数） */
+/** 部屋の定員（Rovo は 1 段なので、横に並ぶ数） */
 export function roomCapacity(id: RoomId): number {
-  return perRow(id) * roomGeom(id).rows;
+  return perRow(id);
+}
+
+/** 帯の幅のときの断面図の高さ（幅に合わせて縮み、SCENE_MAX_W より広くはしない） */
+export function stageHeight(width: number): number {
+  return (Math.min(width, SCENE_MAX_W) * SCENE.h) / SCENE.w;
+}
+
+/**
+ * 保存した好みが無いとき、最初から広げるか。広げてもレールとコンソール（.main）に 700px が残る画面だけ広げる
+ * （ヘッダ 51 + 帯の見出し 34 + ステータスバー 42 + .main 700 = 827）。それより低い画面は最初は人数の 1 行
+ */
+export function expandsByDefault(width: number, height: number): boolean {
+  return height - stageHeight(width) >= 827;
 }
 
 export function floorOf(place: Place): 1 | 2 {

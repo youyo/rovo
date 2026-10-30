@@ -1,4 +1,13 @@
-import { expect, loginAs, openDrawer, rail, taskPath, test, withBudgetBinding } from "./fixtures";
+import {
+  expect,
+  loginAs,
+  openDrawer,
+  rail,
+  tallScreen,
+  taskPath,
+  test,
+  withBudgetBinding,
+} from "./fixtures";
 import { readState } from "./state";
 
 const s = readState();
@@ -74,6 +83,7 @@ test("(3) レールの行のリンクで詳細へ行ける", async ({ page }) =>
 
 test("(9) 状態が DOM の属性とアクセシブルな名前で判別できる（色に頼らない）", async ({ page }) => {
   // 今日の工場の Rovo: 部屋は data-room と名前の文字で分かる（人の色だけに頼らず、頭文字のバッジもある）
+  await tallScreen(page);
   await loginAs(page, s.users.alice);
   const rovo = page.locator(`section[data-factory] a[data-task="${s.tasks.running}"]`);
   await expect(rovo).toHaveAttribute("data-room", /^(prep|code)$/);

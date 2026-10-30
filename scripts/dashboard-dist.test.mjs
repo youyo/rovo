@@ -22,11 +22,11 @@ const html = readFileSync(join(dist, "index.html"), "utf8");
 const MAX_APP_BYTES = 400 * 1024;
 const MAX_FONT_BYTES = 6 * 1024 * 1024;
 const isFont = (f) => /\.(woff2?|ttf|otf)$/i.test(f);
-// 工場の帯の断面図（factory-scene.tsx と factory-scene.css）は遅延読み込みの別チャンク。今日の一覧を広げたときだけ読む。
-// アプリ本体の上限とは別枠にする（本体の上限は据え置き）。実測（JS 約 51KB + CSS 約 13KB）に 15% 程度の余裕
-const MAX_FACTORY_BYTES = 75 * 1024;
+// 工場の帯の中身（factory-panel.tsx・factory-scene.tsx と factory-scene.css）は遅延読み込みの別チャンク。今日の一覧でだけ読む。
+// アプリ本体の上限とは別枠にする（本体の上限は据え置き）。実測（JS 約 44KB + CSS 約 13KB）に 15% 程度の余裕
+const MAX_FACTORY_BYTES = 65 * 1024;
 const isFactoryChunk = (f) =>
-  /^assets\/factory-scene-[A-Za-z0-9_-]+\.(js|css)$/.test(relative(dist, f));
+  /^assets\/factory-panel-[A-Za-z0-9_-]+\.(js|css)$/.test(relative(dist, f));
 
 test("index.html が dist 直下にある（assets のパスは dist 直下から。Worker が /dashboard を剥がして渡す）", () => {
   assert.ok(statSync(join(dist, "index.html")).isFile());

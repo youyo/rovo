@@ -12,6 +12,7 @@ import { inEn, inJa } from "./lang";
 
 const roots: { unmount: () => void }[] = [];
 const restores: (() => void)[] = [];
+const lastAnim: { current: Animation | null } = { current: null };
 afterEach(() => {
   for (const r of restores.splice(0)) r();
   for (const r of roots.splice(0)) act(() => r.unmount());
@@ -146,7 +147,8 @@ describe("FactoryScene（工場の断面図）", () => {
 describe("工程が変わった Rovo の移動（FLIP。element.animate）", () => {
   const stubAnimate = () => {
     const calls: { el: Element; frames: Keyframe[] }[] = [];
-    const anim = { onfinish: null, oncancel: null } as unknown as Animation;
+    const anim = { onfinish: null, oncancel: null, cancel() {} } as unknown as Animation;
+    lastAnim.current = anim;
     // jsdom は Web Animations API を持たないので、テストの間だけ足す
     const proto = Element.prototype as { animate?: unknown };
     const had = Object.hasOwn(proto, "animate");
@@ -175,6 +177,23 @@ describe("工程が変わった Rovo の移動（FLIP。element.animate）", () 
     expect(el.classList.contains("fx-walking")).toBe(true);
     expect(frames.at(-1)?.transform).toBe("translate(0px, 0px)");
     expect(frames).toHaveLength(4);
+  });
+
+  it("歩いている間は、ポーリングで並び順が変わっても歩く姿（fx-walking）のまま。歩き終えると戻る", () => {
+    const calls = stubAnimate();
+    const a = task({ stage: "code", owner_login: "m-user" });
+    const { draw, container } = render(withTasks([a]));
+    draw(withTasks([{ ...a, stage: "verify" }]));
+    expect(calls).toHaveLength(1);
+    const mover = () => container.querySelector(`a[data-task="${a.task_id}"] .fx-mover`) as Element;
+    expect(mover().classList.contains("fx-walking")).toBe(true);
+    // 同じ部屋の前に別の人の Rovo が入り、並びの番号（待機の動作のずらし）が変わる
+    const before = task({ stage: "verify", owner_login: "a-user" });
+    draw(withTasks([before, { ...a, stage: "verify" }]));
+    expect(mover().classList.contains("fx-walking")).toBe(true);
+    // 歩き終える
+    act(() => (lastAnim.current?.onfinish as (() => void) | null)?.());
+    expect(mover().classList.contains("fx-walking")).toBe(false);
   });
 
   it("階をまたぐときはエレベーター（横に歩く → かご → 横に歩く）", () => {

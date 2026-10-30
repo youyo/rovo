@@ -6,6 +6,21 @@ import { useLang } from "./lang";
  * 本体の容量を増やさないよう、断面図の中の文言はチャンクに置く。i18n.ts と同じく en が正で、ja は同じキー集合を型で強制する。
  */
 const en = {
+  "factory.collapse": "Collapse",
+  "factory.expand": "Expand",
+  "factory.toggleTitle": "Collapse the factory to one line of head counts per room",
+  "factory.hidden": "{n} hidden",
+  "factory.hiddenTitle": "Tasks in repositories you can't see this month are counted, not shown",
+  "factory.legend": "Antenna light = person, badge = initial",
+  "factory.summaryAria": "Robots per room",
+  "factory.prep": "Prep",
+  "factory.code": "Coding",
+  "factory.verify": "Verify",
+  "factory.review": "Review",
+  "factory.ready": "Ready",
+  "factory.wait": "Waiting",
+  "factory.research": "Research",
+  "factory.shipped": "Shipped",
   "factory.sceneAria": "Factory floor. Each robot is a task",
   "factory.bot": "{title} ({login}, {room})",
   "factory.more": "+{n}",
@@ -37,6 +52,21 @@ const en = {
 export type FactoryKey = keyof typeof en;
 
 const ja: Record<FactoryKey, string> = {
+  "factory.collapse": "たたむ",
+  "factory.expand": "広げる",
+  "factory.toggleTitle": "工場をたたんで、部屋ごとの人数の 1 行にする",
+  "factory.hidden": "見えない {n} 件",
+  "factory.hiddenTitle": "今月の、権限の無いリポジトリのタスクは工場に入れず、件数だけ出します",
+  "factory.legend": "アンテナの光が人の色、バッジが頭文字",
+  "factory.summaryAria": "部屋ごとの Rovo の数",
+  "factory.prep": "準備",
+  "factory.code": "コーディング",
+  "factory.verify": "検証",
+  "factory.review": "レビュー",
+  "factory.ready": "Ready",
+  "factory.wait": "返事待ち",
+  "factory.research": "調査室",
+  "factory.shipped": "出荷",
   "factory.sceneAria": "工場の断面図。Rovo 1 体が 1 タスク",
   "factory.bot": "{title}（{login}・{room}）",
   "factory.more": "+{n}",

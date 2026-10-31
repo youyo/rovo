@@ -2,7 +2,7 @@ import type { OverviewDto } from "@rovo/dashboard-contract";
 import { overviewFixture, overviewMeFixture } from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverviewView } from "../src/overview-view";
 import { TL_AXIS_H, TL_BAND_H, TL_MIN_LANE_H } from "../src/timeline-view";
 import { BROWSER_CLICKS, clickLink } from "./click-link";
@@ -10,8 +10,18 @@ import { inJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// 工場の帯の中身（遅延チャンク）を先に読み込み、React.lazy の解決が CI の遅さに左右されないようにする
+await import("../src/factory-panel");
+
 const roots: { unmount: () => void }[] = [];
+beforeEach(() => {
+  // 背の高い画面（今日の工場の帯を既定で広げる）
+  vi.stubGlobal("innerWidth", 1440);
+  vi.stubGlobal("innerHeight", 1600);
+  localStorage.clear();
+});
 afterEach(() => {
+  vi.unstubAllGlobals();
   for (const r of roots.splice(0)) act(() => r.unmount());
   document.body.innerHTML = "";
 });
@@ -23,6 +33,7 @@ function mount(
     selectedId?: string | null;
     isToday?: boolean;
     onSelectTask?: (id: string) => void;
+    mode?: "split" | "list" | "detail";
   } = {},
 ) {
   const container = document.createElement("div");
@@ -41,6 +52,7 @@ function mount(
           isToday: extra.isToday ?? true,
           selectedId: extra.selectedId ?? null,
           onSelectTask: extra.onSelectTask,
+          mode: extra.mode,
           console: createElement("section", { className: "console" }, "コンソールの場所"),
         }),
       ),
@@ -48,6 +60,11 @@ function mount(
   });
   return container;
 }
+
+/** 工場の断面図（遅延読み込み）が描かれるまで待つ */
+const settle = async () => {
+  for (let i = 0; i < 20; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)));
+};
 
 const lanesOf = (c: HTMLElement) =>
   [...c.querySelectorAll("[data-lane]")].map((e) => e.getAttribute("data-lane"));
@@ -66,9 +83,25 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
     );
   });
 
-  it("構成: 帯 → レール + コンソール → ステータスバー の順", () => {
+  it("構成: 帯 → レール + コンソール → ステータスバー の順（今日は工場の帯、過去の日はタイムラインの帯）", () => {
+    for (const isToday of [true, false]) {
+      document.body.innerHTML = "";
+      const c = mount(overviewFixture, { isToday });
+      const band = c.querySelector(isToday ? "section[data-factory]" : ".tlband") as HTMLElement;
+      expect(band, `isToday=${isToday}`).not.toBeNull();
+      expect(c.querySelector(isToday ? ".tlband" : "section[data-factory]")).toBeNull();
+      const main = c.querySelector(".main") as HTMLElement;
+      const bar = c.querySelector(".statusbar") as HTMLElement;
+      const order = [band, main, bar].map((e) =>
+        [...(c.querySelectorAll("*") as NodeListOf<Element>)].indexOf(e),
+      );
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+    }
+  });
+
+  it("構成: レールとコンソールは帯の下", () => {
     const c = mount(overviewFixture);
-    const band = c.querySelector(".tlband") as HTMLElement;
+    const band = c.querySelector("section[data-factory]") as HTMLElement;
     const main = c.querySelector(".main") as HTMLElement;
     const bar = c.querySelector(".statusbar") as HTMLElement;
     expect(band).not.toBeNull();
@@ -80,17 +113,17 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
 
-  it("全員: owner_login ごとのレーン。自分: 自分だけ", () => {
-    expect(lanesOf(mount(overviewFixture))).toEqual([
+  it("過去の日の全員: owner_login ごとのレーン。自分: タイムラインの帯は出さない", () => {
+    expect(lanesOf(mount(overviewFixture, { isToday: false }))).toEqual([
       "alice-example",
       "bob-example",
       "carol-example",
     ]);
     document.body.innerHTML = "";
-    expect(lanesOf(mount(overviewMeFixture))).toEqual([]);
+    expect(lanesOf(mount(overviewMeFixture, { isToday: false }))).toEqual([]);
   });
 
-  it("タイムラインは細い帯（行ごとの高さ + 軸が 48px 前後に収まる）", () => {
+  it("過去の日のタイムラインは細い帯（行ごとの高さ + 軸が 48px 前後に収まる）", () => {
     const heights = (c: HTMLElement) => {
       const lanes = [...c.querySelectorAll("svg.lane-svg")].map((e) =>
         Number(e.getAttribute("height")),
@@ -98,19 +131,19 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
       const axis = Number(c.querySelector("svg.axis-svg")?.getAttribute("height"));
       return { lanes, axis };
     };
-    const three = heights(mount(overviewFixture));
+    const three = heights(mount(overviewFixture, { isToday: false }));
     expect(three.axis).toBe(TL_AXIS_H);
     expect(three.lanes.reduce((a, b) => a + b, 0) + three.axis).toBeLessThanOrEqual(TL_BAND_H);
     expect(three.lanes.every((h) => h >= TL_MIN_LANE_H)).toBe(true);
     document.body.innerHTML = "";
-    const one = heights(mount({ ...overviewMeFixture, scope: "all" }));
+    const one = heights(mount({ ...overviewMeFixture, scope: "all" }, { isToday: false }));
     expect(one.lanes.reduce((a, b) => a + b, 0) + one.axis).toBeLessThanOrEqual(TL_BAND_H);
     expect(TL_BAND_H).toBeGreaterThanOrEqual(44);
     expect(TL_BAND_H).toBeLessThanOrEqual(56);
   });
 
-  it("棒はタスク詳細へのリンク。状態は aria-label と data 属性に文字で出る（色だけに頼らない）", () => {
-    const c = mount(overviewFixture);
+  it("過去の日の棒はタスク詳細へのリンク。状態は aria-label と data 属性に文字で出る（色だけに頼らない）", () => {
+    const c = mount(overviewFixture, { isToday: false });
     const bars = [...c.querySelectorAll("svg a[data-task]")];
     expect(bars).toHaveLength(5);
     for (const a of bars) {
@@ -123,18 +156,18 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
     expect(bars.filter((a) => a.getAttribute("data-mark") === "merged")).toHaveLength(2);
   });
 
-  it("consult は点、いまの破線、時刻の目盛り", () => {
-    const c = mount(overviewFixture);
+  it("過去の日: consult は点、時刻の目盛り", () => {
+    const c = mount(overviewFixture, { isToday: false });
     expect(c.querySelectorAll("[data-consult]")).toHaveLength(3);
-    expect(c.querySelector("[data-now]")).toBeTruthy();
     expect(c.querySelectorAll("[data-tick]").length).toBeGreaterThanOrEqual(3);
   });
 
-  it("今日のタスクが無いときは、帯の代わりに空の表示。レールにも空の表示", () => {
+  it("今日のタスクが無いときも工場の帯は出す（誰もいない工場）。レールには空の表示", () => {
     const empty: OverviewDto = { ...overviewMeFixture, scope: "all", tasks: [], consults: [] };
     const c = mount(empty);
     expect(c.textContent).toContain("今日のタスクはまだありません");
     expect(c.querySelector("a.rail-row")).toBeNull();
+    expect(c.querySelector("section[data-factory]")).not.toBeNull();
     expect(c.querySelector("[data-lane]")).toBeNull();
   });
 
@@ -146,10 +179,32 @@ describe("OverviewView（骨格: 細いタイムライン帯・レール・コ�
     expect(c.querySelector(".tlband")?.getAttribute("aria-label")).toBe("この日のタイムライン");
   });
 
-  it("いまの破線は今日のときだけ出す", () => {
+  it("いまの破線は出さない（過去の日のタイムラインには「いま」が無く、今日は工場の帯）", () => {
     expect(mount(overviewFixture, { isToday: false }).querySelector("[data-now]")).toBeNull();
     document.body.innerHTML = "";
-    expect(mount(overviewFixture, { isToday: true }).querySelector("[data-now]")).toBeTruthy();
+    const today = mount(overviewFixture, { isToday: true });
+    expect(today.querySelector("[data-now]")).toBeNull();
+    expect(today.querySelector("section[data-factory]")).not.toBeNull();
+  });
+
+  it("今日はマイタスク（scope=me）でもチームでも工場の帯。詳細だけの表示（detail）では帯を出さない", async () => {
+    const mine = mount(overviewMeFixture);
+    expect(mine.querySelector("section[data-factory]")).not.toBeNull();
+    await settle();
+    const rovos = [...mine.querySelectorAll("section[data-factory] a[data-task]")];
+    expect(rovos.length).toBeGreaterThan(0);
+    for (const a of rovos) {
+      const id = a.getAttribute("data-task");
+      expect(overviewMeFixture.tasks.find((t) => t.task_id === id)?.owner_login).toBe(
+        overviewMeFixture.viewer.login,
+      );
+    }
+    document.body.innerHTML = "";
+    expect(mount(overviewFixture).querySelector("section[data-factory]")).not.toBeNull();
+    document.body.innerHTML = "";
+    expect(
+      mount(overviewFixture, { mode: "detail" }).querySelector("section[data-factory], .tlband"),
+    ).toBeNull();
   });
 
   it("レール: 新しい開始が上。選択中の行を示す", () => {
@@ -301,7 +356,7 @@ describe("凡例・レーンの見出し・点の title は、初めて見た人
   });
 
   it("レーンの見出し（読み上げ）: 「N 件、consult（モデルに意見を聞いた） M 回」", () => {
-    const c = mount(overviewFixture);
+    const c = mount(overviewFixture, { isToday: false });
     const notes = [...c.querySelectorAll("[data-lane] .lane-name .sr-only")].map(
       (e) => e.textContent,
     );
@@ -311,7 +366,7 @@ describe("凡例・レーンの見出し・点の title は、初めて見た人
   });
 
   it("consult の点の title: 「consult（モデルに意見を聞いた） HH:MM」", () => {
-    const c = mount(overviewFixture);
+    const c = mount(overviewFixture, { isToday: false });
     const dots = [...c.querySelectorAll("[data-consult]")];
     expect(dots).toHaveLength(3);
     for (const d of dots) {
@@ -322,7 +377,7 @@ describe("凡例・レーンの見出し・点の title は、初めて見た人
   });
 
   it("タスクの点の title と aria-label: 閉じた は説明つき（閉じた（マージせず））", () => {
-    const c = mount(closedData);
+    const c = mount(closedData, { isToday: false });
     const dot = c.querySelector('svg a[data-task][data-mark="closed"]') as Element;
     expect(dot.getAttribute("aria-label")).toContain("閉じた（マージせず）");
     expect(dot.querySelector("title")?.textContent).toContain("閉じた（マージせず）");
@@ -360,8 +415,10 @@ describe("表示の安全（D14）", () => {
     expect(text).toContain("<img src=x onerror=alert(1)>");
   });
 
-  it("リンクは /dashboard/ 配下か Cloudflare のトップだけ（javascript: などを作らない）", () => {
+  it("リンクは /dashboard/ 配下か Cloudflare のトップだけ（javascript: などを作らない）。工場の Rovo も", async () => {
     const c = mount(evil);
+    await settle();
+    expect(c.querySelector("section[data-factory] a[data-task]")).not.toBeNull();
     expect(c.querySelector("a[href^='javascript:']")).toBeNull();
     for (const a of c.querySelectorAll("a")) {
       const h = a.getAttribute("href") ?? "";
@@ -369,8 +426,10 @@ describe("表示の安全（D14）", () => {
     }
   });
 
-  it("マークアップに style 属性・style 要素・外部ホストへの参照を作らない", () => {
+  it("マークアップに style 属性・style 要素・外部ホストへの参照を作らない（工場の断面図も）", async () => {
     const c = mount(overviewFixture);
+    await settle();
+    expect(c.querySelector(".fx-stage svg")).not.toBeNull();
     expect(c.innerHTML).not.toMatch(/\sstyle=/i);
     expect(c.innerHTML).not.toMatch(/<style/i);
     expect(c.innerHTML).not.toMatch(/(src|href)="https?:\/\/(?!github\.com\/)/);
@@ -380,9 +439,21 @@ describe("表示の安全（D14）", () => {
 describe("OverviewView: レールとタイムラインの行のクリック（ページを読み直さず切り替える）", () => {
   const id = overviewFixture.tasks[1]?.task_id as string;
 
-  it("タイムラインの棒: 左クリックは preventDefault して onSelectTask(ID)。href は残る", () => {
+  it("工場の Rovo: 左クリックは preventDefault して onSelectTask(ID)。href は残る", async () => {
     const calls: string[] = [];
     const c = mount(overviewFixture, { onSelectTask: (x) => calls.push(x) });
+    await settle();
+    const a = c.querySelector(`section[data-factory] a[data-task="${id}"]`) as Element;
+    expect(clickLink(a)).toBe(true);
+    expect(calls).toEqual([id]);
+    expect(a.getAttribute("href")).toBe(`/dashboard/tasks/${id}`);
+    for (const { name, init } of BROWSER_CLICKS) expect(clickLink(a, init), name).toBe(false);
+    expect(calls).toEqual([id]);
+  });
+
+  it("過去の日のタイムラインの棒: 左クリックは preventDefault して onSelectTask(ID)。href は残る", () => {
+    const calls: string[] = [];
+    const c = mount(overviewFixture, { onSelectTask: (x) => calls.push(x), isToday: false });
     const a = c.querySelector(`a[data-task="${id}"]`) as Element;
     expect(clickLink(a)).toBe(true);
     expect(calls).toEqual([id]);
@@ -391,7 +462,7 @@ describe("OverviewView: レールとタイムラインの行のクリック（�
 
   it("タイムラインの棒: 修飾キー付き・中クリックは preventDefault も onSelectTask もしない", () => {
     const calls: string[] = [];
-    const c = mount(overviewFixture, { onSelectTask: (x) => calls.push(x) });
+    const c = mount(overviewFixture, { onSelectTask: (x) => calls.push(x), isToday: false });
     const a = c.querySelector(`a[data-task="${id}"]`) as Element;
     for (const { name, init } of BROWSER_CLICKS) expect(clickLink(a, init), name).toBe(false);
     expect(calls).toEqual([]);
@@ -406,16 +477,19 @@ describe("OverviewView: レールとタイムラインの行のクリック（�
   });
 
   it("onSelectTask が無ければ、どちらも普通のリンク", () => {
-    const c = mount(overviewFixture);
+    const c = mount(overviewFixture, { isToday: false });
     expect(clickLink(c.querySelector(`a[data-task="${id}"]`) as Element)).toBe(false);
     expect(clickLink(c.querySelector(`a.rail-row[data-task-id="${id}"]`) as Element)).toBe(false);
   });
 });
 
 describe("OverviewView: 時刻の横軸のグラフ", () => {
-  it("マイタスクでは出さず、チームでは出す", () => {
-    expect(mount(overviewMeFixture).querySelector(".tlband")).toBeNull();
+  it("過去の日: マイタスクでは出さず、チームでは出す。今日はどちらも工場の帯", () => {
+    expect(mount(overviewMeFixture, { isToday: false }).querySelector(".tlband")).toBeNull();
     document.body.innerHTML = "";
-    expect(mount(overviewFixture).querySelector(".tlband")).not.toBeNull();
+    expect(mount(overviewFixture, { isToday: false }).querySelector(".tlband")).not.toBeNull();
+    document.body.innerHTML = "";
+    expect(mount(overviewMeFixture).querySelector(".tlband")).toBeNull();
+    expect(mount(overviewMeFixture).querySelector("section[data-factory]")).not.toBeNull();
   });
 });

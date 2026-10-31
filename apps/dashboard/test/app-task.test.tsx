@@ -11,6 +11,9 @@ import { LANG_KEY } from "../src/prefs";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// 工場の帯の中身（遅延チャンク）を先に読み込み、React.lazy の解決が CI の遅さに左右されないようにする
+await import("../src/factory-panel");
+
 const ID = taskDetailRunningFixture.task.task_id;
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -173,6 +176,7 @@ describe("App のルーティング（個別ページは無い。/dashboard/task
       expect(paths(f), p).toContain("/dashboard/api/overview");
       // 一覧のコンソールは走行中のタスク。URL の ID が不正でも一覧になる
       expect(c.querySelector("[data-lane]"), p).toBeNull();
+      expect(c.querySelector("section[data-factory]"), p).not.toBeNull();
       expect(c.querySelector("a.rail-row"), p).not.toBeNull();
       act(() => roots.pop()?.unmount());
       document.body.innerHTML = "";

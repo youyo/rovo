@@ -85,9 +85,10 @@ test("(TB1) チームで何も選んでいないときはボード。マイタ�
   await expect(page.locator("#tb-people-h")).toHaveText("いま");
   await expect(page.locator("#tb-repos-h")).toContainText("リポジトリ別");
   await expect(page.locator("#tb-repos-h")).toContainText("今日");
-  // レール・帯・ステータスバーはそのまま
+  // レール・帯（今日は工場）・ステータスバーはそのまま
   await expect(page.locator("nav.rail")).toBeVisible();
-  await expect(page.locator(".tlband .tl-scroll").first()).toBeVisible();
+  await expect(page.locator("section[data-factory]")).toBeVisible();
+  await expect(page.locator(".tlband")).toHaveCount(0);
   await expect(page.locator(".statusbar")).toBeVisible();
 
   // マイタスクへ戻すとコンソール
@@ -223,6 +224,9 @@ test("(TB5) 過去の日: 走行中の欄を出さず、その日の完了・失
   await page.getByRole("button", { name: "チーム" }).click();
   await page.getByRole("button", { name: "前の日" }).click();
   await expect(page.locator("[data-teamboard]")).toBeVisible();
+  // 過去の日の帯は工場ではなくタイムライン
+  await expect(page.locator(".tlband .tl-scroll").first()).toBeVisible();
+  await expect(page.locator("section[data-factory]")).toHaveCount(0);
   await expect(page.locator("#tb-people-h")).toHaveText("この日");
   await expect(page.locator("#tb-repos-h")).toContainText("この日");
   await expect(page.locator('[data-stat="running"]')).toHaveCount(0);

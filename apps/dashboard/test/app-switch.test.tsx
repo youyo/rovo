@@ -57,6 +57,9 @@ type Script = {
 const roots: { unmount: () => void }[] = [];
 let setItem: ReturnType<typeof vi.fn>;
 beforeEach(() => {
+  // 背の高い画面（今日の工場の帯を既定で広げる。Rovo を押して切り替えるテストがある）
+  vi.stubGlobal("innerWidth", 1440);
+  vi.stubGlobal("innerHeight", 1600);
   setItem = vi.fn();
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => (k === LANG_KEY ? "ja" : null),
@@ -191,7 +194,7 @@ describe("レール・タイムラインでの切り替え: ページを読み�
     expect(railRow(c, B).getAttribute("href")).toBe(`/dashboard/tasks/${B}`);
   });
 
-  it("タイムラインの棒を左クリックしても同じ", async () => {
+  it("帯の Rovo・棒（今日は工場の Rovo）を左クリックしても同じ", async () => {
     const { c } = await mount("/dashboard/", { team: true });
     const push = vi.spyOn(history, "pushState");
     expect(await leftClick(barOf(c, C))).toBe(true);
@@ -226,7 +229,7 @@ describe("レール・タイムラインでの切り替え: ページを読み�
     const push = vi.spyOn(history, "pushState");
     for (const { name, init } of BROWSER_CLICKS) {
       expect(await leftClick(railRow(c, B), init), `レール ${name}`).toBe(false);
-      expect(await leftClick(barOf(c, B), init), `タイムライン ${name}`).toBe(false);
+      expect(await leftClick(barOf(c, B), init), `帯 ${name}`).toBe(false);
     }
     expect(push).not.toHaveBeenCalled();
     expect(location.pathname).toBe("/dashboard/");

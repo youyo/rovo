@@ -14,6 +14,9 @@ import { LANG_KEY } from "../src/prefs";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// 工場の帯の中身（遅延チャンク）を先に読み込み、React.lazy の解決が CI の遅さに左右されないようにする
+await import("../src/factory-panel");
+
 const RUNNING_ID = taskDetailRunningFixture.task.task_id;
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -140,14 +143,14 @@ describe("モバイル幅: 一覧と詳細の切り替え", () => {
     expect(location.pathname).toBe(`/dashboard/tasks/${RUNNING_ID}`);
     expect(text(c.querySelector(".console h1"))).toBe(taskDetailRunningFixture.task.title);
     expect(c.querySelector("nav.rail")).toBeNull();
-    expect(c.querySelector(".tlband")).toBeNull();
+    expect(c.querySelector(".tlband, section[data-factory]")).toBeNull();
     expect(text(c.querySelector("button.back-to-list"))).toBe("← 一覧");
   });
 
   it("タスクの URL を直接開いても詳細だけ", async () => {
     const { c } = await mount(`/dashboard/tasks/${RUNNING_ID}`);
     expect(c.querySelector("nav.rail")).toBeNull();
-    expect(c.querySelector(".tlband")).toBeNull();
+    expect(c.querySelector(".tlband, section[data-factory]")).toBeNull();
     expect(c.querySelector("button.back-to-list")).not.toBeNull();
   });
 

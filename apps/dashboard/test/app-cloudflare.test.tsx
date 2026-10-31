@@ -10,6 +10,9 @@ import { LANG_KEY } from "../src/prefs";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// 工場の帯の中身（遅延チャンク）を先に読み込み、React.lazy の解決が CI の遅さに左右されないようにする
+await import("../src/factory-panel");
+
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
@@ -107,6 +110,7 @@ describe("Cloudflare の枠", () => {
     ] as Cf[]) {
       const { container, root } = await mount(router(cf));
       expect(container.querySelector("[data-lane]")).toBeNull();
+      expect(container.querySelector("section[data-factory]")).not.toBeNull();
       expect(container.querySelector("[data-budget='month']")).not.toBeNull();
       expect(panel(container).textContent).toContain("取得できませんでした");
       act(() => root.unmount());

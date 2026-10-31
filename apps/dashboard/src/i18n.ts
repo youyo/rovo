@@ -201,6 +201,9 @@ const en = {
   "timeline.pr": "PR {n}",
   "timeline.now": "now",
   "timeline.consult": "consult (asked a model for its opinion)",
+
+  // --- 工場の帯（今日）
+  "factory.title": "Rovo factory",
   "legend.label": "Legend",
   "legend.height": " (height = cost)",
 
@@ -603,6 +606,8 @@ const ja: Record<Key, string> = {
   "timeline.pr": "PR {n}",
   "timeline.now": "いま",
   "timeline.consult": "consult（モデルに意見を聞いた）",
+
+  "factory.title": "Rovo の工場",
   "legend.label": "凡例",
   "legend.height": "（高さは費用）",
 

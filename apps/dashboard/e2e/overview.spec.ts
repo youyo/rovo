@@ -1,4 +1,13 @@
-import { expect, loginAs, openDrawer, rail, taskPath, test, withBudgetBinding } from "./fixtures";
+import {
+  expect,
+  loginAs,
+  openDrawer,
+  rail,
+  tallScreen,
+  taskPath,
+  test,
+  withBudgetBinding,
+} from "./fixtures";
 import { readState } from "./state";
 
 const s = readState();
@@ -18,10 +27,12 @@ test("(1) 偽 GitHub でログインすると一覧が出る（127.0.0.1 の __H
   expect(session?.secure).toBe(true);
   // 見本の構成: ヘッダの要約・今日のタイムライン（細い帯）・レール・コンソール・ステータスバー
   await expect(page.locator(".day-summary")).toBeVisible();
-  // マイタスク（既定）では時刻の帯を出さず、チームでは出す
+  // 今日はマイタスク（既定）でもチームでも工場の帯（時刻の帯は過去の日のチームだけ）
+  await expect(page.locator("section[data-factory]")).toBeVisible();
   await expect(page.locator(".tlband")).toHaveCount(0);
   await page.getByRole("button", { name: "チーム" }).click();
-  await expect(page.locator(".tlband .tl-scroll").first()).toBeVisible();
+  await expect(page.locator("section[data-factory]")).toBeVisible();
+  await expect(page.locator(".tlband")).toHaveCount(0);
   await expect(page.locator(".statusbar")).toBeVisible();
   // 予算の内訳（自分・全員を 1 つの欄に）は「内訳」の引き出しの中
   await openDrawer(page);
@@ -71,11 +82,20 @@ test("(3) レールの行のリンクで詳細へ行ける", async ({ page }) =>
 });
 
 test("(9) 状態が DOM の属性とアクセシブルな名前で判別できる（色に頼らない）", async ({ page }) => {
+  // 今日の工場の Rovo: 部屋は data-room と名前の文字で分かる（人の色だけに頼らず、頭文字のバッジもある）
+  await tallScreen(page);
   await loginAs(page, s.users.alice);
-  // 時刻の帯の棒（a[data-task]）はチームのときだけ出る
+  const rovo = page.locator(`section[data-factory] a[data-task="${s.tasks.running}"]`);
+  await expect(rovo).toHaveAttribute("data-room", /^(prep|code)$/);
+  await expect(rovo).toHaveAccessibleName(/実行中のタスク（.*・(準備|コーディング)）/);
+  await expect(rovo.locator(".fx-badge")).toHaveText(s.users.alice.login.slice(0, 1).toUpperCase());
+  // 時刻の帯の棒（a[data-task]）は過去の日のチームのときだけ出る。ブラウザだけ 1 日先の時計にして、テストのタスクを「前の日」にする
+  await page.clock.setFixedTime(Date.now() + 24 * 3_600_000);
+  await page.reload();
   await page.getByRole("button", { name: "チーム" }).click();
-  const done = page.locator(`a[data-task="${s.tasks.done}"]`);
-  const failed = page.locator(`a[data-task="${s.tasks.failed}"]`);
+  await page.getByRole("button", { name: "前の日" }).click();
+  const done = page.locator(`.tlband a[data-task="${s.tasks.done}"]`);
+  const failed = page.locator(`.tlband a[data-task="${s.tasks.failed}"]`);
   await expect(done).toHaveAttribute("data-status", "COMPLETED");
   await expect(done).toHaveAttribute("data-mark", "done");
   await expect(failed).toHaveAttribute("data-status", "FAILED");
@@ -90,7 +110,7 @@ test("(9) 状態が DOM の属性とアクセシブルな名前で判別でき�
   await expect(railMark(s.tasks.failed as string)).toHaveAttribute("data-shape", "cross");
   // 印の形が属性で違う（塗り・縁）。色を無視しても、文字と形で区別できる
   const mark = (id: string) =>
-    page.locator(`a[data-task="${id}"] rect[data-mark]`).getAttribute("class");
+    page.locator(`.tlband a[data-task="${id}"] rect[data-mark]`).getAttribute("class");
   const running = await mark(s.tasks.running as string);
   expect(running).toContain("mk--dashed");
   expect(await mark(s.tasks.done as string)).toContain("mk--solid");

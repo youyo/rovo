@@ -72,8 +72,11 @@ for (const width of [360, 390]) {
   test(`(M3) ${width}px: タイムラインは 3 時間ごと（520px 以下は 6 時間ごと）の文字だけ。グリッドは毎時`, async ({
     page,
   }) => {
+    // タイムラインは過去の日の帯。ブラウザだけ 1 日先の時計にして、テストのタスクを「前の日」にする
+    await page.clock.setFixedTime(Date.now() + 24 * 3_600_000);
     await loginAs(page, s.users.alice);
     await page.getByRole("button", { name: "チーム" }).click();
+    await page.getByRole("button", { name: "前の日" }).click();
     await page.setViewportSize({ width, height: 844 });
     await expect(page.locator(".tlband")).toBeVisible();
     const labels = page.locator(".lbl--axis");

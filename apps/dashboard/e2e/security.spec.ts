@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, loginAs, openDrawer, rail, taskPath, test } from "./fixtures";
+import { expect, loginAs, openDrawer, rail, tallScreen, taskPath, test } from "./fixtures";
 import { readState } from "./state";
 
 const s = readState();
@@ -32,13 +32,16 @@ function collectApi(page: Page): ApiResponse[] {
 
 test("(6) 権限の無いタスクは、一覧の画面にもネットワーク応答にも出ない", async ({ page }) => {
   const api = collectApi(page);
+  await tallScreen(page);
   await loginAs(page, s.users.bob);
   await expect(rail(page, s.tasks.bob as string)).toBeVisible();
   // 既定は「マイタスク」。他人のタスクの権限を確かめるので「チーム」にする
   await page.getByRole("button", { name: "チーム" }).click();
   // alice の widgets のタスクは見える（権限がある）
   await expect(rail(page, id("done"))).toBeVisible();
-  // secret のタスクはレールにもタイムラインにもない
+  // 工場には見えるタスクの Rovo がいて、見えない件数を出す。secret のタスクはレールにも工場にもない
+  await expect(page.locator("section[data-factory] a[data-task]").first()).toBeVisible();
+  await expect(page.locator("section[data-factory] [data-factory-hidden]")).toBeVisible();
   await expect(
     page.locator(`[data-task-id="${id("secret")}"], [data-task="${id("secret")}"]`),
   ).toHaveCount(0);

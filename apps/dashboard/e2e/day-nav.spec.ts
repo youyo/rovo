@@ -49,8 +49,11 @@ test("(day-2) 日付が進んだ画面（ブラウザの時計を 1 日進める
   await loginAs(page, s.users.alice);
   await expect(page.getByRole("button", { name: "次の日" })).toBeDisabled();
   await expect(rail(page, s.tasks.done as string)).toHaveCount(0);
+  // 今日は工場の帯
+  await expect(page.locator("section[data-factory]")).toBeVisible();
 
   await page.getByRole("button", { name: "前の日" }).click();
+  await expect(page.locator("section[data-factory]")).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`\\?day=${ymd(Date.now())}$`));
   await expect(page.locator(".day-summary")).toContainText(heading(Date.now()));
   await expect(rail(page, s.tasks.done as string)).toBeVisible();

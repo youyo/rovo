@@ -235,3 +235,151 @@ for (const [label, w, h] of [
     expect(await mainTop(page), "チャンクが届いた後").toBe(before);
   });
 }
+
+// 工場の小窓（Document Picture-in-Picture。docs/specs/dashboard-factory.md の「小窓」）。headless Chromium にも window.documentPictureInPicture がある。
+const pipButton = (page: Page) => page.locator("[data-factory-pip]");
+const pipBack = (page: Page) => page.locator("[data-factory-pip-back]");
+
+/** 小窓の中身の数（小窓が無ければ null）。小窓は別 window なので元のページの evaluate から触る */
+const pipInfo = (page: Page) =>
+  page.evaluate(() => {
+    const w = (window as unknown as { documentPictureInPicture?: { window: Window | null } })
+      .documentPictureInPicture?.window;
+    if (!w) return null;
+    const d = w.document;
+    return {
+      rovos: d.querySelectorAll("a[data-task]").length,
+      links: d.querySelectorAll("link[rel~=stylesheet]").length,
+      styles: d.querySelectorAll("style").length,
+      styleAttrs: d.querySelectorAll("[style]").length,
+    };
+  });
+
+/** 小窓を開く（ボタンを押し、小窓の中に Rovo が描かれるまで待つ） */
+async function openPip(page: Page) {
+  await expect(pipButton(page)).toBeVisible();
+  await pipButton(page).click();
+  await expect(pipBack(page)).toBeVisible();
+  await expect.poll(async () => (await pipInfo(page))?.rovos ?? 0).toBeGreaterThan(0);
+}
+
+/** 小窓を閉じる（利用者が小窓の ✕ を押したのと同じ） */
+const closePipWindow = (page: Page) =>
+  page.evaluate(() =>
+    (
+      window as unknown as { documentPictureInPicture: { window: Window | null } }
+    ).documentPictureInPicture.window?.close(),
+  );
+
+/** 元のページの可視状態を hidden に見せかける（false で visible に戻す）。ポーラーは document.visibilityState と visibilitychange を見る */
+const fakeHidden = (page: Page, hidden: boolean) =>
+  page.evaluate((h) => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => (h ? "hidden" : "visible"),
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+
+test("(F10) 小窓: ボタンで開くと小窓に Rovo と CSS の link が入り、元の帯は「小窓で表示中」の 1 行。<style> も style 属性も CSP の違反も無い", async ({
+  page,
+}) => {
+  const csp = await watchCsp(page);
+  await tallScreen(page);
+  await loginAs(page, s.users.alice);
+  await expect(band(page).locator(".fx-stage svg.fx-svg")).toBeVisible();
+  await openPip(page);
+  const info = await pipInfo(page);
+  expect(info?.rovos).toBeGreaterThan(0);
+  expect(info?.links).toBeGreaterThan(0);
+  expect(info?.styles).toBe(0);
+  expect(info?.styleAttrs).toBe(0);
+  // 元の帯は 1 行（断面図は小窓にある）
+  await expect(page.locator("[data-factory-pip-on]")).toBeVisible();
+  await expect(band(page).locator(".fx-stage")).toHaveCount(0);
+  // 小窓の CSS が読まれ終わった後も違反は出ない
+  await page.waitForTimeout(1000);
+  expect(csp).toEqual([]);
+});
+
+test("(F11) 小窓の中の Rovo を押すと、元のページでそのタスクが選ばれる", async ({ page }) => {
+  await tallScreen(page);
+  await loginAs(page, s.users.alice);
+  await expect(band(page).locator(".fx-stage svg.fx-svg")).toBeVisible();
+  await openPip(page);
+  const target = id("running");
+  // 小窓の Rovo は動き続けるので、動かない当たり判定（.fx-hit）に小窓の window のクリックを送る
+  const hitInPip = (tid: string) =>
+    page.evaluate((t) => {
+      const w = (window as unknown as { documentPictureInPicture: { window: Window | null } })
+        .documentPictureInPicture.window;
+      return w?.document.querySelector(`a[data-task="${t}"] .fx-hit`) != null;
+    }, tid);
+  await expect.poll(() => hitInPip(target)).toBe(true);
+  await page.evaluate((tid) => {
+    const w = (window as unknown as { documentPictureInPicture: { window: Window } })
+      .documentPictureInPicture.window;
+    const hit = w.document.querySelector(`a[data-task="${tid}"] .fx-hit`);
+    hit?.dispatchEvent(
+      new (w as unknown as typeof globalThis).MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        view: w,
+      }),
+    );
+  }, target);
+  await expect(page).toHaveURL(new RegExp(`${taskPath(target)}$`));
+  await expect(rail(page, target)).toHaveAttribute("aria-current", "true");
+  // 選んでも小窓は開いたまま
+  await expect(pipBack(page)).toBeVisible();
+});
+
+test("(F12) 「戻す」でも、小窓を閉じても、元の帯が断面図に戻る", async ({ page }) => {
+  await tallScreen(page);
+  await loginAs(page, s.users.alice);
+  await expect(band(page).locator(".fx-stage svg.fx-svg")).toBeVisible();
+  // 「戻す」
+  await openPip(page);
+  await pipBack(page).click();
+  await expect(band(page).locator(".fx-stage svg.fx-svg")).toBeVisible();
+  await expect(pipBack(page)).toHaveCount(0);
+  expect(await pipInfo(page)).toBeNull();
+  // 小窓を閉じる
+  await openPip(page);
+  await closePipWindow(page);
+  await expect(band(page).locator(".fx-stage svg.fx-svg")).toBeVisible();
+  await expect(pipBack(page)).toHaveCount(0);
+  await expect(pipButton(page)).toBeVisible();
+});
+
+test("(F13) 小窓が開いている間は、元のページが hidden でも一覧の取得が続く。閉じると止まる", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await tallScreen(page);
+  await loginAs(page, s.users.alice);
+  await expect(band(page).locator(".fx-stage svg.fx-svg")).toBeVisible();
+  let overviewRequests = 0;
+  page.on("request", (r) => {
+    if (/\/dashboard\/api\/overview/.test(r.url())) overviewRequests += 1;
+  });
+  await openPip(page);
+  // 見せかけが効いていること（効かなければ以降の検査が意味を持たない）
+  await fakeHidden(page, true);
+  expect(await page.evaluate(() => document.visibilityState)).toBe("hidden");
+  // 小窓がある間は、間隔（5 秒）ごとに取り続ける
+  const t0 = overviewRequests;
+  await expect
+    .poll(() => overviewRequests - t0, { timeout: 30_000, intervals: [500] })
+    .toBeGreaterThanOrEqual(2);
+  // 小窓を閉じると、hidden の間は止まる
+  await closePipWindow(page);
+  await expect(band(page).locator(".fx-stage svg.fx-svg")).toBeVisible();
+  await page.waitForTimeout(1500); // 閉じる前の取得が終わるのを待つ
+  const t1 = overviewRequests;
+  await page.waitForTimeout(11_000); // 5 秒の間隔 2 回分より長く
+  expect(overviewRequests - t1).toBe(0);
+  // visible に戻すと取り直す
+  await fakeHidden(page, false);
+  await expect.poll(() => overviewRequests - t1, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+});

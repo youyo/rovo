@@ -27,6 +27,8 @@ export function OverviewView(props: {
   onRefresh: () => void;
   /** 直近の更新に失敗した（前のデータを出している） */
   stale: boolean;
+  /** 最後に一覧の更新に成功した時刻（use-overview の okAt。工場の小窓の古さの表示に使う） */
+  okAt?: number;
   /** Cloudflare の枠の状態（無ければ枠を出さない） */
   cloudflare?: CloudflareState;
   /** 一覧が届くまでのステータスバーに出す予算（/budget）。一覧が届いたら使わない */
@@ -61,7 +63,14 @@ export function OverviewView(props: {
   if (props.isToday && mode !== "detail") {
     // 今日は工場の帯（マイタスクでも。API が自分の分しか返さないので自分の Rovo だけ）。
     // 一覧がまだ（data が null）でも枠だけは出し、届いたときに帯の下を動かさない
-    band = <FactoryBand data={data} onSelect={props.onSelectTask} stale={props.stale} />;
+    band = (
+      <FactoryBand
+        data={data}
+        onSelect={props.onSelectTask}
+        stale={props.stale}
+        okAt={props.okAt}
+      />
+    );
   } else if (data && data.scope === "all" && mode !== "detail") {
     const dayStart = Date.parse(data.range.from);
     const domain = timelineDomain({

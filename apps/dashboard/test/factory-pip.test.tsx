@@ -434,7 +434,13 @@ function mountHook(mode: () => "visible" | "hidden" = () => "visible") {
     return null;
   }
   const draw = () =>
-    act(() => root.render(createElement(Activity, { mode: mode() }, createElement(Probe))));
+    act(() =>
+      root.render(
+        <Activity mode={mode()}>
+          <Probe />
+        </Activity>,
+      ),
+    );
   draw();
   return { ref, root, draw, api: () => ref.current as ReturnType<typeof usePip> };
 }

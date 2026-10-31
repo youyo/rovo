@@ -14,15 +14,18 @@ import {
 
 export type OverviewState =
   | { phase: "loading" }
-  /** stale: 直近の更新に失敗した（前のデータを出し続けている） */
-  | { phase: "ready"; data: OverviewDto; stale: boolean; key?: string }
+  /**
+   * stale: 直近の更新に失敗した（前のデータを出し続けている）。
+   * okAt: 最後に更新に成功した時刻（失敗して stale になっても前の成功の時刻のまま。工場の小窓の古さの表示に使う）
+   */
+  | { phase: "ready"; data: OverviewDto; stale: boolean; okAt: number; key?: string }
   | { phase: "error" }
   | { phase: "unauthorized" }
   | { phase: "not_found" };
 
 export type OverviewDeps = {
   fetchImpl?: typeof fetch;
-  /** 「今日」の範囲を決める現在時刻（注入できる） */
+  /** 現在時刻（注入できる）。「今日」の範囲と、更新に成功した時刻（okAt）に使う */
   now?: () => number;
   pollerDeps?: PollerDeps;
 };
@@ -66,7 +69,8 @@ export function useOverview(
         const now = depsRef.current.now ?? Date.now;
         const r = await fetchOverview(dayRange(d, now()), sc, depsRef.current.fetchImpl);
         if (alive && scopeRef.current === sc && dayRef.current === d) {
-          if (r.kind === "ok") setState({ phase: "ready", data: r.data, stale: false, key });
+          if (r.kind === "ok")
+            setState({ phase: "ready", data: r.data, stale: false, okAt: now(), key });
           else if (r.kind === "unauthorized") setState({ phase: "unauthorized" });
           else if (r.kind === "not_found") setState({ phase: "not_found" });
           else

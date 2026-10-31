@@ -35,6 +35,11 @@ export default function FactoryPanel(props: {
   onSelect?: (id: string) => void;
   /** 直近の更新に失敗した（小窓に「通信エラー」と出す） */
   stale?: boolean;
+  /**
+   * 最後に一覧の更新に成功した時刻（取得元 use-overview の okAt。小窓の古さの表示に使う）。
+   * 渡されないときは一覧の generated_at（そのデータが作られた時刻）
+   */
+  okAt?: number;
 }) {
   const { data } = props;
   const t = useFactoryT();
@@ -70,6 +75,7 @@ export default function FactoryPanel(props: {
             win={pip.win}
             data={data}
             stale={props.stale === true}
+            okAt={props.okAt ?? Date.parse(data.generated_at)}
             onSelect={props.onSelect}
           />
         ) : null}
@@ -115,6 +121,7 @@ export default function FactoryPanel(props: {
             className="fxband-toggle fxband-pip"
             data-factory-pip=""
             title={t("factory.pipTitle")}
+            disabled={pip.requesting}
             onClick={pip.open}
           >
             {t("factory.pip")}

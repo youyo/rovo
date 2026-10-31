@@ -506,7 +506,7 @@
   font: inherit;
   cursor: pointer;
 }
-/* 「小窓で表示」はたたむボタンの隣（右寄せはこちらが受け持つ） */
+/* 「ピクチャー・イン・ピクチャー」はたたむボタンの隣（右寄せはこちらが受け持つ） */
 .fxband-pip {
   margin-left: auto;
 }
@@ -515,7 +515,7 @@
 }
 
 /*
- * 小窓（Document Picture-in-Picture。factory-pip.tsx）の文書。元の文書の link を写して読むので、配色・動き・reduced-motion は同じ CSS のまま。
+ * PiP の窓（Document Picture-in-Picture。factory-pip.tsx）の文書。元の文書の link を写して読むので、配色・動き・reduced-motion は同じ CSS のまま。
  * 断面図だけを窓の幅に合わせて縮め（.fx-svg は幅 100%）、縦は中央に置く。古さの表示は左上に重ねる
  */
 .fxpip {

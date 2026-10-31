@@ -15,9 +15,9 @@ const FactoryPanel = lazy(() => import("./factory-panel"));
 export function FactoryBand(props: {
   data: OverviewDto | null;
   onSelect?: (id: string) => void;
-  /** 直近の更新に失敗した（小窓に出す） */
+  /** 直近の更新に失敗した（PiP の窓に出す） */
   stale?: boolean;
-  /** 最後に一覧の更新に成功した時刻（use-overview の okAt。小窓の古さの表示に使う） */
+  /** 最後に一覧の更新に成功した時刻（use-overview の okAt。PiP の古さの表示に使う） */
   okAt?: number;
 }) {
   const t = useT();

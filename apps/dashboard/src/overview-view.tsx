@@ -27,7 +27,7 @@ export function OverviewView(props: {
   onRefresh: () => void;
   /** 直近の更新に失敗した（前のデータを出している） */
   stale: boolean;
-  /** 最後に一覧の更新に成功した時刻（use-overview の okAt。工場の小窓の古さの表示に使う） */
+  /** 最後に一覧の更新に成功した時刻（use-overview の okAt。工場の PiP の古さの表示に使う） */
   okAt?: number;
   /** Cloudflare の枠の状態（無ければ枠を出さない） */
   cloudflare?: CloudflareState;

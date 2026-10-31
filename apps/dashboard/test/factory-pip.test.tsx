@@ -102,7 +102,8 @@ const backButton = (c: Element) =>
 /** 小窓に写した link の load を出す（描くのは load の後） */
 const loadLinks = (pip: ReturnType<typeof stubPip>) =>
   act(() => {
-    for (const l of pip.doc.head.querySelectorAll("link")) l.dispatchEvent(new pip.win.Event("load"));
+    for (const l of pip.doc.head.querySelectorAll("link"))
+      l.dispatchEvent(new pip.win.Event("load"));
   });
 
 async function openPip(c: Element, pip: ReturnType<typeof stubPip>) {
@@ -119,7 +120,9 @@ describe("小窓で表示のボタン（documentPictureInPicture があるとき
     const btn = pipButton(container);
     expect(btn?.textContent).toBe("小窓で表示");
     expect(btn?.getAttribute("title")).toBeTruthy();
-    expect(btn?.closest(".fxband-bar")?.querySelector("button[data-factory-toggle]")).not.toBeNull();
+    expect(
+      btn?.closest(".fxband-bar")?.querySelector("button[data-factory-toggle]"),
+    ).not.toBeNull();
   });
 
   it("API が無いブラウザ（Safari・Firefox）では出さない", () => {
@@ -241,6 +244,8 @@ describe("小窓の中の Rovo", () => {
     await openPip(container, pip);
     const a = pip.doc.body.querySelector("a[data-task]") as Element;
     const id = a.getAttribute("data-task") as string;
+    // 「小窓で表示」のボタンのクリックは元の文書の中なので、親に届いてよい。ここからは小窓の中のクリックだけを見る
+    outer.mockClear();
     const ev = new pip.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
     act(() => void a.dispatchEvent(ev));
     expect(focus).toHaveBeenCalledTimes(1);

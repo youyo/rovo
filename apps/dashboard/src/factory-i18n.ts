@@ -48,6 +48,15 @@ const en = {
   "factory.dock": "GitHub dock",
   "factory.call": "Calling",
   "factory.inspect": "Inspect",
+  "factory.pip": "Pop out",
+  "factory.pipTitle": "Show the factory in a small window that stays on top of other windows",
+  "factory.pipOn": "Shown in a small window",
+  "factory.pipBack": "Bring back",
+  "factory.pipBackTitle": "Close the small window and show the factory here again",
+  "factory.pipOld": "No update since {time}",
+  "factory.pipError": "Connection error (as of {time})",
+  "factory.pipStaleTitle":
+    "This picture may be out of date. Open the dashboard tab to check the connection",
 };
 export type FactoryKey = keyof typeof en;
 
@@ -94,6 +103,15 @@ const ja: Record<FactoryKey, string> = {
   "factory.dock": "GitHub 出荷口",
   "factory.call": "お呼び出し",
   "factory.inspect": "検品待ち",
+  "factory.pip": "小窓で表示",
+  "factory.pipTitle": "工場の断面図を、ほかのウィンドウより手前の小窓に出します",
+  "factory.pipOn": "小窓で表示中",
+  "factory.pipBack": "戻す",
+  "factory.pipBackTitle": "小窓を閉じて、ここに断面図を戻します",
+  "factory.pipOld": "{time} から更新なし",
+  "factory.pipError": "通信エラー（{time} 時点）",
+  "factory.pipStaleTitle":
+    "この絵は古いかもしれません。ダッシュボードのタブを開いて通信を確かめてください",
 };
 
 export const FACTORY_DICTS: Record<Lang, Record<FactoryKey, string>> = { en, ja };

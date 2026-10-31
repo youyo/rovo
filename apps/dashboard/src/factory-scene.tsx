@@ -166,11 +166,16 @@ function walk(el: Element, pts: Spot[], to: Spot): Animation | null {
   });
 }
 
-function reducedMotion(): boolean {
+/**
+ * 動きを減らす設定か。描いている文書の window（小窓に出しているときは小窓の window）で評価する。
+ * 要素がまだ無いときだけ、グローバルの window に倒す
+ */
+function reducedMotion(el: Element | null): boolean {
+  const view = el?.ownerDocument.defaultView ?? (typeof window === "undefined" ? null : window);
   return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    view !== null &&
+    typeof view.matchMedia === "function" &&
+    view.matchMedia("(prefers-reduced-motion: reduce)").matches
   );
 }
 
@@ -178,14 +183,27 @@ function reducedMotion(): boolean {
  * 前回の場所を覚えて、場所が変わった Rovo だけ歩かせる（FLIP）。歩いている Rovo は state に持ち、
  * 歩く姿（fx-walking）は className に入れる（ポーリングで並びが変わって className が書き直されても消えない）。
  * 歩き途中にまた場所が変わったら、前の歩きを止めて今の場所から歩き直す。
+ * 小窓への付け替えなどで作り直されたら、前回の場所は空から始め（最初は歩かない）、実行中の歩きは外すときに止める。
  */
 function useWalks(bots: Placed[]) {
   const prev = useRef(new Map<string, { place: Place; at: Spot }>());
   const nodes = useRef(new Map<string, Element>());
   const anims = useRef(new Map<string, Animation>());
+  const stage = useRef<HTMLDivElement | null>(null);
   const [walking, setWalking] = useState<ReadonlySet<string>>(() => new Set());
+  useLayoutEffect(
+    () => () => {
+      for (const a of anims.current.values()) {
+        a.onfinish = null;
+        a.oncancel = null;
+        a.cancel();
+      }
+      anims.current.clear();
+    },
+    [],
+  );
   useLayoutEffect(() => {
-    const motion = !reducedMotion();
+    const motion = !reducedMotion(stage.current);
     const next = new Map<string, { place: Place; at: Spot }>();
     const started: string[] = [];
     for (const b of bots) {
@@ -220,7 +238,7 @@ function useWalks(bots: Placed[]) {
     if (el) nodes.current.set(id, el);
     else nodes.current.delete(id);
   };
-  return { ref, walking };
+  return { ref, walking, stage };
 }
 
 function botLabel(task: VisibleTaskDto, place: Place, t: FT): string {
@@ -1192,7 +1210,7 @@ export default function FactoryScene(props: {
   const { data, onSelect } = props;
   const t = useFactoryT();
   const { bots, tiles } = placeFactory(data.tasks);
-  const { ref, walking } = useWalks(bots);
+  const { ref, walking, stage } = useWalks(bots);
   const shipped = bots.filter((b) => b.place === "shipped");
   const select = (id: string) => (e: React.MouseEvent) => {
     if (onSelect === undefined || !isPlainLeftClick(e)) return;
@@ -1200,7 +1218,7 @@ export default function FactoryScene(props: {
     onSelect(id);
   };
   return (
-    <div className="fx-stage">
+    <div className="fx-stage" ref={stage}>
       {/* biome-ignore lint/a11y/useSemanticElements: SVG にはグループを表す要素が無い */}
       <svg
         className="fx fx-svg"

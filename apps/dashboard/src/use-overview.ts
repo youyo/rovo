@@ -2,7 +2,15 @@ import type { OverviewDto } from "@rovo/dashboard-contract";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchOverview, type Scope } from "./api";
 import { type DayKey, dayRange } from "./day";
-import { createPoller, type Poller, type PollerDeps, type PollOutcome } from "./poller";
+import {
+  browserDeps,
+  createPoller,
+  overviewKeepAlive,
+  type Poller,
+  type PollerDeps,
+  type PollOutcome,
+  withKeepAlive,
+} from "./poller";
 
 export type OverviewState =
   | { phase: "loading" }
@@ -22,6 +30,7 @@ export type OverviewDeps = {
 /**
  * 一覧のデータを取り、自動更新する（D15）。scope を変えると取り直す。
  * 取得中の結果が別の scope のものなら捨てる（画面を古い scope で上書きしない）。
+ * 工場の小窓が見えている間（overviewKeepAlive）は、元のタブが hidden でも自動更新を続ける。
  */
 export function useOverview(
   scope: Scope,
@@ -46,7 +55,8 @@ export function useOverview(
     let alive = true;
     const poller = createPoller({
       autoRefresh: autoRef.current,
-      deps: depsRef.current.pollerDeps,
+      // 工場の小窓が見えている間は、元のタブが hidden でも続ける（docs/specs/dashboard-factory.md の「小窓」）
+      deps: withKeepAlive(depsRef.current.pollerDeps ?? browserDeps, overviewKeepAlive),
       run: async (): Promise<PollOutcome> => {
         const sc = scopeRef.current;
         const d = dayRef.current;

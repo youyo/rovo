@@ -19,7 +19,7 @@ const flush = async () => {
 };
 
 describe("useOverview: 工場の小窓が見えている間は、元のタブが hidden でも一覧を取り続ける", () => {
-  it("元が hidden のまま始めると取らない。小窓の条件（overviewKeepAlive）が立つと即取り、予約を続ける。閉じると予約を消す", async () => {
+  it("元が hidden のまま始めると最初の 1 回だけ取り、予約しない。小窓の条件（overviewKeepAlive）が立つと即取り、予約を続ける。閉じると予約を消す", async () => {
     let hidden = true;
     const timers = new Map<number, () => void>();
     let id = 0;
@@ -53,11 +53,13 @@ describe("useOverview: 工場の小窓が見えている間は、元のタブが
     roots.push(root);
     act(() => root.render(createElement(Probe)));
     await flush();
-    expect(fetchImpl).toHaveBeenCalledTimes(0);
+    // 最初の 1 回（日が決まったときの取り直し）は hidden でも取る。次は予約しない
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(timers.size).toBe(0);
 
     act(() => overviewKeepAlive.set(() => true));
     await flush();
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(timers.size).toBe(1);
 
     act(() => overviewKeepAlive.set(null));
@@ -65,6 +67,6 @@ describe("useOverview: 工場の小窓が見えている間は、元のタブが
     hidden = false;
     for (const l of [...listeners]) l();
     await flush();
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 });

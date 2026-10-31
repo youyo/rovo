@@ -61,7 +61,7 @@ export function OverviewView(props: {
   if (props.isToday && mode !== "detail") {
     // 今日は工場の帯（マイタスクでも。API が自分の分しか返さないので自分の Rovo だけ）。
     // 一覧がまだ（data が null）でも枠だけは出し、届いたときに帯の下を動かさない
-    band = <FactoryBand data={data} onSelect={props.onSelectTask} />;
+    band = <FactoryBand data={data} onSelect={props.onSelectTask} stale={props.stale} />;
   } else if (data && data.scope === "all" && mode !== "detail") {
     const dayStart = Date.parse(data.range.from);
     const domain = timelineDomain({

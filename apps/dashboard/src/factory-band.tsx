@@ -17,6 +17,8 @@ export function FactoryBand(props: {
   onSelect?: (id: string) => void;
   /** 直近の更新に失敗した（小窓に出す） */
   stale?: boolean;
+  /** 最後に一覧の更新に成功した時刻（use-overview の okAt。小窓の古さの表示に使う） */
+  okAt?: number;
 }) {
   const t = useT();
   const narrow = useNarrow();
@@ -31,7 +33,12 @@ export function FactoryBand(props: {
         wait
       ) : (
         <Suspense fallback={wait}>
-          <FactoryPanel data={props.data} onSelect={props.onSelect} stale={props.stale} />
+          <FactoryPanel
+            data={props.data}
+            onSelect={props.onSelect}
+            stale={props.stale}
+            okAt={props.okAt}
+          />
         </Suspense>
       )}
     </section>

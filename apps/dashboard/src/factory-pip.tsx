@@ -76,14 +76,31 @@ function whenLoaded(links: HTMLLinkElement[], view: Window): Promise<void> {
   });
 }
 
+/** 閉じる（もう閉じている・閉じられないときも投げない） */
+function closeQuietly(win: Window) {
+  try {
+    win.close();
+  } catch {
+    // 閉じられなくても続ける
+  }
+}
+
 /**
- * 小窓の開け閉め。win は開いている小窓（元の帯を「小窓で表示中」の 1 行にする）、ready は小窓の CSS を読み終えたか（読み終えてから描く）。
+ * 小窓の開け閉め。win は開いている小窓（元の帯を「小窓で表示中」の 1 行にする）、ready は小窓の CSS を読み終えたか（読み終えてから描く）、
+ * requesting は requestWindow の解決を待っている間（ボタンを押せなくする。二重に開かないためのガードは open の中の ref）。
  * 開いている間は overviewKeepAlive に「小窓の文書が visible か」を差し込み、元のタブが hidden でも一覧の自動更新を続ける。
  * 小窓の pagehide（利用者が閉じた・「戻す」）で元に戻し、帯が消えたら小窓も閉じる。
+ * 要求ごとに世代を持ち、最新の世代でない要求（帯が消えた・effect の後始末が走った後に解決したもの）の小窓はすぐ閉じ、状態にも keepAlive にも触らない。
+ * 小窓の初期化で例外が出たら、その小窓を閉じて keepAlive を外す（管理外の小窓を残さない）。
  */
 export function usePip(title: string) {
   const [state, setState] = useState<{ win: Window; ready: boolean } | null>(null);
+  const [requesting, setRequesting] = useState(false);
   const cur = useRef<{ win: Window; off: () => void } | null>(null);
+  /** requestWindow を呼んでから解決・拒否までの間。呼ぶ前に同期的に立てる（state の反映を待たない） */
+  const pending = useRef(false);
+  /** 要求の世代。open のたびと後始末で進める */
+  const gen = useRef(0);
 
   const finish = useCallback((win: Window) => {
     if (cur.current?.win !== win) return;
@@ -92,43 +109,67 @@ export function usePip(title: string) {
     setState(null);
   }, []);
 
+  /** 開いた小窓を初期化して採用する。例外が出たら閉じて元に戻す */
+  const attach = (win: Window) => {
+    const doc = win.document;
+    const onHide = () => finish(win);
+    const onVisible = () => overviewKeepAlive.notify();
+    cur.current = {
+      win,
+      off: () => {
+        win.removeEventListener("pagehide", onHide);
+        doc.removeEventListener("visibilitychange", onVisible);
+        overviewKeepAlive.set(null);
+      },
+    };
+    try {
+      win.addEventListener("pagehide", onHide);
+      doc.addEventListener("visibilitychange", onVisible);
+      doc.documentElement.lang = document.documentElement.lang;
+      doc.title = title;
+      doc.body.classList.add("fxpip");
+      const links = copyStylesheets(document, doc);
+      overviewKeepAlive.set(() => doc.visibilityState === "visible");
+      setState({ win, ready: false });
+      void whenLoaded(links, win).then(() => {
+        if (cur.current?.win === win) setState({ win, ready: true });
+      });
+    } catch {
+      finish(win);
+      closeQuietly(win);
+    }
+  };
+
   const open = () => {
     const api = documentPip();
-    if (api === null || cur.current !== null) return;
+    if (api === null || pending.current || cur.current !== null) return;
+    gen.current += 1;
+    const my = gen.current;
+    pending.current = true;
     // ユーザーの操作（クリック）の中で最初に呼ぶ（この前に await を置かない）
     let req: Promise<Window>;
     try {
       req = api.requestWindow(PIP_SIZE);
     } catch {
+      pending.current = false;
       return;
     }
+    setRequesting(true);
+    /** この要求が最新なら「要求中」を下ろして true。古い世代なら何もしないで false */
+    const settle = (): boolean => {
+      if (gen.current !== my) return false;
+      pending.current = false;
+      setRequesting(false);
+      return true;
+    };
     req.then(
       (win) => {
-        const doc = win.document;
-        doc.documentElement.lang = document.documentElement.lang;
-        doc.title = title;
-        doc.body.classList.add("fxpip");
-        const links = copyStylesheets(document, doc);
-        const onHide = () => finish(win);
-        const onVisible = () => overviewKeepAlive.notify();
-        win.addEventListener("pagehide", onHide);
-        doc.addEventListener("visibilitychange", onVisible);
-        cur.current = {
-          win,
-          off: () => {
-            win.removeEventListener("pagehide", onHide);
-            doc.removeEventListener("visibilitychange", onVisible);
-            overviewKeepAlive.set(null);
-          },
-        };
-        overviewKeepAlive.set(() => doc.visibilityState === "visible");
-        setState({ win, ready: false });
-        void whenLoaded(links, win).then(() => {
-          if (cur.current?.win === win) setState({ win, ready: true });
-        });
+        if (settle()) attach(win);
+        else closeQuietly(win);
       },
       () => {
         // 断られた（ユーザーの操作の外・別の小窓が開いているなど）。帯はそのまま
+        settle();
       },
     );
   };
@@ -137,12 +178,23 @@ export function usePip(title: string) {
     const c = cur.current;
     if (c === null) return;
     finish(c.win);
-    c.win.close();
+    closeQuietly(c.win);
   }, [finish]);
 
-  useEffect(() => close, [close]);
+  useEffect(
+    () => () => {
+      // 帯が消えた（または effect の後始末）。要求中の要求を無効にし、開いている小窓を閉じる
+      gen.current += 1;
+      if (pending.current) {
+        pending.current = false;
+        setRequesting(false);
+      }
+      close();
+    },
+    [close],
+  );
 
-  return { win: state?.win ?? null, ready: state?.ready === true, open, close };
+  return { win: state?.win ?? null, ready: state?.ready === true, requesting, open, close };
 }
 
 /** 古さ: ok / 最後に更新に成功してから PIP_STALE_MS 以上（old）/ 直近の更新に失敗（error） */
@@ -162,19 +214,14 @@ export function PipScene(props: {
   win: Window;
   data: OverviewDto;
   stale: boolean;
+  /** 最後に一覧の更新に成功した時刻（取得元 use-overview が持つ。小窓を開いた時刻ではない） */
+  okAt: number;
   onSelect?: (id: string) => void;
 }) {
-  const { win, data, stale, onSelect } = props;
+  const { win, data, stale, okAt, onSelect } = props;
   const t = useFactoryT();
   const { t: tMain } = useLang();
-  const [okAt, setOkAt] = useState(() => Date.now());
   const [, setTick] = useState(0);
-  const seen = useRef(data);
-  useEffect(() => {
-    if (seen.current === data) return;
-    seen.current = data;
-    setOkAt(Date.now());
-  }, [data]);
   useEffect(() => {
     const id = win.setInterval(() => setTick((n) => n + 1), PIP_TICK_MS);
     return () => win.clearInterval(id);

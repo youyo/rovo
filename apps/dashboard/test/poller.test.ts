@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPoller, type PollOutcome } from "../src/poller";
+import { createKeepAlive, createPoller, type PollOutcome, withKeepAlive } from "../src/poller";
 
 /** 時刻・タイマー・可視状態を差し替えた環境（実時間を待たない） */
 function makeEnv() {
@@ -275,5 +275,121 @@ describe("createPoller: 間隔を関数で渡す（PR の CI。実行中は短�
     await c.resolve(2, "error");
     expect(env.pending()).toEqual([60_000]);
     p.stop();
+  });
+});
+
+describe("withKeepAlive: 工場の小窓が見えている間は、元のタブが hidden でも一覧の自動更新を続ける", () => {
+  /** 元の文書の可視状態（env）と、小窓の文書の可視状態（pip）。小窓が閉じていれば条件は null */
+  function setup(opts: { hidden?: boolean; pip?: "visible" | "hidden" | null } = {}) {
+    const env = makeEnv();
+    if (opts.hidden) env.setHidden(true);
+    const keep = createKeepAlive();
+    let pip: "visible" | "hidden" | null = opts.pip ?? null;
+    const setPip = (v: "visible" | "hidden" | null) => {
+      pip = v;
+      if (v === null) keep.set(null);
+      else keep.set(() => pip === "visible");
+    };
+    if (pip !== null) setPip(pip);
+    const c = controllable();
+    const p = createPoller({ run: c.run, deps: withKeepAlive(env.deps, keep) });
+    return {
+      env,
+      keep,
+      c,
+      p,
+      setPip,
+      /** 小窓の文書の visibilitychange（条件は同じ関数のまま、値だけが変わる） */
+      pipVisibility(v: "visible" | "hidden") {
+        pip = v;
+        keep.notify();
+      },
+    };
+  }
+
+  it("元が hidden でも、小窓が visible なら開始で即取り、5 秒後の予約を続ける", async () => {
+    const { env, c, p } = setup({ hidden: true, pip: "visible" });
+    p.start();
+    expect(c.count()).toBe(1);
+    await c.resolve(0, "ok");
+    expect(env.pending()).toEqual([5_000]);
+    await env.fire();
+    expect(c.count()).toBe(2);
+  });
+
+  it("動いている間に元が hidden になっても、小窓が visible なら止めない", async () => {
+    const { env, c, p, setPip } = setup();
+    p.start();
+    await c.resolve(0, "ok");
+    setPip("visible");
+    // 小窓を開いただけでは取り直さない（ポーラーは 1 本。予約も 1 つのまま）
+    expect(c.count()).toBe(1);
+    expect(env.pending()).toEqual([5_000]);
+    env.setHidden(true);
+    expect(env.pending()).toEqual([5_000]);
+    await env.fire();
+    expect(c.count()).toBe(2);
+    expect(c.maxInflight()).toBe(1);
+  });
+
+  it("小窓を閉じたら hidden の扱いに戻る（予約を消す）。元が visible に戻ったら即 1 回だけ取る", async () => {
+    const { env, c, p, setPip } = setup({ hidden: true, pip: "visible" });
+    p.start();
+    await c.resolve(0, "ok");
+    expect(env.pending()).toEqual([5_000]);
+    setPip(null);
+    expect(env.pending()).toEqual([]);
+    env.setHidden(false);
+    // 遅れた分を追いかけない（1 回だけ）
+    expect(c.count()).toBe(2);
+    expect(c.maxInflight()).toBe(1);
+  });
+
+  it("小窓の文書が hidden になったら止め、visible に戻ったら即 1 回取る", async () => {
+    const { env, c, p, pipVisibility } = setup({ hidden: true, pip: "visible" });
+    p.start();
+    await c.resolve(0, "ok");
+    pipVisibility("hidden");
+    expect(env.pending()).toEqual([]);
+    expect(c.count()).toBe(1);
+    pipVisibility("visible");
+    expect(c.count()).toBe(2);
+    await c.resolve(1, "ok");
+    expect(env.pending()).toEqual([5_000]);
+  });
+
+  it("元が hidden で小窓を開いたら即 1 回取り、予約を続ける", async () => {
+    const { env, c, p, setPip } = setup({ hidden: true });
+    p.start();
+    expect(c.count()).toBe(0);
+    setPip("visible");
+    expect(c.count()).toBe(1);
+    await c.resolve(0, "ok");
+    expect(env.pending()).toEqual([5_000]);
+  });
+
+  it("小窓の条件が変わらない通知では取り直さない。stop で両方の購読を解く", async () => {
+    const { env, c, p, keep, pipVisibility } = setup({ pip: "visible" });
+    p.start();
+    await c.resolve(0, "ok");
+    pipVisibility("visible");
+    keep.notify();
+    expect(c.count()).toBe(1);
+    expect(env.pending()).toEqual([5_000]);
+    p.stop();
+    expect(env.listenerCount()).toBe(0);
+    keep.set(null);
+    expect(c.count()).toBe(1);
+  });
+
+  it("条件が無いとき（小窓を開いていない）は、元の hidden の扱いのまま", async () => {
+    const { env, c, p, keep } = setup();
+    expect(keep.active()).toBe(false);
+    p.start();
+    await c.resolve(0, "ok");
+    env.setHidden(true);
+    expect(env.pending()).toEqual([]);
+    env.setHidden(false);
+    expect(c.count()).toBe(2);
   });
 });

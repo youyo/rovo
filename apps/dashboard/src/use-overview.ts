@@ -2,19 +2,30 @@ import type { OverviewDto } from "@rovo/dashboard-contract";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchOverview, type Scope } from "./api";
 import { type DayKey, dayRange } from "./day";
-import { createPoller, type Poller, type PollerDeps, type PollOutcome } from "./poller";
+import {
+  browserDeps,
+  createPoller,
+  overviewKeepAlive,
+  type Poller,
+  type PollerDeps,
+  type PollOutcome,
+  withKeepAlive,
+} from "./poller";
 
 export type OverviewState =
   | { phase: "loading" }
-  /** stale: 直近の更新に失敗した（前のデータを出し続けている） */
-  | { phase: "ready"; data: OverviewDto; stale: boolean; key?: string }
+  /**
+   * stale: 直近の更新に失敗した（前のデータを出し続けている）。
+   * okAt: 最後に更新に成功した時刻（失敗して stale になっても前の成功の時刻のまま。工場の小窓の古さの表示に使う）
+   */
+  | { phase: "ready"; data: OverviewDto; stale: boolean; okAt: number; key?: string }
   | { phase: "error" }
   | { phase: "unauthorized" }
   | { phase: "not_found" };
 
 export type OverviewDeps = {
   fetchImpl?: typeof fetch;
-  /** 「今日」の範囲を決める現在時刻（注入できる） */
+  /** 現在時刻（注入できる）。「今日」の範囲と、更新に成功した時刻（okAt）に使う */
   now?: () => number;
   pollerDeps?: PollerDeps;
 };
@@ -22,6 +33,7 @@ export type OverviewDeps = {
 /**
  * 一覧のデータを取り、自動更新する（D15）。scope を変えると取り直す。
  * 取得中の結果が別の scope のものなら捨てる（画面を古い scope で上書きしない）。
+ * 工場の小窓が見えている間（overviewKeepAlive）は、元のタブが hidden でも自動更新を続ける。
  */
 export function useOverview(
   scope: Scope,
@@ -46,7 +58,8 @@ export function useOverview(
     let alive = true;
     const poller = createPoller({
       autoRefresh: autoRef.current,
-      deps: depsRef.current.pollerDeps,
+      // 工場の小窓が見えている間は、元のタブが hidden でも続ける（docs/specs/dashboard-factory.md の「小窓」）
+      deps: withKeepAlive(depsRef.current.pollerDeps ?? browserDeps, overviewKeepAlive),
       run: async (): Promise<PollOutcome> => {
         const sc = scopeRef.current;
         const d = dayRef.current;
@@ -56,7 +69,8 @@ export function useOverview(
         const now = depsRef.current.now ?? Date.now;
         const r = await fetchOverview(dayRange(d, now()), sc, depsRef.current.fetchImpl);
         if (alive && scopeRef.current === sc && dayRef.current === d) {
-          if (r.kind === "ok") setState({ phase: "ready", data: r.data, stale: false, key });
+          if (r.kind === "ok")
+            setState({ phase: "ready", data: r.data, stale: false, okAt: now(), key });
           else if (r.kind === "unauthorized") setState({ phase: "unauthorized" });
           else if (r.kind === "not_found") setState({ phase: "not_found" });
           else

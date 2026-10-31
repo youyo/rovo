@@ -7,6 +7,7 @@
  * - 401（unauthorized）と 404（not_found）は止まる。手動の refresh だけが再開できる
  * - finished（終端のタスクを追い終えた）も同じく止まる
  * - 自動更新を切ると予約を消す。手動の refresh は取れる
+ * - hidden でも続ける条件（工場の小窓が見えている間など）は withKeepAlive で isHidden に差し込む（ポーラーは 1 本のまま）
  */
 
 export type PollOutcome = "ok" | "error" | "unauthorized" | "not_found" | "finished";
@@ -139,6 +140,73 @@ export function createPoller(opts: {
       auto = on;
       if (on) schedule();
       else clear();
+    },
+  };
+}
+
+/**
+ * hidden でも自動更新を続ける条件（docs/specs/dashboard-factory.md の「小窓」）。条件は 1 つだけ差し込める（後から set したもので置き換わる）。
+ * 工場の小窓（遅延チャンク）が開いている間、「小窓の文書が visible か」を set し、小窓の visibilitychange で notify、閉じたら set(null)。
+ */
+export type KeepAlive = {
+  /** 今、hidden でも続けるか */
+  active(): boolean;
+  /** 条件の変化を購読する。戻り値は購読の解除 */
+  subscribe(cb: () => void): () => void;
+  /** 条件を差し込む（null で外す）。購読者に知らせる */
+  set(fn: (() => boolean) | null): void;
+  /** 条件の値が変わったかもしれないことを知らせる */
+  notify(): void;
+};
+
+export function createKeepAlive(): KeepAlive {
+  let cond: (() => boolean) | null = null;
+  const subs = new Set<() => void>();
+  const notify = () => {
+    for (const cb of [...subs]) cb();
+  };
+  return {
+    active: () => cond?.() === true,
+    subscribe(cb) {
+      subs.add(cb);
+      return () => subs.delete(cb);
+    },
+    set(fn) {
+      cond = fn;
+      notify();
+    },
+    notify,
+  };
+}
+
+/** 一覧（use-overview）の自動更新に差し込む条件。工場の小窓が使う */
+export const overviewKeepAlive = createKeepAlive();
+
+/**
+ * 元の可視状態に「hidden でも続ける条件」を重ねた PollerDeps。hidden = 元が hidden かつ条件が立っていない。
+ * 元の visibilitychange・条件の通知とも、重ねた hidden の判定が変わったときだけ渡す
+ * （小窓を開いただけ・小窓が見えている間に元が hidden になっただけでは取り直さない。ポーラーは 1 本）。
+ */
+export function withKeepAlive(deps: PollerDeps, keep: KeepAlive): PollerDeps {
+  const isHidden = () => deps.isHidden() && !keep.active();
+  return {
+    setTimer: deps.setTimer,
+    clearTimer: deps.clearTimer,
+    isHidden,
+    onVisibilityChange(cb) {
+      let last = isHidden();
+      const check = () => {
+        const now = isHidden();
+        if (now === last) return;
+        last = now;
+        cb();
+      };
+      const offBase = deps.onVisibilityChange(check);
+      const offKeep = keep.subscribe(check);
+      return () => {
+        offBase();
+        offKeep();
+      };
     },
   };
 }

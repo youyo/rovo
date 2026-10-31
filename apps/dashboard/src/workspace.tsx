@@ -214,6 +214,7 @@ export function Workspace(props: {
         data={data}
         isToday={day === null}
         stale={state.phase === "ready" ? state.stale : false}
+        okAt={state.phase === "ready" ? state.okAt : undefined}
         cloudflare={cloudflare}
         budget={budget}
         autoRefresh={autoRefresh}

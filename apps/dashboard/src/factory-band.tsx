@@ -12,7 +12,14 @@ const FactoryPanel = lazy(() => import("./factory-panel"));
  * それまでは、中身が描かれたときと同じ高さ（たたむ既定なら見出しの 1 行、広げる既定なら + 断面図）の空の枠を出し、
  * 読み込みの前後で帯の下（レールとコンソール）を動かさない。data が null（一覧がまだ）でも枠は出す
  */
-export function FactoryBand(props: { data: OverviewDto | null; onSelect?: (id: string) => void }) {
+export function FactoryBand(props: {
+  data: OverviewDto | null;
+  onSelect?: (id: string) => void;
+  /** 直近の更新に失敗した（小窓に出す） */
+  stale?: boolean;
+  /** 最後に一覧の更新に成功した時刻（use-overview の okAt。小窓の古さの表示に使う） */
+  okAt?: number;
+}) {
   const t = useT();
   const narrow = useNarrow();
   const wait = (
@@ -26,7 +33,12 @@ export function FactoryBand(props: { data: OverviewDto | null; onSelect?: (id: s
         wait
       ) : (
         <Suspense fallback={wait}>
-          <FactoryPanel data={props.data} onSelect={props.onSelect} />
+          <FactoryPanel
+            data={props.data}
+            onSelect={props.onSelect}
+            stale={props.stale}
+            okAt={props.okAt}
+          />
         </Suspense>
       )}
     </section>

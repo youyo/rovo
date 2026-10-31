@@ -13,6 +13,9 @@ import { legacyTailEvents } from "./legacy-events";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// 工場の帯の中身（遅延チャンク）を先に読み込み、React.lazy の解決が CI の遅さに左右されないようにする
+await import("../src/factory-panel");
+
 // レール・タイムラインでの切り替え: ページを読み直さず pushState。fresh=1 は URL を直接開いたときの最初の取得だけ。
 // 切り替えた瞬間に一覧の行の情報とキャッシュの詳細を描き、古い応答は捨てる。
 

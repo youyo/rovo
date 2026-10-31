@@ -16,7 +16,7 @@ export type OverviewState =
   | { phase: "loading" }
   /**
    * stale: 直近の更新に失敗した（前のデータを出し続けている）。
-   * okAt: 最後に更新に成功した時刻（失敗して stale になっても前の成功の時刻のまま。工場の小窓の古さの表示に使う）
+   * okAt: 最後に更新に成功した時刻（失敗して stale になっても前の成功の時刻のまま。工場の PiP の古さの表示に使う）
    */
   | { phase: "ready"; data: OverviewDto; stale: boolean; okAt: number; key?: string }
   | { phase: "error" }
@@ -33,7 +33,7 @@ export type OverviewDeps = {
 /**
  * 一覧のデータを取り、自動更新する（D15）。scope を変えると取り直す。
  * 取得中の結果が別の scope のものなら捨てる（画面を古い scope で上書きしない）。
- * 工場の小窓が見えている間（overviewKeepAlive）は、元のタブが hidden でも自動更新を続ける。
+ * 工場の PiP が見えている間（overviewKeepAlive）は、元のタブが hidden でも自動更新を続ける。
  */
 export function useOverview(
   scope: Scope,
@@ -58,7 +58,7 @@ export function useOverview(
     let alive = true;
     const poller = createPoller({
       autoRefresh: autoRef.current,
-      // 工場の小窓が見えている間は、元のタブが hidden でも続ける（docs/specs/dashboard-factory.md の「小窓」）
+      // 工場の PiP が見えている間は、元のタブが hidden でも続ける（docs/specs/dashboard-factory.md の「ピクチャー・イン・ピクチャー」）
       deps: withKeepAlive(depsRef.current.pollerDeps ?? browserDeps, overviewKeepAlive),
       run: async (): Promise<PollOutcome> => {
         const sc = scopeRef.current;

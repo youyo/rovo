@@ -27,16 +27,16 @@ const DOTS = 6;
  * 工場の帯の中身（docs/specs/dashboard-factory.md）。遅延読み込みのチャンク（本体は枠の section だけ）。
  * 広げると工場の断面図、たたむと部屋ごとの人数の 1 行。背の低い画面は最初はたたむ（保存した好みが優先）。
  * 狭い幅（720px 以下）は断面図を出さず、たたんだときと同じ 1 行。見えないタスクは件数だけ。
- * 「小窓で表示」（Document Picture-in-Picture があるブラウザで、狭い幅でないときだけ）を押すと断面図を小窓に出し、
- * その間の帯は「小窓で表示中」と「戻す」の 1 行（たたんだ帯と同じ高さ）。
+ * 「ピクチャー・イン・ピクチャー」（Document Picture-in-Picture があるブラウザで、狭い幅でないときだけ）を押すと断面図を PiP の窓に出し、
+ * その間の帯は「ピクチャー・イン・ピクチャーで表示中」と「戻す」の 1 行（たたんだ帯と同じ高さ）。
  */
 export default function FactoryPanel(props: {
   data: OverviewDto;
   onSelect?: (id: string) => void;
-  /** 直近の更新に失敗した（小窓に「通信エラー」と出す） */
+  /** 直近の更新に失敗した（PiP の窓に「通信エラー」と出す） */
   stale?: boolean;
   /**
-   * 最後に一覧の更新に成功した時刻（取得元 use-overview の okAt。小窓の古さの表示に使う）。
+   * 最後に一覧の更新に成功した時刻（取得元 use-overview の okAt。PiP の古さの表示に使う）。
    * 渡されないときは一覧の generated_at（そのデータが作られた時刻）
    */
   okAt?: number;

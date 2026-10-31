@@ -7,7 +7,7 @@
  * - 401（unauthorized）と 404（not_found）は止まる。手動の refresh だけが再開できる
  * - finished（終端のタスクを追い終えた）も同じく止まる
  * - 自動更新を切ると予約を消す。手動の refresh は取れる
- * - hidden でも続ける条件（工場の小窓が見えている間など）は withKeepAlive で isHidden に差し込む（ポーラーは 1 本のまま）
+ * - hidden でも続ける条件（工場の PiP が見えている間など）は withKeepAlive で isHidden に差し込む（ポーラーは 1 本のまま）
  */
 
 export type PollOutcome = "ok" | "error" | "unauthorized" | "not_found" | "finished";
@@ -145,8 +145,8 @@ export function createPoller(opts: {
 }
 
 /**
- * hidden でも自動更新を続ける条件（docs/specs/dashboard-factory.md の「小窓」）。条件は 1 つだけ差し込める（後から set したもので置き換わる）。
- * 工場の小窓（遅延チャンク）が開いている間、「小窓の文書が visible か」を set し、小窓の visibilitychange で notify、閉じたら set(null)。
+ * hidden でも自動更新を続ける条件（docs/specs/dashboard-factory.md の「ピクチャー・イン・ピクチャー」）。条件は 1 つだけ差し込める（後から set したもので置き換わる）。
+ * 工場の PiP（遅延チャンク）が開いている間、「PiP の文書が visible か」を set し、PiP の visibilitychange で notify、閉じたら set(null)。
  */
 export type KeepAlive = {
   /** 今、hidden でも続けるか */
@@ -179,13 +179,13 @@ export function createKeepAlive(): KeepAlive {
   };
 }
 
-/** 一覧（use-overview）の自動更新に差し込む条件。工場の小窓が使う */
+/** 一覧（use-overview）の自動更新に差し込む条件。工場の PiP が使う */
 export const overviewKeepAlive = createKeepAlive();
 
 /**
  * 元の可視状態に「hidden でも続ける条件」を重ねた PollerDeps。hidden = 元が hidden かつ条件が立っていない。
  * 元の visibilitychange・条件の通知とも、重ねた hidden の判定が変わったときだけ渡す
- * （小窓を開いただけ・小窓が見えている間に元が hidden になっただけでは取り直さない。ポーラーは 1 本）。
+ * （PiP の窓を開いただけ・ PiP の窓が見えている間に元が hidden になっただけでは取り直さない。ポーラーは 1 本）。
  */
 export function withKeepAlive(deps: PollerDeps, keep: KeepAlive): PollerDeps {
   const isHidden = () => deps.isHidden() && !keep.active();

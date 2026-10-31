@@ -15,8 +15,8 @@ import { inJa, tJa } from "./lang";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 /**
- * 工場の帯の「小窓で表示」（Document Picture-in-Picture。docs/specs/dashboard-factory.md の「小窓」）。
- * jsdom には documentPictureInPicture が無いので、requestWindow を差し替え、別の document を持つ iframe の window を小窓として返す。
+ * 工場の帯の「ピクチャー・イン・ピクチャー」（Document Picture-in-Picture。docs/specs/dashboard-factory.md の「ピクチャー・イン・ピクチャー」）。
+ * jsdom には documentPictureInPicture が無いので、requestWindow を差し替え、別の document を持つ iframe の window を PiP の窓として返す。
  */
 
 const roots: { unmount: () => void }[] = [];
@@ -48,7 +48,7 @@ afterEach(() => {
 
 type PipWin = Window & typeof globalThis;
 
-/** 小窓の代わり（別の document を持つ iframe の window）。close は本物と同じく pagehide を出す */
+/** PiP の代わり（別の document を持つ iframe の window）。close は本物と同じく pagehide を出す */
 function stubPip() {
   const frame = document.createElement("iframe");
   document.body.append(frame);
@@ -81,7 +81,7 @@ function mount(opts: { onSelect?: (id: string) => void; stale?: boolean; okAt?: 
     act(() =>
       root.render(
         inJa(
-          // 一覧側の親の onClick（小窓の中のクリックが React の木を伝って届いてはいけない）
+          // 一覧側の親の onClick（PiP の中のクリックが React の木を伝って届いてはいけない）
           createElement(
             "div",
             { onClick: outer },
@@ -103,7 +103,7 @@ const pipButton = (c: Element) =>
 const backButton = (c: Element) =>
   c.querySelector("button[data-factory-pip-back]") as HTMLButtonElement | null;
 
-/** 小窓に写した link の load を出す（描くのは load の後） */
+/** PiP の窓に写した link の load を出す（描くのは load の後） */
 const loadLinks = (pip: ReturnType<typeof stubPip>) =>
   act(() => {
     for (const l of pip.doc.head.querySelectorAll("link"))
@@ -117,12 +117,12 @@ async function openPip(c: Element, pip: ReturnType<typeof stubPip>) {
   await settle();
 }
 
-describe("小窓で表示のボタン（documentPictureInPicture があるときだけ）", () => {
-  it("API があれば、見出しの行（たたむボタンの隣）に「小窓で表示」を出す", () => {
+describe("ピクチャー・イン・ピクチャーのボタン（documentPictureInPicture があるときだけ）", () => {
+  it("API があれば、見出しの行（たたむボタンの隣）に「ピクチャー・イン・ピクチャー」を出す", () => {
     stubPip();
     const { container } = mount();
     const btn = pipButton(container);
-    expect(btn?.textContent).toBe("小窓で表示");
+    expect(btn?.textContent).toBe("ピクチャー・イン・ピクチャー");
     expect(btn?.getAttribute("title")).toBeTruthy();
     expect(
       btn?.closest(".fxband-bar")?.querySelector("button[data-factory-toggle]"),
@@ -143,8 +143,8 @@ describe("小窓で表示のボタン（documentPictureInPicture があるとき
   });
 });
 
-describe("小窓を開く", () => {
-  it("押すとクリックの中で requestWindow を呼び、小窓の head に link を絶対 URL で写し（style 要素は作らない）、load の後に断面図を描く。元の帯は「小窓で表示中」の 1 行", async () => {
+describe("PiP の窓を開く", () => {
+  it("押すとクリックの中で requestWindow を呼び、PiP の head に link を絶対 URL で写し（style 要素は作らない）、load の後に断面図を描く。元の帯は「ピクチャー・イン・ピクチャーで表示中」の 1 行", async () => {
     const pip = stubPip();
     const { container } = mount();
     act(() => pipButton(container)?.click());
@@ -167,9 +167,9 @@ describe("小窓を開く", () => {
     // link を読み終えるまでは描かない
     expect(pip.doc.body.querySelector("[data-task]")).toBeNull();
 
-    // 元の帯は「小窓で表示中」と「戻す」の 1 行（断面図・たたむボタンは出さない）
+    // 元の帯は「ピクチャー・イン・ピクチャーで表示中」と「戻す」の 1 行（断面図・たたむボタンは出さない）
     const note = container.querySelector("[data-factory-pip-on]");
-    expect(note?.textContent).toBe("小窓で表示中");
+    expect(note?.textContent).toBe("ピクチャー・イン・ピクチャーで表示中");
     expect(backButton(container)?.textContent).toBe("戻す");
     expect(container.querySelector(".fx-stage")).toBeNull();
     expect(container.querySelector("button[data-factory-toggle]")).toBeNull();
@@ -179,13 +179,13 @@ describe("小窓を開く", () => {
     await settle();
     expect(pip.doc.body.querySelector(".fx-stage svg.fx-svg")).not.toBeNull();
     expect(pip.doc.body.querySelectorAll("a[data-task]").length).toBeGreaterThan(0);
-    // 小窓の中も style 属性・style 要素を作らない（CSP の style-src 'self'）
+    // PiP の中も style 属性・style 要素を作らない（CSP の style-src 'self'）
     expect(pip.doc.querySelector("[style]")).toBeNull();
     expect(pip.doc.querySelector("style")).toBeNull();
     expect(container.querySelector("[data-task]")).toBeNull();
   });
 
-  it("小窓の pagehide（利用者が閉じた）で元の表示に戻る", async () => {
+  it("PiP の pagehide（利用者が閉じた）で元の表示に戻る", async () => {
     const pip = stubPip();
     const { container } = mount();
     await openPip(container, pip);
@@ -196,7 +196,7 @@ describe("小窓を開く", () => {
     expect(pip.doc.body.querySelector("[data-task]")).toBeNull();
   });
 
-  it("「戻す」は小窓を閉じ、元の表示に戻す", async () => {
+  it("「戻す」は PiP の窓を閉じ、元の表示に戻す", async () => {
     const pip = stubPip();
     const { container } = mount();
     await openPip(container, pip);
@@ -206,7 +206,7 @@ describe("小窓を開く", () => {
     expect(container.querySelector(".fx-stage svg.fx-svg")).not.toBeNull();
   });
 
-  it("帯が消えたら（一覧の読み込み直しなど）小窓も閉じる", async () => {
+  it("帯が消えたら（一覧の読み込み直しなど）PiP の窓も閉じる", async () => {
     const pip = stubPip();
     const { container, root } = mount();
     await openPip(container, pip);
@@ -228,7 +228,7 @@ describe("小窓を開く", () => {
     expect(container.querySelector(".fx-stage svg.fx-svg")).not.toBeNull();
   });
 
-  it("たたんだ帯からも開ける（小窓は断面図）", async () => {
+  it("たたんだ帯からも開ける（PiP の窓は断面図）", async () => {
     saveFactoryPref("collapsed");
     const pip = stubPip();
     const { container } = mount();
@@ -238,7 +238,7 @@ describe("小窓を開く", () => {
   });
 });
 
-describe("小窓の中の Rovo", () => {
+describe("PiP の中の Rovo", () => {
   it("押すと、同期的に opener の window.focus() を呼び、そのタスクを選ぶ。一覧側の親の onClick には届かない", async () => {
     const order: string[] = [];
     const onSelect = vi.fn((id: string) => void order.push(`select:${id}`));
@@ -248,14 +248,14 @@ describe("小窓の中の Rovo", () => {
     await openPip(container, pip);
     const a = pip.doc.body.querySelector("a[data-task]") as Element;
     const id = a.getAttribute("data-task") as string;
-    // 「小窓で表示」のボタンのクリックは元の文書の中なので、親に届いてよい。ここからは小窓の中のクリックだけを見る
+    // 「ピクチャー・イン・ピクチャー」のボタンのクリックは元の文書の中なので、親に届いてよい。ここからは PiP の中のクリックだけを見る
     outer.mockClear();
     const ev = new pip.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
     act(() => void a.dispatchEvent(ev));
     expect(focus).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledWith(id);
     expect(order).toEqual(["focus", `select:${id}`]);
-    // ページ（小窓）を読み直さない
+    // ページ（PiP の窓）を読み直さない
     expect(ev.defaultPrevented).toBe(true);
     expect(outer).not.toHaveBeenCalled();
   });
@@ -279,8 +279,8 @@ describe("小窓の中の Rovo", () => {
   });
 });
 
-describe("小窓と一覧の自動更新（overviewKeepAlive）", () => {
-  it("開いている間は、小窓の文書が visible なら hidden でも続ける条件が立つ。小窓の visibilitychange で再評価を知らせ、閉じれば条件を外す", async () => {
+describe("PiP の窓と一覧の自動更新（overviewKeepAlive）", () => {
+  it("開いている間は、PiP の文書が visible なら hidden でも続ける条件が立つ。PiP の visibilitychange で再評価を知らせ、閉じれば条件を外す", async () => {
     const pip = stubPip();
     const { container } = mount();
     expect(overviewKeepAlive.active()).toBe(false);
@@ -305,7 +305,7 @@ describe("小窓と一覧の自動更新（overviewKeepAlive）", () => {
   });
 });
 
-describe("小窓の古さの表示（止まった絵を新しいと誤解させない）", () => {
+describe("PiP の古さの表示（止まった絵を新しいと誤解させない）", () => {
   it("最後に更新に成功してから 30 秒以上で「更新なし」、通信エラーで「通信エラー」。新しいデータが届くと消える", async () => {
     let now = Date.parse("2026-10-21T05:00:00Z");
     vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -364,7 +364,7 @@ describe("小窓の古さの表示（止まった絵を新しいと誤解させ�
     expect(status?.textContent).toContain(formatClock(okAt, tJa));
   });
 
-  it("FactoryBand・OverviewView も okAt を小窓まで渡す", async () => {
+  it("FactoryBand・OverviewView も okAt を PiP の窓まで渡す", async () => {
     const now = Date.parse("2026-10-21T05:00:00Z");
     vi.spyOn(Date, "now").mockImplementation(() => now);
     const okAt = now - 45_000;
@@ -403,7 +403,7 @@ describe("小窓の古さの表示（止まった絵を新しいと誤解させ�
   });
 });
 
-/** requestWindow の解決を手で進める版。呼ばれるたびに別の小窓（iframe の window）を用意する */
+/** requestWindow の解決を手で進める版。呼ばれるたびに別の PiP の窓（iframe の window）を用意する */
 function stubPipDeferred() {
   const calls: { win: PipWin; close: ReturnType<typeof vi.fn>; resolve: () => void }[] = [];
   const requestWindow = vi.fn((_opts?: { width?: number; height?: number }) => {
@@ -445,7 +445,7 @@ function mountHook(mode: () => "visible" | "hidden" = () => "visible") {
   return { ref, root, draw, api: () => ref.current as ReturnType<typeof usePip> };
 }
 
-describe("小窓の要求中（requestWindow の解決前）", () => {
+describe("PiP の要求中（requestWindow の解決前）", () => {
   it("open を 2 回続けて呼んでも requestWindow は 1 回だけ。解決したら 1 本だけ採用する", async () => {
     const pip = stubPipDeferred();
     const h = mountHook();
@@ -467,7 +467,7 @@ describe("小窓の要求中（requestWindow の解決前）", () => {
     expect(pip.requestWindow).toHaveBeenCalledTimes(1);
   });
 
-  it("要求中は「小窓で表示」のボタンを押せない（disabled）", async () => {
+  it("要求中は「ピクチャー・イン・ピクチャー」のボタンを押せない（disabled）", async () => {
     const pip = stubPipDeferred();
     const { container } = mount();
     act(() => pipButton(container)?.click());
@@ -505,7 +505,7 @@ describe("小窓の要求中（requestWindow の解決前）", () => {
     expect(h.api().requesting).toBe(false);
   });
 
-  it("要求中にアンマウントしたら、あとで解決した小窓はすぐ閉じ、keepAlive にも触らない", async () => {
+  it("要求中にアンマウントしたら、あとで解決した PiP の窓はすぐ閉じ、keepAlive にも触らない", async () => {
     const pip = stubPipDeferred();
     const h = mountHook();
     act(() => h.api().open());
@@ -514,11 +514,11 @@ describe("小窓の要求中（requestWindow の解決前）", () => {
     await settle();
     expect(pip.calls[0]?.close).toHaveBeenCalledTimes(1);
     expect(overviewKeepAlive.active()).toBe(false);
-    // 小窓に何も入れていない（初期化していない）
+    // PiP の窓に何も入れていない（初期化していない）
     expect(pip.calls[0]?.win.document.head.querySelector("link")).toBeNull();
   });
 
-  it("要求中に帯（FactoryPanel）が消えても、あとで解決した小窓は閉じ、管理外の小窓や keepAlive を残さない", async () => {
+  it("要求中に帯（FactoryPanel）が消えても、あとで解決した PiP の窓は閉じ、管理外の PiP の窓や keepAlive を残さない", async () => {
     const pip = stubPipDeferred();
     const { container, root } = mount();
     act(() => pipButton(container)?.click());
@@ -529,7 +529,7 @@ describe("小窓の要求中（requestWindow の解決前）", () => {
     expect(overviewKeepAlive.active()).toBe(false);
   });
 
-  it("古い世代の要求の解決は採用しない（隠して戻した後に開き直した場合。古い小窓は閉じ、新しい要求だけを採用する）", async () => {
+  it("古い世代の要求の解決は採用しない（隠して戻した後に開き直した場合。古い PiP の窓は閉じ、新しい要求だけを採用する）", async () => {
     const pip = stubPipDeferred();
     let mode: "visible" | "hidden" = "visible";
     const h = mountHook(() => mode);
@@ -558,7 +558,7 @@ describe("小窓の要求中（requestWindow の解決前）", () => {
     expect(overviewKeepAlive.active()).toBe(true);
   });
 
-  it("小窓の初期化で例外が出たら、その小窓を閉じ、keepAlive を外し、帯は元のまま", async () => {
+  it("PiP の初期化で例外が出たら、その PiP の窓を閉じ、keepAlive を外し、帯は元のまま", async () => {
     const pip = stubPip();
     vi.spyOn(pip.doc, "createElement").mockImplementation(() => {
       throw new Error("boom");
@@ -571,7 +571,7 @@ describe("小窓の要求中（requestWindow の解決前）", () => {
     expect(container.querySelector("[data-factory-pip-on]")).toBeNull();
     expect(pipButton(container)).not.toBeNull();
     expect(pipButton(container)?.disabled).toBe(false);
-    // 閉じた小窓のイベントで状態が動かない（リスナーを外している）
+    // 閉じた PiP のイベントで状態が動かない（リスナーを外している）
     act(() => void pip.doc.dispatchEvent(new pip.win.Event("visibilitychange")));
     expect(overviewKeepAlive.active()).toBe(false);
   });

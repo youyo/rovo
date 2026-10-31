@@ -167,7 +167,7 @@ function walk(el: Element, pts: Spot[], to: Spot): Animation | null {
 }
 
 /**
- * 動きを減らす設定か。描いている文書の window（小窓に出しているときは小窓の window）で評価する。
+ * 動きを減らす設定か。描いている文書の window（PiP の窓に出しているときは PiP の window）で評価する。
  * 要素がまだ無いときだけ、グローバルの window に倒す
  */
 function reducedMotion(el: Element | null): boolean {
@@ -183,7 +183,7 @@ function reducedMotion(el: Element | null): boolean {
  * 前回の場所を覚えて、場所が変わった Rovo だけ歩かせる（FLIP）。歩いている Rovo は state に持ち、
  * 歩く姿（fx-walking）は className に入れる（ポーリングで並びが変わって className が書き直されても消えない）。
  * 歩き途中にまた場所が変わったら、前の歩きを止めて今の場所から歩き直す。
- * 小窓への付け替えなどで作り直されたら、前回の場所は空から始め（最初は歩かない）、実行中の歩きは外すときに止める。
+ * PiP の窓への付け替えなどで作り直されたら、前回の場所は空から始め（最初は歩かない）、実行中の歩きは外すときに止める。
  */
 function useWalks(bots: Placed[]) {
   const prev = useRef(new Map<string, { place: Place; at: Spot }>());

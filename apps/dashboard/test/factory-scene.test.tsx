@@ -218,8 +218,8 @@ describe("工程が変わった Rovo の移動（FLIP。element.animate）", () 
     expect(calls).toHaveLength(0);
   });
 
-  it("prefers-reduced-motion は、描いている文書の window（小窓）の matchMedia で決める", () => {
-    // 元の window は動いてよい設定。小窓（別の document を持つ iframe）だけ reduce
+  it("prefers-reduced-motion は、描いている文書の window（PiP の窓）の matchMedia で決める", () => {
+    // 元の window は動いてよい設定。PiP の窓（別の document を持つ iframe）だけ reduce
     vi.stubGlobal("matchMedia", (q: string) => ({
       matches: false,
       media: q,
@@ -254,11 +254,11 @@ describe("工程が変わった Rovo の移動（FLIP。element.animate）", () 
       return calls;
     };
     expect(one(true)).toHaveLength(0);
-    // 対照: 小窓が reduce でなければ歩く
+    // 対照: PiP の窓が reduce でなければ歩く
     expect(one(false)).toHaveLength(1);
   });
 
-  it("作り直し（小窓への付け替えなど）で外すときは、実行中の歩きを止める", () => {
+  it("作り直し（PiP の窓への付け替えなど）で外すときは、実行中の歩きを止める", () => {
     const cancel = vi.fn();
     const proto = Element.prototype as { animate?: unknown };
     const had = Object.hasOwn(proto, "animate");

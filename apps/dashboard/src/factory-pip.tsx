@@ -9,9 +9,9 @@ import { overviewKeepAlive } from "./poller";
 import { taskPath } from "./route";
 
 /**
- * 工場の帯の「小窓」（Document Picture-in-Picture。docs/specs/dashboard-factory.md の「小窓」）。遅延読み込みのチャンクに置く（本体を増やさない）。
- * 小窓の中身は断面図だけ。同じ React の木から createPortal で描く（同じデータ・同じ onSelect）。
- * CSP（style-src 'self'）を変えないため、小窓の head には元の文書の <link rel="stylesheet"> を絶対 URL で作り直して入れる
+ * 工場の帯のピクチャー・イン・ピクチャー（PiP。Document Picture-in-Picture。docs/specs/dashboard-factory.md の「ピクチャー・イン・ピクチャー」）。遅延読み込みのチャンクに置く（本体を増やさない）。
+ * PiP の中身は断面図だけ。同じ React の木から createPortal で描く（同じデータ・同じ onSelect）。
+ * CSP（style-src 'self'）を変えないため、PiP の head には元の文書の <link rel="stylesheet"> を絶対 URL で作り直して入れる
  * （<style> 要素は作らない・cssRules の文字列は写さない）。この処理はチャンクの中で走るので、チャンクの CSS の link も元の head に入っている。
  */
 
@@ -19,13 +19,13 @@ type DocumentPip = {
   requestWindow(opts?: { width?: number; height?: number }): Promise<Window>;
 };
 
-/** 小窓に頼む大きさ（断面図の 1440 × 280 を半分に縮めた幅。高さは古さの表示の分だけ足す） */
+/** PiP の窓に頼む大きさ（断面図の 1440 × 280 を半分に縮めた幅。高さは古さの表示の分だけ足す） */
 const PIP_SIZE = { width: 720, height: 150 } as const;
 /** 最後に更新に成功してから、これより経ったら古いと出す */
 export const PIP_STALE_MS = 30_000;
 /** 古さの表示を描き直す間隔 */
 const PIP_TICK_MS = 5_000;
-/** 小窓の link の load を待つ上限（読めなくても描く） */
+/** PiP の link の load を待つ上限（読めなくても描く） */
 const LINK_TIMEOUT_MS = 3_000;
 
 function documentPip(): DocumentPip | null {
@@ -33,12 +33,12 @@ function documentPip(): DocumentPip | null {
   return (window as unknown as { documentPictureInPicture: DocumentPip }).documentPictureInPicture;
 }
 
-/** このブラウザで小窓を出せるか（Chrome / Edge。Safari・Firefox は出せない） */
+/** このブラウザで PiP の窓を出せるか（Chrome / Edge。Safari・Firefox は出せない） */
 export function pipSupported(): boolean {
   return documentPip() !== null;
 }
 
-/** 元の文書の <link rel="stylesheet"> を、href を絶対 URL にして小窓の head に作り直す */
+/** 元の文書の <link rel="stylesheet"> を、href を絶対 URL にして PiP の head に作り直す */
 export function copyStylesheets(from: Document, to: Document): HTMLLinkElement[] {
   const out: HTMLLinkElement[] = [];
   for (const src of from.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"]')) {
@@ -86,12 +86,12 @@ function closeQuietly(win: Window) {
 }
 
 /**
- * 小窓の開け閉め。win は開いている小窓（元の帯を「小窓で表示中」の 1 行にする）、ready は小窓の CSS を読み終えたか（読み終えてから描く）、
+ * PiP の開け閉め。win は開いている PiP の窓（元の帯を「ピクチャー・イン・ピクチャーで表示中」の 1 行にする）、ready は PiP の CSS を読み終えたか（読み終えてから描く）、
  * requesting は requestWindow の解決を待っている間（ボタンを押せなくする。二重に開かないためのガードは open の中の ref）。
- * 開いている間は overviewKeepAlive に「小窓の文書が visible か」を差し込み、元のタブが hidden でも一覧の自動更新を続ける。
- * 小窓の pagehide（利用者が閉じた・「戻す」）で元に戻し、帯が消えたら小窓も閉じる。
- * 要求ごとに世代を持ち、最新の世代でない要求（帯が消えた・effect の後始末が走った後に解決したもの）の小窓はすぐ閉じ、状態にも keepAlive にも触らない。
- * 小窓の初期化で例外が出たら、その小窓を閉じて keepAlive を外す（管理外の小窓を残さない）。
+ * 開いている間は overviewKeepAlive に「PiP の文書が visible か」を差し込み、元のタブが hidden でも一覧の自動更新を続ける。
+ * PiP の pagehide（利用者が閉じた・「戻す」）で元に戻し、帯が消えたら PiP の窓も閉じる。
+ * 要求ごとに世代を持ち、最新の世代でない要求（帯が消えた・effect の後始末が走った後に解決したもの）の PiP の窓はすぐ閉じ、状態にも keepAlive にも触らない。
+ * PiP の初期化で例外が出たら、その PiP の窓を閉じて keepAlive を外す（管理外の PiP の窓を残さない）。
  */
 export function usePip(title: string) {
   const [state, setState] = useState<{ win: Window; ready: boolean } | null>(null);
@@ -109,7 +109,7 @@ export function usePip(title: string) {
     setState(null);
   }, []);
 
-  /** 開いた小窓を初期化して採用する。例外が出たら閉じて元に戻す */
+  /** 開いた PiP の窓を初期化して採用する。例外が出たら閉じて元に戻す */
   const attach = (win: Window) => {
     const doc = win.document;
     const onHide = () => finish(win);
@@ -168,7 +168,7 @@ export function usePip(title: string) {
         else closeQuietly(win);
       },
       () => {
-        // 断られた（ユーザーの操作の外・別の小窓が開いているなど）。帯はそのまま
+        // 断られた（ユーザーの操作の外・別の PiP の窓が開いているなど）。帯はそのまま
         settle();
       },
     );
@@ -183,7 +183,7 @@ export function usePip(title: string) {
 
   useEffect(
     () => () => {
-      // 帯が消えた（または effect の後始末）。要求中の要求を無効にし、開いている小窓を閉じる
+      // 帯が消えた（または effect の後始末）。要求中の要求を無効にし、開いている PiP の窓を閉じる
       gen.current += 1;
       if (pending.current) {
         pending.current = false;
@@ -203,18 +203,18 @@ export function pipFreshness(okAt: number, now: number, stale: boolean): "ok" | 
   return now - okAt >= PIP_STALE_MS ? "old" : "ok";
 }
 
-/** 小窓のイベントを、React の木を伝って一覧側の親に届かせない（Rovo 自身の onClick は先に動く） */
+/** PiP のイベントを、React の木を伝って一覧側の親に届かせない（Rovo 自身の onClick は先に動く） */
 const stop = (e: SyntheticEvent) => e.stopPropagation();
 
 /**
- * 小窓の中身（断面図と古さの表示）。小窓の body に portal で描く。
+ * PiP の中身（断面図と古さの表示）。PiP の body に portal で描く。
  * Rovo を押したら、クリックの処理の中で同期的に元の window を前に出し（focus の成否によらず）、そのタスクを選ぶ。
  */
 export function PipScene(props: {
   win: Window;
   data: OverviewDto;
   stale: boolean;
-  /** 最後に一覧の更新に成功した時刻（取得元 use-overview が持つ。小窓を開いた時刻ではない） */
+  /** 最後に一覧の更新に成功した時刻（取得元 use-overview が持つ。PiP の窓を開いた時刻ではない） */
   okAt: number;
   onSelect?: (id: string) => void;
 }) {

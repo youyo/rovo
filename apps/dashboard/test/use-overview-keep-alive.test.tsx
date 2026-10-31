@@ -70,3 +70,67 @@ describe("useOverview: 工場の小窓が見えている間は、元のタブが
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 });
+
+describe("useOverview: 最後に更新に成功した時刻（okAt。工場の小窓の古さの表示に使う）", () => {
+  it("成功のたびに deps.now の時刻を okAt に持つ。失敗（stale）になっても okAt は前の成功の時刻のまま", async () => {
+    let now = Date.parse("2026-10-21T05:00:00Z");
+    const timers = new Map<number, () => void>();
+    let id = 0;
+    const deps: PollerDeps = {
+      setTimer: (fn) => {
+        timers.set(++id, fn);
+        return id;
+      },
+      clearTimer: (h) => void timers.delete(h as number),
+      isHidden: () => false,
+      onVisibilityChange: () => () => {},
+    };
+    let fail = false;
+    const fetchImpl = vi.fn(async () =>
+      fail
+        ? new Response("oops", { status: 500 })
+        : new Response(JSON.stringify(overviewFixture), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+    );
+    const seen: { current: ReturnType<typeof useOverview> | null } = { current: null };
+    function Probe() {
+      seen.current = useOverview("all", null, true, {
+        fetchImpl,
+        pollerDeps: deps,
+        now: () => now,
+      });
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    act(() => root.render(createElement(Probe)));
+    await flush();
+    const firstOk = now;
+    expect(seen.current?.state).toMatchObject({ phase: "ready", stale: false, okAt: firstOk });
+
+    // 次の取得は失敗
+    now += 7_000;
+    fail = true;
+    act(() => seen.current?.refresh());
+    await flush();
+    expect(seen.current?.state).toMatchObject({ phase: "ready", stale: true, okAt: firstOk });
+
+    // もう一度失敗しても動かない
+    now += 20_000;
+    act(() => seen.current?.refresh());
+    await flush();
+    expect(seen.current?.state).toMatchObject({ phase: "ready", stale: true, okAt: firstOk });
+
+    // 成功したら、その時刻
+    now += 3_000;
+    fail = false;
+    act(() => seen.current?.refresh());
+    await flush();
+    expect(seen.current?.state).toMatchObject({ phase: "ready", stale: false, okAt: now });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+});

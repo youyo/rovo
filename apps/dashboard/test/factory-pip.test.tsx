@@ -1,12 +1,16 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
 import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
-import { act, createElement } from "react";
+import { Activity, act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FactoryBand } from "../src/factory-band";
 import FactoryPanel from "../src/factory-panel";
+import { usePip } from "../src/factory-pip";
 import { saveFactoryPref } from "../src/factory-prefs";
+import { formatClock } from "../src/format";
+import { OverviewView } from "../src/overview-view";
 import { overviewKeepAlive } from "../src/poller";
-import { inJa } from "./lang";
+import { inJa, tJa } from "./lang";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -67,13 +71,13 @@ function stubNarrow(narrow: boolean) {
   }));
 }
 
-function mount(opts: { onSelect?: (id: string) => void; stale?: boolean } = {}) {
+function mount(opts: { onSelect?: (id: string) => void; stale?: boolean; okAt?: number } = {}) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   roots.push(root);
   const outer = vi.fn();
-  const draw = (data: OverviewDto, stale = opts.stale ?? false) =>
+  const draw = (data: OverviewDto, stale = opts.stale ?? false, okAt = opts.okAt) =>
     act(() =>
       root.render(
         inJa(
@@ -81,7 +85,7 @@ function mount(opts: { onSelect?: (id: string) => void; stale?: boolean } = {}) 
           createElement(
             "div",
             { onClick: outer },
-            createElement(FactoryPanel, { data, onSelect: opts.onSelect, stale }),
+            createElement(FactoryPanel, { data, onSelect: opts.onSelect, stale, okAt }),
           ),
         ),
       ),
@@ -305,29 +309,264 @@ describe("小窓の古さの表示（止まった絵を新しいと誤解させ�
   it("最後に更新に成功してから 30 秒以上で「更新なし」、通信エラーで「通信エラー」。新しいデータが届くと消える", async () => {
     let now = Date.parse("2026-10-21T05:00:00Z");
     vi.spyOn(Date, "now").mockImplementation(() => now);
+    const okAt = now;
     const pip = stubPip();
-    const { container, draw } = mount();
+    const { container, draw } = mount({ okAt });
     await openPip(container, pip);
     const status = () => pip.doc.body.querySelector("[data-pip-stale]");
     expect(status()).toBeNull();
 
     now += 29_000;
-    draw(overviewFixture);
+    draw(overviewFixture, false, okAt);
     expect(status()).toBeNull();
 
     now += 2_000;
-    draw(overviewFixture);
+    draw(overviewFixture, false, okAt);
     expect(status()?.getAttribute("data-pip-stale")).toBe("old");
     expect(status()?.textContent).toContain("更新なし");
     expect(status()?.getAttribute("title")).toBeTruthy();
 
-    draw(overviewFixture, true);
+    draw(overviewFixture, true, okAt);
     expect(status()?.getAttribute("data-pip-stale")).toBe("error");
     expect(status()?.textContent).toContain("通信エラー");
 
-    // 次の取得に成功（新しいデータ）
-    draw({ ...overviewFixture }, false);
+    // 次の取得に成功（新しいデータ。取得元の最後の成功の時刻も進む）
+    draw({ ...overviewFixture }, false, now);
     await settle();
     expect(status()).toBeNull();
+  });
+
+  it("最後の成功の時刻は取得元から受け取る: すでに 30 秒以上更新できていない状態で開くと、すぐ「更新なし」。開き直しても時刻は戻らない", async () => {
+    const now = Date.parse("2026-10-21T05:00:00Z");
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const okAt = now - 31_000;
+    const pip = stubPip();
+    const { container } = mount({ okAt });
+    await openPip(container, pip);
+    const status = () => pip.doc.body.querySelector("[data-pip-stale]");
+    expect(status()?.getAttribute("data-pip-stale")).toBe("old");
+    expect(status()?.textContent).toContain(formatClock(okAt, tJa));
+
+    act(() => backButton(container)?.click());
+    await openPip(container, pip);
+    expect(status()?.getAttribute("data-pip-stale")).toBe("old");
+  });
+
+  it("失敗（stale）の表示の時刻も、取得元の最後の成功の時刻", async () => {
+    const now = Date.parse("2026-10-21T05:00:00Z");
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const okAt = now - 12 * 60_000;
+    const pip = stubPip();
+    const { container } = mount({ okAt, stale: true });
+    await openPip(container, pip);
+    const status = pip.doc.body.querySelector("[data-pip-stale]");
+    expect(status?.getAttribute("data-pip-stale")).toBe("error");
+    expect(status?.textContent).toContain(formatClock(okAt, tJa));
+  });
+
+  it("FactoryBand・OverviewView も okAt を小窓まで渡す", async () => {
+    const now = Date.parse("2026-10-21T05:00:00Z");
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const okAt = now - 45_000;
+    for (const el of ["band", "view"] as const) {
+      const pip = stubPip();
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      act(() =>
+        root.render(
+          inJa(
+            el === "band"
+              ? createElement(FactoryBand, { data: overviewFixture, okAt })
+              : createElement(OverviewView, {
+                  data: overviewFixture,
+                  okAt,
+                  autoRefresh: true,
+                  onAutoRefreshChange: () => {},
+                  onRefresh: () => {},
+                  stale: false,
+                  isToday: true,
+                  selectedId: null,
+                  console: null,
+                }),
+          ),
+        ),
+      );
+      await settle();
+      await openPip(container, pip);
+      expect(pip.doc.body.querySelector("[data-pip-stale]")?.getAttribute("data-pip-stale")).toBe(
+        "old",
+      );
+      act(() => root.render(null));
+    }
+  });
+});
+
+/** requestWindow の解決を手で進める版。呼ばれるたびに別の小窓（iframe の window）を用意する */
+function stubPipDeferred() {
+  const calls: { win: PipWin; close: ReturnType<typeof vi.fn>; resolve: () => void }[] = [];
+  const requestWindow = vi.fn((_opts?: { width?: number; height?: number }) => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const win = frame.contentWindow as PipWin;
+    const close = vi.fn(() => {
+      win.dispatchEvent(new win.Event("pagehide"));
+    });
+    win.close = close;
+    return new Promise<Window>((resolve) => {
+      calls.push({ win, close, resolve: () => resolve(win) });
+    });
+  });
+  vi.stubGlobal("documentPictureInPicture", { requestWindow });
+  return { calls, requestWindow };
+}
+
+/** usePip をそのまま試す（ボタンの disabled に頼らず、open のガードそのものを見る） */
+function mountHook(mode: () => "visible" | "hidden" = () => "visible") {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  roots.push(root);
+  const ref: { current: ReturnType<typeof usePip> | null } = { current: null };
+  function Probe() {
+    ref.current = usePip("Rovo の工場");
+    return null;
+  }
+  const draw = () =>
+    act(() => root.render(createElement(Activity, { mode: mode() }, createElement(Probe))));
+  draw();
+  return { ref, root, draw, api: () => ref.current as ReturnType<typeof usePip> };
+}
+
+describe("小窓の要求中（requestWindow の解決前）", () => {
+  it("open を 2 回続けて呼んでも requestWindow は 1 回だけ。解決したら 1 本だけ採用する", async () => {
+    const pip = stubPipDeferred();
+    const h = mountHook();
+    act(() => {
+      h.api().open();
+      h.api().open();
+    });
+    expect(pip.requestWindow).toHaveBeenCalledTimes(1);
+    // 再描画の後も（要求中は）何もしない
+    act(() => h.api().open());
+    expect(pip.requestWindow).toHaveBeenCalledTimes(1);
+
+    pip.calls[0]?.resolve();
+    await settle();
+    expect(h.api().win).toBe(pip.calls[0]?.win);
+    expect(overviewKeepAlive.active()).toBe(true);
+    // 開いている間も何もしない
+    act(() => h.api().open());
+    expect(pip.requestWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it("要求中は「小窓で表示」のボタンを押せない（disabled）", async () => {
+    const pip = stubPipDeferred();
+    const { container } = mount();
+    act(() => pipButton(container)?.click());
+    expect(pipButton(container)?.disabled).toBe(true);
+    pip.calls[0]?.resolve();
+    await settle();
+    expect(container.querySelector("[data-factory-pip-on]")).not.toBeNull();
+  });
+
+  it("要求が断られたら要求中を下ろす（もう一度押せる）", async () => {
+    let n = 0;
+    const requestWindow = vi.fn(async () => {
+      n += 1;
+      throw new Error(`NotAllowedError ${n}`);
+    });
+    vi.stubGlobal("documentPictureInPicture", { requestWindow });
+    const h = mountHook();
+    act(() => h.api().open());
+    await settle();
+    expect(h.api().requesting).toBe(false);
+    act(() => h.api().open());
+    await settle();
+    expect(requestWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it("requestWindow が同期的に例外を出しても要求中を下ろす", async () => {
+    const requestWindow = vi.fn(() => {
+      throw new Error("sync");
+    });
+    vi.stubGlobal("documentPictureInPicture", { requestWindow });
+    const h = mountHook();
+    act(() => h.api().open());
+    act(() => h.api().open());
+    expect(requestWindow).toHaveBeenCalledTimes(2);
+    expect(h.api().requesting).toBe(false);
+  });
+
+  it("要求中にアンマウントしたら、あとで解決した小窓はすぐ閉じ、keepAlive にも触らない", async () => {
+    const pip = stubPipDeferred();
+    const h = mountHook();
+    act(() => h.api().open());
+    act(() => h.root.render(null));
+    pip.calls[0]?.resolve();
+    await settle();
+    expect(pip.calls[0]?.close).toHaveBeenCalledTimes(1);
+    expect(overviewKeepAlive.active()).toBe(false);
+    // 小窓に何も入れていない（初期化していない）
+    expect(pip.calls[0]?.win.document.head.querySelector("link")).toBeNull();
+  });
+
+  it("要求中に帯（FactoryPanel）が消えても、あとで解決した小窓は閉じ、管理外の小窓や keepAlive を残さない", async () => {
+    const pip = stubPipDeferred();
+    const { container, root } = mount();
+    act(() => pipButton(container)?.click());
+    act(() => root.render(null));
+    pip.calls[0]?.resolve();
+    await settle();
+    expect(pip.calls[0]?.close).toHaveBeenCalledTimes(1);
+    expect(overviewKeepAlive.active()).toBe(false);
+  });
+
+  it("古い世代の要求の解決は採用しない（隠して戻した後に開き直した場合。古い小窓は閉じ、新しい要求だけを採用する）", async () => {
+    const pip = stubPipDeferred();
+    let mode: "visible" | "hidden" = "visible";
+    const h = mountHook(() => mode);
+    act(() => h.api().open());
+    expect(pip.requestWindow).toHaveBeenCalledTimes(1);
+    // 隠す（effect の後始末が走る = 要求を無効にする）→ 戻す
+    mode = "hidden";
+    h.draw();
+    mode = "visible";
+    h.draw();
+    expect(h.api().requesting).toBe(false);
+    act(() => h.api().open());
+    expect(pip.requestWindow).toHaveBeenCalledTimes(2);
+
+    pip.calls[0]?.resolve();
+    await settle();
+    expect(pip.calls[0]?.close).toHaveBeenCalledTimes(1);
+    expect(h.api().win).toBeNull();
+    expect(overviewKeepAlive.active()).toBe(false);
+    expect(h.api().requesting).toBe(true);
+
+    pip.calls[1]?.resolve();
+    await settle();
+    expect(pip.calls[1]?.close).not.toHaveBeenCalled();
+    expect(h.api().win).toBe(pip.calls[1]?.win);
+    expect(overviewKeepAlive.active()).toBe(true);
+  });
+
+  it("小窓の初期化で例外が出たら、その小窓を閉じ、keepAlive を外し、帯は元のまま", async () => {
+    const pip = stubPip();
+    vi.spyOn(pip.doc, "createElement").mockImplementation(() => {
+      throw new Error("boom");
+    });
+    const { container } = mount();
+    act(() => pipButton(container)?.click());
+    await settle();
+    expect(pip.close).toHaveBeenCalledTimes(1);
+    expect(overviewKeepAlive.active()).toBe(false);
+    expect(container.querySelector("[data-factory-pip-on]")).toBeNull();
+    expect(pipButton(container)).not.toBeNull();
+    expect(pipButton(container)?.disabled).toBe(false);
+    // 閉じた小窓のイベントで状態が動かない（リスナーを外している）
+    act(() => void pip.doc.dispatchEvent(new pip.win.Event("visibilitychange")));
+    expect(overviewKeepAlive.active()).toBe(false);
   });
 });

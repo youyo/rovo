@@ -27,6 +27,20 @@
 - 狭い幅（720px 以下）では断面図を出さず、たたんだときと同じ「部屋ごとの人の色の点と人数」の簡略版にする。
 - Rovo を押すと、そのタスクを選ぶ（レール・タイムラインの棒と同じ `href` と `pushState` の流儀）。
 
+## 小窓（Document Picture-in-Picture）
+
+別の作業をしながら画面の端で工場の様子を見られるよう、断面図を最前面の小窓に出せる。**Chrome / Edge だけ**（`documentPictureInPicture.requestWindow()`）。処理は工場のチャンク（`factory-pip.tsx`）に置き、本体の容量は増やさない（自動更新の条件を差し込む口だけが本体の `poller.ts` にある）。
+
+- **ボタン**: `'documentPictureInPicture' in window` のときだけ、帯の見出しの行（たたむボタンの隣）に「小窓で表示」を出す。API の無いブラウザ（Safari・Firefox）と狭い幅（720px 以下）では出さない。たたんだ帯からも開ける。
+- **中身**: 小窓には断面図（`FactoryScene`）だけを出し、窓の幅に合わせて縮める。描画は同じ React の木からの `createPortal`（同じデータ・同じ `onSelect`）。小窓へ付け替えると断面図は作り直され、FLIP の前回の場所は空から始まり（最初は歩かない）、実行中の歩き（`element.animate`）は外すときに止める。
+- **元の帯**: 小窓に出している間は「小窓で表示中」と「戻す」の 1 行（たたんだ帯と同じ高さ。帯の下を動かさない）。小窓を閉じたら（小窓の window の `pagehide`）元の表示に戻る。「戻す」は小窓を閉じる。帯が消えたら（過去の日へ移る・scope を変えて読み込み直すなど）小窓も閉じる。
+- **Rovo を押す**: クリックの処理の中で同期的に元の window の `focus()` を呼び（前に出せるかはブラウザ次第）、そのタスクを選ぶ（既存の `onSelect`）。focus の成否に選択は依存させない。小窓の中のイベントは portal の根で止め、React の木を伝って一覧側の親の `onClick` などに届かせない。
+- **CSS と CSP**: CSP（`style-src 'self'`）は変えない。小窓の `document.head` には、元の文書の `<link rel="stylesheet">` を `href` を絶対 URL にして作り直して入れる（`<style>` 要素は作らない・`cssRules` の文字列は写さない）。ボタンは工場のチャンクの中にあるので、押した時点でチャンクの CSS（`factory-panel-*.css`）の link も元の head に入っている。`requestWindow` はクリックの中で最初に呼び（前に `await` を置かない）、小窓に入れた link の `load` を待ってから描く（読めなくても 3 秒で描く）。小窓用の見た目は `factory-scene.css`（`.fxpip*`）にあり、インラインの style・色の直書きは使わない。
+- **配色と動き**: ダーク / ライトは小窓の文書で `prefers-color-scheme` が評価されるので、同じ CSS のまま切り替わる。`prefers-reduced-motion` は小窓でも全部止める（CSS は小窓の文書で評価され、`element.animate` の判定も描いている要素の `ownerDocument.defaultView` の `matchMedia` で行う）。
+- **自動更新**: 小窓を開いている間は、元のタブが hidden でも一覧（`use-overview`）の自動更新を続ける。判定は「元の文書が visible、または開いている小窓の文書が visible」。`poller.ts` の `withKeepAlive` が `PollerDeps` の `isHidden` に `overviewKeepAlive`（小窓が差し込む条件）を重ねる。ポーラーは 1 本のまま（二重にしない）で、小窓を開いただけ・元が hidden になっただけでは取り直さない。止まっていたところから再開するときは即 1 回取り、遅れた分は追いかけない。元の文書と小窓の文書の `visibilitychange`、小窓の `pagehide` で判定し直す。閉じれば元の扱い（hidden の間は予約しない）に戻る。一覧以外（Cloudflare・待ち・コンソール）は今までどおり。
+- **古さの表示**: 小窓の左上に、最後に更新に成功してから 30 秒以上経ったら「hh:mm から更新なし」、直近の更新に失敗したら「通信エラー（hh:mm 時点）」を小さく出す（止まった絵を新しいと誤解させない）。説明は `title`。新しいデータが届くと消える。
+- **手元で確かめること**: OS の最前面表示、小窓の大きさの変更、スリープからの復帰、元のタブを裏にしたときのタイマーの間引き（ブラウザの throttling）での自動更新の続き方は、自動テストでは確かめられない。Chrome / Edge の実機で確かめる。Vite の開発サーバーは CSS を `<style>` で入れるため小窓に CSS が写らない（ビルドしたものでは link なので写る）。
+
 ## 人の色
 
 - 6 色のトークン `--person-0`〜`--person-5`（ライト・ダークとも）。

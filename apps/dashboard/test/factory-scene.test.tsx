@@ -218,6 +218,69 @@ describe("工程が変わった Rovo の移動（FLIP。element.animate）", () 
     expect(calls).toHaveLength(0);
   });
 
+  it("prefers-reduced-motion は、描いている文書の window（小窓）の matchMedia で決める", () => {
+    // 元の window は動いてよい設定。小窓（別の document を持つ iframe）だけ reduce
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: false,
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const one = (reduce: boolean) => {
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const win = frame.contentWindow as Window & typeof globalThis;
+      win.matchMedia = ((q: string) => ({
+        matches: reduce && q.includes("reduce"),
+        media: q,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })) as unknown as typeof win.matchMedia;
+      const calls: Element[] = [];
+      const proto = win.Element.prototype as { animate?: unknown };
+      proto.animate = function (this: Element) {
+        calls.push(this);
+        return { onfinish: null, oncancel: null, cancel() {} };
+      };
+      const container = win.document.createElement("div");
+      win.document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      const a = task({ stage: "code" });
+      const draw = (d: OverviewDto) =>
+        act(() => root.render(inJa(createElement(FactoryScene, { data: d }))));
+      draw(withTasks([a]));
+      draw(withTasks([{ ...a, stage: "verify" }]));
+      return calls;
+    };
+    expect(one(true)).toHaveLength(0);
+    // 対照: 小窓が reduce でなければ歩く
+    expect(one(false)).toHaveLength(1);
+  });
+
+  it("作り直し（小窓への付け替えなど）で外すときは、実行中の歩きを止める", () => {
+    const cancel = vi.fn();
+    const proto = Element.prototype as { animate?: unknown };
+    const had = Object.hasOwn(proto, "animate");
+    const before = proto.animate;
+    proto.animate = () => ({ onfinish: null, oncancel: null, cancel });
+    restores.push(() => {
+      if (had) proto.animate = before;
+      else delete proto.animate;
+    });
+    const a = task({ stage: "code" });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const draw = (d: OverviewDto) =>
+      act(() => root.render(inJa(createElement(FactoryScene, { data: d }))));
+    draw(withTasks([a]));
+    draw(withTasks([{ ...a, stage: "verify" }]));
+    expect(cancel).not.toHaveBeenCalled();
+    act(() => root.unmount());
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
   it("walkPath: 同じ階は 前 → 通路 → 横 → 今。階をまたぐと間にエレベーターの縦の移動", () => {
     const same = walkPath({ x: 300, y: 600 }, { x: 600, y: 600 }, "code", "verify");
     expect(same).toHaveLength(4);

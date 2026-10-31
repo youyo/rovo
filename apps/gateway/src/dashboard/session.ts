@@ -16,10 +16,10 @@ export const LOGIN_COOKIE = "__Host-rovo_dash_login";
 /** Cookie の暗号化の AAD。別用途の暗号文の流用を拒否する。 */
 export const SESSION_AAD = "dashboard-session-v1";
 
-/** 絶対期限 7 日。 */
-export const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60 * 1000;
-/** 無操作の期限 8 時間。 */
-export const SESSION_IDLE_MS = 8 * 60 * 60 * 1000;
+/** 絶対期限 30 日。 */
+export const SESSION_ABSOLUTE_MS = 30 * 24 * 60 * 60 * 1000;
+/** 無操作の期限 7 日。権限の変化は ensureMember が 5 分ごとに確かめ直して反映する。 */
+export const SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * 1 人の利用者が同時に持てるセッションの数（端末・ブラウザの数）。PC・スマホ・タブレット × 複数ブラウザを見込んだ値。
  * 超えたら、ログインのときに last_seen がいちばん古いものから消す。

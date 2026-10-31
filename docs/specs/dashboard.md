@@ -184,7 +184,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 | 項目 | 選択肢 | 推奨 |
 |---|---|---|
 | セッションの記録の置き場所 | (a) UserDO の新テーブル `dashboard_session`（sid・version・created/expires・revoked）<br>(b) KV（`OAUTH_KV`）<br>(c) 状態を持たない署名 Cookie だけ | **(a)**。Cookie に `uid` が入っているので UserDO を引き当てられ、GitHub の資格と同じ DO にあるため、ログアウト・資格の失効と同じトランザクションで消せる。(b) は結果整合で失効が遅れる。(c) はサーバー側の失効ができず要件に反する |
-| 期限 | 絶対期限と、無操作の期限 | **絶対 7 日 + 無操作 8 時間**（Cookie の `exp` は絶対期限。無操作は DO の `last_seen` で見て、更新は最大 5 分に 1 回）。短めに倒す（運用画面で、GitHub の権限が変わりうる） |
+| 期限 | 絶対期限と、無操作の期限 | **絶対 30 日 + 無操作 7 日**（Cookie の `exp` は絶対期限。無操作は DO の `last_seen` で見て、更新は最大 5 分に 1 回）。毎日使う運用画面で、1 日ほどで再ログインになるのが煩わしいので延ばした（2026-10-31。以前は絶対 7 日 + 無操作 8 時間）。GitHub の権限は 5 分ごとの ensureMember で確かめ直すので、セッションを長くしても権限の変化は反映される。ログアウトとログイン世代（`dashboard_epoch`）での失効は変えない。デプロイ前に作られた行（`expires_at` が 7 日）はその期限のまま、無操作だけ新しい 7 日で扱う |
 | ログイン世代 | UserDO に永続の `dashboard_epoch`（ログインのたびに進める）を持ち、Cookie の `version` と照合 | 採用。MCP の `loginEpoch`（メモリのみ。`user-do.ts` の `loginEpoch`）とは**別**にする（MCP の再ログインでダッシュボードを落とさない。ダッシュボードの再ログインは古いセッションを全部失効させる） |
 | ログアウト | `POST /dashboard/api/logout` | 採用。sid を失効し、Cookie を `Max-Age=0` で消す。GitHub 側の取り消しはしない（MCP の資格が同居するため） |
 

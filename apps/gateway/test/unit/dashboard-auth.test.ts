@@ -14,6 +14,7 @@ import {
   LOGIN_COOKIE,
   openSession,
   SESSION_AAD,
+  SESSION_ABSOLUTE_MS,
   SESSION_COOKIE,
   sealSession,
 } from "../../src/dashboard/session";
@@ -365,6 +366,9 @@ describe("GET /callback（接頭辞付きの state はダッシュボードの�
     expect(session).not.toContain("ghu_");
     const claims = await openSession(ENC_KEY, value, Date.now());
     expect(claims?.uid).toBe(user.userId);
+    // Cookie の Max-Age と claims の絶対期限は 30 日（SESSION_ABSOLUTE_MS）
+    expect(attrs).toContain("max-age=2592000");
+    expect((claims?.exp ?? 0) - (claims?.iat ?? 0)).toBe(SESSION_ABSOLUTE_MS);
     expect(JSON.stringify(claims)).not.toContain(user.login);
     expect(JSON.stringify(claims)).not.toContain("ghu_");
 
@@ -844,7 +848,7 @@ describe("セッションの確認（GET /dashboard/api/me）とログアウト"
       uid: user.userId,
       sid: created.sid,
       ver: created.version,
-      iat: Date.now() - 8 * 24 * 3600_000,
+      iat: Date.now() - SESSION_ABSOLUTE_MS - 24 * 3600_000,
       exp: Date.now() - 1000,
     });
     const res = await me(env, { ...SAME, cookie: `${SESSION_COOKIE}=${old}` });

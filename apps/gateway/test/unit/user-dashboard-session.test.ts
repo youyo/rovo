@@ -11,6 +11,7 @@ import { newUserId, userStub } from "./helpers";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
 
 type UserStub = ReturnType<typeof userStub>;
 
@@ -35,12 +36,13 @@ function sql<T>(stub: UserStub, query: string, ...bindings: unknown[]): Promise<
 }
 
 describe("UserDO のダッシュボードのセッション（D3）", () => {
-  it("作成: 新しい sid（base64url 43 文字）と、絶対期限 7 日の記録ができる", async () => {
+  it("作成: 新しい sid（base64url 43 文字）と、絶対期限 30 日の記録ができる", async () => {
     const stub = userStub(newUserId());
     const clock = await useClock(stub);
     const s = await stub.createDashboardSession("alice");
     expect(s.sid).toMatch(SID_RE);
     expect(s.expiresAt).toBe(clock.now() + SESSION_ABSOLUTE_MS);
+    expect(SESSION_ABSOLUTE_MS).toBe(30 * DAY);
     expect(await stub.checkDashboardSession(s.sid, s.version)).toEqual({
       ok: true,
       login: "alice",
@@ -145,20 +147,48 @@ describe("UserDO のダッシュボードのセッション（D3）", () => {
     expect(await stub.checkDashboardSession("A".repeat(43), 1)).toEqual({ ok: false });
   });
 
-  it("絶対期限（7 日）を過ぎると拒否する", async () => {
+  it("絶対期限（30 日）を過ぎると拒否する。直前までは使い続ければ通る", async () => {
     const stub = userStub(newUserId());
     const clock = await useClock(stub);
     const s = await stub.createDashboardSession("alice");
-    // 無操作の期限に掛からないよう、4 時間ごとに使い続ける
-    for (let i = 0; i < (7 * 24) / 4 - 1; i++) {
-      clock.advance(4 * HOUR);
+    // 無操作の期限（7 日）に掛からないよう、5 日ごとに使い続ける
+    const step = 5 * DAY;
+    expect(step).toBeLessThan(SESSION_IDLE_MS);
+    let elapsed = 0;
+    while (elapsed + step < SESSION_ABSOLUTE_MS) {
+      clock.advance(step);
+      elapsed += step;
       expect((await stub.checkDashboardSession(s.sid, s.version)).ok).toBe(true);
     }
-    clock.advance(4 * HOUR);
+    // 絶対期限の 1ms 前は通り、ちょうどで失効する
+    clock.advance(SESSION_ABSOLUTE_MS - 1 - elapsed);
+    expect((await stub.checkDashboardSession(s.sid, s.version)).ok).toBe(true);
+    clock.advance(1);
     expect(await stub.checkDashboardSession(s.sid, s.version)).toEqual({ ok: false });
   });
 
-  it("無操作 8 時間で失効し、使い続ければ延びる（更新は 5 分に 1 回まで）", async () => {
+  it("旧実装が作った 7 日の絶対期限の行は、そのままの期限（7 日）で失効する", async () => {
+    const stub = userStub(newUserId());
+    const clock = await useClock(stub);
+    await runInDurableObject(stub, (_i, state) => {
+      state.storage.sql.exec("UPDATE dashboard_epoch SET epoch = 5 WHERE singleton = 1");
+      state.storage.sql.exec(
+        "INSERT INTO dashboard_session (sid, version, login, created_at, expires_at, last_seen) VALUES (?, 5, 'alice', ?, ?, ?)",
+        "L".repeat(43),
+        clock.now(),
+        clock.now() + 7 * DAY,
+        clock.now(),
+      );
+    });
+    clock.advance(3 * DAY);
+    expect((await stub.checkDashboardSession("L".repeat(43), 5)).ok).toBe(true);
+    clock.advance(4 * DAY - 1);
+    expect((await stub.checkDashboardSession("L".repeat(43), 5)).ok).toBe(true);
+    clock.advance(1);
+    expect((await stub.checkDashboardSession("L".repeat(43), 5)).ok).toBe(false);
+  });
+
+  it("無操作 7 日で失効し、使い続ければ延びる（更新は 5 分に 1 回まで）", async () => {
     const stub = userStub(newUserId());
     const clock = await useClock(stub);
     const s = await stub.createDashboardSession("alice");
@@ -173,6 +203,7 @@ describe("UserDO のダッシュボードのセッション（D3）", () => {
     expect((await stub.checkDashboardSession(s.sid, s.version)).ok).toBe(true);
     expect(await lastSeen()).toBe(clock.now());
 
+    expect(SESSION_IDLE_MS).toBe(7 * DAY);
     clock.advance(SESSION_IDLE_MS - 1);
     expect((await stub.checkDashboardSession(s.sid, s.version)).ok).toBe(true);
     clock.advance(SESSION_IDLE_MS);

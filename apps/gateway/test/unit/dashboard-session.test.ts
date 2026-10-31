@@ -83,6 +83,13 @@ describe("セッション Cookie の中身", () => {
     expect(await openSession(KEY, future, NOW)).toBeNull();
   });
 
+  it("絶対期限ちょうどの exp は通り、旧実装の 7 日の Cookie も開ける", async () => {
+    const exact = await sealSession(KEY, claims({ exp: NOW + SESSION_ABSOLUTE_MS }));
+    expect(await openSession(KEY, exact, NOW)).not.toBeNull();
+    const legacy = await sealSession(KEY, claims({ exp: NOW + 7 * 24 * 3600 * 1000 }));
+    expect(await openSession(KEY, legacy, NOW)).not.toBeNull();
+  });
+
   it("項目の型・形が不正な JSON は拒否する", async () => {
     const bad: unknown[] = [
       { ...claims(), uid: "1001" },
@@ -95,6 +102,7 @@ describe("セッション Cookie の中身", () => {
       { ...claims(), exp: "x" },
       { ...claims(), iat: null },
       { ...claims(), exp: NOW + 400 * 24 * 3600 * 1000 }, // 絶対期限を超える
+      { ...claims(), exp: NOW + SESSION_ABSOLUTE_MS + 1 }, // 絶対期限を 1ms 超える
       { uid: 1, sid: "S".repeat(43), ver: 1, iat: NOW }, // exp なし
       [],
       "str",
@@ -120,7 +128,7 @@ async function decryptForTest(sealed: string): Promise<string> {
 
 describe("Set-Cookie の属性", () => {
   it("セッション: __Host-・Path=/・Secure・HttpOnly・SameSite=Lax・Max-Age があり、Domain は無い", () => {
-    const c = sessionCookie("VALUE", 604800);
+    const c = sessionCookie("VALUE", Math.floor(SESSION_ABSOLUTE_MS / 1000));
     expect(c.startsWith(`${SESSION_COOKIE}=VALUE;`)).toBe(true);
     expect(SESSION_COOKIE.startsWith("__Host-")).toBe(true);
     const attrs = c.split("; ").map((s) => s.toLowerCase());
@@ -128,7 +136,7 @@ describe("Set-Cookie の属性", () => {
     expect(attrs).toContain("secure");
     expect(attrs).toContain("httponly");
     expect(attrs).toContain("samesite=lax");
-    expect(attrs).toContain("max-age=604800");
+    expect(attrs).toContain("max-age=2592000"); // 30 日
     expect(c.toLowerCase()).not.toContain("domain");
   });
 

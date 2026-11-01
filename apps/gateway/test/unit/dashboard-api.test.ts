@@ -22,7 +22,7 @@ import { handleDashboard } from "../../src/dashboard/serve";
 import { SESSION_COOKIE, sealSession } from "../../src/dashboard/session";
 import { DIRECTORY_NAME, type TaskIndexSnapshot } from "../../src/directory/types";
 import { ulid } from "../../src/tasks/ulid";
-import { createTask, runToCompleted } from "./pr-helpers";
+import { clearTaskAlarms, createTask, runToCompleted } from "./pr-helpers";
 
 // ダッシュボードの読み取り API（docs/specs/dashboard.md M5b）。認可の最後の関門なので、
 // 「見えないタスクが応答のどこにも出ない」「失敗は fail closed」を、実 TaskDO・実 DirectoryDO で確かめる。
@@ -30,6 +30,9 @@ import { createTask, runToCompleted } from "./pr-helpers";
 
 // 他の利用者の台帳のキャッシュ（モジュールの状態）がテスト間で残らないようにする
 beforeEach(() => resetLedgerCache());
+
+// 作ったタスクの alarm（作成の 10 秒後）が、ファイルの終わりより後に発火して teardown 中の RPC に console を流さないよう、テストごとに消す
+afterEach(clearTaskAlarms);
 
 // 「今月」を見るテストは、UTC の月の境目をまたいで揺れないよう、月の途中（3 月: 実行時の月と違う月）に Date を固定する。
 const freezeMidMonth = () => {

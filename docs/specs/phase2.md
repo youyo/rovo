@@ -158,14 +158,24 @@ apps/gateway (既存 Worker)
       - 認証ヘッダは Worker 側で注入する。Phase 2 は公開リポジトリだけを対象にし、認証なしで通す。非公開リポジトリは Phase 3 の Token Broker で対応する。
       - git-receive-pack、dumb HTTP、LFS、別リポジトリ（submodule を含む）は拒否する。
       - リクエスト本文のサイズと時間に上限を設ける。
-    - `registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`: GET と HEAD だけ。
+    - `registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`、`proxy.golang.org`、`sum.golang.org`: GET と HEAD だけ。
   - それ以外（CONNECT、WebSocket、別ポート、裸の IP、IPv6 の直接指定、Host と SNI の不一致を含む）はすべて拒否し、ポリシー違反としてイベントに記録する。記録には query や本文を残さない。
   - 上流への転送
     - `redirect: "manual"` にし、redirect の行き先ごとに scheme / host / port / path / method を判定し直す。
     - 上流は HTTPS に固定し、必要なヘッダだけで組み立て直す。コンテナから来た Authorization / Cookie / Host は転送しない。
   - コンテナ内では、Cloudflare のエフェメラル CA を `NODE_EXTRA_CA_CERTS` / `GIT_SSL_CAINFO` / `REQUESTS_CA_BUNDLE` に設定する。
   - 残るリスク: 許可したホストへの GET / HEAD の path / query / header や、git の POST 本文を使った情報流出は、原理的には防ぎきれない（7.2）。「GET だから流出しない」とは言えない。lockfile にあるパッケージだけに絞るのは、将来の強化策とする。npm の tarball が外部ホストにある依存は失敗する（fail-closed）。
+- Sandbox の言語（イメージに焼いてあるもの）
+  - サポートする言語は Node・TypeScript・Go・Python の 4 つだけ。Rust・Java・Ruby など、ほかの言語は対象外。
+  - Go は `ARG GO_VERSION`（公式 tarball を sha256 で確認して `/usr/local/go` に置く）。`GOTOOLCHAIN=auto` で、別の版の go.mod の toolchain は `proxy.golang.org` から取る。`GOPROXY=https://proxy.golang.org`、`GOSUMDB=sum.golang.org`。
+  - Python は uv で入れた 3.13 だけ（`python3` / `python` / `pip` は 3.13）。`UV_PYTHON_DOWNLOADS=never` なので、別の版の Python は取れず、すぐ失敗する。
+  - mise は `ARG MISE_VERSION`（公式 release の tarball を sha256 で確認して `/usr/local/bin/mise` に置く）。焼いた node・Go・Python は `mise link` で登録してあり、リポジトリの `mise.toml` の `[tools]` が焼いた版（前方一致を含む。`node = "24"`、`go = "1.26"`、`python = "3.13"` など）を指すときは、ダウンロードせずに `mise run` / `mise exec` で使える。違う版は今は入れられない（外向き通信の許可先に mise 用のホストは足さない。別のタスクで扱う）。
+  - mise の設定: データ・キャッシュは `/opt/mise`、`MISE_TRUSTED_CONFIG_PATHS=/workspace`、`MISE_YES=1`、`MISE_OFFLINE=1`（外へ出ずにすぐ失敗させる）。同じ値を `/etc/mise/config.toml` にも書く（exec が PATH しか引き継がないことがあるため）。shims と activate は使わず、PATH は焼いたツールを直接指す。
+  - gcc（build-essential）は入れない。cgo を使う Go のパッケージ、Python の sdist のビルド、node のネイティブ拡張のビルドはできない。wheel / ビルド済みバイナリがあるものだけが入る。
+  - 依存の導入とキャッシュへの Go / Python の追加は、このイメージの変更とは別に扱う。
 - 既知の制限
+  - mise の中の `python` は venv（`/opt/venv`）を指す（`mise link` のリンク経由で起動するので `sys.prefix` はリンクのパスになるが、実体は `/opt/venv`。venv のモジュールを import でき、`python -m pip` も動く）。
+  - `mise.toml` の `[tools]` が焼いた版（node 24・go 1.26.5・python 3.13）と違う `mise run` / `mise exec` は、版を入れられず失敗する。その場合はコマンドを直接書く。
   - postinstall で外部からバイナリを取る依存（playwright など）は失敗する。
   - 許可したホスト経由の情報流出は、原理的には防ぎきれない（7.2）。Phase 2 は GET 系だけに絞る。
 

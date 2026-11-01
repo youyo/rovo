@@ -14,7 +14,14 @@ export interface OutboundOptions {
   branch?: string;
 }
 
-const REGISTRY_HOSTS = new Set(["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"]);
+/** パッケージレジストリ（GET / HEAD だけ許可）。ログの分類（outbound-gateway の classifyDestination）も同じ一覧を使う。 */
+export const REGISTRY_HOSTS: ReadonlySet<string> = new Set([
+  "registry.npmjs.org",
+  "pypi.org",
+  "files.pythonhosted.org",
+  "proxy.golang.org",
+  "sum.golang.org",
+]);
 /**
  * decideOutbound が返しうる違反コードの全部（outbound_denied の reason になる）。
  * deny() の引数の型にしてあるので、足し忘れるとコンパイルが通らない。テスト（outbound-denied-reasons.test.ts）が表の過不足を確かめる。

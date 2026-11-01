@@ -53,6 +53,8 @@ describe("classifyDestination", () => {
     expect(classifyDestination("github.com")).toBe("github");
     expect(classifyDestination("registry.npmjs.org")).toBe("registry");
     expect(classifyDestination("pypi.org")).toBe("registry");
+    expect(classifyDestination("proxy.golang.org")).toBe("registry");
+    expect(classifyDestination("sum.golang.org")).toBe("registry");
     expect(classifyDestination("evil.example")).toBe("other");
     expect(classifyDestination("169.254.169.254")).toBe("other");
   });

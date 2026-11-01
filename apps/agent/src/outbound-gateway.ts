@@ -2,7 +2,13 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import { type AuditFields, audit } from "@rovo/audit";
 import type { GitCredential } from "./agent/types";
 import { parseReceivePackHead, type ReceivePackRejectCode } from "./git-pkt";
-import { decideOutbound, type GitRoute, gitRoute, type PolicyDenyCode } from "./outbound-policy";
+import {
+  decideOutbound,
+  type GitRoute,
+  gitRoute,
+  type PolicyDenyCode,
+  REGISTRY_HOSTS,
+} from "./outbound-policy";
 import type { PushPermit } from "./sandbox-port";
 
 export interface OutboundGatewayProps {
@@ -54,8 +60,7 @@ export const UPSTREAM_TIMEOUT_MS = 10 * 60_000;
 export function classifyDestination(host: string): "github" | "registry" | "other" {
   const h = host.toLowerCase();
   if (h === "github.com") return "github";
-  if (h === "registry.npmjs.org" || h === "pypi.org" || h === "files.pythonhosted.org")
-    return "registry";
+  if (REGISTRY_HOSTS.has(h)) return "registry";
   return "other";
 }
 

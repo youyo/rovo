@@ -19,6 +19,8 @@ RUN npm config set audit false --global && npm config set fund false --global
 # pm-prepare.mjs を呼んで、npm の経路で用意する。焼く版を変えるときは、この ARG だけ直す（E2E も ARG を読む）。
 ARG PNPM_VERSION=12.14.0
 ARG YARN_VERSION=1.22.22
+# 注意: 本番（Cloudflare Containers）の container.exec は、このイメージの ENV を引き継がない（PATH も既定値になる）。
+# ENV を足す・変えるときは src/sandbox-env.ts の BASE_ENV にも同じ値を書く（test/node/sandbox-env-dockerfile.node.test.ts が一致を確かめる）。
 ENV COREPACK_HOME=/opt/corepack
 # ダウンロードの確認で止まらないようにする
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -38,7 +40,7 @@ RUN corepack enable \
 # Go: go.dev の公式 tarball を sha256 で確かめて /usr/local/go に置く。版を変えるときは ARG（と sha256）だけ直す。
 # GOTOOLCHAIN=auto のまま、別の版の go.mod の toolchain は proxy.golang.org から取る（外向き通信で許可済み）。
 # exec は root（HOME=/root）で動くが、どのユーザーでも書けるよう GOPATH / GOMODCACHE / GOCACHE は /opt/go-cache に置く。
-# exec は PATH しか引き継がないことがあるので、ENV に加えて go env -w（$HOME/.config/go/env）にも同じ値を書く。
+# exec は ENV を引き継がないことがあるので（本番）、ENV に加えて go env -w（$HOME/.config/go/env）にも同じ値を書く。
 ARG GO_VERSION=1.26.5
 ARG GO_SHA256_AMD64=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
 ARG GO_SHA256_ARM64=fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49
@@ -87,7 +89,7 @@ RUN python3 --version | grep -F "Python 3.13." \
 # 焼いた node / go / python は `mise link` で登録する。mise.toml の [tools] が焼いた版（前方一致を含む。node = "24"、go = "1.26"、python = "3.13" など）を
 # 指すとき、ダウンロードせずに解決する。違う版は実行時に入れられない（mise.jdx.dev・nodejs.org・go.dev・GitHub Releases は外向き通信で許可していない。
 # 許可先は増やさない）ので、MISE_OFFLINE=1 で外に出ずにすぐ失敗させる。shims / activate は使わず、PATH はこれまでどおり焼いたツールを直接指す。
-# データ・キャッシュは /opt/mise（どのユーザーでも書ける）。exec は PATH しか引き継がないことがあるので、ENV に加えて
+# データ・キャッシュは /opt/mise（どのユーザーでも書ける）。exec は ENV を引き継がないことがあるので（本番）、ENV に加えて
 # /etc/mise/config.toml（システムの設定）にも同じ値を書き、/root の既定の置き場所は /opt/mise への symlink にする。
 ARG MISE_VERSION=2026.10.25
 ARG MISE_SHA256_AMD64=199966edaad1b208eb4c72955f1722dafb8fa799f575db720dea05aaa8216546

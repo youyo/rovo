@@ -309,6 +309,17 @@ describe("buildMonthCosts（人ごとの今月の費用）", () => {
     expect(r?.hidden).toEqual({ count: 2, costUsd: 3 });
   });
 
+  it("ペースの境界: 月の経過が 1 日未満なら pace は null、1 日ちょうどからは値が出る", () => {
+    const start = Date.parse(overviewFixture.month.period.start);
+    const at = (ms: number) =>
+      buildMonthCosts({
+        ...month({ by_owner: [{ login: "bob-example", task_cost_usd: 60, consult_cost_usd: 0 }] }),
+        generated_at: new Date(start + ms).toISOString(),
+      })?.rows[1];
+    expect(at(86_400_000 - 1)).toMatchObject({ ratio: 0.6, pace: null });
+    expect(at(86_400_000)?.pace).not.toBeNull();
+  });
+
   it("上限が無ければ割合とペースは null。hidden が 0 件なら null", () => {
     const d = month({
       by_owner: [{ login: "bob-example", task_cost_usd: 1, consult_cost_usd: 1 }],

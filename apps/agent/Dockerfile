@@ -32,7 +32,7 @@ RUN corepack enable \
  && echo "{\"packageManager\":\"yarn@${YARN_VERSION}\"}" > package.json \
  && COREPACK_ENABLE_NETWORK=0 corepack yarn --version | grep -Fx "${YARN_VERSION}" \
  && cd / && rm -rf /tmp/pmcheck
-# Go / Python（対応する言語は Node・TypeScript・Go・Python の 4 つだけ。mise は入れない）。
+# Go / Python（対応する言語は Node・TypeScript・Go・Python の 4 つだけ。mise は `mise run` / `mise exec` 用に入れる。下の mise の節）。
 # gcc（build-essential）は入れない: cgo の Go パッケージ、Python の sdist、node のネイティブ拡張はビルドできない。
 # apt は外向き通信で使えない（deb.debian.org は許可していない）ので、ビルド時に公式の配布物から焼く。
 # Go: go.dev の公式 tarball を sha256 で確かめて /usr/local/go に置く。版を変えるときは ARG（と sha256）だけ直す。
@@ -82,6 +82,55 @@ RUN python3 --version | grep -F "Python 3.13." \
  && python --version | grep -F "Python 3.13." \
  && pip --version | grep -F "(python 3.13)" \
  && uv --version
+# mise: リポジトリの mise.toml の [tools] / [tasks] を最優先で使えるようにする（mise run / mise exec 用）。
+# 公式 release の tarball をビルド時に取り、sha256 で確かめて /usr/local/bin/mise に置く。版を変えるときは ARG（と sha256）だけ直す。
+# 焼いた node / go / python は `mise link` で登録する。mise.toml の [tools] が焼いた版（前方一致を含む。node = "24"、go = "1.26"、python = "3.13" など）を
+# 指すとき、ダウンロードせずに解決する。違う版は実行時に入れられない（mise.jdx.dev・nodejs.org・go.dev・GitHub Releases は外向き通信で許可していない。
+# 許可先は増やさない）ので、MISE_OFFLINE=1 で外に出ずにすぐ失敗させる。shims / activate は使わず、PATH はこれまでどおり焼いたツールを直接指す。
+# データ・キャッシュは /opt/mise（どのユーザーでも書ける）。exec は PATH しか引き継がないことがあるので、ENV に加えて
+# /etc/mise/config.toml（システムの設定）にも同じ値を書き、/root の既定の置き場所は /opt/mise への symlink にする。
+ARG MISE_VERSION=2026.10.25
+ARG MISE_SHA256_AMD64=199966edaad1b208eb4c72955f1722dafb8fa799f575db720dea05aaa8216546
+ARG MISE_SHA256_ARM64=a7d1e2add53441ff76e7e971e7a3fb15c117741836ce51c026f5fb7eebe7dbcf
+ENV MISE_DATA_DIR=/opt/mise/data \
+    MISE_CACHE_DIR=/opt/mise/cache \
+    MISE_STATE_DIR=/opt/mise/state \
+    MISE_TRUSTED_CONFIG_PATHS=/workspace \
+    MISE_YES=1 \
+    MISE_OFFLINE=1 \
+    MISE_DISABLE_UPDATE_WARNING=1
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) MISE_SHA256="${MISE_SHA256_AMD64}"; MISE_ARCH=x64 ;; \
+      arm64) MISE_SHA256="${MISE_SHA256_ARM64}"; MISE_ARCH=arm64 ;; \
+      *) echo "unsupported arch: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL -o /tmp/mise.tgz "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-${MISE_ARCH}.tar.gz" \
+ && echo "${MISE_SHA256}  /tmp/mise.tgz" | sha256sum -c - \
+ && tar -C /tmp -xzf /tmp/mise.tgz \
+ && install -m 0755 /tmp/mise/bin/mise /usr/local/bin/mise \
+ && rm -rf /tmp/mise /tmp/mise.tgz \
+ && mkdir -p /opt/mise/data /opt/mise/cache /opt/mise/state /etc/mise /root/.local/share /root/.cache /root/.local/state \
+ && printf '%s\n' '[settings]' 'yes = true' 'offline = true' 'disable_update_warning = true' \
+      'trusted_config_paths = ["/workspace"]' > /etc/mise/config.toml \
+ && ln -s /opt/mise/data /root/.local/share/mise \
+ && ln -s /opt/mise/cache /root/.cache/mise \
+ && ln -s /opt/mise/state /root/.local/state/mise \
+ && NODE_FULL="$(node -p process.versions.node)" \
+ && PY_FULL="$(/opt/venv/bin/python -c 'import platform; print(platform.python_version())')" \
+ && PY_HOME="$(/opt/venv/bin/python -c 'import sys; print(sys.base_prefix)')" \
+ && mise link "node@${NODE_FULL}" /usr/local \
+ && mise link "go@${GO_VERSION}" /usr/local/go \
+ && mise link "python@${PY_FULL}" "${PY_HOME}" \
+ && mkdir /tmp/misecheck && cd /tmp/misecheck \
+ && printf '%s\n' '[tools]' 'node = "24"' "go = \"${GO_VERSION}\"" 'python = "3.13"' '' '[tasks.hello]' \
+      'run = "go version && python --version && node --version"' > mise.toml \
+ && mise --version | grep -F "${MISE_VERSION}" \
+ && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise run hello \
+ && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- go version | grep -F "go${GO_VERSION} " \
+ && sed -i "s/^go = .*/go = \"${GO_VERSION%.*}\"/" mise.toml \
+ && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- go version | grep -F "go${GO_VERSION} " \
+ && cd / && rm -rf /tmp/misecheck \
+ && chmod -R a+rwX /opt/mise
 COPY --from=shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 RUN mkdir -p /workspace && chown node:node /workspace
 WORKDIR /workspace

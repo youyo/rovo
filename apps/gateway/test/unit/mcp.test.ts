@@ -2716,13 +2716,13 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     expect(start).toContain("pnpm・node・python・pip・uv・go など");
     expect(start).toContain("mise.toml があるリポジトリでは `mise run <task>` を使える");
     expect(start).toContain("node 24・go 1.26.5・python 3.13");
-    expect(start).toMatch(/違う版は今は入れられない[^。]*コマンドを直接書く/);
+    expect(start).toMatch(/違う版は今は入れられない。そのときはコマンドを直接書く/);
     expect(start).not.toMatch(/mise run[^。]*使わない/);
     const instructions = client.getInstructions() ?? "";
     expect(instructions).toContain("pnpm・node・python・pip・uv・go など");
     expect(instructions).toContain("mise.toml があるリポジトリでは `mise run <task>` を使える");
     expect(instructions).toContain("node 24・go 1.26.5・python 3.13");
-    expect(instructions).toMatch(/違う版は今は入れられない[^。]*コマンドを直接書く/);
+    expect(instructions).toMatch(/違う版は今は入れられない。そのときはコマンドを直接書く/);
     expect(instructions).not.toMatch(/mise run[^。]*使わない/);
     await client.close();
   });

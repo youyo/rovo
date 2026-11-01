@@ -183,6 +183,26 @@ describe("lazy boot: Sandbox は必要になるまで起動しない", () => {
     expect(fx.modelCalls.count).toBe(1);
   });
 
+  it("ensureReady が返らなくても、期限切れを失敗として数え、3 回使い切ると sandbox_setup_failed で終える", async () => {
+    const fx = newFixture("lazy-hang", [call("write_note", { text: "1" }), report()]);
+    let attempts = 0;
+    fx.sandbox.ensureReady = (spec) => {
+      attempts += 1;
+      fx.sandbox.readySpecs.push(spec);
+      return new Promise<void>(() => {});
+    };
+    await runInDO(fx.stub, (inst) => {
+      const orig = inst.overrides.bind(inst);
+      inst.overrides = () => ({ ...orig(), ensureReadyTimeoutMs: 100 });
+    });
+    await fx.stub.start(noVerify("lazy-hang"));
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(attempts).toBe(3);
+    expect(await runInDO(fx.stub, (inst) => inst.store.meta("setup_attempts"))).toBe(3);
+    const phase = (await allEvents(fx)).filter((e) => e.type === "phase").at(-1);
+    expect(phase?.data).toMatchObject({ phase: "failed", reason: "sandbox_setup_failed" });
+  });
+
   it("終端になった後に来た起動の要求は、ensureReady を呼ばず、失敗として数えない", async () => {
     const fx = newFixture("lazy-after-terminal", [call("gate"), report()], { cancelWaitMs: 300 });
     await fx.stub.start(noVerify("lazy-after-terminal"));

@@ -2713,8 +2713,10 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     const start = tools.find((t) => t.name === "task_start")?.description ?? "";
     expect(start).toContain("Sandbox にあるコマンド");
     expect(start).toContain("pnpm");
+    expect(start).toContain("pnpm・node・python・pip・uv・go など");
     expect(start).toMatch(/mise run[^。]*使わない/);
     const instructions = client.getInstructions() ?? "";
+    expect(instructions).toContain("pnpm・node・python・pip・uv・go など");
     expect(instructions).toMatch(/mise run[^。]*使わない/);
     await client.close();
   });

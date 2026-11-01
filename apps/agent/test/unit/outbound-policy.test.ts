@@ -77,11 +77,28 @@ describe("decideOutbound: GitHub", () => {
 });
 
 describe("decideOutbound: パッケージレジストリ", () => {
-  it.each(["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"])(
+  it.each([
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "proxy.golang.org",
+    "sum.golang.org",
+  ])(
     "%s の GET/HEAD を許可する",
     (host) => {
       expect(get(`https://${host}/x`).allow).toBe(true);
       expect(decideOutbound({ method: "HEAD", url: `https://${host}/x` }, {}).allow).toBe(true);
+    },
+  );
+
+  it.each(["proxy.golang.org", "sum.golang.org"])(
+    "%s への POST などは registry_method で拒否する",
+    (host) => {
+      for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+        const d = decideOutbound({ method, url: `https://${host}/x` }, {});
+        expect(d.allow).toBe(false);
+        if (!d.allow) expect(d.code).toBe("registry_method");
+      }
     },
   );
 

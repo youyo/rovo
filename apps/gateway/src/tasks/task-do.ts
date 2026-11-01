@@ -403,6 +403,8 @@ export type ResultView = {
     deps_cache_miss_reason?: string;
     /** deps_cache が付くときは常に付く: キャッシュを作るのにかかった時間（ms。作っていなければ 0。Sandbox の時間の推定にも含まれる） */
     cache_build_ms?: number;
+    /** Python / Go の依存の導入の結果（言語ごとに 1 件。kind: python|go / command: argv の先頭 2〜3 語 / status: ok|failed|timeout|skipped）。何も入れていなければ付かない */
+    deps_lang?: { kind: "python" | "go"; command: string; status: string; duration_ms: number }[];
     /** Sandbox を動かした累計の時間（ms。task_summary の sandbox_runtime_ms と同じもの）。agent がカウンタを読めたときだけ付く */
     sandbox_runtime_ms?: number;
     /** 最初にコンテナを起動した大きさ（standard-2 など）。Sandbox を一度も起動しなかったタスク・agent が報告しなかったタスクには付かない。昇格しても変わらない */
@@ -5037,18 +5039,49 @@ function depsUsage(sb: UsageDto["sandbox"]): {
   deps_cache?: "hit" | "miss" | "built" | "disabled";
   deps_cache_miss_reason?: string;
   cache_build_ms?: number;
+  deps_lang?: { kind: "python" | "go"; command: string; status: string; duration_ms: number }[];
 } {
   const status = depsCacheStatus(sb?.depsCache);
   const reason = depsMissReason(sb?.depsCache, sb?.depsMissReason);
   const ms = sb?.cacheBuildMs;
   const buildMs = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
+  const lang = depsLangUsage(sb?.depsLang);
   return {
     ...(status !== undefined ? { deps_cache: status } : {}),
     // 使えなかった理由は miss のときだけ（ログにしか出ていなかった固定コード）
     ...(reason !== undefined ? { deps_cache_miss_reason: reason } : {}),
     // deps_cache が出るときは cache_build_ms も常に出す（作っていなければ 0）
     ...(status !== undefined ? { cache_build_ms: buildMs } : {}),
+    ...(lang.length > 0 ? { deps_lang: lang } : {}),
   };
+}
+
+const DEPS_LANG_STATUSES: readonly string[] = ["ok", "failed", "timeout", "skipped"];
+
+/** usage.sandbox.depsLang を公開用に絞る（kind / status は固定の値だけ。command は短い文字列に切る） */
+function depsLangUsage(v: unknown): {
+  kind: "python" | "go";
+  command: string;
+  status: string;
+  duration_ms: number;
+}[] {
+  if (!Array.isArray(v)) return [];
+  const out: { kind: "python" | "go"; command: string; status: string; duration_ms: number }[] = [];
+  for (const e of v.slice(0, 4)) {
+    if (typeof e !== "object" || e === null) continue;
+    const r = e as Record<string, unknown>;
+    if (r.kind !== "python" && r.kind !== "go") continue;
+    if (typeof r.status !== "string" || !DEPS_LANG_STATUSES.includes(r.status)) continue;
+    const ms =
+      typeof r.duration_ms === "number" && Number.isFinite(r.duration_ms) ? r.duration_ms : 0;
+    out.push({
+      kind: r.kind,
+      command: typeof r.command === "string" ? r.command.slice(0, 60) : "",
+      status: r.status,
+      duration_ms: Math.max(0, Math.floor(ms)),
+    });
+  }
+  return out;
 }
 
 /** 文字列の末尾を、UTF-8 で maxBytes 以下になるように残す（文字の途中では切らない）。 */

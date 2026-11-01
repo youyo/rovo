@@ -37,6 +37,15 @@ import {
   depsSnapshotName,
   parseDepsSpec,
 } from "./deps-cache";
+import {
+  DEPS_LANG_TAIL_CHARS,
+  type DepsLangPlan,
+  type DepsLangResult,
+  depsLangCommand,
+  depsLangNote,
+  planGo,
+  planPython,
+} from "./deps-lang";
 import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./deps-scripts";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
@@ -279,6 +288,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private exitWaiters = new Set<(e: Error) => void>();
   /** 依存関係のキャッシュの ensure を待つ上限（ms）。テストで短くする。 */
   private depsEnsureWaitMs = DEPS_ENSURE_WAIT_MS;
+  /** Python / Go の導入の時間の上限（ms）。指定が無ければ言語ごとの定数（deps-lang.ts）。テストで短くする。 */
+  private depsLangTimeoutMs: number | undefined = undefined;
   /** 昇格のスナップショットを待つ上限（ms）。テストで短くする。 */
   private promoteSnapshotMs = PROMOTE_SNAPSHOT_MS;
   /** 「上げなかったのに長くかかった」とみなす実行時間（ms）。テストで短くする。 */
@@ -474,6 +485,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       depsCache === "miss"
         ? this.ctx.storage.kv.get<DepsMissReason>("deps_miss_reason")
         : undefined;
+    const depsLang = this.ctx.storage.kv.get<DepsLangResult[]>("deps_lang");
+    const depsLangNoteText = this.ctx.storage.kv.get<string>("deps_lang_note");
     return {
       runtimeMs: this.runtimeTotal(),
       restarts: Math.max(0, this.num("starts") - 1),
@@ -481,6 +494,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       ...(depsCache !== undefined ? { depsCache } : {}),
       ...(depsMissReason !== undefined ? { depsMissReason } : {}),
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
+      ...(depsLang !== undefined && depsLang.length > 0 ? { depsLang } : {}),
+      ...(depsLangNoteText ? { depsLangNote: depsLangNoteText } : {}),
       ...(instance !== undefined ? { instance } : {}),
       // 昇格（重いコマンドの初回に大きい Sandbox へ）。昇格した後は promotedTo と、その時点までの時間（費用の按分に使う）
       ...(promotedTo !== undefined
@@ -1302,6 +1317,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     await this.prepareWorkspace(spec);
     this.assertBootCurrent(g);
     this.recordDepsStatus(await this.finishDeps(deps, restoring));
+    // Python / Go の依存。コンテナを新しく起動したときだけ入れる（/opt/venv と Go のキャッシュはコンテナごとなので、
+    // 作り直し・image からの再起動では入れ直しが要る。コンテナが生きたままの DO の再起動・昇格・中断からの復元では入れない）
+    if (started) await this.installLangDeps(g);
     // 起動をタスクの期限の先までブロックしない(足りなければ諦める。corepack が従来どおり自分で取る)
     await this.preparePackageManager(spec.deadlineAt);
     await this.armAlarm();
@@ -1971,6 +1989,88 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       return "miss";
     }
     return restoring.built ? "built" : "hit";
+  }
+
+  /**
+   * Python / Go の依存を入れる（作業ツリーのルートのファイルから言語ごとに 1 つ。argv で実行）。
+   * 失敗・時間切れでもタスクは止めない（結果を記録し、ワーカーへの通知と usage.deps_lang / warnings に出す）。
+   */
+  private async installLangDeps(g: number): Promise<void> {
+    const kv = this.ctx.storage.kv;
+    const results: DepsLangResult[] = [];
+    let tail = "";
+    try {
+      const ls = await this.rawExec(
+        [
+          "find",
+          WORKSPACE,
+          "-maxdepth",
+          "1",
+          "(",
+          "-type",
+          "f",
+          "-o",
+          "-type",
+          "l",
+          ")",
+          "-printf",
+          "%f\n",
+        ],
+        { timeoutMs: 10_000 },
+      );
+      const files = ls.exitCode === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
+      let pyproject = "";
+      if (files.includes("pyproject.toml") && !files.includes("uv.lock")) {
+        const reqs = ["requirements.txt", "requirements-dev.txt", "requirements-test.txt"];
+        if (!reqs.some((f) => files.includes(f))) {
+          const r = await this.rawExec(["cat", `${WORKSPACE}/pyproject.toml`], {
+            timeoutMs: 10_000,
+          });
+          pyproject = r.exitCode === 0 ? r.stdout : "";
+        }
+      }
+      const py = planPython(files, () => pyproject);
+      const plans: (DepsLangPlan | "skipped")[] = [];
+      if (py !== undefined) plans.push(py);
+      const go = planGo(files);
+      if (go) plans.push(go);
+      for (const plan of plans) {
+        if (plan === "skipped") {
+          results.push({
+            kind: "python",
+            command: "pyproject.toml",
+            status: "skipped",
+            duration_ms: 0,
+          });
+          continue;
+        }
+        const timeoutMs = this.depsLangTimeoutMs ?? plan.timeoutMs;
+        const t0 = Date.now();
+        const r = await this.rawExec(plan.argv, { timeoutMs });
+        const duration = Date.now() - t0;
+        this.assertBootCurrent(g);
+        const timedOut = r.exitCode !== 0 && duration >= timeoutMs - 20 && r.exitCode === -1;
+        const status = r.exitCode === 0 ? "ok" : timedOut ? "timeout" : "failed";
+        results.push({
+          kind: plan.kind,
+          command: depsLangCommand(plan.argv),
+          status,
+          duration_ms: duration,
+        });
+        if (status !== "ok") {
+          tail = maskSecrets((r.stderr || r.stdout).trim()).slice(-DEPS_LANG_TAIL_CHARS);
+          console.warn(`[sandbox-boot] deps_lang_${status}: ${plan.kind}`);
+        }
+      }
+    } catch (e) {
+      // 世代が変わった（boot を止める）ときは投げ直す。それ以外の予期しない失敗はタスクを止めない
+      if (this.gen !== g) throw e;
+      console.warn("[sandbox-boot] deps_lang_error");
+    }
+    kv.put("deps_lang", results);
+    const note = depsLangNote(results, tail);
+    if (note) kv.put("deps_lang_note", note);
+    else kv.delete("deps_lang_note");
   }
 
   /**

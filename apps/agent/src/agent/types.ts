@@ -375,6 +375,15 @@ export interface SandboxMetrics {
   depsMissReason?: DepsMissReason;
   /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms）。runtimeMs（Sandbox の時間）にも含む */
   cacheBuildMs?: number;
+  /** Python / Go の依存の導入の結果（言語ごとに 1 件。直近の起動のもの）。何も入れていなければ無い */
+  depsLang?: {
+    kind: "python" | "go";
+    command: string;
+    status: "ok" | "failed" | "timeout" | "skipped";
+    duration_ms: number;
+  }[];
+  /** ワーカーのプロンプトに足す英語の 1〜3 行（失敗時は秘密を伏せた出力の末尾つき）。gateway には送らない */
+  depsLangNote?: string;
   /** 最初にコンテナを start() した大きさ。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
   /** 昇格した最終の大きさ（Clef が上げると判断した先）。昇格していなければ無い。上げる方向だけで、戻さない（作り直しも最終の大きさで起動する） */

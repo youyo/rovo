@@ -101,7 +101,12 @@ describe("SandboxDO: Python / Go の依存の導入", () => {
     const r = await boot("lang-uvlock", ["uv.lock", "requirements.txt", "pyproject.toml"]);
     expect(r.argv).toEqual([["uv", "sync", "--active", "--frozen"]]);
     expect(r.metrics.depsLang).toEqual([
-      { kind: "python", command: "uv sync --active", status: "ok", duration_ms: expect.any(Number) },
+      {
+        kind: "python",
+        command: "uv sync --active",
+        status: "ok",
+        duration_ms: expect.any(Number),
+      },
     ]);
   });
 
@@ -198,7 +203,9 @@ describe("SandboxDO: Python / Go の依存の導入", () => {
       fake.handler = (argv) => (argv[0] === "go" ? { hang: true } : undefined);
       await inst.ensureReady(spec());
       const m = await inst.metrics();
-      expect(m.depsLang).toMatchObject([{ kind: "go", command: "go mod download", status: "timeout" }]);
+      expect(m.depsLang).toMatchObject([
+        { kind: "go", command: "go mod download", status: "timeout" },
+      ]);
     });
   });
 

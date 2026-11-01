@@ -113,6 +113,10 @@ const PM_PREPARE_MIN_MS = 10_000;
  */
 const BOOT_ATTEMPT_MS = 25_000;
 const BOOT_MAX_ATTEMPTS = 3;
+/** setInactivityTimeout の呼び出し 1 回を待つ上限（ms）。返らなくても起動は進める（警告だけ） */
+const INACTIVITY_CALL_MS = BOOT_ATTEMPT_MS;
+/** ワーカーの exec が開始する（container.exec が返る）のを、timeoutMs に加えて待つ余裕（ms） */
+const EXEC_START_GRACE_MS = 5_000;
 /**
  * 起動の途中で行う破棄の待ちの上限（1 回あたり）。通常の DESTROY_WAIT_MS（15 秒）より短くする。
  * 起動全体の最悪時間 = 最初の破棄 10 + 3 x (待ち 25 + 破棄 10) = 115 秒 < E2E の 1 操作の期限 120 秒。
@@ -172,6 +176,9 @@ class DepsBuildError extends Error {
     super(reason);
   }
 }
+
+/** monitor が reject した（コンテナが rovo の意図なく止まった）ので、待っていた呼び出しを中断する */
+class ContainerExitedError extends Error {}
 
 /** promise を期限（絶対時刻）まで待つ。期限が来たら "timeout"（promise は放置する）。 */
 async function withDeadline<T>(promise: Promise<T>, until: number): Promise<T | "timeout"> {
@@ -249,6 +256,8 @@ interface ContainerLife {
   startGen: number;
   /** rovo 自身が destroy を呼んだか */
   destroyedByRovo: boolean;
+  /** monitor が reject した（rovo が破棄したのではない停止）。以降の待ちはすぐに中断する */
+  exitError?: ContainerExitedError;
 }
 
 /** monitor が観測した停止（メモリのみ） */
@@ -281,6 +290,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   /** ready を待つ 1 回あたりの期限と、起動中の破棄の待ちの上限（ms）。テストで短くする。 */
   private bootAttemptMs = BOOT_ATTEMPT_MS;
   private bootDestroyMs = BOOT_DESTROY_MS;
+  /** setInactivityTimeout の待ちの上限と、exec の開始の余裕（ms）。テストで短くする。 */
+  private inactivityCallMs = INACTIVITY_CALL_MS;
+  private execStartGraceMs = EXEC_START_GRACE_MS;
+  /** monitor の reject を待っている呼び出し（boot の待ち・exec）を中断するための印 */
+  private exitWaiters = new Set<(e: Error) => void>();
   /** 依存関係のキャッシュの ensure を待つ上限（ms）。テストで短くする。 */
   private depsEnsureWaitMs = DEPS_ENSURE_WAIT_MS;
   /** 昇格のスナップショットを待つ上限（ms）。テストで短くする。 */
@@ -325,6 +339,29 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     if (!spec) throw new Error("sandbox is not ready: call ensureReady first");
     if (Date.now() >= spec.deadlineAt) throw new Error("sandbox deadline exceeded");
     return spec;
+  }
+
+  /** monitor が reject したら、promise の結果を待たずに ContainerExitedError で reject する */
+  private abortOnExit<T>(promise: Promise<T>): Promise<T> {
+    const exited = this.life?.exitError;
+    if (exited) {
+      promise.catch(() => {});
+      return Promise.reject(exited);
+    }
+    return new Promise<T>((resolve, reject) => {
+      const waiter = (e: Error) => reject(e);
+      this.exitWaiters.add(waiter);
+      promise.then(
+        (v) => {
+          this.exitWaiters.delete(waiter);
+          resolve(v);
+        },
+        (e: unknown) => {
+          this.exitWaiters.delete(waiter);
+          reject(e);
+        },
+      );
+    });
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -950,7 +987,13 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     this.lastExit = undefined;
     this.watchContainer(container, life);
     try {
-      await container.setInactivityTimeout(timeoutMs);
+      const call = Promise.resolve().then(() => container.setInactivityTimeout(timeoutMs));
+      const r = await withDeadline(this.abortOnExit(call), Date.now() + this.inactivityCallMs);
+      if (r === "timeout") {
+        console.warn(
+          `[sandbox-boot] setInactivityTimeout timed out after ${this.inactivityCallMs}ms`,
+        );
+      }
     } catch (e) {
       console.warn(`[sandbox-boot] setInactivityTimeout failed: ${errorText(e)}`);
     }
@@ -994,6 +1037,13 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         ...(exitCode !== undefined ? { exitCode } : {}),
       };
       if (this.life === life) this.lastExit = exit;
+      if (outcome === "rejected" && !life.destroyedByRovo && this.life === life) {
+        life.exitError = new ContainerExitedError(
+          `container exited: ${text ?? "monitor rejected"}`,
+        );
+        for (const w of [...this.exitWaiters]) w(life.exitError);
+        this.exitWaiters.clear();
+      }
       console.warn(
         JSON.stringify({
           event: "sandbox_container_exited",
@@ -1950,7 +2000,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     until: number,
     promise: Promise<T>,
   ): Promise<{ timedOut: false; value: T } | { timedOut: true }> {
-    const settled = promise.then(
+    const settled = this.abortOnExit(promise).then(
       (value) => ({ done: true as const, value }),
       (error: unknown) => ({ done: true as const, error }),
     );
@@ -1961,6 +2011,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         sleep(Math.max(0, Math.min(BOOT_POLL_MS, remaining))),
       ]);
       if (r) {
+        // monitor の reject: この試行は止まったものとして扱う（呼び出し側が破棄して再試行する）
+        if ("error" in r && r.error instanceof ContainerExitedError) return { timedOut: true };
         if ("error" in r) throw r.error;
         return { timedOut: false, value: r.value };
       }
@@ -2252,11 +2304,23 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), opts.timeoutMs);
     try {
-      const proc = await container.exec(argv, {
-        cwd: opts.cwd ?? WORKSPACE,
-        env: BASE_ENV,
-        signal: ac.signal,
-      });
+      const started = await withDeadline(
+        this.abortOnExit(
+          Promise.resolve().then(() =>
+            container.exec(argv, {
+              cwd: opts.cwd ?? WORKSPACE,
+              env: BASE_ENV,
+              signal: ac.signal,
+            }),
+          ),
+        ),
+        Date.now() + opts.timeoutMs + this.execStartGraceMs,
+      );
+      if (started === "timeout") {
+        ac.abort();
+        return { exitCode: -1, stdout: "", stderr: "exec did not start before the deadline" };
+      }
+      const proc = started;
       const out = new TailBuffer(64 * 1024);
       const err = new TailBuffer(64 * 1024);
       const a = drain(proc.stdout, out);
@@ -2370,11 +2434,37 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const active = options.origin !== undefined ? { startedAt: Date.now(), out, err } : undefined;
     try {
-      const proc = await container.exec(argv, {
-        cwd: options.cwd,
-        env: { ...BASE_ENV, ...options.env },
-        signal: ac.signal,
-      });
+      // container.exec 自体が返らないことがある（コンテナの内部エラーなど）。timeoutMs + 余裕で打ち切る。
+      // 打ち切ったら serial の鎖を解放するため、結果を返す（コンテナは破棄し、次の操作で作り直す）
+      const started = await withDeadline(
+        this.abortOnExit(
+          Promise.resolve().then(() =>
+            container.exec(argv, {
+              cwd: options.cwd,
+              env: { ...BASE_ENV, ...options.env },
+              signal: ac.signal,
+            }),
+          ),
+        ),
+        Date.now() + timeoutMs + this.execStartGraceMs,
+      );
+      if (started === "timeout") {
+        try {
+          await this.destroyAudited("exec_timeout");
+        } catch (e) {
+          console.warn(`[sandbox] destroy after exec start timeout failed: ${errorText(e)}`);
+        } finally {
+          ac.abort();
+        }
+        return {
+          exitCode: 137,
+          stdout: "",
+          stderr: "exec did not start before the deadline (container is not responding)",
+          timedOut: true,
+          truncated: false,
+        };
+      }
+      const proc = started;
       this.activeExec = active;
       const a = drain(proc.stdout, out);
       const b = drain(proc.stderr, err);
@@ -2382,7 +2472,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       const timeout = new Promise<"timeout">((resolve) => {
         timer = setTimeout(() => resolve("timeout"), timeoutMs);
       });
-      const first = await Promise.race([exited, timeout]);
+      const first = await Promise.race([this.abortOnExit(exited), timeout]);
       clearTimeout(timer);
       let exitCode: number;
       if (first === "timeout") {

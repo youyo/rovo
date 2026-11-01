@@ -258,3 +258,83 @@ describe("SandboxDO: コンテナの停止の診断（console のみ）", () => 
     });
   });
 });
+
+describe("SandboxDO: 返らない呼び出しに期限を付ける（issue #146）", () => {
+  it("setInactivityTimeout が返らなくても、期限で打ち切って boot は成功する", async () => {
+    await runInDO(sandboxStub("hang-inactivity"), async (inst) => {
+      const fake = setup(inst);
+      fake.setInactivityTimeout = () => new Promise<void>(() => {});
+      inst.inactivityCallMs = 200;
+      const { lines } = await capturingWarn(async () => {
+        const started = Date.now();
+        await inst.ensureReady(spec());
+        expect(Date.now() - started).toBeLessThan(3_000);
+      });
+      expect(fake.startCalls).toHaveLength(1);
+      expect(lines.some((l) => l.includes("setInactivityTimeout"))).toBe(true);
+    });
+  });
+
+  it("container.exec が返らなくても、timeoutMs（+ 余裕）で打ち切り、timedOut の結果を返し、次の exec が動く", async () => {
+    await runInDO(sandboxStub("hang-exec"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      fake.onExec = (argv) =>
+        argv[0] === "slow" ? new Promise<void>(() => {}) : Promise.resolve();
+      inst.execStartGraceMs = 100;
+      const started = Date.now();
+      const r = await inst.exec(["slow"], { timeoutMs: 200 });
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(r).toMatchObject({ exitCode: 137, timedOut: true });
+      // serial のキューが解放されている（コンテナの再起動を伝える 1 回の例外を挟んで、次の exec が動く）
+      let next: { exitCode: number } | undefined;
+      for (let i = 0; i < 2 && !next; i++) {
+        next = await inst.exec(LS, { timeoutMs: 2_000 }).catch(() => undefined);
+      }
+      expect(next?.exitCode).toBe(0);
+    });
+  });
+
+  it("monitor が reject したら、ready を待っている boot を待たずに中断して再試行する", async () => {
+    await runInDO(sandboxStub("monitor-abort-boot"), async (inst) => {
+      const fake = setup(inst);
+      inst.bootAttemptMs = 20_000;
+      fake.onExec = (argv) =>
+        fake.startCalls.length < 2 && argv[0] === "true"
+          ? new Promise<void>(() => {})
+          : Promise.resolve();
+      const { lines } = await capturingWarn(async () => {
+        const ensure = inst.ensureReady(spec());
+        while (fake.monitors.length < 1) await sleep(10);
+        await sleep(100);
+        const started = Date.now();
+        fake.monitors[0]?.reject(new Error("Container service had an internal error"));
+        await ensure;
+        expect(Date.now() - started).toBeLessThan(5_000);
+      });
+      expect(fake.startCalls).toHaveLength(2);
+      expect(lines.some((l) => l.includes("sandbox_container_exited"))).toBe(true);
+    });
+  });
+
+  it("monitor が reject したら、返らない exec も待たずに中断する", async () => {
+    await runInDO(sandboxStub("monitor-abort-exec"), async (inst) => {
+      const fake = setup(inst);
+      await inst.ensureReady(spec());
+      fake.onExec = (argv) =>
+        argv[0] === "slow" ? new Promise<void>(() => {}) : Promise.resolve();
+      await capturingWarn(async () => {
+        const running = inst.exec(["slow"], { timeoutMs: 60_000 }).then(
+          (r: unknown) => ({ r }),
+          (e: unknown) => ({ e }),
+        );
+        await sleep(100);
+        const started = Date.now();
+        fake.monitors[0]?.reject(new Error("Container service had an internal error"));
+        const out = await running;
+        expect(Date.now() - started).toBeLessThan(5_000);
+        expect("e" in out || (out as { r: { exitCode: number } }).r.exitCode !== 0).toBe(true);
+      });
+    });
+  });
+});

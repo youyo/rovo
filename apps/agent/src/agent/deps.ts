@@ -41,6 +41,8 @@ export interface AgentTestOverrides {
   beforeSubmit?: () => Promise<void>;
   /** Sandbox の起動の再試行の間隔（ms）。テストで 0 にする */
   setupRetryDelayMs?: number;
+  /** SandboxDO.ensureReady の RPC 1 回を待つ上限（ms）。テストで短くする */
+  ensureReadyTimeoutMs?: number;
   /** ask_parent が未 commit の確認と質問の記録に入る直前 */
   beforeAskParent?: () => Promise<void>;
   /** ask_parent が質問を記録した直後（ツールの結果を返す前） */

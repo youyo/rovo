@@ -10,6 +10,8 @@ import { E2E_TOKEN_ENC_KEY, type RunningWrangler, startWrangler } from "../suppo
 //   - registry.npmjs.org への GET / npm install が通る
 //   - 許可外のホスト・メタデータ・内部 IP には出られない
 //   - github.com への通信は、トークンが無ければ OutboundGateway が 401 で落とす（認証なしの clone は通らない）
+//   - mise が焼いていない node・python の版を、パスで絞った配布元（nodejs.org・python-build-standalone の releases）から取れる。
+//     ほかのリポジトリの releases は拒否する。Takumi Guard（npm.flatt.tech）への GET は拒否しない
 // git の clone / push の検証（トークン注入・receive-pack の判定）は偽 git の E2E（e2e/git-push.e2e.test.ts）が担う。
 // 実 GitHub への認証付きアクセスと push はしない（トークンを持たない）。
 let wrangler: RunningWrangler;
@@ -129,6 +131,89 @@ describe("実ネットワーク", () => {
   it("storage.googleapis.com は Go のモジュールのバケット以外へは出られない", async () => {
     expect((await sb.curl("https://storage.googleapis.com/other-bucket/x.zip")).code).toBe("403");
     expect((await sb.curl("https://storage.googleapis.com/")).code).toBe("403");
+  });
+
+  it("mise は焼いていない node の版（24.21.0）を nodejs.org から取って、mise.toml の mise run で使える", async () => {
+    const dir = "/workspace/.mise-net-node";
+    const w = await sb.exec([
+      "sh",
+      "-c",
+      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\\nnode = "24.21.0"\\n\\n[tasks.v]\\nrun = "node --version"\\n' > ${dir}/mise.toml`,
+    ]);
+    expect(w.exitCode, w.stderr).toBe(0);
+    const install = await sb.exec(["mise", "install", "node@24.21.0"], {
+      cwd: dir,
+      timeoutMs: 300_000,
+    });
+    expect(install.exitCode, install.stderr).toBe(0);
+    const r = await sb.exec(["mise", "run", "v"], { cwd: dir, timeoutMs: 120_000 });
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe("v24.21.0");
+    await sb.exec(["rm", "-rf", dir]);
+  }, 400_000);
+
+  it("mise は焼いていない python の版（3.12）を python-build-standalone の releases から取って使える", async () => {
+    const install = await sb.exec(["mise", "install", "python@3.12"], {
+      cwd: "/workspace",
+      timeoutMs: 300_000,
+    });
+    expect(install.exitCode, install.stderr).toBe(0);
+    const r = await sb.exec(["mise", "exec", "python@3.12", "--", "python", "--version"], {
+      cwd: "/workspace",
+      timeoutMs: 120_000,
+    });
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toMatch(/^Python 3\.12\.\d+$/);
+  }, 400_000);
+
+  it("Takumi Guard（npm.flatt.tech）への GET は、rovo の拒否（outbound request denied）にならない", async () => {
+    const r = await sb.exec(["curl", "-sS", "-m", "10", "https://npm.flatt.tech/is-odd"]);
+    expect(r.stdout).not.toContain("rovo: outbound request denied");
+    const post = await sb.exec([
+      "curl",
+      "-sS",
+      "-m",
+      "10",
+      "-X",
+      "POST",
+      "https://npm.flatt.tech/-/npm/v1/security/advisories/bulk",
+    ]);
+    expect(post.stdout).toContain("rovo: outbound request denied (registry_method)");
+  });
+
+  it("許可していない GitHub のリポジトリの releases と、releases の転送先の別のリポジトリのパスは拒否する", async () => {
+    const other = await sb.exec([
+      "curl",
+      "-sS",
+      "-m",
+      "10",
+      "https://github.com/astral-sh/uv/releases/download/0.8.22/uv-x86_64-unknown-linux-gnu.tar.gz",
+    ]);
+    expect(other.stdout).toContain("rovo: outbound request denied (github_path)");
+    expect(
+      (
+        await sb.curl(
+          "https://github.com/astral-sh/uv/releases/download/0.8.22/uv-x86_64-unknown-linux-gnu.tar.gz",
+        )
+      ).code,
+    ).toBe("403");
+    expect(
+      (
+        await sb.curl(
+          "https://release-assets.githubusercontent.com/github-production-release-asset/1/x",
+        )
+      ).code,
+    ).toBe("403");
+    expect((await sb.curl("https://objects.githubusercontent.com/")).code).toBe("403");
+    // 許可した releases のパスは rovo の拒否にならない（存在しない資産なので GitHub 自身が 404 を返す）
+    const pbs = await sb.exec([
+      "curl",
+      "-sS",
+      "-m",
+      "10",
+      "https://github.com/astral-sh/python-build-standalone/releases/download/0/x.tar.gz",
+    ]);
+    expect(pbs.stdout).not.toContain("rovo: outbound request denied");
   });
 
   it("許可外のホスト・別リポジトリ・メタデータ・内部 IP には出られない", async () => {

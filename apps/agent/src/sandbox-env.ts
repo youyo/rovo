@@ -30,8 +30,12 @@ export const BASE_ENV: Record<string, string> = {
   MISE_STATE_DIR: "/opt/mise/state",
   MISE_TRUSTED_CONFIG_PATHS: "/workspace",
   MISE_YES: "1",
-  MISE_OFFLINE: "1",
   MISE_DISABLE_UPDATE_WARNING: "1",
+  // 焼いていない node / python は実行時に取る。許可先を最小にする mise の設定（理由は Dockerfile の mise の節）
+  MISE_USE_VERSIONS_HOST: "false",
+  MISE_NODE_COMPILE: "false",
+  MISE_PYTHON_COMPILE: "false",
+  MISE_PYTHON_GITHUB_ATTESTATIONS: "false",
   GIT_TERMINAL_PROMPT: "0",
   GIT_CONFIG_COUNT: "1",
   GIT_CONFIG_KEY_0: "safe.directory",

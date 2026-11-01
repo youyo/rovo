@@ -2708,7 +2708,7 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     await client.close();
   });
 
-  it("verification_commands: Sandbox にあるコマンド（pnpm・node・python など）で書き、mise run は mise.toml の [tools] が焼いた版と一致するときだけ使える", async () => {
+  it("verification_commands: Sandbox にあるコマンド（pnpm・node・python など）で書き、mise run を使える。焼いていない node・python の版は初回に取るので時間がかかり、npm.flatt.tech は許可済み", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
@@ -2718,13 +2718,23 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     expect(start).toContain("pnpm・node・python・pip・uv・go など");
     expect(start).toContain("mise.toml があるリポジトリでは `mise run <task>` を使える");
     expect(start).toContain("node 24・go 1.26.5・python 3.13");
-    expect(start).toMatch(/違う版は今は入れられない。そのときはコマンドを直接書く/);
+    expect(start).toContain(
+      "[tools] の node・python が焼いていない版のときは、初回に配布元から取るので時間がかかる",
+    );
+    expect(start).toContain("go の違う版は mise では取れない");
+    expect(start).toContain("Takumi Guard（npm.flatt.tech）も許可済み");
+    expect(start).not.toContain("違う版は今は入れられない");
     expect(start).not.toMatch(/mise run[^。]*使わない/);
     const instructions = client.getInstructions() ?? "";
     expect(instructions).toContain("pnpm・node・python・pip・uv・go など");
     expect(instructions).toContain("mise.toml があるリポジトリでは `mise run <task>` を使える");
     expect(instructions).toContain("node 24・go 1.26.5・python 3.13");
-    expect(instructions).toMatch(/違う版は今は入れられない。そのときはコマンドを直接書く/);
+    expect(instructions).toContain(
+      "[tools] の node・python が焼いていない版のときは、初回に配布元から取るので時間がかかる",
+    );
+    expect(instructions).toContain("go の違う版は mise では取れない");
+    expect(instructions).toContain("Takumi Guard（npm.flatt.tech）も許可済み");
+    expect(instructions).not.toContain("違う版は今は入れられない");
     expect(instructions).not.toMatch(/mise run[^。]*使わない/);
     await client.close();
   });

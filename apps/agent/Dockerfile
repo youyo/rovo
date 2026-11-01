@@ -4,7 +4,8 @@ FROM docker.io/cloudflare/sandbox:1.0.1 AS shim
 # uv は公式イメージの固定タグから COPY する（版を変えるときはこのタグだけ直す）。
 FROM ghcr.io/astral-sh/uv:0.8.22 AS uv
 
-FROM node:24-bookworm-slim
+# node は正確な版に固定する（mise link で登録する焼いた版がビルドのたびにずれないように）。版を変えるときはこのタグだけ直す。
+FROM node:24.22.2-bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ripgrep curl ca-certificates tini \
  && rm -rf /var/lib/apt/lists/*
@@ -98,8 +99,17 @@ RUN python3 --version | grep -F "Python 3.13." \
 # mise: リポジトリの mise.toml の [tools] / [tasks] を最優先で使えるようにする（mise run / mise exec 用）。
 # 公式 release の tarball をビルド時に取り、sha256 で確かめて /usr/local/bin/mise に置く。版を変えるときは ARG（と sha256）だけ直す。
 # 焼いた node / go / python は `mise link` で登録する。mise.toml の [tools] が焼いた版（前方一致を含む。node = "24"、go = "1.26"、python = "3.13" など）を
-# 指すとき、ダウンロードせずに解決する。違う版は実行時に入れられない（mise.jdx.dev・nodejs.org・go.dev・GitHub Releases は外向き通信で許可していない。
-# 許可先は増やさない）ので、MISE_OFFLINE=1 で外に出ずにすぐ失敗させる。shims / activate は使わず、PATH はこれまでどおり焼いたツールを直接指す。
+# 指すとき、ダウンロードせずに解決する。焼いていない node / python の版は、初回の mise run / mise exec / mise install で取る。
+# 外向き通信はその配布元だけを、パスで絞って GET / HEAD で許可している（src/outbound-policy.ts の REGISTRY_PATH_PREFIXES。
+# 根拠は docs/specs/phase2.md）: nodejs.org の /dist/、mise-versions.jdx.dev の /data/python-precompiled-、
+# github.com の astral-sh/python-build-standalone の /releases/download/ と、その 302 の転送先（リポジトリ ID のパスだけ）。
+# 許可先を最小にするため、mise の設定で次のようにする（ENV と /etc/mise/config.toml の両方に書く）:
+#   use_versions_host=false: node の版の一覧を mise-versions.jdx.dev ではなく nodejs.org/dist/index.json から取る（インストールの記録の送信も止まる）。
+#   node.compile=false / python.compile=false: 配布物が無い版をソースからビルドしに行かない（gcc も無い。python-build の git clone もしない）。
+#   python.github_attestations=false: GitHub の attestation の検証（api.github.com・mise-versions・Sigstore の TUF への通信）をしない。
+#     node は SHASUMS256.txt とその署名（mise に組み込みの鍵）で確かめる。python は HTTPS で固定のリポジトリの releases から取ることだけが根拠になる。
+# go の焼いていない版は mise では取れない（mise の go は dl.google.com と github.com/golang/go の ls-remote を使い、許可していない）。
+# go.mod の toolchain は GOTOOLCHAIN=auto で proxy.golang.org から取れる。shims / activate は使わず、PATH はこれまでどおり焼いたツールを直接指す。
 # データ・キャッシュは /opt/mise（どのユーザーでも書ける）。exec は ENV を引き継がないことがあるので（本番）、ENV に加えて
 # /etc/mise/config.toml（システムの設定）にも同じ値を書き、/root の既定の置き場所は /opt/mise への symlink にする。
 ARG MISE_VERSION=2026.10.25
@@ -110,8 +120,11 @@ ENV MISE_DATA_DIR=/opt/mise/data \
     MISE_STATE_DIR=/opt/mise/state \
     MISE_TRUSTED_CONFIG_PATHS=/workspace \
     MISE_YES=1 \
-    MISE_OFFLINE=1 \
-    MISE_DISABLE_UPDATE_WARNING=1
+    MISE_DISABLE_UPDATE_WARNING=1 \
+    MISE_USE_VERSIONS_HOST=false \
+    MISE_NODE_COMPILE=false \
+    MISE_PYTHON_COMPILE=false \
+    MISE_PYTHON_GITHUB_ATTESTATIONS=false
 RUN case "${TARGETARCH:-amd64}" in \
       amd64) MISE_SHA256="${MISE_SHA256_AMD64}"; MISE_ARCH=x64 ;; \
       arm64) MISE_SHA256="${MISE_SHA256_ARM64}"; MISE_ARCH=arm64 ;; \
@@ -123,8 +136,9 @@ RUN case "${TARGETARCH:-amd64}" in \
  && install -m 0755 /tmp/mise/bin/mise /usr/local/bin/mise \
  && rm -rf /tmp/mise /tmp/mise.tgz \
  && mkdir -p /opt/mise/data /opt/mise/cache /opt/mise/state /etc/mise /root/.local/share /root/.cache /root/.local/state \
- && printf '%s\n' '[settings]' 'yes = true' 'offline = true' 'disable_update_warning = true' \
-      'trusted_config_paths = ["/workspace"]' > /etc/mise/config.toml \
+ && printf '%s\n' '[settings]' 'yes = true' 'disable_update_warning = true' \
+      'trusted_config_paths = ["/workspace"]' 'use_versions_host = false' \
+      'node.compile = false' 'python.compile = false' 'python.github_attestations = false' > /etc/mise/config.toml \
  && ln -s /opt/mise/data /root/.local/share/mise \
  && ln -s /opt/mise/cache /root/.cache/mise \
  && ln -s /opt/mise/state /root/.local/state/mise \

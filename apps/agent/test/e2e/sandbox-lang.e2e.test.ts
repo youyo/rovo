@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BASE_ENV } from "../../src/sandbox-env";
 import type { WorkspaceSpec } from "../../src/sandbox-port";
 import { type FakeUpstream, startFakeUpstream } from "../support/fake-upstream";
 import { sandboxClient } from "../support/sandbox-client";
@@ -72,6 +73,26 @@ describe("Go / Python のイメージ", () => {
     const pip = await run(["pip", "--version"]);
     expect(pip.exitCode, pip.stderr).toBe(0);
     expect(pip.stdout).toContain("(python 3.13)");
+  }, 150_000);
+
+  // bash ツールは port.exec(["bash", "-lc", command]) で流す。ログインシェルは /etc/profile を読み、root の PATH を上書きする
+  // （本番で go・python3 が見つからなかった原因）。argv のままの exec では再現しないので、bash -lc で確かめる。
+  it("bash -lc（bash ツールと同じ起動）でも go / python3 / pip が見つかり、PATH の先頭が BASE_ENV と同じ", async () => {
+    const found = await run(["bash", "-lc", "command -v go python3 pip"]);
+    expect(found.exitCode, found.stderr).toBe(0);
+    expect(found.stdout.trim().split("\n")).toEqual([
+      "/usr/local/go/bin/go",
+      "/opt/venv/bin/python3",
+      "/opt/venv/bin/pip",
+    ]);
+    const go = await run(["bash", "-lc", "go version"]);
+    expect(go.exitCode, go.stderr).toBe(0);
+    expect(go.stdout).toContain(`go${GO_VERSION} `);
+    const py = await run(["bash", "-lc", "python3 -c 'import sys; print(sys.prefix)'"]);
+    expect(py.exitCode, py.stderr).toBe(0);
+    expect(py.stdout.trim()).toBe("/opt/venv");
+    const path = await run(["bash", "-lc", "echo $PATH"]);
+    expect(path.stdout.trim()).toBe(BASE_ENV.PATH);
   }, 150_000);
 
   it("Dockerfile の ARG MISE_VERSION を読めている", () => {

@@ -39,4 +39,14 @@ describe("BASE_ENV と Dockerfile の ENV の一致", () => {
   it.each(Object.entries(env))("%s が BASE_ENV に同じ値で入っている", (key, value) => {
     expect(BASE_ENV[key]).toBe(value);
   });
+
+  // bash ツールは bash -lc で、/etc/profile が PATH を上書きする。profile.d で足し直す先頭の要素が BASE_ENV の PATH と一致すること。
+  it("profile.d に書く PATH の先頭が BASE_ENV の PATH の先頭と一致する", () => {
+    const text = readFileSync(join(__dirname, "../../Dockerfile"), "utf8");
+    const m = /rovo-path\.sh/.test(text) && /export PATH="([^"]+):\$PATH"/.exec(text);
+    expect(m).toBeTruthy();
+    const prefix = m ? (m[1] ?? "") : "";
+    expect(prefix).toBe("/opt/venv/bin:/usr/local/go/bin");
+    expect(BASE_ENV.PATH).toBe(`${prefix}:${DEFAULT_PATH}`);
+  });
 });

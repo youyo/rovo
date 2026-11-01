@@ -121,4 +121,56 @@ describe("Go / Python のイメージ", () => {
     }
     await run(["rm", "-rf", dir]);
   }, 300_000);
+
+  it("mise 内の python が venv の実体を指し、venv に入れたモジュールを import できる", async () => {
+    const dir = "/workspace/.mise-e2e-py";
+    // mise は installs/python/<版> -> /opt/venv のリンク経由で起動するので、sys.prefix はリンクのパスになる。
+    // 実体（realpath）で比べ、さらに venv の site-packages に置いたモジュールが見えることを確かめる。
+    const probe = "rovo_mise_venv_probe";
+    const w = await run([
+      "sh",
+      "-c",
+      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\\npython = "3.13"\\n' > ${dir}/mise.toml` +
+        ` && echo 'VALUE = 42' > "$(python -c 'import site; print(site.getsitepackages()[0])')/${probe}.py"`,
+    ]);
+    expect(w.exitCode, w.stderr).toBe(0);
+    const code = `import os, sys, ${probe}; print(os.path.realpath(sys.prefix), ${probe}.VALUE)`;
+    const inside = await sb.exec(["mise", "exec", "--", "python", "-c", code], {
+      cwd: dir,
+      timeoutMs: 120_000,
+    });
+    expect(inside.exitCode, inside.stderr).toBe(0);
+    expect(inside.stdout.trim()).toBe("/opt/venv 42");
+    const outside = await sb.exec(["python", "-c", code], { cwd: dir, timeoutMs: 120_000 });
+    expect(outside.exitCode, outside.stderr).toBe(0);
+    expect(outside.stdout.trim()).toBe(inside.stdout.trim());
+    const pip = await sb.exec(["mise", "exec", "--", "python", "-m", "pip", "--version"], {
+      cwd: dir,
+      timeoutMs: 120_000,
+    });
+    expect(pip.exitCode, pip.stderr).toBe(0);
+    await run([
+      "sh",
+      "-c",
+      `rm -rf ${dir} "$(python -c 'import site; print(site.getsitepackages()[0])')/${probe}.py"`,
+    ]);
+  }, 300_000);
+
+  it("焼いていない版（go 1.24）の mise exec は、待たずにすぐ失敗する", async () => {
+    const dir = "/workspace/.mise-e2e-unbaked";
+    const w = await run([
+      "sh",
+      "-c",
+      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\\ngo = "1.24"\\n' > ${dir}/mise.toml`,
+    ]);
+    expect(w.exitCode, w.stderr).toBe(0);
+    const started = Date.now();
+    const r = await sb.exec(["mise", "exec", "--", "go", "version"], {
+      cwd: dir,
+      timeoutMs: 60_000,
+    });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(r.exitCode).not.toBe(0);
+    await run(["rm", "-rf", dir]);
+  }, 120_000);
 });

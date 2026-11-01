@@ -117,10 +117,9 @@ RUN case "${TARGETARCH:-amd64}" in \
  && ln -s /opt/mise/state /root/.local/state/mise \
  && NODE_FULL="$(node -p process.versions.node)" \
  && PY_FULL="$(/opt/venv/bin/python -c 'import platform; print(platform.python_version())')" \
- && PY_HOME="$(/opt/venv/bin/python -c 'import sys; print(sys.base_prefix)')" \
  && mise link "node@${NODE_FULL}" /usr/local \
  && mise link "go@${GO_VERSION}" /usr/local/go \
- && mise link "python@${PY_FULL}" "${PY_HOME}" \
+ && mise link "python@${PY_FULL}" /opt/venv \
  && mkdir /tmp/misecheck && cd /tmp/misecheck \
  && printf '%s\n' '[tools]' 'node = "24"' "go = \"${GO_VERSION}\"" 'python = "3.13"' '' '[tasks.hello]' \
       'run = "go version && python --version && node --version"' > mise.toml \
@@ -129,6 +128,8 @@ RUN case "${TARGETARCH:-amd64}" in \
  && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- go version | grep -F "go${GO_VERSION} " \
  && sed -i "s/^go = .*/go = \"${GO_VERSION%.*}\"/" mise.toml \
  && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- go version | grep -F "go${GO_VERSION} " \
+ && [ "$(MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- python -c 'import os, sys; print(os.path.realpath(sys.prefix))')" = /opt/venv ] \
+ && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- python -m pip --version \
  && cd / && rm -rf /tmp/misecheck \
  && chmod -R a+rwX /opt/mise
 COPY --from=shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim

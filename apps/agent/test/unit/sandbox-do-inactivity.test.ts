@@ -279,7 +279,8 @@ describe("SandboxDO: 返らない呼び出しに期限を付ける（issue #146�
     await runInDO(sandboxStub("hang-exec"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());
-      fake.onExec = (argv) => (argv[0] === "slow" ? new Promise<void>(() => {}) : Promise.resolve());
+      fake.onExec = (argv) =>
+        argv[0] === "slow" ? new Promise<void>(() => {}) : Promise.resolve();
       inst.execStartGraceMs = 100;
       const started = Date.now();
       const r = await inst.exec(["slow"], { timeoutMs: 200 });
@@ -320,7 +321,8 @@ describe("SandboxDO: 返らない呼び出しに期限を付ける（issue #146�
     await runInDO(sandboxStub("monitor-abort-exec"), async (inst) => {
       const fake = setup(inst);
       await inst.ensureReady(spec());
-      fake.onExec = (argv) => (argv[0] === "slow" ? new Promise<void>(() => {}) : Promise.resolve());
+      fake.onExec = (argv) =>
+        argv[0] === "slow" ? new Promise<void>(() => {}) : Promise.resolve();
       await capturingWarn(async () => {
         const running = inst.exec(["slow"], { timeoutMs: 60_000 }).then(
           (r: unknown) => ({ r }),

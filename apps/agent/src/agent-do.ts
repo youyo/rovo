@@ -319,6 +319,11 @@ const MAX_YIELD_NUDGES = 2;
 const MAX_SETUP_ATTEMPTS = 3;
 /** Sandbox の起動を再試行するまでの待ち（ms）。呼び出したツールはこの間待つ */
 const SETUP_RETRY_DELAY_MS = 5_000;
+/**
+ * SandboxDO.ensureReady の RPC 1 回を待つ上限。SandboxDO 側の最悪（起動 約 2 分 + clone 5 分 + 依存の用意など）を超える値にする。
+ * 返ってこない RPC は失敗として MAX_SETUP_ATTEMPTS に数える。
+ */
+const ENSURE_READY_TIMEOUT_MS = 10 * 60_000;
 const PATCH_LIMIT = 1024 * 1024;
 /** worker_review のレビューの段が Sandbox から読む差分の上限（UTF-8 のバイト数。gateway が task_review で取る上限と同じ。超えたら切って「一部は未確認」にする） */
 const WORKER_REVIEW_DIFF_MAX_BYTES = 1024 * 1024;
@@ -941,6 +946,27 @@ export class AgentDO extends DurableObject<Env> {
     );
   }
 
+  /** ensureReady の RPC を期限付きで待つ。期限切れは例外（= 準備の失敗）にする */
+  private async ensureReadyWithDeadline(spec: ReturnType<AgentDO["workspaceSpec"]>): Promise<void> {
+    const ms = this.overrides().ensureReadyTimeoutMs ?? ENSURE_READY_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const call = Promise.resolve().then(() => this.sandbox().ensureReady(spec));
+    call.catch(() => {});
+    try {
+      await Promise.race([
+        call,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`sandbox ensureReady timed out after ${ms}ms`)),
+            ms,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private async bootSandbox(): Promise<void> {
     const spec = this.spec();
     if (!spec) throw new Error("sandbox is not ready: the task has not started");
@@ -951,7 +977,7 @@ export class AgentDO extends DurableObject<Env> {
       if (this.sandboxStopped())
         throw new Error("sandbox boot skipped: the task has ended or is stopping");
       try {
-        await this.sandbox().ensureReady(this.workspaceSpec(spec));
+        await this.ensureReadyWithDeadline(this.workspaceSpec(spec));
         break;
       } catch (e) {
         // cancel などで終端・停止した後の失敗は、準備の失敗として数えない

@@ -226,6 +226,8 @@ const START_DESCRIPTION = [
   "利用者ごとに同時に実行できるタスクの上限は budget_status の concurrency_limit を見る（上限に達していると concurrency_limit で断られる）。対象リポジトリは GitHub App が導入済みで、利用者に push 権限が必要。",
   "並列と分割: 独立した作業（触るファイルが重ならない・互いに依存しない）は、複数の task_start に分けて並列に走らせると速い（上限は concurrency_limit）。同じファイルを触る作業や、起動の費用のほうが大きい小さな作業は分けない。依存のある作業は、前の PR のブランチ agent/task-<task_id> を base_ref、task_result の pr.head_sha を base_sha にして積む。instructions はワーカーが単独で読めるよう、目的・完了条件・対象ファイル・やってはいけないことを書く。役割ごとに model を変えたいときは別タスクにする。",
   "完了まで数分〜数十分かかる。待ち方は task_wait の説明を参照。",
+  "ワーカーは .github/workflows/ の変更を push できない（GitHub App に workflows 権限が無い）。workflow の変更が要るタスクは、ワーカーに summary へ書かせて、クライアントが手で反映する。",
+  "ワーカーは対象リポジトリの issue・PR を読めない（gh が無く、web_fetch も private には届かない）。instructions には issue の番号だけを書かず、必要な本文を貼る。",
 ].join("\n");
 
 const REVIEW_DESCRIPTION = [

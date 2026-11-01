@@ -131,7 +131,11 @@ import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createReadOnlySandboxTools, createSandboxTools } from "./tools";
 import { commitAuthorOf, createToolContext } from "./tools/context";
 import { normalizeBashArgs } from "./tools/leading-cd";
-import type { PushResult, SandboxToolsFactory } from "./tools/types";
+import {
+  isWorkflowsPermissionRejection,
+  type PushResult,
+  type SandboxToolsFactory,
+} from "./tools/types";
 import { stripUntrustedMarkers, wrapUntrusted } from "./tools/untrusted";
 import {
   formatWebBrowse,
@@ -2607,6 +2611,8 @@ export class AgentDO extends DurableObject<Env> {
           `push_failed: 作業ブランチを検証済みの SHA に揃えられませんでした（${sync.error ?? "unknown"}）。patch は結果に残っています`,
         );
       }
+      if (this.store.meta("push_rejected_workflows") === true)
+        warnings.push("push_rejected_workflows_permission");
       // 予算超過の停止で、システムが未 commit の変更を WIP として commit した（できなかった）ことを伝える
       const wip = this.store.meta<WipCommit>("wip_commit");
       if (wip && decision.phase === "budget_exceeded") warnings.push(wipWarning(wip));
@@ -4638,7 +4644,12 @@ export class AgentDO extends DurableObject<Env> {
       // 完了せずに止まったときも、最後に push できた SHA を結果に返せるよう残す（PR の head の記録に使う）
       if (SHA_RE.test(r.sha))
         this.store.setMeta("branch_sync", { pushedSha: r.sha } satisfies BranchSync);
-    } else this.emit("push_failed", { sha: r.sha, message: tail(maskSecrets(r.error), 500) });
+    } else {
+      // workflows 権限の拒否は再試行しても通らない。結果の warnings に 1 回だけ付けるため、印だけ残す
+      if (isWorkflowsPermissionRejection(r.error))
+        this.store.setMeta("push_rejected_workflows", true);
+      this.emit("push_failed", { sha: r.sha, message: tail(maskSecrets(r.error), 500) });
+    }
   }
 
   /**

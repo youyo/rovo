@@ -1,4 +1,4 @@
-// Go と Python をイメージに焼いてあること（版は Dockerfile の ARG と一致する）。docker が要るので手元で実行する。
+// Go・Python・mise をイメージに焼いてあること（版は Dockerfile の ARG と一致する）。docker が要るので手元で実行する。
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { E2E_TOKEN_ENC_KEY, type RunningWrangler, startWrangler } from "../suppo
 
 const dockerfile = readFileSync(new URL("../../Dockerfile", import.meta.url), "utf8");
 const GO_VERSION = dockerfile.match(/^ARG GO_VERSION=(\S+)$/m)?.[1] as string;
+const MISE_VERSION = dockerfile.match(/^ARG MISE_VERSION=(\S+)$/m)?.[1] as string;
 
 let upstream: FakeUpstream;
 let wrangler: RunningWrangler;
@@ -72,4 +73,104 @@ describe("Go / Python のイメージ", () => {
     expect(pip.exitCode, pip.stderr).toBe(0);
     expect(pip.stdout).toContain("(python 3.13)");
   }, 150_000);
+
+  it("Dockerfile の ARG MISE_VERSION を読めている", () => {
+    expect(MISE_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("mise --version が MISE_VERSION と一致する", async () => {
+    const r = await run(["mise", "--version"]);
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(r.stdout.trim().split(/\s+/)[0]).toBe(MISE_VERSION);
+  }, 150_000);
+
+  it("焼いた版を指す mise.toml で mise run / mise exec が、ダウンロードなしで通る", async () => {
+    const dir = "/workspace/.mise-e2e";
+    const goMinor = GO_VERSION.split(".").slice(0, 2).join(".");
+    const toml = (go: string) =>
+      [
+        "[tools]",
+        'node = "24"',
+        `go = "${go}"`,
+        'python = "3.13"',
+        "",
+        "[tasks.hello]",
+        'run = "go version && python --version && node --version"',
+        "",
+      ].join("\n");
+    // 一時ディレクトリに置く。許可していないホストへ出ようとすると失敗するので、ダウンロードが起きれば落ちる。
+    for (const go of [GO_VERSION, goMinor]) {
+      const w = await run([
+        "sh",
+        "-c",
+        `rm -rf ${dir} && mkdir -p ${dir} && printf '%s' '${toml(go)}' > ${dir}/mise.toml`,
+      ]);
+      expect(w.exitCode, w.stderr).toBe(0);
+      const hello = await sb.exec(["mise", "run", "hello"], { cwd: dir, timeoutMs: 120_000 });
+      expect(hello.exitCode, hello.stderr).toBe(0);
+      expect(hello.stdout).toContain(`go${GO_VERSION} `);
+      expect(hello.stdout).toMatch(/Python 3\.13\.\d+/);
+      expect(hello.stdout).toMatch(/v24\.\d+\.\d+/);
+      const ex = await sb.exec(["mise", "exec", "--", "go", "version"], {
+        cwd: dir,
+        timeoutMs: 120_000,
+      });
+      expect(ex.exitCode, ex.stderr).toBe(0);
+      expect(ex.stdout).toContain(`go${GO_VERSION} `);
+      expect(`${hello.stderr}${ex.stderr}`).not.toMatch(/download/i);
+    }
+    await run(["rm", "-rf", dir]);
+  }, 300_000);
+
+  it("mise 内の python が venv の実体を指し、venv に入れたモジュールを import できる", async () => {
+    const dir = "/workspace/.mise-e2e-py";
+    // mise は installs/python/<版> -> /opt/venv のリンク経由で起動するので、sys.prefix はリンクのパスになる。
+    // 実体（realpath）で比べ、さらに venv の site-packages に置いたモジュールが見えることを確かめる。
+    const probe = "rovo_mise_venv_probe";
+    const w = await run([
+      "sh",
+      "-c",
+      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\\npython = "3.13"\\n' > ${dir}/mise.toml` +
+        ` && echo 'VALUE = 42' > "$(python -c 'import site; print(site.getsitepackages()[0])')/${probe}.py"`,
+    ]);
+    expect(w.exitCode, w.stderr).toBe(0);
+    const code = `import os, sys, ${probe}; print(os.path.realpath(sys.prefix), ${probe}.VALUE)`;
+    const inside = await sb.exec(["mise", "exec", "--", "python", "-c", code], {
+      cwd: dir,
+      timeoutMs: 120_000,
+    });
+    expect(inside.exitCode, inside.stderr).toBe(0);
+    expect(inside.stdout.trim()).toBe("/opt/venv 42");
+    const outside = await sb.exec(["python", "-c", code], { cwd: dir, timeoutMs: 120_000 });
+    expect(outside.exitCode, outside.stderr).toBe(0);
+    expect(outside.stdout.trim()).toBe(inside.stdout.trim());
+    const pip = await sb.exec(["mise", "exec", "--", "python", "-m", "pip", "--version"], {
+      cwd: dir,
+      timeoutMs: 120_000,
+    });
+    expect(pip.exitCode, pip.stderr).toBe(0);
+    await run([
+      "sh",
+      "-c",
+      `rm -rf ${dir} "$(python -c 'import site; print(site.getsitepackages()[0])')/${probe}.py"`,
+    ]);
+  }, 300_000);
+
+  it("焼いていない版（go 1.24）の mise exec は、待たずにすぐ失敗する", async () => {
+    const dir = "/workspace/.mise-e2e-unbaked";
+    const w = await run([
+      "sh",
+      "-c",
+      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\\ngo = "1.24"\\n' > ${dir}/mise.toml`,
+    ]);
+    expect(w.exitCode, w.stderr).toBe(0);
+    const started = Date.now();
+    const r = await sb.exec(["mise", "exec", "--", "go", "version"], {
+      cwd: dir,
+      timeoutMs: 60_000,
+    });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(r.exitCode).not.toBe(0);
+    await run(["rm", "-rf", dir]);
+  }, 120_000);
 });

@@ -2706,7 +2706,7 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     await client.close();
   });
 
-  it("verification_commands: Sandbox にあるコマンド（pnpm・node・python など）で書き、mise run は使わない（Sandbox に mise が無い）", async () => {
+  it("verification_commands: Sandbox にあるコマンド（pnpm・node・python など）で書き、mise run は mise.toml の [tools] が焼いた版と一致するときだけ使える", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
@@ -2714,10 +2714,16 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     expect(start).toContain("Sandbox にあるコマンド");
     expect(start).toContain("pnpm");
     expect(start).toContain("pnpm・node・python・pip・uv・go など");
-    expect(start).toMatch(/mise run[^。]*使わない/);
+    expect(start).toContain("mise.toml があるリポジトリでは `mise run <task>` を使える");
+    expect(start).toContain("node 24・go 1.26.5・python 3.13");
+    expect(start).toMatch(/違う版は今は入れられない。そのときはコマンドを直接書く/);
+    expect(start).not.toMatch(/mise run[^。]*使わない/);
     const instructions = client.getInstructions() ?? "";
     expect(instructions).toContain("pnpm・node・python・pip・uv・go など");
-    expect(instructions).toMatch(/mise run[^。]*使わない/);
+    expect(instructions).toContain("mise.toml があるリポジトリでは `mise run <task>` を使える");
+    expect(instructions).toContain("node 24・go 1.26.5・python 3.13");
+    expect(instructions).toMatch(/違う版は今は入れられない。そのときはコマンドを直接書く/);
+    expect(instructions).not.toMatch(/mise run[^。]*使わない/);
     await client.close();
   });
 });

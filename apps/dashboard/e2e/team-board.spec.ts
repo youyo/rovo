@@ -242,9 +242,37 @@ test("(TB5) 過去の日: 走行中の欄を出さず、その日の完了・失
 
 const monthSection = (page: Page) => page.locator("[data-month]");
 
+/**
+ * 月の初日は pace が出ない仕様のため、実行日に依存しないよう、概要の応答の generated_at だけを書き換える。
+ * offsetMs が無ければ month.period の中間、あれば period.start からの経過。
+ */
+async function pinGeneratedAt(
+  page: Page,
+  opts: { offsetMs?: number; mutate?: (body: any) => void } = {},
+) {
+  await page.route(/\/dashboard\/api\/overview/, async (route) => {
+    const res = await route.fetch({
+      headers: { ...route.request().headers(), "sec-fetch-site": "same-origin" },
+    });
+    const body = (await res.json()) as any;
+    const start = Date.parse(body.month.period.start);
+    const end = Date.parse(body.month.period.end);
+    body.generated_at = new Date(
+      opts.offsetMs === undefined ? start + (end - start) / 2 : start + opts.offsetMs,
+    ).toISOString();
+    opts.mutate?.(body);
+    await route.fulfill({
+      status: res.status(),
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+}
+
 test("(TB9) 今月の費用: 見出しに今月、閲覧者が先頭で人ごとに 1 行、割合とペースが文字でも分かる", async ({
   page,
 }) => {
+  await pinGeneratedAt(page);
   await loginAs(page, s.users.alice);
   await openTeam(page);
   const sec = monthSection(page);
@@ -274,27 +302,27 @@ test("(TB9b) ペース速め: 上限に対して月の経過より多く使っ�
   page,
 }) => {
   // 表示のロジックを確かめるため、応答の人ごとの費用だけを大きくする（上限は gateway の値のまま）
-  await page.route(/\/dashboard\/api\/overview/, async (route) => {
-    const res = await route.fetch({
-      headers: { ...route.request().headers(), "sec-fetch-site": "same-origin" },
-    });
-    const body = (await res.json()) as {
-      month: { by_owner?: { login: string; task_cost_usd: number; consult_cost_usd: number }[] };
-    };
-    for (const o of body.month.by_owner ?? []) {
-      if (o.login === s.users.alice.login) o.task_cost_usd = 99;
-    }
-    await route.fulfill({
-      status: res.status(),
-      contentType: "application/json",
-      body: JSON.stringify(body),
-    });
+  await pinGeneratedAt(page, {
+    mutate: (body) => {
+      for (const o of body.month.by_owner ?? []) {
+        if (o.login === s.users.alice.login) o.task_cost_usd = 99;
+      }
+    },
   });
   await loginAs(page, s.users.alice);
   await openTeam(page);
   const alice = monthSection(page).locator(`li.tb-month-row[data-login="${s.users.alice.login}"]`);
   await expect(alice.locator(".tb-month-pace")).toHaveText("▲ ペース速め");
   await expect(alice.locator(".tb-month-pace")).toHaveAttribute("data-pace", "fast");
+});
+
+test("(TB9c) 月の初日（経過 1 時間）は pace を出さず、割合だけ出る", async ({ page }) => {
+  await pinGeneratedAt(page, { offsetMs: 3_600_000 });
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  const alice = monthSection(page).locator(`li.tb-month-row[data-login="${s.users.alice.login}"]`);
+  await expect(alice.locator(".tb-month-ratio")).toHaveText(/^\d+%$/);
+  await expect(alice.locator(".tb-month-pace")).toHaveCount(0);
 });
 
 test("(TB10) 権限の無いタスクは 1 行にまとまり、持ち主の login は画面にも応答にも出ない", async ({

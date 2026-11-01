@@ -174,6 +174,7 @@ apps/gateway (既存 Worker)
   - gcc（build-essential）は入れない。cgo を使う Go のパッケージ、Python の sdist のビルド、node のネイティブ拡張のビルドはできない。wheel / ビルド済みバイナリがあるものだけが入る。
   - 依存の導入とキャッシュへの Go / Python の追加は、このイメージの変更とは別に扱う。
 - 既知の制限
+  - mise の中の `python` は venv（`/opt/venv`）を指す（`sys.prefix` が `/opt/venv`。venv のモジュールを import でき、`python -m pip` も動く）。
   - `mise.toml` の `[tools]` が焼いた版（node 24・go 1.26.5・python 3.13）と違う `mise run` / `mise exec` は、版を入れられず失敗する。その場合はコマンドを直接書く。
   - postinstall で外部からバイナリを取る依存（playwright など）は失敗する。
   - 許可したホスト経由の情報流出は、原理的には防ぎきれない（7.2）。Phase 2 は GET 系だけに絞る。

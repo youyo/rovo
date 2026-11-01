@@ -1177,7 +1177,7 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - `git` の直後に `-c core.hooksPath=/dev/null -c credential.helper=` を付け、ワーカーが置いた pre-push フックと credential helper を使わない（`-c` は `.git/config` より優先する）。
   - `push` と `ls-remote` は `origin` ではなくリポジトリの URL（`https://github.com/<owner>/<name>.git`）を直接指定する。`remote.origin.url`・`remote.origin.pushurl` に左右されない。`url.<base>.insteadOf` は打ち消せない（同じ長さなら先に書かれた設定が勝つ）ので上書きしない。書き換えられても、行き先は gateway の判定と許可証が止めるので、push が失敗するだけで、秘密の検査を通らない push にはならない。
 - ワーカーの道具の制約（#156・#157。権限や読み取りの道具は別の判断で、当座の手当て）:
-  - GitHub App に `workflows` 権限が無く、`.github/workflows/` を変える commit の push は「without `workflows` permission」で拒否される。再試行しても通らないので、`git_commit` の結果で固定の文（workflow の変更を commit から外すか、summary に手で反映する変更として書く）を返し、`task_result` の `warnings` に `push_rejected_workflows_permission` を 1 回だけ付ける。
+  - GitHub App に `workflows` 権限が無く、`.github/workflows/` を変える commit の push は「without `workflows` permission」で拒否される。再試行しても通らないので、`git_commit` の結果で固定の文（workflow の変更を commit から外すか、summary に手で反映する変更として書く）を返し、`task_result` の `warnings` に `push_rejected_workflows_permission` を 1 回だけ付ける。後の push が通ったとき（push は履歴ごと送るので、拒否された commit が外れたことになる）は付けない。
   - ワーカーは対象リポジトリの issue・PR を読めない（`gh` が無く、`web_fetch` は private に届かない）。`task_start` の説明で、instructions に必要な本文を貼るよう案内する。
 - 既知の課題（今回の対象外）:
   - ワーカーが `/` などに作った `.git` や、`PATH` の差し替えで、ワーカーのコマンドの中の git の振る舞いを変えることは止めない（自動の git はこの影響を受けない）。

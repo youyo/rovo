@@ -535,6 +535,34 @@ describe("git_commit のたびの push（本番のツール配線）", () => {
     expect(r.warnings.filter((w) => w === "push_rejected_workflows_permission")).toHaveLength(1);
   });
 
+  it("workflows の拒否のあと、後の push が通れば（拒否された commit が履歴から外れた）warnings に固定コードを付けない", async () => {
+    let n = 0;
+    const { sandbox } = prodSandbox(() => (n++ === 0 ? { exitCode: 1, stderr: WF_REJECT } : {}));
+    setAgentTestOverrides("ck-push-wf-recover", {
+      sandbox,
+      pushRetryDelayMs: 0,
+      script: [
+        call("git_commit", { message: "one" }),
+        call("git_commit", { message: "two" }),
+        report("done"),
+      ],
+    });
+    const stub = env.AGENT_DO.getByName("ck-push-wf-recover");
+    await stub.start(
+      makeSpec("ck-push-wf-recover", {
+        verificationCommands: [],
+        deadlineAt: Date.now() + 3_600_000,
+      }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    const events = await allEvents(asFx(stub));
+    const ends = events.filter((e) => e.type === "tool_end" && e.data.name === "git_commit");
+    expect(JSON.stringify(ends[0]?.data)).toContain("will not succeed if retried");
+    expect(JSON.stringify(ends[1]?.data)).toContain("pushed to the task branch");
+    const r = done(await stub.getResult());
+    expect(r.warnings).not.toContain("push_rejected_workflows_permission");
+  });
+
   it("ほかの理由の push の失敗では、固定コードは付かず、再試行の文のまま", async () => {
     const { sandbox } = prodSandbox(() => ({ exitCode: 1, stderr: "remote: Permission denied" }));
     setAgentTestOverrides("ck-push-nowf", {

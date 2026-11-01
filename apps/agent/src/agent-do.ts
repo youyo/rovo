@@ -4644,6 +4644,9 @@ export class AgentDO extends DurableObject<Env> {
       // 完了せずに止まったときも、最後に push できた SHA を結果に返せるよう残す（PR の head の記録に使う）
       if (SHA_RE.test(r.sha))
         this.store.setMeta("branch_sync", { pushedSha: r.sha } satisfies BranchSync);
+      // push は履歴ごと送るので、通ったなら拒否された workflow の commit はもう残っていない。印を下ろす
+      if (this.store.meta("push_rejected_workflows") === true)
+        this.store.setMeta("push_rejected_workflows", false);
     } else {
       // workflows 権限の拒否は再試行しても通らない。結果の warnings に 1 回だけ付けるため、印だけ残す
       if (isWorkflowsPermissionRejection(r.error))

@@ -19,7 +19,12 @@ import {
 import { stripAnsi } from "../text-util";
 import { resolveWorkspacePath } from "../workspace-path";
 import { splitLeadingCd } from "./leading-cd";
-import type { PushResult, ToolContext } from "./types";
+import {
+  isWorkflowsPermissionRejection,
+  type PushResult,
+  type ToolContext,
+  WORKFLOWS_REJECTED_TEXT,
+} from "./types";
 import { wrapUntrusted } from "./untrusted";
 
 export const READ_MAX_LINES = 2000;
@@ -562,9 +567,9 @@ export function createSandboxToolsImpl(port: SandboxPort, context: ToolContext) 
     } catch {
       // 記録の失敗で commit を失敗にしない
     }
-    return result.ok
-      ? "\npushed to the task branch"
-      : "\npush failed (the commit is kept locally; the next git_commit tries again)";
+    if (result.ok) return "\npushed to the task branch";
+    if (isWorkflowsPermissionRejection(result.error)) return WORKFLOWS_REJECTED_TEXT;
+    return "\npush failed (the commit is kept locally; the next git_commit tries again)";
   };
 
   const git_commit = defineTool({

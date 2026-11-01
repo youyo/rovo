@@ -101,6 +101,8 @@ describe("/mcp ツール一覧", () => {
     expect(start?.description).toContain("idempotency_key");
     expect(start?.description).toContain("verification_commands");
     expect(start?.description).toContain("budget_exceeded");
+    expect(start?.description).toContain(".github/workflows/ の変更を push できない");
+    expect(start?.description).toContain("issue の番号だけを書かず、必要な本文を貼る");
     const props = start?.inputSchema.properties as Record<string, { type?: string }>;
     expect(props.verification_commands?.type).toBe("array");
     const result = tools.find((t) => t.name === "task_result");

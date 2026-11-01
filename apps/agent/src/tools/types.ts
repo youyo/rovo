@@ -41,3 +41,12 @@ export type SandboxToolsFactory = (
   port: SandboxPort,
   context: ToolContext,
 ) => ReturnType<typeof import("@earendil-works/pi-durable").defineTool>[];
+
+/** GitHub App に workflows 権限が無いため、.github/workflows/ を変える commit の push が拒否されたときの出力か */
+export function isWorkflowsPermissionRejection(error: string): boolean {
+  return /without `workflows` permission/.test(error);
+}
+
+/** 上の拒否のとき git_commit の結果に返す固定の文（再試行しても通らない） */
+export const WORKFLOWS_REJECTED_TEXT =
+  "\npush failed (the commit is kept locally): this commit changes files under .github/workflows/, and the GitHub App has no `workflows` permission, so the push is rejected and will not succeed if retried. Remove the workflow changes from the commit (undo them with git), or describe them in the summary of report_completion as workflow changes the client must apply by hand.";

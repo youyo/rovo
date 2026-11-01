@@ -504,6 +504,83 @@ describe("git_commit のたびの push（本番のツール配線）", () => {
     expect(String(failed?.data.message)).toContain("Permission denied");
     expect(failed?.data.sha).toBe(SHA);
   });
+
+  const WF_REJECT =
+    "remote: error: GH013: refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows` permission";
+
+  it("workflows 権限の拒否は恒久的な失敗として git_commit の結果で伝え、warnings に固定コードを 1 回だけ付ける", async () => {
+    const { sandbox } = prodSandbox(() => ({ exitCode: 1, stderr: WF_REJECT }));
+    setAgentTestOverrides("ck-push-wf", {
+      sandbox,
+      pushRetryDelayMs: 0,
+      script: [
+        call("git_commit", { message: "one" }),
+        call("git_commit", { message: "two" }),
+        report("done"),
+      ],
+    });
+    const stub = env.AGENT_DO.getByName("ck-push-wf");
+    await stub.start(
+      makeSpec("ck-push-wf", { verificationCommands: [], deadlineAt: Date.now() + 3_600_000 }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    const events = await allEvents(asFx(stub));
+    const ends = events.filter((e) => e.type === "tool_end" && e.data.name === "git_commit");
+    expect(ends.length).toBe(2);
+    for (const end of ends) {
+      expect(JSON.stringify(end.data)).toContain("will not succeed if retried");
+      expect(JSON.stringify(end.data)).not.toContain("the next git_commit tries again");
+    }
+    const r = done(await stub.getResult());
+    expect(r.warnings.filter((w) => w === "push_rejected_workflows_permission")).toHaveLength(1);
+  });
+
+  it("workflows の拒否のあと、後の push が通れば（拒否された commit が履歴から外れた）warnings に固定コードを付けない", async () => {
+    let n = 0;
+    const { sandbox } = prodSandbox(() => (n++ === 0 ? { exitCode: 1, stderr: WF_REJECT } : {}));
+    setAgentTestOverrides("ck-push-wf-recover", {
+      sandbox,
+      pushRetryDelayMs: 0,
+      script: [
+        call("git_commit", { message: "one" }),
+        call("git_commit", { message: "two" }),
+        report("done"),
+      ],
+    });
+    const stub = env.AGENT_DO.getByName("ck-push-wf-recover");
+    await stub.start(
+      makeSpec("ck-push-wf-recover", {
+        verificationCommands: [],
+        deadlineAt: Date.now() + 3_600_000,
+      }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    const events = await allEvents(asFx(stub));
+    const ends = events.filter((e) => e.type === "tool_end" && e.data.name === "git_commit");
+    expect(JSON.stringify(ends[0]?.data)).toContain("will not succeed if retried");
+    expect(JSON.stringify(ends[1]?.data)).toContain("pushed to the task branch");
+    const r = done(await stub.getResult());
+    expect(r.warnings).not.toContain("push_rejected_workflows_permission");
+  });
+
+  it("ほかの理由の push の失敗では、固定コードは付かず、再試行の文のまま", async () => {
+    const { sandbox } = prodSandbox(() => ({ exitCode: 1, stderr: "remote: Permission denied" }));
+    setAgentTestOverrides("ck-push-nowf", {
+      sandbox,
+      pushRetryDelayMs: 0,
+      script: [call("git_commit", { message: "one" }), report("done")],
+    });
+    const stub = env.AGENT_DO.getByName("ck-push-nowf");
+    await stub.start(
+      makeSpec("ck-push-nowf", { verificationCommands: [], deadlineAt: Date.now() + 3_600_000 }),
+    );
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    const events = await allEvents(asFx(stub));
+    const end = events.find((e) => e.type === "tool_end" && e.data.name === "git_commit");
+    expect(JSON.stringify(end?.data)).toContain("the next git_commit tries again");
+    const r = done(await stub.getResult());
+    expect(r.warnings).not.toContain("push_rejected_workflows_permission");
+  });
 });
 
 describe("システムプロンプト", () => {

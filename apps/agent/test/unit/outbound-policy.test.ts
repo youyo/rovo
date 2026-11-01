@@ -83,13 +83,10 @@ describe("decideOutbound: パッケージレジストリ", () => {
     "files.pythonhosted.org",
     "proxy.golang.org",
     "sum.golang.org",
-  ])(
-    "%s の GET/HEAD を許可する",
-    (host) => {
-      expect(get(`https://${host}/x`).allow).toBe(true);
-      expect(decideOutbound({ method: "HEAD", url: `https://${host}/x` }, {}).allow).toBe(true);
-    },
-  );
+  ])("%s の GET/HEAD を許可する", (host) => {
+    expect(get(`https://${host}/x`).allow).toBe(true);
+    expect(decideOutbound({ method: "HEAD", url: `https://${host}/x` }, {}).allow).toBe(true);
+  });
 
   it.each(["proxy.golang.org", "sum.golang.org"])(
     "%s への POST などは registry_method で拒否する",

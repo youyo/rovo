@@ -390,7 +390,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 - データの作り方: 偽 GitHub のログイン（`/login/oauth/authorize` は偽サーバーが即承認）で実ブラウザのログインを通し、タスクは**実際の MCP 経路**（`task_start`）で作って、偽の agent の台本で終端まで進める（完了・失敗・キャンセル・consult を混ぜる）。時刻依存（「今日」のタイムライン）は、`ENVIRONMENT=test` のときだけ使える時計の差し替え（既存の `/__test/` ルートの流儀）で固定する。
 - 偽の Cloudflare API: `CLOUDFLARE_API_BASE` を偽サーバーに向け、(1) 正常、(2) 一部の項目が 403 / 空、(3) 5xx を切り替える。画面の「取得できない」の表示と、他の項目が生きていることを確かめる。
 - 前提（M4 の最初に確かめる）: `wrangler dev` の `http://localhost` で、Chromium が `Secure` / `__Host-` の Cookie を受け付けること（D3）。
-- **Sandbox の外で動かす**: Playwright のブラウザの取得先（CDN）とフォントの配布元は、rovo のワーカーの Sandbox の外向き通信の許可（`registry.npmjs.org` / `pypi.org` / `files.pythonhosted.org` と対象リポジトリの `github.com` だけ。`apps/agent/src/outbound-policy.ts:17,48-51`）に入らない。`wrangler dev` が Sandbox で立つかも未確認。したがって Playwright の E2E は**手元で実行・保守する**（委譲の基準の節）。
+- **Sandbox の外で動かす**: Playwright のブラウザの取得先（CDN）とフォントの配布元は、rovo のワーカーの Sandbox の外向き通信の許可（`registry.npmjs.org` / `pypi.org` / `files.pythonhosted.org` / `proxy.golang.org` / `sum.golang.org` と対象リポジトリの `github.com` だけ。`apps/agent/src/outbound-policy.ts:17,48-51`）に入らない。`wrangler dev` が Sandbox で立つかも未確認。したがって Playwright の E2E は**手元で実行・保守する**（委譲の基準の節）。
 - 並列: 偽 GitHub の状態を共有するので `workers: 1`（既存と同じ）。
 - `mise run test` に `test:e2e:dashboard` を**含める**（`test:e2e` の `depends` に足す。wrangler dev の dev registry の取り違えを避けるため、`test:e2e:gateway` 系の後に直列で走らせる）。Docker は要らない。
 
@@ -442,7 +442,7 @@ GitHub App の `callback_urls` は `/callback` の 1 本だけ（manifest `scrip
 
 ### 委譲の基準（rovo のワーカーに任せてよい範囲）
 
-rovo のワーカーの Sandbox は、外向き通信が `registry.npmjs.org` / `pypi.org` / `files.pythonhosted.org` と対象リポジトリの `github.com` だけに限られる（`apps/agent/src/outbound-policy.ts:17,48-51`）。Playwright のブラウザの CDN やフォントの配布元には届かず、`wrangler dev` が Sandbox で立つかも未確認。そのため基準は次のとおり。
+rovo のワーカーの Sandbox は、外向き通信が `registry.npmjs.org` / `pypi.org` / `files.pythonhosted.org` / `proxy.golang.org` / `sum.golang.org` と対象リポジトリの `github.com` だけに限られる（`apps/agent/src/outbound-policy.ts:17,48-51`）。Playwright のブラウザの CDN やフォントの配布元には届かず、`wrangler dev` が Sandbox で立つかも未確認。そのため基準は次のとおり。
 
 - **rovo に任せてよい**: `vitest`（jsdom）で閉じる、純関数・コンポーネント・契約（DTO）・ビルド成果物の検査（`dist` に外部ホストが無い等）まで。受入条件が観測でき、設計の判断・認可・移行を含まないもの。
 - **手元でやる**: Playwright の E2E、`wrangler dev` を使うもの、実 API への接続、フォントの同梱（ライセンスの確認と取得）、認可・セッション・DO の変更と移行・デプロイの経路・安全に関わるもの。

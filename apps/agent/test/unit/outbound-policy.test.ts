@@ -341,3 +341,217 @@ describe("decideOutbound: Go のモジュール zip の配布元（storage.googl
     expect(get("https://evil.storage.googleapis.com/proxy-golang-org-prod/x").allow).toBe(false);
   });
 });
+
+describe("decideOutbound: Takumi Guard（npm.flatt.tech）", () => {
+  const code = (d: ReturnType<typeof decideOutbound>) => (d.allow ? "allow" : d.code);
+
+  it("GET / HEAD を許可する（npm のレジストリと同じ扱い）", () => {
+    expect(get("https://npm.flatt.tech/is-odd").allow).toBe(true);
+    expect(decideOutbound({ method: "HEAD", url: "https://npm.flatt.tech/is-odd" }).allow).toBe(
+      true,
+    );
+  });
+
+  it("POST などは registry_method", () => {
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      expect(
+        code(decideOutbound({ method, url: "https://npm.flatt.tech/-/npm/v1/security" })),
+      ).toBe("registry_method");
+    }
+  });
+
+  it("同名のサブドメインや後置ドメインは許可しない", () => {
+    expect(get("https://evil.npm.flatt.tech/x").allow).toBe(false);
+    expect(get("https://npm.flatt.tech.evil.com/x").allow).toBe(false);
+  });
+});
+
+describe("decideOutbound: mise が焼いていない node を取る配布元（nodejs.org の /dist/ だけ）", () => {
+  const code = (d: ReturnType<typeof decideOutbound>) => (d.allow ? "allow" : d.code);
+  const v = "24.21.0";
+
+  it("版の一覧・本体・チェックサム・署名の GET / HEAD を許可する", () => {
+    for (const path of [
+      "/dist/index.json",
+      `/dist/v${v}/node-v${v}-linux-x64.tar.gz`,
+      `/dist/v${v}/node-v${v}-linux-arm64.tar.gz`,
+      `/dist/v${v}/SHASUMS256.txt`,
+      `/dist/v${v}/SHASUMS256.txt.sig`,
+    ]) {
+      expect(code(get(`https://nodejs.org${path}`)), path).toBe("allow");
+      expect(code(decideOutbound({ method: "HEAD", url: `https://nodejs.org${path}` })), path).toBe(
+        "allow",
+      );
+    }
+  });
+
+  it("/dist/ 以外は host_not_allowed", () => {
+    for (const path of ["/", "/en/", "/dist", "/distx/index.json", "/api/dist/index.json"]) {
+      expect(code(get(`https://nodejs.org${path}`)), path).toBe("host_not_allowed");
+    }
+  });
+
+  it("POST などは registry_method", () => {
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      expect(code(decideOutbound({ method, url: "https://nodejs.org/dist/index.json" }))).toBe(
+        "registry_method",
+      );
+    }
+  });
+
+  it("パスの抜け（%2f・%2e・..）で /dist/ の外へ出られない", () => {
+    for (const path of ["/dist/..%2fen/", "/dist/%2e%2e/en/", "/dist/../en/"]) {
+      expect(get(`https://nodejs.org${path}`).allow, path).toBe(false);
+    }
+  });
+
+  it("別のホスト名（www・unofficial-builds・後置ドメイン）は許可しない", () => {
+    expect(get("https://www.nodejs.org/dist/index.json").allow).toBe(false);
+    expect(get("https://unofficial-builds.nodejs.org/download/release/index.json").allow).toBe(
+      false,
+    );
+    expect(get("https://nodejs.org.evil.com/dist/index.json").allow).toBe(false);
+  });
+});
+
+describe("decideOutbound: mise が焼いていない python を取る配布元（python-build-standalone）", () => {
+  const code = (d: ReturnType<typeof decideOutbound>) => (d.allow ? "allow" : d.code);
+  const repo = { owner: "octocat", name: "Hello-World" };
+  const asset =
+    "https://github.com/astral-sh/python-build-standalone/releases/download/20251014/cpython-3.12.12+20251014-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz";
+
+  it("mise-versions.jdx.dev は python の precompiled の一覧（/data/python-precompiled-）だけ", () => {
+    expect(
+      code(
+        get("https://mise-versions.jdx.dev/data/python-precompiled-x86_64-unknown-linux-gnu.gz"),
+      ),
+    ).toBe("allow");
+    expect(
+      code(
+        get("https://mise-versions.jdx.dev/data/python-precompiled-aarch64-unknown-linux-gnu.gz"),
+      ),
+    ).toBe("allow");
+    for (const path of ["/", "/data/node.toml", "/data/python.toml", "/t?tool=node", "/data/"]) {
+      expect(code(get(`https://mise-versions.jdx.dev${path}`)), path).toBe("host_not_allowed");
+    }
+    expect(
+      code(
+        decideOutbound({
+          method: "POST",
+          url: "https://mise-versions.jdx.dev/data/python-precompiled-x86_64-unknown-linux-gnu.gz",
+        }),
+      ),
+    ).toBe("registry_method");
+  });
+
+  it("github.com の astral-sh/python-build-standalone の /releases/download/ の GET / HEAD を許可する（repo の設定に関係なく）", () => {
+    expect(code(get(asset))).toBe("allow");
+    expect(code(get(asset, { repo }))).toBe("allow");
+    expect(code(decideOutbound({ method: "HEAD", url: asset }))).toBe("allow");
+    expect(
+      code(
+        get(
+          "https://github.com/astral-sh/python-build-standalone/releases/download/20251014/SHA256SUMS",
+        ),
+      ),
+    ).toBe("allow");
+  });
+
+  it("POST などは registry_method", () => {
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      expect(code(decideOutbound({ method, url: asset }, { repo }))).toBe("registry_method");
+    }
+  });
+
+  it("ほかのリポジトリ（タスクのリポジトリを含む）の releases は拒否する", () => {
+    for (const url of [
+      "https://github.com/evil/python-build-standalone/releases/download/1/x.tar.gz",
+      "https://github.com/astral-sh/uv/releases/download/0.8.22/uv.tar.gz",
+      "https://github.com/astral-sh/python-build-standalone-x/releases/download/1/x.tar.gz",
+      "https://github.com/octocat/Hello-World/releases/download/v1/x.tar.gz",
+      "https://github.com/jdx/mise/releases/download/v2026.10.25/mise.tar.gz",
+    ]) {
+      expect(code(get(url, { repo })), url).toBe("github_path");
+    }
+  });
+
+  it("同じリポジトリでも /releases/download/ 以外（latest・tag・archive・API）は拒否する", () => {
+    for (const path of [
+      "/astral-sh/python-build-standalone/releases",
+      "/astral-sh/python-build-standalone/releases/latest",
+      "/astral-sh/python-build-standalone/releases/tag/20251014",
+      "/astral-sh/python-build-standalone/archive/refs/heads/main.zip",
+      "/astral-sh/python-build-standalone/releases/downloadx/1/x",
+    ]) {
+      expect(get(`https://github.com${path}`, { repo }).allow, path).toBe(false);
+    }
+    expect(
+      get("https://api.github.com/repos/astral-sh/python-build-standalone/releases").allow,
+    ).toBe(false);
+  });
+
+  it("パスの抜け（..・%2f・%2e・%5c）でほかのリポジトリへ出られない", () => {
+    for (const path of [
+      "/astral-sh/python-build-standalone/releases/download/../../../../evil/x/releases/download/1/x",
+      "/astral-sh/python-build-standalone/releases/download/..%2f..%2f..%2f..%2fevil/x",
+      "/astral-sh/python-build-standalone/releases/download/%2e%2e/%2e%2e/%2e%2e/%2e%2e/evil/x",
+      "/astral-sh/python-build-standalone/releases/download/..%5c..%5cevil/x",
+      "/astral-sh%2fpython-build-standalone/releases/download/1/x",
+    ]) {
+      expect(get(`https://github.com${path}`, { repo }).allow, path).toBe(false);
+    }
+  });
+
+  it("releases の配布物のリダイレクト先（release-assets.githubusercontent.com）は、このリポジトリの ID のパスだけ", () => {
+    const signed =
+      "https://release-assets.githubusercontent.com/github-production-release-asset/162334160/a5728c4e-7f3d-4eb4-a394-ec620039da16?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-01-01T00%3A00%3A00Z&rscd=attachment%3B+filename%3Dcpython.tar.gz&sig=AbC%2Bd%3D";
+    expect(code(get(signed))).toBe("allow");
+    expect(code(decideOutbound({ method: "HEAD", url: signed }))).toBe("allow");
+    for (const path of [
+      "/",
+      "/github-production-release-asset/1/a5728c4e",
+      "/github-production-release-asset/1623341600/a5728c4e",
+      "/github-production-release-asset/16233416/a5728c4e",
+      "/other/162334160/a5728c4e",
+      "/github-production-release-asset/162334160/../1/a5728c4e",
+      "/github-production-release-asset/162334160/..%2f1/a5728c4e",
+    ]) {
+      expect(get(`https://release-assets.githubusercontent.com${path}`).allow, path).toBe(false);
+    }
+    expect(
+      code(
+        get(
+          "https://release-assets.githubusercontent.com/x?/github-production-release-asset/162334160/",
+        ),
+      ),
+    ).toBe("host_not_allowed");
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      expect(code(decideOutbound({ method, url: signed }))).toBe("registry_method");
+    }
+  });
+
+  it("旧来のリダイレクト先（objects.githubusercontent.com）も、このリポジトリの ID のパスだけ", () => {
+    const signed =
+      "https://objects.githubusercontent.com/github-production-release-asset-2e65be/162334160/a5728c4e-7f3d-4eb4-a394-ec620039da16?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc";
+    expect(code(get(signed))).toBe("allow");
+    for (const path of [
+      "/",
+      "/github-production-release-asset-2e65be/1/a5728c4e",
+      "/github-production-release-asset-2e65be/1623341600/a5728c4e",
+      "/github-production-repository-file-5c1aeb/162334160/x",
+    ]) {
+      expect(get(`https://objects.githubusercontent.com${path}`).allow, path).toBe(false);
+    }
+    expect(code(decideOutbound({ method: "POST", url: signed }))).toBe("registry_method");
+  });
+
+  it("GitHub のほかのコンテンツのホストは許可しない", () => {
+    for (const url of [
+      "https://raw.githubusercontent.com/astral-sh/python-build-standalone/main/README.md",
+      "https://codeload.github.com/astral-sh/python-build-standalone/tar.gz/main",
+      "https://evil.release-assets.githubusercontent.com/github-production-release-asset/162334160/x",
+    ]) {
+      expect(get(url).allow, url).toBe(false);
+    }
+  });
+});

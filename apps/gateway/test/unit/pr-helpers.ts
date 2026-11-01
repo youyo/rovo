@@ -12,9 +12,25 @@ export const app = () => getFakeApp(env as unknown as UnitGitHubEnv);
 
 export type TaskStub = ReturnType<typeof taskStub>;
 
+/** createTask が作ったタスク（clearTaskAlarms が alarm を消す対象）。 */
+const createdStubs: TaskStub[] = [];
+
+/**
+ * createTask / runToCompleted が作ったタスクの alarm を消し、記録を空にする。afterEach で呼ぶ。
+ * TaskDO は作成の 10 秒後に alarm を置く。残したままファイルが終わると、共有の workerd の中で後から発火して
+ * console に監査ログを出し、閉じかけの vitest の RPC に当たって EnvironmentTeardownError（Unhandled Rejection）になる。
+ */
+export async function clearTaskAlarms(): Promise<void> {
+  const stubs = createdStubs.splice(0);
+  await Promise.all(
+    stubs.map((s) => runInDurableObject(s, (_i, state) => state.storage.deleteAlarm())),
+  );
+}
+
 export async function createTask(overrides: Record<string, unknown> = {}, owner = 801) {
   const id = newTaskId();
   const stub = taskStub(id);
+  createdStubs.push(stub);
   const r = await stub.ensureCreated(sampleInput(id, owner, overrides));
   if (!r.ok) throw new Error(`ensureCreated failed: ${r.code}`);
   // ENVIRONMENT=test にして、DO の中に監査の記録（test_audit）を残すようにする

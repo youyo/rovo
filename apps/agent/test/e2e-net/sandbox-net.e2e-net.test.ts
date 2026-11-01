@@ -97,6 +97,40 @@ describe("実ネットワーク", () => {
     expect(r.stdout.trim().endsWith("true")).toBe(true);
   });
 
+  it("Go のモジュールを取れる（zip は proxy.golang.org から storage.googleapis.com の限定バケットへ 302 で転送される）", async () => {
+    const r = await sb.exec([
+      "bash",
+      "-c",
+      "mkdir -p /tmp/g && cd /tmp/g && go mod init example.com/m && go get golang.org/x/text@v0.14.0 && go mod download -x golang.org/x/text && ls $(go env GOMODCACHE)/golang.org/x/text@v0.14.0/go.mod",
+    ]);
+    expect(r.exitCode, r.stderr).toBe(0);
+  }, 300_000);
+
+  it("storage.googleapis.com の Go のバケットへの GET は、rovo の拒否（outbound request denied）にならない", async () => {
+    // 存在しないオブジェクトなので Google 自身が 403 / 404 を返す。区別は本文で行う
+    const r = await sb.exec([
+      "curl",
+      "-sS",
+      "-m",
+      "10",
+      "https://storage.googleapis.com/proxy-golang-org-prod/x.zip",
+    ]);
+    expect(r.stdout).not.toContain("rovo: outbound request denied");
+    const other = await sb.exec([
+      "curl",
+      "-sS",
+      "-m",
+      "10",
+      "https://storage.googleapis.com/other-bucket/x.zip",
+    ]);
+    expect(other.stdout).toContain("rovo: outbound request denied (host_not_allowed)");
+  });
+
+  it("storage.googleapis.com は Go のモジュールのバケット以外へは出られない", async () => {
+    expect((await sb.curl("https://storage.googleapis.com/other-bucket/x.zip")).code).toBe("403");
+    expect((await sb.curl("https://storage.googleapis.com/")).code).toBe("403");
+  });
+
   it("許可外のホスト・別リポジトリ・メタデータ・内部 IP には出られない", async () => {
     expect((await sb.curl("https://example.com/")).code).toBe("403");
     expect(

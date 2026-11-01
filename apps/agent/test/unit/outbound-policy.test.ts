@@ -287,3 +287,57 @@ describe("gitRoute", () => {
     expect(gitRoute("POST", u(`${base}/info/refs?service=git-receive-pack`))).toBeUndefined();
   });
 });
+
+describe("decideOutbound: Go のモジュール zip の配布元（storage.googleapis.com の限定パス）", () => {
+  const signed =
+    "https://storage.googleapis.com/proxy-golang-org-prod/abc123-golang.org:x:text-v0.14.0.zip?Expires=1&GoogleAccessId=x%40y.iam.gserviceaccount.com&Signature=AbC%2Bd%3D";
+  const code = (d: ReturnType<typeof decideOutbound>) => (d.allow ? "allow" : d.code);
+
+  it("署名付き query を含む実際の形の GET/HEAD を許可する", () => {
+    expect(get(signed).allow).toBe(true);
+    expect(decideOutbound({ method: "HEAD", url: signed }, {}).allow).toBe(true);
+  });
+
+  it("別のバケットは host_not_allowed", () => {
+    expect(code(get("https://storage.googleapis.com/other-bucket/x.zip"))).toBe("host_not_allowed");
+    expect(code(get("https://storage.googleapis.com/"))).toBe("host_not_allowed");
+    expect(code(get("https://storage.googleapis.com/proxy-golang-org-prodx/x.zip"))).toBe(
+      "host_not_allowed",
+    );
+    expect(code(get("https://storage.googleapis.com/other/proxy-golang-org-prod/x"))).toBe(
+      "host_not_allowed",
+    );
+  });
+
+  it("バケット名の指定を query に置いても許可しない", () => {
+    expect(code(get("https://storage.googleapis.com/other-bucket/x?/proxy-golang-org-prod/"))).toBe(
+      "host_not_allowed",
+    );
+  });
+
+  it("パスの .. やエンコードされた区切りで別のバケットへ抜けられない", () => {
+    for (const path of [
+      "/proxy-golang-org-prod/../other/x",
+      "/proxy-golang-org-prod/%2e%2e/other/x",
+      "/proxy-golang-org-prod/%2E%2E/other/x",
+      "/proxy-golang-org-prod/.%2e/other/x",
+      "/proxy-golang-org-prod/..%2fother/x",
+      "/proxy-golang-org-prod%2f../other/x",
+      "/proxy-golang-org-prod/..\\other/x",
+    ]) {
+      expect(get(`https://storage.googleapis.com${path}`).allow, path).toBe(false);
+    }
+  });
+
+  it("POST などは registry_method", () => {
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      expect(code(decideOutbound({ method, url: signed }, {}))).toBe("registry_method");
+    }
+  });
+
+  it("別ポート・http・別ホスト名は許可しない", () => {
+    expect(get("http://storage.googleapis.com/proxy-golang-org-prod/x").allow).toBe(false);
+    expect(get("https://storage.googleapis.com:8443/proxy-golang-org-prod/x").allow).toBe(false);
+    expect(get("https://evil.storage.googleapis.com/proxy-golang-org-prod/x").allow).toBe(false);
+  });
+});

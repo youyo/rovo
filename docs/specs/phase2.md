@@ -159,6 +159,7 @@ apps/gateway (既存 Worker)
       - git-receive-pack、dumb HTTP、LFS、別リポジトリ（submodule を含む）は拒否する。
       - リクエスト本文のサイズと時間に上限を設ける。
     - `registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`、`proxy.golang.org`、`sum.golang.org`: GET と HEAD だけ。
+    - `storage.googleapis.com` は、パスが `/proxy-golang-org-prod/` で始まるものだけ（GET と HEAD。ホストごとは許可しない）。`proxy.golang.org` が Go のモジュールの zip（と GOTOOLCHAIN の toolchain 本体）を 302 で転送する先。判定は pathname だけで行い、`..`・`%2e`・`%2f`・`%5c` を含むパスは拒否する。
   - それ以外（CONNECT、WebSocket、別ポート、裸の IP、IPv6 の直接指定、Host と SNI の不一致を含む）はすべて拒否し、ポリシー違反としてイベントに記録する。記録には query や本文を残さない。
   - 上流への転送
     - `redirect: "manual"` にし、redirect の行き先ごとに scheme / host / port / path / method を判定し直す。

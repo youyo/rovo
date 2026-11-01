@@ -23,6 +23,27 @@ export const REGISTRY_HOSTS: ReadonlySet<string> = new Set([
   "sum.golang.org",
 ]);
 /**
+ * ホスト全体ではなく、パスの先頭が一致するものだけを許可するレジストリ（GET / HEAD だけ）。
+ * proxy.golang.org は、モジュールの zip（GOTOOLCHAIN の toolchain 本体も）を 302 でこのバケットへ転送する。
+ * storage.googleapis.com は誰でもバケットを作れるので、ホストごとは許可しない。
+ */
+export const REGISTRY_PATH_PREFIXES: ReadonlyMap<string, readonly string[]> = new Map([
+  ["storage.googleapis.com", ["/proxy-golang-org-prod/"]],
+]);
+
+/**
+ * host と pathname が、パス限定のレジストリに当たるか。判定は pathname だけで行い、query は見ない。
+ * pathname は URL が正規化済み（.. と %2e%2e は解決される）。解決されずに残る %2f・%5c・%2e を含むものは、別のバケットへ
+ * 抜けるおそれがあるので許可しない。
+ */
+export function isPathRegistry(host: string, pathname: string): boolean {
+  const prefixes = REGISTRY_PATH_PREFIXES.get(host.toLowerCase());
+  if (!prefixes) return false;
+  if (/%2f|%5c|%2e/i.test(pathname)) return false;
+  return prefixes.some((p) => pathname.startsWith(p));
+}
+
+/**
  * decideOutbound が返しうる違反コードの全部（outbound_denied の reason になる）。
  * deny() の引数の型にしてあるので、足し忘れるとコンパイルが通らない。テスト（outbound-denied-reasons.test.ts）が表の過不足を確かめる。
  */
@@ -75,6 +96,13 @@ export function decideOutbound(req: OutboundRequest, opts: OutboundOptions = {})
 
   if (host === "github.com") return decideGitHub(method, url, opts);
   if (REGISTRY_HOSTS.has(host)) {
+    return method === "GET" || method === "HEAD"
+      ? { allow: true }
+      : deny("registry_method", `${method} is not allowed for registry: ${host}`);
+  }
+  if (REGISTRY_PATH_PREFIXES.has(host)) {
+    if (!isPathRegistry(host, url.pathname))
+      return deny("host_not_allowed", `host is not allowed: ${host}`);
     return method === "GET" || method === "HEAD"
       ? { allow: true }
       : deny("registry_method", `${method} is not allowed for registry: ${host}`);

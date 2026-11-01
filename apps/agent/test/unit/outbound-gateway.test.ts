@@ -56,6 +56,12 @@ describe("classifyDestination", () => {
     expect(classifyDestination("proxy.golang.org")).toBe("registry");
     expect(classifyDestination("sum.golang.org")).toBe("registry");
     expect(classifyDestination("evil.example")).toBe("other");
+    // storage.googleapis.com は、Go のモジュール zip のバケットのパスだけが registry
+    expect(classifyDestination("storage.googleapis.com", "/proxy-golang-org-prod/a.zip")).toBe(
+      "registry",
+    );
+    expect(classifyDestination("storage.googleapis.com", "/other-bucket/a.zip")).toBe("other");
+    expect(classifyDestination("storage.googleapis.com")).toBe("other");
     expect(classifyDestination("169.254.169.254")).toBe("other");
   });
 });

@@ -6,6 +6,7 @@ import {
   decideOutbound,
   type GitRoute,
   gitRoute,
+  isPathRegistry,
   type PolicyDenyCode,
   REGISTRY_HOSTS,
 } from "./outbound-policy";
@@ -57,10 +58,10 @@ export const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 export const UPSTREAM_TIMEOUT_MS = 10 * 60_000;
 
 /** 転送先の分類。ログにはホスト名そのものでなくこれを残す。 */
-export function classifyDestination(host: string): "github" | "registry" | "other" {
+export function classifyDestination(host: string, pathname = ""): "github" | "registry" | "other" {
   const h = host.toLowerCase();
   if (h === "github.com") return "github";
-  if (REGISTRY_HOSTS.has(h)) return "registry";
+  if (REGISTRY_HOSTS.has(h) || isPathRegistry(h, pathname)) return "registry";
   return "other";
 }
 
@@ -167,7 +168,7 @@ function denied(
     taskId: deps.props.taskId,
     caller: "child",
     reason: code,
-    dest: classifyDestination(url.hostname),
+    dest: classifyDestination(url.hostname, url.pathname),
   };
   try {
     if (deps.audit) deps.audit("outbound_denied", fields);

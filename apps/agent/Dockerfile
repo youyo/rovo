@@ -80,6 +80,17 @@ ENV VIRTUAL_ENV=/opt/venv \
     UV_PYTHON_DOWNLOADS=never \
     UV_PYTHON=/opt/venv/bin/python \
     PATH=/opt/venv/bin:$PATH
+# bash ツールは port.exec(["bash", "-lc", command]) で流す。ログインシェルは /etc/profile を読み、root の PATH を
+# "/usr/local/sbin:...:/bin" で上書きする（上の ENV PATH も BASE_ENV の PATH もここで消える。本番で go・python3 が見つからなかった原因）。
+# /etc/profile は最後に /etc/profile.d/*.sh を読むので、そこで venv と go を PATH の先頭へ足し直す（順番は ENV PATH / BASE_ENV と同じ）。
+# /etc/profile が上書きするのは PATH だけ（ほかの ENV は消えない）。test/node/sandbox-env-dockerfile.node.test.ts が BASE_ENV の PATH との一致を確かめる。
+RUN printf '%s\n' \
+      'case ":$PATH:" in' \
+      '  *:/opt/venv/bin:*) ;;' \
+      '  *) export PATH="/opt/venv/bin:/usr/local/go/bin:$PATH" ;;' \
+      'esac' > /etc/profile.d/rovo-path.sh \
+ && chmod 0644 /etc/profile.d/rovo-path.sh \
+ && grep -q 'profile.d' /etc/profile
 RUN python3 --version | grep -F "Python 3.13." \
  && python --version | grep -F "Python 3.13." \
  && pip --version | grep -F "(python 3.13)" \

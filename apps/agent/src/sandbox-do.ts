@@ -40,6 +40,7 @@ import {
 import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./deps-scripts";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
+import { BASE_ENV, CA_CERT, WORKSPACE } from "./sandbox-env";
 import type {
   ExecOptions,
   ExecResult,
@@ -63,25 +64,6 @@ import {
   validateWorkspaceSpec,
 } from "./workspace-path";
 
-const WORKSPACE = "/workspace";
-const CA_CERT = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
-/** HTTPS 傍受の CA を各ツールに信用させる。exec は PATH しか引き継がないので毎回渡す。 */
-const BASE_ENV: Record<string, string> = {
-  NODE_EXTRA_CA_CERTS: CA_CERT,
-  GIT_SSL_CAINFO: CA_CERT,
-  REQUESTS_CA_BUNDLE: CA_CERT,
-  SSL_CERT_FILE: CA_CERT,
-  // 作業ツリー（/workspace）に npm のキャッシュなどが書かれて git add -A に混ざらないよう、HOME は外に置く
-  HOME: "/root",
-  // pnpm / yarn の本体はイメージのビルド時にここへ入れてある（apps/agent/Dockerfile）
-  COREPACK_HOME: "/opt/corepack",
-  // corepack が pnpm / yarn の本体を取るときに「ダウンロードしてよいか」の確認で止まらないようにする
-  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
-  GIT_TERMINAL_PROMPT: "0",
-  GIT_CONFIG_COUNT: "1",
-  GIT_CONFIG_KEY_0: "safe.directory",
-  GIT_CONFIG_VALUE_0: WORKSPACE,
-};
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 /** 自動の push の許可証（storage の kv）のキー。exec の間だけ置き、finally で消す。 */
 const PUSH_PERMIT_KEY = "push_permit";

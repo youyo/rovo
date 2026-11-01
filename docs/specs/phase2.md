@@ -170,7 +170,8 @@ apps/gateway (既存 Worker)
   - Go は `ARG GO_VERSION`（公式 tarball を sha256 で確認して `/usr/local/go` に置く）。`GOTOOLCHAIN=auto` で、別の版の go.mod の toolchain は `proxy.golang.org` から取る。`GOPROXY=https://proxy.golang.org`、`GOSUMDB=sum.golang.org`。
   - Python は uv で入れた 3.13 だけ（`python3` / `python` / `pip` は 3.13）。`UV_PYTHON_DOWNLOADS=never` なので、別の版の Python は取れず、すぐ失敗する。
   - mise は `ARG MISE_VERSION`（公式 release の tarball を sha256 で確認して `/usr/local/bin/mise` に置く）。焼いた node・Go・Python は `mise link` で登録してあり、リポジトリの `mise.toml` の `[tools]` が焼いた版（前方一致を含む。`node = "24"`、`go = "1.26"`、`python = "3.13"` など）を指すときは、ダウンロードせずに `mise run` / `mise exec` で使える。違う版は今は入れられない（外向き通信の許可先に mise 用のホストは足さない。別のタスクで扱う）。
-  - mise の設定: データ・キャッシュは `/opt/mise`、`MISE_TRUSTED_CONFIG_PATHS=/workspace`、`MISE_YES=1`、`MISE_OFFLINE=1`（外へ出ずにすぐ失敗させる）。同じ値を `/etc/mise/config.toml` にも書く（exec が PATH しか引き継がないことがあるため）。shims と activate は使わず、PATH は焼いたツールを直接指す。
+  - mise の設定: データ・キャッシュは `/opt/mise`、`MISE_TRUSTED_CONFIG_PATHS=/workspace`、`MISE_YES=1`、`MISE_OFFLINE=1`（外へ出ずにすぐ失敗させる）。同じ値を `/etc/mise/config.toml` にも書く（exec が ENV を引き継がないことがあるため）。shims と activate は使わず、PATH は焼いたツールを直接指す。
+  - 本番（Cloudflare Containers）の `container.exec` は Dockerfile の `ENV` を引き継がないので、`ENV` を足す・変えるときは `apps/agent/src/sandbox-env.ts` の `BASE_ENV` にも同じ値を書く（`test:unit:agent-git` が一致を確かめる）。
   - gcc（build-essential）は入れない。cgo を使う Go のパッケージ、Python の sdist のビルド、node のネイティブ拡張のビルドはできない。wheel / ビルド済みバイナリがあるものだけが入る。
   - 依存の導入とキャッシュへの Go / Python の追加は、このイメージの変更とは別に扱う。
 - 既知の制限

@@ -17,6 +17,21 @@ const SHA = "a".repeat(40);
 const TREE = "b".repeat(40);
 
 describe("GitHubRepoApi", () => {
+  it("deleteBranch: 204（本文なし）で true を返し例外を投げない", async () => {
+    const { a } = api({
+      "GET /repos/acme/widgets/git/ref/heads/feat": () => json({ object: { sha: SHA } }),
+      "DELETE /repos/acme/widgets/git/refs/heads/feat": () => new Response(null, { status: 204 }),
+    });
+    expect(await a.deleteBranch("feat", SHA)).toBe(true);
+  });
+
+  it("本文があり JSON でない成功応答は non-JSON response で失敗する", async () => {
+    const { a } = api({
+      "GET /repos/acme/widgets/git/commits/abc": () => new Response("<html>", { status: 200 }),
+    });
+    await expect(a.getCommit("abc")).rejects.toMatchObject({ detail: "non-JSON response" });
+  });
+
   it("getCommit: 完全な SHA と tree を返す。token で認証する", async () => {
     const { a, calls } = api({
       "GET /repos/acme/widgets/git/commits/0123456": () =>

@@ -1170,6 +1170,7 @@ describe("変更なしで終端: 空の Draft PR を閉じる", () => {
     if (!r.ok) throw new Error("not ready");
     expect(r.result.status).toBe("COMPLETED");
     expect(r.result.pr).toMatchObject({ closed_empty: true });
+    expect(String(r.result.warnings)).not.toContain("delete_branch_failed");
   });
 
   it("ワーカーの commit がある（head ≠ initial_sha）と何もしない", async () => {

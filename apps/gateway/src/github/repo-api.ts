@@ -85,11 +85,21 @@ export class GitHubRepoApi {
     }
     if (!res.ok && !accept.includes(res.status)) return throwApiError(res, what);
     let json: unknown = null;
-    try {
-      json = await res.json();
-    } catch {
-      if (res.ok)
-        throw new GitHubApiError({ status: res.status, what, detail: "non-JSON response" });
+    if (res.status !== 204 && res.status !== 205) {
+      let text = "";
+      try {
+        text = await res.text();
+      } catch {
+        // 本文を読めない
+      }
+      if (text.trim() !== "") {
+        try {
+          json = JSON.parse(text);
+        } catch {
+          if (res.ok)
+            throw new GitHubApiError({ status: res.status, what, detail: "non-JSON response" });
+        }
+      }
     }
     return { status: res.status, json };
   }

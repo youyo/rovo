@@ -128,7 +128,7 @@ RUN case "${TARGETARCH:-amd64}" in \
  && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- go version | grep -F "go${GO_VERSION} " \
  && sed -i "s/^go = .*/go = \"${GO_VERSION%.*}\"/" mise.toml \
  && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- go version | grep -F "go${GO_VERSION} " \
- && [ "$(MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- python -c 'import sys; print(sys.prefix)')" = /opt/venv ] \
+ && [ "$(MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- python -c 'import os, sys; print(os.path.realpath(sys.prefix))')" = /opt/venv ] \
  && MISE_TRUSTED_CONFIG_PATHS=/tmp/misecheck mise exec -- python -m pip --version \
  && cd / && rm -rf /tmp/misecheck \
  && chmod -R a+rwX /opt/mise

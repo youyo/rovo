@@ -433,7 +433,7 @@ GitHub Appの秘密鍵はCloudflare Worker Secretsに保持する。
 | Workflows | Read & Write（任意。worker が `.github/workflows/` を push するため） |
 | Issues | Read（任意。worker が `read_issue` で issue を読むため） |
 
-Workflows と Issues は、既存の App では App の設定で権限を足し、各 installation が承認するまで有効にならない。gateway は installation の承認済みの権限を `GET /app/installations/{id}`（App の JWT。10 分キャッシュ、失敗は 1 分）で読み、`workflows: write` を持つときだけ token に `workflows: write` を、`issues` が read / write のときだけ `issues: read` を要求する。読めない・未承認なら従来の 3 権限（Contents / Pull requests write・Metadata read）で token を作る（未承認の権限を要求すると token の発行が失敗しうるため）。未承認の間の workflow の push は、従来どおり拒否の検知（`push_rejected_workflows_permission`）で扱う。
+Workflows と Issues は、既存の App では App の設定で権限を足し、各 installation が承認するまで有効にならない。gateway は installation の承認済みの権限を `GET /app/installations/{id}`（App の JWT。token の発行ごとに読む。同じクライアントの中だけ成功 10 分・失敗 1 分キャッシュする）で読み、`workflows: write` を持つときだけ token に `workflows: write` を、`issues` が read / write のときだけ `issues: read` を要求する。読めない・未承認なら従来の 3 権限（Contents / Pull requests write・Metadata read）で token を作る（未承認の権限を要求すると token の発行が失敗しうるため）。未承認の間の workflow の push は、従来どおり拒否の検知（`push_rejected_workflows_permission`）で扱う。
 
 **残るリスク**: worker が push した workflow は、そのブランチで push をきっかけに、リポジトリの Actions の設定（secrets・`GITHUB_TOKEN` の権限など）のとおりに動きうる。`task_result` の CI 設定の警告（変更・削除・追加）は `task_pr_merge` を止めるが、push で起きる実行は止められない。必要なら Actions の設定（secrets の公開範囲・fork / ブランチの制限）で絞り、worker の workflow はマージ前にレビューする。
 

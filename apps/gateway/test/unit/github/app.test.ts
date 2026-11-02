@@ -92,18 +92,114 @@ describe("GitHubAppClient", () => {
 
   it("Installation Token を発行する（repository_ids と permissions を絞る。JWT で認証）", async () => {
     const { c, calls } = await client({
+      "GET /app/installations/77": () => json({ permissions: { contents: "write" } }),
       "POST /app/installations/77/access_tokens": () =>
         json({ token: "ghs_secret", expires_at: "2027-01-15T09:00:00Z" }, { status: 201 }),
     });
     const t = await c.createInstallationToken(77, 4242);
     expect(t).toEqual({ token: "ghs_secret", expiresAt: Date.parse("2027-01-15T09:00:00Z") });
-    const req = calls[0] as Request;
+    const req = calls.find((r) => r.method === "POST") as Request;
     expect(await req.clone().json()).toEqual({
       repository_ids: [4242],
       permissions: { contents: "write", pull_requests: "write", metadata: "read" },
     });
     const jwt = req.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
     expect((await verifyJwt(jwt, pair.publicPem)).ok).toBe(true);
+  });
+
+  describe("installation の権限に応じた token の権限", () => {
+    const BASE = { contents: "write", pull_requests: "write", metadata: "read" };
+    const tok = () =>
+      json({ token: "[REDACTED]", expires_at: "2027-01-15T09:00:00Z" }, { status: 201 });
+    const posted = async (calls: Request[]) => {
+      const req = calls.find((r) => r.method === "POST") as Request;
+      return ((await req.clone().json()) as { permissions: unknown }).permissions;
+    };
+
+    it("workflows: write を持つときだけ workflows: write を足す（JWT で GET する）", async () => {
+      const { c, calls } = await client({
+        "GET /app/installations/77": () => json({ permissions: { workflows: "write" } }),
+        "POST /app/installations/77/access_tokens": tok,
+      });
+      await c.createInstallationToken(77, 4242);
+      expect(await posted(calls)).toEqual({ ...BASE, workflows: "write" });
+      const jwt = calls[0]?.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
+      expect((await verifyJwt(jwt, pair.publicPem)).ok).toBe(true);
+      expect(c.lastTokenPermissions).toEqual({ workflows: true, issues: false });
+    });
+
+    it("issues は read でも write でも read だけを要求する", async () => {
+      for (const level of ["read", "write"]) {
+        const { c, calls } = await client({
+          "GET /app/installations/77": () => json({ permissions: { issues: level } }),
+          "POST /app/installations/77/access_tokens": tok,
+        });
+        await c.createInstallationToken(77, 4242);
+        expect(await posted(calls)).toEqual({ ...BASE, issues: "read" });
+        expect(c.lastTokenPermissions).toEqual({ workflows: false, issues: true });
+      }
+    });
+
+    it("workflows: read など write 以外では足さない", async () => {
+      const { c, calls } = await client({
+        "GET /app/installations/77": () => json({ permissions: { workflows: "read" } }),
+        "POST /app/installations/77/access_tokens": tok,
+      });
+      await c.createInstallationToken(77, 4242);
+      expect(await posted(calls)).toEqual(BASE);
+    });
+
+    it("取得に失敗しても従来の 3 権限で発行する（5xx・不正な本文・ネットワーク）", async () => {
+      const bad: Array<() => Response | Promise<Response>> = [
+        () => json({}, { status: 500 }),
+        () => json({ permissions: "x" }),
+        () => new Response("not json", { status: 200 }),
+        () => {
+          throw new Error("net");
+        },
+      ];
+      for (const h of bad) {
+        const { c, calls } = await client({
+          "GET /app/installations/77": h,
+          "POST /app/installations/77/access_tokens": tok,
+        });
+        await c.createInstallationToken(77, 4242);
+        expect(await posted(calls)).toEqual(BASE);
+        expect(c.lastTokenPermissions).toEqual({ workflows: false, issues: false });
+      }
+    });
+
+    it("成功は短い TTL でキャッシュし、失敗は 1 分以内で再取得する", async () => {
+      let now = 1_800_000_000_000;
+      const r = routerFetch({
+        "GET /app/installations/77": [
+          () => json({}, { status: 500 }),
+          () => json({ permissions: { workflows: "write" } }),
+        ],
+        "POST /app/installations/77/access_tokens": tok,
+      });
+      const c = new GitHubAppClient({
+        appId: "12345",
+        privateKey: pair.privatePem,
+        apiBase: "https://api.github.test",
+        fetch: r.fetch,
+        now: () => now,
+      });
+      const gets = () => r.calls.filter((x) => x.method === "GET").length;
+      await c.createInstallationToken(77, 1);
+      await c.createInstallationToken(77, 1);
+      expect(gets()).toBe(1); // 失敗も直後はキャッシュ
+      now += 61_000;
+      await c.createInstallationToken(77, 1);
+      expect(gets()).toBe(2);
+      expect(c.lastTokenPermissions.workflows).toBe(true);
+      now += 5 * 60_000;
+      await c.createInstallationToken(77, 1);
+      expect(gets()).toBe(2); // 成功は 10 分
+      now += 6 * 60_000;
+      await c.createInstallationToken(77, 1);
+      expect(gets()).toBe(3);
+    });
   });
 
   it("bot の作者: GET /app の slug と GET /users/<slug>[bot] の id から <id>+<slug>[bot] の noreply を作る（JWT で /app を引く）", async () => {

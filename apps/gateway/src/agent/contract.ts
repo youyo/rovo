@@ -521,4 +521,12 @@ export interface AgentRpc {
    * 道具（#135）を渡したときは往復の 1 歩（モデルを 1 回呼び、呼んだ道具を返す）。往復は UserDO が回す
    */
   consult(request: ConsultRequest): Promise<ConsultResult>;
+  /**
+   * ワーカーの read_issue / read_pr（github_read イベント）への応答。TaskDO がタスクのリポジトリを読んで整形した文を渡す
+   * （token は渡さない）。待っている依頼が無い（時間切れ・再起動・重複）なら ignored:true
+   */
+  deliverGitHubRead(
+    requestId: string,
+    result: { text: string; isError: boolean },
+  ): Promise<{ ok: boolean; ignored?: boolean }>;
 }

@@ -104,7 +104,9 @@ describe("AgentDO: read_issue / read_pr（gateway が GitHub を読む）", () =
     expect(await waitForTerminal(fx)).toBe("completed");
     const events = await allEvents(fx);
     expect(events.filter((e) => e.type === "github_read")).toEqual([]);
-    const ends = (await toolEnds(fx)).filter((e) => e.name === "read_issue" || e.name === "read_pr");
+    const ends = (await toolEnds(fx)).filter(
+      (e) => e.name === "read_issue" || e.name === "read_pr",
+    );
     expect(ends).toHaveLength(bad.length + 1);
     for (const e of ends) expect(e.isError).toBe(true);
   });

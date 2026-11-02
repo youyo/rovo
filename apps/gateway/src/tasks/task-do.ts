@@ -40,6 +40,7 @@ import {
   renderReportBlock,
   resolveGitHubBaseUrls,
 } from "../github";
+import { type parseWorkerReadRequest, readForWorker } from "../github/worker-read";
 import { type ModelSelection, modelSelectionSchema } from "../model-selection";
 import { agentModelsOf, defaultModelOf, effortOf, effortRejection } from "../models";
 import {
@@ -764,7 +765,18 @@ type GithubRow = {
   deps: string | null;
 };
 
-type TokenRow = { id: number; enc: string; expires_at: number; revoked: number; kind: string };
+/** 取り込みで見つけた read_issue / read_pr の依頼（検査済み） */
+type GitHubReadRequest = NonNullable<ReturnType<typeof parseWorkerReadRequest>>;
+
+type TokenRow = {
+  id: number;
+  enc: string;
+  expires_at: number;
+  revoked: number;
+  kind: string;
+  /** issues: read を含めて発行したか（0 / 1。列を足す前の行は 0） */
+  issues: number;
+};
 
 /** 再試行しても直らない失敗。TaskDO を FAILED にする。reason は公開される（秘密を入れない）。 */
 class SetupFailure extends Error {
@@ -1092,6 +1104,8 @@ export class TaskDO extends DurableObject<Env> {
       revoked INTEGER NOT NULL DEFAULT 0,
       kind TEXT NOT NULL
     )`);
+    // #157: その token が issues: read を持つか（installation が承認していたときだけ 1）。read_issue の可否に使う
+    addColumnIfMissing(sql, "git_token", "issues", "INTEGER NOT NULL DEFAULT 0");
     // Phase 7 M2: 終端済み（finalize_done = 1）で暗号文が残っている既存の行を空にする（冪等）
     this.scrubTokenCiphertext();
   }
@@ -2991,7 +3005,10 @@ export class TaskDO extends DurableObject<Env> {
       const link = this.getLink();
       if (!link) return true;
       const res = await this.agentStub().getEvents(link.ingest_cursor, EVENT_PAGE_LIMIT);
-      const progressed = this.applyPage(res);
+      const reads: GitHubReadRequest[] = [];
+      const progressed = this.applyPage(res, reads);
+      // 取り込みのトランザクションの外で GitHub を読む（カーソルは進めてあるので、同じ依頼を 2 回読まない）
+      for (const r of reads) await this.answerGitHubRead(r);
       if (!res.hasMore) return true;
       if (!progressed) return false;
     }
@@ -3002,7 +3019,7 @@ export class TaskDO extends DurableObject<Env> {
    * 1 ページ分を、状態・自分の seq・イベント・取り込みカーソルとまとめて 1 トランザクションで反映する。
    * カーソル以下の seq は取り込み済みとして読み飛ばすので、同じ範囲が重なって届いても重複しない。
    */
-  private applyPage(page: EventsPage): boolean {
+  private applyPage(page: EventsPage, reads: GitHubReadRequest[] = []): boolean {
     const before = this.latestSeq();
     const progressed = this.ctx.storage.transactionSync(() => {
       const link = this.getLink();
@@ -3032,6 +3049,9 @@ export class TaskDO extends DurableObject<Env> {
         } else if (m.kind === "progress") {
           // 履歴（events）には積まない。最新の 1 件だけを上書きする（終端の後は取り込まない）
           if (open && m.progress !== undefined) this.applyProgress(m.progress, e.ts);
+        } else if (m.kind === "github_read") {
+          // read_issue / read_pr の依頼。公開イベントにはしない。検査に通らない依頼は捨てる（AgentDO 側が時間切れで返す）
+          if (open && m.read !== undefined) reads.push(m.read);
         } else if (open) {
           this.appendAgentEvent(m.type, m.payload, e.ts, link.operation_id, e.seq);
           // 索引の stage / verify_attempt に効くイベント（一覧の段階を古いままにしない）
@@ -3067,6 +3087,52 @@ export class TaskDO extends DurableObject<Env> {
     });
     if (this.latestSeq() !== before) this.notifyWaiters();
     return progressed;
+  }
+
+  /**
+   * ワーカーの read_issue / read_pr に答える（#157）。リポジトリはタスクのもの、token は gateway が持つものを使い、
+   * 整形した文（非信頼の囲み・伏せ字済み）だけを AgentDO に渡す。失敗しても取り込みは止めない（AgentDO は時間切れで続ける）
+   */
+  private async answerGitHubRead(r: GitHubReadRequest): Promise<void> {
+    let result: { text: string; isError: boolean };
+    try {
+      const row = this.getRow();
+      if (!row) return;
+      const token = await this.githubReadToken(row);
+      result = await readForWorker(
+        {
+          token: token.token,
+          repository: row.repository,
+          apiBase: this.apiBase(),
+          issuesPermission: token.issues,
+          ...(this.githubFetch ? { fetch: this.githubFetch } : {}),
+        },
+        r.request,
+      );
+    } catch {
+      // token の発行・復号の失敗など。中身は出さない
+      result = { isError: true, text: `[${r.request.tool}] github_error (token unavailable)` };
+    }
+    try {
+      await this.withTimeout(
+        this.agentStub().deliverGitHubRead(r.requestId, result),
+        this.resultTimeoutMs,
+      );
+    } catch {
+      // 届かなければ AgentDO は時間切れの固定のエラーで続ける
+    }
+  }
+
+  /** read_issue / read_pr に使う token と、それが issues: read を持つか（workingToken と同じ選び方） */
+  private async githubReadToken(row: TaskRow): Promise<{ token: string; issues: boolean }> {
+    for (const t of this.tokenRows("revoked = 0").reverse()) {
+      if (t.expires_at - this.now() > 60_000) {
+        return { token: await this.decryptToken(t), issues: t.issues === 1 };
+      }
+    }
+    const issued = await this.issueToken(row, "final");
+    const stored = this.tokenRows(`id = ${Number(issued.id)}`)[0];
+    return { token: issued.token, issues: stored?.issues === 1 };
   }
 
   /** 実行中の進捗（command_progress）の保存場所。meta の 1 行で、履歴の events には入れない。 */
@@ -3346,10 +3412,11 @@ export class TaskDO extends DurableObject<Env> {
     const id = this.ctx.storage.transactionSync(() => {
       const inserted = this.ctx.storage.sql
         .exec<{ id: number }>(
-          "INSERT INTO git_token (enc, expires_at, kind) VALUES (?, ?, ?) RETURNING id",
+          "INSERT INTO git_token (enc, expires_at, kind, issues) VALUES (?, ?, ?, ?) RETURNING id",
           enc,
           issued.expiresAt,
           kind,
+          client.lastTokenPermissions.issues ? 1 : 0,
         )
         .one().id;
       this.auditBoth("credential_issued", { kind });

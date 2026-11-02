@@ -431,7 +431,7 @@ GitHub Appの秘密鍵はCloudflare Worker Secretsに保持する。
 | Contents | Read & Write |
 | Pull requests | Read & Write |
 | Workflows | Read & Write（任意。worker が `.github/workflows/` を push するため） |
-| Issues | Read（任意。worker が issue を読むため） |
+| Issues | Read（任意。worker が `read_issue` で issue を読むため） |
 
 Workflows と Issues は、既存の App では App の設定で権限を足し、各 installation が承認するまで有効にならない。gateway は installation の承認済みの権限を `GET /app/installations/{id}`（App の JWT。10 分キャッシュ、失敗は 1 分）で読み、`workflows: write` を持つときだけ token に `workflows: write` を、`issues` が read / write のときだけ `issues: read` を要求する。読めない・未承認なら従来の 3 権限（Contents / Pull requests write・Metadata read）で token を作る（未承認の権限を要求すると token の発行が失敗しうるため）。未承認の間の workflow の push は、従来どおり拒否の検知（`push_rejected_workflows_permission`）で扱う。
 
@@ -1182,9 +1182,16 @@ Sandbox障害が発生した場合は、保存されたチェックポイント�
   - env で `GIT_CONFIG_GLOBAL=/dev/null`・`GIT_CONFIG_NOSYSTEM=1` を渡し、global と system の設定を読ませない（`safe.directory` は `BASE_ENV` の `GIT_CONFIG_COUNT` 側に残る）。
   - `git` の直後に `-c core.hooksPath=/dev/null -c credential.helper=` を付け、ワーカーが置いた pre-push フックと credential helper を使わない（`-c` は `.git/config` より優先する）。
   - `push` と `ls-remote` は `origin` ではなくリポジトリの URL（`https://github.com/<owner>/<name>.git`）を直接指定する。`remote.origin.url`・`remote.origin.pushurl` に左右されない。`url.<base>.insteadOf` は打ち消せない（同じ長さなら先に書かれた設定が勝つ）ので上書きしない。書き換えられても、行き先は gateway の判定と許可証が止めるので、push が失敗するだけで、秘密の検査を通らない push にはならない。
-- ワーカーの道具の制約（#156・#157。権限や読み取りの道具は別の判断で、当座の手当て）:
+- ワーカーの道具の制約と読み取りの道具（#156・#157）:
   - （`workflows` 権限を承認済みの installation では push できる。上の権限の節）GitHub App に `workflows` 権限が無く、`.github/workflows/` を変える commit の push は「without `workflows` permission」で拒否される。再試行しても通らないので、`git_commit` の結果で固定の文（workflow の変更を commit から外すか、summary に手で反映する変更として書く）を返し、`task_result` の `warnings` に `push_rejected_workflows_permission` を 1 回だけ付ける。後の push が通ったとき（push は履歴ごと送るので、拒否された commit が外れたことになる）は付けない。
-  - ワーカーは対象リポジトリの issue・PR を読めない（`gh` が無く、`web_fetch` は private に届かない）。`task_start` の説明で、instructions に必要な本文を貼るよう案内する。
+  - ワーカーは対象リポジトリの issue・PR を、読み取り専用の道具 `read_issue({ number, include_comments? })`・`read_pr({ number, include_comments?, include_files? })` で読める（#157。`gh` は無く、`web_fetch` は private に届かない）。
+    - 経路: AgentDO は番号と取り込み方だけを `github_read` イベントに積んで待つ（既定 60 秒）。TaskDO はイベントの取り込みのときに、タスクの repository とタスク用の Installation Token で GitHub を読み、整形した文を `AgentDO.deliverGitHubRead` で返す。token は AgentDO の依頼にも Sandbox にもワーカーの文脈にも入らない。`github_read` は公開イベントにしない。時間切れは固定の `gateway_timeout` で、タスクは続く。
+    - 呼ぶのは GET の `/repos/{o}/{r}/issues/{n}`・`/issues/{n}/comments`・`/pulls/{n}`・`/pulls/{n}/files` だけ。応答の URL はたどらない（リダイレクトも追わない）。書き込みの操作は無い。number は正の整数だけ（文字列の数は数に直さない）。
+    - 返す項目: title・state・作者・labels・本文・作成と更新の時刻。read_pr は base / head の ref・merged・draft も。include_comments で最新 30 件のコメント（作者・時刻・本文。PR も issue のコメント）、include_files で変更したファイル（path・status・additions・deletions。100 件まで。diff の本文は返さない）。
+    - 文は `maskSecrets` を通し、ツールの結果の非信頼の囲み（`wrapUntrusted`）で囲む。上限は本文 20,000 文字・コメント 1 件 4,000 文字・全体 60,000 文字で、切ったときは切ったことを書く。tool_end の summary には本文を載せない。
+    - 権限: read_issue は token が `issues: read` を持つとき（installation が承認済み。上の権限の節）だけ。無ければ GitHub を呼ばず、固定の文（`the GitHub App does not have the issues permission on this repository; ask the client to paste the issue text`）のエラーを返し、タスクは続く。read_pr は既存の Pull requests の権限で読める。
+    - エラー: 404 は固定の `not_found`、rate limit は `github_rate_limited (HTTP <status>)`、それ以外は `github_error (HTTP <status>)`・`github_error (network)`。GitHub の応答の本文は含めない。
+    - `task_start` の説明で、issues 権限があれば番号から読める・無ければ instructions に必要な本文を貼るよう案内する。
 - 既知の課題（今回の対象外）:
   - ワーカーが `/` などに作った `.git` や、`PATH` の差し替えで、ワーカーのコマンドの中の git の振る舞いを変えることは止めない（自動の git はこの影響を受けない）。
   - 本物の git を使うテストは `apps/agent/vitest.node.config.ts`（`mise run test:unit:agent-git`）で流れる。秘密の検査を変えるときは、rovo の検証コマンドに `pnpm exec vitest run --config vitest.node.config.ts`（`apps/agent` で実行）も入れる。

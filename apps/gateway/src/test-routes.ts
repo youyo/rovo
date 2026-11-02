@@ -346,5 +346,6 @@ export function withTestScripts(env: Env, agent: AgentRpc): AgentRpc {
       if (raw !== null) await scriptable.setScript(key, JSON.parse(raw) as unknown[]);
       return agent.consult(request);
     },
+    deliverGitHubRead: (requestId, result) => agent.deliverGitHubRead(requestId, result),
   };
 }

@@ -106,6 +106,46 @@ describe("TaskDO: github_read の依頼に答える", () => {
     expect(st.ok && st.task.status).not.toBe("FAILED");
   });
 
+  it("read_issue: installation が issues を承認していれば、issues: read を含めた token で読む（token は文に入らない）", async () => {
+    app().setInstallationPermissions({
+      contents: "write",
+      pull_requests: "write",
+      metadata: "read",
+      issues: "read",
+    });
+    try {
+      const t = await createTask();
+      await t.stub.advance();
+      const pr = app()
+        .pulls(REPO)
+        .find((p) => p.head === t.branch);
+      expect(pr).toBeDefined();
+      await t.agent.emit("github_read", {
+        request_id: "rq-issue-ok",
+        tool: "read_issue",
+        number: pr?.number,
+        include_comments: false,
+      });
+      await t.stub.advance();
+      const reads = (await t.agent.calls()).githubReads ?? [];
+      expect(reads.map((r) => r.requestId)).toEqual(["rq-issue-ok"]);
+      const text = reads[0]?.result.text ?? "";
+      expect(reads[0]?.result.isError).toBe(false);
+      expect(text.startsWith("[read_issue result.")).toBe(true);
+      expect(text).toContain(`Issue #${pr?.number}`);
+      expect(text).not.toContain(ISSUES_PERMISSION_MESSAGE);
+      for (const tok of app().tokenList()) expect(text).not.toContain(tok.token);
+      // GitHub への呼び出しは GET だけ
+      const issueCalls = app()
+        .requests()
+        .filter((r) => r.path.includes(`/issues/${pr?.number}`));
+      expect(issueCalls.length).toBeGreaterThan(0);
+      expect(issueCalls.every((r) => r.method === "GET")).toBe(true);
+    } finally {
+      app().setInstallationPermissions(null);
+    }
+  });
+
   it("同じ依頼を 2 回取り込まない（取り込みのカーソルの後ろだけ）", async () => {
     const t = await createTask();
     await t.stub.advance();

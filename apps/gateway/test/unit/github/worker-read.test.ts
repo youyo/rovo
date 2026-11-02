@@ -107,9 +107,9 @@ describe("parseWorkerReadRequest（AgentDO の github_read イベントの検査
     expect(parseWorkerReadRequest({ request_id: "", tool: "read_issue", number: 1 })).toBe(
       undefined,
     );
-    expect(
-      parseWorkerReadRequest({ request_id: "a b/../c", tool: "read_issue", number: 1 }),
-    ).toBe(undefined);
+    expect(parseWorkerReadRequest({ request_id: "a b/../c", tool: "read_issue", number: 1 })).toBe(
+      undefined,
+    );
   });
 });
 
@@ -241,7 +241,8 @@ describe("readForWorker: read_issue", () => {
 
     const se = await readForWorker(
       deps({
-        "GET /repos/acme/widgets/issues/12": () => json({ message: "boom-detail" }, { status: 502 }),
+        "GET /repos/acme/widgets/issues/12": () =>
+          json({ message: "boom-detail" }, { status: 502 }),
       }).d,
       req(),
     );

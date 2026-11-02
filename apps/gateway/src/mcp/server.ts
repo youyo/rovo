@@ -227,7 +227,7 @@ const START_DESCRIPTION = [
   "並列と分割: 独立した作業（触るファイルが重ならない・互いに依存しない）は、複数の task_start に分けて並列に走らせると速い（上限は concurrency_limit）。同じファイルを触る作業や、起動の費用のほうが大きい小さな作業は分けない。依存のある作業は、前の PR のブランチ agent/task-<task_id> を base_ref、task_result の pr.head_sha を base_sha にして積む。instructions はワーカーが単独で読めるよう、目的・完了条件・対象ファイル・やってはいけないことを書く。役割ごとに model を変えたいときは別タスクにする。",
   "完了まで数分〜数十分かかる。待ち方は task_wait の説明を参照。",
   "GitHub App に workflows 権限があり、対象の installation が承認していれば、ワーカーは .github/workflows/ の変更を push できる（push した workflow はそのブランチで、リポジトリの Actions の設定どおりに動くので、必ずレビューする）。権限が無い・未承認なら push は拒否され、ワーカーにそう伝わり、task_result の warnings に push_rejected_workflows_permission が付く。その場合 workflow の変更が要るタスクは、ワーカーに summary へ書かせて、クライアントが手で反映する。",
-  "ワーカーは対象リポジトリの issue・PR を読めない（gh が無く、web_fetch も private には届かない）。instructions には issue の番号だけを書かず、必要な本文を貼る。",
+  "ワーカーは対象リポジトリの issue・PR を、読み取り専用の道具 read_issue・read_pr で番号から読める（gateway が読み、token はワーカーに渡らない。gh は無く、web_fetch は private に届かない）。read_pr は常に使える。read_issue は GitHub App に issues 権限があり、対象の installation が承認しているときだけ使える。権限が無い・未承認なら、instructions には issue の番号だけを書かず、必要な本文を貼る。",
   "Sandbox の外向き通信は許可先（GitHub の対象リポジトリ・npm（registry.npmjs.org と Takumi Guard の npm.flatt.tech）・PyPI・proxy.golang.org など）に限られる。起動時に作業ツリーのルートを調べ、.npmrc の registry が許可先でなければ npmrc_registry_not_allowed、mise.toml（.mise.toml）の [tools] の go が Sandbox に焼いた Go の版と合わなければ mise_go_version_unavailable を、ワーカーに伝え、task_result の warnings にも付ける。拒否した外向き通信は task_result の usage.outbound_denied に集計される。",
 ].join("\n");
 

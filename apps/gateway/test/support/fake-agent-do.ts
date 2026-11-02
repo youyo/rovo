@@ -74,6 +74,8 @@ export type FakeCalls = {
   answers: { questionId: string; answer: string }[];
   steer: number;
   steers: { steerId: string; message: string }[];
+  /** deliverGitHubRead で受け取った read_issue / read_pr の応答（#157） */
+  githubReads: { requestId: string; result: { text: string; isError: boolean } }[];
 };
 
 /** consult の台本の 1 手（apps/agent の ScriptStep の usage にキャッシュを足した形）。 */
@@ -197,6 +199,7 @@ export class FakeAgentDO extends DurableObject {
     answers: [],
     steer: 0,
     steers: [],
+    githubReads: [],
   };
   /** 未回答の質問（question_id）。 */
   private pendingQuestion: string | undefined;
@@ -253,6 +256,7 @@ export class FakeAgentDO extends DurableObject {
       credentials: [...this.callCounts.credentials],
       answers: [...this.callCounts.answers],
       steers: [...this.callCounts.steers],
+      githubReads: [...(this.callCounts.githubReads ?? [])],
     };
   }
 
@@ -436,6 +440,19 @@ export class FakeAgentDO extends DurableObject {
     this.append("answered", { question_id: questionId });
     this.setPhase("running");
     if (step === "lose") throw new Error("fake agent: answer response lost");
+    return { ok: true };
+  }
+
+  /** read_issue / read_pr の応答を記録する（本物は待っている依頼に渡す。偽物は記録だけ） */
+  async deliverGitHubRead(
+    requestId: string,
+    result: { text: string; isError: boolean },
+  ): Promise<{ ok: boolean; ignored?: boolean }> {
+    this.callCounts.githubReads = [
+      ...(this.callCounts.githubReads ?? []),
+      { requestId, result: { text: result.text, isError: result.isError } },
+    ];
+    this.save();
     return { ok: true };
   }
 

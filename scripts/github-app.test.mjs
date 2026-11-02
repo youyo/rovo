@@ -55,6 +55,8 @@ describe("manifest", () => {
         metadata: "read",
         checks: "read",
         statuses: "read",
+        workflows: "write",
+        issues: "read",
       },
       default_events: [],
       setup_on_update: false,

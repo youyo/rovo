@@ -4,6 +4,7 @@ const TEST_CONFIG =
   /(^|\/)(vitest|jest|playwright|cypress|karma|ava|mocha)\.config\.[cm]?[jt]s$|(^|\/)\.mocharc[^/]*$|(^|\/)(pytest\.ini|tox\.ini|conftest\.py)$/;
 const CI_CONFIG =
   /^(\.github\/workflows\/[^/]+\.ya?ml|\.circleci\/config\.yml|\.gitlab-ci\.yml|azure-pipelines\.yml|\.buildkite\/.+\.yml)$/;
+const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 const TASK_DEF =
   /(^|\/)(\.?mise\.toml|mise\.(?!local\.toml$)[^/]+\.toml|Makefile|[Jj]ustfile|Taskfile\.ya?ml|pyproject\.toml|setup\.cfg|noxfile\.py)$/;
 const LINT_CONFIG =
@@ -124,7 +125,9 @@ export function detectTestTampering(input: TamperingInput): string[] {
       warnings.push(`変更されたパスを読めないため、テストの改ざんを判定できていません: ${path}`);
       continue;
     }
-    if (status.startsWith("D") && TEST_FILE.test(path)) {
+    if (status.startsWith("A") && WORKFLOW_FILE.test(path)) {
+      warnings.push(`CI の設定が追加されています: ${path}`);
+    } else if (status.startsWith("D") && TEST_FILE.test(path)) {
       warnings.push(`テストファイルが削除されています: ${path}`);
     } else if (!status.startsWith("A") && TEST_CONFIG.test(path)) {
       warnings.push(`テスト設定が変更されています: ${path}`);

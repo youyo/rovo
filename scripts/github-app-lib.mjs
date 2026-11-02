@@ -30,6 +30,9 @@ export function buildManifest({ name, publicBaseUrl, redirectUrl, members }) {
     metadata: "read",
     checks: "read",
     statuses: "read",
+    // workflows: write は worker が .github/workflows/ を push するため、issues: read は worker が issue を読むため
+    workflows: "write",
+    issues: "read",
   };
   // org の Members: read は allowed.org（+ team）で所属を確かめるときだけ。org 単独も team も同じ権限
   if (members) permissions.members = "read";

@@ -298,11 +298,25 @@ describe("detectTestTampering: CI・タスク定義・lint と型の設定", () 
       for (const p of hits) {
         expect(run("M", p)).toEqual([`${msg}${p}`]);
         expect(run("D", p)).toEqual([`${msg}${p}`]);
-        expect(run("A", p)).toEqual([]);
+        // .github/workflows/ の追加だけは警告する（下のテスト）
+        if (!p.startsWith(".github/workflows/")) expect(run("A", p)).toEqual([]);
       }
     });
     it(`${name}: 対象外のパスは警告しない`, () => {
       for (const p of misses) expect(run("M", p)).toEqual([]);
     });
   }
+  it("workflow ファイルの追加も警告する（ほかの CI 設定の追加は警告しない）", () => {
+    for (const p of [".github/workflows/ci.yml", ".github/workflows/deploy.yaml"]) {
+      expect(run("A", p)).toEqual([`CI の設定が追加されています: ${p}`]);
+    }
+    for (const p of [
+      ".github/workflows/README.md",
+      ".github/workflows/sub/ci.yml",
+      "apps/web/.github/workflows/ci.yml",
+      ".circleci/config.yml",
+    ]) {
+      expect(run("A", p)).toEqual([]);
+    }
+  });
 });

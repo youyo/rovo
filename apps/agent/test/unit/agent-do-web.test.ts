@@ -420,6 +420,7 @@ describe("AgentDO: web ツールの登録とシステムプロンプト", () => 
       webFetch: async () => ({ text: "", isError: false }),
       webBrowse: async () => ({ text: "", isError: false }),
       webBrowseEnabled: () => true,
+      githubRead: async () => ({ text: "", isError: false }),
       sections: () => [],
     });
     const tools = (ext as unknown as { tools: { name: string; replay: string }[] }).tools;
@@ -459,6 +460,7 @@ describe("AgentDO: web_browse（既定は無効）", () => {
     webFetch: async () => ({ text: "", isError: false }),
     webBrowse: async () => ({ text: "", isError: false }),
     webBrowseEnabled: () => enabled,
+    githubRead: async () => ({ text: "", isError: false }),
     sections: () => [],
   });
   const toolsOf = async (enabled: boolean) => {

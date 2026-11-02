@@ -62,6 +62,12 @@ const ALLOW = [
       "テストの明らかなダミー（連続したアルファベット・AAAA・SECRET・secretvalue）。マスキング処理の検証用",
   },
   {
+    rule: "github-token",
+    value: /^ghs_installationTokenValue0123456789$/,
+    reason:
+      "テストの明らかなダミー（英語の語と連番）。worker-read のテストで token が応答に漏れないことの検証用。62e11b9 で履歴に入ったので値で許可する",
+  },
+  {
     rule: "anthropic-or-openai-key",
     value: /^sk-abcdefghijklmnopqrstuvwxyz0123456789$/,
     reason: "テストの明らかなダミー（連続したアルファベット）。マスキング処理の検証用",

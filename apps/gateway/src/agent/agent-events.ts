@@ -6,6 +6,7 @@ import {
   type StructuredEvent,
 } from "@rovo/audit";
 import { isSandboxPromotionReason } from "@rovo/models";
+import { parseWorkerReadRequest } from "../github/worker-read";
 import {
   sandboxInstanceName,
   sanitizePromotionFailures,
@@ -41,7 +42,12 @@ export type MappedAgentEvent =
    * 実行中のコマンドの途中の出力（command_progress）。events（履歴）には積まず、TaskDO が最新の 1 件だけを上書きで持つ。
    * 正規化できないもの（progress が undefined）は捨てる。汎用の agent_event の行に落とさない（task_wait に出さないため）。
    */
-  | { kind: "progress"; progress: CommandProgressEvent | undefined };
+  | { kind: "progress"; progress: CommandProgressEvent | undefined }
+  /**
+   * ワーカーの read_issue / read_pr の依頼（#157）。公開イベントにはせず、TaskDO が GitHub を読んで AgentDO に返す。
+   * 検査に通らない依頼は read が undefined（捨てる）
+   */
+  | { kind: "github_read"; read: ReturnType<typeof parseWorkerReadRequest> };
 
 const PHASE_STATUS: Readonly<Record<AgentPhase, TaskStatus | null>> = {
   starting: null,
@@ -390,6 +396,8 @@ export function mapAgentEvent(e: AgentEventDto): MappedAgentEvent {
     }
     case "command_progress":
       return { kind: "progress", progress: normalizeCommandProgress(d) };
+    case "github_read":
+      return { kind: "github_read", read: parseWorkerReadRequest(d) };
     case "command":
     case "edit":
     case "commit":

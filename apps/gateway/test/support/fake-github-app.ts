@@ -242,6 +242,11 @@ export class FakeGitHubApp {
     statuses: "read",
   };
 
+  /**
+   * GET /app/installations/{id} が返す、installation が承認済みの権限。undefined なら 404（既定。追加の権限なしとして扱われる）。
+   */
+  private installationPermissions: Record<string, string> | undefined;
+
   constructor(opts: FakeAppOptions) {
     this.appId = String(opts.appId);
     this.publicKeyPem = opts.publicKeyPem;
@@ -268,6 +273,12 @@ export class FakeGitHubApp {
       statuses: "read",
     };
     this.prHost = "github.test";
+    this.installationPermissions = undefined;
+  }
+
+  /** installation が承認済みの権限（GET /app/installations/{id}）を置く。null で 404 に戻す（reset でも戻る）。 */
+  setInstallationPermissions(permissions: Record<string, string> | null): void {
+    this.installationPermissions = permissions === null ? undefined : { ...permissions };
   }
 
   /** PR の html_url の host を変える（"github.com" など。reset で github.test に戻る）。 */
@@ -685,6 +696,11 @@ export class FakeGitHubApp {
     }
     if (path === "/app" && req.method === "GET") {
       return res(200, { id: Number(this.appId), slug: this.slug, name: this.slug });
+    }
+    const inst = /^\/app\/installations\/(\d+)$/.exec(path);
+    if (inst && req.method === "GET") {
+      if (this.installationPermissions === undefined) return fail(404, "Not Found");
+      return res(200, { id: Number(inst[1]), permissions: this.installationPermissions });
     }
     const m = /^\/app\/installations\/(\d+)\/access_tokens$/.exec(path);
     if (!m || req.method !== "POST") return fail(404, "Not Found");
@@ -1166,6 +1182,27 @@ export class FakeGitHubApp {
       if (!can("pull_requests")) return fail(403, "Resource not accessible by integration");
       p.comments = [...(p.comments ?? []), String(b.body ?? "")];
       return res(201, { id: 1, body: b.body });
+    }
+
+    // GET /issues/{n}: PR も issue として読める（GitHub と同じ）。token に issues の権限が要る
+    const issueOne = method === "GET" ? match(/^\/issues\/(\d+)$/) : null;
+    if (issueOne) {
+      const perm = tok.permissions.issues;
+      if (perm !== "read" && perm !== "write") {
+        return fail(403, "Resource not accessible by integration");
+      }
+      const p = repo.pulls.find((x) => x.number === Number(issueOne[1]));
+      if (!p) return fail(404, "Not Found");
+      return res(200, {
+        number: p.number,
+        title: p.title,
+        body: p.body,
+        state: p.state,
+        user: { login: "alice" },
+        labels: [],
+        comments: 0,
+        pull_request: { url: `https://${this.prHost}/${repo.fullName}/pull/${p.number}` },
+      });
     }
 
     const pullOne = match(/^\/pulls\/(\d+)$/);

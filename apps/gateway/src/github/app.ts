@@ -193,8 +193,9 @@ export class GitHubAppClient {
   }
 
   /**
-   * GET /app/installations/{id}（App の JWT）で installation が承認済みの権限を読む。短い TTL でキャッシュする
-   * （成功 10 分・失敗 1 分）。失敗しても例外にせず、追加の権限なしとして扱う。
+   * GET /app/installations/{id}（App の JWT）で installation が承認済みの権限を読む。同じクライアントの中では短い TTL でキャッシュする
+   * （成功 10 分・失敗 1 分）。TaskDO は発行のたびにクライアントを作るので、本番では実質「発行ごとに 1 回読む」
+   * （その分、権限を外したあとに古い値で要求して失敗することも無い）。失敗しても例外にせず、追加の権限なしとして扱う。
    */
   private async installationGrants(
     installationId: number,

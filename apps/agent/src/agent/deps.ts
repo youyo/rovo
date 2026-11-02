@@ -33,6 +33,8 @@ export interface AgentTestOverrides {
   stopPatchWaitMs?: number;
   /** 予算超過の停止で、未 commit の変更を WIP として commit・push するのを待つ上限（ms）。既定 90000。テスト用 */
   wipCommitWaitMs?: number;
+  /** read_issue / read_pr が gateway の応答を待つ上限（ms）。既定 60000 */
+  githubReadWaitMs?: number;
   /** 完了時の push の再試行の間隔（ms）。既定 2000 */
   pushRetryDelayMs?: number;
   /** refreshUsage が Pi の usage を読む直前に待つ（読み取りが遅れて戻るケースの再現用） */

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildFakePypi, FAKE_PYPI_REQ } from "./fake-pypi";
 
 /** 偽 GitHub が既定で要求する Installation Token（Basic の x-access-token）。E2E が SandboxDO に預ける値と合わせる。 */
 export const TEST_GIT_TOKEN = "ghs_e2e_installation_token";
@@ -26,6 +27,11 @@ export interface FakeUpstream {
    * 偽 npm の tiny-pkg 1 つに依存する（pnpm の本体の取得と pnpm install の E2E 用）。
    */
   pnpmSha: string;
+  /**
+   * 偽 GitHub の acme/py（main）の先頭コミット SHA。ルートの requirements.txt が偽 PyPI の rovo-e2e-req 1 つに依存する
+   * （Python の依存の導入の E2E 用。偽 PyPI は fake-pypi.ts）。
+   */
+  pySha: string;
   /** 受け取った（= 許可されて上流まで届いた）リクエスト */
   requests: {
     host: string;
@@ -64,7 +70,7 @@ export interface FakeUpstream {
   stop(): Promise<void>;
 }
 
-export type FakeRepoName = "hello" | "calc" | "deps" | "pnpm";
+export type FakeRepoName = "hello" | "calc" | "deps" | "pnpm" | "py";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, {
@@ -337,7 +343,11 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
     .toString()
     .trim();
   const pnpmSha = buildRepo(root, "pnpm", pnpmRepoFiles(tar.integrity));
+  const pySha = buildRepo(root, "py", {
+    "requirements.txt": `${FAKE_PYPI_REQ.name}==${FAKE_PYPI_REQ.version}\n`,
+  });
   const fakePnpm = buildFakePnpm(root);
+  const fakePypi = buildFakePypi();
   const requests: FakeUpstream["requests"] = [];
   const state: {
     expectedToken: string | undefined;
@@ -375,6 +385,7 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
         }
         return gitBackend(root, req, res, body, want === undefined ? "" : "x-access-token");
       }
+      if (fakePypi.handle(host, path, res)) return;
       if (host === "registry.npmjs.org") {
         if (path === "/tiny-pkg") {
           res.setHeader("content-type", "application/json");
@@ -448,6 +459,7 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
     depsSha,
     depsLockBlobSha,
     pnpmSha,
+    pySha,
     requests,
     get expectedToken() {
       return state.expectedToken;
@@ -471,7 +483,9 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
             ? depsSha
             : repo === "pnpm"
               ? pnpmSha
-              : calcSha;
+              : repo === "py"
+                ? pySha
+                : calcSha;
       const branch = `agent/task-${taskId}`;
       let initialSha = base;
       if (opts.initialCommit) {

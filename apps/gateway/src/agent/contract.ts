@@ -258,6 +258,15 @@ export interface SandboxUsageDto {
     | "invalid_deps";
   /** キャッシュを作ったタスクだけ: 作るのにかかった時間（ms。runtimeMs にも含む） */
   cacheBuildMs?: number;
+  /** Python / Go の依存の導入の結果（言語ごとに 1 件）。何も入れていなければ無い */
+  depsLang?: {
+    kind: "python" | "go";
+    command: string;
+    status: "ok" | "failed" | "timeout" | "skipped";
+    duration_ms: number;
+  }[];
+  /** ワーカーのプロンプトに足す英語の文（agent 内でだけ使う。gateway は読まない） */
+  depsLangNote?: string;
   /** 最初にコンテナを起動した大きさ（standard-2 など）。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
   /** 昇格した最終の大きさ（Clef が上げると判断した先）。昇格していなければ無い */

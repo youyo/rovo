@@ -69,6 +69,7 @@ import {
   type WebUsage,
 } from "./agent/types";
 import { emitAudit, readTestAudit } from "./audit-adapter";
+import { type DepsLangResult, depsLangWarnings } from "./deps-lang";
 import { GIT_ISOLATION_ENV, isolatedGit, pushTarget } from "./git-isolation";
 import { runModelStep, type StepMessage, type StepToolCall, type StepToolDef } from "./model-step";
 import { applyConsultCacheControl } from "./pi/consult-cache";
@@ -127,6 +128,7 @@ import {
   scanRangeForSecrets,
   scanUnpushedForSecrets,
 } from "./secret-scan";
+import { ENSURE_READY_TIMEOUT_MS } from "./setup-budget";
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createReadOnlySandboxTools, createSandboxTools } from "./tools";
 import { commitAuthorOf, createToolContext } from "./tools/context";
@@ -323,11 +325,7 @@ const MAX_YIELD_NUDGES = 2;
 const MAX_SETUP_ATTEMPTS = 3;
 /** Sandbox の起動を再試行するまでの待ち（ms）。呼び出したツールはこの間待つ */
 const SETUP_RETRY_DELAY_MS = 5_000;
-/**
- * SandboxDO.ensureReady の RPC 1 回を待つ上限。SandboxDO 側の最悪（起動 約 2 分 + clone 5 分 + 依存の用意など）を超える値にする。
- * 返ってこない RPC は失敗として MAX_SETUP_ATTEMPTS に数える。
- */
-const ENSURE_READY_TIMEOUT_MS = 10 * 60_000;
+// SandboxDO.ensureReady の RPC 1 回を待つ上限 ENSURE_READY_TIMEOUT_MS は setup-budget.ts にある（起動の最悪の合計から決める）。
 const PATCH_LIMIT = 1024 * 1024;
 /** worker_review のレビューの段が Sandbox から読む差分の上限（UTF-8 のバイト数。gateway が task_review で取る上限と同じ。超えたら切って「一部は未確認」にする） */
 const WORKER_REVIEW_DIFF_MAX_BYTES = 1024 * 1024;
@@ -1805,6 +1803,9 @@ export class AgentDO extends DurableObject<Env> {
     try {
       const m = await this.sandbox().metrics?.();
       if (m?.depsCache) this.store.setMeta("deps_cache", m.depsCache);
+      // Python / Go の依存の導入の結果（ワーカーのプロンプトに足す文。失敗は warnings にも出す）
+      if (m?.depsLangNote) this.store.setMeta("deps_lang_note", m.depsLangNote);
+      if (m?.depsLang) this.store.setMeta("deps_lang", m.depsLang);
     } catch {
       // 診断の読み取りの失敗で、タスクを止めない
     }
@@ -2613,6 +2614,8 @@ export class AgentDO extends DurableObject<Env> {
       }
       if (this.store.meta("push_rejected_workflows") === true)
         warnings.push("push_rejected_workflows_permission");
+      // Python / Go の依存を入れられなかった（失敗・時間切れ）。固定コードだけ
+      warnings.push(...depsLangWarnings(this.store.meta<DepsLangResult[]>("deps_lang") ?? []));
       // 予算超過の停止で、システムが未 commit の変更を WIP として commit した（できなかった）ことを伝える
       const wip = this.store.meta<WipCommit>("wip_commit");
       if (wip && decision.phase === "budget_exceeded") warnings.push(wipWarning(wip));
@@ -2843,6 +2846,8 @@ export class AgentDO extends DurableObject<Env> {
     const depsMissReason =
       depsCache === "miss" ? (m.depsMissReason ?? prev?.depsMissReason) : undefined;
     const cacheBuildMs = Math.max(prev?.cacheBuildMs ?? 0, finiteCount(m.cacheBuildMs));
+    // Python / Go の依存の導入の結果（起動のたびに SandboxDO が置き換える。読めなければ前回の値）
+    const depsLang = m.depsLang ?? prev?.depsLang;
     // 実際に起動した大きさ（起動のたびに同じ値。最後に読めたものを残す）
     const instance = typeof m.instance === "string" ? m.instance : prev?.instance;
     // 昇格（重いコマンドの初回に大きい Sandbox へ）。昇格したら戻さないので、読めた値を残す。理由は最後に読めたもの
@@ -2880,6 +2885,7 @@ export class AgentDO extends DurableObject<Env> {
       ...(depsCache !== undefined ? { depsCache } : {}),
       ...(depsMissReason !== undefined ? { depsMissReason } : {}),
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
+      ...(depsLang !== undefined && depsLang.length > 0 ? { depsLang } : {}),
       ...(instance !== undefined ? { instance } : {}),
       ...(promotedTo !== undefined
         ? {
@@ -2901,6 +2907,7 @@ export class AgentDO extends DurableObject<Env> {
       next.depsCache !== prev.depsCache ||
       next.depsMissReason !== prev.depsMissReason ||
       next.cacheBuildMs !== prev.cacheBuildMs ||
+      JSON.stringify(next.depsLang) !== JSON.stringify(prev.depsLang) ||
       next.instance !== prev.instance ||
       next.promotedTo !== prev.promotedTo ||
       next.promotionReason !== prev.promotionReason ||
@@ -3077,6 +3084,12 @@ export class AgentDO extends DurableObject<Env> {
     return v === "hit" || v === "built";
   }
 
+  /** 依存の節に、Python / Go の導入の結果（SandboxDO が作った英語の 1〜3 行）を足す */
+  private withDepsLangNote(text: string | undefined): string | undefined {
+    const note = this.store.meta<string>("deps_lang_note");
+    return note ? (text ? `${text}\n${note}` : note) : text;
+  }
+
   private promptSections(): { key: string; text: string | undefined }[] {
     const spec = this.spec();
     if (!spec) return [{ key: "role", text: "You are a test agent. Use the tools you are given." }];
@@ -3117,11 +3130,13 @@ export class AgentDO extends DurableObject<Env> {
       },
       {
         key: "dependencies",
-        text: this.depsInstalled()
-          ? "Dependencies are already installed: node_modules was restored from the lockfile at the base commit (the package manager is also available through corepack, e.g. `corepack pnpm ...`). You do not need to run npm ci / pnpm install / yarn install. Run an install again only if you change the lockfile or the dependencies in package.json. Build outputs (dist and similar) are not included, so run the build if a task needs them."
-          : spec.deps && !this.sandboxBooted()
-            ? "Dependencies are installed before your first command: when the sandbox starts, node_modules is restored from the lockfile at the base commit if a cache is available (this is fast), so you usually do not need to run npm ci / pnpm install / yarn install. If node_modules is missing, install once. Build outputs (dist and similar) are not included, so run the build if a task needs them."
-            : undefined,
+        text: this.withDepsLangNote(
+          this.depsInstalled()
+            ? "Dependencies are already installed: node_modules was restored from the lockfile at the base commit (the package manager is also available through corepack, e.g. `corepack pnpm ...`). You do not need to run npm ci / pnpm install / yarn install. Run an install again only if you change the lockfile or the dependencies in package.json. Build outputs (dist and similar) are not included, so run the build if a task needs them."
+            : spec.deps && !this.sandboxBooted()
+              ? "Dependencies are installed before your first command: when the sandbox starts, node_modules is restored from the lockfile at the base commit if a cache is available (this is fast), so you usually do not need to run npm ci / pnpm install / yarn install. If node_modules is missing, install once. Build outputs (dist and similar) are not included, so run the build if a task needs them."
+              : undefined,
+        ),
       },
       {
         // テストの出力は一度読むと会話に残り、以後の呼び出しのたびにキャッシュから読み直されるので、絞ってから読ませる

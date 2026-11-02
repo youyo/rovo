@@ -102,4 +102,28 @@ describe("task_result の usage（依存関係のキャッシュ）", () => {
     expect(usage).not.toHaveProperty("deps_cache");
     expect(usage).not.toHaveProperty("cache_build_ms");
   });
+
+  it("deps_lang: Python / Go の導入の結果を返す（固定の値だけ。壊れた要素は捨てる）", async () => {
+    const usage = await resultWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      depsCache: "disabled",
+      depsLang: [
+        { kind: "python", command: "uv sync --active", status: "ok", duration_ms: 1234 },
+        { kind: "go", command: "go mod download", status: "timeout", duration_ms: 300000 },
+        { kind: "ruby", command: "bundle", status: "ok", duration_ms: 1 },
+        { kind: "go", command: "x", status: "weird", duration_ms: 1 },
+      ],
+    });
+    expect(usage.deps_lang).toEqual([
+      { kind: "python", command: "uv sync --active", status: "ok", duration_ms: 1234 },
+      { kind: "go", command: "go mod download", status: "timeout", duration_ms: 300000 },
+    ]);
+  });
+
+  it("deps_lang は何も入れていなければ付かない", async () => {
+    const usage = await resultWith({ runtimeMs: 1, restarts: 0, bootRetries: 0, depsCache: "hit" });
+    expect(usage).not.toHaveProperty("deps_lang");
+  });
 });

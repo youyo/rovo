@@ -1,10 +1,24 @@
 // Python / Go の依存の導入（D14 の近く。docs/specs/design.md「言語の依存の導入」）。
 // 作業ツリーのルートのファイルから、言語ごとに 1 つだけ選ぶ。argv で実行する（シェルを通さない）。
 
-/** Python の導入の時間の上限（uv sync / uv pip install） */
+/** Python の導入 1 回の時間の上限（uv sync / uv pip install） */
 export const DEPS_PYTHON_TIMEOUT_MS = 5 * 60_000;
-/** Go の導入の時間の上限（go mod download） */
+/** Go の導入 1 回の時間の上限（go mod download） */
 export const DEPS_GO_TIMEOUT_MS = 5 * 60_000;
+/**
+ * Python と Go を合わせた時間の枠。導入は boot() の中で直列に走るので、言語ごとの上限を足した 10 分を取らず、
+ * 1 つの枠で分け合う。各言語の上限は、枠の残りとタスクの期限までの残りのうち短いほうに縮める（depsLangTimeout）。
+ */
+export const DEPS_LANG_TOTAL_MS = 8 * 60_000;
+
+/** 1 言語の導入に許す時間: 言語の上限・枠の残り・タスクの期限までの残りのうち一番短いもの（0 以下なら 0 = 実行しない） */
+export function depsLangTimeout(input: {
+  capMs: number;
+  frameLeftMs: number;
+  deadlineLeftMs: number;
+}): number {
+  return Math.max(0, Math.min(input.capMs, input.frameLeftMs, input.deadlineLeftMs));
+}
 /** ワーカーに伝える失敗の出力の末尾の長さ */
 export const DEPS_LANG_TAIL_CHARS = 500;
 
@@ -93,8 +107,14 @@ export function depsLangCommand(argv: readonly string[]): string {
   return argv.slice(0, 3).join(" ");
 }
 
-/** ワーカーの最初のプロンプトに足す英語の 1〜3 行。results が空なら undefined。tail は秘密を伏せた出力の末尾。 */
-export function depsLangNote(results: readonly DepsLangResult[], tail: string): string | undefined {
+/**
+ * ワーカーの最初のプロンプトに足す英語の短い文。results が空なら undefined。
+ * tails は言語ごとの、秘密を伏せた出力の末尾（失敗・時間切れした言語の分）。
+ */
+export function depsLangNote(
+  results: readonly DepsLangResult[],
+  tails: Partial<Record<DepsLangKind, string>>,
+): string | undefined {
   if (results.length === 0) return undefined;
   const lines: string[] = [];
   const ok = results.filter((r) => r.status === "ok");
@@ -106,8 +126,12 @@ export function depsLangNote(results: readonly DepsLangResult[], tail: string): 
   const bad = results.filter((r) => r.status === "failed" || r.status === "timeout");
   if (bad.length > 0) {
     lines.push(
-      `Dependency install did not finish: ${bad.map((r) => `${r.kind} (${r.command}: ${r.status})`).join(", ")}.${tail ? ` Output tail: ${tail}` : ""}`,
+      `Dependency install did not finish: ${bad.map((r) => `${r.kind} (${r.command}: ${r.status})`).join(", ")}.`,
     );
+    for (const kind of new Set(bad.map((r) => r.kind))) {
+      const tail = tails[kind];
+      if (tail) lines.push(`Output tail (${kind}): ${tail}`);
+    }
     lines.push(
       "If a dependency is missing, find the cause; if you cannot install it, tell the client with ask_parent.",
     );

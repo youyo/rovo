@@ -128,6 +128,7 @@ import {
   scanRangeForSecrets,
   scanUnpushedForSecrets,
 } from "./secret-scan";
+import { ENSURE_READY_TIMEOUT_MS } from "./setup-budget";
 import { headChars, stripAnsi, tailChars } from "./text-util";
 import { createReadOnlySandboxTools, createSandboxTools } from "./tools";
 import { commitAuthorOf, createToolContext } from "./tools/context";
@@ -324,11 +325,7 @@ const MAX_YIELD_NUDGES = 2;
 const MAX_SETUP_ATTEMPTS = 3;
 /** Sandbox の起動を再試行するまでの待ち（ms）。呼び出したツールはこの間待つ */
 const SETUP_RETRY_DELAY_MS = 5_000;
-/**
- * SandboxDO.ensureReady の RPC 1 回を待つ上限。SandboxDO 側の最悪（起動 約 2 分 + clone 5 分 + 依存の用意など）を超える値にする。
- * 返ってこない RPC は失敗として MAX_SETUP_ATTEMPTS に数える。
- */
-const ENSURE_READY_TIMEOUT_MS = 10 * 60_000;
+// SandboxDO.ensureReady の RPC 1 回を待つ上限 ENSURE_READY_TIMEOUT_MS は setup-budget.ts にある（起動の最悪の合計から決める）。
 const PATCH_LIMIT = 1024 * 1024;
 /** worker_review のレビューの段が Sandbox から読む差分の上限（UTF-8 のバイト数。gateway が task_review で取る上限と同じ。超えたら切って「一部は未確認」にする） */
 const WORKER_REVIEW_DIFF_MAX_BYTES = 1024 * 1024;

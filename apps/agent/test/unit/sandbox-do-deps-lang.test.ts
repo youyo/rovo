@@ -23,7 +23,16 @@ const spec = () => ({
   deadlineAt: Date.now() + 3_600_000,
 });
 
-type Reply = { code?: number; out?: string; err?: string; hang?: boolean } | undefined;
+type Reply =
+  | {
+      code?: number;
+      out?: string;
+      err?: string;
+      hang?: boolean;
+      /** abort されると、例外ではなくこの終了コードで終わる（SIGKILL された 137 など） */
+      abortExit?: number;
+    }
+  | undefined;
 
 class FakeContainer {
   running = false;
@@ -65,6 +74,11 @@ class FakeContainer {
     const exitCode = new Promise<number>((resolve, reject) => {
       if (reply?.hang) {
         opts?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        return;
+      }
+      if (reply?.abortExit !== undefined) {
+        const code = reply.abortExit;
+        opts?.signal?.addEventListener("abort", () => resolve(code));
         return;
       }
       resolve(reply?.code ?? 0);
@@ -221,6 +235,97 @@ describe("SandboxDO: Python / Go の依存の導入", () => {
       inst.readyGen = -1;
       await inst.ensureReady(spec());
       expect(fake.langCalls()).toHaveLength(2);
+    });
+  });
+  it("Python と Go は 1 つの枠を分け合う: Python が枠を使い切ると、Go は実行せずに timeout にする", async () => {
+    await runInDO(sandboxStub("lang-frame"), async (inst) => {
+      const fake = setup(inst, ["uv.lock", "go.mod"]);
+      inst.depsLangTotalMs = 300; // 枠。各言語の上限（既定 5 分）より短い
+      fake.handler = (argv) => (argv[0] === "uv" ? { hang: true } : undefined);
+      const t0 = Date.now();
+      await inst.ensureReady(spec());
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      expect(fake.langCalls().map((a) => a[0])).toEqual(["uv"]);
+      const m = await inst.metrics();
+      expect(m.depsLang).toMatchObject([
+        { kind: "python", status: "timeout" },
+        { kind: "go", status: "timeout", duration_ms: 0 },
+      ]);
+    });
+  });
+
+  it("各言語の上限は、枠の残りに縮む: Python が速く終わっても、Go の上限は枠の残り", async () => {
+    await runInDO(sandboxStub("lang-frame-rest"), async (inst) => {
+      const fake = setup(inst, ["uv.lock", "go.mod"]);
+      inst.depsLangTotalMs = 600;
+      fake.handler = (argv) => (argv[0] === "go" ? { hang: true } : undefined);
+      const t0 = Date.now();
+      await inst.ensureReady(spec());
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      const m = await inst.metrics();
+      expect(m.depsLang).toMatchObject([
+        { kind: "python", status: "ok" },
+        { kind: "go", status: "timeout" },
+      ]);
+      // 上限は枠（600ms）より長くならない
+      expect(m.depsLang[1].duration_ms).toBeLessThan(1_500);
+    });
+  });
+
+  it("タスクの期限 spec.deadlineAt までの残りより長くは待たない（上限は期限までの残りに縮む）", async () => {
+    await runInDO(sandboxStub("lang-deadline"), async (inst) => {
+      setup(inst, ["uv.lock"]);
+      const limits: number[] = [];
+      const raw = inst.rawExec.bind(inst);
+      inst.rawExec = (argv: string[], opts: { timeoutMs: number }) => {
+        if (argv[0] === "uv") limits.push(opts.timeoutMs);
+        return raw(argv, opts);
+      };
+      await inst.ensureReady({ ...spec(), deadlineAt: Date.now() + 90_000 });
+      // 既定の上限（5 分）ではなく、期限までの残り（約 90 秒）
+      expect(limits).toHaveLength(1);
+      expect(limits[0]).toBeLessThanOrEqual(90_000);
+      expect(limits[0]).toBeGreaterThan(80_000);
+    });
+  });
+
+  it("時間切れは abort した事実で判定する: abort されたプロセスが 137 で終わっても timeout", async () => {
+    await runInDO(sandboxStub("lang-abort-137"), async (inst) => {
+      const fake = setup(inst, ["go.mod"]);
+      inst.depsLangTimeoutMs = 80;
+      fake.handler = (argv) => (argv[0] === "go" ? { abortExit: 137 } : undefined);
+      await inst.ensureReady(spec());
+      expect((await inst.metrics()).depsLang).toMatchObject([{ kind: "go", status: "timeout" }]);
+    });
+  });
+
+  it("自分で 137 や -1 で終わった失敗は failed のまま", async () => {
+    await runInDO(sandboxStub("lang-exit-137"), async (inst) => {
+      const fake = setup(inst, ["uv.lock", "go.mod"]);
+      fake.handler = (argv) =>
+        argv[0] === "uv" ? { code: 137 } : argv[0] === "go" ? { code: -1 } : undefined;
+      await inst.ensureReady(spec());
+      expect((await inst.metrics()).depsLang).toMatchObject([
+        { kind: "python", status: "failed" },
+        { kind: "go", status: "failed" },
+      ]);
+    });
+  });
+
+  it("失敗の出力の末尾は言語ごとに残す（Python も Go も）。秘密は伏せる", async () => {
+    await runInDO(sandboxStub("lang-tails"), async (inst) => {
+      const fake = setup(inst, ["uv.lock", "go.mod"]);
+      fake.handler = (argv) =>
+        argv[0] === "uv"
+          ? { code: 2, err: `python-failure token ghp_${"B".repeat(36)}` }
+          : argv[0] === "go"
+            ? { code: 1, err: "go-failure: module not found" }
+            : undefined;
+      await inst.ensureReady(spec());
+      const note = (await inst.metrics()).depsLangNote as string;
+      expect(note).toContain("python-failure");
+      expect(note).toContain("go-failure");
+      expect(note).not.toContain("ghp_");
     });
   });
 });

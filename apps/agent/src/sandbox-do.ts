@@ -39,10 +39,13 @@ import {
 } from "./deps-cache";
 import {
   DEPS_LANG_TAIL_CHARS,
+  DEPS_LANG_TOTAL_MS,
+  type DepsLangKind,
   type DepsLangPlan,
   type DepsLangResult,
   depsLangCommand,
   depsLangNote,
+  depsLangTimeout,
   planGo,
   planPython,
 } from "./deps-lang";
@@ -65,6 +68,16 @@ import {
   resolveClefThresholds,
 } from "./sandbox-scale-decision";
 import { isLightCommand, scaleCmd } from "./scale-cmd";
+import {
+  BOOT_ATTEMPT_MS,
+  BOOT_DESTROY_MS,
+  BOOT_MAX_ATTEMPTS,
+  CLONE_TIMEOUT_MS,
+  DEPS_ENSURE_WAIT_MS,
+  DEPS_RESTORE_TIMEOUT_MS,
+  INACTIVITY_CALL_MS,
+  PM_PREPARE_TIMEOUT_MS,
+} from "./setup-budget";
 import { TailBuffer } from "./tail-buffer";
 import {
   isInsideWorkspace,
@@ -90,30 +103,13 @@ const KEEPALIVE_MS = 60_000;
 const REAPER_TIMEOUT_MS = 10_000;
 const STREAM_GRACE_MS = 2_000;
 const DESTROY_WAIT_MS = 15_000;
-const CLONE_TIMEOUT_MS = 5 * 60_000;
 /** pnpm / yarn の本体を用意するスクリプト（Dockerfile が置く）と、その期限。 */
 const PM_PREPARE_SCRIPT = "/usr/local/lib/rovo/pm-prepare.mjs";
-const PM_PREPARE_TIMEOUT_MS = 3 * 60_000;
 /** 残り時間がこれ未満なら、用意しない(間に合わない) */
 const PM_PREPARE_MIN_MS = 10_000;
-/**
- * コンテナが ready になる（exec が応答する）までの 1 回あたりの期限。
- * 正常な起動は E2E の実測で ensureReady 全体が 0.9 秒前後（最大 0.92 秒、clone を含む）。その約 25 倍を見る。
- * 止まった起動は何分待っても進まないので、これを超えたら破棄して起動し直す。
- * 待ちは試行ごとに数える（前の試行の破棄にかかった時間で、次の試行の待ちを削らない）。
- */
-const BOOT_ATTEMPT_MS = 25_000;
-const BOOT_MAX_ATTEMPTS = 3;
-/** setInactivityTimeout の呼び出し 1 回を待つ上限（ms）。返らなくても起動は進める（警告だけ） */
-const INACTIVITY_CALL_MS = BOOT_ATTEMPT_MS;
+// 起動の期限の定数（BOOT_ATTEMPT_MS など）は setup-budget.ts にある（AgentDO の ensureReady の待ちと関係を固定するため）。
 /** ワーカーの exec が開始する（container.exec が返る）のを、timeoutMs に加えて待つ余裕（ms） */
 const EXEC_START_GRACE_MS = 5_000;
-/**
- * 起動の途中で行う破棄の待ちの上限（1 回あたり）。通常の DESTROY_WAIT_MS（15 秒）より短くする。
- * 起動全体の最悪時間 = 最初の破棄 10 + 3 x (待ち 25 + 破棄 10) = 115 秒 < E2E の 1 操作の期限 120 秒。
- * 破棄が上限内に止まらなければ、そこで "container did not stop" として失敗する（残りの試行は行わない）。
- */
-const BOOT_DESTROY_MS = 10_000;
 const BOOT_POLL_MS = 500;
 /** 期限の延長の上限: 作成から 2 時間（タスクの最長）+ 回答待ちの累計の上限 24 時間 */
 const MAX_TASK_MS = 2 * 60 * 60_000;
@@ -140,10 +136,6 @@ const RECENT_COMMANDS_KEEP = 3;
 /** 「上げなかったのに長くかかった」とみなすコマンドの実行時間（ms） */
 const SLOW_COMMAND_MS = 60_000;
 
-/** 依存関係のキャッシュの ensure（作成を待つことがある）を待つ上限。作成の時間切れ + 余裕 */
-const DEPS_ENSURE_WAIT_MS = DEPS_BUILD_TIMEOUT_MS + 60_000;
-/** 退避した node_modules を作業ツリーへ戻す（同じファイルシステム内の mv）のに許す時間 */
-const DEPS_RESTORE_TIMEOUT_MS = 2 * 60_000;
 const DEPS_STATUS_RANK: Record<DepsCacheStatus, number> = {
   disabled: 0,
   miss: 1,
@@ -206,6 +198,8 @@ interface RawResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** rovo が時間切れで abort した（exitCode の値ではなく、abort した事実） */
+  timedOut?: boolean;
 }
 
 /** stream を読み続けて buf に溜める（読むのを止めるとプロセスが書き込みで詰まる）。cancel で打ち切れる。 */
@@ -288,8 +282,10 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   private exitWaiters = new Set<(e: Error) => void>();
   /** 依存関係のキャッシュの ensure を待つ上限（ms）。テストで短くする。 */
   private depsEnsureWaitMs = DEPS_ENSURE_WAIT_MS;
-  /** Python / Go の導入の時間の上限（ms）。指定が無ければ言語ごとの定数（deps-lang.ts）。テストで短くする。 */
+  /** Python / Go の導入 1 回の上限（ms）。指定が無ければ言語ごとの定数（deps-lang.ts）。テストで短くする。 */
   private depsLangTimeoutMs: number | undefined = undefined;
+  /** Python と Go を合わせた時間の枠（ms）。テストで短くする。 */
+  private depsLangTotalMs = DEPS_LANG_TOTAL_MS;
   /** 昇格のスナップショットを待つ上限（ms）。テストで短くする。 */
   private promoteSnapshotMs = PROMOTE_SNAPSHOT_MS;
   /** 「上げなかったのに長くかかった」とみなす実行時間（ms）。テストで短くする。 */
@@ -1319,7 +1315,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     this.recordDepsStatus(await this.finishDeps(deps, restoring));
     // Python / Go の依存。コンテナを新しく起動したときだけ入れる（/opt/venv と Go のキャッシュはコンテナごとなので、
     // 作り直し・image からの再起動では入れ直しが要る。コンテナが生きたままの DO の再起動・昇格・中断からの復元では入れない）
-    if (started) await this.installLangDeps(g);
+    if (started) await this.installLangDeps(g, spec.deadlineAt);
     // 起動をタスクの期限の先までブロックしない(足りなければ諦める。corepack が従来どおり自分で取る)
     await this.preparePackageManager(spec.deadlineAt);
     await this.armAlarm();
@@ -1995,10 +1991,13 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
    * Python / Go の依存を入れる（作業ツリーのルートのファイルから言語ごとに 1 つ。argv で実行）。
    * 失敗・時間切れでもタスクは止めない（結果を記録し、ワーカーへの通知と usage.deps_lang / warnings に出す）。
    */
-  private async installLangDeps(g: number): Promise<void> {
+  private async installLangDeps(g: number, deadlineAt: number): Promise<void> {
     const kv = this.ctx.storage.kv;
     const results: DepsLangResult[] = [];
-    let tail = "";
+    // 失敗した言語ごとの出力の末尾（maskSecrets を通してから切る）
+    const tails: Partial<Record<DepsLangKind, string>> = {};
+    // Python と Go は 1 つの時間の枠を分け合う（boot() の中で直列に走るため）。枠の終わりまでの残りが各言語の上限になる
+    const frameEnd = Date.now() + this.depsLangTotalMs;
     try {
       const ls = await this.rawExec(
         [
@@ -2044,13 +2043,28 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           });
           continue;
         }
-        const timeoutMs = this.depsLangTimeoutMs ?? plan.timeoutMs;
+        // 言語の上限・枠の残り・タスクの期限までの残りのうち、一番短いもの。残りが無ければ実行せず timeout にする
+        const timeoutMs = depsLangTimeout({
+          capMs: this.depsLangTimeoutMs ?? plan.timeoutMs,
+          frameLeftMs: frameEnd - Date.now(),
+          deadlineLeftMs: deadlineAt - Date.now(),
+        });
+        if (timeoutMs <= 0) {
+          results.push({
+            kind: plan.kind,
+            command: depsLangCommand(plan.argv),
+            status: "timeout",
+            duration_ms: 0,
+          });
+          console.warn(`[sandbox-boot] deps_lang_timeout: ${plan.kind} (no time left)`);
+          continue;
+        }
         const t0 = Date.now();
         const r = await this.rawExec(plan.argv, { timeoutMs });
         const duration = Date.now() - t0;
         this.assertBootCurrent(g);
-        const timedOut = r.exitCode !== 0 && duration >= timeoutMs - 20 && r.exitCode === -1;
-        const status = r.exitCode === 0 ? "ok" : timedOut ? "timeout" : "failed";
+        // 時間切れは、rovo が abort したという事実で決める（abort されたプロセスの終了コードは 137 などにもなる）
+        const status = r.exitCode === 0 ? "ok" : r.timedOut ? "timeout" : "failed";
         results.push({
           kind: plan.kind,
           command: depsLangCommand(plan.argv),
@@ -2058,7 +2072,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           duration_ms: duration,
         });
         if (status !== "ok") {
-          tail = maskSecrets((r.stderr || r.stdout).trim()).slice(-DEPS_LANG_TAIL_CHARS);
+          tails[plan.kind] = maskSecrets((r.stderr || r.stdout).trim()).slice(
+            -DEPS_LANG_TAIL_CHARS,
+          );
           console.warn(`[sandbox-boot] deps_lang_${status}: ${plan.kind}`);
         }
       }
@@ -2068,7 +2084,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       console.warn("[sandbox-boot] deps_lang_error");
     }
     kv.put("deps_lang", results);
-    const note = depsLangNote(results, tail);
+    const note = depsLangNote(results, tails);
     if (note) kv.put("deps_lang_note", note);
     else kv.delete("deps_lang_note");
   }
@@ -2384,7 +2400,11 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
   ): Promise<RawResult> {
     const container = this.container();
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), opts.timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort();
+    }, opts.timeoutMs);
     try {
       const started = await withDeadline(
         this.abortOnExit(
@@ -2400,7 +2420,12 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       );
       if (started === "timeout") {
         ac.abort();
-        return { exitCode: -1, stdout: "", stderr: "exec did not start before the deadline" };
+        return {
+          exitCode: -1,
+          stdout: "",
+          stderr: "exec did not start before the deadline",
+          timedOut: true,
+        };
       }
       const proc = started;
       const out = new TailBuffer(64 * 1024);
@@ -2411,9 +2436,14 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       await Promise.race([Promise.all([a.done, b.done]), sleep(STREAM_GRACE_MS)]);
       a.cancel();
       b.cancel();
-      return { exitCode, stdout: out.result().text, stderr: err.result().text };
+      return { exitCode, stdout: out.result().text, stderr: err.result().text, timedOut };
     } catch (e) {
-      return { exitCode: -1, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
+      return {
+        exitCode: -1,
+        stdout: "",
+        stderr: e instanceof Error ? e.message : String(e),
+        timedOut,
+      };
     } finally {
       clearTimeout(timer);
     }

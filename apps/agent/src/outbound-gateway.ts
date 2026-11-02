@@ -43,7 +43,7 @@ export const GATEWAY_DENY_CODES = [
   "read_error",
 ] as const;
 export type GatewayDenyCode = (typeof GATEWAY_DENY_CODES)[number];
-type DenyCode = GatewayDenyCode | PolicyDenyCode | ReceivePackRejectCode;
+export type DenyCode = GatewayDenyCode | PolicyDenyCode | ReceivePackRejectCode;
 
 /** git-receive-pack（push）のリクエスト本文の上限。 */
 export const MAX_RECEIVE_PACK_BYTES = 50 * 1024 * 1024;
@@ -145,6 +145,11 @@ export interface OutboundDeps {
    * 渡されるのは許可したフィールド（taskId / caller / reason / dest）だけ。
    */
   audit?(event: "outbound_denied", fields: AuditFields): void;
+  /**
+   * 拒否 1 件をタスクの集計（task_result の usage.outbound_denied）に足す。渡すのはホスト名と固定の違反コードだけ
+   * （path・query・本文は渡さない。ホスト名の検証は受け取る側が行う）。失敗しても拒否の応答は変えない。
+   */
+  recordDenied?(host: string, reason: DenyCode): void;
   /** E2E 用: 許可した通信だけを偽サーバーへ向ける。 */
   testUpstream?: string;
   limits?: {
@@ -176,6 +181,11 @@ function denied(
     else audit("outbound_denied", fields);
   } catch {
     // 監査の出力の失敗で、拒否の応答を変えない
+  }
+  try {
+    deps.recordDenied?.(url.hostname, code);
+  } catch {
+    // 集計の失敗で、拒否の応答を変えない
   }
   return text(status, body);
 }
@@ -414,6 +424,14 @@ export class OutboundGateway extends WorkerEntrypoint<Env, OutboundGatewayProps>
           };
           this.ctx.waitUntil(stub.testRecordAudit(record).catch(() => undefined));
         }
+      },
+      recordDenied: (host, reason) => {
+        // タスクの SandboxDO に数える（task_result の usage.outbound_denied）。待たず、失敗は握りつぶす
+        if (!props.taskId) return;
+        const stub = env.SANDBOX_DO.getByName(props.taskId) as unknown as {
+          recordOutboundDenied(host: string, reason: string): Promise<void>;
+        };
+        this.ctx.waitUntil(stub.recordOutboundDenied(host, reason).catch(() => undefined));
       },
       testUpstream: env.ENVIRONMENT === "test" && env.TEST_UPSTREAM ? env.TEST_UPSTREAM : undefined,
     });

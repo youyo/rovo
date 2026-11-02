@@ -136,6 +136,7 @@ describe("task_result の usage（依存関係のキャッシュ）", () => {
         "npm.internal.example.com",
         "Bad Host",
         "x/y",
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: .npmrc の環境変数の書き方をそのまま試す
         "${TOKEN}",
         3,
         "a.example",

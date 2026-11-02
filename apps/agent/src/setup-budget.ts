@@ -28,7 +28,10 @@ export const BOOT_DESTROY_MS = 10_000;
 /** 起動の確認の exec（CA 証明書の確認・baseline の記録）1 回の上限 */
 export const BOOT_CHECK_EXEC_MS = 10_000;
 
-/** 依存関係のキャッシュの ensure（作成を待つことがある）を待つ上限。作成の時間切れ + 余裕 */
+/**
+ * 依存関係のキャッシュの ensure（作成を待つことがある）を待つ上限。作成の時間切れ + 余裕。
+ * 作成の時間切れ DEPS_BUILD_TIMEOUT_MS の定義は apps/agent/src/deps-cache.ts にある。
+ */
 export const DEPS_ENSURE_WAIT_MS = DEPS_BUILD_TIMEOUT_MS + 60_000;
 /** 退避した node_modules を作業ツリーへ戻す（同じファイルシステム内の mv）のに許す時間 */
 export const DEPS_RESTORE_TIMEOUT_MS = 2 * 60_000;
@@ -61,5 +64,7 @@ export const ENSURE_READY_MARGIN_MS = 2 * 60_000;
 /**
  * AgentDO が SandboxDO.ensureReady の RPC 1 回を待つ上限。起動の最悪の合計 + 余裕。
  * 返ってこない RPC は失敗として MAX_SETUP_ATTEMPTS に数える。
+ * 注意: SandboxDO の RPC そのものが止まった（AgentDO の待ちのタイマーも DO の退避などで効かない）ときの実際の上限は、
+ * ENSURE_READY_TIMEOUT_MS × MAX_SETUP_ATTEMPTS ではなく、タスクの期限（deadlineAt。最大 2 時間）になる。
  */
 export const ENSURE_READY_TIMEOUT_MS = SANDBOX_SETUP_WORST_MS + ENSURE_READY_MARGIN_MS;

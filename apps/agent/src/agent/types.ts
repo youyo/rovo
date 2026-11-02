@@ -384,6 +384,19 @@ export interface SandboxMetrics {
   }[];
   /** ワーカーのプロンプトに足す英語の 1〜3 行（失敗時は秘密を伏せた出力の末尾つき）。gateway には送らない */
   depsLangNote?: string;
+  /**
+   * 起動時の作業ツリーの診断の固定コード（npmrc_registry_not_allowed / mise_go_version_unavailable）。task_result の warnings になる。
+   * 何も無ければ無い
+   */
+  repoWarnings?: ("npmrc_registry_not_allowed" | "mise_go_version_unavailable")[];
+  /** .npmrc の許可されていない registry のホスト名（厳密に検証したものだけ。最大 5 件）。usage.npmrc_registry_hosts になる */
+  npmrcRegistryHosts?: string[];
+  /** 診断のワーカー向けの英語の文（依存の節に足す）。gateway には送らない */
+  repoNote?: string;
+  /** 拒否した外向き通信の {host, reason, count}（最大 20 件）。usage.outbound_denied になる。拒否が無ければ無い */
+  outboundDenied?: { host: string; reason: string; count: number }[];
+  /** 拒否した外向き通信の合計（outboundDenied に入らなかったものも含む）。usage.outbound_denied_total になる */
+  outboundDeniedTotal?: number;
   /** 最初にコンテナを start() した大きさ。一度も起動していなければ無い（Sandbox が必要になるまで起動しない）。昇格しても変わらない */
   instance?: string;
   /** 昇格した最終の大きさ（Clef が上げると判断した先）。昇格していなければ無い。上げる方向だけで、戻さない（作り直しも最終の大きさで起動する） */

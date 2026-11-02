@@ -1,11 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { type GitCredential, handleOutbound, type OutboundDeps } from "../../src/outbound-gateway";
 import {
   addOutboundDenied,
   OUTBOUND_DENIED_MAX_ENTRIES,
   sanitizeOutboundDenied,
 } from "../../src/outbound-denied";
+import { type GitCredential, handleOutbound, type OutboundDeps } from "../../src/outbound-gateway";
 
 // 拒否した外向き通信を、タスクごとに {host, reason} で数える（task_result の usage.outbound_denied になる）。
 // host は検証したホスト名だけ、reason は既存の固定の違反コードだけ。
@@ -36,7 +36,10 @@ describe("handleOutbound: 拒否を recordDenied に渡す", () => {
       new Request("https://github.com/acme/other.git/info/refs?service=git-upload-pack"),
       deps,
     );
-    await handleOutbound(new Request("https://pypi.org/simple/x", { method: "POST", body: "x" }), deps);
+    await handleOutbound(
+      new Request("https://pypi.org/simple/x", { method: "POST", body: "x" }),
+      deps,
+    );
     await handleOutbound(new Request("https://registry.npmjs.org/tiny"), deps);
     expect(recorded).toEqual([
       ["evil.example", "host_not_allowed"],

@@ -68,7 +68,10 @@ class FakeContainer {
         reply = { code: 1 };
       } else if (argv[0] === "find" && argv.includes("-printf")) {
         reply = { out: this.rootFiles.map((f) => `${f}\n`).join("") };
-      } else if ((argv[0] === "cat" || argv[0] === "head") && argv.at(-1)?.startsWith("/workspace/")) {
+      } else if (
+        (argv[0] === "cat" || argv[0] === "head") &&
+        argv.at(-1)?.startsWith("/workspace/")
+      ) {
         const name = (argv.at(-1) ?? "").slice("/workspace/".length);
         reply = name in this.contents ? { out: this.contents[name] } : { code: 1 };
       } else reply = {};

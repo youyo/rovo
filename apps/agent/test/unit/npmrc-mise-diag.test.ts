@@ -29,6 +29,7 @@ describe("isValidHostname", () => {
       "x".repeat(64),
       `${"a.".repeat(130)}com`,
       "tok=en@host",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: .npmrc の環境変数の書き方をそのまま試す
       "${NPM_HOST}",
       3,
       undefined,
@@ -89,6 +90,7 @@ describe("npmrcDiagnostics", () => {
 
   it("ホスト名として検証できない値（環境変数・壊れた URL）は警告するが、hosts には入れない", () => {
     const r = npmrcDiagnostics(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: .npmrc の環境変数の書き方をそのまま試す
       ["registry=${NPM_REGISTRY_URL}", "@x:registry=not a url ghp_SECRET"].join("\n"),
     );
     expect(r.blocked).toBe(true);
@@ -96,10 +98,7 @@ describe("npmrcDiagnostics", () => {
   });
 
   it("hosts は重複を除いて最大 5 件", () => {
-    const lines = Array.from(
-      { length: 8 },
-      (_, i) => `@s${i}:registry=https://r${i}.example.com/`,
-    );
+    const lines = Array.from({ length: 8 }, (_, i) => `@s${i}:registry=https://r${i}.example.com/`);
     lines.push("registry=https://r0.example.com/");
     const r = npmrcDiagnostics(lines.join("\n"));
     expect(r.hosts).toEqual([

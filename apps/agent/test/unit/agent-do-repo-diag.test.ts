@@ -87,6 +87,30 @@ describe("AgentDO: 作業ツリーの診断を伝える", () => {
     expect(sb?.outboundDeniedTotal).toBe(5);
   });
 
+  it("途中の更新（final でない）でも、拒否の集計が増えれば新しい値に替える", async () => {
+    const fx = newFixture("diag-agent-denied-mid", [boot(), call("gate"), report()]);
+    fx.sandbox.metricsValue = base;
+    await fx.stub.start(makeSpec("diag-agent-denied-mid"));
+    await fx.gate.waitEntered();
+    const prev = {
+      ...base,
+      outboundDenied: [{ host: "evil.example", reason: "host_not_allowed", count: 1 }],
+      outboundDeniedTotal: 1,
+    };
+    fx.sandbox.metricsValue = {
+      ...base,
+      outboundDenied: [{ host: "evil.example", reason: "host_not_allowed", count: 4 }],
+      outboundDeniedTotal: 4,
+    } as SandboxMetrics;
+    const next = await runInDO(fx.stub, (inst) => inst.sandboxUsage(prev, false));
+    expect(next?.outboundDeniedTotal).toBe(4);
+    expect(next?.outboundDenied).toEqual([
+      { host: "evil.example", reason: "host_not_allowed", count: 4 },
+    ]);
+    fx.gate.release();
+    expect(await waitForTerminal(fx)).toBe("completed");
+  });
+
   it("診断が無ければ何も足さない", async () => {
     const fx = newFixture("diag-agent-none", [boot(), report()]);
     fx.sandbox.metricsValue = base;

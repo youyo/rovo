@@ -79,6 +79,7 @@ import {
   DEPS_RESTORE_TIMEOUT_MS,
   INACTIVITY_CALL_MS,
   PM_PREPARE_TIMEOUT_MS,
+  REPO_DIAG_EXEC_MS,
 } from "./setup-budget";
 import { TailBuffer } from "./tail-buffer";
 import {
@@ -2130,9 +2131,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       try {
         const r = await this.rawExec(
           ["head", "-c", String(REPO_DIAG_MAX_BYTES), `${WORKSPACE}/${name}`],
-          {
-            timeoutMs: 10_000,
-          },
+          { timeoutMs: REPO_DIAG_EXEC_MS },
         );
         return r.exitCode === 0 ? r.stdout : undefined;
       } catch {

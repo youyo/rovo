@@ -51,6 +51,11 @@ export const SETUP_BOOT_WORST_MS =
 export const SETUP_WORKSPACE_WORST_MS =
   GIT_STEP_TIMEOUT_MS + 3 * CLONE_TIMEOUT_MS + 6 * GIT_STEP_TIMEOUT_MS;
 
+/** 作業ツリーの診断（.npmrc・mise.toml・.mise.toml を読む）1 ファイルあたりの上限 */
+export const REPO_DIAG_EXEC_MS = 10_000;
+/** 作業ツリーの診断の最悪（読むファイルは最大 3 つ） */
+export const REPO_DIAG_WORST_MS = 3 * REPO_DIAG_EXEC_MS;
+
 /** 起動の最悪の合計（上の各段は直列に走る。exec 1 回ごとの余裕は ENSURE_READY_MARGIN_MS に含める） */
 export const SANDBOX_SETUP_WORST_MS =
   DEPS_ENSURE_WAIT_MS +
@@ -58,6 +63,7 @@ export const SANDBOX_SETUP_WORST_MS =
   SETUP_WORKSPACE_WORST_MS +
   DEPS_RESTORE_TIMEOUT_MS +
   DEPS_LANG_TOTAL_MS +
+  REPO_DIAG_WORST_MS +
   PM_PREPARE_TIMEOUT_MS;
 /** exec の開始の待ち（EXEC_START_GRACE_MS）やストリームの後始末など、段ごとの小さな余裕の合計 */
 export const ENSURE_READY_MARGIN_MS = 2 * 60_000;

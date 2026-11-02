@@ -2936,6 +2936,8 @@ export class AgentDO extends DurableObject<Env> {
       next.cacheBuildMs !== prev.cacheBuildMs ||
       JSON.stringify(next.depsLang) !== JSON.stringify(prev.depsLang) ||
       JSON.stringify(next.npmrcRegistryHosts) !== JSON.stringify(prev.npmrcRegistryHosts) ||
+      next.outboundDeniedTotal !== prev.outboundDeniedTotal ||
+      JSON.stringify(next.outboundDenied) !== JSON.stringify(prev.outboundDenied) ||
       next.instance !== prev.instance ||
       next.promotedTo !== prev.promotedTo ||
       next.promotionReason !== prev.promotionReason ||

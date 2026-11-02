@@ -10,6 +10,7 @@ import {
   DEPS_RESTORE_TIMEOUT_MS,
   ENSURE_READY_TIMEOUT_MS,
   PM_PREPARE_TIMEOUT_MS,
+  REPO_DIAG_WORST_MS,
   SANDBOX_SETUP_WORST_MS,
   SETUP_BOOT_WORST_MS,
   SETUP_WORKSPACE_WORST_MS,
@@ -18,13 +19,14 @@ import {
 // AgentDO の ensureReady の待ち（ENSURE_READY_TIMEOUT_MS）は、SandboxDO.boot の最悪の合計を必ず上回る。
 // 下回ると、まだ進んでいる起動を時間切れにして MAX_SETUP_ATTEMPTS（3 回）に数えてしまう。
 describe("setup-budget: ensureReady の待ちと起動の最悪の合計", () => {
-  it("合計は、依存キャッシュの待ち・起動・clone・Node の依存の復元・言語の依存・パッケージマネージャの用意の和", () => {
+  it("合計は、依存キャッシュの待ち・起動・clone・Node の依存の復元・言語の依存・作業ツリーの診断・パッケージマネージャの用意の和", () => {
     expect(SANDBOX_SETUP_WORST_MS).toBe(
       DEPS_ENSURE_WAIT_MS +
         SETUP_BOOT_WORST_MS +
         SETUP_WORKSPACE_WORST_MS +
         DEPS_RESTORE_TIMEOUT_MS +
         DEPS_LANG_TOTAL_MS +
+        REPO_DIAG_WORST_MS +
         PM_PREPARE_TIMEOUT_MS,
     );
   });
@@ -39,6 +41,10 @@ describe("setup-budget: ensureReady の待ちと起動の最悪の合計", () =>
     );
     expect(SETUP_WORKSPACE_WORST_MS).toBeGreaterThanOrEqual(CLONE_TIMEOUT_MS);
     expect(DEPS_ENSURE_WAIT_MS).toBeGreaterThan(DEPS_BUILD_TIMEOUT_MS);
+  });
+
+  it("作業ツリーの診断は、読むファイル 3 つ（.npmrc・mise.toml・.mise.toml）分の上限", () => {
+    expect(REPO_DIAG_WORST_MS).toBeGreaterThanOrEqual(3 * 10_000);
   });
 
   it("言語の依存の枠は、Python と Go を別々に 5 分ずつ（10 分）取るより短い", () => {

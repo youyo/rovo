@@ -104,11 +104,18 @@ describe("AgentDO: read_issue / read_pr（gateway が GitHub を読む）", () =
     expect(await waitForTerminal(fx)).toBe("completed");
     const events = await allEvents(fx);
     expect(events.filter((e) => e.type === "github_read")).toEqual([]);
-    const ends = (await toolEnds(fx)).filter(
-      (e) => e.name === "read_issue" || e.name === "read_pr",
+    // 引数の検査は Pi のハーネスが beforeTool より前に行い、落ちた呼び出しは afterTool（tool_end）を通らない。
+    // そのため、各呼び出しの結果としてモデルに返ったエラーで確かめる（toolResults[i + 1] の最後が i 番目の呼び出しの結果）
+    const calls = bad.length + 1;
+    for (let i = 0; i < calls; i++) {
+      const last = fx.modelCalls.toolResults[i + 1]?.at(-1) ?? "";
+      expect(last, `call ${i}`).toContain("number must be a positive integer");
+    }
+    // 文字列の "12" は Value.Convert で 12 に直されずに弾かれる（4 番目の呼び出し）
+    expect(bad[3]).toBe("12");
+    expect(fx.modelCalls.toolResults[4]?.at(-1) ?? "").toContain(
+      "number must be a positive integer",
     );
-    expect(ends).toHaveLength(bad.length + 1);
-    for (const e of ends) expect(e.isError).toBe(true);
   });
 
   it("gateway が時間内に答えなければ、固定のエラーを返してタスクは続く", async () => {

@@ -72,6 +72,7 @@ import { emitAudit, readTestAudit } from "./audit-adapter";
 import { type DepsLangResult, depsLangWarnings } from "./deps-lang";
 import { GIT_ISOLATION_ENV, isolatedGit, pushTarget } from "./git-isolation";
 import { runModelStep, type StepMessage, type StepToolCall, type StepToolDef } from "./model-step";
+import { sanitizeOutboundDenied } from "./outbound-denied";
 import { applyConsultCacheControl } from "./pi/consult-cache";
 import { type AgentPiHooks, createAgentExtension } from "./pi/extension";
 import {
@@ -88,6 +89,7 @@ import {
   type ScriptStep,
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
+import { repoDiagWarnings, sanitizeHostnames } from "./repo-diag";
 import { buildReviewBody } from "./review/body";
 import { buildFixInstruction } from "./review/fix";
 import {
@@ -979,6 +981,8 @@ export class AgentDO extends DurableObject<Env> {
       if (this.sandboxStopped())
         throw new Error("sandbox boot skipped: the task has ended or is stopping");
       try {
+        // SandboxDO の RPC そのものが止まったときの実際の上限は、ENSURE_READY_TIMEOUT_MS × MAX_SETUP_ATTEMPTS ではなく
+        // タスクの期限（deadlineAt。最大 2 時間。deadline のジョブが止める）になる（setup-budget.ts）
         await this.ensureReadyWithDeadline(this.workspaceSpec(spec));
         break;
       } catch (e) {
@@ -1806,6 +1810,9 @@ export class AgentDO extends DurableObject<Env> {
       // Python / Go の依存の導入の結果（ワーカーのプロンプトに足す文。失敗は warnings にも出す）
       if (m?.depsLangNote) this.store.setMeta("deps_lang_note", m.depsLangNote);
       if (m?.depsLang) this.store.setMeta("deps_lang", m.depsLang);
+      // 作業ツリーの診断（.npmrc の registry・mise.toml の go の版）。文はワーカーへ、固定コードは warnings へ
+      if (m?.repoNote) this.store.setMeta("repo_note", m.repoNote);
+      if (m?.repoWarnings) this.store.setMeta("repo_warnings", repoDiagWarnings(m.repoWarnings));
     } catch {
       // 診断の読み取りの失敗で、タスクを止めない
     }
@@ -2616,6 +2623,8 @@ export class AgentDO extends DurableObject<Env> {
         warnings.push("push_rejected_workflows_permission");
       // Python / Go の依存を入れられなかった（失敗・時間切れ）。固定コードだけ
       warnings.push(...depsLangWarnings(this.store.meta<DepsLangResult[]>("deps_lang") ?? []));
+      // 作業ツリーの診断（npmrc_registry_not_allowed / mise_go_version_unavailable）。固定コードだけ
+      warnings.push(...repoDiagWarnings(this.store.meta<string[]>("repo_warnings")));
       // 予算超過の停止で、システムが未 commit の変更を WIP として commit した（できなかった）ことを伝える
       const wip = this.store.meta<WipCommit>("wip_commit");
       if (wip && decision.phase === "budget_exceeded") warnings.push(wipWarning(wip));
@@ -2848,6 +2857,20 @@ export class AgentDO extends DurableObject<Env> {
     const cacheBuildMs = Math.max(prev?.cacheBuildMs ?? 0, finiteCount(m.cacheBuildMs));
     // Python / Go の依存の導入の結果（起動のたびに SandboxDO が置き換える。読めなければ前回の値）
     const depsLang = m.depsLang ?? prev?.depsLang;
+    // .npmrc の許可されていない registry のホスト名（検証したものだけ）。起動のたびに SandboxDO が置き換える
+    const npmrcHosts =
+      m.npmrcRegistryHosts !== undefined
+        ? sanitizeHostnames(m.npmrcRegistryHosts)
+        : (prev?.npmrcRegistryHosts ?? []);
+    // 拒否した外向き通信の集計（増えるだけ。読めなければ前回の値）。形の正しい要素だけ
+    const outboundDenied =
+      m.outboundDenied !== undefined
+        ? sanitizeOutboundDenied(m.outboundDenied)
+        : (prev?.outboundDenied ?? []);
+    const outboundDeniedTotal = Math.max(
+      prev?.outboundDeniedTotal ?? 0,
+      finiteCount(m.outboundDeniedTotal),
+    );
     // 実際に起動した大きさ（起動のたびに同じ値。最後に読めたものを残す）
     const instance = typeof m.instance === "string" ? m.instance : prev?.instance;
     // 昇格（重いコマンドの初回に大きい Sandbox へ）。昇格したら戻さないので、読めた値を残す。理由は最後に読めたもの
@@ -2886,6 +2909,10 @@ export class AgentDO extends DurableObject<Env> {
       ...(depsMissReason !== undefined ? { depsMissReason } : {}),
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
       ...(depsLang !== undefined && depsLang.length > 0 ? { depsLang } : {}),
+      ...(npmrcHosts.length > 0 ? { npmrcRegistryHosts: npmrcHosts } : {}),
+      ...(outboundDeniedTotal > 0
+        ? { outboundDenied, outboundDeniedTotal: Math.floor(outboundDeniedTotal) }
+        : {}),
       ...(instance !== undefined ? { instance } : {}),
       ...(promotedTo !== undefined
         ? {
@@ -2908,6 +2935,9 @@ export class AgentDO extends DurableObject<Env> {
       next.depsMissReason !== prev.depsMissReason ||
       next.cacheBuildMs !== prev.cacheBuildMs ||
       JSON.stringify(next.depsLang) !== JSON.stringify(prev.depsLang) ||
+      JSON.stringify(next.npmrcRegistryHosts) !== JSON.stringify(prev.npmrcRegistryHosts) ||
+      next.outboundDeniedTotal !== prev.outboundDeniedTotal ||
+      JSON.stringify(next.outboundDenied) !== JSON.stringify(prev.outboundDenied) ||
       next.instance !== prev.instance ||
       next.promotedTo !== prev.promotedTo ||
       next.promotionReason !== prev.promotionReason ||
@@ -3084,10 +3114,14 @@ export class AgentDO extends DurableObject<Env> {
     return v === "hit" || v === "built";
   }
 
-  /** 依存の節に、Python / Go の導入の結果（SandboxDO が作った英語の 1〜3 行）を足す */
+  /** 依存の節に、Python / Go の導入の結果（SandboxDO が作った英語の 1〜3 行）と、作業ツリーの診断の文を足す */
   private withDepsLangNote(text: string | undefined): string | undefined {
-    const note = this.store.meta<string>("deps_lang_note");
-    return note ? (text ? `${text}\n${note}` : note) : text;
+    const notes = [
+      text,
+      this.store.meta<string>("deps_lang_note"),
+      this.store.meta<string>("repo_note"),
+    ].filter((t): t is string => typeof t === "string" && t !== "");
+    return notes.length > 0 ? notes.join("\n") : undefined;
   }
 
   private promptSections(): { key: string; text: string | undefined }[] {

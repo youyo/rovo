@@ -107,6 +107,23 @@ describe("/mcp ツール一覧", () => {
     expect(props.verification_commands?.type).toBe("array");
     const result = tools.find((t) => t.name === "task_result");
     expect(result?.description).toContain("not_ready");
+    // 起動時の作業ツリーの診断と、拒否した外向き通信の集計（固定コードと usage の欄）
+    for (const word of [
+      "npmrc_registry_not_allowed",
+      "mise_go_version_unavailable",
+      "usage.npmrc_registry_hosts",
+      "usage.outbound_denied",
+      "usage.outbound_denied_total",
+    ]) {
+      expect(result?.description, word).toContain(word);
+    }
+    for (const word of [
+      "npmrc_registry_not_allowed",
+      "mise_go_version_unavailable",
+      "outbound_denied",
+    ]) {
+      expect(start?.description, word).toContain(word);
+    }
     await client.close();
   });
 });

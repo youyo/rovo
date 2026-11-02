@@ -405,6 +405,12 @@ export type ResultView = {
     cache_build_ms?: number;
     /** Python / Go の依存の導入の結果（言語ごとに 1 件。kind: python|go / command: argv の先頭 2〜3 語 / status: ok|failed|timeout|skipped）。何も入れていなければ付かない */
     deps_lang?: { kind: "python" | "go"; command: string; status: string; duration_ms: number }[];
+    /** 作業ツリーの .npmrc が指す、外向き通信で許可されていない registry のホスト名（ホスト名の形を検証したものだけ。最大 5 件）。warnings の npmrc_registry_not_allowed と一緒に付く。無ければ付かない */
+    npmrc_registry_hosts?: string[];
+    /** Sandbox からの外向き通信で拒否したもの（{host: ホスト名, reason: 固定の違反コード, count: 回数}。最大 20 件）。拒否が無ければ付かない */
+    outbound_denied?: OutboundDeniedUsage[];
+    /** 拒否した外向き通信の合計（outbound_denied に入らなかった分も含む）。拒否が無ければ付かない */
+    outbound_denied_total?: number;
     /** Sandbox を動かした累計の時間（ms。task_summary の sandbox_runtime_ms と同じもの）。agent がカウンタを読めたときだけ付く */
     sandbox_runtime_ms?: number;
     /** 最初にコンテナを起動した大きさ（standard-2 など）。Sandbox を一度も起動しなかったタスク・agent が報告しなかったタスクには付かない。昇格しても変わらない */
@@ -5040,6 +5046,9 @@ function depsUsage(sb: UsageDto["sandbox"]): {
   deps_cache_miss_reason?: string;
   cache_build_ms?: number;
   deps_lang?: { kind: "python" | "go"; command: string; status: string; duration_ms: number }[];
+  npmrc_registry_hosts?: string[];
+  outbound_denied?: OutboundDeniedUsage[];
+  outbound_denied_total?: number;
 } {
   const status = depsCacheStatus(sb?.depsCache);
   const reason = depsMissReason(sb?.depsCache, sb?.depsMissReason);
@@ -5053,6 +5062,61 @@ function depsUsage(sb: UsageDto["sandbox"]): {
     // deps_cache が出るときは cache_build_ms も常に出す（作っていなければ 0）
     ...(status !== undefined ? { cache_build_ms: buildMs } : {}),
     ...(lang.length > 0 ? { deps_lang: lang } : {}),
+    ...diagUsage(sb),
+  };
+}
+
+/** usage の値として受け取るホスト名の厳密な形（小文字のラベルを . でつないだもの） */
+const USAGE_HOSTNAME =
+  /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+/** 違反コードの厳密な形（agent の固定コードは小文字・数字・_ だけ） */
+const DENY_REASON_CODE = /^[a-z][a-z0-9_]{0,39}$/;
+const NPMRC_HOSTS_MAX = 5;
+const OUTBOUND_DENIED_MAX = 20;
+
+export interface OutboundDeniedUsage {
+  host: string;
+  reason: string;
+  count: number;
+}
+
+/**
+ * usage.sandbox の作業ツリーの診断（npmrcRegistryHosts）と、拒否した外向き通信の集計（outboundDenied）。
+ * リポジトリ・コンテナ由来の値なので、形を検証したものだけを返す（ホスト名の正規表現・固定コードの正規表現・正の整数）。
+ */
+function diagUsage(sb: UsageDto["sandbox"]): {
+  npmrc_registry_hosts?: string[];
+  outbound_denied?: OutboundDeniedUsage[];
+  outbound_denied_total?: number;
+} {
+  const hostOk = (h: unknown): h is string => typeof h === "string" && USAGE_HOSTNAME.test(h);
+  const hosts: string[] = [];
+  if (Array.isArray(sb?.npmrcRegistryHosts)) {
+    for (const h of sb.npmrcRegistryHosts as unknown[]) {
+      if (hosts.length >= NPMRC_HOSTS_MAX) break;
+      if (hostOk(h) && !hosts.includes(h)) hosts.push(h);
+    }
+  }
+  const denied: OutboundDeniedUsage[] = [];
+  if (Array.isArray(sb?.outboundDenied)) {
+    for (const e of sb.outboundDenied as unknown[]) {
+      if (denied.length >= OUTBOUND_DENIED_MAX) break;
+      if (typeof e !== "object" || e === null) continue;
+      const r = e as Record<string, unknown>;
+      if (!hostOk(r.host)) continue;
+      if (typeof r.reason !== "string" || !DENY_REASON_CODE.test(r.reason)) continue;
+      if (typeof r.count !== "number" || !Number.isSafeInteger(r.count) || r.count < 1) continue;
+      denied.push({ host: r.host, reason: r.reason, count: r.count });
+    }
+  }
+  const t = sb?.outboundDeniedTotal;
+  const counted = denied.reduce((n, e) => n + e.count, 0);
+  const total =
+    typeof t === "number" && Number.isSafeInteger(t) && t > 0 ? Math.max(t, counted) : counted;
+  return {
+    ...(hosts.length > 0 ? { npmrc_registry_hosts: hosts } : {}),
+    ...(denied.length > 0 ? { outbound_denied: denied } : {}),
+    ...(total > 0 ? { outbound_denied_total: total } : {}),
   };
 }
 

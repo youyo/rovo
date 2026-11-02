@@ -1,5 +1,10 @@
 export const CA_CERT = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 export const WORKSPACE = "/workspace";
+/**
+ * イメージに焼いた Go の版（apps/agent/Dockerfile の ARG GO_VERSION と同じ値。
+ * test/node/sandbox-env-dockerfile.node.test.ts が一致を確かめる）。mise.toml の go の版の診断（repo-diag.ts）に使う。
+ */
+export const GO_VERSION = "1.26.5";
 /** HTTPS 傍受の CA を各ツールに信用させる。exec はイメージの ENV を引き継がないので毎回渡す。
  * Dockerfile の最終ステージの ENV は、ここにも同じ値で書く（test/node/sandbox-env-dockerfile.node.test.ts が一致を確かめる）。 */
 export const BASE_ENV: Record<string, string> = {

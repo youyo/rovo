@@ -50,9 +50,11 @@ import {
   planPython,
 } from "./deps-lang";
 import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./deps-scripts";
+import { addOutboundDenied, type OutboundDeniedState } from "./outbound-denied";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
-import { BASE_ENV, CA_CERT, WORKSPACE } from "./sandbox-env";
+import { miseGoVersion, type RepoDiagnostics, repoDiagnostics } from "./repo-diag";
+import { BASE_ENV, CA_CERT, GO_VERSION, WORKSPACE } from "./sandbox-env";
 import type {
   ExecOptions,
   ExecResult,
@@ -77,6 +79,7 @@ import {
   DEPS_RESTORE_TIMEOUT_MS,
   INACTIVITY_CALL_MS,
   PM_PREPARE_TIMEOUT_MS,
+  REPO_DIAG_EXEC_MS,
 } from "./setup-budget";
 import { TailBuffer } from "./tail-buffer";
 import {
@@ -93,6 +96,8 @@ const PUSH_PERMIT_KEY = "push_permit";
 const PUSH_PERMIT_GRACE_MS = 30_000;
 const DEFAULT_MAX_OUTPUT = 64 * 1024;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
+/** 診断（.npmrc / mise.toml）で読むファイルの先頭の上限 */
+const REPO_DIAG_MAX_BYTES = 64 * 1024;
 /**
  * コンテナの無操作の期限（container.setInactivityTimeout）。設定しないと、DO が inactive になった直後にコンテナが止まり、
  * push していない作業が消える。KEEPALIVE_MS（60 秒の alarm）より十分長い。
@@ -381,6 +386,17 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     appendTestAudit(this.ctx.storage.kv, record as AuditRecord);
   }
 
+  /**
+   * OutboundGateway 用: 拒否した外向き通信 1 件を数える（task_result の usage.outbound_denied）。
+   * host は厳密に検証したホスト名だけ（違えば合計にだけ数える）、reason は固定の違反コードだけ（違えば数えない）。
+   */
+  async recordOutboundDenied(host: unknown, reason: unknown): Promise<void> {
+    const kv = this.ctx.storage.kv;
+    const prev = kv.get<OutboundDeniedState>("outbound_denied");
+    const next = addOutboundDenied(prev, host, reason);
+    if (next.total !== (prev?.total ?? 0)) kv.put("outbound_denied", next);
+  }
+
   // ---- 実行時間と起動世代のカウンタ（永続。観測性 11.1 / phase6.md「観測性」）----
   //
   // 定義（Unit で固定する）:
@@ -483,6 +499,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         : undefined;
     const depsLang = this.ctx.storage.kv.get<DepsLangResult[]>("deps_lang");
     const depsLangNoteText = this.ctx.storage.kv.get<string>("deps_lang_note");
+    const diag = this.ctx.storage.kv.get<RepoDiagnostics>("repo_diag");
+    const denied = this.ctx.storage.kv.get<OutboundDeniedState>("outbound_denied");
     return {
       runtimeMs: this.runtimeTotal(),
       restarts: Math.max(0, this.num("starts") - 1),
@@ -492,6 +510,16 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
       ...(depsLang !== undefined && depsLang.length > 0 ? { depsLang } : {}),
       ...(depsLangNoteText ? { depsLangNote: depsLangNoteText } : {}),
+      // 作業ツリーの診断（固定コード・検証したホスト名・ワーカー向けの文）
+      ...(diag !== undefined && diag.warnings.length > 0 ? { repoWarnings: diag.warnings } : {}),
+      ...(diag !== undefined && diag.npmrcRegistryHosts.length > 0
+        ? { npmrcRegistryHosts: diag.npmrcRegistryHosts }
+        : {}),
+      ...(diag?.note ? { repoNote: diag.note } : {}),
+      // 拒否した外向き通信の集計
+      ...(denied !== undefined && denied.total > 0
+        ? { outboundDenied: denied.entries, outboundDeniedTotal: denied.total }
+        : {}),
       ...(instance !== undefined ? { instance } : {}),
       // 昇格（重いコマンドの初回に大きい Sandbox へ）。昇格した後は promotedTo と、その時点までの時間（費用の按分に使う）
       ...(promotedTo !== undefined
@@ -2028,6 +2056,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
           pyproject = r.exitCode === 0 ? r.stdout : "";
         }
       }
+      // .npmrc の registry と mise.toml の go の版の診断（ワーカーと task_result に伝える。失敗してもタスクは止めない）
+      await this.diagnoseRepo(files);
+      this.assertBootCurrent(g);
       const py = planPython(files, () => pyproject);
       const plans: (DepsLangPlan | "skipped")[] = [];
       if (py !== undefined) plans.push(py);
@@ -2087,6 +2118,38 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const note = depsLangNote(results, tails);
     if (note) kv.put("deps_lang_note", note);
     else kv.delete("deps_lang_note");
+  }
+
+  /**
+   * 作業ツリーのルートの .npmrc と mise.toml（.mise.toml）を読み、診断を残す（metrics の repoWarnings など）。
+   * 読めない・壊れているときは何もしない。中身は記録しない（固定コード・検証したホスト名・ワーカー向けの文だけ）。
+   */
+  private async diagnoseRepo(files: readonly string[]): Promise<void> {
+    const kv = this.ctx.storage.kv;
+    const read = async (name: string): Promise<string | undefined> => {
+      if (!files.includes(name)) return undefined;
+      try {
+        const r = await this.rawExec(
+          ["head", "-c", String(REPO_DIAG_MAX_BYTES), `${WORKSPACE}/${name}`],
+          { timeoutMs: REPO_DIAG_EXEC_MS },
+        );
+        return r.exitCode === 0 ? r.stdout : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const npmrc = await read(".npmrc");
+    let miseToml: string | undefined;
+    for (const name of ["mise.toml", ".mise.toml"]) {
+      const t = await read(name);
+      if (t !== undefined && miseGoVersion(t) !== undefined) {
+        miseToml = t;
+        break;
+      }
+    }
+    const diag = repoDiagnostics({ npmrc, miseToml }, GO_VERSION);
+    kv.put("repo_diag", diag);
+    for (const w of diag.warnings) console.warn(`[sandbox-boot] ${w}`);
   }
 
   /**

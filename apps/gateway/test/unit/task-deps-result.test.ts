@@ -126,4 +126,75 @@ describe("task_result の usage（依存関係のキャッシュ）", () => {
     const usage = await resultWith({ runtimeMs: 1, restarts: 0, bootRetries: 0, depsCache: "hit" });
     expect(usage).not.toHaveProperty("deps_lang");
   });
+
+  it("npmrc_registry_hosts: 検証したホスト名だけ（最大 5 件）。無ければ付かない", async () => {
+    const usage = await resultWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      npmrcRegistryHosts: [
+        "npm.internal.example.com",
+        "Bad Host",
+        "x/y",
+        "${TOKEN}",
+        3,
+        "a.example",
+        "b.example",
+        "c.example",
+        "d.example",
+        "e.example",
+      ],
+    });
+    expect(usage.npmrc_registry_hosts).toEqual([
+      "npm.internal.example.com",
+      "a.example",
+      "b.example",
+      "c.example",
+      "d.example",
+    ]);
+    expect(await resultWith({ runtimeMs: 1, npmrcRegistryHosts: "x" })).not.toHaveProperty(
+      "npmrc_registry_hosts",
+    );
+    expect(await resultWith({ runtimeMs: 1 })).not.toHaveProperty("npmrc_registry_hosts");
+  });
+
+  it("outbound_denied: {host, reason, count} の正しい形だけ（最大 20 件）と合計", async () => {
+    const usage = await resultWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      outboundDenied: [
+        { host: "evil.example", reason: "host_not_allowed", count: 3 },
+        { host: "github.com", reason: "github_other_repo", count: 1 },
+        { host: "bad host", reason: "host_not_allowed", count: 1 },
+        { host: "x.example", reason: "Not A Code!", count: 1 },
+        { host: "x.example", reason: "registry_method", count: 1.5 },
+        { host: "x.example", reason: "registry_method", count: 0 },
+        { host: "x.example", reason: "registry_method", count: "2" },
+        "junk",
+      ],
+      outboundDeniedTotal: 9,
+    });
+    expect(usage.outbound_denied).toEqual([
+      { host: "evil.example", reason: "host_not_allowed", count: 3 },
+      { host: "github.com", reason: "github_other_repo", count: 1 },
+    ]);
+    expect(usage.outbound_denied_total).toBe(9);
+    const many = await resultWith({
+      runtimeMs: 1,
+      outboundDenied: Array.from({ length: 30 }, (_, i) => ({
+        host: `h${i}.example`,
+        reason: "host_not_allowed",
+        count: 1,
+      })),
+      outboundDeniedTotal: 30,
+    });
+    expect(many.outbound_denied).toHaveLength(20);
+  });
+
+  it("outbound_denied は拒否が無ければ付かない", async () => {
+    const usage = await resultWith({ runtimeMs: 1, restarts: 0, bootRetries: 0 });
+    expect(usage).not.toHaveProperty("outbound_denied");
+    expect(usage).not.toHaveProperty("outbound_denied_total");
+  });
 });

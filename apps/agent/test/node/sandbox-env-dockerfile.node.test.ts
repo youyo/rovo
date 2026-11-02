@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { BASE_ENV } from "../../src/sandbox-env";
+import { BASE_ENV, GO_VERSION } from "../../src/sandbox-env";
 
 // 本番（Cloudflare Containers）の container.exec はイメージの ENV を引き継がない。
 // Dockerfile の最終ステージの ENV と BASE_ENV がずれると、本番だけ go / python3 が見つからなくなる。
@@ -48,5 +48,14 @@ describe("BASE_ENV と Dockerfile の ENV の一致", () => {
     const prefix = m ? (m[1] ?? "") : "";
     expect(prefix).toBe("/opt/venv/bin:/usr/local/go/bin");
     expect(BASE_ENV.PATH).toBe(`${prefix}:${DEFAULT_PATH}`);
+  });
+});
+
+describe("GO_VERSION と Dockerfile の ARG GO_VERSION の一致", () => {
+  it("mise.toml の go の診断に使う焼いた版が、Dockerfile で入れる版と同じ", () => {
+    const text = readFileSync(join(__dirname, "../../Dockerfile"), "utf8");
+    const m = /^ARG GO_VERSION=(\S+)$/m.exec(text);
+    expect(m?.[1]).toBeTruthy();
+    expect(GO_VERSION).toBe(m?.[1]);
   });
 });

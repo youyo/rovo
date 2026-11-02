@@ -6,6 +6,7 @@ import {
   allEvents,
   ask,
   call,
+  clearAgentFixtures,
   done,
   makeSpec,
   newFixture,
@@ -15,7 +16,10 @@ import {
   waitUntil,
 } from "./support/agent-fixture";
 
-afterEach(() => clearAgentTestOverrides());
+afterEach(async () => {
+  await clearAgentFixtures();
+  clearAgentTestOverrides();
+});
 
 // biome-ignore lint/suspicious/noExplicitAny: private メンバーの観測
 type Inst = any;

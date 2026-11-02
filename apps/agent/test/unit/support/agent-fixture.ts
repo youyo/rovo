@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { setAgentTestOverrides } from "../../../src/agent/deps";
@@ -120,6 +120,42 @@ export interface Fixture {
   reviewDiff: { value: string };
   /** git diff --no-ext-diff の呼び出し（argv） */
   reviewDiffCalls: string[][];
+  /** 後始末用: 止めてある gate をすべて外す（clearAgentFixtures が使う） */
+  releaseAll: () => void;
+}
+
+/** newFixture が作った fixture（clearAgentFixtures が後始末する対象）。 */
+const createdFixtures: Fixture[] = [];
+
+/**
+ * newFixture が作ったタスクを止め、alarm を消し、記録を空にする。afterEach で呼ぶ。
+ * テストが終端を待たずに終わると、タスクが共有の workerd の中で動き続け、後から console にログを出して、
+ * 閉じかけの vitest の RPC に当たり EnvironmentTeardownError（Unhandled Rejection）になる。
+ * そのため gate を外し、cancel して終端まで待ち、DO に残った alarm を消す。
+ */
+export async function clearAgentFixtures(): Promise<void> {
+  const fxs = createdFixtures.splice(0);
+  await Promise.all(
+    fxs.map(async (fx) => {
+      fx.releaseAll();
+      try {
+        await fx.stub.cancel();
+        await waitForTerminal(fx, 3_000);
+      } catch {
+        // 未開始・終端済み・待ち切れない場合も、alarm の削除は行う
+      }
+      // Lifecycle（agents）は DO の動きの後に deadman の alarm を張り直す。途切れるまで消し直す
+      for (let quiet = 0, n = 0; quiet < 2 && n < 20; n++) {
+        const had = await runInDurableObject(fx.stub, async (_i, state) => {
+          const a = await state.storage.getAlarm();
+          await state.storage.deleteAlarm();
+          return a !== null;
+        });
+        quiet = had ? 0 : quiet + 1;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }),
+  );
 }
 
 /** AgentDO を 1 つ用意する。sandbox は fake、モデルは台本、ツールはテスト用の小さな factory。 */
@@ -335,7 +371,7 @@ export function newFixture(
       modelCalls.toolNames.push(ctx?.toolNames ?? []);
     },
   });
-  return {
+  const fixture: Fixture = {
     name,
     stub: env.AGENT_DO.getByName(name),
     sandbox,
@@ -390,7 +426,26 @@ export function newFixture(
         patchState.held = false;
       },
     },
+    releaseAll: () => {
+      gateState.released = true;
+      for (const g of [
+        patchState,
+        execState.status,
+        execState.switch,
+        usageState,
+        submitState,
+        askState,
+        answerState,
+        afterAnswerState,
+        steerState,
+        questionState,
+      ]) {
+        g.held = false;
+      }
+    },
   };
+  createdFixtures.push(fixture);
+  return fixture;
 }
 
 function gateOf(state: { held: boolean; entered: boolean }): ExecGate {

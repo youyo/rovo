@@ -178,26 +178,32 @@ describe("Go / Python のイメージ", () => {
   }, 300_000);
 
   // MISE_OFFLINE をやめたので、焼いていない node・python の版は配布元から取る（実ネットワークの確認は e2e-net）。
-  // go は mise の取り方（dl.google.com・github.com/golang/go の ls-remote）を許可していないので、焼いていない版は取れずに失敗する。
-  // go.mod の toolchain は GOTOOLCHAIN=auto で proxy.golang.org から取る。
-  it("焼いていない go の版（1.24）の mise exec は、配布元が許可されていないので失敗する（待ち続けない）", async () => {
+  // go は mise の取り方（dl.google.com・github.com/golang/go の ls-remote）を許可していないので、焼いていない版は取れない。
+  // mise install / mise run は失敗する。mise exec は版の一覧の取得失敗を警告にするだけで、ツールを解決できないまま
+  // PATH 上の焼いた go（GO_VERSION）で動く（mise の挙動。設定では変えられない）。go.mod の toolchain は GOTOOLCHAIN=auto で proxy.golang.org から取る。
+  it("焼いていない go の版（1.24）は取れず、mise install は失敗し、mise exec は警告を出して焼いた go で動く（待ち続けない）", async () => {
     const dir = "/workspace/.mise-e2e-unbaked";
     const w = await run([
       "sh",
       "-c",
-      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\\ngo = "1.24"\\n' > ${dir}/mise.toml`,
+      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\ngo = "1.24"\n' > ${dir}/mise.toml`,
     ]);
     expect(w.exitCode, w.stderr).toBe(0);
     const started = Date.now();
+    const install = await sb.exec(["mise", "install"], { cwd: dir, timeoutMs: 60_000 });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(install.exitCode).not.toBe(0);
     const r = await sb.exec(["mise", "exec", "--", "go", "version"], {
       cwd: dir,
-      timeoutMs: 90_000,
+      timeoutMs: 60_000,
     });
-    expect(Date.now() - started).toBeLessThan(60_000);
-    expect(r.exitCode).not.toBe(0);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`go${GO_VERSION} `);
     expect(r.stdout).not.toContain("go1.24");
+    expect(r.stderr).toContain("Failed to resolve tool version list for go");
     await run(["rm", "-rf", dir]);
-  }, 150_000);
+  }, 120_000);
 
   it("mise の設定: MISE_OFFLINE は無く、許可先を最小にする設定が ENV と /etc/mise/config.toml の両方に入っている", async () => {
     const env = await run(["sh", "-c", "env | grep '^MISE_' | sort"]);

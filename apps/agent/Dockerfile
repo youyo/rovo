@@ -109,6 +109,7 @@ RUN python3 --version | grep -F "Python 3.13." \
 #   python.github_attestations=false: GitHub の attestation の検証（api.github.com・mise-versions・Sigstore の TUF への通信）をしない。
 #     node は SHASUMS256.txt とその署名（mise に組み込みの鍵）で確かめる。python は HTTPS で固定のリポジトリの releases から取ることだけが根拠になる。
 # go の焼いていない版は mise では取れない（mise の go は dl.google.com と github.com/golang/go の ls-remote を使い、許可していない）。
+# mise install / mise run は失敗するが、mise exec は版の一覧の取得失敗を警告にするだけで、PATH 上の焼いた go で動く（mise の挙動。設定では変えられない）。
 # go.mod の toolchain は GOTOOLCHAIN=auto で proxy.golang.org から取れる。shims / activate は使わず、PATH はこれまでどおり焼いたツールを直接指す。
 # データ・キャッシュは /opt/mise（どのユーザーでも書ける）。exec は ENV を引き継がないことがあるので（本番）、ENV に加えて
 # /etc/mise/config.toml（システムの設定）にも同じ値を書き、/root の既定の置き場所は /opt/mise への symlink にする。

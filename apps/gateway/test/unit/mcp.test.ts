@@ -2721,7 +2721,11 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     expect(start).toContain(
       "[tools] の node・python が焼いていない版のときは、初回に配布元から取るので時間がかかる",
     );
-    expect(start).toContain("go の違う版は mise では取れない");
+    expect(start).toContain("go の焼いていない版は mise では取れない");
+    expect(start).toContain(
+      "mise install・mise run は失敗し、mise exec は警告を出して焼いた go 1.26.5 で動く",
+    );
+    expect(start).toContain("go version で確かめる");
     expect(start).toContain("Takumi Guard（npm.flatt.tech）も許可済み");
     expect(start).not.toContain("違う版は今は入れられない");
     expect(start).not.toMatch(/mise run[^。]*使わない/);
@@ -2732,7 +2736,11 @@ describe("モデルの自動選択: AI への伝え方（instructions と説明�
     expect(instructions).toContain(
       "[tools] の node・python が焼いていない版のときは、初回に配布元から取るので時間がかかる",
     );
-    expect(instructions).toContain("go の違う版は mise では取れない");
+    expect(instructions).toContain("go の焼いていない版は mise では取れない");
+    expect(instructions).toContain(
+      "mise install・mise run は失敗し、mise exec は警告を出して焼いた go 1.26.5 で動く",
+    );
+    expect(instructions).toContain("go version で確かめる");
     expect(instructions).toContain("Takumi Guard（npm.flatt.tech）も許可済み");
     expect(instructions).not.toContain("違う版は今は入れられない");
     expect(instructions).not.toMatch(/mise run[^。]*使わない/);

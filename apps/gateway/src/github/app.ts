@@ -140,6 +140,9 @@ export function botIdentity(slug: string, botUserId: number): BotAuthor {
   };
 }
 
+const INSTALLATION_PERMS_TTL_MS = 10 * 60_000;
+const INSTALLATION_PERMS_FAILURE_TTL_MS = 60_000;
+
 export interface InstallationToken {
   token: string;
   /** epoch ms */
@@ -163,6 +166,15 @@ export class GitHubAppClient {
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private key: Promise<CryptoKey> | undefined;
+  private readonly installationPerms = new Map<
+    number,
+    { workflows: boolean; issues: boolean; until: number }
+  >();
+  /** 直近に発行した token に workflows / issues の権限を含めたか（agent の案内用）。 */
+  lastTokenPermissions: { workflows: boolean; issues: boolean } = {
+    workflows: false,
+    issues: false,
+  };
 
   constructor(opts: GitHubAppClientOptions) {
     this.appId = opts.appId;
@@ -180,7 +192,50 @@ export class GitHubAppClient {
     }
   }
 
-  /** repository_ids を 1 件に絞り、contents:write / pull_requests:write / metadata:read だけの token を発行する。 */
+  /**
+   * GET /app/installations/{id}（App の JWT）で installation が承認済みの権限を読む。短い TTL でキャッシュする
+   * （成功 10 分・失敗 1 分）。失敗しても例外にせず、追加の権限なしとして扱う。
+   */
+  private async installationGrants(
+    installationId: number,
+    jwt: string,
+  ): Promise<{ workflows: boolean; issues: boolean }> {
+    const cached = this.installationPerms.get(installationId);
+    if (cached && cached.until > this.now()) return cached;
+    let grants = { workflows: false, issues: false };
+    let ttl = INSTALLATION_PERMS_FAILURE_TTL_MS;
+    try {
+      const res = await this.fetchImpl(`${this.apiBase}/app/installations/${installationId}`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${jwt}`,
+          "x-github-api-version": "2022-11-28",
+          "user-agent": "rovo-gateway",
+        },
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { permissions?: unknown };
+        const p = body.permissions;
+        if (typeof p === "object" && p !== null && !Array.isArray(p)) {
+          const perms = p as Record<string, unknown>;
+          grants = {
+            workflows: perms.workflows === "write",
+            issues: perms.issues === "read" || perms.issues === "write",
+          };
+          ttl = INSTALLATION_PERMS_TTL_MS;
+        }
+      }
+    } catch {
+      // 取得できなければ従来の権限
+    }
+    this.installationPerms.set(installationId, { ...grants, until: this.now() + ttl });
+    return grants;
+  }
+
+  /**
+   * repository_ids を 1 件に絞り、contents:write / pull_requests:write / metadata:read の token を発行する。
+   * installation が承認していれば workflows:write・issues:read も足す。
+   */
   async createInstallationToken(
     installationId: number,
     repositoryId: number,
@@ -192,6 +247,14 @@ export class GitHubAppClient {
       nowMs: this.now(),
     });
     const what = "create installation token";
+    const grants = await this.installationGrants(installationId, jwt);
+    const permissions: Record<string, string> = {
+      contents: "write",
+      pull_requests: "write",
+      metadata: "read",
+    };
+    if (grants.workflows) permissions.workflows = "write";
+    if (grants.issues) permissions.issues = "read";
     const res = await this.send(
       what,
       `${this.apiBase}/app/installations/${installationId}/access_tokens`,
@@ -206,7 +269,7 @@ export class GitHubAppClient {
         },
         body: JSON.stringify({
           repository_ids: [repositoryId],
-          permissions: { contents: "write", pull_requests: "write", metadata: "read" },
+          permissions,
         }),
       },
     );
@@ -222,6 +285,7 @@ export class GitHubAppClient {
     if (typeof body.token !== "string" || body.token === "" || !Number.isFinite(expiresAt)) {
       throw new GitHubApiError({ status: res.status, what, detail: "unexpected response" });
     }
+    this.lastTokenPermissions = { workflows: grants.workflows, issues: grants.issues };
     return { token: body.token, expiresAt };
   }
 

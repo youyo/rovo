@@ -177,21 +177,56 @@ describe("Go / Python のイメージ", () => {
     ]);
   }, 300_000);
 
-  it("焼いていない版（go 1.24）の mise exec は、待たずにすぐ失敗する", async () => {
+  // MISE_OFFLINE をやめたので、焼いていない node・python の版は配布元から取る（実ネットワークの確認は e2e-net）。
+  // go は mise の取り方（dl.google.com・github.com/golang/go の ls-remote）を許可していないので、焼いていない版は取れない。
+  // mise install / mise run は失敗する。mise exec は版の一覧の取得失敗を警告にするだけで、ツールを解決できないまま
+  // PATH 上の焼いた go（GO_VERSION）で動く（mise の挙動。設定では変えられない）。go.mod の toolchain は GOTOOLCHAIN=auto で proxy.golang.org から取る。
+  it("焼いていない go の版（1.24）は取れず、mise install は失敗し、mise exec は警告を出して焼いた go で動く（待ち続けない）", async () => {
     const dir = "/workspace/.mise-e2e-unbaked";
     const w = await run([
       "sh",
       "-c",
-      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\\ngo = "1.24"\\n' > ${dir}/mise.toml`,
+      `rm -rf ${dir} && mkdir -p ${dir} && printf '[tools]\ngo = "1.24"\n' > ${dir}/mise.toml`,
     ]);
     expect(w.exitCode, w.stderr).toBe(0);
     const started = Date.now();
+    const install = await sb.exec(["mise", "install"], { cwd: dir, timeoutMs: 60_000 });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(install.exitCode).not.toBe(0);
     const r = await sb.exec(["mise", "exec", "--", "go", "version"], {
       cwd: dir,
       timeoutMs: 60_000,
     });
     expect(Date.now() - started).toBeLessThan(10_000);
-    expect(r.exitCode).not.toBe(0);
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`go${GO_VERSION} `);
+    expect(r.stdout).not.toContain("go1.24");
+    expect(r.stderr).toContain("Failed to resolve tool version list for go");
     await run(["rm", "-rf", dir]);
   }, 120_000);
+
+  it("mise の設定: MISE_OFFLINE は無く、許可先を最小にする設定が ENV と /etc/mise/config.toml の両方に入っている", async () => {
+    const env = await run(["sh", "-c", "env | grep '^MISE_' | sort"]);
+    expect(env.exitCode, env.stderr).toBe(0);
+    expect(env.stdout).not.toContain("MISE_OFFLINE");
+    for (const kv of [
+      "MISE_USE_VERSIONS_HOST=false",
+      "MISE_NODE_COMPILE=false",
+      "MISE_PYTHON_COMPILE=false",
+      "MISE_PYTHON_GITHUB_ATTESTATIONS=false",
+    ]) {
+      expect(env.stdout).toContain(kv);
+    }
+    const conf = await run(["cat", "/etc/mise/config.toml"]);
+    expect(conf.exitCode, conf.stderr).toBe(0);
+    expect(conf.stdout).not.toMatch(/offline/);
+    for (const line of [
+      "use_versions_host = false",
+      "node.compile = false",
+      "python.compile = false",
+      "python.github_attestations = false",
+    ]) {
+      expect(conf.stdout).toContain(line);
+    }
+  }, 150_000);
 });

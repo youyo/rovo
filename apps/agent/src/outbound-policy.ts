@@ -21,14 +21,41 @@ export const REGISTRY_HOSTS: ReadonlySet<string> = new Set([
   "files.pythonhosted.org",
   "proxy.golang.org",
   "sum.golang.org",
+  // Takumi Guard（npm のレジストリのプロキシ）。npm のレジストリと同じく GET / HEAD だけ
+  "npm.flatt.tech",
 ]);
 /**
+ * python-build-standalone（astral-sh/python-build-standalone）の GitHub のリポジトリ ID。
+ * github.com の releases/download は、配布物を `/github-production-release-asset/<リポジトリ ID>/<資産の ID>` の形の
+ * 署名付き URL へ 302 で転送する。転送先のホストは誰でも releases を置けるので、このリポジトリの ID のパスだけを許す。
+ */
+export const PYTHON_BUILD_STANDALONE_REPO_ID = "162334160";
+
+/**
  * ホスト全体ではなく、パスの先頭が一致するものだけを許可するレジストリ（GET / HEAD だけ）。
- * proxy.golang.org は、モジュールの zip（GOTOOLCHAIN の toolchain 本体も）を 302 でこのバケットへ転送する。
- * storage.googleapis.com は誰でもバケットを作れるので、ホストごとは許可しない。
+ * - storage.googleapis.com: proxy.golang.org が、モジュールの zip（GOTOOLCHAIN の toolchain 本体も）を 302 でこのバケットへ転送する。
+ *   誰でもバケットを作れるので、ホストごとは許可しない。
+ * - nodejs.org の /dist/: mise が焼いていない node の版を取る（index.json・本体・SHASUMS256.txt・SHASUMS256.txt.sig）。
+ * - mise-versions.jdx.dev の /data/python-precompiled-: mise が python の precompiled の版の一覧を取る。
+ * - github.com の python-build-standalone の /releases/download/: mise が焼いていない python の版を取る。
+ *   github.com のほかのパスは git の smart HTTP だけ（decideGitHub）。ほかのリポジトリの releases は許さない。
+ * - release-assets.githubusercontent.com / objects.githubusercontent.com: 上の releases/download の 302 の転送先（新旧）。
+ *   python-build-standalone のリポジトリ ID のパスだけ。
+ * 根拠と一覧は docs/specs/phase2.md の許可先の節。
  */
 export const REGISTRY_PATH_PREFIXES: ReadonlyMap<string, readonly string[]> = new Map([
   ["storage.googleapis.com", ["/proxy-golang-org-prod/"]],
+  ["nodejs.org", ["/dist/"]],
+  ["mise-versions.jdx.dev", ["/data/python-precompiled-"]],
+  ["github.com", ["/astral-sh/python-build-standalone/releases/download/"]],
+  [
+    "release-assets.githubusercontent.com",
+    [`/github-production-release-asset/${PYTHON_BUILD_STANDALONE_REPO_ID}/`],
+  ],
+  [
+    "objects.githubusercontent.com",
+    [`/github-production-release-asset-2e65be/${PYTHON_BUILD_STANDALONE_REPO_ID}/`],
+  ],
 ]);
 
 /**
@@ -76,7 +103,7 @@ const deny = (code: PolicyDenyCode, reason: string): OutboundDecision => ({
 /**
  * Sandbox からの外向き通信を許可するか判定する純粋関数（design 7.2）。
  * 許可: github.com の git-upload-pack（fetch/clone）と、作業ブランチ向けの git-receive-pack（push。本文の検証は別）、
- * レジストリの GET/HEAD。それ以外はすべて拒否。
+ * レジストリ（パス限定のもの。github.com の特定のリポジトリの releases の配布物を含む）の GET/HEAD。それ以外はすべて拒否。
  */
 export function decideOutbound(req: OutboundRequest, opts: OutboundOptions = {}): OutboundDecision {
   let url: URL;
@@ -94,7 +121,15 @@ export function decideOutbound(req: OutboundRequest, opts: OutboundOptions = {})
   if (url.username || url.password)
     return deny("url_credentials", `credentials in url are not allowed: ${host}`);
 
-  if (host === "github.com") return decideGitHub(method, url, opts);
+  if (host === "github.com") {
+    // 特定のリポジトリの releases の配布物だけは、レジストリと同じ扱い（GET / HEAD。認証は付けない）
+    if (isPathRegistry(host, url.pathname)) {
+      return method === "GET" || method === "HEAD"
+        ? { allow: true }
+        : deny("registry_method", `${method} is not allowed for registry: ${host}`);
+    }
+    return decideGitHub(method, url, opts);
+  }
   if (REGISTRY_HOSTS.has(host)) {
     return method === "GET" || method === "HEAD"
       ? { allow: true }

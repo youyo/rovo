@@ -134,6 +134,22 @@ describe("トークンの注入", () => {
     expect(reads).toHaveLength(0);
   });
 
+  it("github.com の releases の配布物（python-build-standalone）には Authorization を付けず、リダイレクトは追わない", async () => {
+    const { deps, up, reads } = setup();
+    const res = await handleOutbound(
+      get(
+        "https://github.com/astral-sh/python-build-standalone/releases/download/20251014/cpython-3.12.12+20251014-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        { authorization: "Bearer x" },
+      ),
+      deps,
+    );
+    expect(res.status).toBe(200);
+    expect(up.calls).toHaveLength(1);
+    expect(new Headers(up.calls[0]?.init.headers).has("authorization")).toBe(false);
+    expect(up.calls[0]?.init.redirect).toBe("manual");
+    expect(reads).toHaveLength(0);
+  });
+
   it("トークンが無ければ 401。上流には出ない", async () => {
     const { deps, up } = setup({ readCredential: async () => undefined });
     const res = await handleOutbound(get(`${REPO}/info/refs?service=git-upload-pack`), deps);

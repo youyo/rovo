@@ -64,6 +64,38 @@ describe("classifyDestination", () => {
     expect(classifyDestination("storage.googleapis.com")).toBe("other");
     expect(classifyDestination("169.254.169.254")).toBe("other");
   });
+
+  it("mise 用の配布元（パス限定）と Takumi Guard は registry。github.com の releases の配布物も registry", () => {
+    expect(classifyDestination("npm.flatt.tech")).toBe("registry");
+    expect(classifyDestination("nodejs.org", "/dist/index.json")).toBe("registry");
+    expect(classifyDestination("nodejs.org", "/en/")).toBe("other");
+    expect(
+      classifyDestination(
+        "mise-versions.jdx.dev",
+        "/data/python-precompiled-x86_64-unknown-linux-gnu.gz",
+      ),
+    ).toBe("registry");
+    expect(classifyDestination("mise-versions.jdx.dev", "/data/node.toml")).toBe("other");
+    expect(
+      classifyDestination(
+        "github.com",
+        "/astral-sh/python-build-standalone/releases/download/1/x.tar.gz",
+      ),
+    ).toBe("registry");
+    expect(classifyDestination("github.com", "/evil/repo/releases/download/1/x")).toBe("github");
+    expect(
+      classifyDestination(
+        "release-assets.githubusercontent.com",
+        "/github-production-release-asset/162334160/x",
+      ),
+    ).toBe("registry");
+    expect(
+      classifyDestination(
+        "release-assets.githubusercontent.com",
+        "/github-production-release-asset/1/x",
+      ),
+    ).toBe("other");
+  });
 });
 
 describe("limitBody", () => {

@@ -158,8 +158,24 @@ apps/gateway (既存 Worker)
       - 認証ヘッダは Worker 側で注入する。Phase 2 は公開リポジトリだけを対象にし、認証なしで通す。非公開リポジトリは Phase 3 の Token Broker で対応する。
       - git-receive-pack、dumb HTTP、LFS、別リポジトリ（submodule を含む）は拒否する。
       - リクエスト本文のサイズと時間に上限を設ける。
-    - `registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`、`proxy.golang.org`、`sum.golang.org`: GET と HEAD だけ。
+    - `registry.npmjs.org`、`npm.flatt.tech`（Takumi Guard。npm のレジストリのプロキシ）、`pypi.org`、`files.pythonhosted.org`、`proxy.golang.org`、`sum.golang.org`: GET と HEAD だけ。
     - `storage.googleapis.com` は、パスが `/proxy-golang-org-prod/` で始まるものだけ（GET と HEAD。ホストごとは許可しない）。`proxy.golang.org` が Go のモジュールの zip（と GOTOOLCHAIN の toolchain 本体）を 302 で転送する先。判定は pathname だけで行い、`..`・`%2e`・`%2f`・`%5c` を含むパスは拒否する。
+    - mise が焼いていない node・python の版を取る配布元（下の表）。どれもパスの先頭で絞り、GET と HEAD だけ。判定は pathname だけで行い（query は見ない）、`%2e`・`%2f`・`%5c` を含むパスは拒否する。github.com は、表のリポジトリの `/releases/download/` だけをレジストリと同じ扱い（認証を付けない）にし、ほかのパス（ほかのリポジトリの releases を含む）は従来どおり git の smart HTTP だけを許す。ホスト全体（github.com・objects.githubusercontent.com など、誰でも置けるホスト）は許可しない。
+      - 調べた版: mise 2026.10.25（`src/plugins/core/node.rs`・`src/plugins/core/python.rs`・`src/versions_host.rs`・`crates/mise-util/src/github/sigstore.rs`・`src/plugins/core/go.rs`。https://github.com/jdx/mise/tree/v2026.10.25 ）。
+
+        | ホスト | パス | 用途 | 根拠 |
+        | --- | --- | --- | --- |
+        | `nodejs.org` | `/dist/` | node の版の一覧（`/dist/index.json`）、本体（`/dist/v<版>/node-v<版>-linux-<x64\|arm64>.tar.gz`）、チェックサム（`/dist/v<版>/SHASUMS256.txt`）、その署名（`SHASUMS256.txt.sig`。鍵は mise に組み込み） | node.rs の `_list_remote_versions`（`mirror_url` + `index.json`）、`BuildOpts`、`get_checksum`、`verify_with_gpg`。既定の `node.mirror_url` は `https://nodejs.org/dist/` |
+        | `mise-versions.jdx.dev` | `/data/python-precompiled-` | python の precompiled の版の一覧（`/data/python-precompiled-<arch>-<os>.gz`。版からタグとファイル名を引く） | versions_host.rs の `python_precompiled`（`use_versions_host` に関係なく常にここを読む） |
+        | `github.com` | `/astral-sh/python-build-standalone/releases/download/` | python の本体（`<タグ>/cpython-<版>+<タグ>-<triple>-install_only_stripped.tar.gz` など） | python.rs の `PBS_RELEASE_DOWNLOAD_URL` と `install_precompiled` |
+        | `release-assets.githubusercontent.com` | `/github-production-release-asset/162334160/` | 上の releases/download の 302 の転送先（署名付き URL。162334160 は python-build-standalone のリポジトリ ID） | https://github.com/orgs/community/discussions/165767 （転送先の形）、https://github.com/astral-sh/uv/issues/8525 （リポジトリ ID） |
+        | `objects.githubusercontent.com` | `/github-production-release-asset-2e65be/162334160/` | 旧来の 302 の転送先（同上） | https://github.com/astral-sh/uv/issues/8525 |
+
+      - 通信先を減らすための mise の設定（Dockerfile の ENV・`BASE_ENV`・`/etc/mise/config.toml` に同じ値を書く。`MISE_OFFLINE` / `offline` は外した）:
+        - `use_versions_host = false`（`MISE_USE_VERSIONS_HOST=false`）: node の版の一覧を `mise-versions.jdx.dev/data/node.toml` ではなく `nodejs.org/dist/index.json` から取る。インストールの記録（`mise-versions.jdx.dev/t?...`）も送らない。
+        - `node.compile = false`・`python.compile = false`: 配布物が無い版をソースからビルドしない（node のソースの tarball、python-build のための pyenv の git clone を取りに行かない。gcc も無い）。`python.compile = false` のとき、python の版の一覧は上の precompiled の一覧になる（pypy の一覧 `downloads.python.org/pypy/versions.json` も読むが、失敗は警告だけで CPython の一覧は使えるので、許可しない）。
+        - `python.github_attestations = false`: GitHub の artifact attestation の検証をしない。検証には `mise-versions.jdx.dev` の attestation の写し・`api.github.com/repos/<owner>/<repo>/attestations/...`・Sigstore の TUF のリポジトリへの通信が要り、許可先が増えるため。python の配布物は、HTTPS で固定のリポジトリの releases から取ることだけが根拠になる（リポジトリに `mise.lock` があれば、そのチェックサムで確かめる）。node は `SHASUMS256.txt` とその署名で確かめる（`node.verify` / `node.gpg_verify` は既定のまま）。
+      - go: mise の go は本体を `go.download_mirror`（既定 `https://dl.google.com/go`）から、版の一覧を `git ls-remote https://github.com/golang/go`（または `mise-versions.jdx.dev`）から取り、`proxy.golang.org` は使わない。go の版は go.mod の toolchain を `GOTOOLCHAIN=auto` で `proxy.golang.org` から取れるので、mise の go 用の許可は足さない（`mise.toml` の `[tools]` の go が焼いていない版だと、`mise install`・`mise run` は失敗し、`mise exec` は「Failed to resolve tool version list for go」の警告を出して PATH 上の焼いた go で動く。mise が版の一覧の取得失敗を警告にするためで、設定では変えられない。ワーカーは `go version` で確かめる）。
   - それ以外（CONNECT、WebSocket、別ポート、裸の IP、IPv6 の直接指定、Host と SNI の不一致を含む）はすべて拒否し、ポリシー違反としてイベントに記録する。記録には query や本文を残さない。
   - 上流への転送
     - `redirect: "manual"` にし、redirect の行き先ごとに scheme / host / port / path / method を判定し直す。
@@ -170,15 +186,16 @@ apps/gateway (既存 Worker)
   - サポートする言語は Node・TypeScript・Go・Python の 4 つだけ。Rust・Java・Ruby など、ほかの言語は対象外。
   - Go は `ARG GO_VERSION`（公式 tarball を sha256 で確認して `/usr/local/go` に置く）。`GOTOOLCHAIN=auto` で、別の版の go.mod の toolchain は `proxy.golang.org` から取る。`GOPROXY=https://proxy.golang.org`、`GOSUMDB=sum.golang.org`。
   - Python は uv で入れた 3.13 だけ（`python3` / `python` / `pip` は 3.13）。`UV_PYTHON_DOWNLOADS=never` なので、別の版の Python は取れず、すぐ失敗する。
-  - mise は `ARG MISE_VERSION`（公式 release の tarball を sha256 で確認して `/usr/local/bin/mise` に置く）。焼いた node・Go・Python は `mise link` で登録してあり、リポジトリの `mise.toml` の `[tools]` が焼いた版（前方一致を含む。`node = "24"`、`go = "1.26"`、`python = "3.13"` など）を指すときは、ダウンロードせずに `mise run` / `mise exec` で使える。違う版は今は入れられない（外向き通信の許可先に mise 用のホストは足さない。別のタスクで扱う）。
-  - mise の設定: データ・キャッシュは `/opt/mise`、`MISE_TRUSTED_CONFIG_PATHS=/workspace`、`MISE_YES=1`、`MISE_OFFLINE=1`（外へ出ずにすぐ失敗させる）。同じ値を `/etc/mise/config.toml` にも書く（exec が ENV を引き継がないことがあるため）。shims と activate は使わず、PATH は焼いたツールを直接指す。
+  - mise は `ARG MISE_VERSION`（公式 release の tarball を sha256 で確認して `/usr/local/bin/mise` に置く）。焼いた node・Go・Python は `mise link` で登録してあり、リポジトリの `mise.toml` の `[tools]` が焼いた版（前方一致を含む。`node = "24"`、`go = "1.26"`、`python = "3.13"` など）を指すときは、ダウンロードせずに `mise run` / `mise exec` で使える。焼いていない node・python の版は、初回に配布元（外向き通信の許可先の表）から取る（時間がかかる）。go の焼いていない版は mise では取れない。
+  - mise の設定: データ・キャッシュは `/opt/mise`、`MISE_TRUSTED_CONFIG_PATHS=/workspace`、`MISE_YES=1`、`MISE_USE_VERSIONS_HOST=false`・`MISE_NODE_COMPILE=false`・`MISE_PYTHON_COMPILE=false`・`MISE_PYTHON_GITHUB_ATTESTATIONS=false`（許可先を最小にする。理由は外向き通信の節）。`MISE_OFFLINE` は使わない。同じ値を `/etc/mise/config.toml` にも書く（exec が ENV を引き継がないことがあるため）。shims と activate は使わず、PATH は焼いたツールを直接指す。
   - 本番（Cloudflare Containers）の `container.exec` は Dockerfile の `ENV` を引き継がないので、`ENV` を足す・変えるときは `apps/agent/src/sandbox-env.ts` の `BASE_ENV` にも同じ値を書く（`test:unit:agent-git` が一致を確かめる）。
   - bash ツールは `bash -lc` で流す。ログインシェルが読む `/etc/profile` は root の PATH を既定値で上書きする（ENV も `BASE_ENV` の PATH も消える）ので、`/etc/profile.d/rovo-path.sh` で venv と go を PATH の先頭へ足し直す。`/etc/profile` が上書きするのは PATH だけ。
   - gcc（build-essential）は入れない。cgo を使う Go のパッケージ、Python の sdist のビルド、node のネイティブ拡張のビルドはできない。wheel / ビルド済みバイナリがあるものだけが入る。
   - 依存の導入とキャッシュへの Go / Python の追加は、このイメージの変更とは別に扱う。
 - 既知の制限
   - mise の中の `python` は venv（`/opt/venv`）を指す（`mise link` のリンク経由で起動するので `sys.prefix` はリンクのパスになるが、実体は `/opt/venv`。venv のモジュールを import でき、`python -m pip` も動く）。
-  - `mise.toml` の `[tools]` が焼いた版（node 24・go 1.26.5・python 3.13）と違う `mise run` / `mise exec` は、版を入れられず失敗する。その場合はコマンドを直接書く。
+  - `mise.toml` の `[tools]` の node・python が焼いた版（node 24・python 3.13）と違うときは、初回の `mise run` / `mise exec` で配布元から取るので時間がかかる。go が焼いた版（1.26.5）と違うときは失敗する（go.mod の toolchain に任せるか、コマンドを直接書く）。
+  - Sandbox の node のベースイメージは正確な版（`node:24.22.2-bookworm-slim`）に固定する。
   - postinstall で外部からバイナリを取る依存（playwright など）は失敗する。
   - 許可したホスト経由の情報流出は、原理的には防ぎきれない（7.2）。Phase 2 は GET 系だけに絞る。
 

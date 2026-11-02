@@ -141,6 +141,8 @@ export function newFixture(
     webLimits?: { search?: number; fetch?: number; browse?: number };
     /** web_browse を有効にするか（既定は無効。WEB_BROWSE_ENABLED の代わり） */
     webBrowse?: boolean;
+    /** read_issue / read_pr が gateway の応答を待つ上限（ms） */
+    githubReadWaitMs?: number;
   } = {},
 ): Fixture {
   const clock = { now: T0 };
@@ -309,6 +311,7 @@ export function newFixture(
     web: opts.web,
     webLimits: opts.webLimits,
     webBrowseEnabled: opts.webBrowse,
+    ...(opts.githubReadWaitMs !== undefined ? { githubReadWaitMs: opts.githubReadWaitMs } : {}),
     beforeUsageRead: () => hold(usageState),
     beforeSubmit: () => hold(submitState),
     beforeAskParent: () => hold(askState),

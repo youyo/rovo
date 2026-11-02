@@ -104,7 +104,12 @@ describe("/mcp ツール一覧", () => {
     expect(start?.description).toContain("push_rejected_workflows_permission");
     expect(start?.description).toContain("workflows 権限");
     expect(start?.description).toContain("レビュー");
-    expect(start?.description).toContain("issue の番号だけを書かず、必要な本文を貼る");
+    // ワーカーは対象リポジトリの issue・PR を read_issue / read_pr で読める（issue は issues 権限があるときだけ）
+    expect(start?.description).toContain("read_issue");
+    expect(start?.description).toContain("read_pr");
+    expect(start?.description).toContain("issues 権限");
+    expect(start?.description).toContain("必要な本文を貼る");
+    expect(start?.description).not.toContain("issue・PR を読めない");
     const props = start?.inputSchema.properties as Record<string, { type?: string }>;
     expect(props.verification_commands?.type).toBe("array");
     const result = tools.find((t) => t.name === "task_result");

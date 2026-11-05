@@ -3,6 +3,7 @@ import {
   goVersionMatches,
   isValidHostname,
   MISE_GO_VERSION_UNAVAILABLE,
+  MISE_NOT_ON_PATH_NOTE,
   MISE_TOOL_UNAVAILABLE,
   miseGoVersion,
   miseUnavailableTools,
@@ -300,12 +301,51 @@ describe("repoDiagnostics", () => {
     expect(r.warnings).toEqual([NPMRC_REGISTRY_NOT_ALLOWED, MISE_GO_VERSION_UNAVAILABLE]);
   });
 
-  it("terraform / tflint だけならフラグなし（mise が GitHub releases などから取れる）", () => {
+  it("terraform / tflint だけならフラグなし（mise が GitHub releases などから取れる）。PATH に入らない旨の 1 文だけを伝える", () => {
     const r = repoDiagnostics(
       { miseToml: '[tools]\nterraform = "1.15.8"\ntflint = "0.64.0"\nnode = "24"\n' },
       "1.26.5",
     );
-    expect(r).toEqual({ warnings: [], npmrcRegistryHosts: [], miseUnavailableTools: [] });
+    expect(r).toEqual({
+      warnings: [],
+      npmrcRegistryHosts: [],
+      miseUnavailableTools: [],
+      note: MISE_NOT_ON_PATH_NOTE,
+    });
+  });
+
+  it("PATH の注記: mise で入れたツールは PATH に入らないので mise exec -- <tool> か mise run <task> で呼ぶ（英語の 1 文）", () => {
+    expect(MISE_NOT_ON_PATH_NOTE.split("\n")).toHaveLength(1);
+    expect(MISE_NOT_ON_PATH_NOTE).toMatch(/not on PATH/);
+    expect(MISE_NOT_ON_PATH_NOTE).toMatch(/shims/);
+    expect(MISE_NOT_ON_PATH_NOTE).toContain("`mise exec -- <tool> ...`");
+    expect(MISE_NOT_ON_PATH_NOTE).toContain("`mise run <task>`");
+  });
+
+  it("焼いたツール（node / go / python）だけなら PATH の注記は出さない（core: の接頭辞・版違いの go も）", () => {
+    for (const toml of [
+      '[tools]\nnode = "24"\ngo = "1.26"\npython = "3.13"\n',
+      '[tools]\n"core:node" = "24"\n"core:python" = "3.13"\n',
+      "[tools]\n",
+      '[env]\nFOO = "1"\n',
+    ]) {
+      expect(repoDiagnostics({ miseToml: toml }, "1.26.5").note, toml).toBeUndefined();
+    }
+    const go = repoDiagnostics({ miseToml: '[tools]\ngo = "1.22.1"\n' }, "1.26.5").note ?? "";
+    expect(go).not.toContain(MISE_NOT_ON_PATH_NOTE);
+    // mise.toml が無ければ何も言わない
+    expect(repoDiagnostics({ npmrc: "" }, "1.26.5").note).toBeUndefined();
+  });
+
+  it("焼いていないツールが 1 つでもあれば、ほかの注記の後に PATH の注記を 1 回だけ足す", () => {
+    const r = repoDiagnostics(
+      { miseToml: '[tools]\ngo = "1.22.1"\n"asdf:foo" = "1"\nterraform = "1"\ntflint = "1"\n' },
+      "1.26.5",
+    );
+    const lines = (r.note ?? "").split("\n");
+    expect(lines.at(-1)).toBe(MISE_NOT_ON_PATH_NOTE);
+    expect(lines.filter((l) => l === MISE_NOT_ON_PATH_NOTE)).toHaveLength(1);
+    expect(r.note).toContain("asdf:foo");
   });
 
   it("asdf: / cargo: など: mise_tool_unavailable と、未実行で報告する案内", () => {
@@ -327,7 +367,7 @@ describe("repoDiagnostics", () => {
     expect(note).toMatch(/summary/);
   });
 
-  it("node / go / python / npm: / pipx: / go: / aqua: だけならフラグなし", () => {
+  it("node / go / python / npm: / pipx: / go: / aqua: だけならフラグなし（npm: などは焼いていないので PATH の注記だけ）", () => {
     const r = repoDiagnostics(
       {
         miseToml:
@@ -335,7 +375,12 @@ describe("repoDiagnostics", () => {
       },
       "1.26.5",
     );
-    expect(r).toEqual({ warnings: [], npmrcRegistryHosts: [], miseUnavailableTools: [] });
+    expect(r).toEqual({
+      warnings: [],
+      npmrcRegistryHosts: [],
+      miseUnavailableTools: [],
+      note: MISE_NOT_ON_PATH_NOTE,
+    });
   });
 
   it("go の版違いと asdf: が同時なら両方のコードが順に出る（npmrc → go → tool）", () => {

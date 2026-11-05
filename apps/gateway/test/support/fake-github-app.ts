@@ -485,12 +485,19 @@ export class FakeGitHubApp {
     return this.repos.get(fullName.toLowerCase())?.commits.get(sha) ?? null;
   }
 
-  tokenList(): { token: string; revoked: boolean; expiresAt: number; repoIds: number[] }[] {
+  tokenList(): {
+    token: string;
+    revoked: boolean;
+    expiresAt: number;
+    repoIds: number[];
+    permissions: Record<string, string>;
+  }[] {
     return [...this.tokens.values()].map((t) => ({
       token: t.token,
       revoked: t.revoked,
       expiresAt: t.expiresAt,
       repoIds: t.repoIds,
+      permissions: { ...t.permissions },
     }));
   }
 

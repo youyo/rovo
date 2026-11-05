@@ -60,6 +60,17 @@ async function setEnv(stub: TaskStub, patch: Record<string, string | undefined>)
   });
 }
 
+/** git の token（contents:write）だけ。読み取り専用 token（metadata:read）は除く */
+const gitTokenList = () =>
+  app()
+    .tokenList()
+    .filter((t) => t.permissions.contents === "write");
+/** 読み取り専用 token（api.github.com の releases 用。metadata:read だけ） */
+const readTokenList = () =>
+  app()
+    .tokenList()
+    .filter((t) => JSON.stringify(t.permissions) === JSON.stringify({ metadata: "read" }));
+
 const pullOf = (branch: string) =>
   app()
     .pulls(REPO)
@@ -608,7 +619,8 @@ describe("トークンの配送と更新", () => {
     const { specs } = await agent.calls();
     expect(specs.length).toBe(2);
     expect(JSON.stringify(specs[1])).toBe(JSON.stringify(specs[0]));
-    expect(app().tokenList().length).toBe(1);
+    expect(gitTokenList().length).toBe(1);
+    expect(readTokenList().length).toBe(1);
   });
 
   it("期限の 15 分前になったら新しいトークンを発行して setGitCredential で渡す", async () => {
@@ -643,7 +655,9 @@ describe("トークンの配送と更新", () => {
     const c = await agent.calls();
     expect(c.setGitCredential).toBe(4);
     expect(new Set(c.credentials.map((x) => x.token)).size).toBe(1);
-    expect(app().tokenList().length).toBe(2);
+    expect(new Set(c.credentials.map((x) => x.apiRead?.token)).size).toBe(1);
+    expect(gitTokenList().length).toBe(2);
+    expect(readTokenList().length).toBe(2);
     await runDurableObjectAlarm(stub);
     expect((await agent.calls()).setGitCredential).toBe(4);
   });
@@ -674,10 +688,107 @@ describe("トークンの配送と更新", () => {
     const first = (await agent.calls()).specs[0]?.gitCredential;
     await warp(stub, (first?.expiresAt ?? 0) - Date.now() - 10 * 60_000);
     await runDurableObjectAlarm(stub);
-    const [old, fresh] = app().tokenList();
+    const [old, fresh] = gitTokenList();
     expect(old?.token).toBe(first?.token);
     expect(old?.revoked).toBe(true);
     expect(fresh?.revoked).toBe(false);
+  });
+});
+
+describe("読み取り専用トークン（apiRead。api.github.com の releases / attestations 用）", () => {
+  const READ_ONLY = { metadata: "read" };
+  const readTokens = readTokenList;
+  const gitTokens = gitTokenList;
+
+  it("git の token と一緒に、metadata:read だけ・対象リポジトリに絞った token を発行し、start の gitCredential.apiRead で渡す", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    const [read] = readTokens();
+    expect(readTokens()).toHaveLength(1);
+    expect(read?.repoIds).toEqual([4242]);
+    const issue = app()
+      .requests()
+      .filter((r) => r.path === "/app/installations/77/access_tokens")
+      .map((r) => r.body);
+    expect(issue).toContainEqual({ repository_ids: [4242], permissions: READ_ONLY });
+    const cred = (await agent.calls()).specs[0]?.gitCredential;
+    expect(cred?.apiRead?.token).toBe(read?.token);
+    expect(Math.abs((cred?.apiRead?.expiresAt ?? 0) - (read?.expiresAt ?? 0))).toBeLessThan(1000);
+    // git の token（contents:write）は apiRead にならない
+    expect(cred?.apiRead?.token).not.toBe(cred?.token);
+    expect(gitTokens().map((t) => t.token)).toEqual([cred?.token]);
+    // 平文は TaskDO の行に残らない
+    const dump = JSON.stringify(await rows(stub, "SELECT * FROM git_token"));
+    expect(dump).not.toContain(read?.token);
+  });
+
+  it("発行に失敗しても、apiRead を付けずにタスクを進める（fail-soft）", async () => {
+    // 1 回目（git の token）は通し、2 回目（読み取り専用）だけ失敗させる
+    app().setFault({
+      pattern: "^POST /app/installations/.*/access_tokens$",
+      status: 500,
+      skip: 1,
+      count: 1,
+    });
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    expect((await status(stub)).status).toBe("RUNNING");
+    const cred = (await agent.calls()).specs[0]?.gitCredential;
+    expect(cred?.token).toMatch(/^ghs_/);
+    expect(cred?.apiRead).toBeUndefined();
+    expect(readTokens()).toHaveLength(0);
+    app().setFault({ pattern: "^POST /app/installations/.*/access_tokens$", status: null });
+  });
+
+  it("期限の前の更新で、apiRead も新しくして渡す。渡せたら古い読み取り専用 token も失効する", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    const first = (await agent.calls()).specs[0]?.gitCredential;
+    await warp(stub, (first?.expiresAt ?? 0) - Date.now() - 10 * 60_000);
+    await runDurableObjectAlarm(stub);
+    const next = (await agent.calls()).credentials[0];
+    expect(next?.apiRead?.token).toMatch(/^ghs_/);
+    expect(next?.apiRead?.token).not.toBe(first?.apiRead?.token);
+    expect(next?.apiRead?.token).not.toBe(next?.token);
+    const reads = readTokens();
+    expect(reads.map((t) => [t.token, t.revoked])).toEqual([
+      [first?.apiRead?.token, true],
+      [next?.apiRead?.token, false],
+    ]);
+    // git の token の側の扱いは変わらない
+    expect(gitTokens().map((t) => t.revoked)).toEqual([true, false]);
+  });
+
+  it("PR の更新など gateway の GitHub 操作には、新しい行でも読み取り専用 token を使わない", async () => {
+    const { stub, agent, branch } = await createTask();
+    await stub.advance();
+    const [read] = readTokens();
+    // 読み取り専用 token を偽 GitHub で無効にする。gateway がこれを使えば 401 になり、本文の更新が済まない
+    app().expireTokens(read?.token);
+    await agent.setProgram({ result: completedResult("f".repeat(40)) });
+    await agent.setPhase("completed");
+    await stub.advance();
+    expect(pullOf(branch)?.body).toContain("COMPLETED");
+    expect(await gl(stub)).toMatchObject({ body_done: 1, finalize_done: 1 });
+  });
+
+  it("終端で、読み取り専用 token も失効する。events には積まない", async () => {
+    const { stub, agent } = await createTask();
+    await stub.advance();
+    await agent.setProgram({ result: completedResult("f".repeat(40)) });
+    await agent.setPhase("completed");
+    await stub.advance();
+    expect(readTokens()).toHaveLength(1);
+    expect(readTokens().every((t) => t.revoked)).toBe(true);
+    expect(
+      app()
+        .tokenList()
+        .every((t) => t.revoked),
+    ).toBe(true);
+    // events（task_wait で見えるもの）には積まない（監査ログ側は task-audit.test.ts）
+    const events = (await eventsOf(stub, "audit")).map((e) => String(e.kind));
+    expect(events.some((k) => k.startsWith("api_read"))).toBe(false);
+    expect((await gl(stub)).finalize_done).toBe(1);
   });
 });
 

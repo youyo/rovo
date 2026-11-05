@@ -114,6 +114,47 @@ describe("start: 契約の検証", () => {
   });
 });
 
+describe("読み取り専用トークン（apiRead）の伝播", () => {
+  const withRead = (token: string, expiresAt: number, read: string) => ({
+    token,
+    expiresAt,
+    apiRead: { token: read, expiresAt },
+  });
+
+  it("start と setGitCredential の apiRead を、git の token と一緒に SandboxDO に預ける。AgentDO の storage には残さない", async () => {
+    const fx = newFixture("apiread-flow", [call("gate")]);
+    const spec = makeSpec("apiread-flow", {
+      gitCredential: withRead("t1", EXP, "ghs_read_must_not_persist"),
+    });
+    expect(await fx.stub.start(spec)).toMatchObject({ status: "accepted" });
+    expect(await fx.stub.setGitCredential(withRead("t2", EXP + 10, "ghs_read_2"))).toEqual({
+      ok: true,
+    });
+    // apiRead が違うだけの start の再送は conflict にならない（gitCredential ごと fingerprint の外）
+    const resent = await fx.stub.start({
+      ...spec,
+      gitCredential: withRead("t3", EXP + 20, "ghs_read_3"),
+    });
+    expect(resent).toMatchObject({ status: "accepted", alreadyAccepted: true });
+    expect(fx.sandbox.credentials).toEqual([
+      withRead("t1", EXP, "ghs_read_must_not_persist"),
+      withRead("t2", EXP + 10, "ghs_read_2"),
+      withRead("t3", EXP + 20, "ghs_read_3"),
+    ]);
+    fx.gate.release();
+    await waitForTerminal(fx);
+    const dump = await runInDO(fx.stub, (inst) => {
+      const sql = inst.ctx.storage.sql;
+      const rows = [
+        ...sql.exec("SELECT value FROM agent_meta").toArray(),
+        ...sql.exec("SELECT data FROM agent_events").toArray(),
+      ];
+      return JSON.stringify(rows) + JSON.stringify([...inst.ctx.storage.kv.list()]);
+    });
+    expect(dump).not.toContain("ghs_read");
+  });
+});
+
 describe("setGitCredential（RPC）", () => {
   it("start 前は ok:false（預け先がまだ無い）", async () => {
     const fx = newFixture("sgc-prestart", []);

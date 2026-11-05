@@ -46,6 +46,12 @@ export interface VerificationCommand {
 export interface GitCredential {
   token: string;
   expiresAt: number;
+  /**
+   * api.github.com の releases / attestations（GET / HEAD）にだけ付ける読み取り専用の Installation Token
+   * （permissions は metadata:read だけ）。未認証の上限（共有の送信元 IP で 60 回/時）を避けるため。
+   * 発行できなかったときは無い（中継は認証を付けずに通す）。git の token と同じく、コンテナには入れない。
+   */
+  apiRead?: { token: string; expiresAt: number };
 }
 
 /** Gateway が認証済みの値から作って渡すタスク仕様。 */

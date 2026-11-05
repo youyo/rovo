@@ -201,6 +201,11 @@ export interface GitCredential {
   token: string;
   /** epoch ms */
   expiresAt: number;
+  /**
+   * api.github.com の releases / attestations にだけ中継が付ける、読み取り専用（metadata:read）の Installation Token。
+   * 発行できなかったときは載せない（fail-soft）。期限・更新・失効は git の token と同じ。
+   */
+  apiRead?: { token: string; expiresAt: number };
 }
 
 export type StartResult =

@@ -373,7 +373,7 @@ Phase 6（R2 へのアーカイブ、監査ログ、観測性）のコードが�
 
 - [ ] 次の事象を起こす: 許可されていない team のアカウントのログイン、他人の `task_id` の操作、`task_cancel`、予算超過（`BUDGET_EXCEEDED`）、ワーカーの外向き通信の違反、`web_fetch` の block / robots
 - [ ] それぞれの監査行（`"audit": true`）が、Logpush の宛先に**欠けずに**見える。期待するイベント: `auth_failed`、`authz_denied`（`not_team_member` / `not_owner` など）、`task_cancelled`、`task_ended_by_limit`（`budget_exceeded`）、`outbound_denied`（`dest` と `reason`）、`web_blocked`（`kind` と `reason`）、`task_summary`
-- [ ] gateway の二重化したイベント（`credential_issued` / `credential_revoked` / `delivery_given_up`、`credential_revoke_given_up` の `setup_failure`）の行の件数が、同じタスクの TaskDO の events の `audit` の件数と合う。agent の `agent_cancelled` と `sandbox_privileged_op`（`set_deadline` / `extend_deadline`）も合うが、`terminate` は終端後の片付けの分がログにだけ出るので、ログのほうが多くてよい
+- [ ] gateway の二重化したイベント（`credential_issued` / `credential_revoked` / `delivery_given_up`、`credential_revoke_given_up` の `setup_failure`）の行の件数が、同じタスクの TaskDO の events の `audit` の件数と合う（api.github.com 用の読み取り専用 token の `kind: api_read_*` の行は監査ログだけなので数えない）。agent の `agent_cancelled` と `sandbox_privileged_op`（`set_deadline` / `extend_deadline`）も合うが、`terminate` は終端後の片付けの分がログにだけ出るので、ログのほうが多くてよい
 - [ ] 監査行に、本文、URL のパスやクエリ、トークン、タスクの入力が無い。host は出てよい
 - [ ] Logpush を通さない Workers Logs だけでは、欠落しうることを確かめる（sampling を下げた構成で行が減ることを記録する。実施が難しければ、設定が条件を満たしていることの確認だけでよい）
 - [ ] トークンの発行・失効（`credential_issued` / `credential_revoked`）が、タスクの終端までの間に events と監査ログの両方に出る

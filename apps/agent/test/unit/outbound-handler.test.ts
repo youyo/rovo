@@ -263,6 +263,29 @@ describe("トークンの注入", () => {
     expect(logs.length).toBeGreaterThan(0); // 拒否（credential_unavailable）の監査は出ている
     expect(logs.join("\n")).not.toContain("ghs_leak");
   });
+
+  it("読み取り専用トークン（apiRead）もログに出さない（付けた場合も、拒否した場合も）", async () => {
+    const { logs, restore } = captureConsole();
+    try {
+      const { deps } = setup({
+        readCredential: async () => ({
+          token: "ghs_leak_git",
+          expiresAt: NOW + 60_000,
+          apiRead: { token: "ghs_leak_read", expiresAt: NOW + 60_000 },
+        }),
+      });
+      await handleOutbound(get("https://api.github.com/repos/a/b/releases/latest"), deps);
+      await handleOutbound(get("https://api.github.com/user"), deps);
+      await handleOutbound(
+        new Request("https://api.github.com/repos/a/b/releases", { method: "POST" }),
+        deps,
+      );
+    } finally {
+      restore();
+    }
+    expect(logs.length).toBeGreaterThan(0); // 拒否の監査は出ている
+    expect(logs.join("\n")).not.toContain("ghs_leak");
+  });
 });
 
 /** console.log / warn / error の出力を集める。 */
@@ -282,6 +305,112 @@ function captureConsole() {
     },
   };
 }
+
+describe("api.github.com の読み取り専用トークン（apiRead）", () => {
+  const API_READ = { token: "ghs_api_read_token", expiresAt: NOW + 3_600_000 };
+  const withRead = () => {
+    const s = setup();
+    s.deps.readCredential = async (taskId) => {
+      s.reads.push(taskId);
+      return { ...CRED, apiRead: API_READ };
+    };
+    return s;
+  };
+  const authOf = (up: Upstream, i = 0) =>
+    new Headers(up.calls[i]?.init.headers).get("authorization");
+  const req = (url: string, method: string, headers: HeadersInit = {}) =>
+    new Request(url, { method, headers });
+
+  it("releases の GET と attestations の HEAD に Bearer を付ける（ワーカーの Authorization / Proxy-Authorization は捨てる）", async () => {
+    const { deps, up } = withRead();
+    for (const [url, method] of [
+      ["https://api.github.com/repos/terraform-linters/tflint/releases/tags/v0.64.0", "GET"],
+      ["https://api.github.com/repos/terraform-linters/tflint/releases", "GET"],
+      ["https://api.github.com/repos/jdx/mise/attestations/sha256:abc", "HEAD"],
+    ] as const) {
+      const res = await handleOutbound(
+        req(url, method, {
+          authorization: "Bearer worker-supplied",
+          "proxy-authorization": "Basic worker-proxy",
+        }),
+        deps,
+      );
+      expect(res.status, url).toBe(200);
+    }
+    expect(up.calls).toHaveLength(3);
+    for (let i = 0; i < 3; i++) {
+      expect(authOf(up, i)).toBe("Bearer ghs_api_read_token");
+      expect(new Headers(up.calls[i]?.init.headers).has("proxy-authorization")).toBe(false);
+    }
+  });
+
+  it("git の token（contents:write）は api.github.com に付けない", async () => {
+    const { deps, up } = withRead();
+    await handleOutbound(get("https://api.github.com/repos/acme/hello/releases"), deps);
+    expect(authOf(up)).toBe("Bearer ghs_api_read_token");
+    expect(authOf(up) ?? "").not.toContain("ghs_secret_token");
+    expect(authOf(up)).not.toBe(AUTH);
+  });
+
+  it("POST・許可外のパスは拒否のまま。上流に出ず、トークンも読まない", async () => {
+    const { deps, up, reads } = withRead();
+    for (const [url, method] of [
+      ["https://api.github.com/repos/acme/hello/releases", "POST"],
+      ["https://api.github.com/user", "GET"],
+      ["https://api.github.com/repos/acme/hello/contents/README.md", "GET"],
+    ] as const) {
+      const res = await handleOutbound(req(url, method), deps);
+      expect(res.status, `${method} ${url}`).toBe(403);
+    }
+    expect(up.calls).toHaveLength(0);
+    expect(reads).toHaveLength(0);
+  });
+
+  it("github.com の releases/download と、その 302 の転送先には付けない（トークンも読まない）", async () => {
+    const { deps, up, reads } = withRead();
+    for (const url of [
+      "https://github.com/terraform-linters/tflint/releases/download/v0.64.0/tflint_linux_amd64.zip",
+      "https://release-assets.githubusercontent.com/github-production-release-asset/123/abc",
+      "https://objects.githubusercontent.com/github-production-release-asset-2e65be/123/abc",
+    ]) {
+      await handleOutbound(get(url, { authorization: "Bearer worker-supplied" }), deps);
+    }
+    expect(up.calls).toHaveLength(3);
+    for (let i = 0; i < 3; i++) expect(authOf(up, i)).toBeNull();
+    expect(reads).toHaveLength(0);
+  });
+
+  it("git の経路（clone）は今までどおり git の token の Basic で、読み取り専用トークンではない", async () => {
+    const { deps, up } = withRead();
+    await handleOutbound(get(`${REPO}/info/refs?service=git-upload-pack`), deps);
+    expect(authOf(up)).toBe(AUTH);
+  });
+
+  it("取れない（無い・apiRead が無い・期限切れ・読み出し失敗）ときは付けずに通す（fail-soft）", async () => {
+    const url = "https://api.github.com/repos/terraform-linters/tflint/releases/latest";
+    for (const readCredential of [
+      async () => undefined,
+      async () => CRED,
+      async () => ({ ...CRED, apiRead: { token: "ghs_old", expiresAt: NOW } }),
+      async () => ({ ...CRED, apiRead: { token: "", expiresAt: NOW + 1000 } }),
+      async (): Promise<GitCredential> => {
+        throw new Error("boom");
+      },
+    ]) {
+      const { deps, up } = setup({ readCredential });
+      const res = await handleOutbound(get(url, { authorization: "Bearer worker-supplied" }), deps);
+      expect(res.status).toBe(200);
+      expect(up.calls).toHaveLength(1);
+      expect(authOf(up)).toBeNull();
+    }
+  });
+
+  it("トークンを読むときの taskId は props のものだけ", async () => {
+    const { deps, reads } = withRead();
+    await handleOutbound(get("https://api.github.com/repos/other/x/releases"), deps);
+    expect(reads).toEqual(["t1"]);
+  });
+});
 
 describe("違反ログは @rovo/audit の JSON（outbound_denied）", () => {
   async function denied(url: string, over: Partial<OutboundDeps> = {}, init?: RequestInit) {

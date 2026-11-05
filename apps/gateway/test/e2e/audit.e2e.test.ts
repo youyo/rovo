@@ -122,10 +122,19 @@ describe("監査イベント（/__test/audit。stdout は走査しない）", ()
       for (const e of events) {
         expect(Object.keys(e.payload).every((k) => k === "code" || k === "kind")).toBe(true);
       }
-      // 二重化した監査ログの件数と、events の audit の件数が合う（acceptance 16）
-      const dual = (await auditRecords(taskId)).filter(
+      // 二重化した監査ログの件数と、events の audit の件数が合う（acceptance 16）。
+      // api.github.com 用の読み取り専用 token（kind が api_read_*）は監査ログだけに出す（二重化しない）ので除く
+      const records = await auditRecords(taskId);
+      expect(
+        records.some(
+          (r) =>
+            r.event === "credential_issued" && (r as { kind?: string }).kind === "api_read_start",
+        ),
+      ).toBe(true);
+      const dual = records.filter(
         (r) =>
           r.taskId === taskId &&
+          !String((r as { kind?: string }).kind ?? "").startsWith("api_read_") &&
           (["credential_issued", "credential_revoked", "delivery_given_up"].includes(r.event) ||
             // 他の失効の諦め（attempts_exhausted / not_retryable）は既存の warning が events 側
             (r.event === "credential_revoke_given_up" && r.reason === "setup_failure")),

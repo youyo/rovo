@@ -107,6 +107,36 @@ describe("GitHubAppClient", () => {
     expect((await verifyJwt(jwt, pair.publicPem)).ok).toBe(true);
   });
 
+  it("読み取り専用の token（api.github.com の releases 用）: 対象リポジトリに絞り、permissions は metadata:read だけ。installation の権限は読まない", async () => {
+    const { c, calls } = await client({
+      "GET /app/installations/77": () =>
+        json({ permissions: { contents: "write", workflows: "write", issues: "read" } }),
+      "POST /app/installations/77/access_tokens": () =>
+        json({ token: "ghs_read_only", expires_at: "2027-01-15T09:00:00Z" }, { status: 201 }),
+    });
+    const t = await c.createReadOnlyToken(77, 4242);
+    expect(t).toEqual({ token: "ghs_read_only", expiresAt: Date.parse("2027-01-15T09:00:00Z") });
+    expect(calls.map((r) => `${r.method} ${new URL(r.url).pathname}`)).toEqual([
+      "POST /app/installations/77/access_tokens",
+    ]);
+    const req = calls[0] as Request;
+    expect(await req.clone().json()).toEqual({
+      repository_ids: [4242],
+      permissions: { metadata: "read" },
+    });
+    const jwt = req.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
+    expect((await verifyJwt(jwt, pair.publicPem)).ok).toBe(true);
+    // git の token の案内（lastTokenPermissions）は変えない
+    expect(c.lastTokenPermissions).toEqual({ workflows: false, issues: false });
+  });
+
+  it("読み取り専用の token の発行の失敗は GitHubApiError", async () => {
+    const { c } = await client({
+      "POST /app/installations/77/access_tokens": () => json({ message: "x" }, { status: 500 }),
+    });
+    await expect(c.createReadOnlyToken(77, 4242)).rejects.toBeInstanceOf(GitHubApiError);
+  });
+
   describe("installation の権限に応じた token の権限", () => {
     const BASE = { contents: "write", pull_requests: "write", metadata: "read" };
     const tok = () =>

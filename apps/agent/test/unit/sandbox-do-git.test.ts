@@ -137,6 +137,59 @@ describe("SandboxDO: Git 認証トークンの保管", () => {
     });
   });
 
+  it("読み取り専用トークン（apiRead）も暗号化して一緒に保存し、読み出すと元に戻る", async () => {
+    await runInDO(sandbox("cred-apiread"), async (inst) => {
+      await inst.setGitCredential({
+        token: "ghs_git_value",
+        expiresAt: 5_000,
+        apiRead: { token: "ghs_read_value", expiresAt: 5_100 },
+      });
+      expect(await inst.readGitCredential()).toEqual({
+        token: "ghs_git_value",
+        expiresAt: 5_000,
+        apiRead: { token: "ghs_read_value", expiresAt: 5_100 },
+      });
+      const raw = JSON.stringify(inst.ctx.storage.kv.get("git_credential"));
+      expect(raw).not.toContain("ghs_read_value");
+      expect(raw).not.toContain("ghs_git_value");
+      // 更新で apiRead が無ければ、古い apiRead は残さない
+      await inst.setGitCredential({ token: "ghs_git_2", expiresAt: 6_000 });
+      expect(await inst.readGitCredential()).toEqual({ token: "ghs_git_2", expiresAt: 6_000 });
+    });
+  });
+
+  it("apiRead が不正な形なら、apiRead だけを捨てて git の token は預ける（fail-soft）", async () => {
+    await runInDO(sandbox("cred-apiread-bad"), async (inst) => {
+      for (const [i, bad] of [
+        { token: "", expiresAt: 1 },
+        { token: "a b", expiresAt: 1 },
+        { token: "ok", expiresAt: Number.NaN },
+        "ghs_string",
+        null,
+      ].entries()) {
+        await inst.setGitCredential({ token: `ghs_g${i}`, expiresAt: 1_000 + i, apiRead: bad });
+        expect(await inst.readGitCredential()).toEqual({
+          token: `ghs_g${i}`,
+          expiresAt: 1_000 + i,
+        });
+      }
+    });
+  });
+
+  it("apiRead の暗号文を git の token の位置にコピーしても復号できない（用途ごとに AAD が違う）", async () => {
+    await runInDO(sandbox("cred-apiread-swap"), async (inst) => {
+      await inst.setGitCredential({
+        token: "ghs_git_value",
+        expiresAt: 5_000,
+        apiRead: { token: "ghs_read_value", expiresAt: 5_000 },
+      });
+      const stored = inst.ctx.storage.kv.get("git_credential");
+      expect(stored.readCt).toBeTypeOf("string");
+      inst.ctx.storage.kv.put("git_credential", { ...stored, ct: stored.readCt });
+      expect(await inst.readGitCredential()).toBeUndefined();
+    });
+  });
+
   it("鍵が無い・不正なら預けられない（fail-closed）", async () => {
     await runInDO(sandbox("cred-nokey"), async (inst) => {
       inst.env = { ...inst.env, TOKEN_ENC_KEY: "" };

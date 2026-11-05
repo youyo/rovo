@@ -208,6 +208,25 @@ async function authorization(deps: OutboundDeps): Promise<string | undefined> {
   }
 }
 
+/**
+ * api.github.com の releases / attestations に付ける読み取り専用トークン（Bearer）。
+ * 無い・期限切れ・読み出し失敗は undefined（= 認証を付けずに通す。fail-soft）。git の token は使わない。
+ */
+async function apiReadAuthorization(deps: OutboundDeps): Promise<string | undefined> {
+  const taskId = deps.props.taskId;
+  if (!taskId) return undefined;
+  try {
+    const read = (await deps.readCredential(taskId))?.apiRead;
+    if (!read || typeof read.token !== "string" || !/^[\x21-\x7e]{1,2048}$/.test(read.token)) {
+      return undefined;
+    }
+    if (!(read.expiresAt > deps.now())) return undefined;
+    return `Bearer ${read.token}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** push の許可証を読む。無い・読み出し失敗は undefined（= 拒否）。 */
 async function readPermit(deps: OutboundDeps): Promise<PushPermit | undefined> {
   const taskId = deps.props.taskId;
@@ -368,6 +387,11 @@ export async function handleOutbound(request: Request, deps: OutboundDeps): Prom
       );
     }
     headers.set("authorization", auth);
+  } else if (url.hostname.toLowerCase() === "api.github.com") {
+    // decideOutbound を通った api.github.com は、releases / attestations の GET / HEAD だけ。
+    // 読み取り専用トークンを付ける（取れなければ付けずに通す）。ワーカーの Authorization は buildUpstreamHeaders で落ちている
+    const auth = await apiReadAuthorization(deps);
+    if (auth !== undefined) headers.set("authorization", auth);
   }
 
   const init: RequestInit = {

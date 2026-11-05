@@ -165,8 +165,10 @@ describe("credential_issued / credential_revoked（トークンの発行と失�
     await stub.advance();
     expect(await auditEvents(stub)).toEqual([{ code: "credential_issued", kind: "start" }]);
     const issued = await sinkOf(stub, "credential_issued");
-    expect(issued).toHaveLength(1);
+    // 読み取り専用 token（api_read_start）の発行は監査ログだけに出る（events には積まない）
+    expect(issued.map((r) => r.kind)).toEqual(["start", "api_read_start"]);
     expect(issued[0]).toMatchObject({ taskId: id, caller: "system", kind: "start" });
+    expect(issued[1]).toMatchObject({ taskId: id, caller: "system", kind: "api_read_start" });
     const everything = JSON.stringify(await sink(stub)) + JSON.stringify(await auditEvents(stub));
     for (const t of app().tokenList()) expect(everything).not.toContain(t.token);
     expect(everything).not.toContain("ghs_");
@@ -191,9 +193,18 @@ describe("credential_issued / credential_revoked（トークンの発行と失�
     expect(codes).toContain("credential_issued:refresh");
     expect((await sinkOf(stub, "credential_issued")).map((r) => r.kind)).toEqual([
       "start",
+      "api_read_start",
       "refresh",
+      "api_read_refresh",
     ]);
-    expect(await sinkOf(stub, "credential_revoked")).toHaveLength(1);
+    // 渡せた後に失効するのは、古い git の token と古い読み取り専用 token
+    expect((await sinkOf(stub, "credential_revoked")).map((r) => r.kind)).toEqual([
+      "start",
+      "api_read_start",
+    ]);
+    expect(codes.filter((c) => c.startsWith("credential_revoked"))).toEqual([
+      "credential_revoked:start",
+    ]);
   });
 
   it("終端のトークンの失効を events（audit）と監査ログの両方に出す", async () => {
@@ -210,7 +221,10 @@ describe("credential_issued / credential_revoked（トークンの発行と失�
     const revoked = (await auditEvents(stub)).filter((e) => e.code === "credential_revoked");
     expect(revoked.length).toBeGreaterThanOrEqual(1);
     expect(revoked[0]).toMatchObject({ code: "credential_revoked", kind: "start" });
-    expect((await sinkOf(stub, "credential_revoked")).length).toBe(revoked.length);
+    const logged = await sinkOf(stub, "credential_revoked");
+    // 監査ログには、events の分（git の token）に加えて読み取り専用 token の失効も出る
+    expect(logged.filter((r) => r.kind !== "api_read_start").length).toBe(revoked.length);
+    expect(logged.filter((r) => r.kind === "api_read_start")).toHaveLength(1);
   });
 
   it("失効を諦めたら credential_revoke_given_up を監査ログに出す（events は既存の warning: token_revoke_failed）", async () => {
@@ -244,7 +258,10 @@ describe("credential_issued / credential_revoked（トークンの発行と失�
       code: "credential_revoke_given_up",
       kind: "start",
     });
-    expect(await sinkOf(stub, "credential_revoke_given_up")).toHaveLength(1);
+    expect((await sinkOf(stub, "credential_revoke_given_up")).map((r) => r.kind)).toEqual([
+      "start",
+      "api_read_start",
+    ]);
   });
 
   it("発行に失敗したら credential_issue_failed を監査ログに出す（固定コードだけ）", async () => {
@@ -259,6 +276,26 @@ describe("credential_issued / credential_revoked（トークンの発行と失�
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ kind: "start", reason: "github_error_500" });
     expect(JSON.stringify(failed)).not.toContain("ghs_");
+  });
+});
+
+describe("読み取り専用 token（api_read_*）の監査", () => {
+  it("発行に失敗したら credential_issue_failed（kind: api_read_start）を監査ログに出し、タスクは進む", async () => {
+    // 1 回目（git の token）は通し、2 回目（読み取り専用）だけ失敗させる
+    app().setFault({
+      pattern: "^POST /app/installations/.*/access_tokens$",
+      status: 500,
+      skip: 1,
+      count: 1,
+    });
+    const { stub } = await createTask();
+    await stub.advance();
+    const failed = await sinkOf(stub, "credential_issue_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ kind: "api_read_start", reason: "github_error_500" });
+    expect((await sinkOf(stub, "credential_issued")).map((r) => r.kind)).toEqual(["start"]);
+    expect(await eventTypes(stub)).toContain("status_changed");
+    app().setFault({ pattern: "^POST /app/installations/.*/access_tokens$", status: null });
   });
 });
 

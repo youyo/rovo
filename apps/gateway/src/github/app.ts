@@ -241,13 +241,7 @@ export class GitHubAppClient {
     installationId: number,
     repositoryId: number,
   ): Promise<InstallationToken> {
-    this.key ??= parsePrivateKey(this.privateKey);
-    const jwt = await createAppJwt({
-      appId: this.appId,
-      key: await this.key,
-      nowMs: this.now(),
-    });
-    const what = "create installation token";
+    const jwt = await this.appJwt();
     const grants = await this.installationGrants(installationId, jwt);
     const permissions: Record<string, string> = {
       contents: "write",
@@ -256,6 +250,38 @@ export class GitHubAppClient {
     };
     if (grants.workflows) permissions.workflows = "write";
     if (grants.issues) permissions.issues = "read";
+    const issued = await this.requestToken(jwt, installationId, repositoryId, permissions);
+    this.lastTokenPermissions = { workflows: grants.workflows, issues: grants.issues };
+    return issued;
+  }
+
+  /**
+   * 読み取り専用の token（metadata:read だけ。repository_ids は対象リポジトリの 1 件）。OutboundGateway が
+   * api.github.com の releases / attestations の GET / HEAD にだけ付け、未認証の上限（送信元 IP ごと 60 回/時）を避ける。
+   * 公開リポジトリの releases は権限なしで読める（GitHub の REST の文書: 公開されたリリースの情報は誰でも読める）ので、
+   * contents:read は要求しない。installation の権限は読まない（追加の権限を足さないので要らない）。lastTokenPermissions は変えない。
+   */
+  async createReadOnlyToken(
+    installationId: number,
+    repositoryId: number,
+  ): Promise<InstallationToken> {
+    const jwt = await this.appJwt();
+    return this.requestToken(jwt, installationId, repositoryId, { metadata: "read" });
+  }
+
+  private async appJwt(): Promise<string> {
+    this.key ??= parsePrivateKey(this.privateKey);
+    return createAppJwt({ appId: this.appId, key: await this.key, nowMs: this.now() });
+  }
+
+  /** POST /app/installations/{id}/access_tokens。応答の形が違えば GitHubApiError。 */
+  private async requestToken(
+    jwt: string,
+    installationId: number,
+    repositoryId: number,
+    permissions: Record<string, string>,
+  ): Promise<InstallationToken> {
+    const what = "create installation token";
     const res = await this.send(
       what,
       `${this.apiBase}/app/installations/${installationId}/access_tokens`,
@@ -286,7 +312,6 @@ export class GitHubAppClient {
     if (typeof body.token !== "string" || body.token === "" || !Number.isFinite(expiresAt)) {
       throw new GitHubApiError({ status: res.status, what, detail: "unexpected response" });
     }
-    this.lastTokenPermissions = { workflows: grants.workflows, issues: grants.issues };
     return { token: body.token, expiresAt };
   }
 

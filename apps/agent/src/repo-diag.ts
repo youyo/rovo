@@ -227,6 +227,24 @@ export function miseUnavailableTools(toml: string): { tools: string[]; total: nu
   return { tools: sanitizeMiseToolNames(seen), total: seen.length };
 }
 
+/** Sandbox のイメージに焼いてあり、mise を通さなくても PATH にあるツール（[tools] の名前。core: の接頭辞は外して比べる） */
+const BAKED_MISE_TOOLS: readonly string[] = ["node", "go", "python"];
+
+/**
+ * ワーカーへの 1 文: mise で入れたツールは PATH に入らない（Sandbox は mise の shims も activate も使わない）。
+ * 本番の smoke で、terraform を直接呼ぶと command not found（127）だった。
+ */
+export const MISE_NOT_ON_PATH_NOTE =
+  "Tools that mise installs are not on PATH (the sandbox uses neither mise shims nor `mise activate`), so call them as `mise exec -- <tool> ...` or through `mise run <task>` instead of running the bare command.";
+
+/** mise.toml の [tools] に、焼いていないツール（node・go・python 以外）が 1 つでもあるか */
+export function miseHasUnbakedTools(toml: string): boolean {
+  return miseToolEntries(toml).some(({ key }) => {
+    const name = key.toLowerCase().replace(/^core:/, "");
+    return !BAKED_MISE_TOOLS.includes(name);
+  });
+}
+
 /** mise の go の版の指定が、焼いた版で解決できるか（同じ版か、. 区切りの前方一致。prefix: と system も） */
 export function goVersionMatches(requested: string, baked: string): boolean {
   let r = requested.trim();
@@ -294,6 +312,7 @@ export function repoDiagnostics(
         `mise.toml lists tools whose mise backend cannot download in this sandbox: ${which}. asdf: / vfox: plugins clone other git repositories, and backends such as cargo: / gem: / http: fetch from hosts the sandbox network does not allow, so \`mise install\` / \`mise run\` / \`mise exec\` will try to fetch them and fail. Tools from the mise registry (terraform, tflint, ...) and aqua: / github: / ubi: tools can be installed normally. Check each listed tool with \`command -v <tool>\`: if it is on PATH, call it directly without mise. If it is not, do not try to download it another way (outbound network access is denied); write in your summary that the verification needing it was not run.`,
       );
     }
+    if (miseHasUnbakedTools(input.miseToml)) notes.push(MISE_NOT_ON_PATH_NOTE);
   }
   return {
     warnings,

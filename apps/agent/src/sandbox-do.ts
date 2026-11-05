@@ -665,7 +665,15 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     return `git-credential:${this.ctx.id.name ?? ""}`;
   }
 
-  /** 暗号化して保存する。保存済みより新しい expiresAt のものだけ採用する（冪等）。 */
+  /** apiRead（api.github.com の読み取り専用トークン）の AAD。git の token とは用途を分け、暗号文を入れ替えても復号できないようにする */
+  private apiReadAad(): string {
+    return `api-read-credential:${this.ctx.id.name ?? ""}`;
+  }
+
+  /**
+   * 暗号化して保存する。保存済みより新しい expiresAt のものだけ採用する（冪等）。
+   * apiRead（読み取り専用トークン）は git の token と一緒に差し替える。形が不正なら apiRead だけを捨てる（fail-soft）。
+   */
   async setGitCredential(input: GitCredential): Promise<void> {
     const c = input as Partial<GitCredential> | null;
     if (
@@ -677,30 +685,66 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     ) {
       throw new Error("invalid git credential");
     }
+    const read = c.apiRead as Partial<{ token: unknown; expiresAt: unknown }> | null | undefined;
+    const apiRead =
+      typeof read === "object" &&
+      read !== null &&
+      typeof read.token === "string" &&
+      /^[\x21-\x7e]{1,2048}$/.test(read.token) &&
+      typeof read.expiresAt === "number" &&
+      Number.isFinite(read.expiresAt)
+        ? { token: read.token, expiresAt: read.expiresAt }
+        : undefined;
     if (this.terminated()) throw new Error("sandbox was terminated");
     const stored = this.ctx.storage.kv.get<{ ct: string; expiresAt: number }>("git_credential");
     if (stored && stored.expiresAt >= c.expiresAt) return;
     const key = await importEncryptionKey(this.env.TOKEN_ENC_KEY ?? "");
     const ct = await encryptString(key, c.token, this.credentialAad());
+    const readCt = apiRead ? await encryptString(key, apiRead.token, this.apiReadAad()) : undefined;
     // 暗号化の間に terminate されていたら保存しない
     if (this.terminated()) throw new Error("sandbox was terminated");
     const again = this.ctx.storage.kv.get<{ expiresAt: number }>("git_credential");
     if (again && again.expiresAt >= c.expiresAt) return;
-    this.ctx.storage.kv.put("git_credential", { ct, expiresAt: c.expiresAt });
+    this.ctx.storage.kv.put("git_credential", {
+      ct,
+      expiresAt: c.expiresAt,
+      ...(apiRead && readCt !== undefined ? { readCt, readExpiresAt: apiRead.expiresAt } : {}),
+    });
   }
 
-  /** OutboundGateway 用。無い・終端・復号できないときは undefined（= 401）。 */
+  /**
+   * OutboundGateway 用。無い・終端・復号できないときは undefined（= 401）。
+   * apiRead は復号できたときだけ付ける（復号できなくても git の token は返す）。
+   */
   async readGitCredential(): Promise<GitCredential | undefined> {
     if (this.terminated()) return undefined;
-    const stored = this.ctx.storage.kv.get<{ ct: string; expiresAt: number }>("git_credential");
+    const stored = this.ctx.storage.kv.get<{
+      ct: string;
+      expiresAt: number;
+      readCt?: string;
+      readExpiresAt?: number;
+    }>("git_credential");
     if (!stored) return undefined;
+    let key: CryptoKey;
+    let token: string;
     try {
-      const key = await importEncryptionKey(this.env.TOKEN_ENC_KEY ?? "");
-      const token = await decryptString(key, stored.ct, this.credentialAad());
-      return { token, expiresAt: stored.expiresAt };
+      key = await importEncryptionKey(this.env.TOKEN_ENC_KEY ?? "");
+      token = await decryptString(key, stored.ct, this.credentialAad());
     } catch {
       return undefined;
     }
+    let apiRead: GitCredential["apiRead"];
+    if (typeof stored.readCt === "string" && typeof stored.readExpiresAt === "number") {
+      try {
+        apiRead = {
+          token: await decryptString(key, stored.readCt, this.apiReadAad()),
+          expiresAt: stored.readExpiresAt,
+        };
+      } catch {
+        apiRead = undefined;
+      }
+    }
+    return { token, expiresAt: stored.expiresAt, ...(apiRead ? { apiRead } : {}) };
   }
 
   /**

@@ -13,6 +13,7 @@ import { count, depsCacheStatus, depsMissReason, mapAgentEvent } from "../agent/
 import type {
   AgentRpc,
   EventsPage,
+  GitCredential,
   ResultDto,
   ReviewCommandResultDto,
   ReviewResultDto,
@@ -769,6 +770,17 @@ type GithubRow = {
 
 /** 取り込みで見つけた read_issue / read_pr の依頼（検査済み） */
 type GitHubReadRequest = NonNullable<ReturnType<typeof parseWorkerReadRequest>>;
+
+/**
+ * git_token の行の用途。git の token（start / refresh / final。contents:write）と、
+ * api.github.com の releases / attestations 用の読み取り専用 token（api_read_*。metadata:read だけ）を同じ表で持つ。
+ * 失効（終端の一括失効・記録の閉じ方・暗号文の消去）は両方に同じく効く。選ぶときは必ずどちらかに絞る。
+ */
+const GIT_TOKEN_KINDS = "kind IN ('start', 'refresh', 'final')";
+const API_READ_TOKEN_KINDS = "kind IN ('api_read_start', 'api_read_refresh')";
+type TokenKind = "start" | "refresh" | "final" | "api_read_start" | "api_read_refresh";
+const isApiReadKind = (kind: string): boolean =>
+  kind === "api_read_start" || kind === "api_read_refresh";
 
 type TokenRow = {
   id: number;
@@ -3127,7 +3139,7 @@ export class TaskDO extends DurableObject<Env> {
 
   /** read_issue / read_pr に使う token と、それが issues: read を持つか（workingToken と同じ選び方） */
   private async githubReadToken(row: TaskRow): Promise<{ token: string; issues: boolean }> {
-    for (const t of this.tokenRows("revoked = 0").reverse()) {
+    for (const t of this.tokenRows(`revoked = 0 AND ${GIT_TOKEN_KINDS}`).reverse()) {
       if (t.expires_at - this.now() > 60_000) {
         return { token: await this.decryptToken(t), issues: t.issues === 1 };
       }
@@ -3382,7 +3394,7 @@ export class TaskDO extends DurableObject<Env> {
   /** Installation Token を発行して暗号化保存する。トークンの値はログにもイベントにも出さない。 */
   private async issueToken(
     row: TaskRow,
-    kind: "start" | "refresh" | "final",
+    kind: TokenKind,
   ): Promise<{ id: number; token: string; expiresAt: number }> {
     try {
       return await this.issueTokenInner(row, kind);
@@ -3395,15 +3407,18 @@ export class TaskDO extends DurableObject<Env> {
 
   private async issueTokenInner(
     row: TaskRow,
-    kind: "start" | "refresh" | "final",
+    kind: TokenKind,
   ): Promise<{ id: number; token: string; expiresAt: number }> {
     if (row.repository_id === null || row.installation_id === null) {
       throw new SetupFailure("github_app_not_configured");
     }
     const client = this.appClient();
+    const apiRead = kind === "api_read_start" || kind === "api_read_refresh";
     let issued: { token: string; expiresAt: number };
     try {
-      issued = await client.createInstallationToken(row.installation_id, row.repository_id);
+      issued = apiRead
+        ? await client.createReadOnlyToken(row.installation_id, row.repository_id)
+        : await client.createInstallationToken(row.installation_id, row.repository_id);
     } catch (e) {
       if (e instanceof GitHubApiError) throw e;
       // 鍵の形式不正など（メッセージに鍵の内容は含まれない）
@@ -3418,14 +3433,49 @@ export class TaskDO extends DurableObject<Env> {
           enc,
           issued.expiresAt,
           kind,
-          client.lastTokenPermissions.issues ? 1 : 0,
+          !apiRead && client.lastTokenPermissions.issues ? 1 : 0,
         )
         .one().id;
-      this.auditBoth("credential_issued", { kind });
+      // 読み取り専用 token は監査ログだけに出す（events には積まない。phase2.md の許可先の節）。
+      // events に積むと公開イベントの seq がずれ、task_wait に中継の内部の token が見えるだけになるため
+      if (apiRead) this.emitAudit("credential_issued", { kind });
+      else this.auditBoth("credential_issued", { kind });
       return inserted;
     });
     this.notifyWaiters();
     return { id, token: issued.token, expiresAt: issued.expiresAt };
+  }
+
+  /**
+   * api.github.com の releases / attestations 用の読み取り専用 token（metadata:read だけ）を発行する。
+   * 失敗しても例外にしない（fail-soft: 中継は認証を付けずに通す）。失敗は issueToken が監査ログ（credential_issue_failed）に出す。
+   */
+  private async issueApiReadToken(
+    row: TaskRow,
+    kind: "api_read_start" | "api_read_refresh",
+  ): Promise<void> {
+    try {
+      await this.issueToken(row, kind);
+    } catch {
+      // 付けずに通す
+    }
+  }
+
+  /** 起動時の読み取り専用 token を、まだ無ければ 1 回発行する（setup の再開でも重ねない）。 */
+  private async ensureApiReadStart(row: TaskRow): Promise<void> {
+    if (this.tokenRows("kind = 'api_read_start'").length > 0) return;
+    await this.issueApiReadToken(row, "api_read_start");
+  }
+
+  /** start の spec に載せる apiRead（起動時の読み取り専用 token）。無い・失効済みなら載せない。 */
+  private async startApiRead(): Promise<Pick<GitCredential, "apiRead">> {
+    const r = this.tokenRows("kind = 'api_read_start' AND revoked = 0")[0];
+    if (!r || r.enc === "") return {};
+    try {
+      return { apiRead: { token: await this.decryptToken(r), expiresAt: r.expires_at } };
+    } catch {
+      return {};
+    }
   }
 
   private async decryptToken(r: TokenRow): Promise<string> {
@@ -3478,7 +3528,11 @@ export class TaskDO extends DurableObject<Env> {
     return {
       branch: gl.branch,
       initialSha: gl.initial_sha,
-      gitCredential: { token: await this.decryptToken(start), expiresAt: start.expires_at },
+      gitCredential: {
+        token: await this.decryptToken(start),
+        expiresAt: start.expires_at,
+        ...(await this.startApiRead()),
+      },
       // 取得済みの値をそのまま送る（再送で変わらない）。未取得（この機能より前に始まったタスク）は載せない: 受理済みの spec と食い違わせない
       ...(gl.deps !== null ? { deps: JSON.parse(gl.deps) as TaskSpec["deps"] } : {}),
       // 初期コミットで決めた作者（保存済みのときだけ。この機能より前に始まったタスクは載せない: 受理済みの spec と食い違わせない）
@@ -3521,6 +3575,7 @@ export class TaskDO extends DurableObject<Env> {
     const plain = existing
       ? await this.decryptToken(existing)
       : (await this.issueToken(row, "start")).token;
+    await this.ensureApiReadStart(row);
     const api = this.repoApi(row, plain);
 
     // 0. 依存関係のキャッシュの指定（D14）。base_sha 時点のルート直下の lockfile。読めなくても null で続ける（失敗しない）。
@@ -3632,6 +3687,7 @@ export class TaskDO extends DurableObject<Env> {
     const plain = existing
       ? await this.decryptToken(existing)
       : (await this.issueToken(row, "start")).token;
+    await this.ensureApiReadStart(row);
     const api = this.repoApi(row, plain);
     if (start.deps === null) {
       const deps = await detectDeps(api, row.repository_id ?? 0, rl.head_sha);
@@ -3659,7 +3715,11 @@ export class TaskDO extends DurableObject<Env> {
     return {
       branch: "",
       initialSha: rl.head_sha,
-      gitCredential: { token: await this.decryptToken(start), expiresAt: start.expires_at },
+      gitCredential: {
+        token: await this.decryptToken(start),
+        expiresAt: start.expires_at,
+        ...(await this.startApiRead()),
+      },
       ...(gl.deps !== null ? { deps: JSON.parse(gl.deps) as TaskSpec["deps"] } : {}),
       review: {
         pullNumber: rl.pull_number,
@@ -3841,27 +3901,47 @@ export class TaskDO extends DurableObject<Env> {
     const gl = this.getGithub();
     if (!row || !link || !gl) return;
     if (link.start_state !== "accepted" || isTerminal(this.statusOf(row))) return;
-    let latest = this.tokenRows("revoked = 0").at(-1);
+    let latest = this.tokenRows(`revoked = 0 AND ${GIT_TOKEN_KINDS}`).at(-1);
     if (!latest) return;
     // 期限の 15 分前になったら新しいトークンを発行する（まだ渡せていない新しいトークンがあれば、それを再送する）
     // 未配送のトークン自身が期限に近づいた場合も再発行して差し替える（配送失敗が続いても期限切れを送り続けない）
     if (latest.expires_at - this.now() <= TOKEN_REFRESH_BEFORE_MS) {
       const issued = await this.issueToken(row, "refresh");
       latest = this.tokenRows(`id = ${issued.id}`)[0] as TokenRow;
+      // 読み取り専用 token も同じ時に新しくする（失敗しても git の token の更新は止めない）
+      await this.issueApiReadToken(row, "api_read_refresh");
     }
     if (latest.id <= gl.cred_delivered_id) return;
+    // 一緒に渡す読み取り専用 token: 失効しておらず、期限に余裕のある最新のもの（無ければ載せない）
+    const read = this.tokenRows(`revoked = 0 AND ${API_READ_TOKEN_KINDS}`)
+      .reverse()
+      .find((t) => t.expires_at - this.now() > 60_000);
+    let apiRead: GitCredential["apiRead"];
+    if (read) {
+      try {
+        apiRead = { token: await this.decryptToken(read), expiresAt: read.expires_at };
+      } catch {
+        apiRead = undefined;
+      }
+    }
     const r = await this.agentStub().setGitCredential({
       token: await this.decryptToken(latest),
       expiresAt: latest.expires_at,
+      ...(apiRead ? { apiRead } : {}),
     });
     if (!r.ok) return;
     this.ctx.storage.sql.exec(
       "UPDATE github_link SET cred_delivered_id = MAX(cred_delivered_id, ?)",
       latest.id,
     );
-    // 渡せたので、古いトークンは失効させる（失敗しても終端で失効する）
-    for (const old of this.tokenRows(`revoked = 0 AND id < ${latest.id}`)) {
+    // 渡せたので、古いトークンは失効させる（失敗しても終端で失効する）。
+    // 読み取り専用 token は、いま渡したもの以外を失効させる（SandboxDO は渡した組で丸ごと差し替える）
+    const keepRead = apiRead && read ? read.id : Number.POSITIVE_INFINITY;
+    for (const old of this.tokenRows(`revoked = 0 AND ${GIT_TOKEN_KINDS} AND id < ${latest.id}`)) {
       await this.revokeToken(old).catch(() => {});
+    }
+    for (const old of this.tokenRows(`revoked = 0 AND ${API_READ_TOKEN_KINDS}`)) {
+      if (old.id < keepRead) await this.revokeToken(old).catch(() => {});
     }
   }
 
@@ -3872,10 +3952,10 @@ export class TaskDO extends DurableObject<Env> {
     }
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", r.id);
-      this.auditBoth("credential_revoked", {
-        kind: r.kind,
-        reason: expired ? "already_expired" : "revoked",
-      });
+      const fields = { kind: r.kind, reason: expired ? "already_expired" : "revoked" };
+      // 読み取り専用 token（api_read_*）は監査ログだけ（発行と同じ）
+      if (isApiReadKind(r.kind)) this.emitAudit("credential_revoked", fields);
+      else this.auditBoth("credential_revoked", fields);
     });
     this.notifyWaiters();
   }
@@ -3946,11 +4026,10 @@ export class TaskDO extends DurableObject<Env> {
           // App の設定が失われている・暗号文を復号できない。再試行しても直らないので、記録だけ閉じる（期限は 1 時間）。
           this.ctx.storage.transactionSync(() => {
             this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", t.id);
-            // 既存の warning が無い経路なので、events にも audit で残す
-            this.auditBoth("credential_revoke_given_up", {
-              kind: t.kind,
-              reason: "setup_failure",
-            });
+            // 既存の warning が無い経路なので、events にも audit で残す（読み取り専用 token は監査ログだけ）
+            const fields = { kind: t.kind, reason: "setup_failure" };
+            if (isApiReadKind(t.kind)) this.emitAudit("credential_revoke_given_up", fields);
+            else this.auditBoth("credential_revoke_given_up", fields);
           });
           this.notifyWaiters();
           continue;
@@ -4217,7 +4296,7 @@ export class TaskDO extends DurableObject<Env> {
 
   /** 失効していない、期限に余裕のあるトークン。無ければ発行する。 */
   private async workingToken(row: TaskRow): Promise<string> {
-    for (const t of this.tokenRows("revoked = 0").reverse()) {
+    for (const t of this.tokenRows(`revoked = 0 AND ${GIT_TOKEN_KINDS}`).reverse()) {
       if (t.expires_at - this.now() > 60_000) return this.decryptToken(t);
     }
     return (await this.issueToken(row, "final")).token;
@@ -4939,7 +5018,7 @@ export class TaskDO extends DurableObject<Env> {
   /** 新しいトークンを渡せていない、または期限が近く更新が要る。 */
   private credentialWorkPending(): boolean {
     const gl = this.getGithub();
-    const latest = this.tokenRows("revoked = 0").at(-1);
+    const latest = this.tokenRows(`revoked = 0 AND ${GIT_TOKEN_KINDS}`).at(-1);
     if (!gl || !latest) return false;
     return (
       latest.id > gl.cred_delivered_id || latest.expires_at - this.now() <= TOKEN_REFRESH_BEFORE_MS

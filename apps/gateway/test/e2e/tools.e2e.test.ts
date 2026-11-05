@@ -399,7 +399,11 @@ describe("Draft PR（偽 GitHub の App API 経由）", () => {
           { path: string; method: string; auth: string; body: Record<string, unknown> }[]
         >("requests");
       const issued = reqs.filter((r) => r.path.endsWith("/access_tokens"));
-      expect(issued.at(-1)).toMatchObject({
+      // git の token（contents:write）と、api.github.com の releases 用の読み取り専用 token（metadata:read だけ）
+      const gitIssued = issued.filter(
+        (r) => (r.body.permissions as Record<string, string> | undefined)?.contents === "write",
+      );
+      expect(gitIssued.at(-1)).toMatchObject({
         method: "POST",
         auth: "jwt",
         body: {
@@ -407,6 +411,13 @@ describe("Draft PR（偽 GitHub の App API 経由）", () => {
           permissions: { contents: "write", pull_requests: "write", metadata: "read" },
         },
       });
+      expect(issued).toContainEqual(
+        expect.objectContaining({
+          method: "POST",
+          auth: "jwt",
+          body: { repository_ids: [4242], permissions: { metadata: "read" } },
+        }),
+      );
 
       await client.callTool({ name: "task_cancel", arguments: { task_id: taskId } });
       // 終端処理（停止確認の後の PR 更新と失効）は alarm 経由なので、少し待つ

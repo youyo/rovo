@@ -174,9 +174,20 @@ describe("SandboxDO: 作業ツリーの診断（.npmrc / mise.toml）", () => {
     expect(m.miseUnavailableTools).toBeUndefined();
   });
 
+  it("取れる焼いていないツール（terraform / tflint）だけでも、mise exec / mise run で呼ぶ注記がワーカーに届く", async () => {
+    const a = await boot("diag-path-note", {
+      "mise.toml": '[tools]\nterraform = "1.15.8"\ntflint = "0.64.0"\n',
+    });
+    expect(a.repoWarnings).toBeUndefined();
+    expect(a.repoNote).toMatch(/mise exec --/);
+    const b = await boot("diag-path-note-dot", { ".mise.toml": '[tools]\ngitleaks = "8"\n' });
+    expect(b.repoNote).toMatch(/mise run/);
+  });
+
   it("mise.toml の go が焼いた版（前方一致）なら警告しない", async () => {
     const m = await boot("diag-mise-ok", { "mise.toml": '[tools]\ngo = "1.26"\nnode = "24"\n' });
     expect(m.repoWarnings).toBeUndefined();
+    expect(m.repoNote).toBeUndefined();
   });
 
   it("不正な値（ホスト名でないもの・巨大な値）は metrics に出ない", async () => {

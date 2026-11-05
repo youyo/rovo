@@ -55,6 +55,7 @@ import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
 import {
   miseGoVersion,
+  miseHasUnbakedTools,
   miseUnavailableTools,
   type RepoDiagnostics,
   repoDiagnostics,
@@ -2196,7 +2197,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       const t = await read(name);
       if (
         t !== undefined &&
-        (miseGoVersion(t) !== undefined || miseUnavailableTools(t).total > 0)
+        (miseGoVersion(t) !== undefined ||
+          miseUnavailableTools(t).total > 0 ||
+          miseHasUnbakedTools(t))
       ) {
         miseToml = t;
         break;

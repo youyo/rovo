@@ -463,15 +463,13 @@ describe("decideOutbound: mise が焼いていない python を取る配布元�
     }
   });
 
-  it("ほかのリポジトリ（タスクのリポジトリを含む）の releases は拒否する", () => {
+  it("ほかのリポジトリ（タスクのリポジトリを含む）の releases/download も GET / HEAD で許可する（開発ツールの配布）", () => {
     for (const url of [
-      "https://github.com/evil/python-build-standalone/releases/download/1/x.tar.gz",
       "https://github.com/astral-sh/uv/releases/download/0.8.22/uv.tar.gz",
-      "https://github.com/astral-sh/python-build-standalone-x/releases/download/1/x.tar.gz",
       "https://github.com/octocat/Hello-World/releases/download/v1/x.tar.gz",
       "https://github.com/jdx/mise/releases/download/v2026.10.25/mise.tar.gz",
     ]) {
-      expect(code(get(url, { repo })), url).toBe("github_path");
+      expect(code(get(url, { repo })), url).toBe("allow");
     }
   });
 
@@ -485,14 +483,11 @@ describe("decideOutbound: mise が焼いていない python を取る配布元�
     ]) {
       expect(get(`https://github.com${path}`, { repo }).allow, path).toBe(false);
     }
-    expect(
-      get("https://api.github.com/repos/astral-sh/python-build-standalone/releases").allow,
-    ).toBe(false);
   });
 
   it("パスの抜け（..・%2f・%2e・%5c）でほかのリポジトリへ出られない", () => {
     for (const path of [
-      "/astral-sh/python-build-standalone/releases/download/../../../../evil/x/releases/download/1/x",
+      "/astral-sh/python-build-standalone/releases/download/../../../../evil/x/info/refs?service=git-upload-pack",
       "/astral-sh/python-build-standalone/releases/download/..%2f..%2f..%2f..%2fevil/x",
       "/astral-sh/python-build-standalone/releases/download/%2e%2e/%2e%2e/%2e%2e/%2e%2e/evil/x",
       "/astral-sh/python-build-standalone/releases/download/..%5c..%5cevil/x",
@@ -502,18 +497,18 @@ describe("decideOutbound: mise が焼いていない python を取る配布元�
     }
   });
 
-  it("releases の配布物のリダイレクト先（release-assets.githubusercontent.com）は、このリポジトリの ID のパスだけ", () => {
+  it("releases の配布物のリダイレクト先（release-assets.githubusercontent.com）は /github-production-release-asset/<ID>/ のパスだけ", () => {
     const signed =
       "https://release-assets.githubusercontent.com/github-production-release-asset/162334160/a5728c4e-7f3d-4eb4-a394-ec620039da16?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-01-01T00%3A00%3A00Z&rscd=attachment%3B+filename%3Dcpython.tar.gz&sig=AbC%2Bd%3D";
     expect(code(get(signed))).toBe("allow");
     expect(code(decideOutbound({ method: "HEAD", url: signed }))).toBe("allow");
     for (const path of [
       "/",
-      "/github-production-release-asset/1/a5728c4e",
-      "/github-production-release-asset/1623341600/a5728c4e",
-      "/github-production-release-asset/16233416/a5728c4e",
+      "/github-production-release-asset/",
+      "/github-production-release-asset/abc/a5728c4e",
+      "/github-production-release-asset/162334160/",
       "/other/162334160/a5728c4e",
-      "/github-production-release-asset/162334160/../1/a5728c4e",
+      "/github-production-release-asset/162334160/../../other/1/a5728c4e",
       "/github-production-release-asset/162334160/..%2f1/a5728c4e",
     ]) {
       expect(get(`https://release-assets.githubusercontent.com${path}`).allow, path).toBe(false);
@@ -530,14 +525,14 @@ describe("decideOutbound: mise が焼いていない python を取る配布元�
     }
   });
 
-  it("旧来のリダイレクト先（objects.githubusercontent.com）も、このリポジトリの ID のパスだけ", () => {
+  it("旧来のリダイレクト先（objects.githubusercontent.com）も /github-production-release-asset-2e65be/<ID>/ のパスだけ", () => {
     const signed =
       "https://objects.githubusercontent.com/github-production-release-asset-2e65be/162334160/a5728c4e-7f3d-4eb4-a394-ec620039da16?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc";
     expect(code(get(signed))).toBe("allow");
     for (const path of [
       "/",
-      "/github-production-release-asset-2e65be/1/a5728c4e",
-      "/github-production-release-asset-2e65be/1623341600/a5728c4e",
+      "/github-production-release-asset-2e65be/x1/a5728c4e",
+      "/github-production-release-asset-2e65be/162334160/",
       "/github-production-repository-file-5c1aeb/162334160/x",
     ]) {
       expect(get(`https://objects.githubusercontent.com${path}`).allow, path).toBe(false);
@@ -553,5 +548,239 @@ describe("decideOutbound: mise が焼いていない python を取る配布元�
     ]) {
       expect(get(url).allow, url).toBe(false);
     }
+  });
+});
+
+describe("decideOutbound: 開発ツールの配布（GitHub releases）", () => {
+  const code = (d: ReturnType<typeof decideOutbound>) => (d.allow ? "allow" : d.code);
+  const tflint =
+    "https://github.com/terraform-linters/tflint/releases/download/v0.64.0/tflint_linux_amd64.zip";
+
+  it("github.com の任意のリポジトリの /<owner>/<repo>/releases/download/<tag>/<asset> の GET / HEAD を許可する", () => {
+    for (const url of [
+      tflint,
+      "https://github.com/terraform-linters/tflint/releases/download/v0.64.0/checksums.txt",
+      "https://github.com/terraform-linters/tflint/releases/download/v0.64.0/checksums.txt.sig",
+      "https://github.com/cloudflare/terraform-provider-cloudflare/releases/download/v5.0.0/terraform-provider-cloudflare_5.0.0_linux_amd64.zip",
+      "https://github.com/a_b/c.d-e/releases/download/1/x",
+    ]) {
+      expect(code(get(url)), url).toBe("allow");
+      expect(code(get(url, { repo })), url).toBe("allow");
+      expect(code(decideOutbound({ method: "HEAD", url })), url).toBe("allow");
+    }
+  });
+
+  it("releases/download への POST などは registry_method", () => {
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      expect(code(decideOutbound({ method, url: tflint }, { repo }))).toBe("registry_method");
+    }
+  });
+
+  it("github.com の releases/download 以外のパスは拒否する", () => {
+    for (const path of [
+      "/terraform-linters/tflint/releases",
+      "/terraform-linters/tflint/releases/latest",
+      "/terraform-linters/tflint/releases/tag/v0.64.0",
+      "/terraform-linters/tflint/releases/download/",
+      "/terraform-linters/tflint/releases/downloadx/v1/x",
+      "/terraform-linters/tflint/archive/refs/tags/v0.64.0.zip",
+      "/terraform-linters/tflint/raw/main/README.md",
+      "/terraform-linters/releases/download/v1/x",
+      "/x/terraform-linters/tflint/releases/download/v1/x",
+      "/login",
+    ]) {
+      expect(get(`https://github.com${path}`, { repo }).allow, path).toBe(false);
+    }
+  });
+
+  it("owner / repo が . や .. だけ・不正な文字・エンコードのものは拒否する", () => {
+    for (const path of [
+      "/terraform-linters/tflint/releases/download/v1/..%2f..%2f..%2fevil/x",
+      "/terraform-linters/tflint/releases/download/%2e%2e/%2e%2e/%2e%2e/%2e%2e/evil/x",
+      "/terraform-linters/tflint/releases/download/..%5cevil/x",
+      "/terraform-linters%2ftflint/releases/download/v1/x",
+      "/terraform-linters/tf%20lint/releases/download/v1/x",
+      "/terraform-linters/tf!lint/releases/download/v1/x",
+      "/.../tflint/releases/download/v1/x",
+      "/terraform-linters/.../releases/download/v1/x",
+    ]) {
+      expect(get(`https://github.com${path}`, { repo }).allow, path).toBe(false);
+    }
+  });
+
+  it("git の smart HTTP は今までどおり対象リポジトリだけ（releases を足しても緩めない）", () => {
+    const opts = { repo, branch: "agent/task-abc" };
+    for (const url of [
+      "https://github.com/terraform-linters/tflint.git/info/refs?service=git-upload-pack",
+      "https://github.com/terraform-linters/tflint.git/info/refs?service=git-receive-pack",
+      "https://github.com/terraform-linters/tflint/releases/download/v1/../../../../../evil/x/info/refs?service=git-upload-pack",
+    ]) {
+      expect(code(get(url, opts)), url).toBe("github_other_repo");
+    }
+    for (const tail of ["git-upload-pack", "git-receive-pack"]) {
+      expect(
+        code(
+          decideOutbound(
+            { method: "POST", url: `https://github.com/terraform-linters/tflint.git/${tail}` },
+            opts,
+          ),
+        ),
+      ).toBe("github_other_repo");
+    }
+  });
+
+  it("リダイレクト先（release-assets / objects.githubusercontent.com）は任意のリポジトリ ID を許可する", () => {
+    expect(
+      code(
+        get(
+          "https://release-assets.githubusercontent.com/github-production-release-asset/123456/a5728c4e-7f3d?sp=r&sig=x",
+        ),
+      ),
+    ).toBe("allow");
+    expect(
+      code(
+        get(
+          "https://objects.githubusercontent.com/github-production-release-asset-2e65be/123456/a5728c4e?X-Amz-Signature=abc",
+        ),
+      ),
+    ).toBe("allow");
+    expect(
+      code(
+        decideOutbound({
+          method: "POST",
+          url: "https://release-assets.githubusercontent.com/github-production-release-asset/123456/x",
+        }),
+      ),
+    ).toBe("registry_method");
+  });
+});
+
+describe("decideOutbound: 開発ツールの配布（api.github.com の releases / attestations）", () => {
+  const code = (d: ReturnType<typeof decideOutbound>) => (d.allow ? "allow" : d.code);
+  const api = "https://api.github.com";
+
+  it("/repos/<o>/<r>/releases と、その下（tags・latest・id・assets）、attestations の GET / HEAD を許可する（query は見ない）", () => {
+    for (const path of [
+      "/repos/hashicorp/terraform/releases?per_page=100",
+      "/repos/hashicorp/terraform/releases",
+      "/repos/terraform-linters/tflint/releases/tags/0.64.0",
+      "/repos/terraform-linters/tflint/releases/tags/v0.64.0",
+      "/repos/terraform-linters/tflint/releases/latest",
+      "/repos/terraform-linters/tflint/releases/123456",
+      "/repos/terraform-linters/tflint/releases/assets/987",
+      "/repos/terraform-linters/tflint/attestations/sha256:abcdef0123",
+    ]) {
+      expect(code(get(`${api}${path}`)), path).toBe("allow");
+      expect(code(decideOutbound({ method: "HEAD", url: `${api}${path}` })), path).toBe("allow");
+    }
+  });
+
+  it("releases / attestations への POST などは registry_method", () => {
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      for (const path of [
+        "/repos/terraform-linters/tflint/releases",
+        "/repos/terraform-linters/tflint/releases/generate-notes",
+        "/repos/terraform-linters/tflint/attestations",
+        "/repos/terraform-linters/tflint/attestations/sha256:abc",
+      ]) {
+        const d = decideOutbound({ method, url: `${api}${path}` });
+        expect(d.allow, `${method} ${path}`).toBe(false);
+      }
+    }
+    expect(
+      code(
+        decideOutbound({ method: "POST", url: `${api}/repos/terraform-linters/tflint/releases` }),
+      ),
+    ).toBe("registry_method");
+  });
+
+  it("api.github.com のそれ以外は host_not_allowed", () => {
+    for (const path of [
+      "/",
+      "/user",
+      "/user/repos",
+      "/repos/terraform-linters/tflint",
+      "/repos/terraform-linters/tflint/contents/README.md",
+      "/repos/terraform-linters/tflint/git/refs",
+      "/repos/terraform-linters/tflint/releasesx",
+      "/repos/terraform-linters/tflint/attestations",
+      "/repos/terraform-linters/tflint/attestations/",
+      "/repos/terraform-linters/releases",
+      "/repos/a/b/c/releases",
+      "/orgs/hashicorp/repos",
+      "/graphql",
+      "/app/installations",
+      "/repos/terraform-linters/tflint/releases/../contents/x",
+      "/repos/terraform-linters/tflint/releases/..%2fcontents/x",
+      "/repos/terraform-linters/tflint/releases/%2e%2e/contents/x",
+      "/repos/terraform-linters%2ftflint/releases",
+      "/repos/.../tflint/releases",
+    ]) {
+      expect(code(get(`${api}${path}`)), path).toBe("host_not_allowed");
+    }
+    expect(code(decideOutbound({ method: "POST", url: `${api}/graphql` }))).toBe(
+      "host_not_allowed",
+    );
+  });
+});
+
+describe("decideOutbound: Terraform の配布元", () => {
+  const code = (d: ReturnType<typeof decideOutbound>) => (d.allow ? "allow" : d.code);
+
+  it("registry.terraform.io は /.well-known/terraform.json と /v1/providers/ だけ（GET / HEAD）", () => {
+    for (const path of [
+      "/.well-known/terraform.json",
+      "/v1/providers/hashicorp/aws/versions",
+      "/v1/providers/cloudflare/cloudflare/5.0.0/download/linux/amd64",
+    ]) {
+      expect(code(get(`https://registry.terraform.io${path}`)), path).toBe("allow");
+      expect(
+        code(decideOutbound({ method: "HEAD", url: `https://registry.terraform.io${path}` })),
+        path,
+      ).toBe("allow");
+    }
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      expect(
+        code(
+          decideOutbound({
+            method,
+            url: "https://registry.terraform.io/v1/providers/hashicorp/aws/versions",
+          }),
+        ),
+      ).toBe("registry_method");
+    }
+  });
+
+  it("registry.terraform.io の modules（/v1/modules/）やほかのパスは拒否する", () => {
+    for (const path of [
+      "/v1/modules/terraform-aws-modules/vpc/aws/versions",
+      "/v1/modules/terraform-aws-modules/vpc/aws/5.0.0/download",
+      "/",
+      "/.well-known/terraform.jsonx",
+      "/.well-known/other.json",
+      "/v1/providersx/a",
+      "/v2/providers/a",
+      "/v1/providers/../modules/a/b/c/versions",
+      "/v1/providers/..%2fmodules/a",
+    ]) {
+      expect(code(get(`https://registry.terraform.io${path}`)), path).toBe("host_not_allowed");
+    }
+  });
+
+  it("releases.hashicorp.com はホスト全体を GET / HEAD で許可する", () => {
+    const zip = "https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_linux_amd64.zip";
+    expect(code(get(zip))).toBe("allow");
+    expect(code(decideOutbound({ method: "HEAD", url: zip }))).toBe("allow");
+    expect(
+      code(get("https://releases.hashicorp.com/terraform-provider-aws/6.0.0/x_SHA256SUMS")),
+    ).toBe("allow");
+    expect(code(decideOutbound({ method: "POST", url: zip }))).toBe("registry_method");
+    expect(code(get("https://evil.releases.hashicorp.com/x"))).toBe("host_not_allowed");
+  });
+
+  it("checkpoint-api.hashicorp.com は許可しない（CHECKPOINT_DISABLE で止める）", () => {
+    expect(code(get("https://checkpoint-api.hashicorp.com/v1/check/terraform"))).toBe(
+      "host_not_allowed",
+    );
   });
 });

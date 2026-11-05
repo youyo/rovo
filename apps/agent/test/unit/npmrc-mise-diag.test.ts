@@ -138,14 +138,14 @@ describe("miseGoVersion", () => {
 });
 
 describe("miseUnavailableTools", () => {
-  it("terraform / tflint などは unavailable（宣言順・重複なし）", () => {
+  it("接頭辞の無い登録名（terraform・tflint・gitleaks・pnpm・uv など）は取れるとみなしてフラグしない", () => {
     const r = miseUnavailableTools(
-      '[tools]\nterraform = "1.15.8"\ntflint = "0.64.0"\nterraform = "1"\n',
+      '[tools]\nterraform = "1.15.8"\ntflint = "0.64.0"\ngitleaks = "8"\npnpm = "10"\nuv = "latest"\n',
     );
-    expect(r).toEqual({ tools: ["terraform", "tflint"], total: 2 });
+    expect(r).toEqual({ tools: [], total: 0 });
   });
 
-  it("node / nodejs / go / golang / python と npm: / pipx: / go: の接頭辞は用意できるとみなす", () => {
+  it("node / go / python と aqua: / github: / ubi: / npm: / pipx: / go: / core: の backend はフラグしない", () => {
     const toml = [
       "[tools]",
       'node = "24"',
@@ -153,44 +153,59 @@ describe("miseUnavailableTools", () => {
       'go = "1.99.0"',
       'golang = "1.26"',
       'python = { version = "3.13" }',
+      '"aqua:hashicorp/terraform" = "1"',
+      '"github:terraform-linters/tflint" = "0.64.0"',
+      "'ubi:a/b' = \"1\"",
       '"npm:prettier" = "3"',
       '"pipx:ruff" = "latest"',
       "'go:github.com/x/y/cmd/z' = \"latest\"",
+      '"core:node" = "24"',
     ].join("\n");
     expect(miseUnavailableTools(toml)).toEqual({ tools: [], total: 0 });
   });
 
-  it("aqua: / ubi: / cargo: / pnpm / uv も unavailable。引用符つきのキーも読む", () => {
-    const toml =
-      '[tools]\n"aqua:hashicorp/terraform" = "1"\n\'ubi:a/b\' = "1"\n"cargo:ripgrep" = "1"\npnpm = "10"\nuv = "latest"\n';
-    expect(miseUnavailableTools(toml).tools).toEqual([
-      "aqua:hashicorp/terraform",
-      "ubi:a/b",
-      "cargo:ripgrep",
-      "pnpm",
-      "uv",
-    ]);
+  it("取れない backend（asdf: / vfox: / cargo: / gem: / spm: / dotnet: / conda: / http: など）をフラグする（宣言順・重複なし）", () => {
+    const toml = [
+      "[tools]",
+      '"asdf:foo" = "1"',
+      '"vfox:version-fox/vfox-bar" = "1"',
+      '"cargo:ripgrep" = "14"',
+      'terraform = "1.15.8"',
+      '"asdf:foo" = "2"',
+      '"gem:rubocop" = "1"',
+      '"spm:a/b" = "1"',
+    ].join("\n");
+    expect(miseUnavailableTools(toml)).toEqual({
+      tools: ["asdf:foo", "vfox:version-fox/vfox-bar", "cargo:ripgrep", "gem:rubocop", "spm:a/b"],
+      total: 5,
+    });
+    expect(
+      miseUnavailableTools(
+        '[tools]\n"dotnet:x" = "1"\n"conda:y" = "1"\n"http:z" = { version = "1", url = "https://example.com/z" }\n',
+      ).tools,
+    ).toEqual(["dotnet:x", "conda:y", "http:z"]);
   });
 
   it("トップレベルの tools.key = ... と [tools.key] の節も読む", () => {
     expect(
-      miseUnavailableTools('tools.terraform = "1"\ntools."aqua:x/y" = "1"\ntools.node = "24"\n')
+      miseUnavailableTools('tools.terraform = "1"\ntools."asdf:x" = "1"\ntools.node = "24"\n')
         .tools,
-    ).toEqual(["terraform", "aqua:x/y"]);
+    ).toEqual(["asdf:x"]);
     expect(
-      miseUnavailableTools('[tools.tflint]\nversion = "0.64.0"\n[tools.node]\nversion = "24"\n')
-        .tools,
-    ).toEqual(["tflint"]);
+      miseUnavailableTools(
+        '[tools.tflint]\nversion = "0.64.0"\n[tools."cargo:ripgrep"]\nversion = "14"\n',
+      ).tools,
+    ).toEqual(["cargo:ripgrep"]);
   });
 
   it("[tools] 以外の節・コメント・複数行の値の中身は見ない", () => {
     const toml = [
       "[env]",
-      'terraform = "x"',
+      '"asdf:x" = "x"',
       "[tasks.build]",
-      'run = "terraform plan"',
+      'run = "cargo:plan"',
       "[tools]",
-      "# tflint = 1",
+      '# "asdf:y" = 1',
       'node = "24"',
       "[settings]",
       "experimental = true",
@@ -201,11 +216,11 @@ describe("miseUnavailableTools", () => {
   it("安全な形でない名前は tools に入れず total だけ数える。最大 5 件", () => {
     const toml = [
       "[tools]",
-      '"evil <b>x</b> ghp_AAAA" = "1"',
-      ...["a", "b", "c", "d", "e", "f"].map((n) => `${n}tool = "1"`),
+      '"asdf:evil <b>x</b> ghp_AAAA" = "1"',
+      ...["a", "b", "c", "d", "e", "f"].map((n) => `"asdf:${n}tool" = "1"`),
     ].join("\n");
     const r = miseUnavailableTools(toml);
-    expect(r.tools).toEqual(["atool", "btool", "ctool", "dtool", "etool"]);
+    expect(r.tools).toEqual(["asdf:atool", "asdf:btool", "asdf:ctool", "asdf:dtool", "asdf:etool"]);
     expect(r.total).toBe(7);
   });
 
@@ -285,40 +300,49 @@ describe("repoDiagnostics", () => {
     expect(r.warnings).toEqual([NPMRC_REGISTRY_NOT_ALLOWED, MISE_GO_VERSION_UNAVAILABLE]);
   });
 
-  it("terraform / tflint: mise_tool_unavailable と、未実行で報告する案内", () => {
+  it("terraform / tflint だけならフラグなし（mise が GitHub releases などから取れる）", () => {
     const r = repoDiagnostics(
       { miseToml: '[tools]\nterraform = "1.15.8"\ntflint = "0.64.0"\nnode = "24"\n' },
       "1.26.5",
     );
+    expect(r).toEqual({ warnings: [], npmrcRegistryHosts: [], miseUnavailableTools: [] });
+  });
+
+  it("asdf: / cargo: など: mise_tool_unavailable と、未実行で報告する案内", () => {
+    const r = repoDiagnostics(
+      { miseToml: '[tools]\n"asdf:foo" = "1"\n"cargo:ripgrep" = "14"\nterraform = "1.15.8"\n' },
+      "1.26.5",
+    );
     expect(r.warnings).toEqual([MISE_TOOL_UNAVAILABLE]);
-    expect(r.miseUnavailableTools).toEqual(["terraform", "tflint"]);
+    expect(r.miseUnavailableTools).toEqual(["asdf:foo", "cargo:ripgrep"]);
     const note = r.note ?? "";
-    expect(note).toContain("terraform, tflint");
+    // 名前を並べるのは取れない backend のものだけ（terraform は並べない）
+    expect(note).toContain("cannot download in this sandbox: asdf:foo, cargo:ripgrep.");
+    expect(note).toMatch(/backend/);
     expect(note).toMatch(/mise install/);
     expect(note).toMatch(/mise run/);
     expect(note).toMatch(/mise exec/);
     expect(note).toMatch(/command -v/);
-    expect(note).toMatch(/pnpm, yarn and uv/);
     expect(note).toMatch(/not run/);
     expect(note).toMatch(/summary/);
   });
 
-  it("node / go / python / npm: / pipx: / go: だけならフラグなし", () => {
+  it("node / go / python / npm: / pipx: / go: / aqua: だけならフラグなし", () => {
     const r = repoDiagnostics(
       {
         miseToml:
-          '[tools]\nnode = "24"\ngo = "1.26"\npython = "3.13"\n"npm:x" = "1"\n"pipx:y" = "1"\n"go:z" = "1"\n',
+          '[tools]\nnode = "24"\ngo = "1.26"\npython = "3.13"\n"npm:x" = "1"\n"pipx:y" = "1"\n"go:z" = "1"\n"aqua:a/b" = "1"\n',
       },
       "1.26.5",
     );
     expect(r).toEqual({ warnings: [], npmrcRegistryHosts: [], miseUnavailableTools: [] });
   });
 
-  it("go の版違いと terraform が同時なら両方のコードが順に出る（npmrc → go → tool）", () => {
+  it("go の版違いと asdf: が同時なら両方のコードが順に出る（npmrc → go → tool）", () => {
     const r = repoDiagnostics(
       {
         npmrc: "registry=https://a.example.com/",
-        miseToml: '[tools]\ngo = "1.22.1"\nterraform = "1.15.8"\n',
+        miseToml: '[tools]\ngo = "1.22.1"\n"asdf:foo" = "1"\n',
       },
       "1.26.5",
     );
@@ -327,13 +351,13 @@ describe("repoDiagnostics", () => {
       MISE_GO_VERSION_UNAVAILABLE,
       MISE_TOOL_UNAVAILABLE,
     ]);
-    expect(r.note).toContain("terraform");
+    expect(r.note).toContain("asdf:foo");
     expect(r.note).toContain("1.22.1");
   });
 
   it("安全な形でない名前は文にも usage にも書かず、数だけ書く", () => {
     const r = repoDiagnostics(
-      { miseToml: '[tools]\n"evil <b>x</b> ghp_AAAA" = "1"\n"a b" = "1"\n' },
+      { miseToml: '[tools]\n"asdf:evil <b>x</b> ghp_AAAA" = "1"\n"cargo:a b" = "1"\n' },
       "1.26.5",
     );
     expect(r.warnings).toEqual([MISE_TOOL_UNAVAILABLE]);
@@ -344,11 +368,11 @@ describe("repoDiagnostics", () => {
   });
 
   it("6 件以上は 5 件まで名前を書き、残りは数だけ", () => {
-    const toml = `[tools]\n${["a", "b", "c", "d", "e", "f", "g"].map((n) => `${n}t = "1"`).join("\n")}\n`;
+    const toml = `[tools]\n${["a", "b", "c", "d", "e", "f", "g"].map((n) => `"asdf:${n}t" = "1"`).join("\n")}\n`;
     const r = repoDiagnostics({ miseToml: toml }, "1.26.5");
-    expect(r.miseUnavailableTools).toEqual(["at", "bt", "ct", "dt", "et"]);
-    expect(r.note).toContain("at, bt, ct, dt, et");
-    expect(r.note).not.toContain("ft");
+    expect(r.miseUnavailableTools).toEqual(["asdf:at", "asdf:bt", "asdf:ct", "asdf:dt", "asdf:et"]);
+    expect(r.note).toContain("asdf:at, asdf:bt, asdf:ct, asdf:dt, asdf:et");
+    expect(r.note).not.toContain("asdf:ft");
     expect(r.note).toMatch(/and 2 more/);
   });
 

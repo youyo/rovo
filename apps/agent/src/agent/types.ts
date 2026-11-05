@@ -395,7 +395,7 @@ export interface SandboxMetrics {
   )[];
   /** .npmrc の許可されていない registry のホスト名（厳密に検証したものだけ。最大 5 件）。usage.npmrc_registry_hosts になる */
   npmrcRegistryHosts?: string[];
-  /** mise.toml の [tools] のうち Sandbox の mise で用意できないツール名（安全な形のものだけ。最大 5 件）。usage.mise_unavailable_tools になる */
+  /** mise.toml の [tools] のうち Sandbox の mise で取れない backend のツール名（安全な形のものだけ。最大 5 件）。usage.mise_unavailable_tools になる */
   miseUnavailableTools?: string[];
   /** 診断のワーカー向けの英語の文（依存の節に足す）。gateway には送らない */
   repoNote?: string;

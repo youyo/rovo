@@ -147,26 +147,28 @@ describe("SandboxDO: 作業ツリーの診断（.npmrc / mise.toml）", () => {
     expect(b.repoWarnings).toEqual(["mise_go_version_unavailable"]);
   });
 
-  it("mise.toml（.mise.toml も）に terraform / tflint があれば mise_tool_unavailable とツール名", async () => {
+  it("mise.toml（.mise.toml も）に取れない backend（asdf: / cargo:）があれば mise_tool_unavailable とツール名", async () => {
     const a = await boot("diag-tool", {
-      "mise.toml": '[tools]\nterraform = "1.15.8"\ntflint = "0.64.0"\nnode = "24"\n',
+      "mise.toml":
+        '[tools]\n"asdf:foo" = "1"\n"cargo:ripgrep" = "14"\nterraform = "1.15.8"\nnode = "24"\n',
     });
     expect(a.repoWarnings).toEqual(["mise_tool_unavailable"]);
-    expect(a.miseUnavailableTools).toEqual(["terraform", "tflint"]);
+    expect(a.miseUnavailableTools).toEqual(["asdf:foo", "cargo:ripgrep"]);
     expect(a.repoNote).toMatch(/command -v/);
-    const b = await boot("diag-tool-dot", { ".mise.toml": '[tools]\nterraform = "1"\n' });
+    const b = await boot("diag-tool-dot", { ".mise.toml": '[tools]\n"vfox:a/b" = "1"\n' });
     expect(b.repoWarnings).toEqual(["mise_tool_unavailable"]);
-    expect(b.miseUnavailableTools).toEqual(["terraform"]);
+    expect(b.miseUnavailableTools).toEqual(["vfox:a/b"]);
   });
 
-  it("go の版違いと terraform が同時なら両方のコードが順に出る", async () => {
-    const m = await boot("diag-both", { "mise.toml": '[tools]\ngo = "1.22"\nterraform = "1"\n' });
+  it("go の版違いと asdf: が同時なら両方のコードが順に出る", async () => {
+    const m = await boot("diag-both", { "mise.toml": '[tools]\ngo = "1.22"\n"asdf:foo" = "1"\n' });
     expect(m.repoWarnings).toEqual(["mise_go_version_unavailable", "mise_tool_unavailable"]);
   });
 
-  it("node / go / python / npm: / pipx: / go: だけなら mise_tool_unavailable は付かない", async () => {
+  it("node / go / npm: / pipx: と terraform / tflint / aqua: だけなら mise_tool_unavailable は付かない", async () => {
     const m = await boot("diag-tool-ok", {
-      "mise.toml": '[tools]\nnode = "24"\ngo = "1.26"\n"npm:x" = "1"\n"pipx:y" = "1"\n',
+      "mise.toml":
+        '[tools]\nnode = "24"\ngo = "1.26"\n"npm:x" = "1"\n"pipx:y" = "1"\nterraform = "1.15.8"\ntflint = "0.64.0"\n"aqua:a/b" = "1"\n',
     });
     expect(m.repoWarnings).toBeUndefined();
     expect(m.miseUnavailableTools).toBeUndefined();

@@ -23,51 +23,65 @@ export const REGISTRY_HOSTS: ReadonlySet<string> = new Set([
   "sum.golang.org",
   // Takumi Guard（npm のレジストリのプロキシ）。npm のレジストリと同じく GET / HEAD だけ
   "npm.flatt.tech",
+  // HashiCorp の配布物（terraform 本体と、hashicorp 製の provider）。mise と terraform init が取る
+  "releases.hashicorp.com",
 ]);
-/**
- * python-build-standalone（astral-sh/python-build-standalone）の GitHub のリポジトリ ID。
- * github.com の releases/download は、配布物を `/github-production-release-asset/<リポジトリ ID>/<資産の ID>` の形の
- * 署名付き URL へ 302 で転送する。転送先のホストは誰でも releases を置けるので、このリポジトリの ID のパスだけを許す。
- */
-export const PYTHON_BUILD_STANDALONE_REPO_ID = "162334160";
+
+/** GitHub の owner / repo のセグメント。英数字と _ . - だけで、. だけのもの（. や ..）は除く。 */
+const GH_NAME = "(?!\\.+/)[A-Za-z0-9_.-]+";
 
 /**
- * ホスト全体ではなく、パスの先頭が一致するものだけを許可するレジストリ（GET / HEAD だけ）。
+ * パスの規則 1 つ。文字列はパスの先頭の一致、正規表現はパス全体の一致。
+ */
+type PathRule = string | RegExp;
+
+/**
+ * ホスト全体ではなく、パスが規則に合うものだけを許可するレジストリ（GET / HEAD だけ）。
  * - storage.googleapis.com: proxy.golang.org が、モジュールの zip（GOTOOLCHAIN の toolchain 本体も）を 302 でこのバケットへ転送する。
  *   誰でもバケットを作れるので、ホストごとは許可しない。
  * - nodejs.org の /dist/: mise が焼いていない node の版を取る（index.json・本体・SHASUMS256.txt・SHASUMS256.txt.sig）。
  * - mise-versions.jdx.dev の /data/python-precompiled-: mise が python の precompiled の版の一覧を取る。
- * - github.com の python-build-standalone の /releases/download/: mise が焼いていない python の版を取る。
- *   github.com のほかのパスは git の smart HTTP だけ（decideGitHub）。ほかのリポジトリの releases は許さない。
+ * - github.com の /<owner>/<repo>/releases/download/<...>: 開発ツールの配布物（mise の aqua / github / ubi backend、
+ *   tflint --init、terraform の サードパーティの provider、python-build-standalone）。どのリポジトリでも許す。
+ *   github.com のほかのパスは git の smart HTTP だけ（decideGitHub）で、clone / fetch / push は対象リポジトリに限ったまま。
  * - release-assets.githubusercontent.com / objects.githubusercontent.com: 上の releases/download の 302 の転送先（新旧）。
- *   python-build-standalone のリポジトリ ID のパスだけ。
+ *   リポジトリ ID は問わない（releases/download をどのリポジトリでも許すので、その転送先も同じ）。
+ * - api.github.com の /repos/<o>/<r>/releases（とその下）と /repos/<o>/<r>/attestations/<...>: mise と tflint --init が
+ *   版の一覧・assets・attestation を読む。ほかの API は拒否のまま。
+ * - registry.terraform.io の /.well-known/terraform.json と /v1/providers/: terraform init の provider の解決。
+ *   modules（/v1/modules/）は git clone に解決されるので許可しない。
  * 根拠と一覧は docs/specs/phase2.md の許可先の節。
  */
-export const REGISTRY_PATH_PREFIXES: ReadonlyMap<string, readonly string[]> = new Map([
+export const REGISTRY_PATH_RULES: ReadonlyMap<string, readonly PathRule[]> = new Map<
+  string,
+  readonly PathRule[]
+>([
   ["storage.googleapis.com", ["/proxy-golang-org-prod/"]],
   ["nodejs.org", ["/dist/"]],
   ["mise-versions.jdx.dev", ["/data/python-precompiled-"]],
-  ["github.com", ["/astral-sh/python-build-standalone/releases/download/"]],
+  ["github.com", [new RegExp(`^/${GH_NAME}/${GH_NAME}/releases/download/[^/]+/.+$`)]],
+  ["release-assets.githubusercontent.com", [/^\/github-production-release-asset\/\d+\/.+$/]],
+  ["objects.githubusercontent.com", [/^\/github-production-release-asset-2e65be\/\d+\/.+$/]],
   [
-    "release-assets.githubusercontent.com",
-    [`/github-production-release-asset/${PYTHON_BUILD_STANDALONE_REPO_ID}/`],
+    "api.github.com",
+    [
+      new RegExp(`^/repos/${GH_NAME}/${GH_NAME}/releases(?:/.+)?$`),
+      new RegExp(`^/repos/${GH_NAME}/${GH_NAME}/attestations/.+$`),
+    ],
   ],
-  [
-    "objects.githubusercontent.com",
-    [`/github-production-release-asset-2e65be/${PYTHON_BUILD_STANDALONE_REPO_ID}/`],
-  ],
+  ["registry.terraform.io", [/^\/\.well-known\/terraform\.json$/, "/v1/providers/"]],
 ]);
 
 /**
  * host と pathname が、パス限定のレジストリに当たるか。判定は pathname だけで行い、query は見ない。
- * pathname は URL が正規化済み（.. と %2e%2e は解決される）。解決されずに残る %2f・%5c・%2e を含むものは、別のバケットへ
- * 抜けるおそれがあるので許可しない。
+ * pathname は URL が正規化済み（.. と %2e%2e は解決される）。解決されずに残る %2f・%5c・%2e を含むものは、別のバケットや
+ * リポジトリへ抜けるおそれがあるので許可しない。
  */
 export function isPathRegistry(host: string, pathname: string): boolean {
-  const prefixes = REGISTRY_PATH_PREFIXES.get(host.toLowerCase());
-  if (!prefixes) return false;
+  const rules = REGISTRY_PATH_RULES.get(host.toLowerCase());
+  if (!rules) return false;
   if (/%2f|%5c|%2e/i.test(pathname)) return false;
-  return prefixes.some((p) => pathname.startsWith(p));
+  return rules.some((r) => (typeof r === "string" ? pathname.startsWith(r) : r.test(pathname)));
 }
 
 /**
@@ -103,7 +117,8 @@ const deny = (code: PolicyDenyCode, reason: string): OutboundDecision => ({
 /**
  * Sandbox からの外向き通信を許可するか判定する純粋関数（design 7.2）。
  * 許可: github.com の git-upload-pack（fetch/clone）と、作業ブランチ向けの git-receive-pack（push。本文の検証は別）、
- * レジストリ（パス限定のもの。github.com の特定のリポジトリの releases の配布物を含む）の GET/HEAD。それ以外はすべて拒否。
+ * レジストリ（パス限定のもの。github.com の releases の配布物と api.github.com の releases / attestations を含む）の GET/HEAD。
+ * それ以外はすべて拒否。
  */
 export function decideOutbound(req: OutboundRequest, opts: OutboundOptions = {}): OutboundDecision {
   let url: URL;
@@ -122,7 +137,7 @@ export function decideOutbound(req: OutboundRequest, opts: OutboundOptions = {})
     return deny("url_credentials", `credentials in url are not allowed: ${host}`);
 
   if (host === "github.com") {
-    // 特定のリポジトリの releases の配布物だけは、レジストリと同じ扱い（GET / HEAD。認証は付けない）
+    // releases の配布物（/<owner>/<repo>/releases/download/...）は、レジストリと同じ扱い（GET / HEAD。認証は付けない）
     if (isPathRegistry(host, url.pathname)) {
       return method === "GET" || method === "HEAD"
         ? { allow: true }
@@ -135,7 +150,7 @@ export function decideOutbound(req: OutboundRequest, opts: OutboundOptions = {})
       ? { allow: true }
       : deny("registry_method", `${method} is not allowed for registry: ${host}`);
   }
-  if (REGISTRY_PATH_PREFIXES.has(host)) {
+  if (REGISTRY_PATH_RULES.has(host)) {
     if (!isPathRegistry(host, url.pathname))
       return deny("host_not_allowed", `host is not allowed: ${host}`);
     return method === "GET" || method === "HEAD"

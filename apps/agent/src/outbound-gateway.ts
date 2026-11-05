@@ -60,7 +60,7 @@ export const UPSTREAM_TIMEOUT_MS = 10 * 60_000;
 /** 転送先の分類。ログにはホスト名そのものでなくこれを残す。 */
 export function classifyDestination(host: string, pathname = ""): "github" | "registry" | "other" {
   const h = host.toLowerCase();
-  // github.com のうち、パス限定のレジストリ（特定のリポジトリの releases の配布物）は registry、それ以外は github
+  // github.com のうち、パス限定のレジストリ（releases の配布物）は registry、それ以外は github
   if (h === "github.com") return isPathRegistry(h, pathname) ? "registry" : "github";
   if (REGISTRY_HOSTS.has(h) || isPathRegistry(h, pathname)) return "registry";
   return "other";

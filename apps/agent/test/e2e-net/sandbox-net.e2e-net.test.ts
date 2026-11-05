@@ -11,7 +11,9 @@ import { E2E_TOKEN_ENC_KEY, type RunningWrangler, startWrangler } from "../suppo
 //   - 許可外のホスト・メタデータ・内部 IP には出られない
 //   - github.com への通信は、トークンが無ければ OutboundGateway が 401 で落とす（認証なしの clone は通らない）
 //   - mise が焼いていない node・python の版を、パスで絞った配布元（nodejs.org・python-build-standalone の releases）から取れる。
-//     ほかのリポジトリの releases は拒否する。Takumi Guard（npm.flatt.tech）への GET は拒否しない
+//     Takumi Guard（npm.flatt.tech）への GET は拒否しない
+//   - 開発ツールの配布元（GitHub の任意のリポジトリの releases・api.github.com の releases・releases.hashicorp.com・
+//     registry.terraform.io の provider）から、mise が terraform・tflint を取り、terraform init と tflint --init が通る
 // git の clone / push の検証（トークン注入・receive-pack の判定）は偽 git の E2E（e2e/git-push.e2e.test.ts）が担う。
 // 実 GitHub への認証付きアクセスと push はしない（トークンを持たない）。
 let wrangler: RunningWrangler;
@@ -181,40 +183,92 @@ describe("実ネットワーク", () => {
     expect(post.stdout).toContain("rovo: outbound request denied (registry_method)");
   });
 
-  it("許可していない GitHub のリポジトリの releases と、releases の転送先の別のリポジトリのパスは拒否する", async () => {
-    const other = await sb.exec([
-      "curl",
-      "-sS",
-      "-m",
-      "10",
-      "https://github.com/astral-sh/uv/releases/download/0.8.22/uv-x86_64-unknown-linux-gnu.tar.gz",
-    ]);
-    expect(other.stdout).toContain("rovo: outbound request denied (github_path)");
-    expect(
-      (
-        await sb.curl(
-          "https://github.com/astral-sh/uv/releases/download/0.8.22/uv-x86_64-unknown-linux-gnu.tar.gz",
-        )
-      ).code,
-    ).toBe("403");
-    expect(
-      (
-        await sb.curl(
-          "https://release-assets.githubusercontent.com/github-production-release-asset/1/x",
-        )
-      ).code,
-    ).toBe("403");
-    expect((await sb.curl("https://objects.githubusercontent.com/")).code).toBe("403");
-    // 許可した releases のパスは rovo の拒否にならない（存在しない資産なので GitHub 自身が 404 を返す）
-    const pbs = await sb.exec([
-      "curl",
-      "-sS",
-      "-m",
-      "10",
+  it("GitHub の releases の配布物はどのリポジトリでも GET できるが、releases 以外のパスと git の別リポジトリは拒否する", async () => {
+    // 存在しない資産なので GitHub 自身が 404 を返す。rovo の拒否でないことは本文で確かめる
+    for (const url of [
       "https://github.com/astral-sh/python-build-standalone/releases/download/0/x.tar.gz",
-    ]);
-    expect(pbs.stdout).not.toContain("rovo: outbound request denied");
+      "https://github.com/terraform-linters/tflint/releases/download/v0.0.0-none/x.zip",
+    ]) {
+      const r = await sb.exec(["curl", "-sS", "-m", "10", url]);
+      expect(r.stdout, url).not.toContain("rovo: outbound request denied");
+    }
+    expect(
+      (await sb.curl("https://github.com/terraform-linters/tflint/archive/refs/heads/master.zip"))
+        .code,
+    ).toBe("403");
+    expect(
+      (
+        await sb.curl(
+          "https://github.com/terraform-linters/tflint.git/info/refs?service=git-upload-pack",
+        )
+      ).code,
+    ).toBe("403");
+    expect((await sb.curl("https://release-assets.githubusercontent.com/other/1/x")).code).toBe(
+      "403",
+    );
+    expect((await sb.curl("https://objects.githubusercontent.com/")).code).toBe("403");
   });
+
+  it("api.github.com は releases / attestations の GET だけ。/user・contents・POST は拒否する", async () => {
+    const rel = await sb.exec([
+      "curl",
+      "-sS",
+      "-m",
+      "10",
+      "https://api.github.com/repos/terraform-linters/tflint/releases/tags/v0.64.0",
+    ]);
+    expect(rel.stdout).not.toContain("rovo: outbound request denied");
+    expect((await sb.curl("https://api.github.com/user")).code).toBe("403");
+    expect(
+      (await sb.curl("https://api.github.com/repos/terraform-linters/tflint/contents/README.md"))
+        .code,
+    ).toBe("403");
+    const post = await sb.exec([
+      "curl",
+      "-sS",
+      "-m",
+      "10",
+      "-X",
+      "POST",
+      "https://api.github.com/repos/terraform-linters/tflint/releases",
+    ]);
+    expect(post.stdout).toContain("rovo: outbound request denied (registry_method)");
+    expect(
+      (
+        await sb.curl(
+          "https://registry.terraform.io/v1/modules/terraform-aws-modules/vpc/aws/versions",
+        )
+      ).code,
+    ).toBe("403");
+  });
+
+  it("Terraform のリポジトリ: mise install（terraform・tflint）、terraform init / validate、tflint --init && tflint が通る", async () => {
+    const dir = "/workspace/.mise-net-tf";
+    const files = [
+      `rm -rf ${dir} && mkdir -p ${dir}`,
+      `printf '[tools]\\nterraform = "1.15.8"\\ntflint = "0.64.0"\\n\\n[tasks.lint]\\nrun = "tflint --init && tflint"\\n' > ${dir}/mise.toml`,
+      `printf 'terraform {\\n  required_version = ">= 1.5"\\n  required_providers {\\n    null = {\\n      source  = "hashicorp/null"\\n      version = "~> 3.2"\\n    }\\n  }\\n}\\n\\nresource "null_resource" "x" {}\\n' > ${dir}/main.tf`,
+      `printf 'plugin "terraform" {\\n  enabled = true\\n  preset  = "recommended"\\n}\\n' > ${dir}/.tflint.hcl`,
+    ].join(" && ");
+    const w = await sb.exec(["sh", "-c", files]);
+    expect(w.exitCode, w.stderr).toBe(0);
+    const install = await sb.exec(["mise", "install"], { cwd: dir, timeoutMs: 300_000 });
+    expect(install.exitCode, install.stderr).toBe(0);
+    const init = await sb.exec(["mise", "exec", "--", "terraform", "init", "-input=false"], {
+      cwd: dir,
+      timeoutMs: 300_000,
+    });
+    expect(init.exitCode, init.stderr).toBe(0);
+    const validate = await sb.exec(["mise", "exec", "--", "terraform", "validate"], {
+      cwd: dir,
+      timeoutMs: 120_000,
+    });
+    expect(validate.exitCode, validate.stderr).toBe(0);
+    const lint = await sb.exec(["mise", "run", "lint"], { cwd: dir, timeoutMs: 300_000 });
+    // tflint は指摘があると 2 で終わる。stdout も出して原因を見られるようにする
+    expect(lint.exitCode, `${lint.stdout}\n${lint.stderr}`).toBe(0);
+    await sb.exec(["rm", "-rf", dir]);
+  }, 900_000);
 
   it("許可外のホスト・別リポジトリ・メタデータ・内部 IP には出られない", async () => {
     expect((await sb.curl("https://example.com/")).code).toBe("403");

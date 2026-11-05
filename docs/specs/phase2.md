@@ -160,21 +160,40 @@ apps/gateway (既存 Worker)
       - リクエスト本文のサイズと時間に上限を設ける。
     - `registry.npmjs.org`、`npm.flatt.tech`（Takumi Guard。npm のレジストリのプロキシ）、`pypi.org`、`files.pythonhosted.org`、`proxy.golang.org`、`sum.golang.org`: GET と HEAD だけ。
     - `storage.googleapis.com` は、パスが `/proxy-golang-org-prod/` で始まるものだけ（GET と HEAD。ホストごとは許可しない）。`proxy.golang.org` が Go のモジュールの zip（と GOTOOLCHAIN の toolchain 本体）を 302 で転送する先。判定は pathname だけで行い、`..`・`%2e`・`%2f`・`%5c` を含むパスは拒否する。
-    - mise が焼いていない node・python の版を取る配布元（下の表）。どれもパスの先頭で絞り、GET と HEAD だけ。判定は pathname だけで行い（query は見ない）、`%2e`・`%2f`・`%5c` を含むパスは拒否する。github.com は、表のリポジトリの `/releases/download/` だけをレジストリと同じ扱い（認証を付けない）にし、ほかのパス（ほかのリポジトリの releases を含む）は従来どおり git の smart HTTP だけを許す。ホスト全体（github.com・objects.githubusercontent.com など、誰でも置けるホスト）は許可しない。
+    - mise が焼いていない node・python の版を取る配布元（下の表）。どれもパスの先頭で絞り、GET と HEAD だけ。判定は pathname だけで行い（query は見ない）、`%2e`・`%2f`・`%5c` を含むパスは拒否する。github.com の releases の配布物（任意のリポジトリ）は下の「開発ツールの配布元」の項にまとめた。
       - 調べた版: mise 2026.10.25（`src/plugins/core/node.rs`・`src/plugins/core/python.rs`・`src/versions_host.rs`・`crates/mise-util/src/github/sigstore.rs`・`src/plugins/core/go.rs`。https://github.com/jdx/mise/tree/v2026.10.25 ）。
 
         | ホスト | パス | 用途 | 根拠 |
         | --- | --- | --- | --- |
         | `nodejs.org` | `/dist/` | node の版の一覧（`/dist/index.json`）、本体（`/dist/v<版>/node-v<版>-linux-<x64\|arm64>.tar.gz`）、チェックサム（`/dist/v<版>/SHASUMS256.txt`）、その署名（`SHASUMS256.txt.sig`。鍵は mise に組み込み） | node.rs の `_list_remote_versions`（`mirror_url` + `index.json`）、`BuildOpts`、`get_checksum`、`verify_with_gpg`。既定の `node.mirror_url` は `https://nodejs.org/dist/` |
         | `mise-versions.jdx.dev` | `/data/python-precompiled-` | python の precompiled の版の一覧（`/data/python-precompiled-<arch>-<os>.gz`。版からタグとファイル名を引く） | versions_host.rs の `python_precompiled`（`use_versions_host` に関係なく常にここを読む） |
-        | `github.com` | `/astral-sh/python-build-standalone/releases/download/` | python の本体（`<タグ>/cpython-<版>+<タグ>-<triple>-install_only_stripped.tar.gz` など） | python.rs の `PBS_RELEASE_DOWNLOAD_URL` と `install_precompiled` |
-        | `release-assets.githubusercontent.com` | `/github-production-release-asset/162334160/` | 上の releases/download の 302 の転送先（署名付き URL。162334160 は python-build-standalone のリポジトリ ID） | https://github.com/orgs/community/discussions/165767 （転送先の形）、https://github.com/astral-sh/uv/issues/8525 （リポジトリ ID） |
-        | `objects.githubusercontent.com` | `/github-production-release-asset-2e65be/162334160/` | 旧来の 302 の転送先（同上） | https://github.com/astral-sh/uv/issues/8525 |
+        | `github.com` | `/astral-sh/python-build-standalone/releases/download/`（下の「開発ツールの配布元」の規則に含まれる） | python の本体（`<タグ>/cpython-<版>+<タグ>-<triple>-install_only_stripped.tar.gz` など） | python.rs の `PBS_RELEASE_DOWNLOAD_URL` と `install_precompiled` |
 
+    - 開発ツールの配布元（2026-11 に追加。利用者の決定は「開発ツールの配布に限って、通信を種類でまとめて許可する」）。Terraform のリポジトリ（`mise.toml` に `terraform`・`tflint`、lint タスクが `tflint --init && tflint`）で、`mise install`・`mise run lint`・`terraform init` / `validate` が通るようにする。どれも GET と HEAD だけで、判定は pathname だけ（query は見ない）、`%2e`・`%2f`・`%5c` を含むパスは拒否する。owner / repo は GitHub の名前の文字（英数字と `_` `.` `-`）だけで、`.` だけのもの（`.`・`..`）は拒否する。
+
+        | ホスト | パス | 用途 |
+        | --- | --- | --- |
+        | `github.com` | `/<owner>/<repo>/releases/download/<タグ>/<ファイル>`（任意のリポジトリ） | mise の aqua / github / ubi backend と登録名（terraform・tflint など）の本体、`tflint --init` のプラグインの zip と `checksums.txt(.sig)`、Terraform のサードパーティの provider（`cloudflare/terraform-provider-cloudflare` など）、python-build-standalone |
+        | `release-assets.githubusercontent.com` | `/github-production-release-asset/<リポジトリ ID>/...`（ID は問わない） | 上の releases/download の 302 の転送先（署名付き URL。https://github.com/orgs/community/discussions/165767 ） |
+        | `objects.githubusercontent.com` | `/github-production-release-asset-2e65be/<リポジトリ ID>/...`（ID は問わない） | 旧来の 302 の転送先 |
+        | `api.github.com` | `/repos/<o>/<r>/releases`、`/repos/<o>/<r>/releases/...`（tags・latest・id・assets）、`/repos/<o>/<r>/attestations/...` | mise の版の一覧（`/repos/hashicorp/terraform/releases?per_page=100` など）、`tflint --init` の assets の取得と attestation の検証 |
+        | `releases.hashicorp.com` | ホスト全体 | terraform の本体（`/terraform/<版>/terraform_<版>_linux_amd64.zip`）と、hashicorp 製の provider |
+        | `registry.terraform.io` | `/.well-known/terraform.json`（完全一致）と `/v1/providers/` | `terraform init` の provider の解決（service discovery と版・配布元の取得） |
+
+      - git の smart HTTP（clone / fetch / push）は従来どおり対象リポジトリだけで、releases の許可はここに影響しない。github.com の releases 以外のパス（`/releases`・`/releases/tag/...`・archive など）と、api.github.com の releases / attestations 以外（`/user`・`/repos/<o>/<r>/contents` など）は拒否のまま。
+      - Terraform の modules（`registry.terraform.io` の `/v1/modules/`）は許可しない。registry の modules は git clone（別のリポジトリ）に解決され、別のリポジトリの clone は許可していないため。
+      - terraform の checkpoint（`checkpoint-api.hashicorp.com`）は許可せず、`CHECKPOINT_DISABLE=1`（Dockerfile の ENV と `BASE_ENV`）で止める。
+      - 許可していない backend（`asdf:`・`vfox:` は別のリポジトリの git clone、`cargo:`・`gem:`・`spm:`・`dotnet:`・`conda:`・`http:` などは許可していない配布元）のツールは、起動時の診断で `mise_tool_unavailable` を付ける（design の 13 章の起動時の作業ツリーの診断）。
+      - 残るリスク: どのリポジトリの releases でも GET できるので、ワーカーは任意の公開リポジトリの配布物を取れる（GET の path を使った情報流出の経路も、github.com の releases の分だけ増える）。git の clone・push の範囲は変わらない。
+      - api.github.com には認証を付けない（未認証で通す）。ワーカーが付けた Authorization は、中継が消してから上流へ送る（コンテナから来た Authorization は転送しない、の一般則のとおり）。
+        - 未認証の上限は 60 回/時で、Cloudflare の共有の送信元 IP に掛かる（ほかの利用者と枠を分け合う）。
+        - 上限に当たったら、読み取り専用の token を新設して外向きの中継が releases / attestations の GET / HEAD に付ける方針にする（未実装。トークンの発行の形を決めてから入れる）。
+        - 上限に当たっても、拒否は GitHub の 403 で、rovo のポリシーの拒否ではないため `usage.outbound_denied` には出ない。mise のエラー（rate limit の 403）で分かる。
       - 通信先を減らすための mise の設定（Dockerfile の ENV・`BASE_ENV`・`/etc/mise/config.toml` に同じ値を書く。`MISE_OFFLINE` / `offline` は外した）:
         - `use_versions_host = false`（`MISE_USE_VERSIONS_HOST=false`）: node の版の一覧を `mise-versions.jdx.dev/data/node.toml` ではなく `nodejs.org/dist/index.json` から取る。インストールの記録（`mise-versions.jdx.dev/t?...`）も送らない。
         - `node.compile = false`・`python.compile = false`: 配布物が無い版をソースからビルドしない（node のソースの tarball、python-build のための pyenv の git clone を取りに行かない。gcc も無い）。`python.compile = false` のとき、python の版の一覧は上の precompiled の一覧になる（pypy の一覧 `downloads.python.org/pypy/versions.json` も読むが、失敗は警告だけで CPython の一覧は使えるので、許可しない）。
-        - `python.github_attestations = false`: GitHub の artifact attestation の検証をしない。検証には `mise-versions.jdx.dev` の attestation の写し・`api.github.com/repos/<owner>/<repo>/attestations/...`・Sigstore の TUF のリポジトリへの通信が要り、許可先が増えるため。python の配布物は、HTTPS で固定のリポジトリの releases から取ることだけが根拠になる（リポジトリに `mise.lock` があれば、そのチェックサムで確かめる）。node は `SHASUMS256.txt` とその署名で確かめる（`node.verify` / `node.gpg_verify` は既定のまま）。
+        - `github_attestations = false`・`aqua.github_attestations = false`（`MISE_GITHUB_ATTESTATIONS=false`・`MISE_AQUA_GITHUB_ATTESTATIONS=false`）: github: / aqua: / 登録名（terraform・tflint など）の backend も、python と同じ方針で attestation の検証をしない。Sigstore の TUF（`timestamp.json`）が取れないことと、tflint で workflow の身元が合わないこと（期待は `terraform-linters/tflint/.github/workflows/release.yml`、実際は `https://dotcom.releases.github.com`）で、検証が通らないため。aqua の checksum の確認（registry に書かれた sha256 との照合）は残る。
+        - `python.github_attestations = false`: python の GitHub の artifact attestation の検証をしない。検証には `mise-versions.jdx.dev` の attestation の写し・Sigstore の TUF のリポジトリへの通信が要り、許可先が増えるため（`api.github.com` の attestations は開発ツールの配布元として許可したが、ほかは許可していない）。python の配布物は、HTTPS で固定のリポジトリの releases から取ることだけが根拠になる（リポジトリに `mise.lock` があれば、そのチェックサムで確かめる）。node は `SHASUMS256.txt` とその署名で確かめる（`node.verify` / `node.gpg_verify` は既定のまま）。
       - go: mise の go は本体を `go.download_mirror`（既定 `https://dl.google.com/go`）から、版の一覧を `git ls-remote https://github.com/golang/go`（または `mise-versions.jdx.dev`）から取り、`proxy.golang.org` は使わない。go の版は go.mod の toolchain を `GOTOOLCHAIN=auto` で `proxy.golang.org` から取れるので、mise の go 用の許可は足さない（`mise.toml` の `[tools]` の go が焼いていない版だと、`mise install`・`mise run` は失敗し、`mise exec` は「Failed to resolve tool version list for go」の警告を出して PATH 上の焼いた go で動く。mise が版の一覧の取得失敗を警告にするためで、設定では変えられない。ワーカーは `go version` で確かめる）。
   - それ以外（CONNECT、WebSocket、別ポート、裸の IP、IPv6 の直接指定、Host と SNI の不一致を含む）はすべて拒否し、ポリシー違反としてイベントに記録する。記録には query や本文を残さない。
   - 上流への転送
@@ -183,7 +202,7 @@ apps/gateway (既存 Worker)
   - コンテナ内では、Cloudflare のエフェメラル CA を `NODE_EXTRA_CA_CERTS` / `GIT_SSL_CAINFO` / `REQUESTS_CA_BUNDLE` に設定する。
   - 残るリスク: 許可したホストへの GET / HEAD の path / query / header や、git の POST 本文を使った情報流出は、原理的には防ぎきれない（7.2）。「GET だから流出しない」とは言えない。lockfile にあるパッケージだけに絞るのは、将来の強化策とする。npm の tarball が外部ホストにある依存は失敗する（fail-closed）。
 - Sandbox の言語（イメージに焼いてあるもの）
-  - サポートする言語は Node・TypeScript・Go・Python の 4 つだけ。Rust・Java・Ruby など、ほかの言語は対象外。
+  - イメージに焼いている言語は Node・TypeScript・Go・Python の 4 つ。Rust・Java・Ruby などの言語のツールチェーンは焼いていない。ほかの開発ツール（terraform・tflint など）は、mise が GitHub releases・releases.hashicorp.com などの配布元（外向き通信の許可先）から取れる。
   - Go は `ARG GO_VERSION`（公式 tarball を sha256 で確認して `/usr/local/go` に置く）。`GOTOOLCHAIN=auto` で、別の版の go.mod の toolchain は `proxy.golang.org` から取る。`GOPROXY=https://proxy.golang.org`、`GOSUMDB=sum.golang.org`。
   - Python は uv で入れた 3.13 だけ（`python3` / `python` / `pip` は 3.13）。`UV_PYTHON_DOWNLOADS=never` なので、別の版の Python は取れず、すぐ失敗する。
   - mise は `ARG MISE_VERSION`（公式 release の tarball を sha256 で確認して `/usr/local/bin/mise` に置く）。焼いた node・Go・Python は `mise link` で登録してあり、リポジトリの `mise.toml` の `[tools]` が焼いた版（前方一致を含む。`node = "24"`、`go = "1.26"`、`python = "3.13"` など）を指すときは、ダウンロードせずに `mise run` / `mise exec` で使える。焼いていない node・python の版は、初回に配布元（外向き通信の許可先の表）から取る（時間がかかる）。go の焼いていない版は mise では取れない。

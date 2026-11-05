@@ -408,7 +408,7 @@ export type ResultView = {
     deps_lang?: { kind: "python" | "go"; command: string; status: string; duration_ms: number }[];
     /** 作業ツリーの .npmrc が指す、外向き通信で許可されていない registry のホスト名（ホスト名の形を検証したものだけ。最大 5 件）。warnings の npmrc_registry_not_allowed と一緒に付く。無ければ付かない */
     npmrc_registry_hosts?: string[];
-    /** 作業ツリーの mise.toml の [tools] のうち、Sandbox の mise で用意できないツール名（安全な名前の形に合うものだけ。最大 5 件）。warnings の mise_tool_unavailable と一緒に付く。無ければ付かない */
+    /** 作業ツリーの mise.toml の [tools] のうち、Sandbox の mise で取れない backend のツール名（安全な名前の形に合うものだけ。最大 5 件）。warnings の mise_tool_unavailable と一緒に付く。無ければ付かない */
     mise_unavailable_tools?: string[];
     /** Sandbox からの外向き通信で拒否したもの（{host: ホスト名, reason: 固定の違反コード, count: 回数}。最大 20 件）。拒否が無ければ付かない */
     outbound_denied?: OutboundDeniedUsage[];

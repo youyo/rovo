@@ -65,7 +65,7 @@ describe("classifyDestination", () => {
     expect(classifyDestination("169.254.169.254")).toBe("other");
   });
 
-  it("mise 用の配布元（パス限定）と Takumi Guard は registry。github.com の releases の配布物も registry", () => {
+  it("mise 用の配布元（パス限定）と Takumi Guard は registry。github.com の releases の配布物・api.github.com の releases・Terraform の配布元も registry", () => {
     expect(classifyDestination("npm.flatt.tech")).toBe("registry");
     expect(classifyDestination("nodejs.org", "/dist/index.json")).toBe("registry");
     expect(classifyDestination("nodejs.org", "/en/")).toBe("other");
@@ -82,7 +82,9 @@ describe("classifyDestination", () => {
         "/astral-sh/python-build-standalone/releases/download/1/x.tar.gz",
       ),
     ).toBe("registry");
-    expect(classifyDestination("github.com", "/evil/repo/releases/download/1/x")).toBe("github");
+    expect(classifyDestination("github.com", "/any/repo/releases/download/1/x")).toBe("registry");
+    expect(classifyDestination("github.com", "/any/repo.git/info/refs")).toBe("github");
+    expect(classifyDestination("github.com", "/any/repo/releases/latest")).toBe("github");
     expect(
       classifyDestination(
         "release-assets.githubusercontent.com",
@@ -94,7 +96,21 @@ describe("classifyDestination", () => {
         "release-assets.githubusercontent.com",
         "/github-production-release-asset/1/x",
       ),
-    ).toBe("other");
+    ).toBe("registry");
+    expect(classifyDestination("release-assets.githubusercontent.com", "/other/1/x")).toBe("other");
+    expect(
+      classifyDestination("api.github.com", "/repos/terraform-linters/tflint/releases/latest"),
+    ).toBe("registry");
+    expect(classifyDestination("api.github.com", "/user")).toBe("other");
+    expect(
+      classifyDestination("registry.terraform.io", "/v1/providers/hashicorp/aws/versions"),
+    ).toBe("registry");
+    expect(classifyDestination("registry.terraform.io", "/v1/modules/a/b/c/versions")).toBe(
+      "other",
+    );
+    expect(classifyDestination("releases.hashicorp.com", "/terraform/1.15.8/x.zip")).toBe(
+      "registry",
+    );
   });
 });
 

@@ -150,6 +150,52 @@ describe("トークンの注入", () => {
     expect(reads).toHaveLength(0);
   });
 
+  it("ほかのリポジトリの releases の配布物（tflint）にも Authorization を付けず、ワーカーが付けたものは落とす", async () => {
+    const { deps, up, reads } = setup();
+    const res = await handleOutbound(
+      get(
+        "https://github.com/terraform-linters/tflint/releases/download/v0.64.0/tflint_linux_amd64.zip",
+        { authorization: "Bearer worker-supplied" },
+      ),
+      deps,
+    );
+    expect(res.status).toBe(200);
+    expect(up.calls).toHaveLength(1);
+    expect(new Headers(up.calls[0]?.init.headers).has("authorization")).toBe(false);
+    expect(reads).toHaveLength(0);
+  });
+
+  it("api.github.com の releases へは、ワーカーが付けた Authorization をそのまま通さない", async () => {
+    const { deps, up } = setup({ readCredential: async () => undefined });
+    const res = await handleOutbound(
+      get("https://api.github.com/repos/terraform-linters/tflint/releases/tags/v0.64.0", {
+        authorization: "Bearer worker-supplied",
+      }),
+      deps,
+    );
+    expect(res.status).toBe(200);
+    expect(up.calls).toHaveLength(1);
+    expect(up.calls[0]?.url).toBe(
+      "https://api.github.com/repos/terraform-linters/tflint/releases/tags/v0.64.0",
+    );
+    expect(new Headers(up.calls[0]?.init.headers).get("authorization") ?? "").not.toContain(
+      "worker-supplied",
+    );
+  });
+
+  it("api.github.com の releases 以外（/user など）は 403 で、上流に出ない", async () => {
+    const { deps, up, reads } = setup();
+    for (const url of [
+      "https://api.github.com/user",
+      "https://api.github.com/repos/acme/hello/contents/README.md",
+    ]) {
+      const res = await handleOutbound(get(url, { authorization: "Bearer x" }), deps);
+      expect(res.status, url).toBe(403);
+    }
+    expect(up.calls).toHaveLength(0);
+    expect(reads).toHaveLength(0);
+  });
+
   it("トークンが無ければ 401。上流には出ない", async () => {
     const { deps, up } = setup({ readCredential: async () => undefined });
     const res = await handleOutbound(get(`${REPO}/info/refs?service=git-upload-pack`), deps);

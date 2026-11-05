@@ -176,10 +176,22 @@ export function miseGoVersion(toml: string): string | undefined {
   return undefined;
 }
 
-/** Sandbox の mise で用意できるとみなす [tools] のキー（go の版違いは mise_go_version_unavailable の担当） */
-const MISE_AVAILABLE_TOOLS: readonly string[] = ["node", "nodejs", "go", "golang", "python"];
-/** backend 付きで、許可先（npm・PyPI・proxy.golang.org）から取れうる接頭辞 */
-const MISE_AVAILABLE_PREFIXES: readonly string[] = ["npm:", "pipx:", "go:"];
+/**
+ * Sandbox の mise で取れるとみなす backend（`<backend>:<name>` の接頭辞）。
+ * aqua / github / ubi は GitHub releases（外向き通信で許可済み）、npm / pipx / go は npm・PyPI・proxy.golang.org、core は mise の組み込み。
+ * 接頭辞の無い登録名（terraform・tflint・gitleaks・pnpm など）は取れるとみなす（mise の registry の多くは aqua / github の backend）。
+ * これ以外の backend（asdf / vfox は別のリポジトリの git clone、cargo / gem / spm / dotnet / conda は許可していない配布元、
+ * http は任意のホスト）は取れないものとしてフラグする。go の版違いは mise_go_version_unavailable の担当。
+ */
+const MISE_AVAILABLE_BACKENDS: readonly string[] = [
+  "aqua",
+  "github",
+  "ubi",
+  "npm",
+  "pipx",
+  "go",
+  "core",
+];
 /** ワーカーへの文・usage に載せてよいツール名の形 */
 export const MISE_TOOL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,63}$/;
 /** ツール名を書く件数の上限（文・usage.mise_unavailable_tools） */
@@ -201,14 +213,15 @@ export function sanitizeMiseToolNames(v: unknown, max = MISE_TOOLS_MAX): string[
 }
 
 /**
- * mise.toml の [tools] のうち、Sandbox の mise で用意できないもの。
- * tools: 安全な名前の形に合うものだけ（宣言順・重複なし・最大 5 件）。total: 用意できないものの数（名前が不正なものも含む）。
+ * mise.toml の [tools] のうち、Sandbox の mise で取れない backend のもの（MISE_AVAILABLE_BACKENDS 以外の `<backend>:` の接頭辞）。
+ * tools: 安全な名前の形に合うものだけ（宣言順・重複なし・最大 5 件）。total: 取れないものの数（名前が不正なものも含む）。
  */
 export function miseUnavailableTools(toml: string): { tools: string[]; total: number } {
   const seen: string[] = [];
   for (const { key } of miseToolEntries(toml)) {
-    if (MISE_AVAILABLE_TOOLS.includes(key)) continue;
-    if (MISE_AVAILABLE_PREFIXES.some((p) => key.startsWith(p))) continue;
+    const colon = key.indexOf(":");
+    if (colon < 0) continue;
+    if (MISE_AVAILABLE_BACKENDS.includes(key.slice(0, colon).toLowerCase())) continue;
     if (!seen.includes(key)) seen.push(key);
   }
   return { tools: sanitizeMiseToolNames(seen), total: seen.length };
@@ -228,7 +241,7 @@ export interface RepoDiagnostics {
   warnings: RepoDiagWarning[];
   /** usage.npmrc_registry_hosts（検証したホスト名。最大 5 件） */
   npmrcRegistryHosts: string[];
-  /** usage.mise_unavailable_tools（mise で用意できないツール名。安全な形のものだけ。最大 5 件） */
+  /** usage.mise_unavailable_tools（mise で取れない backend のツール名。安全な形のものだけ。最大 5 件） */
   miseUnavailableTools: string[];
   /** ワーカーの依存の節に足す英語の文。何も無ければ無い（gateway には送らない） */
   note?: string;
@@ -278,7 +291,7 @@ export function repoDiagnostics(
             ? `${miseTools.join(", ")}, and ${hidden} more`
             : miseTools.join(", ");
       notes.push(
-        `mise.toml lists tools that mise cannot install in this sandbox: ${which}. \`mise install\` / \`mise run\` / \`mise exec\` will try to fetch them and fail. Check each with \`command -v <tool>\`: if it is on PATH (pnpm, yarn and uv are), call it directly without mise. If it is not, do not try to download it (outbound network access is denied); write in your summary that the verification needing it was not run.`,
+        `mise.toml lists tools whose mise backend cannot download in this sandbox: ${which}. asdf: / vfox: plugins clone other git repositories, and backends such as cargo: / gem: / http: fetch from hosts the sandbox network does not allow, so \`mise install\` / \`mise run\` / \`mise exec\` will try to fetch them and fail. Tools from the mise registry (terraform, tflint, ...) and aqua: / github: / ubi: tools can be installed normally. Check each listed tool with \`command -v <tool>\`: if it is on PATH, call it directly without mise. If it is not, do not try to download it another way (outbound network access is denied); write in your summary that the verification needing it was not run.`,
       );
     }
   }

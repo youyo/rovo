@@ -2893,7 +2893,7 @@ export class AgentDO extends DurableObject<Env> {
       m.npmrcRegistryHosts !== undefined
         ? sanitizeHostnames(m.npmrcRegistryHosts)
         : (prev?.npmrcRegistryHosts ?? []);
-    // mise で用意できないツール名（安全な形のものだけ）。起動のたびに SandboxDO が置き換える
+    // mise で取れない backend のツール名（安全な形のものだけ）。起動のたびに SandboxDO が置き換える
     const miseTools =
       m.miseUnavailableTools !== undefined
         ? sanitizeMiseToolNames(m.miseUnavailableTools)

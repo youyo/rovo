@@ -35,7 +35,8 @@ RUN corepack enable \
  && echo "{\"packageManager\":\"yarn@${YARN_VERSION}\"}" > package.json \
  && COREPACK_ENABLE_NETWORK=0 corepack yarn --version | grep -Fx "${YARN_VERSION}" \
  && cd / && rm -rf /tmp/pmcheck
-# Go / Python（対応する言語は Node・TypeScript・Go・Python の 4 つだけ。mise は `mise run` / `mise exec` 用に入れる。下の mise の節）。
+# Go / Python（イメージに焼いている言語は Node・TypeScript・Go・Python の 4 つ。ほかの開発ツール（terraform・tflint など）は、
+# mise が GitHub releases・releases.hashicorp.com などの配布元から取れる。mise は `mise run` / `mise exec` 用に入れる。下の mise の節）。
 # gcc（build-essential）は入れない: cgo の Go パッケージ、Python の sdist、node のネイティブ拡張はビルドできない。
 # apt は外向き通信で使えない（deb.debian.org は許可していない）ので、ビルド時に公式の配布物から焼く。
 # Go: go.dev の公式 tarball を sha256 で確かめて /usr/local/go に置く。版を変えるときは ARG（と sha256）だけ直す。
@@ -100,14 +101,21 @@ RUN python3 --version | grep -F "Python 3.13." \
 # 公式 release の tarball をビルド時に取り、sha256 で確かめて /usr/local/bin/mise に置く。版を変えるときは ARG（と sha256）だけ直す。
 # 焼いた node / go / python は `mise link` で登録する。mise.toml の [tools] が焼いた版（前方一致を含む。node = "24"、go = "1.26"、python = "3.13" など）を
 # 指すとき、ダウンロードせずに解決する。焼いていない node / python の版は、初回の mise run / mise exec / mise install で取る。
-# 外向き通信はその配布元だけを、パスで絞って GET / HEAD で許可している（src/outbound-policy.ts の REGISTRY_PATH_PREFIXES。
+# 外向き通信はその配布元だけを、パスで絞って GET / HEAD で許可している（src/outbound-policy.ts の REGISTRY_PATH_RULES。
 # 根拠は docs/specs/phase2.md）: nodejs.org の /dist/、mise-versions.jdx.dev の /data/python-precompiled-、
-# github.com の astral-sh/python-build-standalone の /releases/download/ と、その 302 の転送先（リポジトリ ID のパスだけ）。
+# github.com の任意のリポジトリの /<owner>/<repo>/releases/download/ と、その 302 の転送先、api.github.com の
+# /repos/<o>/<r>/releases（とその下）と /attestations/、releases.hashicorp.com、registry.terraform.io の provider の解決。
+# これで mise の登録名（terraform・tflint など）と aqua: / github: / ubi: の backend のツールを取れる。
+# asdf: / vfox:（別のリポジトリの git clone）や cargo: / gem: などの配布元は許可していない（起動時の診断 mise_tool_unavailable）。
 # 許可先を最小にするため、mise の設定で次のようにする（ENV と /etc/mise/config.toml の両方に書く）:
 #   use_versions_host=false: node の版の一覧を mise-versions.jdx.dev ではなく nodejs.org/dist/index.json から取る（インストールの記録の送信も止まる）。
 #   node.compile=false / python.compile=false: 配布物が無い版をソースからビルドしに行かない（gcc も無い。python-build の git clone もしない）。
 #   python.github_attestations=false: GitHub の attestation の検証（api.github.com・mise-versions・Sigstore の TUF への通信）をしない。
 #     node は SHASUMS256.txt とその署名（mise に組み込みの鍵）で確かめる。python は HTTPS で固定のリポジトリの releases から取ることだけが根拠になる。
+#   github_attestations=false / aqua.github_attestations=false: github: / aqua: / 登録名（terraform・tflint など）の backend でも、python と同じ方針で attestation の検証をしない。
+#     検証が通らないため: Sigstore の TUF（timestamp.json）が取れない。tflint では workflow の身元も合わない
+#     （期待 terraform-linters/tflint/.github/workflows/release.yml に対し、実際は https://dotcom.releases.github.com）。
+#     aqua の checksum の確認（registry に書かれた sha256 との照合）は残る。
 # go の焼いていない版は mise では取れない（mise の go は dl.google.com と github.com/golang/go の ls-remote を使い、許可していない）。
 # mise install / mise run は失敗するが、mise exec は版の一覧の取得失敗を警告にするだけで、PATH 上の焼いた go で動く（mise の挙動。設定では変えられない）。
 # go.mod の toolchain は GOTOOLCHAIN=auto で proxy.golang.org から取れる。shims / activate は使わず、PATH はこれまでどおり焼いたツールを直接指す。
@@ -125,7 +133,11 @@ ENV MISE_DATA_DIR=/opt/mise/data \
     MISE_USE_VERSIONS_HOST=false \
     MISE_NODE_COMPILE=false \
     MISE_PYTHON_COMPILE=false \
-    MISE_PYTHON_GITHUB_ATTESTATIONS=false
+    MISE_PYTHON_GITHUB_ATTESTATIONS=false \
+    MISE_GITHUB_ATTESTATIONS=false \
+    MISE_AQUA_GITHUB_ATTESTATIONS=false
+# terraform の checkpoint（版の確認・お知らせ。checkpoint-api.hashicorp.com は許可していない）を止める
+ENV CHECKPOINT_DISABLE=1
 RUN case "${TARGETARCH:-amd64}" in \
       amd64) MISE_SHA256="${MISE_SHA256_AMD64}"; MISE_ARCH=x64 ;; \
       arm64) MISE_SHA256="${MISE_SHA256_ARM64}"; MISE_ARCH=arm64 ;; \
@@ -139,7 +151,8 @@ RUN case "${TARGETARCH:-amd64}" in \
  && mkdir -p /opt/mise/data /opt/mise/cache /opt/mise/state /etc/mise /root/.local/share /root/.cache /root/.local/state \
  && printf '%s\n' '[settings]' 'yes = true' 'disable_update_warning = true' \
       'trusted_config_paths = ["/workspace"]' 'use_versions_host = false' \
-      'node.compile = false' 'python.compile = false' 'python.github_attestations = false' > /etc/mise/config.toml \
+      'node.compile = false' 'python.compile = false' 'python.github_attestations = false' \
+      'github_attestations = false' 'aqua.github_attestations = false' > /etc/mise/config.toml \
  && ln -s /opt/mise/data /root/.local/share/mise \
  && ln -s /opt/mise/cache /root/.cache/mise \
  && ln -s /opt/mise/state /root/.local/state/mise \

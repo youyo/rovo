@@ -41,6 +41,11 @@ export const BASE_ENV: Record<string, string> = {
   MISE_NODE_COMPILE: "false",
   MISE_PYTHON_COMPILE: "false",
   MISE_PYTHON_GITHUB_ATTESTATIONS: "false",
+  // github: / aqua: backend も python と同じ方針で attestation の検証を切る（Sigstore の TUF が取れず、tflint は workflow の身元も合わない）。aqua の checksum の確認は残る
+  MISE_GITHUB_ATTESTATIONS: "false",
+  MISE_AQUA_GITHUB_ATTESTATIONS: "false",
+  // terraform の checkpoint（checkpoint-api.hashicorp.com は許可していない）を止める
+  CHECKPOINT_DISABLE: "1",
   GIT_TERMINAL_PROMPT: "0",
   GIT_CONFIG_COUNT: "1",
   GIT_CONFIG_KEY_0: "safe.directory",

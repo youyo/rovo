@@ -275,7 +275,7 @@ export interface SandboxUsageDto {
   )[];
   /** .npmrc の許可されていない registry のホスト名（最大 5 件）。gateway は形を検証して usage.npmrc_registry_hosts に出す */
   npmrcRegistryHosts?: string[];
-  /** mise で用意できないツール名（最大 5 件）。gateway は形を検証して usage.mise_unavailable_tools に出す */
+  /** mise で取れない backend のツール名（最大 5 件）。gateway は形を検証して usage.mise_unavailable_tools に出す */
   miseUnavailableTools?: string[];
   /** 診断のワーカー向けの英語の文（agent 内でだけ使う。gateway は読まない） */
   repoNote?: string;

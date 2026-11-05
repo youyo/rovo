@@ -36,6 +36,25 @@ describe("BASE_ENV と Dockerfile の ENV の一致", () => {
     expect(Object.keys(env).length).toBeGreaterThan(15);
   });
 
+  it("terraform の checkpoint（checkpoint-api.hashicorp.com。外向き通信で許可していない）を止める", () => {
+    expect(env.CHECKPOINT_DISABLE).toBe("1");
+    expect(BASE_ENV.CHECKPOINT_DISABLE).toBe("1");
+  });
+
+  it("GitHub の attestation の検証を切る（github backend と aqua。python と同じ方針）", () => {
+    for (const key of ["MISE_GITHUB_ATTESTATIONS", "MISE_AQUA_GITHUB_ATTESTATIONS"]) {
+      expect(env[key]).toBe("false");
+      expect(BASE_ENV[key]).toBe("false");
+    }
+  });
+
+  it("/etc/mise/config.toml にも attestation の検証を切る設定がある（exec が ENV を引き継がない本番用）", () => {
+    const text = readFileSync(join(__dirname, "../../Dockerfile"), "utf8");
+    expect(text).toContain("'github_attestations = false'");
+    expect(text).toContain("'aqua.github_attestations = false'");
+    expect(text).toContain("'python.github_attestations = false'");
+  });
+
   it.each(Object.entries(env))("%s が BASE_ENV に同じ値で入っている", (key, value) => {
     expect(BASE_ENV[key]).toBe(value);
   });

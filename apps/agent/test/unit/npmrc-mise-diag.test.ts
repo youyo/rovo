@@ -3,7 +3,9 @@ import {
   goVersionMatches,
   isValidHostname,
   MISE_GO_VERSION_UNAVAILABLE,
+  MISE_TOOL_UNAVAILABLE,
   miseGoVersion,
+  miseUnavailableTools,
   NPMRC_REGISTRY_NOT_ALLOWED,
   npmrcDiagnostics,
   repoDiagnostics,
@@ -135,6 +137,83 @@ describe("miseGoVersion", () => {
   });
 });
 
+describe("miseUnavailableTools", () => {
+  it("terraform / tflint などは unavailable（宣言順・重複なし）", () => {
+    const r = miseUnavailableTools(
+      '[tools]\nterraform = "1.15.8"\ntflint = "0.64.0"\nterraform = "1"\n',
+    );
+    expect(r).toEqual({ tools: ["terraform", "tflint"], total: 2 });
+  });
+
+  it("node / nodejs / go / golang / python と npm: / pipx: / go: の接頭辞は用意できるとみなす", () => {
+    const toml = [
+      "[tools]",
+      'node = "24"',
+      'nodejs = "24"',
+      'go = "1.99.0"',
+      'golang = "1.26"',
+      'python = { version = "3.13" }',
+      '"npm:prettier" = "3"',
+      '"pipx:ruff" = "latest"',
+      "'go:github.com/x/y/cmd/z' = \"latest\"",
+    ].join("\n");
+    expect(miseUnavailableTools(toml)).toEqual({ tools: [], total: 0 });
+  });
+
+  it("aqua: / ubi: / cargo: / pnpm / uv も unavailable。引用符つきのキーも読む", () => {
+    const toml =
+      '[tools]\n"aqua:hashicorp/terraform" = "1"\n\'ubi:a/b\' = "1"\n"cargo:ripgrep" = "1"\npnpm = "10"\nuv = "latest"\n';
+    expect(miseUnavailableTools(toml).tools).toEqual([
+      "aqua:hashicorp/terraform",
+      "ubi:a/b",
+      "cargo:ripgrep",
+      "pnpm",
+      "uv",
+    ]);
+  });
+
+  it("トップレベルの tools.key = ... と [tools.key] の節も読む", () => {
+    expect(
+      miseUnavailableTools('tools.terraform = "1"\ntools."aqua:x/y" = "1"\ntools.node = "24"\n')
+        .tools,
+    ).toEqual(["terraform", "aqua:x/y"]);
+    expect(
+      miseUnavailableTools('[tools.tflint]\nversion = "0.64.0"\n[tools.node]\nversion = "24"\n')
+        .tools,
+    ).toEqual(["tflint"]);
+  });
+
+  it("[tools] 以外の節・コメント・複数行の値の中身は見ない", () => {
+    const toml = [
+      "[env]",
+      'terraform = "x"',
+      "[tasks.build]",
+      'run = "terraform plan"',
+      "[tools]",
+      "# tflint = 1",
+      'node = "24"',
+      "[settings]",
+      "experimental = true",
+    ].join("\n");
+    expect(miseUnavailableTools(toml)).toEqual({ tools: [], total: 0 });
+  });
+
+  it("安全な形でない名前は tools に入れず total だけ数える。最大 5 件", () => {
+    const toml = [
+      "[tools]",
+      '"evil <b>x</b> ghp_AAAA" = "1"',
+      ...["a", "b", "c", "d", "e", "f"].map((n) => `${n}tool = "1"`),
+    ].join("\n");
+    const r = miseUnavailableTools(toml);
+    expect(r.tools).toEqual(["atool", "btool", "ctool", "dtool", "etool"]);
+    expect(r.total).toBe(7);
+  });
+
+  it("miseGoVersion と同じファイルを読んでも go の版の読み取りは変わらない", () => {
+    expect(miseGoVersion('[tools]\ngo = "1.22"\nterraform = "1"\n')).toBe("1.22");
+  });
+});
+
 describe("goVersionMatches", () => {
   it("焼いた版と同じ・前方一致（区切りは .）は一致", () => {
     expect(goVersionMatches("1.26.5", "1.26.5")).toBe(true);
@@ -154,13 +233,17 @@ describe("goVersionMatches", () => {
 
 describe("repoDiagnostics", () => {
   it("何も無ければ警告も文も無い", () => {
-    expect(repoDiagnostics({}, "1.26.5")).toEqual({ warnings: [], npmrcRegistryHosts: [] });
+    expect(repoDiagnostics({}, "1.26.5")).toEqual({
+      warnings: [],
+      npmrcRegistryHosts: [],
+      miseUnavailableTools: [],
+    });
     expect(
       repoDiagnostics(
         { npmrc: "registry=https://npm.flatt.tech/\n", miseToml: '[tools]\ngo = "1.26"\n' },
         "1.26.5",
       ),
-    ).toEqual({ warnings: [], npmrcRegistryHosts: [] });
+    ).toEqual({ warnings: [], npmrcRegistryHosts: [], miseUnavailableTools: [] });
   });
 
   it(".npmrc: 固定の警告コードを 1 回、ホスト名、ワーカーへの英語の 2 行以内", () => {
@@ -200,6 +283,73 @@ describe("repoDiagnostics", () => {
       "1.26.5",
     );
     expect(r.warnings).toEqual([NPMRC_REGISTRY_NOT_ALLOWED, MISE_GO_VERSION_UNAVAILABLE]);
+  });
+
+  it("terraform / tflint: mise_tool_unavailable と、未実行で報告する案内", () => {
+    const r = repoDiagnostics(
+      { miseToml: '[tools]\nterraform = "1.15.8"\ntflint = "0.64.0"\nnode = "24"\n' },
+      "1.26.5",
+    );
+    expect(r.warnings).toEqual([MISE_TOOL_UNAVAILABLE]);
+    expect(r.miseUnavailableTools).toEqual(["terraform", "tflint"]);
+    const note = r.note ?? "";
+    expect(note).toContain("terraform, tflint");
+    expect(note).toMatch(/mise install/);
+    expect(note).toMatch(/mise run/);
+    expect(note).toMatch(/mise exec/);
+    expect(note).toMatch(/command -v/);
+    expect(note).toMatch(/pnpm, yarn and uv/);
+    expect(note).toMatch(/not run/);
+    expect(note).toMatch(/summary/);
+  });
+
+  it("node / go / python / npm: / pipx: / go: だけならフラグなし", () => {
+    const r = repoDiagnostics(
+      {
+        miseToml:
+          '[tools]\nnode = "24"\ngo = "1.26"\npython = "3.13"\n"npm:x" = "1"\n"pipx:y" = "1"\n"go:z" = "1"\n',
+      },
+      "1.26.5",
+    );
+    expect(r).toEqual({ warnings: [], npmrcRegistryHosts: [], miseUnavailableTools: [] });
+  });
+
+  it("go の版違いと terraform が同時なら両方のコードが順に出る（npmrc → go → tool）", () => {
+    const r = repoDiagnostics(
+      {
+        npmrc: "registry=https://a.example.com/",
+        miseToml: '[tools]\ngo = "1.22.1"\nterraform = "1.15.8"\n',
+      },
+      "1.26.5",
+    );
+    expect(r.warnings).toEqual([
+      NPMRC_REGISTRY_NOT_ALLOWED,
+      MISE_GO_VERSION_UNAVAILABLE,
+      MISE_TOOL_UNAVAILABLE,
+    ]);
+    expect(r.note).toContain("terraform");
+    expect(r.note).toContain("1.22.1");
+  });
+
+  it("安全な形でない名前は文にも usage にも書かず、数だけ書く", () => {
+    const r = repoDiagnostics(
+      { miseToml: '[tools]\n"evil <b>x</b> ghp_AAAA" = "1"\n"a b" = "1"\n' },
+      "1.26.5",
+    );
+    expect(r.warnings).toEqual([MISE_TOOL_UNAVAILABLE]);
+    expect(r.miseUnavailableTools).toEqual([]);
+    expect(r.note).not.toContain("ghp_");
+    expect(r.note).not.toContain("<b>");
+    expect(r.note).toMatch(/2 tools/);
+  });
+
+  it("6 件以上は 5 件まで名前を書き、残りは数だけ", () => {
+    const toml = `[tools]\n${["a", "b", "c", "d", "e", "f", "g"].map((n) => `${n}t = "1"`).join("\n")}\n`;
+    const r = repoDiagnostics({ miseToml: toml }, "1.26.5");
+    expect(r.miseUnavailableTools).toEqual(["at", "bt", "ct", "dt", "et"]);
+    expect(r.note).toContain("at, bt, ct, dt, et");
+    expect(r.note).not.toContain("ft");
+    expect(r.note).toMatch(/and 2 more/);
   });
 
   it("焼いた Go の版（GO_VERSION）は Dockerfile の ARG と同じ形", () => {

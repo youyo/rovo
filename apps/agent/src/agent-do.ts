@@ -89,7 +89,7 @@ import {
   type ScriptStep,
 } from "./pi/scripted-provider";
 import { maskSecrets } from "./redact";
-import { repoDiagWarnings, sanitizeHostnames } from "./repo-diag";
+import { repoDiagWarnings, sanitizeHostnames, sanitizeMiseToolNames } from "./repo-diag";
 import { buildReviewBody } from "./review/body";
 import { buildFixInstruction } from "./review/fix";
 import {
@@ -2893,6 +2893,11 @@ export class AgentDO extends DurableObject<Env> {
       m.npmrcRegistryHosts !== undefined
         ? sanitizeHostnames(m.npmrcRegistryHosts)
         : (prev?.npmrcRegistryHosts ?? []);
+    // mise で用意できないツール名（安全な形のものだけ）。起動のたびに SandboxDO が置き換える
+    const miseTools =
+      m.miseUnavailableTools !== undefined
+        ? sanitizeMiseToolNames(m.miseUnavailableTools)
+        : (prev?.miseUnavailableTools ?? []);
     // 拒否した外向き通信の集計（増えるだけ。読めなければ前回の値）。形の正しい要素だけ
     const outboundDenied =
       m.outboundDenied !== undefined
@@ -2941,6 +2946,7 @@ export class AgentDO extends DurableObject<Env> {
       ...(cacheBuildMs > 0 ? { cacheBuildMs } : {}),
       ...(depsLang !== undefined && depsLang.length > 0 ? { depsLang } : {}),
       ...(npmrcHosts.length > 0 ? { npmrcRegistryHosts: npmrcHosts } : {}),
+      ...(miseTools.length > 0 ? { miseUnavailableTools: miseTools } : {}),
       ...(outboundDeniedTotal > 0
         ? { outboundDenied, outboundDeniedTotal: Math.floor(outboundDeniedTotal) }
         : {}),
@@ -2967,6 +2973,7 @@ export class AgentDO extends DurableObject<Env> {
       next.cacheBuildMs !== prev.cacheBuildMs ||
       JSON.stringify(next.depsLang) !== JSON.stringify(prev.depsLang) ||
       JSON.stringify(next.npmrcRegistryHosts) !== JSON.stringify(prev.npmrcRegistryHosts) ||
+      JSON.stringify(next.miseUnavailableTools) !== JSON.stringify(prev.miseUnavailableTools) ||
       next.outboundDeniedTotal !== prev.outboundDeniedTotal ||
       JSON.stringify(next.outboundDenied) !== JSON.stringify(prev.outboundDenied) ||
       next.instance !== prev.instance ||

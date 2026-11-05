@@ -268,9 +268,15 @@ export interface SandboxUsageDto {
   /** ワーカーのプロンプトに足す英語の文（agent 内でだけ使う。gateway は読まない） */
   depsLangNote?: string;
   /** 起動時の作業ツリーの診断の固定コード（agent が result.warnings にも足す。gateway は usage では読まない） */
-  repoWarnings?: ("npmrc_registry_not_allowed" | "mise_go_version_unavailable")[];
+  repoWarnings?: (
+    | "npmrc_registry_not_allowed"
+    | "mise_go_version_unavailable"
+    | "mise_tool_unavailable"
+  )[];
   /** .npmrc の許可されていない registry のホスト名（最大 5 件）。gateway は形を検証して usage.npmrc_registry_hosts に出す */
   npmrcRegistryHosts?: string[];
+  /** mise で用意できないツール名（最大 5 件）。gateway は形を検証して usage.mise_unavailable_tools に出す */
+  miseUnavailableTools?: string[];
   /** 診断のワーカー向けの英語の文（agent 内でだけ使う。gateway は読まない） */
   repoNote?: string;
   /** 拒否した外向き通信の {host, reason, count}（最大 20 件）。gateway は形を検証して usage.outbound_denied に出す */

@@ -32,8 +32,13 @@ describe("AgentDO: 作業ツリーの診断を伝える", () => {
     const fx = newFixture("diag-agent", [boot(), call("gate"), report()]);
     fx.sandbox.metricsValue = {
       ...base,
-      repoWarnings: ["npmrc_registry_not_allowed", "mise_go_version_unavailable"],
+      repoWarnings: [
+        "npmrc_registry_not_allowed",
+        "mise_go_version_unavailable",
+        "mise_tool_unavailable",
+      ],
       npmrcRegistryHosts: ["npm.internal.example.com"],
+      miseUnavailableTools: ["terraform", "tflint"],
       repoNote: NOTE,
     };
     await fx.stub.start(makeSpec("diag-agent"));
@@ -47,7 +52,9 @@ describe("AgentDO: 作業ツリーの診断を伝える", () => {
     const r = done(await fx.stub.getResult());
     expect(r.warnings).toContain("npmrc_registry_not_allowed");
     expect(r.warnings).toContain("mise_go_version_unavailable");
+    expect(r.warnings).toContain("mise_tool_unavailable");
     expect(r.usage.sandbox?.npmrcRegistryHosts).toEqual(["npm.internal.example.com"]);
+    expect(r.usage.sandbox?.miseUnavailableTools).toEqual(["terraform", "tflint"]);
     // ワーカー向けの文は gateway へ送らない
     expect(r.usage.sandbox).not.toHaveProperty("repoNote");
   });
@@ -58,6 +65,7 @@ describe("AgentDO: 作業ツリーの診断を伝える", () => {
       ...base,
       repoWarnings: ["npmrc_registry_not_allowed", "evil <b>text</b> ghp_X"] as never,
       npmrcRegistryHosts: ["ok.example.com", "bad host", "x/y", 3 as never, "a", "b", "c", "d"],
+      miseUnavailableTools: ["terraform", "bad tool", "<b>", 3 as never, "a", "b", "c", "d", "e"],
     };
     await fx.stub.start(makeSpec("diag-agent-junk"));
     expect(await waitForTerminal(fx)).toBe("completed");
@@ -65,6 +73,7 @@ describe("AgentDO: 作業ツリーの診断を伝える", () => {
     expect(r.warnings.filter((w: string) => w.includes("ghp_") || w.includes("<b>"))).toEqual([]);
     expect(r.warnings).toContain("npmrc_registry_not_allowed");
     expect(r.usage.sandbox?.npmrcRegistryHosts).toEqual(["ok.example.com", "a", "b", "c", "d"]);
+    expect(r.usage.sandbox?.miseUnavailableTools).toEqual(["terraform", "a", "b", "c", "d"]);
   });
 
   it("拒否した外向き通信の集計（outboundDenied / outboundDeniedTotal）を usage.sandbox に載せる。壊れた要素は捨てる", async () => {

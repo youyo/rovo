@@ -6,14 +6,17 @@ import { decideOutbound } from "./outbound-policy";
 
 export const NPMRC_REGISTRY_NOT_ALLOWED = "npmrc_registry_not_allowed";
 export const MISE_GO_VERSION_UNAVAILABLE = "mise_go_version_unavailable";
+export const MISE_TOOL_UNAVAILABLE = "mise_tool_unavailable";
 /** task_result の warnings に付けうる固定コードの全部（AgentDO はこれ以外を捨てる） */
 export const REPO_DIAG_WARNINGS: readonly string[] = [
   NPMRC_REGISTRY_NOT_ALLOWED,
   MISE_GO_VERSION_UNAVAILABLE,
+  MISE_TOOL_UNAVAILABLE,
 ];
 export type RepoDiagWarning =
   | typeof NPMRC_REGISTRY_NOT_ALLOWED
-  | typeof MISE_GO_VERSION_UNAVAILABLE;
+  | typeof MISE_GO_VERSION_UNAVAILABLE
+  | typeof MISE_TOOL_UNAVAILABLE;
 
 /** usage.npmrc_registry_hosts の件数の上限 */
 export const NPMRC_HOSTS_MAX = 5;
@@ -98,36 +101,117 @@ function toolVersion(value: string): string | undefined {
   return first ? first : undefined;
 }
 
+/** TOML のキー 1 つ分（裸 / "..." / '...'）の先頭を読む。読めなければ undefined */
+function tomlKey(text: string): { key: string; rest: string } | undefined {
+  const m = /^\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))(?=\s*(?:$|=|\.))/.exec(text);
+  if (!m) return undefined;
+  return { key: m[1] ?? m[2] ?? m[3] ?? "", rest: text.slice(m[0].length).trimStart() };
+}
+
 /**
- * mise.toml の [tools] の go の版。小さな TOML の部分集合だけを読む（1 行の key = value。複数行の値は読まない）。
- * 無ければ undefined。
+ * mise.toml の [tools] のエントリ（key と、値の文字列）を宣言順に返す。小さな TOML の部分集合だけを読む
+ * （1 行の key = value、トップレベルの tools.key = value、[tools.key] の節。複数行の値は読まない）。
+ * [tools.key] の節は、値を version = ... の行から読む。
  */
-export function miseGoVersion(toml: string): string | undefined {
+function miseToolEntries(toml: string): { key: string; value: string }[] {
+  const out: { key: string; value: string }[] = [];
   let section = "";
+  let sub: { key: string; value: string } | undefined;
   for (const raw of toml.split(/\r?\n/)) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
     if (line.startsWith("[[")) {
       section = "\0array";
+      sub = undefined;
       continue;
     }
     const head = /^\[\s*([^\]]+?)\s*\]\s*(?:#.*)?$/.exec(line);
     if (head) {
-      section = (head[1] ?? "")
-        .split(".")
-        .map((p) => p.trim().replace(/^["']|["']$/g, ""))
-        .join(".");
+      const h = head[1] ?? "";
+      sub = undefined;
+      if (/^["']?tools["']?\s*$/.test(h)) {
+        section = "tools";
+      } else {
+        const m = /^["']?tools["']?\s*\.\s*(.+)$/.exec(h);
+        const k = m ? tomlKey(m[1] ?? "") : undefined;
+        if (k && k.rest.trim() === "") {
+          section = "\0tool";
+          sub = { key: k.key, value: "" };
+          out.push(sub);
+        } else {
+          section = h
+            .split(".")
+            .map((p) => p.trim().replace(/^["']|["']$/g, ""))
+            .join(".");
+        }
+      }
+      continue;
+    }
+    if (sub && section === "\0tool") {
+      const v = /^(?:version|"version"|'version')\s*=\s*(.+)$/.exec(line);
+      if (v && sub.value === "") sub.value = (v[1] ?? "").trim();
       continue;
     }
     if (section === "tools") {
-      const m = /^(?:go|"go"|'go')\s*=\s*(.+)$/.exec(line);
-      if (m) return toolVersion(m[1] ?? "");
+      const k = tomlKey(line);
+      const eq = k ? /^=\s*(.+)$/.exec(k.rest) : null;
+      if (k && eq) out.push({ key: k.key, value: eq[1] ?? "" });
     } else if (section === "") {
-      const m = /^(?:tools|"tools")\s*\.\s*(?:go|"go"|'go')\s*=\s*(.+)$/.exec(line);
-      if (m) return toolVersion(m[1] ?? "");
+      const m = /^["']?tools["']?\s*\.\s*(.+)$/.exec(line);
+      const k = m ? tomlKey(m[1] ?? "") : undefined;
+      const eq = k ? /^=\s*(.+)$/.exec(k.rest) : null;
+      if (k && eq) out.push({ key: k.key, value: eq[1] ?? "" });
     }
   }
+  return out;
+}
+
+/**
+ * mise.toml の [tools] の go の版。無ければ undefined。
+ */
+export function miseGoVersion(toml: string): string | undefined {
+  for (const e of miseToolEntries(toml)) {
+    if (e.key === "go") return toolVersion(e.value);
+  }
   return undefined;
+}
+
+/** Sandbox の mise で用意できるとみなす [tools] のキー（go の版違いは mise_go_version_unavailable の担当） */
+const MISE_AVAILABLE_TOOLS: readonly string[] = ["node", "nodejs", "go", "golang", "python"];
+/** backend 付きで、許可先（npm・PyPI・proxy.golang.org）から取れうる接頭辞 */
+const MISE_AVAILABLE_PREFIXES: readonly string[] = ["npm:", "pipx:", "go:"];
+/** ワーカーへの文・usage に載せてよいツール名の形 */
+export const MISE_TOOL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,63}$/;
+/** ツール名を書く件数の上限（文・usage.mise_unavailable_tools） */
+export const MISE_TOOLS_MAX = 5;
+
+export function isSafeMiseToolName(v: unknown): v is string {
+  return typeof v === "string" && MISE_TOOL_NAME_RE.test(v);
+}
+
+/** 検証した（安全な形の）ツール名だけを、重複を除いて max 件まで残す */
+export function sanitizeMiseToolNames(v: unknown, max = MISE_TOOLS_MAX): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const n of v) {
+    if (out.length >= max) break;
+    if (isSafeMiseToolName(n) && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+/**
+ * mise.toml の [tools] のうち、Sandbox の mise で用意できないもの。
+ * tools: 安全な名前の形に合うものだけ（宣言順・重複なし・最大 5 件）。total: 用意できないものの数（名前が不正なものも含む）。
+ */
+export function miseUnavailableTools(toml: string): { tools: string[]; total: number } {
+  const seen: string[] = [];
+  for (const { key } of miseToolEntries(toml)) {
+    if (MISE_AVAILABLE_TOOLS.includes(key)) continue;
+    if (MISE_AVAILABLE_PREFIXES.some((p) => key.startsWith(p))) continue;
+    if (!seen.includes(key)) seen.push(key);
+  }
+  return { tools: sanitizeMiseToolNames(seen), total: seen.length };
 }
 
 /** mise の go の版の指定が、焼いた版で解決できるか（同じ版か、. 区切りの前方一致。prefix: と system も） */
@@ -140,10 +224,12 @@ export function goVersionMatches(requested: string, baked: string): boolean {
 }
 
 export interface RepoDiagnostics {
-  /** task_result の warnings に付ける固定コード（.npmrc → mise の順。各 1 回） */
+  /** task_result の warnings に付ける固定コード（.npmrc → mise の go の版 → mise のツールの順。各 1 回） */
   warnings: RepoDiagWarning[];
   /** usage.npmrc_registry_hosts（検証したホスト名。最大 5 件） */
   npmrcRegistryHosts: string[];
+  /** usage.mise_unavailable_tools（mise で用意できないツール名。安全な形のものだけ。最大 5 件） */
+  miseUnavailableTools: string[];
   /** ワーカーの依存の節に足す英語の文。何も無ければ無い（gateway には送らない） */
   note?: string;
 }
@@ -159,6 +245,7 @@ export function repoDiagnostics(
   const warnings: RepoDiagWarning[] = [];
   const notes: string[] = [];
   let hosts: string[] = [];
+  let miseTools: string[] = [];
   if (input.npmrc !== undefined) {
     const npm = npmrcDiagnostics(input.npmrc);
     if (npm.blocked) {
@@ -179,10 +266,26 @@ export function repoDiagnostics(
         `mise.toml asks for${asked}, but mise cannot fetch Go versions other than the baked Go ${bakedGo}: \`mise install\` / \`mise run\` will fail, and \`mise exec\` silently runs the baked Go ${bakedGo} with a warning. Check with \`go version\`; if another Go is required, prefer the go.mod \`toolchain\` directive, which is fetched through proxy.golang.org.`,
       );
     }
+    const unavailable = miseUnavailableTools(input.miseToml);
+    if (unavailable.total > 0) {
+      warnings.push(MISE_TOOL_UNAVAILABLE);
+      miseTools = unavailable.tools;
+      const hidden = unavailable.total - miseTools.length;
+      const which =
+        miseTools.length === 0
+          ? `${hidden} tool${hidden === 1 ? "" : "s"} (names not shown)`
+          : hidden > 0
+            ? `${miseTools.join(", ")}, and ${hidden} more`
+            : miseTools.join(", ");
+      notes.push(
+        `mise.toml lists tools that mise cannot install in this sandbox: ${which}. \`mise install\` / \`mise run\` / \`mise exec\` will try to fetch them and fail. Check each with \`command -v <tool>\`: if it is on PATH (pnpm, yarn and uv are), call it directly without mise. If it is not, do not try to download it (outbound network access is denied); write in your summary that the verification needing it was not run.`,
+      );
+    }
   }
   return {
     warnings,
     npmrcRegistryHosts: hosts,
+    miseUnavailableTools: miseTools,
     ...(notes.length > 0 ? { note: notes.join("\n") } : {}),
   };
 }

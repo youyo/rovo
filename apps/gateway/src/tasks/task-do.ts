@@ -408,6 +408,8 @@ export type ResultView = {
     deps_lang?: { kind: "python" | "go"; command: string; status: string; duration_ms: number }[];
     /** 作業ツリーの .npmrc が指す、外向き通信で許可されていない registry のホスト名（ホスト名の形を検証したものだけ。最大 5 件）。warnings の npmrc_registry_not_allowed と一緒に付く。無ければ付かない */
     npmrc_registry_hosts?: string[];
+    /** 作業ツリーの mise.toml の [tools] のうち、Sandbox の mise で用意できないツール名（安全な名前の形に合うものだけ。最大 5 件）。warnings の mise_tool_unavailable と一緒に付く。無ければ付かない */
+    mise_unavailable_tools?: string[];
     /** Sandbox からの外向き通信で拒否したもの（{host: ホスト名, reason: 固定の違反コード, count: 回数}。最大 20 件）。拒否が無ければ付かない */
     outbound_denied?: OutboundDeniedUsage[];
     /** 拒否した外向き通信の合計（outbound_denied に入らなかった分も含む）。拒否が無ければ付かない */
@@ -5114,6 +5116,7 @@ function depsUsage(sb: UsageDto["sandbox"]): {
   cache_build_ms?: number;
   deps_lang?: { kind: "python" | "go"; command: string; status: string; duration_ms: number }[];
   npmrc_registry_hosts?: string[];
+  mise_unavailable_tools?: string[];
   outbound_denied?: OutboundDeniedUsage[];
   outbound_denied_total?: number;
 } {
@@ -5139,6 +5142,9 @@ const USAGE_HOSTNAME =
 /** 違反コードの厳密な形（agent の固定コードは小文字・数字・_ だけ） */
 const DENY_REASON_CODE = /^[a-z][a-z0-9_]{0,39}$/;
 const NPMRC_HOSTS_MAX = 5;
+/** usage の値として受け取る mise のツール名の厳密な形 */
+const USAGE_MISE_TOOL = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,63}$/;
+const MISE_TOOLS_MAX = 5;
 const OUTBOUND_DENIED_MAX = 20;
 
 export interface OutboundDeniedUsage {
@@ -5153,6 +5159,7 @@ export interface OutboundDeniedUsage {
  */
 function diagUsage(sb: UsageDto["sandbox"]): {
   npmrc_registry_hosts?: string[];
+  mise_unavailable_tools?: string[];
   outbound_denied?: OutboundDeniedUsage[];
   outbound_denied_total?: number;
 } {
@@ -5162,6 +5169,15 @@ function diagUsage(sb: UsageDto["sandbox"]): {
     for (const h of sb.npmrcRegistryHosts as unknown[]) {
       if (hosts.length >= NPMRC_HOSTS_MAX) break;
       if (hostOk(h) && !hosts.includes(h)) hosts.push(h);
+    }
+  }
+  const miseTools: string[] = [];
+  if (Array.isArray(sb?.miseUnavailableTools)) {
+    for (const n of sb.miseUnavailableTools as unknown[]) {
+      if (miseTools.length >= MISE_TOOLS_MAX) break;
+      if (typeof n === "string" && USAGE_MISE_TOOL.test(n) && !miseTools.includes(n)) {
+        miseTools.push(n);
+      }
     }
   }
   const denied: OutboundDeniedUsage[] = [];
@@ -5182,6 +5198,7 @@ function diagUsage(sb: UsageDto["sandbox"]): {
     typeof t === "number" && Number.isSafeInteger(t) && t > 0 ? Math.max(t, counted) : counted;
   return {
     ...(hosts.length > 0 ? { npmrc_registry_hosts: hosts } : {}),
+    ...(miseTools.length > 0 ? { mise_unavailable_tools: miseTools } : {}),
     ...(denied.length > 0 ? { outbound_denied: denied } : {}),
     ...(total > 0 ? { outbound_denied_total: total } : {}),
   };

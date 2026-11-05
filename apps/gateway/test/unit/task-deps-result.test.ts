@@ -159,6 +159,38 @@ describe("task_result の usage（依存関係のキャッシュ）", () => {
     expect(await resultWith({ runtimeMs: 1 })).not.toHaveProperty("npmrc_registry_hosts");
   });
 
+  it("mise_unavailable_tools: 安全な形の名前だけ（最大 5 件）。無ければ付かない", async () => {
+    const usage = await resultWith({
+      runtimeMs: 1,
+      restarts: 0,
+      bootRetries: 0,
+      miseUnavailableTools: [
+        "terraform",
+        "aqua:hashicorp/terraform",
+        "Bad Tool",
+        "<b>x</b>",
+        3,
+        "-lead",
+        "terraform",
+        "a",
+        "b",
+        "c",
+        "d",
+      ],
+    });
+    expect(usage.mise_unavailable_tools).toEqual([
+      "terraform",
+      "aqua:hashicorp/terraform",
+      "a",
+      "b",
+      "c",
+    ]);
+    expect(await resultWith({ runtimeMs: 1, miseUnavailableTools: "x" })).not.toHaveProperty(
+      "mise_unavailable_tools",
+    );
+    expect(await resultWith({ runtimeMs: 1 })).not.toHaveProperty("mise_unavailable_tools");
+  });
+
   it("outbound_denied: {host, reason, count} の正しい形だけ（最大 20 件）と合計", async () => {
     const usage = await resultWith({
       runtimeMs: 1,

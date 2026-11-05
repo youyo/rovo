@@ -385,12 +385,18 @@ export interface SandboxMetrics {
   /** ワーカーのプロンプトに足す英語の 1〜3 行（失敗時は秘密を伏せた出力の末尾つき）。gateway には送らない */
   depsLangNote?: string;
   /**
-   * 起動時の作業ツリーの診断の固定コード（npmrc_registry_not_allowed / mise_go_version_unavailable）。task_result の warnings になる。
+   * 起動時の作業ツリーの診断の固定コード（npmrc_registry_not_allowed / mise_go_version_unavailable / mise_tool_unavailable）。task_result の warnings になる。
    * 何も無ければ無い
    */
-  repoWarnings?: ("npmrc_registry_not_allowed" | "mise_go_version_unavailable")[];
+  repoWarnings?: (
+    | "npmrc_registry_not_allowed"
+    | "mise_go_version_unavailable"
+    | "mise_tool_unavailable"
+  )[];
   /** .npmrc の許可されていない registry のホスト名（厳密に検証したものだけ。最大 5 件）。usage.npmrc_registry_hosts になる */
   npmrcRegistryHosts?: string[];
+  /** mise.toml の [tools] のうち Sandbox の mise で用意できないツール名（安全な形のものだけ。最大 5 件）。usage.mise_unavailable_tools になる */
+  miseUnavailableTools?: string[];
   /** 診断のワーカー向けの英語の文（依存の節に足す）。gateway には送らない */
   repoNote?: string;
   /** 拒否した外向き通信の {host, reason, count}（最大 20 件）。usage.outbound_denied になる。拒否が無ければ無い */

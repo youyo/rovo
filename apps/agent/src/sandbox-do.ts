@@ -53,7 +53,12 @@ import { DEPS_FETCH_SCRIPT, DEPS_RESTORE_SCRIPT, DEPS_STASH_SCRIPT } from "./dep
 import { addOutboundDenied, type OutboundDeniedState } from "./outbound-denied";
 import type { OutboundGatewayProps } from "./outbound-gateway";
 import { maskSecrets } from "./redact";
-import { miseGoVersion, type RepoDiagnostics, repoDiagnostics } from "./repo-diag";
+import {
+  miseGoVersion,
+  miseUnavailableTools,
+  type RepoDiagnostics,
+  repoDiagnostics,
+} from "./repo-diag";
 import { BASE_ENV, CA_CERT, GO_VERSION, WORKSPACE } from "./sandbox-env";
 import type {
   ExecOptions,
@@ -514,6 +519,9 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       ...(diag !== undefined && diag.warnings.length > 0 ? { repoWarnings: diag.warnings } : {}),
       ...(diag !== undefined && diag.npmrcRegistryHosts.length > 0
         ? { npmrcRegistryHosts: diag.npmrcRegistryHosts }
+        : {}),
+      ...(diag?.miseUnavailableTools !== undefined && diag.miseUnavailableTools.length > 0
+        ? { miseUnavailableTools: diag.miseUnavailableTools }
         : {}),
       ...(diag?.note ? { repoNote: diag.note } : {}),
       // 拒否した外向き通信の集計
@@ -2142,7 +2150,10 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     let miseToml: string | undefined;
     for (const name of ["mise.toml", ".mise.toml"]) {
       const t = await read(name);
-      if (t !== undefined && miseGoVersion(t) !== undefined) {
+      if (
+        t !== undefined &&
+        (miseGoVersion(t) !== undefined || miseUnavailableTools(t).total > 0)
+      ) {
         miseToml = t;
         break;
       }

@@ -118,7 +118,9 @@ describe("/mcp ツール一覧", () => {
     for (const word of [
       "npmrc_registry_not_allowed",
       "mise_go_version_unavailable",
+      "mise_tool_unavailable",
       "usage.npmrc_registry_hosts",
+      "usage.mise_unavailable_tools",
       "usage.outbound_denied",
       "usage.outbound_denied_total",
     ]) {
@@ -127,6 +129,7 @@ describe("/mcp ツール一覧", () => {
     for (const word of [
       "npmrc_registry_not_allowed",
       "mise_go_version_unavailable",
+      "mise_tool_unavailable",
       "outbound_denied",
     ]) {
       expect(start?.description, word).toContain(word);

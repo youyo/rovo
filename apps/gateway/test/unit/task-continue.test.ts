@@ -569,71 +569,72 @@ describe("task service: start と continue_task_id", () => {
   });
 });
 
-describe("B2: 積み足しの終端（warnings の引き継ぎ・superseded_by・予約の回収）", () => {
-  type Owner = Awaited<ReturnType<typeof newOwner>>;
-  let keySeq = 0;
+// 積み足しを作って進める共通部品（B2・B3a）
+type Owner = Awaited<ReturnType<typeof newOwner>>;
+let keySeq = 0;
 
-  /** COMPLETED まで進めた根（ワーカーの warnings 付き） */
-  async function rootWithWarnings(o: Owner, warnings: string[]) {
-    const t = await createTask({}, o.id);
+/** COMPLETED まで進めた根（ワーカーの warnings 付き） */
+async function rootWithWarnings(o: Owner, warnings: string[]) {
+  const t = await createTask({}, o.id);
+  await t.stub.advance();
+  const head = await pushChildCommit(t.branch);
+  await t.agent.setProgram({ result: completedResult(head, { warnings }) });
+  await t.agent.setPhase("completed");
+  for (let i = 0; i < 5; i++) {
     await t.stub.advance();
-    const head = await pushChildCommit(t.branch);
-    await t.agent.setProgram({ result: completedResult(head, { warnings }) });
-    await t.agent.setPhase("completed");
-    for (let i = 0; i < 5; i++) {
-      await t.stub.advance();
-      if ((await t.stub.result(o.id)).ok) break;
-    }
-    expect((await t.stub.result(o.id)).ok).toBe(true);
-    return { ...t, head };
+    if ((await t.stub.result(o.id)).ok) break;
   }
+  expect((await t.stub.result(o.id)).ok).toBe(true);
+  return { ...t, head };
+}
 
-  /** authorizeContinue → service.start（reserve → ensureCreated）で積み足しを作る */
-  async function startContinuation(o: Owner, of: string, baseSha: string) {
-    const authz = await authorize(o.user, o.id, { continue_task_id: of, base_sha: baseSha });
-    if (!authz.ok) throw new Error(`authorizeContinue failed: ${authz.code} ${authz.message}`);
-    const svc = createTaskService(env);
-    const r = await svc.start(
-      { githubUserId: o.id, login: "alice" },
-      {
-        continue_task_id: of,
-        base_sha: baseSha,
-        title: "fix",
-        instructions: "apply the review comments",
-        idempotency_key: `cont-${++keySeq}`,
-      },
-      {
-        repositoryId: authz.repositoryId,
-        installationId: authz.installationId,
-        continuation: authz.continuation,
-      },
-    );
-    if (!r.ok) throw new Error(`start failed: ${r.error.code}`);
-    const stub = taskStub(r.value.task_id);
-    extraStubs.push(stub);
-    return { id: r.value.task_id, stub };
-  }
+/** authorizeContinue → service.start（reserve → ensureCreated）で積み足しを作る */
+async function startContinuation(o: Owner, of: string, baseSha: string) {
+  const authz = await authorize(o.user, o.id, { continue_task_id: of, base_sha: baseSha });
+  if (!authz.ok) throw new Error(`authorizeContinue failed: ${authz.code} ${authz.message}`);
+  const svc = createTaskService(env);
+  const r = await svc.start(
+    { githubUserId: o.id, login: "alice" },
+    {
+      continue_task_id: of,
+      base_sha: baseSha,
+      title: "fix",
+      instructions: "apply the review comments",
+      idempotency_key: `cont-${++keySeq}`,
+    },
+    {
+      repositoryId: authz.repositoryId,
+      installationId: authz.installationId,
+      continuation: authz.continuation,
+    },
+  );
+  if (!r.ok) throw new Error(`start failed: ${r.error.code}`);
+  const stub = taskStub(r.value.task_id);
+  extraStubs.push(stub);
+  return { id: r.value.task_id, stub };
+}
 
-  /** 積み足しを COMPLETED まで進める（PR のブランチに 1 つ commit を積む） */
-  async function completeContinuation(
-    o: Owner,
-    c: { id: string; stub: TaskStub },
-    branch: string,
-    warnings: string[],
-  ) {
+/** 積み足しを COMPLETED まで進める（PR のブランチに 1 つ commit を積む） */
+async function completeContinuation(
+  o: Owner,
+  c: { id: string; stub: TaskStub },
+  branch: string,
+  warnings: string[],
+) {
+  await c.stub.advance();
+  const head = await pushChildCommit(branch);
+  await fakeAgent(c.id).setProgram({ result: completedResult(head, { warnings }) });
+  await fakeAgent(c.id).setPhase("completed");
+  for (let i = 0; i < 5; i++) {
     await c.stub.advance();
-    const head = await pushChildCommit(branch);
-    await fakeAgent(c.id).setProgram({ result: completedResult(head, { warnings }) });
-    await fakeAgent(c.id).setPhase("completed");
-    for (let i = 0; i < 5; i++) {
-      await c.stub.advance();
-      if ((await c.stub.result(o.id)).ok) break;
-    }
-    const r = await c.stub.result(o.id);
-    if (!r.ok) throw new Error(`result failed: ${r.code}`);
-    return { head, result: r.result };
+    if ((await c.stub.result(o.id)).ok) break;
   }
+  const r = await c.stub.result(o.id);
+  if (!r.ok) throw new Error(`result failed: ${r.code}`);
+  return { head, result: r.result };
+}
 
+describe("B2: 積み足しの終端（warnings の引き継ぎ・superseded_by・予約の回収）", () => {
   it("根 R → C1（警告あり）→ C2: C2 の warnings に R と C1 の警告が 1 回ずつ、入れ子の接頭辞なしで出る", async () => {
     const o = await newOwner();
     const wR = "tests_modified: root changed a test";
@@ -763,5 +764,217 @@ describe("B2: 積み足しの終端（warnings の引き継ぎ・superseded_by�
       lock: [{ task_id: next.id }],
       chain: [{ latest_task_id: next.id, prev_task_id: root.id }],
     });
+  });
+});
+
+describe("B3a: マージの判定（branch_busy・head_moved）と task_start の continuation", () => {
+  const principalOf = (o: Owner): Principal => ({ githubUserId: o.id, login: "alice" });
+  const writes = () =>
+    app()
+      .requests()
+      .filter((r) => r.method === "PUT" || r.method === "DELETE");
+  const lockRows = (o: Owner) =>
+    runInDurableObject(
+      o.user,
+      (_i, s) =>
+        s.storage.sql.exec("SELECT branch, task_id FROM branch_lock").toArray() as {
+          branch: string;
+          task_id: string;
+        }[],
+    );
+  /** finishTask の前（終端から数秒）の状態: 鍵が残っている */
+  const holdLock = (o: Owner, branch: string, taskId: string, of: string) =>
+    runInDurableObject(o.user, (_i, s) => {
+      s.storage.sql.exec(
+        "INSERT OR REPLACE INTO branch_lock (branch, task_id, continue_of, reserved_at) VALUES (?, ?, ?, ?)",
+        branch,
+        taskId,
+        of,
+        Date.now(),
+      );
+    });
+  const releaseLock = (o: Owner, branch: string) =>
+    runInDurableObject(o.user, (_i, s) => {
+      s.storage.sql.exec("DELETE FROM branch_lock WHERE branch = ?", branch);
+    });
+
+  it("M3: 積み足しの実行中は、最新でない id でも最新の id でも task_pr_merge が branch_busy で止まり、マージもブランチの削除もしない。鍵が開けば最新の id で通る。task_pr_ready は止まらない", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const svc = createTaskService(env);
+    const p = principalOf(o);
+    const c1 = await startContinuation(o, root.id, root.head);
+    expect(await lockRows(o)).toEqual([{ branch: root.branch, task_id: c1.id }]);
+    const before = writes().length;
+
+    // 最新でない id（根）: 実行中の積み足しがあるので branch_busy（id が載り、not_ready でなくなってからの再試行を案内する）
+    const old = await svc.prMerge(p, { task_id: root.id, delete_branch: true });
+    expect(old).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(!old.ok && old.error.message.startsWith("branch_busy:")).toBe(true);
+    expect(!old.ok && old.error.message).toContain(c1.id);
+    expect(!old.ok && old.error.message).toContain("not_ready");
+    // UserDO.prMerge 自身も鍵を見る（正しさは prMerge が保つ）
+    const direct = await o.user.prMerge(
+      { repository: REPO, number: root.pr, branch: root.branch },
+      { expectedSha: root.head, method: "squash", deleteBranch: true },
+    );
+    expect(direct).toMatchObject({ ok: false, code: "conflict", reason: "branch_busy" });
+    expect(!direct.ok && direct.message.startsWith("branch_busy:")).toBe(true);
+    expect(!direct.ok && direct.message).toContain(c1.id);
+    expect(writes()).toHaveLength(before);
+    expect(app().branch(REPO, root.branch)).not.toBeNull();
+    expect(
+      app()
+        .pulls(REPO)
+        .find((x) => x.number === root.pr)?.merged,
+    ).toBe(false);
+
+    // task_pr_ready は PR の状態だけを見るので止めない
+    expect((await svc.prReady(p, { task_id: root.id })).ok).toBe(true);
+
+    // 最新の id（C1）: 終端になっても、鍵が開くまで（finishTask の前）は branch_busy
+    const d1 = await completeContinuation(o, c1, root.branch, []);
+    await holdLock(o, root.branch, c1.id, root.id);
+    const latest = await svc.prMerge(p, { task_id: c1.id, delete_branch: true });
+    expect(latest).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(!latest.ok && latest.error.message.startsWith("branch_busy:")).toBe(true);
+    expect(writes()).toHaveLength(before);
+    expect(
+      app()
+        .pulls(REPO)
+        .find((x) => x.number === root.pr)?.merged,
+    ).toBe(false);
+
+    // 鍵が開いたあとは最新の id で通る
+    await releaseLock(o, root.branch);
+    const ok = await svc.prMerge(p, { task_id: c1.id });
+    expect(ok).toMatchObject({ ok: true, value: { merged: true, merge_sha: d1.head } });
+  });
+
+  it("prMerge: 積み足しのあと古い id でマージすると head_moved（マージしない）。メッセージは最新のタスクでマージするよう案内する。マージ済みなら「すでにマージ済み」を含める", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const svc = createTaskService(env);
+    const p = principalOf(o);
+    const c1 = await startContinuation(o, root.id, root.head);
+    const d1 = await completeContinuation(o, c1, root.branch, []);
+    await releaseLock(o, root.branch);
+    const puts = () =>
+      app()
+        .requests()
+        .filter((r) => r.method === "PUT").length;
+    const before = puts();
+
+    const old = await svc.prMerge(p, { task_id: root.id });
+    expect(old).toMatchObject({ ok: false, error: { code: "head_moved" } });
+    const msg = !old.ok ? old.error.message : "";
+    expect(msg).toContain(d1.head.slice(0, 12));
+    expect(msg).toContain("continue_task_id");
+    expect(msg).toContain("latest task");
+    expect(msg).toContain(c1.id);
+    expect(msg).toContain("task_pr_merge");
+    expect(msg).not.toContain("already merged");
+    expect(puts()).toBe(before);
+
+    expect((await svc.prMerge(p, { task_id: c1.id })).ok).toBe(true);
+    const after = await svc.prMerge(p, { task_id: root.id });
+    expect(after).toMatchObject({ ok: false, error: { code: "head_moved" } });
+    expect(!after.ok && after.error.message).toContain("already merged");
+    expect(puts()).toBe(before + 1);
+  });
+
+  it("task_start の応答: 積み足しのときだけ continuation（of・pr_number・pr_url・branch）が付き、draft_pr_url は既存の PR。task_status・task_result と食い違わない", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const authz = await authorize(o.user, o.id, { continue_task_id: root.id, base_sha: root.head });
+    if (!authz.ok) throw new Error("authorizeContinue failed");
+    const svc = createTaskService(env);
+    const p = principalOf(o);
+    const req = {
+      continue_task_id: root.id,
+      base_sha: root.head,
+      title: "fix",
+      instructions: "apply the review comments",
+      idempotency_key: "cont-shape",
+    };
+    const opts = {
+      repositoryId: authz.repositoryId,
+      installationId: authz.installationId,
+      continuation: authz.continuation,
+    };
+    const r = await svc.start(p, req, opts);
+    if (!r.ok) throw new Error(`start failed: ${r.error.code}`);
+    extraStubs.push(taskStub(r.value.task_id));
+    expect(r.value.continuation).toEqual({
+      of: root.id,
+      pr_number: root.pr,
+      pr_url: root.prUrl,
+      branch: root.branch,
+    });
+    expect(r.value.draft_pr_url).toBe(root.prUrl);
+    // 再試行（同じキー）でも同じ形
+    const again = await svc.start(p, req, opts);
+    expect(again.ok && again.value.continuation).toEqual(r.value.continuation);
+    // task_status の pr と食い違わない
+    const st = await svc.status(p, r.value.task_id);
+    expect(st.ok && st.value.pr).toEqual({
+      number: root.pr,
+      url: root.prUrl,
+      branch: root.branch,
+      continuation_of: root.id,
+    });
+    expect(st.ok && st.value.draft_pr_url).toBe(root.prUrl);
+    // task_result の pr とも食い違わない（終端になったあと）
+    const d = await completeContinuation(
+      o,
+      { id: r.value.task_id, stub: taskStub(r.value.task_id) },
+      root.branch,
+      [],
+    );
+    expect(d.result.pr).toMatchObject({
+      number: r.value.continuation?.pr_number,
+      url: r.value.continuation?.pr_url,
+      branch: r.value.continuation?.branch,
+      continuation_of: r.value.continuation?.of,
+    });
+  });
+
+  it("通し: C1 の実行中に R から始めると branch_busy → C1 を終えると、R からの authorizeContinue は continue_superseded（C1 の id が載る）", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const svc = createTaskService(env);
+    const c1 = await startContinuation(o, root.id, root.head);
+    const authz = await authorize(o.user, o.id, { continue_task_id: root.id, base_sha: root.head });
+    if (!authz.ok) throw new Error("authorizeContinue failed");
+    const busy = await svc.start(
+      principalOf(o),
+      {
+        continue_task_id: root.id,
+        base_sha: root.head,
+        title: "fix",
+        instructions: "apply the review comments",
+        idempotency_key: "flow-busy",
+      },
+      {
+        repositoryId: authz.repositoryId,
+        installationId: authz.installationId,
+        continuation: authz.continuation,
+      },
+    );
+    expect(busy).toMatchObject({ ok: false, error: { code: "branch_busy" } });
+    expect(!busy.ok && busy.error.message).toContain(c1.id);
+
+    const d1 = await completeContinuation(o, c1, root.branch, []);
+    // 鍵は finishTask で開く（数秒の遅れ）。開いたあと
+    await releaseLock(o, root.branch);
+    for (const base of [root.head, d1.head]) {
+      const r = await authorize(o.user, o.id, { continue_task_id: root.id, base_sha: base });
+      expectFailure(r, "conflict", "continue_superseded");
+      expect(!r.ok && r.message).toContain(c1.id);
+    }
+    // C1 からは通る
+    expect((await authorize(o.user, o.id, { continue_task_id: c1.id, base_sha: d1.head })).ok).toBe(
+      true,
+    );
   });
 });

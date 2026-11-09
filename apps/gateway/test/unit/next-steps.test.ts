@@ -167,3 +167,116 @@ describe("task_pr_ready / task_pr_merge の応答の next_steps", () => {
     expect(nextStepsAfterMerge({ branch_deleted: false })).toContain("削除できなかった");
   });
 });
+
+describe("nextSteps: 同じ PR への積み足し（continue_task_id）", () => {
+  const C = "01HZZZZZZZZZZZZZZZZZZZZZZY";
+  const LATEST = "01HZZZZZZZZZZZZZZZZZZZZZZX";
+
+  it("COMPLETED の修正の頼み方: 同じ PR に重ねるなら continue_task_id と base_sha（repository・base_ref は省略可）。別 PR の積み上げは互いに依存する別々の作業のときだけ", () => {
+    const t = nextSteps(input({}, { draft: false }));
+    expect(t).toContain(`continue_task_id: ${ID}`);
+    expect(t).toContain(`base_sha: ${HEAD}`);
+    expect(t).toContain("repository と base_ref は省略");
+    expect(t).toContain("互いに依存する別々の作業");
+    // continue_task_id の案内が、別 PR の積み上げより先
+    expect(t.indexOf("continue_task_id")).toBeLessThan(t.indexOf("互いに依存する別々の作業"));
+  });
+
+  it("COMPLETED 以外で PR があるとき: continue_task_id を先に案内する（base_sha は pr.head_sha）", () => {
+    for (const status of ["FAILED", "CANCELLED", "BUDGET_EXCEEDED"] as const) {
+      const t = nextSteps(input({ status }));
+      expect(t).toContain(`continue_task_id: ${ID}`);
+      expect(t).toContain(HEAD);
+      expect(t).not.toContain("git ls-remote");
+    }
+  });
+
+  it("COMPLETED 以外で pr.head_sha が null: git ls-remote で PR ブランチの先頭を確かめて base_sha に渡す。base_not_from_rovo の注意も添える", () => {
+    const t = nextSteps(
+      input({ status: "FAILED" }, { head_sha: null, head_matches_verified: null }),
+    );
+    expect(t).toContain(`continue_task_id: ${ID}`);
+    expect(t).toContain("git ls-remote");
+    expect(t).toContain(`refs/heads/agent/task-${ID}`);
+    expect(t).toContain("base_not_from_rovo");
+  });
+
+  it("積み足しのタスクの PR ブランチは根のブランチ（pr.branch）を案内する", () => {
+    const t = nextSteps(
+      input(
+        { task_id: C, status: "FAILED", continuation_of: ID },
+        { head_sha: null, head_matches_verified: null, branch: `agent/task-${ID}` },
+      ),
+    );
+    expect(t).toContain(`continue_task_id: ${C}`);
+    expect(t).toContain(`refs/heads/agent/task-${ID}`);
+    expect(t).not.toContain(`agent/task-${C}`);
+  });
+
+  it("superseded_by のある古いタスク: 最新のタスクの結果を確認して、その id で task_pr_merge するよう案内する", () => {
+    const t = nextSteps(input({ superseded_by: LATEST }, { draft: false }));
+    expect(t).toContain(LATEST);
+    expect(t).toContain("task_pr_merge");
+    expect(t).toContain("最新のタスク");
+    // このタスクの id でマージするよう案内しない
+    expect(t).not.toContain("問題が無ければ task_pr_merge でマージする");
+    expect(t).not.toContain(`continue_task_id: ${ID}`);
+  });
+
+  it("積み足しのタスクの COMPLETED: PR は元のタスクと同じ。全体のテストとレビューは今の PR のブランチで行い、よければこのタスクの id で task_pr_merge。直後の branch_busy は not_ready でなくなってから再試行", () => {
+    const t = nextSteps(
+      input(
+        { task_id: C, continuation_of: ID },
+        { draft: false, branch: `agent/task-${ID}`, continuation_of: ID },
+      ),
+    );
+    expect(t).toContain("元のタスク");
+    expect(t).toContain(ID);
+    expect(t).toContain(`agent/task-${ID}`);
+    expect(t).not.toContain(`agent/task-${C}`);
+    expect(t).toContain(`このタスクの id（${C}）で task_pr_merge`);
+    expect(t).toContain("branch_busy");
+    expect(t).toContain("not_ready");
+    // 次の修正もこのタスクから積む
+    expect(t).toContain(`continue_task_id: ${C}`);
+  });
+
+  it("準備の失敗 branch_moved: pr.head_sha か git ls-remote で今の先頭を確かめ直して task_start し直す", () => {
+    const t = nextSteps(
+      input(
+        {
+          task_id: C,
+          status: "FAILED",
+          reason: "branch_moved",
+          failure_phase: "setup",
+          continuation_of: ID,
+        },
+        { head_sha: null, head_matches_verified: null, branch: `agent/task-${ID}` },
+      ),
+    );
+    expect(t).toContain("branch_moved");
+    expect(t).toContain("git ls-remote");
+    expect(t).toContain("base_sha");
+    expect(t).toContain("task_start");
+    expect(t).toContain(`continue_task_id: ${ID}`);
+  });
+
+  it("準備の失敗 pr_not_open: PR が閉じた・マージされたので積み足せない。PR を確かめ、新しいタスクで始める", () => {
+    const t = nextSteps(
+      input(
+        {
+          task_id: C,
+          status: "FAILED",
+          reason: "pr_not_open",
+          failure_phase: "setup",
+          continuation_of: ID,
+        },
+        { branch: `agent/task-${ID}` },
+      ),
+    );
+    expect(t).toContain("pr_not_open");
+    expect(t).toContain("閉じ");
+    expect(t).toContain("マージ");
+    expect(t).toContain("task_start");
+  });
+});

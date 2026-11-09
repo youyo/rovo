@@ -387,7 +387,7 @@ export type MergeMethod = (typeof MERGE_METHODS)[number];
 export const prMergeInputSchema = z.object({
   task_id: z.string(),
   merge_method: z.enum(MERGE_METHODS).default("squash"),
-  delete_branch: z.boolean().default(false),
+  delete_branch: z.boolean().default(true),
 });
 
 /** consult の入力の上限。行サイズではなく、予約額（CONSULT_BUDGET_USD）に収まる大きさの目安。厳密な判定は AgentDO が行う。 */

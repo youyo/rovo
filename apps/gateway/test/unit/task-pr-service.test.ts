@@ -261,7 +261,7 @@ describe("service.prMerge", () => {
   it("確認の GET が失敗したら消さず、branch_delete_skipped に失敗を書く（マージは成功）", async () => {
     const w = await readyWorld();
     const head = app().branch(REPO, w.t.branch);
-    app().setFault({ pattern: "^GET /repos/.+/pulls\\?", status: 502 });
+    app().setFault({ pattern: "^GET /repos/[^/]+/[^/]+/pulls$", status: 502 });
     const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
     expect(r).toMatchObject({ ok: true, value: { merged: true, branch_deleted: false } });
     expect(r.ok && (r.value as { warnings: string[] }).warnings[0]).toContain(

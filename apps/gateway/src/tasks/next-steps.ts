@@ -103,7 +103,7 @@ function workerReviewAdvice(r: NonNullable<NextStepsInput["review"]>): string {
 }
 
 const MERGE_CONDITIONS =
-  "task_pr_merge は、PR が Ready で、head_matches_verified が true、PR の head に付いた GitHub の check（check run と commit status）がすべて成功しているときだけ使える（check が 1 つも無ければ通る。失敗していれば checks_failing、実行中なら checks_pending で拒否される。厳しくしたいときは GitHub のブランチ保護を使う）。merge_method と delete_branch を選べる。";
+  "task_pr_merge は、PR が Ready で、head_matches_verified が true、PR の head に付いた GitHub の check（check run と commit status）がすべて成功しているときだけ使える（check が 1 つも無ければ通る。失敗していれば checks_failing、実行中なら checks_pending で拒否される。厳しくしたいときは GitHub のブランチ保護を使う）。merge_method を選べる。既定で作業ブランチを削除する（残したいときは delete_branch: false。そのブランチを base にした open な PR があれば、消さずに branch_delete_skipped を返す）。";
 
 const DIRECT_MERGE =
   "手元で PR のブランチに修正を積むと head_matches_verified が false になり task_pr_merge は使えなくなるので、そのときは gh pr merge などで直接マージする。";
@@ -290,9 +290,9 @@ export function nextStepsAfterReady(policy: ReviewPolicy): string {
 export function nextStepsAfterMerge(args: { branch_deleted: boolean | null }): string {
   const base = "PR をマージした。このタスクでやることは終わり。";
   if (args.branch_deleted === null)
-    return `${base}作業ブランチは残っている（不要なら GitHub 上で削除する）。`;
+    return `${base}delete_branch: false を指定したので、作業ブランチは残っている（不要なら GitHub 上で削除する）。`;
   if (args.branch_deleted === false) {
     return `${base}作業ブランチを削除できなかった（warnings を参照）。不要なら GitHub 上で削除する。`;
   }
-  return base;
+  return `${base}作業ブランチを削除した。`;
 }

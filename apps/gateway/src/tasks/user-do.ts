@@ -2958,15 +2958,34 @@ export class UserDO extends DurableObject<Env> {
       );
     }
     if (opts.deleteBranch) {
+      // そのブランチを base にした open な PR があると、消した時点でその PR が閉じられる。あるとき・確かめられないときは消さない
+      let skipReason: string | null = null;
       try {
-        await credentials.withToken((tok) =>
-          client.deleteBranch(tok, target.repository, target.branch),
+        const hasOpen = await credentials.withToken((tok) =>
+          client.hasOpenPullWithBase(tok, target.repository, target.branch),
         );
-        branchDeleted = true;
+        if (hasOpen) {
+          skipReason =
+            "the pull request was merged, but the branch was kept because an open pull request uses it as its base (deleting it would close that pull request)";
+        }
       } catch (e) {
-        branchDeleted = false;
         const detail = e instanceof GitHubError ? e.message : "unexpected error";
-        warnings.push(`branch_delete_failed: the pull request was merged, but ${detail}`);
+        skipReason = `the pull request was merged, but the branch was kept because open pull requests based on it could not be checked (${detail})`;
+      }
+      if (skipReason !== null) {
+        branchDeleted = false;
+        warnings.push(`branch_delete_skipped: ${skipReason}`);
+      } else {
+        try {
+          await credentials.withToken((tok) =>
+            client.deleteBranch(tok, target.repository, target.branch),
+          );
+          branchDeleted = true;
+        } catch (e) {
+          branchDeleted = false;
+          const detail = e instanceof GitHubError ? e.message : "unexpected error";
+          warnings.push(`branch_delete_failed: the pull request was merged, but ${detail}`);
+        }
       }
     }
     return {

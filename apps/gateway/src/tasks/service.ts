@@ -1210,6 +1210,8 @@ export function createTaskService(
         kind: "merge",
         outcome: "done",
         changed: !r.already_merged,
+        branch_deleted: r.branch_deleted === true,
+        branch_kept_by_request: !deleteBranch,
       });
       return {
         ok: true,

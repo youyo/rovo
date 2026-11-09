@@ -284,7 +284,14 @@ export type TaskView = {
   /** task_review のタスクだけ: 対象の PR */
   target_pr?: TargetPr;
   /** 積み足し（continue_task_id）のタスクだけ: 元と同じ PR と、元のタスクの id（task_status に付く） */
-  pr?: { number: number; url: string; branch: string; continuation_of: string };
+  pr?: {
+    number: number;
+    url: string;
+    branch?: string;
+    continuation_of?: string;
+    /** 作業ブランチを消せたときだけ true が付く */
+    branch_deleted?: true;
+  };
   repository: string;
   title: string;
   draft_pr_url: string | null;
@@ -396,6 +403,8 @@ export type ResultView = {
     merged: boolean;
     /** 変更なしで終わったので rovo が Draft PR を閉じた（閉じたときだけ true が付く） */
     closed_empty?: true;
+    /** 作業ブランチを消せたときだけ true が付く */
+    branch_deleted?: true;
     /** GitHub から読んだ PR の head。まだ読めていなければ null */
     head_sha: string | null;
     /** head が検証済みの SHA と一致するか。比較できない（未読・検証済みの SHA なし）なら null */
@@ -613,7 +622,15 @@ export type PrContextResult =
 /** UserDO での GitHub 操作の結果を TaskDO に記録する（状態の更新と監査）。 */
 export type PrAction =
   /** changed: false は、すでにその状態だった（冪等な再実行）。状態は合わせるが、pr_ready / pr_merged は監査しない */
-  | { kind: "ready" | "merge"; outcome: "done"; changed?: boolean }
+  | {
+      kind: "ready" | "merge";
+      outcome: "done";
+      changed?: boolean;
+      /** merge のみ: task_pr_merge で作業ブランチを消せた */
+      branch_deleted?: boolean;
+      /** merge のみ: 呼び出し側が delete_branch: false を明示した */
+      branch_kept_by_request?: boolean;
+    }
   | { kind: "ready" | "merge"; outcome: "denied"; reason: string };
 
 export type ResultOutcome =
@@ -834,6 +851,10 @@ type GithubRow = {
   pr_merged: number;
   /** 変更なしで終わったので、空の Draft PR を rovo が閉じた */
   closed_empty: number;
+  /** task_pr_merge で作業ブランチを消せた */
+  branch_deleted: number;
+  /** task_pr_merge で delete_branch: false を明示した */
+  branch_kept_by_request: number;
   /** D14: TaskSpec.deps の JSON。"null" は lockfile なし（または読めなかった）。NULL は未取得（spec に載せない） */
   deps: string | null;
   /** 先行タスクから引き継いだ警告（JSON の InheritedWarning[]）。積み足しでないタスクは [] */
@@ -1178,6 +1199,19 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql,
       "github_link",
       "closed_empty",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    // task_pr_merge で作業ブランチを消せた / delete_branch: false を明示した（後続の掃除が読む。既存の行は 0）
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "branch_deleted",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "branch_kept_by_request",
       "INTEGER NOT NULL DEFAULT 0",
     );
     // D14: 依存関係のキャッシュの指定（TaskSpec.deps の JSON。"null" は lockfile なし・読めなかった。NULL は未取得で、spec に載せない）
@@ -2093,15 +2127,22 @@ export class TaskDO extends DurableObject<Env> {
 
   /** 積み足しのタスクだけ: 元と同じ PR（number・url・branch）と、元のタスク（continuation_of）。task_status に足す */
   private continuationPr(row: TaskRow): Pick<TaskView, "pr"> {
-    if (row.continuation_of === null) return {};
     const gl = this.getGithub();
     if (!gl || gl.pr_number === null || gl.pr_url === null) return {};
+    const deleted = gl.branch_deleted === 1 ? { branch_deleted: true as const } : {};
+    if (row.continuation_of === null) {
+      // 積み足しでないタスクは、ブランチを消せたときだけ pr を付ける
+      return gl.branch_deleted === 1
+        ? { pr: { number: gl.pr_number, url: gl.pr_url, ...deleted } }
+        : {};
+    }
     return {
       pr: {
         number: gl.pr_number,
         url: gl.pr_url,
         branch: gl.branch,
         continuation_of: row.continuation_of,
+        ...deleted,
       },
     };
   }
@@ -2812,6 +2853,12 @@ export class TaskDO extends DurableObject<Env> {
         this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0");
       } else {
         this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0, pr_merged = 1");
+        if (action.branch_deleted === true) {
+          this.ctx.storage.sql.exec("UPDATE github_link SET branch_deleted = 1");
+        }
+        if (action.branch_kept_by_request === true) {
+          this.ctx.storage.sql.exec("UPDATE github_link SET branch_kept_by_request = 1");
+        }
       }
       this.bumpIndexRevision();
     });
@@ -2968,6 +3015,7 @@ export class TaskDO extends DurableObject<Env> {
               draft: gl.pr_draft === null ? null : gl.pr_draft === 1,
               merged: gl.pr_merged === 1,
               ...(gl.closed_empty === 1 ? { closed_empty: true as const } : {}),
+              ...(gl.branch_deleted === 1 ? { branch_deleted: true as const } : {}),
               head_sha: gl.head_sha,
               head_matches_verified: gl.head_matches === null ? null : gl.head_matches === 1,
               // 積み足しのタスクだけ: 元と同じ PR のブランチと、元のタスクの id

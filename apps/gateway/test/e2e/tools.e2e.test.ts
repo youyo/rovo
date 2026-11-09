@@ -637,3 +637,26 @@ describe("task_console（mod 用の読み取り専用ツール。本物のログ
     }
   });
 });
+
+describe("tools/list の task_start（同じ PR への積み足し。docs/specs/continue-task.md）", () => {
+  it("入力スキーマに continue_task_id が出る。repository・base_ref は required に無く（continue_task_id のときだけ省略できる）、base_sha は必須のまま", async () => {
+    const { client } = await memberClient("tl");
+    try {
+      const { tools } = await client.listTools();
+      const start = tools.find((t) => t.name === "task_start");
+      const props = start?.inputSchema.properties as Record<string, { type?: string }>;
+      expect(props.continue_task_id?.type).toBe("string");
+      expect(props.repository?.type).toBe("string");
+      expect(props.base_ref?.type).toBe("string");
+      expect(start?.inputSchema.required).toEqual(
+        expect.arrayContaining(["base_sha", "title", "instructions"]),
+      );
+      expect(start?.inputSchema.required).not.toContain("continue_task_id");
+      expect(start?.inputSchema.required).not.toContain("repository");
+      expect(start?.inputSchema.required).not.toContain("base_ref");
+      expect(start?.description).toContain("continue_task_id");
+    } finally {
+      await client.close();
+    }
+  });
+});

@@ -769,10 +769,16 @@ describe("B2: 積み足しの終端（warnings の引き継ぎ・superseded_by�
 
 describe("B3a: マージの判定（branch_busy・head_moved）と task_start の continuation", () => {
   const principalOf = (o: Owner): Principal => ({ githubUserId: o.id, login: "alice" });
+  // 認証の種類（利用者のトークン・Installation Token）を問わず書き込み（PUT / DELETE）を数える。
+  // トークンの失効（DELETE /installation/token）だけは GitHub の状態を変える書き込みではないので除く
   const writes = () =>
     app()
       .requests()
-      .filter((r) => r.auth === "user" && (r.method === "PUT" || r.method === "DELETE"));
+      .filter(
+        (r) =>
+          (r.method === "PUT" || r.method === "DELETE") &&
+          !(r.method === "DELETE" && r.path === "/installation/token"),
+      );
   const lockRows = (o: Owner) =>
     runInDurableObject(
       o.user,

@@ -622,3 +622,168 @@ describe("worker_review（偽 GitHub 経由の通し）", () => {
     LONG,
   );
 });
+
+// 同じ PR への積み足し（continue_task_id。docs/specs/continue-task.md「gateway の e2e」）。
+// 根 → 積み足し（同じ PR）→ 古い id は head_moved → 最新の id でマージ、を実 Worker と偽 GitHub で通す。
+describe("continue_task_id（同じ PR への積み足しの通し）", () => {
+  type Client = Awaited<ReturnType<typeof setup>>["client"];
+  const deadlineOf = (ms: number) => Date.now() + ms;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function waitRunning(client: Client, taskId: string) {
+    const deadline = deadlineOf(30_000);
+    for (;;) {
+      const st = bodyOf(
+        await client.callTool({ name: "task_status", arguments: { task_id: taskId } }),
+      );
+      if (st.status === "RUNNING") return st;
+      if (Date.now() > deadline)
+        throw new Error(`RUNNING になりませんでした: ${JSON.stringify(st)}`);
+      await sleep(200);
+    }
+  }
+
+  /** 元のタスクの終了処理（finalize_done / body_done）が済むまでは continue_not_finished なので、それ以外が返るまで呼び直す */
+  async function startContinue(client: Client, args: Record<string, unknown>) {
+    const deadline = deadlineOf(60_000);
+    for (;;) {
+      const r = await client.callTool({ name: "task_start", arguments: args });
+      const b = bodyOf(r);
+      const waiting =
+        r.isError === true &&
+        b.code === "conflict" &&
+        String(b.message).startsWith("continue_not_finished");
+      if (!waiting) return r;
+      if (Date.now() > deadline)
+        throw new Error(`終了処理が済みませんでした: ${JSON.stringify(b)}`);
+      await sleep(500);
+    }
+  }
+
+  /** 鍵（branch_lock）は finishTask で開く。開くまでの数秒の branch_busy の間だけ呼び直す */
+  async function mergeAfterUnlock(client: Client, taskId: string) {
+    const deadline = deadlineOf(60_000);
+    for (;;) {
+      const r = await client.callTool({ name: "task_pr_merge", arguments: { task_id: taskId } });
+      const b = bodyOf(r);
+      const busy =
+        r.isError === true && b.code === "conflict" && String(b.message).startsWith("branch_busy");
+      if (!busy) return r;
+      if (Date.now() > deadline) throw new Error(`鍵が開きませんでした: ${JSON.stringify(b)}`);
+      await sleep(500);
+    }
+  }
+
+  it(
+    "根が COMPLETED → 古い base_sha は branch_moved → continue_task_id で積み足し（continuation・同じ PR）→ 実行中の再度の task_start は branch_busy、task_pr_merge も branch_busy → COMPLETED → 古い id は head_moved → 最新の id でマージ",
+    async () => {
+      const t = await setup();
+      try {
+        const root = await complete(t, t.client);
+        expect(root).toMatchObject({
+          status: "COMPLETED",
+          pr: { head_sha: t.head, head_matches_verified: true },
+        });
+        const rootPr = root.pr as { number: number; url: string; branch: string };
+        expect(String(root.next_steps)).toContain("continue_task_id");
+
+        const continueArgs = (title: string, baseSha: string) => ({
+          continue_task_id: t.taskId,
+          base_sha: baseSha,
+          title,
+          instructions: "fix it",
+        });
+
+        // base_sha が PR ブランチの今の head と違う: branch_moved（今の head が載る）。予約もしない
+        const moved = await startContinue(t.client, continueArgs("stale", t.initial));
+        expect(moved.isError).toBe(true);
+        expect(bodyOf(moved)).toMatchObject({
+          code: "branch_moved",
+          message: expect.stringContaining(t.head),
+        });
+
+        // repository・base_ref を省略して積み足す
+        const startedR = await startContinue(t.client, continueArgs("c1", t.head));
+        expect(startedR.isError).toBeFalsy();
+        const started = bodyOf(startedR);
+        const c1 = String(started.task_id);
+        expect(c1).not.toBe(t.taskId);
+        expect(started).toMatchObject({
+          draft_pr_url: rootPr.url,
+          continuation: {
+            of: t.taskId,
+            pr_number: rootPr.number,
+            pr_url: rootPr.url,
+            branch: t.branch,
+          },
+        });
+        const running = await waitRunning(t.client, c1);
+        expect(running).toMatchObject({ draft_pr_url: rootPr.url });
+
+        // 積み足しの実行中: もう一度 task_start すると branch_busy（実行中の id が載る）
+        const busy = await t.client.callTool({
+          name: "task_start",
+          arguments: continueArgs("c1-again", t.head),
+        });
+        expect(busy.isError).toBe(true);
+        expect(bodyOf(busy)).toMatchObject({
+          code: "branch_busy",
+          message: expect.stringContaining(c1),
+        });
+        // task_pr_merge も、どの id でも branch_busy（conflict + 接頭辞）で止まり、マージしない
+        for (const id of [t.taskId, c1]) {
+          const m = await t.client.callTool({ name: "task_pr_merge", arguments: { task_id: id } });
+          expect(m.isError).toBe(true);
+          expect(bodyOf(m).code).toBe(id === c1 ? "not_ready" : "conflict");
+          if (id === t.taskId) expect(String(bodyOf(m).message)).toMatch(/^branch_busy:/);
+        }
+        expect((await pullOf(t.branch))?.merged).toBe(false);
+
+        // 積み足しタスクが同じブランチに commit を積んで COMPLETED
+        const head2 = await admin.app<string>("addCommit", "acme/widgets", t.head, "c1 commit");
+        await admin.app("setBranch", "acme/widgets", t.branch, head2);
+        const done = await complete({ taskId: c1, head: head2 }, t.client);
+        expect(done).toMatchObject({
+          status: "COMPLETED",
+          pr: {
+            number: rootPr.number,
+            url: rootPr.url,
+            branch: t.branch,
+            continuation_of: t.taskId,
+            head_sha: head2,
+            head_matches_verified: true,
+          },
+        });
+        // PR は 1 本のまま
+        const pulls = (await admin.app<{ head: string }[]>("pulls", "acme/widgets")).filter(
+          (p) => p.head === t.branch,
+        );
+        expect(pulls).toHaveLength(1);
+
+        // 古いタスクの task_result は superseded_by で最新の id を案内する
+        const old = bodyOf(
+          await t.client.callTool({ name: "task_result", arguments: { task_id: t.taskId } }),
+        );
+        expect(old.superseded_by).toBe(c1);
+
+        // 鍵が開いたあと: 古い id は head_moved（マージしない）
+        const stale = await mergeAfterUnlock(t.client, t.taskId);
+        expect(stale.isError).toBe(true);
+        expect(bodyOf(stale)).toMatchObject({
+          code: "head_moved",
+          message: expect.stringContaining(c1),
+        });
+        expect((await pullOf(t.branch))?.merged).toBe(false);
+
+        // 最新の id で通る（検証済みの head2）
+        const merged = await mergeAfterUnlock(t.client, c1);
+        expect(merged.isError).toBeFalsy();
+        expect(bodyOf(merged)).toMatchObject({ merged: true, merge_sha: head2 });
+        expect(await pullOf(t.branch)).toMatchObject({ merged: true, mergeSha: head2 });
+      } finally {
+        await t.client.close();
+      }
+    },
+    LONG * 2,
+  );
+});

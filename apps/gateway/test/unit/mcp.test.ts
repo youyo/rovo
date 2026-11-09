@@ -492,6 +492,26 @@ describe("SDK の入力検証に届く前の不正（必須欠落・型不一致
     },
   );
 
+  it.each(["repository", "base_ref"] as const)(
+    "task_start: continue_task_id が無いときに %s を省くと invalid_input（予約しない・GitHub は呼ばない）",
+    async (key) => {
+      const u = await user("alice");
+      const client = await connect(createApiApp(), u.props);
+      const before = u.gh.calls.length;
+      const { [key]: _omit, ...args } = startArgs("x");
+      const r = await client.callTool({ name: "task_start", arguments: args });
+      expect(r.isError).toBe(true);
+      expect(body(r).code).toBe("invalid_input");
+      expect(String(body(r).message)).toContain(key);
+      expect(u.gh.calls.length).toBe(before);
+      const rows = await runInDurableObject(userStub(u.id), (_i, s) =>
+        s.storage.sql.exec("SELECT * FROM requests").toArray(),
+      );
+      expect(rows).toEqual([]);
+      await client.close();
+    },
+  );
+
   it("tools/list の JSON Schema は利用者に分かる型を保つ", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
@@ -500,9 +520,12 @@ describe("SDK の入力検証に届く前の不正（必須欠落・型不一致
     const props = start?.inputSchema.properties as Record<string, { type?: string }>;
     expect(props.title?.type).toBe("string");
     expect(props.acceptance_criteria?.type).toBe("array");
+    // repository・base_ref は continue_task_id のときだけ省略できるので required に無い（無いときの必須は実行時の検査。下のテスト）
     expect(start?.inputSchema.required).toEqual(
-      expect.arrayContaining(["repository", "base_ref", "base_sha", "title", "instructions"]),
+      expect.arrayContaining(["base_sha", "title", "instructions"]),
     );
+    expect(start?.inputSchema.required).not.toContain("repository");
+    expect(start?.inputSchema.required).not.toContain("base_ref");
     const wait = tools.find((t) => t.name === "task_wait");
     const waitProps = wait?.inputSchema.properties as Record<string, { type?: string }>;
     expect(waitProps.timeout_seconds?.type).toBe("number");
@@ -3096,37 +3119,111 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
   });
 });
 
-describe("continue_task_id はまだ公開しない（docs/specs/continue-task.md のタスク B1。公開は B3）", () => {
-  it("tools/list の task_start の入力スキーマに continue_task_id が無い", async () => {
+describe("continue_task_id の公開（docs/specs/continue-task.md のタスク B3）", () => {
+  it("tools/list の task_start の入力スキーマに continue_task_id が出る（任意）。base_sha は必須のまま", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
     const start = tools.find((t) => t.name === "task_start");
-    const props = start?.inputSchema.properties as Record<string, unknown>;
-    expect(Object.keys(props)).not.toContain("continue_task_id");
-    expect(JSON.stringify(start?.inputSchema)).not.toContain("continue_task_id");
+    const props = start?.inputSchema.properties as Record<
+      string,
+      { type?: string; description?: string }
+    >;
+    expect(props.continue_task_id?.type).toBe("string");
+    expect(props.continue_task_id?.description).toContain("同じ PR");
     expect(start?.inputSchema.required).toEqual(
-      expect.arrayContaining(["repository", "base_ref", "base_sha", "title", "instructions"]),
+      expect.arrayContaining(["base_sha", "title", "instructions"]),
     );
+    expect(start?.inputSchema.required).not.toContain("continue_task_id");
     await client.close();
   });
 
-  it("task_start に continue_task_id を渡しても積み足しは始まらず invalid_input（予約しない・GitHub は呼ばない）", async () => {
+  it("task_start に continue_task_id を渡すと積み足しの確認（authorizeContinue）に進む: 存在しないタスクは not_found（予約しない）", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { repository: _r, base_ref: _b, ...rest } = startArgs("t");
+    const r = await client.callTool({
+      name: "task_start",
+      arguments: { ...rest, continue_task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+    });
+    expect(r.isError).toBe(true);
+    expect(body(r).code).toBe("not_found");
+    expect(String(body(r).message)).not.toContain("not available");
+    const rows = await runInDurableObject(userStub(u.id), (_i, s) =>
+      s.storage.sql.exec("SELECT * FROM requests").toArray(),
+    );
+    expect(rows).toEqual([]);
+    await client.close();
+  });
+
+  it("continue_task_id の形が不正なら invalid_input（GitHub は呼ばない）", async () => {
     const u = await user("alice");
     const before = u.gh.calls.length;
     const client = await connect(createApiApp(), u.props);
     const r = await client.callTool({
       name: "task_start",
-      arguments: startArgs("t", { continue_task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" }),
+      arguments: startArgs("t", { continue_task_id: "not-a-ulid" }),
     });
     expect(r.isError).toBe(true);
     expect(body(r).code).toBe("invalid_input");
     expect(String(body(r).message)).toContain("continue_task_id");
     expect(u.gh.calls.length).toBe(before);
-    const rows = await runInDurableObject(userStub(u.id), (_i, s) =>
-      s.storage.sql.exec("SELECT * FROM requests").toArray(),
-    );
-    expect(rows).toEqual([]);
+    await client.close();
+  });
+
+  it("説明: instructions・task_start に continue_task_id・branch_moved・branch_busy・continuation があり、旧い「この PR に積む形で続けられる」が無い", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const text = client.getInstructions() ?? "";
+    const { tools } = await client.listTools();
+    const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    const start = desc("task_start");
+    for (const [name, doc] of [
+      ["instructions", text],
+      ["task_start", start],
+    ] as const) {
+      expect(doc, name).toContain("continue_task_id");
+      expect(doc, name).toContain("同じ PR");
+      expect(doc, name).not.toContain("この PR に積む形で続けられる");
+    }
+    for (const word of [
+      "branch_moved",
+      "branch_busy",
+      "continuation",
+      "continue_not_finished",
+      "continue_superseded",
+      "continue_pr_closed",
+      "continue_pr_merged",
+      "base_not_from_rovo",
+      "repository・base_ref は continue_task_id が無いときは必須",
+    ]) {
+      expect(start, word).toContain(word);
+    }
+    // 別 PR の積み上げは「互いに依存する別々の作業」のときだけ（instructions の 12 と task_start の説明）
+    expect(text).toContain("互いに依存する別々の作業");
+    expect(start).toContain("互いに依存する別々の作業");
+    await client.close();
+  });
+
+  it("説明: task_pr_merge は最新のタスクの id でマージ・branch_busy・古い id は head_moved。task_result は continuation_of・superseded_by・inherited from・branch_moved・pr_not_open", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    const merge = desc("task_pr_merge");
+    for (const word of ["最新のタスク", "branch_busy", "head_moved", "continue_task_id"]) {
+      expect(merge, word).toContain(word);
+    }
+    const result = desc("task_result");
+    for (const word of [
+      "pr.continuation_of",
+      "superseded_by",
+      "inherited from <id>:",
+      "branch_moved",
+      "pr_not_open",
+    ]) {
+      expect(result, word).toContain(word);
+    }
     await client.close();
   });
 });

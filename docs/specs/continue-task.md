@@ -270,6 +270,9 @@ props の `OutboundGatewayProps` に `branchTaskId?: string`（積み足しの�
   - `of`・`root` が `^[A-Za-z0-9_-]+$`、`root !== taskId`、`spec.branch === agent/task-<root>`（それ以外は `invalid_spec: branch`）。
   - `spec.initialSha === spec.baseSha`（積み足しは空コミットを持たない。違えば `invalid_spec: initialSha`）。
   - `spec.kind`（task_review）との併用は `invalid_spec: continuation`。
+  - `continuation.of === taskId` は拒否する（自己参照を防ぐ）。
+  - 作業ツリーの再作成に備え、最後の push の sha（`pushed_head`）を記録し、HEAD 検査（門番 3）の期待値にする。
+  - ローカルに既存のブランチがあれば、`merge-base` で祖先を確認する。
 - `agent/task-<root>` の `root` を、ワーカーが与えられる入力（`instructions` など）から決めることはできない。`spec` は gateway の `TaskDO` が作って RPC で渡す値で、AgentDO は自分の `spec` の保存と同じ経路でしか読まない。
 
 ### 門番 2: `OutboundGateway`

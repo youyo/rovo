@@ -610,15 +610,15 @@ describe("積み足し（continuation）: 門番は根のブランチ 1 本だ�
     await bash(c, `cd /workspace && git add -A && git ${GIT_ID.join(" ")} commit -q -m d`);
     const local = await headSha(c);
     const before = receivePackPosts().length;
-    for (const target of [
-      ref("cont-deny-other"),
-      ref("cont-deny"),
-      "refs/heads/main",
-      "refs/tags/v-cont",
-    ]) {
+    for (const target of [ref("cont-deny-other"), ref("cont-deny"), "refs/heads/main"]) {
       const r = await pushTo(c, target, local);
       expect(r.exitCode, target).not.toBe(0);
     }
+    // タグは許可証の対象にできない（SandboxDO が refs/heads/ 以外の許可証を拒否する）
+    await expect(pushTo(c, "refs/tags/v-cont", local)).rejects.toThrow(/invalid push permit/);
+    // 許可証なしの bash からのタグの push も門番で拒否される
+    const viaTag = await bash(c, "cd /workspace && git push origin HEAD:refs/tags/v-cont");
+    expect(viaTag.exitCode).not.toBe(0);
     // ワーカーの bash からも同じく通らない
     const viaBash = await bash(
       c,
@@ -667,11 +667,17 @@ describe("積み足し（continuation）: AgentDO の完了時の push", () => {
     sandboxes.push(sandbox);
     await agent.setScript(s.instructions, script);
     expect(await agent.start(s)).toMatchObject({ status: "accepted" });
-    return { agent, spec: s };
+    // spec() が積み足しタスク自身のブランチも作るので、作られたときの sha を控える
+    const ownBranchSha = upstream.refSha("calc", ref(task));
+    return { agent, spec: s, ownBranchSha };
   }
 
   it("既存のブランチの先頭から積んだ commit が、完了時に根のブランチへ push される", async () => {
-    const { agent, spec: s } = await runCont("cont-flow", "cont-flow-root", [
+    const {
+      agent,
+      spec: s,
+      ownBranchSha,
+    } = await runCont("cont-flow", "cont-flow-root", [
       FIX,
       tool("git_commit", { message: "fix: correct add" }),
       tool("report_completion", { summary: "done" }),
@@ -684,7 +690,9 @@ describe("積み足し（continuation）: AgentDO の完了時の push", () => {
     expect(sha).not.toBe(s.initialSha);
     expect(r.pushedSha).toBe(sha);
     expect(upstream.refSha("calc", ref("cont-flow-root"))).toBe(sha);
-    expect(upstream.refSha("calc", ref("cont-flow"))).toBeUndefined();
+    // 積み足しタスク自身のブランチには push していない（作られたときの sha のまま）
+    expect(ownBranchSha).toBeDefined();
+    expect(upstream.refSha("calc", ref("cont-flow"))).toBe(ownBranchSha);
     expect(r.warnings.filter((w) => /push/i.test(w))).toEqual([]);
   });
 

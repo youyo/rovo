@@ -469,7 +469,7 @@ describe("TaskDO.continuationSource", () => {
   });
 });
 
-describe("task service: start と continue_task_id（B1 では作成しない）", () => {
+describe("task service: start と continue_task_id", () => {
   const principal = (): Principal => ({ githubUserId: newUserId(), login: "alice" });
   const input = (id: string) => ({
     continue_task_id: id,
@@ -489,30 +489,54 @@ describe("task service: start と continue_task_id（B1 では作成しない）
     expect(rows).toEqual([]);
   });
 
-  it("事実があっても、まだ ensureCreated を呼ばない（予約も TaskDO も作らない）", async () => {
+  it("authorizeContinue → reserve（鍵とチェーン）→ ensureCreated（元の PR の写し）の順に作る。draft_pr_url は既存の PR", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const authz = await authorize(o.user, o.id, { continue_task_id: root.id, base_sha: root.head });
+    if (!authz.ok) throw new Error(`authorizeContinue failed: ${authz.code}`);
     const svc = createTaskService(env);
-    const p = principal();
-    const of = newTaskId();
-    const r = await svc.start(p, input(of), {
-      repositoryId: 4242,
-      installationId: 77,
-      continuation: {
-        of,
-        root: of,
-        branch: `agent/task-${of}`,
-        repository: "acme/widgets",
-        base_ref: "main",
-        pr_number: 1,
-        pr_url: "https://github.com/acme/widgets/pull/1",
-        inherited_warnings: [],
+    const p: Principal = { githubUserId: o.id, login: "alice" };
+    const r = await svc.start(
+      p,
+      { ...input(root.id), base_sha: root.head, idempotency_key: "cont-1" },
+      {
+        repositoryId: authz.repositoryId,
+        installationId: authz.installationId,
+        continuation: authz.continuation,
       },
-    });
-    expect(r.ok).toBe(false);
-    const rows = await runInDurableObject(userStub(p.githubUserId), (_i, s) => ({
-      requests: s.storage.sql.exec("SELECT * FROM requests").toArray(),
-      slots: s.storage.sql.exec("SELECT * FROM reservation_slot").toArray(),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const stub = taskStub(r.value.task_id);
+    extraStubs.push(stub);
+    expect(r.value.draft_pr_url).toBe(root.prUrl);
+    const locks = await runInDurableObject(o.user, (_i, s) => ({
+      lock: s.storage.sql.exec("SELECT branch, task_id, continue_of FROM branch_lock").toArray(),
+      chain: s.storage.sql
+        .exec("SELECT branch, latest_task_id, prev_task_id FROM branch_chain")
+        .toArray(),
     }));
-    expect(rows).toEqual({ requests: [], slots: [] });
+    expect(locks).toEqual({
+      lock: [{ branch: root.branch, task_id: r.value.task_id, continue_of: root.id }],
+      chain: [{ branch: root.branch, latest_task_id: r.value.task_id, prev_task_id: root.id }],
+    });
+    expect(await glOf(stub)).toMatchObject({
+      branch: root.branch,
+      initial_sha: root.head,
+      pr_number: root.pr,
+      pr_url: root.prUrl,
+    });
+    // 同じキーの再試行は同じタスク
+    const again = await svc.start(
+      p,
+      { ...input(root.id), base_sha: root.head, idempotency_key: "cont-1" },
+      {
+        repositoryId: authz.repositoryId,
+        installationId: authz.installationId,
+        continuation: authz.continuation,
+      },
+    );
+    expect(again.ok && again.value.task_id).toBe(r.value.task_id);
   });
 
   it("事実の of が continue_task_id と違えば internal", async () => {

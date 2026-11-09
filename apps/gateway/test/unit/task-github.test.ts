@@ -1418,3 +1418,309 @@ describe("変更なしで終端: 空の Draft PR を閉じる", () => {
     expect(reqs(DELETE_REF)).toHaveLength(1);
   });
 });
+
+describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作成と準備", () => {
+  const WRITE_RE =
+    /^(POST|PATCH|PUT|DELETE) \/repos\/acme\/widgets\/(pulls|issues|git\/refs|git\/commits)/;
+  const repoReqs = (re: RegExp) =>
+    app()
+      .requests()
+      .filter((r) => re.test(`${r.method} ${r.path}`));
+
+  /** PR のある根のタスク（準備が済み、ワーカーの commit が 1 つ push された状態） */
+  async function rootWithPull() {
+    const t = await createTask();
+    await t.stub.advance();
+    const initial = app().branch(REPO, t.branch) as string;
+    const head = await app().addCommit(REPO, initial, "child commit");
+    app().setBranch(REPO, t.branch, head);
+    const g = await gl(t.stub);
+    return { ...t, head, pr: g.pr_number as number, prUrl: g.pr_url as string };
+  }
+
+  type Facts = {
+    of: string;
+    root: string;
+    branch: string;
+    repository: string;
+    base_ref: string;
+    pr_number: number;
+    pr_url: string;
+    inherited_warnings: { from: string; warning: string }[];
+  };
+
+  const factsOf = (root: Awaited<ReturnType<typeof rootWithPull>>, over: Partial<Facts> = {}) => ({
+    of: root.id,
+    root: root.id,
+    branch: root.branch,
+    repository: REPO,
+    base_ref: "main",
+    pr_number: root.pr,
+    pr_url: root.prUrl,
+    inherited_warnings: [],
+    ...over,
+  });
+
+  /** authorizeContinue が固定した事実（facts）で、積み足しタスクを作る。repository・base_ref は省略する */
+  async function createContinuation(facts: Facts, baseSha: string, over: Record<string, unknown> = {}) {
+    const id = newTaskId();
+    const stub = taskStub(id);
+    const { repository: _r, base_ref: _b, ...input } = sampleInput(id, OWNER, {
+      base_sha: baseSha,
+      continue_task_id: facts.of,
+      ...over,
+    });
+    const r = await stub.ensureCreated({ ...input, continuation: facts } as never);
+    return { id, stub, agent: fakeAgent(id), r };
+  }
+
+  async function continued(facts: Facts, baseSha: string) {
+    const c = await createContinuation(facts, baseSha);
+    if (!c.r.ok) throw new Error(`ensureCreated failed: ${c.r.code}`);
+    return c;
+  }
+
+  describe("ensureCreated", () => {
+    it("branch = agent/task-<根>、initial_sha = base_sha、元の PR の写し、continuation_of / continuation_root、spec の continuation", async () => {
+      const root = await rootWithPull();
+      const facts = factsOf(root, {
+        inherited_warnings: [{ from: root.id, warning: "tests_modified: x" }],
+      });
+      const c = await continued(facts, root.head);
+      expect(c.r.ok && c.r.task.draft_pr_url).toBe(root.prUrl);
+      const g = await gl(c.stub);
+      expect(g).toMatchObject({
+        branch: `agent/task-${root.id}`,
+        initial_sha: root.head,
+        pr_number: root.pr,
+        pr_url: root.prUrl,
+        setup_done: 0,
+      });
+      expect(JSON.parse(g.inherited_warnings as string)).toEqual([
+        { from: root.id, warning: "tests_modified: x" },
+      ]);
+      const [row] = await rows<Record<string, unknown>>(c.stub, "SELECT * FROM task");
+      expect(row).toMatchObject({
+        repository: REPO,
+        base_ref: "main",
+        base_sha: root.head,
+        draft_pr_url: root.prUrl,
+        continuation_of: root.id,
+        continuation_root: root.id,
+      });
+      const [link] = await rows<{ spec: string }>(c.stub, "SELECT spec FROM agent_link");
+      const spec = JSON.parse(link?.spec ?? "{}") as Record<string, unknown>;
+      expect(spec).toMatchObject({
+        taskId: c.id,
+        repository: REPO,
+        baseSha: root.head,
+        continuation: { of: root.id, root: root.id },
+      });
+      expect((await status(c.stub)).draft_pr_url).toBe(root.prUrl);
+    });
+
+    it("C1 → C2 と重ねても根を引き継ぐ（根は C1 の TaskDO が持つ continuation_root）", async () => {
+      const root = await rootWithPull();
+      const c1 = await continued(factsOf(root), root.head);
+      const src = await c1.stub.continuationSource(OWNER);
+      if (!src.ok) throw new Error("continuationSource failed");
+      expect(src.source.root).toBe(root.id);
+      const c2 = await continued(
+        factsOf(root, { of: c1.id, root: src.source.root }),
+        root.head,
+      );
+      expect(await gl(c2.stub)).toMatchObject({ branch: `agent/task-${root.id}` });
+      const [row] = await rows<Record<string, unknown>>(c2.stub, "SELECT * FROM task");
+      expect(row).toMatchObject({ continuation_of: c1.id, continuation_root: root.id });
+      const [link] = await rows<{ spec: string }>(c2.stub, "SELECT spec FROM agent_link");
+      expect(JSON.parse(link?.spec ?? "{}")).toMatchObject({
+        continuation: { of: c1.id, root: root.id },
+      });
+    });
+
+    it("同じ入力の再試行は同じタスクを返す（写しは変わらない）", async () => {
+      const root = await rootWithPull();
+      const facts = factsOf(root);
+      const id = newTaskId();
+      const stub = taskStub(id);
+      const { repository: _r, base_ref: _b, ...input } = sampleInput(id, OWNER, {
+        base_sha: root.head,
+        continue_task_id: root.id,
+      });
+      const a = await stub.ensureCreated({ ...input, continuation: facts } as never);
+      const before = await gl(stub);
+      const b = await stub.ensureCreated({ ...input, continuation: facts } as never);
+      expect(a.ok && b.ok && !b.created).toBe(true);
+      expect(await gl(stub)).toEqual(before);
+    });
+
+    it("事実が無い・of が違う・根の id の形が違う・branch が根と合わない・repository / base_ref が違うと invalid_input", async () => {
+      const root = await rootWithPull();
+      const other = newTaskId();
+      const bad: [Facts | undefined, Record<string, unknown>][] = [
+        [undefined, {}],
+        [factsOf(root, { of: other }), {}],
+        [factsOf(root, { root: "../x", branch: "agent/task-../x" }), {}],
+        [factsOf(root, { branch: `agent/task-${other}` }), {}],
+        [factsOf(root), { repository: "acme/other" }],
+        [factsOf(root), { base_ref: "develop" }],
+      ];
+      for (const [facts, over] of bad) {
+        const id = newTaskId();
+        const { repository: _r, base_ref: _b, ...input } = sampleInput(id, OWNER, {
+          base_sha: root.head,
+          continue_task_id: root.id,
+        });
+        const r = await taskStub(id).ensureCreated({
+          ...input,
+          ...over,
+          ...(facts !== undefined ? { continuation: facts } : {}),
+        } as never);
+        expect(r).toMatchObject({ ok: false, code: "invalid_input" });
+      }
+    });
+  });
+
+  describe("runSetup", () => {
+    it("空コミット・createBranch・compare・PR の作成を呼ばず、continued を 1 回だけ出して start する（draft_pr_created は出さない）", async () => {
+      const root = await rootWithPull();
+      const c = await continued(factsOf(root), root.head);
+      const before = app().requests().length;
+      await c.stub.advance();
+      const mine = app().requests().slice(before);
+      const lines = mine.map((r) => `${r.method} ${r.path}`);
+      expect(lines.some((l) => /^POST \/repos\/acme\/widgets\/git\/commits$/.test(l))).toBe(false);
+      expect(lines.some((l) => /^POST \/repos\/acme\/widgets\/git\/refs$/.test(l))).toBe(false);
+      expect(lines.some((l) => /\/compare\//.test(l))).toBe(false);
+      expect(lines.some((l) => /^POST \/repos\/acme\/widgets\/pulls$/.test(l))).toBe(false);
+      expect(lines.some((l) => /^GET \/repos\/acme\/widgets\/pulls\?/.test(l))).toBe(false);
+      expect(lines).toContain(`GET /repos/acme/widgets/pulls/${root.pr}`);
+      expect(lines.some((l) => l.startsWith("GET /repos/acme/widgets/git/ref/heads/"))).toBe(true);
+      expect(app().pulls(REPO).filter((p) => p.head === root.branch)).toHaveLength(1);
+      expect(app().branch(REPO, root.branch)).toBe(root.head);
+
+      expect((await status(c.stub)).status).toBe("RUNNING");
+      const types = await eventTypes(c.stub);
+      expect(types).not.toContain("draft_pr_created");
+      expect(types.filter((t) => t === "continued")).toHaveLength(1);
+      expect(await eventsOf(c.stub, "continued")).toEqual([
+        {
+          of: root.id,
+          number: root.pr,
+          url: root.prUrl,
+          branch: root.branch,
+          initial_sha: root.head,
+        },
+      ]);
+      expect(await gl(c.stub)).toMatchObject({
+        branch_ready: 1,
+        setup_done: 1,
+        initial_sha: root.head,
+        pr_number: root.pr,
+        pr_url: root.prUrl,
+      });
+      const { specs } = await c.agent.calls();
+      expect(specs[0]).toMatchObject({
+        branch: root.branch,
+        initialSha: root.head,
+        baseSha: root.head,
+        continuation: { of: root.id, root: root.id },
+      });
+      // 何度 advance しても continued は 1 回
+      await c.stub.advance();
+      expect((await eventTypes(c.stub)).filter((t) => t === "continued")).toHaveLength(1);
+    });
+
+    it("ブランチの先頭が base_sha と違えば FAILED（branch_moved）。PR・ブランチ・本文に何も書かない", async () => {
+      const root = await rootWithPull();
+      const c = await continued(factsOf(root), root.head);
+      const moved = await app().addCommit(REPO, root.head, "human commit");
+      app().setBranch(REPO, root.branch, moved);
+      const bodyBefore = pullOf(root.branch)?.body;
+      const before = app().requests().length;
+      for (let i = 0; i < 4; i++) {
+        await c.stub.advance();
+        await runDurableObjectAlarm(c.stub).catch(() => {});
+      }
+      expect((await status(c.stub)).status).toBe("FAILED");
+      expect(await failReason(c.stub)).toBe("branch_moved");
+      expect(await eventTypes(c.stub)).not.toContain("continued");
+      const writes = app()
+        .requests()
+        .slice(before)
+        .filter((r) => WRITE_RE.test(`${r.method} ${r.path}`));
+      expect(writes).toEqual([]);
+      expect(pullOf(root.branch)?.body).toBe(bodyBefore);
+      expect(pullOf(root.branch)?.state).toBe("open");
+      expect(app().branch(REPO, root.branch)).toBe(moved);
+      // 終了処理は済む（本文は書かず、トークンは失効する）
+      expect(await gl(c.stub)).toMatchObject({ finalize_done: 1, head_sha: null });
+    });
+
+    it("ブランチが無ければ FAILED（pr_not_open）", async () => {
+      const root = await rootWithPull();
+      const c = await continued(factsOf(root), root.head);
+      app().deleteBranch(REPO, root.branch);
+      await c.stub.advance();
+      expect(await failReason(c.stub)).toBe("pr_not_open");
+    });
+
+    it("PR が閉じていれば・マージ済みなら FAILED（pr_not_open）。何も書かない", async () => {
+      const closed = await rootWithPull();
+      const c1 = await continued(factsOf(closed), closed.head);
+      app().closePull(REPO, closed.pr);
+      const before = app().requests().length;
+      for (let i = 0; i < 3; i++) await c1.stub.advance();
+      expect(await failReason(c1.stub)).toBe("pr_not_open");
+      expect(
+        app()
+          .requests()
+          .slice(before)
+          .filter((r) => WRITE_RE.test(`${r.method} ${r.path}`)),
+      ).toEqual([]);
+
+      const merged = await rootWithPull();
+      const c2 = await continued(factsOf(merged), merged.head);
+      app().markMerged(REPO, merged.pr);
+      await c2.stub.advance();
+      expect(await failReason(c2.stub)).toBe("pr_not_open");
+    });
+
+    it("PR の head のブランチが記録と違えば FAILED（pr_not_open）", async () => {
+      const root = await rootWithPull();
+      const other = await rootWithPull();
+      // 別の根の PR 番号を指す（head のブランチが agent/task-<根> でない）
+      const c = await continued(
+        factsOf(root, { pr_number: other.pr, pr_url: other.prUrl }),
+        root.head,
+      );
+      await c.stub.advance();
+      expect(await failReason(c.stub)).toBe("pr_not_open");
+    });
+
+    it("読めない（5xx）は失敗にせず再試行し、直れば進む。再試行しても continued は 1 回で、写しは変わらない", async () => {
+      const root = await rootWithPull();
+      const c = await continued(factsOf(root), root.head);
+      const copy = await gl(c.stub);
+      app().setFault({ pattern: "^GET /repos/acme/widgets/git/ref/heads/", status: 503, count: 1 });
+      await c.stub.advance();
+      expect((await status(c.stub)).status).toBe("CREATING");
+      expect((await gl(c.stub)).setup_retry_at as number).toBeGreaterThan(0);
+      app().setFault({ pattern: "^GET /repos/acme/widgets/pulls/\\d+$", status: 502, count: 1 });
+      await warp(c.stub, 120_000);
+      await runDurableObjectAlarm(c.stub);
+      expect((await status(c.stub)).status).toBe("CREATING");
+      await warp(c.stub, 240_000);
+      await runDurableObjectAlarm(c.stub);
+      expect((await status(c.stub)).status).toBe("RUNNING");
+      expect((await eventTypes(c.stub)).filter((t) => t === "continued")).toHaveLength(1);
+      const after = await gl(c.stub);
+      for (const k of ["branch", "initial_sha", "pr_number", "pr_url", "inherited_warnings"]) {
+        expect(after[k]).toEqual(copy[k]);
+      }
+      await warp(c.stub, 360_000);
+      await runDurableObjectAlarm(c.stub).catch(() => {});
+      expect((await eventTypes(c.stub)).filter((t) => t === "continued")).toHaveLength(1);
+    });
+  });
+});

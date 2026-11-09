@@ -46,8 +46,14 @@ export interface WorkspaceSpec {
   baseSha: string;
   /** 作業ブランチ名（例: agent/task-<id>）。リモートに既にある（TaskDO が作成済み）ことが前提。 */
   branch: string;
-  /** 作業ブランチの初期コミット（base_sha の上の空コミット）。 */
+  /** 作業ブランチの初期コミット（base_sha の上の空コミット）。continuation があるときは baseSha と同じ。 */
   initialSha: string;
+  /**
+   * 同じ PR への積み足し（TaskSpec の continuation と同じ値）。あるとき branch は `agent/task-<root>` で、
+   * clone / switch の直後に HEAD が initialSha（このタスクの push の後は、最後に push した SHA）と一致することを確かめる。
+   * OutboundGateway の props の branchTaskId にも root を入れる。ensureReady の同一性（conflict）の判定に含める。
+   */
+  continuation?: { of: string; root: string };
   /** epoch ms。超えたら SandboxDO は自分でコンテナを止める。 */
   deadlineAt: number;
   /**

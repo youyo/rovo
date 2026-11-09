@@ -80,6 +80,25 @@ export function validateWorkspaceSpec(spec: WorkspaceSpec): WorkspaceSpec {
       throw new Error("invalid checkout: expected a pull request number and a full commit sha");
     }
   }
+  if (spec.continuation !== undefined) {
+    // 積み足し: 作業ブランチは根の agent/task-<root> だけ。積み足しは空コミットを持たない（initialSha = baseSha）。
+    // task_review（checkout）とは併用しない
+    const c = spec.continuation as unknown;
+    const id = /^[A-Za-z0-9_-]+$/;
+    if (
+      typeof c !== "object" ||
+      c === null ||
+      typeof (c as { of?: unknown }).of !== "string" ||
+      !id.test((c as { of: string }).of) ||
+      typeof (c as { root?: unknown }).root !== "string" ||
+      !id.test((c as { root: string }).root) ||
+      spec.branch !== `agent/task-${(c as { root: string }).root}` ||
+      spec.initialSha !== spec.baseSha ||
+      spec.checkout !== undefined
+    ) {
+      throw new Error("invalid continuation");
+    }
+  }
   if (typeof spec.deadlineAt !== "number" || !Number.isFinite(spec.deadlineAt)) {
     throw new Error("invalid deadlineAt");
   }

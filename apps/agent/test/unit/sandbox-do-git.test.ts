@@ -408,7 +408,8 @@ describe("SandboxDO: prepareWorkspace（作業ブランチの checkout）", () =
         new GitContainer((argv) => {
           const a = gitArgs(argv);
           if (a[0] === "rev-parse" && a.includes("--abbrev-ref")) return { stdout: "HEAD\n" };
-          if (a[0] === "rev-parse" && a.includes(`refs/heads/agent/task-r1`)) return { exitCode: 1 };
+          if (a[0] === "rev-parse" && a.includes(`refs/heads/agent/task-r1`))
+            return { exitCode: 1 };
           if (isHeadRead(a)) return { stdout: `${head}\n` };
           return {};
         });
@@ -447,7 +448,12 @@ describe("SandboxDO: prepareWorkspace（作業ブランチの checkout）", () =
         await expect(inst.prepareWorkspace(contSpec())).rejects.toThrow(/branch_moved/);
       });
       expect(bad.calls.map(gitArgs)).toContainEqual(["switch", "-q", "agent/task-r1"]);
-      expect(bad.calls.map(gitArgs)).toContainEqual(["merge-base", "--is-ancestor", INITIAL, "HEAD"]);
+      expect(bad.calls.map(gitArgs)).toContainEqual([
+        "merge-base",
+        "--is-ancestor",
+        INITIAL,
+        "HEAD",
+      ]);
       const errored = at(128);
       await runInDO(sandbox("prep-cont-switch-error"), async (inst) => {
         inst.maybeContainer = () => errored;

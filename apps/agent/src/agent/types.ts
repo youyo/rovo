@@ -61,10 +61,21 @@ export interface TaskSpec {
   /** owner/name */
   repository: string;
   baseSha: string;
-  /** 作業ブランチ名。`agent/task-<taskId>` と一致しなければ start を拒否する。 */
+  /**
+   * 作業ブランチ名。`agent/task-<taskId>`（continuation があるときは `agent/task-<continuation.root>`）と一致しなければ start を拒否する。
+   */
   branch: string;
-  /** TaskDO が作った初期コミットの SHA（base_sha の上の空コミット。作業ブランチの先頭は最初これを指す）。 */
+  /**
+   * TaskDO が作った初期コミットの SHA（base_sha の上の空コミット。作業ブランチの先頭は最初これを指す）。
+   * continuation があるときは base_sha と同じ（積み足しは空コミットを持たない）。
+   */
   initialSha: string;
+  /**
+   * 同じ PR への積み足し（docs/specs/continue-task.md）。あるときだけ、根のタスクの PR ブランチ `agent/task-<root>` に積む。
+   * of は元のタスクの id、root はチェーンの根の id（どちらも gateway の TaskDO が決める。ワーカーの入力からは決めない）。
+   * 省略は今の動き（自分の `agent/task-<taskId>`）。
+   */
+  continuation?: TaskContinuation;
   /**
    * push / clone 用の Installation Token。AgentDO は永続化せず、SandboxDO に暗号化して預ける。
    * start の同一性判定（fingerprint）には含めない（更新されうるため）。更新は setGitCredential で届く。
@@ -124,6 +135,14 @@ export interface TaskSpec {
    * 結果の review に本文を残す。省略 = client_review（レビューの段は動かない）。
    */
   workerReview?: WorkerReviewSpec;
+}
+
+/** 積み足しの指定（TaskSpec の continuation）。id はどちらも ^[A-Za-z0-9_-]+$ */
+export interface TaskContinuation {
+  /** 元のタスク（continue_task_id）の id */
+  of: string;
+  /** チェーンの根（PR ブランチを作ったタスク）の id。作業ブランチは agent/task-<root> */
+  root: string;
 }
 
 /** worker_review の指定（TaskDO が task_start の入力から作る） */

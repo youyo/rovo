@@ -138,9 +138,7 @@ describe("allowedRef（push を許す唯一の ref）", () => {
   const repo = { owner: "acme", name: "hello" };
   it("branchTaskId（積み足しの根。gateway 由来）があればそれ、無ければ taskId から作る。refs/heads/ を含む", () => {
     expect(allowedRef({ repo, taskId: "t1" })).toBe("refs/heads/agent/task-t1");
-    expect(allowedRef({ repo, taskId: "c1", branchTaskId: "r1" })).toBe(
-      "refs/heads/agent/task-r1",
-    );
+    expect(allowedRef({ repo, taskId: "c1", branchTaskId: "r1" })).toBe("refs/heads/agent/task-r1");
   });
 
   it("props.task（作業ブランチ名。依存のキャッシュ側では弱い検査の値が入る）は見ない", () => {

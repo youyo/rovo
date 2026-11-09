@@ -545,7 +545,9 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
 /** 偽 GitHub の bare リポジトリに、parent の上の空コミットを直接作る（人や他が PR ブランチへ push した commit の代用） */
 function externalCommit(repo: "hello" | "calc", parent: string, message: string): string {
   const dir = upstream.repoDir(repo);
-  const tree = execFileSync("git", ["-C", dir, "rev-parse", `${parent}^{tree}`]).toString().trim();
+  const tree = execFileSync("git", ["-C", dir, "rev-parse", `${parent}^{tree}`])
+    .toString()
+    .trim();
   return execFileSync("git", [
     "-C",
     dir,
@@ -618,7 +620,10 @@ describe("積み足し（continuation）: 門番は根のブランチ 1 本だ�
       expect(r.exitCode, target).not.toBe(0);
     }
     // ワーカーの bash からも同じく通らない
-    const viaBash = await bash(c, `cd /workspace && git push origin HEAD:${ref("cont-deny-other")}`);
+    const viaBash = await bash(
+      c,
+      `cd /workspace && git push origin HEAD:${ref("cont-deny-other")}`,
+    );
     expect(viaBash.exitCode).not.toBe(0);
     expect(receivePackPosts().length).toBe(before);
     expect(upstream.refSha("hello", ref("cont-deny-other"))).toBe(otherBefore);

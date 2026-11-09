@@ -37,7 +37,7 @@
 - 状態は `CREATING / RUNNING / INPUT_REQUIRED / VERIFYING / RECOVERING / COMPLETED / FAILED / BUDGET_EXCEEDED / CANCELLED`（`apps/gateway/src/tasks/state.ts`）。
 - consult は、モデルへの 1 回の質問。`UserDO` で月の枠から予約額を取り、モデルを呼び、実費で精算する（`apps/gateway/src/consult.ts`。失敗時は予約額のまま精算）。120 秒のタイムアウト。
 - 予算は `budget_policy`（`ask` は既定。上限に近づくと `INPUT_REQUIRED` で kind が `budget_extension` の質問を出し、延長は 1 タスク 2 回まで。`stop` は止まる）。
-- push の門番（`OutboundGateway`）は作業ブランチ `agent/task-<id>` だけを許す。
+- push の門番（`OutboundGateway`）が許すのは、**rovo が作った作業ブランチ `agent/task-*` だけ**（`^refs/heads/agent/task-[A-Za-z0-9_-]+$`）。通常はタスク自身のブランチで、同じ利用者が `continue_task_id` で同じ PR に積み足すときだけ、元のタスクのブランチを許す（`docs/specs/continue-task.md`）。クライアントが作ったブランチ・PR への書き込みは許さない。
 - GitHub App の権限は Contents R/W と Pull requests R/W（`docs/specs/design.md` 6.2）。PR にレビューやコメントを書くには足りている。
 
 ## worker_review
@@ -159,7 +159,7 @@
 修正をさせたいときは、クライアントのブランチには push せず、**その PR の上に積む別の PR** として出す。
 
 - 作業ブランチは通常どおり `agent/task-<id>`。base はクライアントの PR の head ブランチ（`base_sha` は固定した head の SHA）。ワーカーが修正を commit し、`agent/task-<id>` の PR を、クライアントの PR のブランチに向けて開く。
-- 今の push の門番（`OutboundGateway`）が許すのは作業ブランチ `agent/task-<id>` だけで、**これを広げない**。クライアントのブランチへの書き込みを rovo に許さないことが、この設計の前提になっている。
+- push の門番（`OutboundGateway`）が許すのは、**rovo が作った作業ブランチ `agent/task-*` だけ**（`^refs/heads/agent/task-[A-Za-z0-9_-]+$`）。タスク自身のブランチに加え、同じ利用者が `continue_task_id` で同じ PR に積み足すときの、元のタスクのブランチを許す（`docs/specs/continue-task.md`）。ブランチ名は gateway が決めて props で渡し、ワーカーの入力からは決めない。**クライアントが作ったブランチ・PR への書き込みは、これまでどおり許さない**。この拡張の別 PR も、この前提を保つ。
 - クライアントは別 PR を読んで、よければ自分の PR にマージする（rovo はマージしない）。
 - この拡張は、`task_review` の入力に修正の回数（`review_fix_rounds`）を足す形になる。実装時に別の仕様案として切り出す。
 

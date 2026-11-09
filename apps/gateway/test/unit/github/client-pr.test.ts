@@ -216,6 +216,38 @@ describe("deleteBranch", () => {
   });
 });
 
+describe("hasOpenPullWithBase", () => {
+  const URL = "GET /repos/acme/widgets/pulls";
+  it("state=open&base=<branch>&per_page=1 を呼び、1 件以上あれば true、空なら false", async () => {
+    const yes = make({ [URL]: () => json([PULL]) });
+    expect(await yes.client.hasOpenPullWithBase("tok", "acme/widgets", "agent/task-X")).toBe(true);
+    const u = new URL(yes.calls[0]?.url ?? "");
+    expect(u.searchParams.get("state")).toBe("open");
+    expect(u.searchParams.get("base")).toBe("agent/task-X");
+    expect(u.searchParams.get("per_page")).toBe("1");
+    expect(yes.calls[0]?.headers.get("authorization")).toBe("Bearer tok");
+    const no = make({ [URL]: () => json([]) });
+    expect(await no.client.hasOpenPullWithBase("tok", "acme/widgets", "b")).toBe(false);
+  });
+
+  it("エラーは GitHubError（403 は forbidden、5xx は upstream_unavailable、配列でなければ upstream_unavailable）", async () => {
+    const f = (status: number) =>
+      make({ [URL]: () => json({ message: "x" }, status) }).client.hasOpenPullWithBase(
+        "t",
+        "acme/widgets",
+        "b",
+      );
+    expect((await errOf(f(403))).code).toBe("forbidden");
+    expect((await errOf(f(500))).code).toBe("upstream_unavailable");
+    const odd = make({ [URL]: () => json({ a: 1 }) }).client.hasOpenPullWithBase(
+      "t",
+      "acme/widgets",
+      "b",
+    );
+    expect((await errOf(odd)).code).toBe("upstream_unavailable");
+  });
+});
+
 describe("getCheckState（PR の head に付いた check と status）", () => {
   const SHA = "a".repeat(40);
   const RUNS = `GET /repos/acme/widgets/commits/${SHA}/check-runs`;

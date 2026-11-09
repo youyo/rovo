@@ -1019,10 +1019,17 @@ export class FakeGitHubApp {
     if (method === "GET" && rest === "/pulls") {
       const head = url.searchParams.get("head") ?? "";
       const state = url.searchParams.get("state") ?? "open";
+      const baseFilter = url.searchParams.get("base") ?? "";
       const branch = head.includes(":") ? head.slice(head.indexOf(":") + 1) : head;
-      const list = repo.pulls.filter(
-        (p) => (state === "all" || p.state === state) && (head === "" || p.head === branch),
-      );
+      const perPage = Number(url.searchParams.get("per_page") ?? "30");
+      const list = repo.pulls
+        .filter(
+          (p) =>
+            (state === "all" || p.state === state) &&
+            (head === "" || p.head === branch) &&
+            (baseFilter === "" || p.base === baseFilter),
+        )
+        .slice(0, Number.isFinite(perPage) && perPage > 0 ? perPage : 30);
       return res(
         200,
         list.map((p) => this.pullJson(repo, p)),

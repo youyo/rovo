@@ -153,6 +153,12 @@ describe("nextSteps", () => {
 });
 
 describe("task_pr_ready / task_pr_merge の応答の next_steps", () => {
+  it("task_pr_merge の案内: 既定で作業ブランチが消えること・残すなら delete_branch: false", () => {
+    const t = nextSteps(input({}, { draft: false }));
+    expect(t).toContain("既定で作業ブランチを削除する");
+    expect(t).toContain("delete_branch: false");
+  });
+
   it("ready 後: 全体のテストとレビューはクライアントの手元。task_pr_merge か直接マージ", () => {
     const t = nextStepsAfterReady("client_review");
     expect(t).toContain("全体のテスト");
@@ -163,6 +169,8 @@ describe("task_pr_ready / task_pr_merge の応答の next_steps", () => {
   it("merge 後: マージ済みで終わり。ブランチを残したことと、消せなかったことを伝える", () => {
     expect(nextStepsAfterMerge({ branch_deleted: null })).toContain("マージした");
     expect(nextStepsAfterMerge({ branch_deleted: null })).toContain("作業ブランチは残");
+    expect(nextStepsAfterMerge({ branch_deleted: null })).toContain("delete_branch: false");
+    expect(nextStepsAfterMerge({ branch_deleted: true })).toContain("作業ブランチを削除した");
     expect(nextStepsAfterMerge({ branch_deleted: true })).not.toContain("作業ブランチは残");
     expect(nextStepsAfterMerge({ branch_deleted: false })).toContain("削除できなかった");
   });

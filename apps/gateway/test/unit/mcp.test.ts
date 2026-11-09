@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { listSandboxInstances } from "@rovo/models";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApiApp } from "../../src/app";
 import { readWorkerAudit } from "../../src/audit-sink";
 import type {
@@ -638,6 +638,35 @@ describe("エラーの返し方", () => {
     expect(JSON.parse(text).code).toBe("internal");
     expect(text).not.toMatch(/ghu_|boom|secret|\.ts/);
     await client.close();
+  });
+
+  it("DO の想定外の例外は、ログにエラー名とマスク済みのメッセージを残す（応答には出さない）", async () => {
+    const u = await user("alice");
+    const broken = Object.create(env, {
+      USER_DO: {
+        value: {
+          getByName() {
+            throw new TypeError(`boom ghu_${"A".repeat(36)}`);
+          },
+        },
+      },
+    }) as Env;
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const client = await connect(createApiApp(), u.props, broken);
+      await client.callTool({
+        name: "task_status",
+        arguments: { task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+      });
+      await client.close();
+      const call = spy.mock.calls.find((c) => c[0] === "mcp_tool_error");
+      expect(call?.[1]).toBe("task_status");
+      expect(call?.[2]).toBe("TypeError");
+      expect(String(call?.[3])).toContain("boom");
+      expect(String(call?.[3])).not.toContain(`ghu_${"A".repeat(36)}`);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("DO が一時的に使えない（retryable）なら upstream_unavailable", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  allowedRef,
   buildTestUpstreamUrl,
   buildUpstreamHeaders,
   classifyDestination,
@@ -130,5 +131,44 @@ describe("limitBody", () => {
     await expect(new Response(limitBody(stream(["abcdef", "ghijkl"]), 8)).text()).rejects.toThrow(
       /too large/,
     );
+  });
+});
+
+describe("allowedRef（push を許す唯一の ref）", () => {
+  const repo = { owner: "acme", name: "hello" };
+  it("branchTaskId（積み足しの根。gateway 由来）があればそれ、無ければ taskId から作る。refs/heads/ を含む", () => {
+    expect(allowedRef({ repo, taskId: "t1" })).toBe("refs/heads/agent/task-t1");
+    expect(allowedRef({ repo, taskId: "c1", branchTaskId: "r1" })).toBe(
+      "refs/heads/agent/task-r1",
+    );
+  });
+
+  it("props.task（作業ブランチ名。依存のキャッシュ側では弱い検査の値が入る）は見ない", () => {
+    expect(allowedRef({ repo, task: "agent/task-evil", taskId: "t1" })).toBe(
+      "refs/heads/agent/task-t1",
+    );
+    expect(allowedRef({ repo, task: "main", taskId: "c1", branchTaskId: "r1" })).toBe(
+      "refs/heads/agent/task-r1",
+    );
+  });
+
+  it("^[A-Za-z0-9_-]+$ 以外は undefined（fail-closed）。branchTaskId が不正でも taskId に戻らない", () => {
+    for (const bad of ["", "a/b", "a.b", "../main", "a b", "x\n", "r1:refs/heads/main"]) {
+      expect(allowedRef({ repo, taskId: bad }), JSON.stringify(bad)).toBeUndefined();
+      expect(allowedRef({ repo, taskId: "t1", branchTaskId: bad }), JSON.stringify(bad)).toBe(
+        undefined,
+      );
+    }
+  });
+
+  it("返す ref は必ず ^refs/heads/agent/task-[A-Za-z0-9_-]+$ に一致する", () => {
+    for (const id of ["t1", "01HZX", "a_b-c", "R"]) {
+      for (const props of [
+        { repo, taskId: id },
+        { repo, taskId: "t1", branchTaskId: id },
+      ]) {
+        expect(allowedRef(props)).toMatch(/^refs\/heads\/agent\/task-[A-Za-z0-9_-]+$/);
+      }
+    }
   });
 });

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -536,5 +537,207 @@ describe("AgentDO: git_commit のたびの push と、完了時の同期", () =>
     expect(r.warnings.some((w) => /push_failed/.test(w))).toBe(true);
     // 検証は通っているので completed のまま、patch は結果に残る
     expect(r.patch).toContain("a + b");
+  });
+});
+
+// ---- 同じ PR への積み足し（continuation。docs/specs/continue-task.md）----
+
+/** 偽 GitHub の bare リポジトリに、parent の上の空コミットを直接作る（人や他が PR ブランチへ push した commit の代用） */
+function externalCommit(repo: "hello" | "calc", parent: string, message: string): string {
+  const dir = upstream.repoDir(repo);
+  const tree = execFileSync("git", ["-C", dir, "rev-parse", `${parent}^{tree}`]).toString().trim();
+  return execFileSync("git", [
+    "-C",
+    dir,
+    ...GIT_ID,
+    "commit-tree",
+    tree,
+    "-p",
+    parent,
+    "-m",
+    message,
+  ])
+    .toString()
+    .trim();
+}
+
+describe("積み足し（continuation）: 門番は根のブランチ 1 本だけを許す", () => {
+  /** 根 root の PR ブランチを用意し、積み足しタスク task の SandboxDO を、根のブランチで ensureReady する */
+  async function contSandbox(task: string, root: string) {
+    const c = sandboxClient(wrangler.baseUrl, task);
+    sandboxes.push(c);
+    const { branch, initialSha } = upstream.createTaskBranch("hello", root);
+    await c.ensureReady({
+      repository: "acme/hello",
+      baseSha: initialSha,
+      branch,
+      initialSha,
+      deadlineAt: Date.now() + 3_600_000,
+      continuation: { of: root, root },
+    });
+    return { c, branch, initialSha };
+  }
+  /** 許可証付きの自動の push（ref は任意。許可証の ref も同じ値にする） */
+  const pushTo = (c: ReturnType<typeof sandboxClient>, target: string, sha: string) =>
+    c.exec(["git", ...ISOLATION, "push", HELLO_URL, `${sha}:${target}`], {
+      cwd: "/workspace",
+      env: ISOLATION_ENV,
+      timeoutMs: 120_000,
+      pushPermit: { ref: target, newSha: sha },
+    });
+
+  it("根のブランチ（agent/task-<root>）から clone され、根のブランチへの自動の push が通る", async () => {
+    const { c } = await contSandbox("cont-sb", "cont-sb-root");
+    const head = (await c.exec(["git", "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+    expect(head).toBe("agent/task-cont-sb-root");
+    await c.writeFile("/workspace/c.txt", "c\n");
+    await bash(c, `cd /workspace && git add -A && git ${GIT_ID.join(" ")} commit -q -m c`);
+    const local = await headSha(c);
+    const r = await pushTo(c, ref("cont-sb-root"), local);
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(upstream.refSha("hello", ref("cont-sb-root"))).toBe(local);
+    // 積み足しタスク自身のブランチは作られない
+    expect(upstream.refSha("hello", ref("cont-sb"))).toBeUndefined();
+  });
+
+  it("branchTaskId があっても、根以外の agent/task-*（自分の id を含む）と main へは、許可証付きでも push できない", async () => {
+    const { c } = await contSandbox("cont-deny", "cont-deny-root");
+    upstream.createTaskBranch("hello", "cont-deny-other");
+    const otherBefore = upstream.refSha("hello", ref("cont-deny-other"));
+    await c.writeFile("/workspace/d.txt", "d\n");
+    await bash(c, `cd /workspace && git add -A && git ${GIT_ID.join(" ")} commit -q -m d`);
+    const local = await headSha(c);
+    const before = receivePackPosts().length;
+    for (const target of [
+      ref("cont-deny-other"),
+      ref("cont-deny"),
+      "refs/heads/main",
+      "refs/tags/v-cont",
+    ]) {
+      const r = await pushTo(c, target, local);
+      expect(r.exitCode, target).not.toBe(0);
+    }
+    // ワーカーの bash からも同じく通らない
+    const viaBash = await bash(c, `cd /workspace && git push origin HEAD:${ref("cont-deny-other")}`);
+    expect(viaBash.exitCode).not.toBe(0);
+    expect(receivePackPosts().length).toBe(before);
+    expect(upstream.refSha("hello", ref("cont-deny-other"))).toBe(otherBefore);
+    expect(upstream.refSha("hello", ref("cont-deny"))).toBeUndefined();
+    expect(upstream.refSha("hello", "refs/heads/main")).toBe(upstream.helloSha);
+    expect(upstream.refSha("hello", "refs/tags/v-cont")).toBeUndefined();
+  });
+
+  it("clone した時点で根のブランチが initialSha より進んでいたら（人の push）、ensureReady が失敗する（fail-closed）", async () => {
+    const root = "cont-moved-root";
+    const { branch, initialSha } = upstream.createTaskBranch("hello", root);
+    upstream.setRef("hello", `refs/heads/${branch}`, externalCommit("hello", initialSha, "human"));
+    const c = sandboxClient(wrangler.baseUrl, "cont-moved");
+    sandboxes.push(c);
+    await expect(
+      c.ensureReady({
+        repository: "acme/hello",
+        baseSha: initialSha,
+        branch,
+        initialSha,
+        deadlineAt: Date.now() + 3_600_000,
+        continuation: { of: root, root },
+      }),
+    ).rejects.toThrow(/branch_moved/);
+  });
+});
+
+describe("積み足し（continuation）: AgentDO の完了時の push", () => {
+  /** 根 root の PR ブランチ（初期コミットの上）を用意して、積み足しタスク task を始める */
+  async function runCont(task: string, root: string, script: ScriptStep[]) {
+    const { branch, initialSha } = upstream.createTaskBranch("calc", root, { initialCommit: true });
+    const s: TaskSpec = {
+      ...spec(task),
+      baseSha: initialSha,
+      branch,
+      initialSha,
+      continuation: { of: root, root },
+    };
+    const agent = agentClient(wrangler.baseUrl, task);
+    const sandbox = sandboxClient(wrangler.baseUrl, task);
+    sandboxes.push(sandbox);
+    await agent.setScript(s.instructions, script);
+    expect(await agent.start(s)).toMatchObject({ status: "accepted" });
+    return { agent, spec: s };
+  }
+
+  it("既存のブランチの先頭から積んだ commit が、完了時に根のブランチへ push される", async () => {
+    const { agent, spec: s } = await runCont("cont-flow", "cont-flow-root", [
+      FIX,
+      tool("git_commit", { message: "fix: correct add" }),
+      tool("report_completion", { summary: "done" }),
+    ]);
+    expect(await agent.waitForTerminal()).toBe("completed");
+    const r = await agent.getResult();
+    if (r.status !== "completed") throw new Error(`unexpected ${r.status}`);
+    const sha = r.verification.commitSha ?? "";
+    expect(sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(sha).not.toBe(s.initialSha);
+    expect(r.pushedSha).toBe(sha);
+    expect(upstream.refSha("calc", ref("cont-flow-root"))).toBe(sha);
+    expect(upstream.refSha("calc", ref("cont-flow"))).toBeUndefined();
+    expect(r.warnings.filter((w) => /push/i.test(w))).toEqual([]);
+  });
+
+  it("作業中に別の commit が push されていたら、完了時の push は lease で止まり、上書きしない（branch_moved_externally）", async () => {
+    const root = "cont-ext-root";
+    // チェックポイントの push のあと、リモートの先頭が自分の HEAD と違うものになるまで待つ（テストが外から push する）
+    const waitMoved = [
+      "head=$(git rev-parse HEAD)",
+      `for i in $(seq 1 120); do r=$(git ls-remote origin ${ref(root)} | cut -f1); if [ -n "$r" ] && [ "$r" != "$head" ]; then echo REMOTE-MOVED; break; fi; sleep 1; done`,
+    ].join("; ");
+    const { agent, spec: s } = await runCont("cont-ext", root, [
+      FIX,
+      tool("git_commit", { message: "fix: correct add" }),
+      tool("bash", { command: waitMoved }),
+      tool("report_completion", { summary: "done" }),
+    ]);
+    let checkpoint = "";
+    await expect
+      .poll(
+        () => {
+          checkpoint = upstream.refSha("calc", ref(root)) ?? "";
+          return checkpoint !== s.initialSha && checkpoint !== "";
+        },
+        { timeout: 180_000, interval: 500 },
+      )
+      .toBe(true);
+    const human = externalCommit("calc", checkpoint, "human");
+    upstream.setRef("calc", ref(root), human);
+    expect(await agent.waitForTerminal()).toBe("completed");
+    const r = await agent.getResult();
+    if (r.status !== "completed") throw new Error(`unexpected ${r.status}`);
+    expect(r.pushedSha).toBeUndefined();
+    expect(r.warnings.some((w) => /push_failed/.test(w))).toBe(true);
+    expect(upstream.refSha("calc", ref(root))).toBe(human);
+    const events = await agent.allEvents();
+    const failed = events.find((e) => e.type === "push_failed" && e.data.final === true);
+    expect(String(failed?.data.message)).toMatch(/^branch_moved_externally:/);
+    const bashEnd = events.find((e) => e.type === "tool_end" && e.data.name === "bash");
+    expect(JSON.stringify(bashEnd)).toContain("REMOTE-MOVED");
+  });
+
+  it("前のタスクの commit を書き換えた（initialSha が祖先でない）commit は push しない（history_rewritten）", async () => {
+    const root = "cont-rw-root";
+    const { agent, spec: s } = await runCont("cont-rw", root, [
+      FIX,
+      // 初期コミット（前のタスクの commit の代わり）を落として、その親の上に commit し直す
+      tool("bash", {
+        command: `git reset -q --soft HEAD~1 && git ${GIT_ID.join(" ")} commit -qam rewritten`,
+      }),
+      tool("report_completion", { summary: "done" }),
+    ]);
+    expect(await agent.waitForTerminal()).toBe("completed");
+    const r = await agent.getResult();
+    if (r.status !== "completed") throw new Error(`unexpected ${r.status}`);
+    expect(r.pushedSha).toBeUndefined();
+    expect(upstream.refSha("calc", ref(root))).toBe(s.initialSha);
+    const events = await agent.allEvents();
+    const failed = events.find((e) => e.type === "push_failed" && e.data.final === true);
+    expect(String(failed?.data.message)).toMatch(/^history_rewritten:/);
   });
 });

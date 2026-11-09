@@ -235,6 +235,25 @@ describe("decideOutbound: GitHub の push（git-receive-pack）", () => {
     expect(get(`${base}/info/refs?service=git-upload-pack`, { repo }).allow).toBe(true);
   });
 
+  it("WORK_BRANCH は refs/heads/ を含まない名前（agent/task-<id>）だけ。refs/heads/ 付き・タグ・他の形は push を許可しない", () => {
+    // allowedRef（outbound-gateway）が返す ref は refs/heads/ を含み、decideOutbound には refs/heads/ を外した名前が渡る
+    expect(post(`${base}/git-receive-pack`, { repo, branch: "agent/task-root01" })).toEqual({
+      allow: true,
+    });
+    for (const b of [
+      "refs/heads/agent/task-root01",
+      "refs/tags/agent/task-root01",
+      "agent/task-root01/x",
+      "agent/task-a.b",
+      "agent/task-../main",
+    ]) {
+      expect(post(`${base}/git-receive-pack`, { repo, branch: b }), b).toMatchObject({
+        allow: false,
+        code: "github_push_not_allowed",
+      });
+    }
+  });
+
   it("別のリポジトリへの push は拒否する", () => {
     expect(
       get("https://github.com/octocat/Other/info/refs?service=git-receive-pack", withBranch),

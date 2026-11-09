@@ -22,7 +22,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          # v5.2.4 から、署名付きのチェックサムをキャッシュに入れて毎回の取得を省く。古いキャッシュには入っていないので、鍵を変えて保存し直す
+          cache_key_prefix: mise-v2
       - name: pnpm のストアの場所を取り出す
         id: pnpm-store
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
@@ -46,7 +49,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          # v5.2.4 から、署名付きのチェックサムをキャッシュに入れて毎回の取得を省く。古いキャッシュには入っていないので、鍵を変えて保存し直す
+          cache_key_prefix: mise-v2
       - run: mise run scan:gitleaks
 
   # 公開のための点検（account id・workers.dev・リポジトリ名・絶対パス・Claude-Session）。
@@ -61,5 +67,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          # v5.2.4 から、署名付きのチェックサムをキャッシュに入れて毎回の取得を省く。古いキャッシュには入っていないので、鍵を変えて保存し直す
+          cache_key_prefix: mise-v2
       - run: mise run scan:secrets

@@ -238,11 +238,11 @@ describe("TaskDO.cleanupBranch: 判断の順と理由コード", () => {
   it("消えたら task_status と task_result の pr に branch_deleted: true が付く", async () => {
     const t = await finished();
     const before = await t.stub.result(t.owner);
-    expect(before.ok && before.value.pr).not.toHaveProperty("branch_deleted");
+    expect(before.ok && before.result.pr).not.toHaveProperty("branch_deleted");
     mergeOutside(t);
     await cleanup(t.stub);
     const res = await t.stub.result(t.owner);
-    expect(res.ok && res.value.pr).toMatchObject({ branch_deleted: true });
+    expect(res.ok && res.result.pr).toMatchObject({ branch_deleted: true });
     const st = await t.stub.getStatus(t.owner);
     expect(st.ok && (st.task as { pr?: unknown }).pr).toMatchObject({ branch_deleted: true });
   });
@@ -400,7 +400,12 @@ describe("TaskDO.cleanupBranch: 積み足し（branch_lock・branch_chain）", (
       inst.env = { ...inst.env, ENVIRONMENT: "test" };
     });
     await stub.advance();
-    await exec(stub, "UPDATE task SET continuation_of = ?, continuation_root = ?", root.id, root.id);
+    await exec(
+      stub,
+      "UPDATE task SET continuation_of = ?, continuation_root = ?",
+      root.id,
+      root.id,
+    );
     await exec(
       stub,
       "UPDATE github_link SET branch = ?, pr_number = ?, pr_url = ?, initial_sha = ?",

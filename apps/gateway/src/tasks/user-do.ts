@@ -156,6 +156,9 @@ export type ReserveResult =
 /** 積み足しの予約の鍵（reserve の lock）。branch は agent/task-<根>、continueOf は元のタスクの id */
 export type ReserveLock = { branch: string; continueOf: string };
 
+/** branchCleanupGate の答え（作業ブランチの掃除の前に、積み足しの連なりを見た結果） */
+export type BranchCleanupGate = "ok" | "continuation_active" | "not_chain_tail";
+
 function isReserveLock(v: unknown): v is ReserveLock {
   const l = v as ReserveLock | null;
   return (
@@ -2842,6 +2845,27 @@ export class UserDO extends DurableObject<Env> {
   async branchBusy(branch: string): Promise<string | null> {
     if (typeof branch !== "string") return null;
     return this.lockRow(branch)?.task_id ?? null;
+  }
+
+  /**
+   * 作業ブランチの掃除（TaskDO.cleanupBranch）の前に、同じブランチを共有する積み足しの連なりを見る。同期的に SQL を読むだけ。
+   * branch_lock にそのブランチの行があれば continuation_active（積み足しが実行中・始まろうとしている。あとで再試行）。
+   * branch_chain の最新が taskId でなければ not_chain_tail（連なりの末尾のタスクが判断する）。
+   * どちらの行も無ければ、積み足しされていない PR なので ok。
+   */
+  async branchCleanupGate(branch: string, taskId: string): Promise<BranchCleanupGate> {
+    if (typeof branch !== "string" || typeof taskId !== "string" || branch === "") {
+      return "continuation_active";
+    }
+    if (this.lockRow(branch)) return "continuation_active";
+    const chain = this.ctx.storage.sql
+      .exec<{ latest_task_id: string }>(
+        "SELECT latest_task_id FROM branch_chain WHERE branch = ?",
+        branch,
+      )
+      .toArray()[0];
+    if (chain && chain.latest_task_id !== taskId) return "not_chain_tail";
+    return "ok";
   }
 
   // ---- PR の Ready 化とマージ（D9）----

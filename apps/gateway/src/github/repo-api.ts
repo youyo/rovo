@@ -438,11 +438,34 @@ export class GitHubRepoApi {
     return { diff: cut >= 0 ? text.slice(0, cut + 1) : "", truncated: true };
   }
 
-  /** ブランチの先頭が expectedSha のときだけ消す。消したら true。 */
-  async deleteBranch(branch: string, expectedSha: string): Promise<boolean> {
+  /**
+   * ブランチの先頭が expectedSha のときだけ消す。消したら true、先頭が違えば消さずに false。
+   * ブランチがすでに無い（GET が 404、または DELETE が 404 / 422 = 確かめてから消すまでの間に他で消えた）ときは
+   * "already_gone"（例外にしない）。それ以外の失敗は GitHubApiError。
+   */
+  async deleteBranch(branch: string, expectedSha: string): Promise<boolean | "already_gone"> {
     const sha = await this.getBranchSha(branch);
+    if (sha === null) return "already_gone";
     if (sha !== expectedSha) return false;
-    await this.call("delete ref", "DELETE", this.repoPath(`/git/refs/heads/${encPath(branch)}`));
-    return true;
+    const { status } = await this.call(
+      "delete ref",
+      "DELETE",
+      this.repoPath(`/git/refs/heads/${encPath(branch)}`),
+      undefined,
+      [404, 422],
+    );
+    return status === 404 || status === 422 ? "already_gone" : true;
+  }
+
+  /**
+   * そのブランチを base にした open な PR があるか（GET pulls?state=open&base=<branch>&per_page=1）。
+   * あるブランチを消すと、それを base にした PR は GitHub が閉じてしまうので、消す前に確かめる。
+   */
+  async hasOpenPullWithBase(branch: string): Promise<boolean> {
+    const what = "list pulls";
+    const q = new URLSearchParams({ state: "open", base: branch, per_page: "1" });
+    const { json } = await this.call(what, "GET", `${this.repoPath("/pulls")}?${q}`);
+    if (!Array.isArray(json)) return this.bad(what);
+    return json.length > 0;
   }
 }

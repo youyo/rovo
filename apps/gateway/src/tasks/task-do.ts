@@ -4470,7 +4470,7 @@ export class TaskDO extends DurableObject<Env> {
       },
       { showCost: this.env.PR_SHOW_COST === "true" },
     );
-    const body = applyManagedBlock(pull.body, block);
+    const body = applyManagedBlock(pull.body, block, row.id, { isRoot: true });
     if (body !== pull.body) await api.updatePullBody(number, body);
     this.ctx.storage.sql.exec(
       "UPDATE github_link SET head_sha = ?, head_matches = ?, warnings = ?, body_done = 1, finalize_attempts = 0, finalize_retry_at = 0",

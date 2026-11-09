@@ -82,7 +82,7 @@ import {
   type TaskSummary,
 } from "./summary";
 import { isTaskId, ulid } from "./ulid";
-import type { ReviewPull, UserDO } from "./user-do";
+import type { BranchCleanupGate, ReviewPull, UserDO } from "./user-do";
 import {
   type BudgetPolicy,
   computeFingerprint,
@@ -284,7 +284,14 @@ export type TaskView = {
   /** task_review のタスクだけ: 対象の PR */
   target_pr?: TargetPr;
   /** 積み足し（continue_task_id）のタスクだけ: 元と同じ PR と、元のタスクの id（task_status に付く） */
-  pr?: { number: number; url: string; branch: string; continuation_of: string };
+  pr?: {
+    number: number;
+    url: string;
+    branch?: string;
+    continuation_of?: string;
+    /** 作業ブランチを消せたときだけ true が付く */
+    branch_deleted?: true;
+  };
   repository: string;
   title: string;
   draft_pr_url: string | null;
@@ -396,6 +403,8 @@ export type ResultView = {
     merged: boolean;
     /** 変更なしで終わったので rovo が Draft PR を閉じた（閉じたときだけ true が付く） */
     closed_empty?: true;
+    /** 作業ブランチを消せたときだけ true が付く */
+    branch_deleted?: true;
     /** GitHub から読んだ PR の head。まだ読めていなければ null */
     head_sha: string | null;
     /** head が検証済みの SHA と一致するか。比較できない（未読・検証済みの SHA なし）なら null */
@@ -613,8 +622,44 @@ export type PrContextResult =
 /** UserDO での GitHub 操作の結果を TaskDO に記録する（状態の更新と監査）。 */
 export type PrAction =
   /** changed: false は、すでにその状態だった（冪等な再実行）。状態は合わせるが、pr_ready / pr_merged は監査しない */
-  | { kind: "ready" | "merge"; outcome: "done"; changed?: boolean }
+  | {
+      kind: "ready" | "merge";
+      outcome: "done";
+      changed?: boolean;
+      /** merge のみ: task_pr_merge で作業ブランチを消せた */
+      branch_deleted?: boolean;
+      /** merge のみ: 呼び出し側が delete_branch: false を明示した */
+      branch_kept_by_request?: boolean;
+    }
   | { kind: "ready" | "merge"; outcome: "denied"; reason: string };
+
+/** 作業ブランチの掃除（cleanupBranch）の理由コード（固定）。監査ログ（branch_cleanup）と github_link にこのまま出る */
+export type BranchCleanupReason =
+  | "deleted"
+  | "already_gone"
+  | "pr_open"
+  | "base_of_open_pr"
+  | "head_changed"
+  | "head_not_verified"
+  | "pr_mismatch"
+  | "app_unavailable"
+  | "kept_by_request"
+  | "continuation_active"
+  | "not_chain_tail"
+  | "no_pr"
+  | "not_finished"
+  | "github_error"
+  | "rate_limited";
+
+/**
+ * cleanupBranch の結果。done: true は「このタスクはもう試さない」。
+ * rate_limited: true は GitHub がレート制限を返した（呼び出し側はその回の残りを止める）。
+ */
+export type BranchCleanupOutcome = {
+  reason: BranchCleanupReason;
+  done: boolean;
+  rate_limited?: true;
+};
 
 export type ResultOutcome =
   | { ok: true; result: ResultView }
@@ -834,6 +879,14 @@ type GithubRow = {
   pr_merged: number;
   /** 変更なしで終わったので、空の Draft PR を rovo が閉じた */
   closed_empty: number;
+  /** task_pr_merge で作業ブランチを消せた */
+  branch_deleted: number;
+  /** task_pr_merge で delete_branch: false を明示した */
+  branch_kept_by_request: number;
+  /** 作業ブランチの掃除（cleanupBranch）の最後の理由（BranchCleanupReason。NULL はまだ判断していない） */
+  branch_cleanup_reason: string | null;
+  /** 掃除を終えた（もう試さない） */
+  branch_cleanup_done: number;
   /** D14: TaskSpec.deps の JSON。"null" は lockfile なし（または読めなかった）。NULL は未取得（spec に載せない） */
   deps: string | null;
   /** 先行タスクから引き継いだ警告（JSON の InheritedWarning[]）。積み足しでないタスクは [] */
@@ -850,9 +903,21 @@ type GitHubReadRequest = NonNullable<ReturnType<typeof parseWorkerReadRequest>>;
  */
 const GIT_TOKEN_KINDS = "kind IN ('start', 'refresh', 'final')";
 const API_READ_TOKEN_KINDS = "kind IN ('api_read_start', 'api_read_refresh')";
-type TokenKind = "start" | "refresh" | "final" | "api_read_start" | "api_read_refresh";
+type TokenKind =
+  | "start"
+  | "refresh"
+  | "final"
+  | "api_read_start"
+  | "api_read_refresh"
+  /** 作業ブランチの掃除（cleanupBranch）。使い終わったらすぐ失効させる */
+  | "cleanup";
 const isApiReadKind = (kind: string): boolean =>
   kind === "api_read_start" || kind === "api_read_refresh";
+/**
+ * 発行・失効を監査ログだけに出す token（events には積まない）。読み取り専用 token と、終端の後に使う掃除の token。
+ * events に積むと公開イベントの seq が動き、task_wait に内部の token の出入りが見えるだけになるため。
+ */
+const isAuditOnlyKind = (kind: string): boolean => isApiReadKind(kind) || kind === "cleanup";
 
 type TokenRow = {
   id: number;
@@ -1178,6 +1243,27 @@ export class TaskDO extends DurableObject<Env> {
       this.ctx.storage.sql,
       "github_link",
       "closed_empty",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    // task_pr_merge で作業ブランチを消せた / delete_branch: false を明示した（後続の掃除が読む。既存の行は 0）
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "branch_deleted",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "branch_kept_by_request",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    // 作業ブランチの掃除（cleanupBranch）の最後の理由（上書き）と、終えたか（既存の行は NULL / 0）
+    addColumnIfMissing(this.ctx.storage.sql, "github_link", "branch_cleanup_reason", "TEXT");
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "branch_cleanup_done",
       "INTEGER NOT NULL DEFAULT 0",
     );
     // D14: 依存関係のキャッシュの指定（TaskSpec.deps の JSON。"null" は lockfile なし・読めなかった。NULL は未取得で、spec に載せない）
@@ -2093,15 +2179,22 @@ export class TaskDO extends DurableObject<Env> {
 
   /** 積み足しのタスクだけ: 元と同じ PR（number・url・branch）と、元のタスク（continuation_of）。task_status に足す */
   private continuationPr(row: TaskRow): Pick<TaskView, "pr"> {
-    if (row.continuation_of === null) return {};
     const gl = this.getGithub();
     if (!gl || gl.pr_number === null || gl.pr_url === null) return {};
+    const deleted = gl.branch_deleted === 1 ? { branch_deleted: true as const } : {};
+    if (row.continuation_of === null) {
+      // 積み足しでないタスクは、ブランチを消せたときだけ pr を付ける
+      return gl.branch_deleted === 1
+        ? { pr: { number: gl.pr_number, url: gl.pr_url, ...deleted } }
+        : {};
+    }
     return {
       pr: {
         number: gl.pr_number,
         url: gl.pr_url,
         branch: gl.branch,
         continuation_of: row.continuation_of,
+        ...deleted,
       },
     };
   }
@@ -2812,6 +2905,12 @@ export class TaskDO extends DurableObject<Env> {
         this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0");
       } else {
         this.ctx.storage.sql.exec("UPDATE github_link SET pr_draft = 0, pr_merged = 1");
+        if (action.branch_deleted === true) {
+          this.ctx.storage.sql.exec("UPDATE github_link SET branch_deleted = 1");
+        }
+        if (action.branch_kept_by_request === true) {
+          this.ctx.storage.sql.exec("UPDATE github_link SET branch_kept_by_request = 1");
+        }
       }
       this.bumpIndexRevision();
     });
@@ -2823,6 +2922,180 @@ export class TaskDO extends DurableObject<Env> {
     }
     // 終端の後は alarm が消えている。未配送の索引を配送するために、alarm を戻す
     await this.ensureAlarm();
+  }
+
+  // ---- 作業ブランチの掃除（issue #185「3. 削除の判断」「4. 監査とタスク記録」）----
+
+  /**
+   * マージ・クローズ後に残った作業ブランチを、条件がすべて揃うときだけ消す（1 タスク分の判断と実行）。
+   * ブランチ名はタスク記録（github_link.branch）からだけ取る。認証は Installation Token だけで、使い終わったら必ず失効させる。
+   * 判断の順: 終端でない（not_finished）→ PR が無い（no_pr）→ 記録で消し済み（deleted）→ 残すよう頼まれた（kept_by_request）
+   * → 積み足しの連なり（continuation_active / not_chain_tail）→ 使う head（head_not_verified）→ token（app_unavailable）
+   * → PR（pr_mismatch / pr_open）→ base にした open な PR（base_of_open_pr）→ ブランチの先頭（already_gone / head_changed / deleted）。
+   * not_finished 以外は github_link に理由を上書きで残し、理由が変わったときと done になったときだけ監査（branch_cleanup）に出す。
+   */
+  async cleanupBranch(): Promise<BranchCleanupOutcome> {
+    const row = this.getRow();
+    if (!row) return { reason: "not_finished", done: false };
+    const gl = this.getGithub();
+    // 終了処理（head の記録・PR 本文・token の失効）が済むまでは判断しない（head_matches がまだ無い）
+    if (
+      !isTerminal(this.statusOf(row)) ||
+      !this.isStopped() ||
+      (gl !== undefined && gl.finalize_done !== 1)
+    ) {
+      return { reason: "not_finished", done: false };
+    }
+    if (!gl || this.isReview(row) || gl.pr_number === null || gl.branch === "") {
+      return this.recordCleanup({ reason: "no_pr", done: true });
+    }
+    if (gl.branch_deleted === 1) return this.recordCleanup({ reason: "deleted", done: true });
+    if (gl.branch_kept_by_request === 1) {
+      return this.recordCleanup({ reason: "kept_by_request", done: true });
+    }
+    // 同じブランチを共有する積み足しの連なり: 実行中・始まろうとしている後続があれば消さない。末尾のタスクだけが判断する
+    let gate: BranchCleanupGate;
+    try {
+      gate = await this.userStub(row.owner_id).branchCleanupGate(gl.branch, row.id);
+    } catch (e) {
+      // 連なりを確かめられない。安全側（消さない・あとで再試行）。一時的な失敗なので記録も監査もしない
+      console.error("task_do_cleanup_gate_error", e instanceof Error ? e.name : typeof e);
+      return { reason: "continuation_active", done: false };
+    }
+    if (gate === "continuation_active") {
+      return this.recordCleanup({ reason: "continuation_active", done: false });
+    }
+    if (gate === "not_chain_tail")
+      return this.recordCleanup({ reason: "not_chain_tail", done: true });
+    // rovo が記録した head: 検証済みの commit と一致した head、または空の PR を閉じたときの初期コミット
+    const expected =
+      gl.head_matches === 1 && gl.head_sha !== null
+        ? gl.head_sha
+        : gl.closed_empty === 1 && gl.initial_sha !== null
+          ? gl.initial_sha
+          : null;
+    if (expected === null) return this.recordCleanup({ reason: "head_not_verified", done: true });
+    if (row.installation_id === null || row.repository_id === null) {
+      return this.recordCleanup({ reason: "app_unavailable", done: false });
+    }
+    let issued: { id: number; token: string };
+    try {
+      issued = await this.issueToken(row, "cleanup");
+    } catch (e) {
+      if (e instanceof GitHubApiError && e.rateLimited) return this.rateLimitedCleanup(gl);
+      return this.recordCleanup({ reason: "app_unavailable", done: false });
+    }
+    let outcome: BranchCleanupOutcome | "rate_limited";
+    try {
+      outcome = await this.judgeBranchCleanup(
+        row,
+        gl.branch,
+        gl.pr_number,
+        expected,
+        this.repoApi(row, issued.token),
+      );
+    } catch (e) {
+      if (e instanceof GitHubApiError && e.rateLimited) {
+        outcome = "rate_limited";
+      } else {
+        console.error(
+          "task_do_cleanup_error",
+          e instanceof GitHubApiError ? e.status : e instanceof Error ? e.name : typeof e,
+        );
+        outcome = { reason: "github_error", done: false };
+      }
+    } finally {
+      await this.revokeCleanupToken(issued.id);
+    }
+    if (outcome === "rate_limited") return this.rateLimitedCleanup(this.getGithub() ?? gl);
+    return this.recordCleanup(outcome);
+  }
+
+  /** GitHub を読んで消すかを決め、条件が揃えば消す（cleanupBranch の 8〜10）。GitHub のエラーは投げる */
+  private async judgeBranchCleanup(
+    row: TaskRow,
+    branch: string,
+    prNumber: number,
+    expected: string,
+    api: GitHubRepoApi,
+  ): Promise<BranchCleanupOutcome> {
+    const pull = await api.getPullHead(prNumber);
+    if (
+      pull.headRef !== branch ||
+      pull.headRepo === null ||
+      pull.headRepo.toLowerCase() !== row.repository.toLowerCase()
+    ) {
+      return { reason: "pr_mismatch", done: true };
+    }
+    if (pull.state === "open") return { reason: "pr_open", done: false };
+    // 消すと、そのブランチを base にした open な PR を GitHub が閉じてしまう
+    if (await api.hasOpenPullWithBase(branch)) return { reason: "base_of_open_pr", done: false };
+    const sha = await api.getBranchSha(branch);
+    if (sha === null) return { reason: "already_gone", done: true };
+    if (sha !== expected) return { reason: "head_changed", done: true };
+    const r = await api.deleteBranch(branch, expected);
+    if (r === true) return { reason: "deleted", done: true };
+    if (r === "already_gone") return { reason: "already_gone", done: true };
+    // 読んでから消すまでの間に先頭が動いた
+    return { reason: "head_changed", done: true };
+  }
+
+  /** レート制限: 理由は前回のもの（無ければ rate_limited）のままにして、その回の残りを止めさせる */
+  private rateLimitedCleanup(gl: GithubRow): BranchCleanupOutcome {
+    const prev = gl.branch_cleanup_reason as BranchCleanupReason | null;
+    const out = this.recordCleanup({ reason: prev ?? "rate_limited", done: false });
+    return { ...out, rate_limited: true };
+  }
+
+  /**
+   * 掃除の理由を github_link に上書きで残す（消せたら branch_deleted = 1 も立てる）。監査（branch_cleanup）は、
+   * 理由が前回と変わったときと、done になったときだけ出す（同じ理由の再試行では出さない）。reason と done 以外は出さない。
+   */
+  private recordCleanup(outcome: BranchCleanupOutcome): BranchCleanupOutcome {
+    const gl = this.getGithub();
+    if (!gl) return outcome;
+    const changed = gl.branch_cleanup_reason !== outcome.reason;
+    const becameDone = outcome.done && gl.branch_cleanup_done !== 1;
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        "UPDATE github_link SET branch_cleanup_reason = ?, branch_cleanup_done = ?",
+        outcome.reason,
+        outcome.done ? 1 : 0,
+      );
+      if (outcome.reason === "deleted" && gl.branch_deleted !== 1) {
+        this.ctx.storage.sql.exec("UPDATE github_link SET branch_deleted = 1");
+      }
+      if (changed || becameDone) {
+        this.emitAudit("branch_cleanup", {
+          caller: "system",
+          reason: outcome.reason,
+          done: outcome.done,
+        });
+      }
+    });
+    return outcome;
+  }
+
+  /**
+   * 掃除に使った token を失効させる（finally から呼ぶ。例外を投げない）。失効できなくても記録は閉じ、暗号文は残さない
+   * （期限は 1 時間。失効の失敗は監査ログに credential_revoke_given_up で残す）。
+   */
+  private async revokeCleanupToken(id: number): Promise<void> {
+    const t = this.tokenRows(`id = ${Number(id)}`)[0];
+    if (!t) return;
+    try {
+      if (t.revoked === 0) await this.revokeToken(t);
+    } catch (e) {
+      console.error(
+        "task_do_cleanup_revoke_error",
+        e instanceof GitHubApiError ? e.status : e instanceof Error ? e.name : typeof e,
+      );
+      this.emitAudit("credential_revoke_given_up", {
+        kind: t.kind,
+        reason: e instanceof SetupFailure ? "setup_failure" : "revoke_failed",
+      });
+    }
+    this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1, enc = '' WHERE id = ?", t.id);
   }
 
   /** task_result と R2 の result.json が共有する結果の組み立て。AgentDO の getResult が失敗・タイムアウトしたら throw する。 */
@@ -2968,6 +3241,7 @@ export class TaskDO extends DurableObject<Env> {
               draft: gl.pr_draft === null ? null : gl.pr_draft === 1,
               merged: gl.pr_merged === 1,
               ...(gl.closed_empty === 1 ? { closed_empty: true as const } : {}),
+              ...(gl.branch_deleted === 1 ? { branch_deleted: true as const } : {}),
               head_sha: gl.head_sha,
               head_matches_verified: gl.head_matches === null ? null : gl.head_matches === 1,
               // 積み足しのタスクだけ: 元と同じ PR のブランチと、元のタスクの id
@@ -3753,7 +4027,7 @@ export class TaskDO extends DurableObject<Env> {
         .one().id;
       // 読み取り専用 token は監査ログだけに出す（events には積まない。phase2.md の許可先の節）。
       // events に積むと公開イベントの seq がずれ、task_wait に中継の内部の token が見えるだけになるため
-      if (apiRead) this.emitAudit("credential_issued", { kind });
+      if (isAuditOnlyKind(kind)) this.emitAudit("credential_issued", { kind });
       else this.auditBoth("credential_issued", { kind });
       return inserted;
     });
@@ -4339,8 +4613,8 @@ export class TaskDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", r.id);
       const fields = { kind: r.kind, reason: expired ? "already_expired" : "revoked" };
-      // 読み取り専用 token（api_read_*）は監査ログだけ（発行と同じ）
-      if (isApiReadKind(r.kind)) this.emitAudit("credential_revoked", fields);
+      // 読み取り専用 token（api_read_*）と掃除の token は監査ログだけ（発行と同じ）
+      if (isAuditOnlyKind(r.kind)) this.emitAudit("credential_revoked", fields);
       else this.auditBoth("credential_revoked", fields);
     });
     this.notifyWaiters();
@@ -4425,7 +4699,7 @@ export class TaskDO extends DurableObject<Env> {
             this.ctx.storage.sql.exec("UPDATE git_token SET revoked = 1 WHERE id = ?", t.id);
             // 既存の warning が無い経路なので、events にも audit で残す（読み取り専用 token は監査ログだけ）
             const fields = { kind: t.kind, reason: "setup_failure" };
-            if (isApiReadKind(t.kind)) this.emitAudit("credential_revoke_given_up", fields);
+            if (isAuditOnlyKind(t.kind)) this.emitAudit("credential_revoke_given_up", fields);
             else this.auditBoth("credential_revoke_given_up", fields);
           });
           this.notifyWaiters();

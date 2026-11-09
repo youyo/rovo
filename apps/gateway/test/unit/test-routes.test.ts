@@ -328,3 +328,26 @@ describe("E2E 用テストルート /__test/task/token-state", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("E2E 用テストルート /__test/branch-cleanup/sweep（作業ブランチの掃除の 1 回分）", () => {
+  it("test 以外では 404（本番では Cron の scheduled だけが掃除を起こす）", async () => {
+    const app = createDefaultApp();
+    for (const environment of ["production", "", undefined]) {
+      const res = await app.request("/__test/branch-cleanup/sweep", post({}), withEnv(environment));
+      expect(res.status).toBe(404);
+    }
+  });
+
+  it("test では sweep を 1 回走らせ、件数を返す", async () => {
+    const res = await createDefaultApp().request(
+      "/__test/branch-cleanup/sweep",
+      post({}),
+      withEnv("test"),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      claimed: expect.any(Number),
+      stopped_by_rate_limit: false,
+    });
+  });
+});

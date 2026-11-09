@@ -2,6 +2,7 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { createApiApp, createDefaultApp } from "./app";
 import { auditFromWorker } from "./audit-sink";
 import { handleDashboard, isDashboardPath } from "./dashboard/serve";
+import { sweepBranchCleanup } from "./tasks/branch-cleanup";
 
 // Durable Object クラスは Worker のエントリから export する（wrangler.jsonc の migrations と対応）。
 export { DirectoryDO } from "./directory/directory-do";
@@ -72,5 +73,9 @@ export default {
     const response = await getProvider(env).fetch(request, env, ctx);
     await auditAuthFailure(request, response, env);
     return response;
+  },
+  // Cron Trigger（wrangler.jsonc の triggers.crons。毎時 17 分）: 作業ブランチの掃除（tasks/branch-cleanup.ts）
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(sweepBranchCleanup(env, Date.now()));
   },
 } satisfies ExportedHandler<Env>;

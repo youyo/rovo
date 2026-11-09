@@ -156,6 +156,9 @@ export type ReserveResult =
 /** 積み足しの予約の鍵（reserve の lock）。branch は agent/task-<根>、continueOf は元のタスクの id */
 export type ReserveLock = { branch: string; continueOf: string };
 
+/** branchCleanupGate の答え（作業ブランチの掃除の前に、積み足しの連なりを見た結果） */
+export type BranchCleanupGate = "ok" | "continuation_active" | "not_chain_tail";
+
 function isReserveLock(v: unknown): v is ReserveLock {
   const l = v as ReserveLock | null;
   return (
@@ -434,7 +437,7 @@ export type PrMergeResult =
       ok: true;
       already_merged: boolean;
       merge_sha: string | null;
-      /** delete_branch を求めなかったときは null */
+      /** delete_branch: false のときは null */
       branch_deleted: boolean | null;
       warnings: string[];
     }
@@ -2844,6 +2847,27 @@ export class UserDO extends DurableObject<Env> {
     return this.lockRow(branch)?.task_id ?? null;
   }
 
+  /**
+   * 作業ブランチの掃除（TaskDO.cleanupBranch）の前に、同じブランチを共有する積み足しの連なりを見る。同期的に SQL を読むだけ。
+   * branch_lock にそのブランチの行があれば continuation_active（積み足しが実行中・始まろうとしている。あとで再試行）。
+   * branch_chain の最新が taskId でなければ not_chain_tail（連なりの末尾のタスクが判断する）。
+   * どちらの行も無ければ、積み足しされていない PR なので ok。
+   */
+  async branchCleanupGate(branch: string, taskId: string): Promise<BranchCleanupGate> {
+    if (typeof branch !== "string" || typeof taskId !== "string" || branch === "") {
+      return "continuation_active";
+    }
+    if (this.lockRow(branch)) return "continuation_active";
+    const chain = this.ctx.storage.sql
+      .exec<{ latest_task_id: string }>(
+        "SELECT latest_task_id FROM branch_chain WHERE branch = ?",
+        branch,
+      )
+      .toArray()[0];
+    if (chain && chain.latest_task_id !== taskId) return "not_chain_tail";
+    return "ok";
+  }
+
   // ---- PR の Ready 化とマージ（D9）----
   // 利用者の GitHub のユーザートークンで行う（Installation Token は使わない: 利用者のブランチ保護の扱いと監査の主体を、
   // 利用者本人に合わせるため）。トークンはこの DO の中だけで使い、戻り値には出さない。
@@ -2958,15 +2982,34 @@ export class UserDO extends DurableObject<Env> {
       );
     }
     if (opts.deleteBranch) {
+      // そのブランチを base にした open な PR があると、消した時点でその PR が閉じられる。あるとき・確かめられないときは消さない
+      let skipReason: string | null = null;
       try {
-        await credentials.withToken((tok) =>
-          client.deleteBranch(tok, target.repository, target.branch),
+        const hasOpen = await credentials.withToken((tok) =>
+          client.hasOpenPullWithBase(tok, target.repository, target.branch),
         );
-        branchDeleted = true;
+        if (hasOpen) {
+          skipReason =
+            "the pull request was merged, but the branch was kept because an open pull request uses it as its base (deleting it would close that pull request)";
+        }
       } catch (e) {
-        branchDeleted = false;
         const detail = e instanceof GitHubError ? e.message : "unexpected error";
-        warnings.push(`branch_delete_failed: the pull request was merged, but ${detail}`);
+        skipReason = `the pull request was merged, but the branch was kept because open pull requests based on it could not be checked (${detail})`;
+      }
+      if (skipReason !== null) {
+        branchDeleted = false;
+        warnings.push(`branch_delete_skipped: ${skipReason}`);
+      } else {
+        try {
+          await credentials.withToken((tok) =>
+            client.deleteBranch(tok, target.repository, target.branch),
+          );
+          branchDeleted = true;
+        } catch (e) {
+          branchDeleted = false;
+          const detail = e instanceof GitHubError ? e.message : "unexpected error";
+          warnings.push(`branch_delete_failed: the pull request was merged, but ${detail}`);
+        }
       }
     }
     return {

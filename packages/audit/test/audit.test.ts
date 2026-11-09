@@ -571,3 +571,42 @@ describe("task_review（review_started / review_posted / review_failed）", () =
     );
   });
 });
+
+describe("作業ブランチの掃除（branch_cleanup）", () => {
+  it("イベント名が閉じた一覧にある", () => {
+    expect(AUDIT_EVENTS).toContain("branch_cleanup");
+  });
+
+  it("reason（固定コード）と done（真偽値）だけを通す。ブランチ名・PR の URL・トークンは項目として存在しない", () => {
+    const rec = run("branch_cleanup", {
+      taskId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+      caller: "system",
+      reason: "deleted",
+      done: true,
+      branch: "agent/task-01HZZZZZZZZZZZZZZZZZZZZZZZ",
+      pr_url: "https://github.com/acme/widgets/pull/1",
+      token: "ghs_abc",
+    }).record;
+    expect(rec).toEqual({
+      audit: true,
+      event: "branch_cleanup",
+      ts: 1_700_000_000_000,
+      taskId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+      caller: "system",
+      reason: "deleted",
+      done: true,
+    });
+    expect(run("branch_cleanup", { reason: "pr_open", done: false }).record).toMatchObject({
+      reason: "pr_open",
+      done: false,
+    });
+  });
+
+  it("done は真偽値だけ。reason は固定コードの形だけ。他のイベントでは done を通さない", () => {
+    for (const bad of ["true", 1, null, {}]) {
+      expect(run("branch_cleanup", { done: bad }).record).not.toHaveProperty("done");
+    }
+    expect(run("branch_cleanup", { reason: "agent/task-X" }).record).not.toHaveProperty("reason");
+    expect(run("task_cancelled", { done: true }).record).not.toHaveProperty("done");
+  });
+});

@@ -1,3 +1,4 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { createTaskService } from "../../src/tasks/service";
@@ -185,14 +186,14 @@ describe("service.prMerge", () => {
         already_merged: false,
         merge_method: "squash",
         merge_sha: head,
-        branch_deleted: null,
+        branch_deleted: true,
         warnings: [],
         review_policy: "client_review",
         next_steps: expect.stringContaining("マージした"),
       },
     });
     expect(w.pull()).toMatchObject({ merged: true, mergeMethod: "squash", mergeSha: head });
-    expect(app().branch(REPO, w.t.branch)).toBe(head); // ブランチは残す（既定）
+    expect(app().branch(REPO, w.t.branch)).toBeNull(); // 既定で作業ブランチを消す
     expect(await w.auditOf(w.t.stub, "pr_merged")).toEqual([
       expect.objectContaining({
         taskId: w.t.id,
@@ -203,6 +204,70 @@ describe("service.prMerge", () => {
     ]);
     const res = await w.service.result(w.principal, w.t.id);
     expect(res.ok && res.value.pr).toMatchObject({ merged: true, draft: false });
+  });
+
+  it("既定で消せたら、記録に branch_deleted。task_status（積み足しの pr）と task_result の pr に branch_deleted: true が付く。branch_kept_by_request は付かない", async () => {
+    const w = await readyWorld();
+    await w.service.prMerge(w.principal, { task_id: w.t.id });
+    const res = await w.service.result(w.principal, w.t.id);
+    expect(res.ok && res.value.pr).toMatchObject({ merged: true, branch_deleted: true });
+    const st = await w.service.status(w.principal, w.t.id);
+    expect(st.ok && (st.value as { pr?: unknown }).pr).toMatchObject({ branch_deleted: true });
+    expect(JSON.stringify(res)).not.toContain("branch_kept_by_request");
+  });
+
+  it("マージ前や消していないときは pr に branch_deleted のキーが無い", async () => {
+    const w = await readyWorld();
+    const before = await w.service.result(w.principal, w.t.id);
+    expect(before.ok && before.value.pr).not.toHaveProperty("branch_deleted");
+    await w.service.prMerge(w.principal, { task_id: w.t.id, delete_branch: false });
+    const after = await w.service.result(w.principal, w.t.id);
+    expect(after.ok && after.value.pr).not.toHaveProperty("branch_deleted");
+  });
+
+  it("delete_branch: false を明示すると消さない。記録に branch_kept_by_request が残る", async () => {
+    const w = await readyWorld();
+    const head = app().branch(REPO, w.t.branch);
+    const r = await w.service.prMerge(w.principal, { task_id: w.t.id, delete_branch: false });
+    expect(r).toMatchObject({ ok: true, value: { branch_deleted: null } });
+    expect(app().branch(REPO, w.t.branch)).toBe(head);
+    const [rec] = await runInDurableObject(w.t.stub, (_i, st) =>
+      st.storage.sql
+        .exec<{ branch_deleted: number; branch_kept_by_request: number }>(
+          "SELECT branch_deleted, branch_kept_by_request FROM github_link",
+        )
+        .toArray(),
+    );
+    expect(rec).toEqual({ branch_deleted: 0, branch_kept_by_request: 1 });
+  });
+
+  it("そのブランチを base にした open な PR があれば消さず、branch_delete_skipped（マージは成功）", async () => {
+    const w = await readyWorld();
+    const head = app().branch(REPO, w.t.branch) as string;
+    const sha = await app().addCommit(REPO, head, "stacked");
+    app().setBranch(REPO, "feature/stacked", sha);
+    app().seedPull(REPO, { head: "feature/stacked", base: w.t.branch, draft: false });
+    const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
+    expect(r).toMatchObject({ ok: true, value: { merged: true, branch_deleted: false } });
+    expect(r.ok && (r.value as { warnings: string[] }).warnings[0]).toContain(
+      "branch_delete_skipped",
+    );
+    expect(app().branch(REPO, w.t.branch)).toBe(head);
+    expect(w.githubCalls().some((c) => c.method === "DELETE")).toBe(false);
+    const res = await w.service.result(w.principal, w.t.id);
+    expect(res.ok && res.value.pr).not.toHaveProperty("branch_deleted");
+  });
+
+  it("確認の GET が失敗したら消さず、branch_delete_skipped に失敗を書く（マージは成功）", async () => {
+    const w = await readyWorld();
+    const head = app().branch(REPO, w.t.branch);
+    app().setFault({ pattern: "^GET /repos/[^/]+/[^/]+/pulls$", status: 502 });
+    const r = await w.service.prMerge(w.principal, { task_id: w.t.id });
+    expect(r).toMatchObject({ ok: true, value: { merged: true, branch_deleted: false } });
+    expect(r.ok && (r.value as { warnings: string[] }).warnings[0]).toContain(
+      "branch_delete_skipped",
+    );
+    expect(app().branch(REPO, w.t.branch)).toBe(head);
   });
 
   it("merge_method と delete_branch を指定できる", async () => {

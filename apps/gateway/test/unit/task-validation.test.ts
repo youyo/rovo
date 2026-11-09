@@ -7,6 +7,7 @@ import {
   isValidIdempotencyKey,
   parseCursor,
   parseTimeoutSeconds,
+  prMergeInputSchema,
   steerInputSchema,
   taskInputSchema,
 } from "../../src/tasks/validation";
@@ -635,5 +636,16 @@ describe("continue_task_id（同じ PR への積み足し。docs/specs/continue-
     // ほかの入力（title・effort など）も、これまでどおり指紋に効く
     expect(await fp({ ...withoutTarget, title: "u", continue_task_id: C })).not.toBe(omitted);
     expect(await fp({ ...withoutTarget, effort: "high", continue_task_id: C })).not.toBe(omitted);
+  });
+});
+
+describe("prMergeInputSchema（delete_branch の既定は true）", () => {
+  it("省略すると true。false を明示すれば false", () => {
+    const id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    expect(prMergeInputSchema.parse({ task_id: id }).delete_branch).toBe(true);
+    expect(prMergeInputSchema.parse({ task_id: id, delete_branch: false }).delete_branch).toBe(
+      false,
+    );
+    expect(prMergeInputSchema.parse({ task_id: id, delete_branch: true }).delete_branch).toBe(true);
   });
 });

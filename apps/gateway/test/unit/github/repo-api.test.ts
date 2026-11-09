@@ -25,6 +25,77 @@ describe("GitHubRepoApi", () => {
     expect(await a.deleteBranch("feat", SHA)).toBe(true);
   });
 
+  it("deleteBranch: 先頭が expectedSha でなければ消さずに false（DELETE を呼ばない）", async () => {
+    const { a, calls } = api({
+      "GET /repos/acme/widgets/git/ref/heads/feat": () => json({ object: { sha: TREE } }),
+      "DELETE /repos/acme/widgets/git/refs/heads/feat": () => new Response(null, { status: 204 }),
+    });
+    expect(await a.deleteBranch("feat", SHA)).toBe(false);
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("deleteBranch: ブランチがすでに無い（GET が 404）なら already_gone（DELETE を呼ばない）", async () => {
+    const { a, calls } = api({
+      "GET /repos/acme/widgets/git/ref/heads/feat": () =>
+        json({ message: "Not Found" }, { status: 404 }),
+    });
+    expect(await a.deleteBranch("feat", SHA)).toBe("already_gone");
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("deleteBranch: DELETE が 404 / 422（直前に他で消えた）なら already_gone で、例外にしない", async () => {
+    for (const status of [404, 422]) {
+      const { a } = api({
+        "GET /repos/acme/widgets/git/ref/heads/agent/task-X": () => json({ object: { sha: SHA } }),
+        "DELETE /repos/acme/widgets/git/refs/heads/agent/task-X": () =>
+          json({ message: "Reference does not exist" }, { status }),
+      });
+      expect(await a.deleteBranch("agent/task-X", SHA)).toBe("already_gone");
+    }
+  });
+
+  it("deleteBranch: DELETE のそれ以外の失敗（403 など）は GitHubApiError", async () => {
+    const { a } = api({
+      "GET /repos/acme/widgets/git/ref/heads/feat": () => json({ object: { sha: SHA } }),
+      "DELETE /repos/acme/widgets/git/refs/heads/feat": () =>
+        json({ message: "Resource not accessible by integration" }, { status: 403 }),
+    });
+    await expect(a.deleteBranch("feat", SHA)).rejects.toBeInstanceOf(GitHubApiError);
+  });
+
+  it("hasOpenPullWithBase: state=open&base=<branch>&per_page=1 で探し、1 件でもあれば true", async () => {
+    const pull = {
+      number: 9,
+      html_url: "https://gh.test/acme/widgets/pull/9",
+      state: "open",
+      head: { sha: SHA },
+      base: { ref: "agent/task-A" },
+    };
+    const { a, calls } = api({
+      "GET /repos/acme/widgets/pulls": [() => json([pull]), () => json([])],
+    });
+    expect(await a.hasOpenPullWithBase("agent/task-A")).toBe(true);
+    expect(await a.hasOpenPullWithBase("agent/task-A")).toBe(false);
+    const u = new URL(calls[0]?.url ?? "");
+    expect(u.searchParams.get("state")).toBe("open");
+    expect(u.searchParams.get("base")).toBe("agent/task-A");
+    expect(u.searchParams.get("per_page")).toBe("1");
+    expect(u.searchParams.has("head")).toBe(false);
+  });
+
+  it("hasOpenPullWithBase: 配列でない応答は GitHubApiError。レート制限は rateLimited", async () => {
+    const bad = api({ "GET /repos/acme/widgets/pulls": () => json({}) });
+    await expect(bad.a.hasOpenPullWithBase("b")).rejects.toBeInstanceOf(GitHubApiError);
+    const limited = api({
+      "GET /repos/acme/widgets/pulls": () =>
+        json(
+          { message: "API rate limit exceeded" },
+          { status: 403, headers: { "x-ratelimit-remaining": "0" } },
+        ),
+    });
+    await expect(limited.a.hasOpenPullWithBase("b")).rejects.toMatchObject({ rateLimited: true });
+  });
+
   it("本文があり JSON でない成功応答は non-JSON response で失敗する", async () => {
     const { a } = api({
       "GET /repos/acme/widgets/git/commits/abc": () => new Response("<html>", { status: 200 }),

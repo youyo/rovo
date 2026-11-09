@@ -438,10 +438,13 @@ export class FakeGitHubApp {
 
   /** PR をマージ済みにする（task_review が断ることの確認用） */
   markMerged(fullName: string, number: number): void {
-    const p = this.mustRepo(fullName).pulls.find((x) => x.number === number);
+    const repo = this.mustRepo(fullName);
+    const p = repo.pulls.find((x) => x.number === number);
     if (p) {
       p.merged = true;
       p.state = "closed";
+      // GitHub と同じく、あとでブランチを消しても PR の head.sha は残る
+      p.headAtMerge ??= repo.refs.get(`refs/heads/${p.head}`);
     }
   }
 
@@ -463,8 +466,13 @@ export class FakeGitHubApp {
 
   /** PR を閉じる。 */
   closePull(fullName: string, number: number): void {
-    const p = this.mustRepo(fullName).pulls.find((x) => x.number === number);
-    if (p) p.state = "closed";
+    const repo = this.mustRepo(fullName);
+    const p = repo.pulls.find((x) => x.number === number);
+    if (p) {
+      p.state = "closed";
+      // 閉じたあとにブランチを消しても PR の head.sha は残る（GitHub と同じ）
+      p.headAtMerge ??= repo.refs.get(`refs/heads/${p.head}`);
+    }
   }
 
   /** PR の本文を書き換える（利用者の編集の再現）。 */
@@ -1019,10 +1027,17 @@ export class FakeGitHubApp {
     if (method === "GET" && rest === "/pulls") {
       const head = url.searchParams.get("head") ?? "";
       const state = url.searchParams.get("state") ?? "open";
+      const baseFilter = url.searchParams.get("base") ?? "";
       const branch = head.includes(":") ? head.slice(head.indexOf(":") + 1) : head;
-      const list = repo.pulls.filter(
-        (p) => (state === "all" || p.state === state) && (head === "" || p.head === branch),
-      );
+      const perPage = Number(url.searchParams.get("per_page") ?? "30");
+      const list = repo.pulls
+        .filter(
+          (p) =>
+            (state === "all" || p.state === state) &&
+            (head === "" || p.head === branch) &&
+            (baseFilter === "" || p.base === baseFilter),
+        )
+        .slice(0, Number.isFinite(perPage) && perPage > 0 ? perPage : 30);
       return res(
         200,
         list.map((p) => this.pullJson(repo, p)),

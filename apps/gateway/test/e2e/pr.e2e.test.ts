@@ -283,6 +283,30 @@ describe("task_pr_ready / task_pr_merge（偽 GitHub 経由の通し）", () => 
   );
 
   it(
+    "task_pr_merge で delete_branch を省略すると、既定（true）で作業ブランチも消える。task_result の pr.branch_deleted が true",
+    async () => {
+      const t = await setup();
+      try {
+        await complete(t, t.client);
+        expect(await admin.app<string | null>("branch", "acme/widgets", t.branch)).toBe(t.head);
+        const merged = bodyOf(
+          await t.client.callTool({ name: "task_pr_merge", arguments: { task_id: t.taskId } }),
+        );
+        expect(merged).toMatchObject({ merged: true, merge_sha: t.head, branch_deleted: true });
+        expect(await pullOf(t.branch)).toMatchObject({ merged: true, state: "closed" });
+        expect(await admin.app<string | null>("branch", "acme/widgets", t.branch)).toBeNull();
+        const result = bodyOf(
+          await t.client.callTool({ name: "task_result", arguments: { task_id: t.taskId } }),
+        );
+        expect(result).toMatchObject({ pr: { merged: true, branch_deleted: true } });
+      } finally {
+        await t.client.close();
+      }
+    },
+    LONG,
+  );
+
+  it(
     "FAILED のタスクは task_pr_ready を拒否する（conflict）。rovo は Ready にしない（PR は Draft のまま）。他の利用者は not_found",
     async () => {
       const t = await setup();

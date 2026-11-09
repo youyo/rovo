@@ -1578,6 +1578,10 @@ describe("MCP の instructions と、D9 のツールの説明", () => {
     expect(ready?.description).toContain("利用者の GitHub");
     expect(ready?.description).toContain("自動で Ready");
     expect(merge?.description).toContain("review_policy によらず");
+    expect(merge?.description).toContain("既定 true");
+    expect(merge?.description).toContain("branch_delete_skipped");
+    expect(merge?.description).not.toContain("既定 false");
+    expect(tools.find((t) => t.name === "task_result")?.description).toContain("branch_deleted");
     expect(merge?.description).not.toContain("agent_merge");
     expect(merge?.description).toContain("checks_failing");
     expect(merge?.description).toContain("checks_pending");

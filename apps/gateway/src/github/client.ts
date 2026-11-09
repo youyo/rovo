@@ -616,6 +616,23 @@ export class GitHubClient {
     await this.throwWriteError(res);
   }
 
+  /** そのブランチを base にした open な PR が 1 件以上あるか（ブランチを消すと、その PR が閉じられる）。 */
+  async hasOpenPullWithBase(
+    accessToken: string,
+    repository: string,
+    base: string,
+  ): Promise<boolean> {
+    const res = await this.api(
+      accessToken,
+      `${this.repoPath(repository)}/pulls?state=open&base=${encodeURIComponent(base)}&per_page=1`,
+    );
+    const body = await this.json(res);
+    if (!Array.isArray(body)) {
+      throw new GitHubError("upstream_unavailable", "unexpected pulls response");
+    }
+    return body.length > 0;
+  }
+
   // ---- 内部 ----
 
   private repoPath(repository: string): string {

@@ -48,6 +48,8 @@ export const AUDIT_EVENTS = [
   "review_started",
   "review_posted",
   "review_failed",
+  // gateway: マージ・クローズ後に残った作業ブランチの掃除（理由の固定コードと done だけ。ブランチ名・PR の URL は出さない）
+  "branch_cleanup",
 ] as const;
 
 export type AuditEventName = (typeof AUDIT_EVENTS)[number];
@@ -91,6 +93,8 @@ export type AuditFields = {
   /** review_* だけ: 直すべき点・提案の件数（非負の整数） */
   must_fix_count?: number;
   suggestion_count?: number;
+  /** branch_cleanup だけ: このタスクの掃除を終えたか（真偽値） */
+  done?: boolean;
 };
 
 /** 出力される 1 件。キーの順序は固定。 */
@@ -161,6 +165,7 @@ const EVENT_FIELDS: Readonly<
         | "consult"
         | "web_counts"
         | "review"
+        | "done"
       )[]
     >
   >
@@ -177,6 +182,7 @@ const EVENT_FIELDS: Readonly<
   review_started: ["review"],
   review_posted: ["review"],
   review_failed: ["review"],
+  branch_cleanup: ["done"],
 };
 
 /** モデルの id（`<provider>/<id>`）。許可リストの形だけを通す。 */
@@ -316,6 +322,10 @@ export function buildAudit(
       const n = own(key);
       put(key, typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : undefined);
     }
+  }
+  if (extra.includes("done")) {
+    const done = own("done");
+    put("done", typeof done === "boolean" ? done : undefined);
   }
   return record as AuditRecord;
 }

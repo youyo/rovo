@@ -772,7 +772,7 @@ describe("B3a: マージの判定（branch_busy・head_moved）と task_start �
   const writes = () =>
     app()
       .requests()
-      .filter((r) => r.method === "PUT" || r.method === "DELETE");
+      .filter((r) => r.auth === "user" && (r.method === "PUT" || r.method === "DELETE"));
   const lockRows = (o: Owner) =>
     runInDurableObject(
       o.user,

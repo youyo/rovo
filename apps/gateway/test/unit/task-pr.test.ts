@@ -349,14 +349,19 @@ describe("完了時の自動の Ready（client_review）", () => {
   });
 
   it("PR の node_id を読めない（応答に node_id が無い）ときは GraphQL を呼ばず、COMPLETED のまま warning イベントを残す", async () => {
-    // 終端の処理の最初の GET /pulls/1 だけ、node_id の無い応答にする
+    // 準備（Draft PR の作成）のあと、終端の処理の最初の GET /pulls/<このタスクの PR> だけ、node_id の無い応答にする。
+    // PR の番号は決め打ちしない（同じ偽 GitHub に、前のテストのタスクの alarm が後から PR を作ることがあり、番号が 1 とは限らない）
+    const { stub, branch, agent } = await createTask();
+    await stub.advance();
+    const number = (await gl(stub)).pr_number as number;
+    expect(Number.isInteger(number)).toBe(true);
     app().setFault({
-      pattern: "^GET /repos/acme/widgets/pulls/1$",
+      pattern: `^GET /repos/acme/widgets/pulls/${number}$`,
       status: 200,
       count: 1,
       body: {
-        number: 1,
-        html_url: "https://github.test/acme/widgets/pull/1",
+        number,
+        html_url: `https://github.test/acme/widgets/pull/${number}`,
         draft: true,
         state: "open",
         body: "",
@@ -364,7 +369,10 @@ describe("完了時の自動の Ready（client_review）", () => {
         base: { ref: "main" },
       },
     });
-    const { stub, branch } = await runToCompleted();
+    const head = await pushChildCommit(branch);
+    await agent.setProgram({ result: completedResult(head) });
+    await agent.setPhase("completed");
+    await stub.advance();
     const st = await stub.getStatus(OWNER);
     expect(st.ok && st.task.status).toBe("COMPLETED");
     expect(graphqlCalls()).toEqual([]);

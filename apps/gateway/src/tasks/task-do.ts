@@ -35,6 +35,7 @@ import {
   GitHubAppClient,
   GitHubRepoApi,
   importEncryptionKey,
+  type PullHeadInfo,
   type PullInfo,
   READY_FALLBACK_NOTE,
   renderInitialBlock,
@@ -57,7 +58,12 @@ import {
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { BUDGET_EXTENSION_KIND, MAX_BUDGET_EXTENSIONS } from "./budget-question";
-import { type InheritedWarning, parseInheritedWarnings } from "./continuation";
+import {
+  branchOfRoot,
+  type ContinuationFacts,
+  type InheritedWarning,
+  parseInheritedWarnings,
+} from "./continuation";
 import {
   fetchGatewayCost,
   type GatewayCostResult,
@@ -92,6 +98,8 @@ import {
   parseTimeoutSeconds,
   type ReviewPolicy,
   reviewInputSchema,
+  type TargetedTaskInput,
+  type TaskInput,
   taskInputSchema,
   WAIT_RETRY_AFTER_SECONDS,
 } from "./validation";
@@ -176,6 +184,11 @@ export type EnsureCreatedInput = z.input<typeof taskInputSchema> & {
    * 省略可（古い呼び出し・直接の作成）。chosen は model と一致していなければならない。
    */
   model_selection?: ModelSelection;
+  /**
+   * 積み足し（continue_task_id）のときだけ: UserDO.authorizeContinue が確かめて固定した事実（docs/specs/continue-task.md）。
+   * continue_task_id があるときは必須。ブランチ名は TaskDO が根の id から作る（ここの branch とも一致を確かめる）。
+   */
+  continuation?: ContinuationFacts;
 };
 
 /** task_review の対象の PR（rovo が開いた PR ではない。task_result の pr の代わり） */
@@ -837,7 +850,67 @@ type TokenRow = {
   issues: number;
 };
 
-/** 再試行しても直らない失敗。TaskDO を FAILED にする。reason は公開される（秘密を入れない）。 */
+/** ensureCreated が確かめた積み足しの事実と、根の id から作ったブランチ名 */
+type CheckedContinuation = { facts: ContinuationFacts; branch: string };
+
+const CONTINUATION_REPOSITORY_RE = /^[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/;
+
+/**
+ * 積み足し（continue_task_id）の事実を確かめる（RPC の入力なので形も見る）。ブランチ名は根の id から作り（^[A-Za-z0-9_-]+$ を検査）、
+ * 渡された branch がそれと同じであることを確かめる。repository・base_ref が入力にあれば元と同じであること。違えば undefined。
+ */
+function checkContinuation(
+  taskId: string,
+  data: TaskInput,
+  c: ContinuationFacts | undefined,
+): CheckedContinuation | undefined {
+  if (typeof c !== "object" || c === null) return undefined;
+  if (typeof c.of !== "string" || c.of !== data.continue_task_id || c.of === taskId) {
+    return undefined;
+  }
+  if (typeof c.root !== "string" || c.root === taskId) return undefined;
+  const branch = branchOfRoot(c.root);
+  if (branch === undefined || c.branch !== branch) return undefined;
+  if (typeof c.repository !== "string" || !CONTINUATION_REPOSITORY_RE.test(c.repository)) {
+    return undefined;
+  }
+  if (typeof c.base_ref !== "string" || c.base_ref === "" || c.base_ref.length > 255) {
+    return undefined;
+  }
+  if (
+    data.repository !== undefined &&
+    data.repository.toLowerCase() !== c.repository.toLowerCase()
+  ) {
+    return undefined;
+  }
+  if (data.base_ref !== undefined && data.base_ref !== c.base_ref) return undefined;
+  if (!Number.isSafeInteger(c.pr_number) || c.pr_number <= 0) return undefined;
+  if (typeof c.pr_url !== "string" || !/^https?:\/\//.test(c.pr_url) || c.pr_url.length > 2048) {
+    return undefined;
+  }
+  if (!Array.isArray(c.inherited_warnings)) return undefined;
+  const warnings = parseInheritedWarnings(JSON.stringify(c.inherited_warnings));
+  if (warnings.length !== c.inherited_warnings.length) return undefined;
+  return {
+    facts: {
+      of: c.of,
+      root: c.root,
+      branch,
+      repository: c.repository,
+      base_ref: c.base_ref,
+      pr_number: c.pr_number,
+      pr_url: c.pr_url,
+      inherited_warnings: warnings.map((w) => ({ from: w.from, warning: w.warning })),
+    },
+    branch,
+  };
+}
+
+/**
+ * 再試行しても直らない失敗。TaskDO を FAILED にする。reason は公開される（秘密を入れない）。
+ * 積み足しの準備では branch_moved（ブランチの先頭が base_sha でない）と pr_not_open（PR が閉じた・マージ済み・
+ * head のブランチや base が記録と違う・ブランチが消えた）も使う。
+ */
 class SetupFailure extends Error {
   readonly reason: string;
   constructor(reason: string) {
@@ -1606,12 +1679,29 @@ export class TaskDO extends DurableObject<Env> {
     ) {
       return { ok: false, code: "invalid_input" };
     }
-    // 積み足し（continue_task_id）の作成はまだ受け付けない（docs/specs/continue-task.md のタスク B2）。
-    // 対象（repository・base_ref）の決まった通常の入力だけを作る
-    if (parsed.data.continue_task_id !== undefined || !hasTarget(parsed.data)) {
+    // 積み足し（continue_task_id。docs/specs/continue-task.md）: authorizeContinue が固定した事実を確かめ、
+    // repository・base_ref は元のタスクの値にする。通常の入力は対象（repository・base_ref）が決まっていること
+    let continuation: CheckedContinuation | undefined;
+    let target: TargetedTaskInput;
+    if (parsed.data.continue_task_id !== undefined) {
+      continuation = checkContinuation(input.task_id, parsed.data, input.continuation);
+      if (continuation === undefined) return { ok: false, code: "invalid_input" };
+      target = {
+        ...parsed.data,
+        repository: continuation.facts.repository,
+        base_ref: continuation.facts.base_ref,
+        // 積み足しの initial_sha は base_sha そのもの（agent は initialSha === baseSha を確かめる）。比べやすいよう小文字にそろえる
+        base_sha: parsed.data.base_sha.toLowerCase(),
+      };
+    } else if (input.continuation !== undefined) {
+      // 事実だけを渡されても積み足しにはしない（continue_task_id と組でなければならない）
+      return { ok: false, code: "invalid_input" };
+    } else if (hasTarget(parsed.data)) {
+      target = parsed.data;
+    } else {
       return { ok: false, code: "invalid_input" };
     }
-    const data = parsed.data;
+    const data = target;
     // D10: モデルはこのデプロイの AGENT_MODELS の中だけ（service でも見るが、TaskDO への直接の呼び出しにも効かせる）
     if (data.model !== undefined && !agentModelsOf(this.env).includes(data.model)) {
       return { ok: false, code: "invalid_input" };
@@ -1640,15 +1730,17 @@ export class TaskDO extends DurableObject<Env> {
     // await のあいだに他の呼び出しが進みうるので、状態の判定は await の後の同期区間で行う。
     // fingerprint は「利用者が入力したもの」で決める。rovo が選んだモデル（mode: auto）は入力ではないので含めない
     // （同じ idempotency_key の再試行で Clef の答えが変わっても、同じタスクとして扱うため）。明示した model は従来どおり含める。
-    const { model: _chosen, ...withoutModel } = data;
+    // 積み足しの指紋は利用者が入力した形（repository・base_ref の省略を含む）のまま作る
+    const given = parsed.data;
+    const { model: _chosen, ...withoutModel } = given;
     const fingerprint = await computeFingerprint(
-      modelSelection?.mode === "auto" ? (withoutModel as typeof data) : data,
+      modelSelection?.mode === "auto" ? (withoutModel as typeof given) : given,
     );
     // この変更より前に model を省略して作られたタスク（fingerprint に既定のモデルが含まれている）の再試行も、同じタスクとして扱う
     const before = this.getRow();
     const legacyFingerprint =
       before !== undefined && before.model_selection === null
-        ? await computeFingerprint({ ...data, model: before.model ?? model })
+        ? await computeFingerprint({ ...given, model: before.model ?? model })
         : undefined;
 
     const result = this.ctx.storage.transactionSync((): EnsureCreatedResult => {
@@ -1722,6 +1814,10 @@ export class TaskDO extends DurableObject<Env> {
         effort,
         // 明示したときだけ載せる（省略は agent の既定。後段の自動の昇格も、明示したタスクでは行わない）
         ...(data.sandbox_instance !== undefined ? { sandboxInstance: data.sandbox_instance } : {}),
+        // 積み足しのときだけ: 元のタスクと根（agent は branch が agent/task-<root> であることを確かめる）
+        ...(continuation !== undefined
+          ? { continuation: { of: continuation.facts.of, root: continuation.facts.root } }
+          : {}),
         budgetUsd: taskBudgetUsd(this.env),
         budgetPolicy: data.budget_policy,
         deadlineAt: at + AGENT_DEADLINE_MS,
@@ -1754,10 +1850,30 @@ export class TaskDO extends DurableObject<Env> {
         JSON.stringify(spec),
         `run:${input.task_id}`,
       );
-      this.ctx.storage.sql.exec(
-        "INSERT INTO github_link (singleton, branch) VALUES (1, ?)",
-        `agent/task-${input.task_id}`,
-      );
+      if (continuation === undefined) {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO github_link (singleton, branch) VALUES (1, ?)",
+          `agent/task-${input.task_id}`,
+        );
+      } else {
+        // 積み足し: 元の PR とブランチ（agent/task-<根>）を写す。空コミットは作らず initial_sha = base_sha（準備で確かめる）
+        const c = continuation.facts;
+        this.ctx.storage.sql.exec(
+          `INSERT INTO github_link (singleton, branch, initial_sha, pr_number, pr_url, inherited_warnings)
+           VALUES (1, ?, ?, ?, ?, ?)`,
+          continuation.branch,
+          data.base_sha,
+          c.pr_number,
+          c.pr_url,
+          JSON.stringify(c.inherited_warnings),
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE task SET continuation_of = ?, continuation_root = ?, draft_pr_url = ? WHERE singleton = 1",
+          c.of,
+          c.root,
+          c.pr_url,
+        );
+      }
       this.appendEvent("created", { status: "CREATING" }, at);
       this.bumpIndexRevision();
       const row = this.getRow();
@@ -3701,6 +3817,12 @@ export class TaskDO extends DurableObject<Env> {
       gl = this.getGithub() as GithubRow;
     }
 
+    // 積み足し（docs/specs/continue-task.md）: 初期コミット・ブランチの作成・PR の作成は飛ばし、記録どおりかだけを確かめる
+    if (row.continuation_of !== null) {
+      await this.runContinuationSetup(row, gl, api);
+      return;
+    }
+
     // 1. 決定的な初期コミット（author / committer の日時を created_at に固定）。SHA は ref を作る前に永続化する。
     if (gl.initial_sha === null) {
       let base: { sha: string; treeSha: string };
@@ -3787,6 +3909,71 @@ export class TaskDO extends DurableObject<Env> {
 
     // 5. 最初のトークンは発行済み（上）。start を送ってよい。
     sql.exec("UPDATE github_link SET setup_done = 1, setup_attempts = 0, setup_retry_at = 0");
+  }
+
+  /**
+   * 積み足しの準備（docs/specs/continue-task.md「準備」）。ensureCreated が写した PR とブランチ（agent/task-<根>）が、
+   * まだ記録どおりかを Installation Token で確かめる: ブランチの先頭が base_sha（= initial_sha）で、PR が open・未マージ・
+   * head のブランチと base が記録どおり。確定した不一致だけを SetupFailure（branch_moved / pr_not_open）にし、
+   * 読めなかった（5xx・ネットワーク）ときは例外のまま返して、今の準備と同じく再試行する。
+   * GitHub には何も書かない（読むだけ）。continued イベントと setup_done は同じトランザクションで記録するので、再試行しても 1 回だけ。
+   */
+  private async runContinuationSetup(
+    row: TaskRow,
+    gl: GithubRow,
+    api: GitHubRepoApi,
+  ): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const initial = gl.initial_sha;
+    if (initial === null || gl.pr_number === null || gl.pr_url === null) {
+      throw new SetupFailure("pr_not_open");
+    }
+    const head = await api.getBranchSha(gl.branch);
+    // ブランチが無い（消された）なら PR も使えない
+    if (head === null) throw new SetupFailure("pr_not_open");
+    if (head.toLowerCase() !== initial.toLowerCase()) throw new SetupFailure("branch_moved");
+    let pull: PullHeadInfo;
+    try {
+      pull = await api.getPullHead(gl.pr_number);
+    } catch (e) {
+      if (e instanceof GitHubApiError && e.status === 404) throw new SetupFailure("pr_not_open");
+      throw e;
+    }
+    const sameRepo =
+      pull.headRepo !== null && pull.headRepo.toLowerCase() === row.repository.toLowerCase();
+    if (
+      pull.number !== gl.pr_number ||
+      pull.state !== "open" ||
+      pull.merged ||
+      pull.headRef !== gl.branch ||
+      !sameRepo ||
+      pull.baseRef !== row.base_ref
+    ) {
+      throw new SetupFailure("pr_not_open");
+    }
+    this.ctx.storage.transactionSync(() => {
+      const already =
+        sql.exec("SELECT 1 AS x FROM events WHERE type = 'continued' LIMIT 1").toArray().length > 0;
+      sql.exec(
+        "UPDATE github_link SET branch_ready = 1, pr_draft = ?, setup_done = 1, setup_attempts = 0, setup_retry_at = 0",
+        pull.draft ? 1 : 0,
+      );
+      if (!already) {
+        this.bumpIndexRevision();
+        this.appendEvent(
+          "continued",
+          {
+            of: row.continuation_of,
+            number: gl.pr_number,
+            url: gl.pr_url,
+            branch: gl.branch,
+            initial_sha: initial,
+          },
+          this.now(),
+        );
+      }
+    });
+    this.notifyWaiters();
   }
 
   /**
@@ -4116,12 +4303,23 @@ export class TaskDO extends DurableObject<Env> {
 
     // worker_review: レビューの投稿は PR の本文の更新と自動の Ready より先（投稿してから Ready にする。
     // 投稿できなかったときの review_comment_failed は、本文の更新が書く warnings に入る）。PR が無ければ投稿しない
-    if (this.getWorkerReview() && gl.pr_number !== null && !(await this.postReview(row, status))) {
+    // 準備を終えなかった積み足しは、写した元の PR に何も書かない（下の本文の更新も飛ばす）
+    const untouchedPull = row.continuation_of !== null && gl.setup_done === 0;
+    if (
+      this.getWorkerReview() &&
+      gl.pr_number !== null &&
+      !untouchedPull &&
+      !(await this.postReview(row, status))
+    ) {
       return;
     }
     // 投稿で warnings（review_comment_failed）が増えたかもしれないので、本文の更新には読み直した行を使う
     const fresh = this.getGithub() ?? gl;
-    if (fresh.pr_number !== null && fresh.body_done === 0) {
+    if (untouchedPull) {
+      // 準備を終えなかった積み足しは、元の PR を写しているだけ（PR が別物になっている恐れもある）。
+      // PR にもブランチにも本文にも何も書かない（レビューの投稿・本文の更新・空の PR の片付けをしない）
+      if (fresh.body_done === 0) this.ctx.storage.sql.exec("UPDATE github_link SET body_done = 1");
+    } else if (fresh.pr_number !== null && fresh.body_done === 0) {
       try {
         await this.updatePullBody(row, fresh, status);
       } catch (e) {

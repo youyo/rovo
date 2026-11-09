@@ -115,7 +115,7 @@
 4. 元のタスクが**チェーンの最新のタスク**。`UserDO.branch_chain` の `latest_task_id` と一致しない（行が無ければ根の id と一致しない）ときは `conflict`・`continue_superseded`（メッセージに最新のタスク id を載せ、その id で続けるよう案内する）。古いタスクから積み足すと、間のタスクの警告が引き継がれずに洗われるため。
 5. 元のタスクに PR がある（`github_link.pr_number` が非 null）。準備で失敗して PR が無いものは `conflict`・`continue_no_pr`。`closed_empty = 1`（rovo が空の PR を閉じた）は `conflict`・`continue_pr_closed`。
 6. `repository` が渡されたら元と同じ、`base_ref` が渡されたら元の `base_ref` と同じ。違えば `invalid_input`・`continue_repository_mismatch` / `continue_base_ref_mismatch`。
-7. 呼んだ人本人のトークンで PR が見え（`authorizeReview` と同じ。見えなければ `not_found`）、PR が open で未マージ。閉じていれば `conflict`・`continue_pr_closed`、マージ済みなら `conflict`・`continue_pr_merged`。PR の head のブランチが元のタスクの `github_link.branch` と一致し、head のリポジトリが base と同じ（fork でない）こと。
+7. 呼んだ人本人のトークンで PR が見え（`authorizeReview` と同じ。見えなければ `not_found`）、PR が open で未マージ。閉じていれば `conflict`・`continue_pr_closed`、マージ済みなら `conflict`・`continue_pr_merged`。PR の head のブランチが元のタスクの `github_link.branch` と一致し、head のリポジトリが base と同じ（fork でない）こと（base も元の `base_ref` と同じこと）。違えば `conflict`・`continue_pr_mismatch`。
 8. **`base_sha` が PR の今の head と一致**。違えば `branch_moved`（メッセージに今の head の sha を載せ、`task_result` の `pr.head_sha` か `git ls-remote` で確かめ直すよう案内する）。一致したうえで、`base_sha` が**元のタスクの記録済みの head**（`github_link.head_sha`。rovo が push したと分かっている sha）と違うときは、`inherited_warnings` に警告 `base_not_from_rovo` を 1 件足す（人や他人の commit が、未レビューのまま `head_matches = true` で `task_pr_merge` を通るのを防ぐ。積み足し自体は止めない）。元のタスクの `head_sha` が null（`FAILED` などで終端の確定が push を読めなかった）ときは、記録済みの head を `github_link.initial_sha`（準備で確かめた、積み足し前の head。根なら空コミット）で代える。それとも違えば（チェックポイントの push が通っていた可能性があるが、rovo は確かめられない）、同じ警告を付ける。`FAILED` などの元のタスクでは `next_steps` が「`git ls-remote` で PR ブランチの先頭を確かめて `base_sha` に渡す」と案内する。
 9. 同じチェーンに非終端の積み足しタスクが無い（無ければ `branch_busy`）。あわせて 4 を `reserve` の同期区間でもう一度確かめる（`continue_superseded`）。次節。
 
@@ -136,7 +136,7 @@
 |---|---|
 | `not_found` | 元のタスクが無い・他人のもの |
 | `invalid_input` | 接頭辞で区別: `continue_review_task`・`continue_repository_mismatch`・`continue_base_ref_mismatch`（`base_sha` が無いのは形式の検査で既に `invalid_input`） |
-| `conflict` | 接頭辞で区別: `continue_not_finished`・`continue_superseded`・`continue_no_pr`・`continue_pr_closed`・`continue_pr_merged` |
+| `conflict` | 接頭辞で区別: `continue_not_finished`・`continue_superseded`・`continue_no_pr`・`continue_pr_closed`・`continue_pr_merged`・`continue_pr_mismatch` |
 | `branch_moved` | `base_sha` が PR ブランチの今の head と違う。人や別のタスクが push した、または古い sha を渡した |
 | `branch_busy` | 同じ PR に積み足しタスクが実行中。終わるか `task_cancel` で止めてから、`branch_moved` が出なければ同じ入力で再試行する。`task_pr_merge` も、同じ PR に積み足しが実行中のあいだはこのコードで止まる（「マージの判定」） |
 

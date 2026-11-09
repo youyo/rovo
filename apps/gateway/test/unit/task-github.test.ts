@@ -1422,10 +1422,6 @@ describe("変更なしで終端: 空の Draft PR を閉じる", () => {
 describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作成と準備", () => {
   const WRITE_RE =
     /^(POST|PATCH|PUT|DELETE) \/repos\/acme\/widgets\/(pulls|issues|git\/refs|git\/commits)/;
-  const repoReqs = (re: RegExp) =>
-    app()
-      .requests()
-      .filter((r) => re.test(`${r.method} ${r.path}`));
 
   /** PR のある根のタスク（準備が済み、ワーカーの commit が 1 つ push された状態） */
   async function rootWithPull() {
@@ -1462,10 +1458,18 @@ describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作�
   });
 
   /** authorizeContinue が固定した事実（facts）で、積み足しタスクを作る。repository・base_ref は省略する */
-  async function createContinuation(facts: Facts, baseSha: string, over: Record<string, unknown> = {}) {
+  async function createContinuation(
+    facts: Facts,
+    baseSha: string,
+    over: Record<string, unknown> = {},
+  ) {
     const id = newTaskId();
     const stub = taskStub(id);
-    const { repository: _r, base_ref: _b, ...input } = sampleInput(id, OWNER, {
+    const {
+      repository: _r,
+      base_ref: _b,
+      ...input
+    } = sampleInput(id, OWNER, {
       base_sha: baseSha,
       continue_task_id: facts.of,
       ...over,
@@ -1525,10 +1529,7 @@ describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作�
       const src = await c1.stub.continuationSource(OWNER);
       if (!src.ok) throw new Error("continuationSource failed");
       expect(src.source.root).toBe(root.id);
-      const c2 = await continued(
-        factsOf(root, { of: c1.id, root: src.source.root }),
-        root.head,
-      );
+      const c2 = await continued(factsOf(root, { of: c1.id, root: src.source.root }), root.head);
       expect(await gl(c2.stub)).toMatchObject({ branch: `agent/task-${root.id}` });
       const [row] = await rows<Record<string, unknown>>(c2.stub, "SELECT * FROM task");
       expect(row).toMatchObject({ continuation_of: c1.id, continuation_root: root.id });
@@ -1543,7 +1544,11 @@ describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作�
       const facts = factsOf(root);
       const id = newTaskId();
       const stub = taskStub(id);
-      const { repository: _r, base_ref: _b, ...input } = sampleInput(id, OWNER, {
+      const {
+        repository: _r,
+        base_ref: _b,
+        ...input
+      } = sampleInput(id, OWNER, {
         base_sha: root.head,
         continue_task_id: root.id,
       });
@@ -1567,7 +1572,11 @@ describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作�
       ];
       for (const [facts, over] of bad) {
         const id = newTaskId();
-        const { repository: _r, base_ref: _b, ...input } = sampleInput(id, OWNER, {
+        const {
+          repository: _r,
+          base_ref: _b,
+          ...input
+        } = sampleInput(id, OWNER, {
           base_sha: root.head,
           continue_task_id: root.id,
         });
@@ -1596,7 +1605,11 @@ describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作�
       expect(lines.some((l) => /^GET \/repos\/acme\/widgets\/pulls\?/.test(l))).toBe(false);
       expect(lines).toContain(`GET /repos/acme/widgets/pulls/${root.pr}`);
       expect(lines.some((l) => l.startsWith("GET /repos/acme/widgets/git/ref/heads/"))).toBe(true);
-      expect(app().pulls(REPO).filter((p) => p.head === root.branch)).toHaveLength(1);
+      expect(
+        app()
+          .pulls(REPO)
+          .filter((p) => p.head === root.branch),
+      ).toHaveLength(1);
       expect(app().branch(REPO, root.branch)).toBe(root.head);
 
       expect((await status(c.stub)).status).toBe("RUNNING");

@@ -16,6 +16,14 @@ export interface PullInfo {
   baseRef: string;
 }
 
+/** getPullHead の結果（PullInfo に、マージ済みか・head のブランチとリポジトリを足したもの） */
+export interface PullHeadInfo extends PullInfo {
+  merged: boolean;
+  headRef: string | null;
+  /** owner/name。読めなければ null */
+  headRepo: string | null;
+}
+
 export interface CommitIdentity {
   name: string;
   email: string;
@@ -290,6 +298,26 @@ export class GitHubRepoApi {
     const what = "get pull";
     const { json } = await this.call(what, "GET", this.repoPath(`/pulls/${number}`));
     return this.toPull(json, what);
+  }
+
+  /**
+   * getPull に、マージ済みか・head のブランチ名とリポジトリを足したもの（積み足しの準備で、PR が記録どおりか確かめる）。
+   * head のリポジトリが消えた（fork が削除された）ときなどは headRepo が null。
+   */
+  async getPullHead(number: number): Promise<PullHeadInfo> {
+    const what = "get pull";
+    const { json } = await this.call(what, "GET", this.repoPath(`/pulls/${number}`));
+    const pull = this.toPull(json, what);
+    const p = json as {
+      merged?: unknown;
+      head?: { ref?: unknown; repo?: { full_name?: unknown } | null };
+    } | null;
+    return {
+      ...pull,
+      merged: p?.merged === true,
+      headRef: typeof p?.head?.ref === "string" ? p.head.ref : null,
+      headRepo: typeof p?.head?.repo?.full_name === "string" ? p.head.repo.full_name : null,
+    };
   }
 
   async updatePullBody(number: number, body: string): Promise<void> {

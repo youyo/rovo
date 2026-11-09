@@ -100,6 +100,11 @@ const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const PUSH_PERMIT_KEY = "push_permit";
 /** 許可証の期限は exec の時間切れ + この猶予（消し忘れても、この後は無効になる）。 */
 const PUSH_PERMIT_GRACE_MS = 30_000;
+/**
+ * 自動の push（許可証付きの exec）が通った最後の SHA（storage の kv）のキー。積み足しのタスクで、作業ツリーを作り直す
+ * （再 clone する）ときに、リモートの先頭がこのタスク自身の push のままかを確かめる（門番 3）。
+ */
+const PUSHED_HEAD_KEY = "pushed_head";
 const DEFAULT_MAX_OUTPUT = 64 * 1024;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 /** 診断（.npmrc / mise.toml）で読むファイルの先頭の上限 */
@@ -602,6 +607,8 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         stored.baseSha !== spec.baseSha ||
         stored.branch !== spec.branch ||
         stored.initialSha !== spec.initialSha ||
+        stored.continuation?.of !== spec.continuation?.of ||
+        stored.continuation?.root !== spec.continuation?.root ||
         stored.checkout?.pullNumber !== spec.checkout?.pullNumber ||
         stored.checkout?.sha !== spec.checkout?.sha
       ) {
@@ -813,6 +820,10 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         const result = await this.runExec(argv, { ...options, cwd });
         if (options.origin !== undefined) {
           this.finishCommand(argv, result, Date.now() - startedAt, pending);
+        }
+        // 許可証付きの push が通った: リモートの作業ブランチは newSha（OutboundGateway が許すのはこの更新だけ）
+        if (permit !== undefined && result.exitCode === 0 && !result.timedOut) {
+          this.ctx.storage.kv.put(PUSHED_HEAD_KEY, permit.newSha);
         }
         return result;
       } finally {
@@ -1295,12 +1306,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       }
       // DO だけが再起動してコンテナが生きている場合も、傍受は登録し直す（同じ宛先の再登録はハンドラを置き換える）。
       // リポジトリは永続化した spec から導く（未設定のまま登録することはない）。
-      const props: OutboundGatewayProps = {
-        repo: parseRepository(spec.repository),
-        task: spec.branch,
-        // トークンの読み出しと push 先の ref はこの値で決める（DO の名前 = task id）
-        taskId: this.ctx.id.name ?? "",
-      };
+      const props = this.outboundProps(spec);
       const gateway = this.ctx.exports.OutboundGateway({ props });
       let stage = "intercept";
       let probes = 0;
@@ -1911,15 +1917,25 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     }
   }
 
+  /**
+   * タスクのコンテナの OutboundGateway の props。リポジトリは永続化した spec から導く（未設定のまま登録することはない）。
+   * トークン・許可証の読み出しは taskId（DO の名前 = task id）で行う。積み足し（continuation）のときだけ、push を許す ref を
+   * 根のブランチにするため branchTaskId に root を入れる（gateway の TaskDO が決めた値。ワーカーの入力からは来ない）。
+   */
+  private outboundProps(spec: WorkspaceSpec): OutboundGatewayProps {
+    return {
+      repo: parseRepository(spec.repository),
+      task: spec.branch,
+      taskId: this.ctx.id.name ?? "",
+      ...(spec.continuation !== undefined ? { branchTaskId: spec.continuation.root } : {}),
+    };
+  }
+
   /** 起動したコンテナの傍受を登録し、exec が応答するまで待つ（boot と同じ。期限は 1 回の起動の待ち）。応答すれば true */
   private async waitContainerReady(g: number, spec: WorkspaceSpec): Promise<boolean> {
     const container = this.container();
     const until = Date.now() + this.bootAttemptMs;
-    const props: OutboundGatewayProps = {
-      repo: parseRepository(spec.repository),
-      task: spec.branch,
-      taskId: this.ctx.id.name ?? "",
-    };
+    const props = this.outboundProps(spec);
     const gateway = this.ctx.exports.OutboundGateway({ props });
     const intercepted = await this.raceUntil(
       g,
@@ -2310,6 +2326,37 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       }
       must(r, "git merge-base");
     };
+    // 積み足し（continuation）: 根のブランチの先頭が、gateway が確かめた先頭（initialSha。このタスクの自動の push が通った後は、
+    // その SHA）のままであること（fail-closed）。verifyBase は祖先かどうかしか見ないので、人や他の push でブランチが進んでいても通ってしまう
+    const expectedHead = () => {
+      const pushed = this.ctx.storage.kv.get<string>(PUSHED_HEAD_KEY);
+      return typeof pushed === "string" && /^[0-9a-f]{40}$/.test(pushed) ? pushed : spec.initialSha;
+    };
+    const moved = (detail: string) =>
+      new Error(`branch_moved: the task branch ${spec.branch} ${detail}`);
+    /** リモートから取り出した直後: HEAD が期待した先頭と等しいこと */
+    const verifyHead = async () => {
+      if (spec.continuation === undefined) return;
+      const expected = expectedHead();
+      const head = await git(["rev-parse", "HEAD"]);
+      const sha = head.stdout.trim();
+      if (head.exitCode !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) {
+        throw moved(`could not be verified (git rev-parse HEAD exit ${head.exitCode})`);
+      }
+      if (sha !== expected) throw moved(`is at ${sha}, expected ${expected}`);
+    };
+    /**
+     * ローカルにあった作業ブランチへ切り替えた直後: リモートから取り出したものではない（このタスクで確かめて取り出したブランチに、
+     * ワーカーが commit を積んだもの）ので、期待した先頭を含むこと（0: 祖先、1: 含まない、他: 判定できない）
+     */
+    const verifyLocalHead = async () => {
+      if (spec.continuation === undefined) return;
+      const expected = expectedHead();
+      const r = await git(["merge-base", "--is-ancestor", expected, "HEAD"]);
+      if (r.exitCode === 1) throw moved(`does not contain ${expected}`);
+      if (r.exitCode !== 0)
+        throw moved(`could not be verified (git merge-base exit ${r.exitCode})`);
+    };
     const healthy = await git(["rev-parse", "--verify", "-q", "HEAD"]);
     if (healthy.exitCode !== 0) {
       // 作業ツリーが無い（または clone の途中で壊れた）: 空にしてから、作業ブランチを直接 clone する
@@ -2330,6 +2377,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
         "git clone",
       );
       await verifyBase();
+      await verifyHead();
       return;
     }
     const current = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -2337,6 +2385,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
     const exists = await git(["rev-parse", "--verify", "-q", `refs/heads/${spec.branch}`]);
     if (exists.exitCode === 0) {
       must(await git(["switch", "-q", spec.branch]), "git switch");
+      await verifyLocalHead();
       return;
     }
     // 作業ツリーはあるが作業ブランチを持っていない: リモートから取り直して切り替える
@@ -2352,6 +2401,7 @@ export class SandboxDO extends DurableObject<Env> implements SandboxPort {
       "git switch -c",
     );
     await verifyBase();
+    await verifyHead();
   }
 
   // ---- 依存関係のキャッシュを作る（DepsCacheDO から呼ばれる。名前が deps-<鍵> のインスタンスで動く）----

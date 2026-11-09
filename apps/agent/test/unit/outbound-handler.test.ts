@@ -609,6 +609,88 @@ describe("receive-pack: SandboxDO の push の許可証", () => {
   });
 });
 
+describe("receive-pack: 積み足し（props の branchTaskId）", () => {
+  const url = `${REPO}/git-receive-pack`;
+  /** 積み足しタスク c1 の SandboxDO。根は r1（gateway 由来の branchTaskId） */
+  const contProps = {
+    repo: { owner: "acme", name: "hello" },
+    task: "agent/task-r1",
+    taskId: "c1",
+    branchTaskId: "r1",
+  };
+  const permitFor = (ref: string) => async () => ({ ref, newSha: B });
+
+  it("根のブランチ（agent/task-<branchTaskId>）への push は、許可証が一致すれば通る。トークンと許可証は自分の taskId で読む", async () => {
+    const asked: string[] = [];
+    const { deps, up, reads } = setup({
+      props: contProps,
+      readPushPermit: async (taskId) => {
+        asked.push(taskId);
+        return { ref: "refs/heads/agent/task-r1", newSha: B };
+      },
+    });
+    const res = await handleOutbound(post(url, cat(cmd("refs/heads/agent/task-r1"), PACK)), deps);
+    expect(res.status).toBe(200);
+    expect(up.calls).toHaveLength(1);
+    expect(asked).toEqual(["c1"]);
+    expect(reads).toEqual(["c1"]);
+  });
+
+  it("branchTaskId があっても、根以外の agent/task-*（自分の id を含む）・main・タグへの push は拒否する", async () => {
+    const targets = [
+      "refs/heads/agent/task-c1",
+      "refs/heads/agent/task-t2",
+      "refs/heads/agent/task-r1x",
+      "refs/heads/main",
+      "refs/tags/agent/task-r1",
+    ];
+    for (const ref of targets) {
+      // 許可証の ref を push に合わせても（SandboxDO が誤って出しても）通らない
+      const { deps, up, reads } = setup({ props: contProps, readPushPermit: permitFor(ref) });
+      const res = await handleOutbound(post(url, cat(cmd(ref), PACK)), deps);
+      expect(res.status, ref).toBe(403);
+      expect(up.calls, ref).toHaveLength(0);
+      expect(reads, ref).toHaveLength(0);
+    }
+  });
+
+  it("根のブランチへの push でも、許可証の ref が根でなければ拒否する", async () => {
+    const { deps, up } = setup({
+      props: contProps,
+      readPushPermit: permitFor("refs/heads/agent/task-c1"),
+    });
+    const res = await handleOutbound(post(url, cat(cmd("refs/heads/agent/task-r1"), PACK)), deps);
+    expect(res.status).toBe(403);
+    expect(up.calls).toHaveLength(0);
+  });
+
+  it("props.task は push 先を決めない（branchTaskId が無ければ taskId のブランチだけ）", async () => {
+    const props = { repo: { owner: "acme", name: "hello" }, task: "agent/task-evil", taskId: "t1" };
+    const evil = setup({ props, readPushPermit: permitFor("refs/heads/agent/task-evil") });
+    const denied = await handleOutbound(
+      post(url, cat(cmd("refs/heads/agent/task-evil"), PACK)),
+      evil.deps,
+    );
+    expect(denied.status).toBe(403);
+    expect(evil.up.calls).toHaveLength(0);
+    const own = setup({ props });
+    const ok = await handleOutbound(post(url, cat(cmd(), PACK)), own.deps);
+    expect(ok.status).toBe(200);
+  });
+
+  it("branchTaskId の形が不正なら、どの push も通さない（taskId のブランチにも戻らない）", async () => {
+    for (const bad of ["", "r1/../main", "a.b"]) {
+      const props = { ...contProps, branchTaskId: bad };
+      for (const ref of ["refs/heads/agent/task-c1", `refs/heads/agent/task-${bad}`]) {
+        const { deps, up } = setup({ props, readPushPermit: permitFor(ref) });
+        const res = await handleOutbound(post(url, cat(cmd(ref), PACK)), deps);
+        expect(res.status, `${bad} ${ref}`).toBe(403);
+        expect(up.calls).toHaveLength(0);
+      }
+    }
+  });
+});
+
 describe("receive-pack: POST", () => {
   const url = `${REPO}/git-receive-pack`;
 

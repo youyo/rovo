@@ -1143,6 +1143,10 @@ export class AgentDO extends DurableObject<Env> {
       baseSha: spec.baseSha,
       branch: spec.branch,
       initialSha: spec.initialSha,
+      // 積み足し: SandboxDO が clone 後の先頭を確かめ、push を許す ref を根のブランチにする
+      ...(spec.continuation !== undefined
+        ? { continuation: { of: spec.continuation.of, root: spec.continuation.root } }
+        : {}),
       deadlineAt: this.deadlineAt(),
       // 依存関係のキャッシュ（D14）。gateway が lockfile から作った指定（無ければ null）。検証と実行は SandboxDO が行う
       deps: spec.deps ?? null,
@@ -1661,6 +1665,10 @@ export class AgentDO extends DurableObject<Env> {
     if (!spec.taskId || !spec.repository || !spec.baseSha || !spec.instructions) {
       return "invalid_spec";
     }
+    // 積み足し（同じ PR に積む）は通常のタスクだけ（task_review とは併用しない）
+    if (spec.continuation !== undefined && spec.kind !== undefined) {
+      return "invalid_spec: continuation";
+    }
     if (spec.kind !== undefined) {
       if (spec.kind !== "review") return "invalid_spec: kind";
       // worker_review は通常のタスクだけ（task_review とは併用しない）
@@ -1670,12 +1678,17 @@ export class AgentDO extends DurableObject<Env> {
     if (spec.review !== undefined) return "invalid_spec: review";
     const workerReviewError = this.validateWorkerReview(spec);
     if (workerReviewError) return workerReviewError;
-    // push は agent/task-<taskId> だけが許される（OutboundGateway が同じ名前で判定する）。ずれていれば始めない
-    if (spec.branch !== `agent/task-${spec.taskId}`) return "invalid_spec: branch";
+    // push は agent/task-<taskId>（積み足しは agent/task-<root>）だけが許される（OutboundGateway が同じ名前で判定する）。ずれていれば始めない
+    const branchError = this.validateBranch(spec);
+    if (branchError) return branchError;
     if (
       typeof spec.initialSha !== "string" ||
       !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(spec.initialSha)
     ) {
+      return "invalid_spec: initialSha";
+    }
+    // 積み足しは空コミットを持たない（作業ブランチの先頭 = 元の PR の head = base_sha）
+    if (spec.continuation !== undefined && spec.initialSha !== spec.baseSha) {
       return "invalid_spec: initialSha";
     }
     if (!isValidCredential(spec.gitCredential)) return "invalid_spec: gitCredential";
@@ -1708,6 +1721,33 @@ export class AgentDO extends DurableObject<Env> {
       ) {
         return "unknown_model: not in AGENT_MODELS";
       }
+    }
+    return undefined;
+  }
+
+  /**
+   * 作業ブランチの検査（fail-closed）。continuation が無ければ今のまま agent/task-<taskId>。あれば of・root が
+   * ^[A-Za-z0-9_-]+$ で自分の id ではなく、branch が agent/task-<root> のときだけ通す。spec は gateway の TaskDO が作って
+   * RPC で渡す値で、ワーカーの入力（instructions など）から root を決める経路は無い。
+   */
+  private validateBranch(spec: TaskSpec): string | undefined {
+    const c = spec.continuation as unknown;
+    if (c === undefined) {
+      return spec.branch === `agent/task-${spec.taskId}` ? undefined : "invalid_spec: branch";
+    }
+    if (typeof c !== "object" || c === null) return "invalid_spec: continuation";
+    const { of, root } = c as Record<string, unknown>;
+    const id = /^[A-Za-z0-9_-]+$/;
+    if (
+      typeof of !== "string" ||
+      !id.test(of) ||
+      typeof root !== "string" ||
+      !id.test(root) ||
+      root === spec.taskId ||
+      of === spec.taskId ||
+      spec.branch !== `agent/task-${root}`
+    ) {
+      return "invalid_spec: branch";
     }
     return undefined;
   }
@@ -3175,7 +3215,9 @@ export class AgentDO extends DurableObject<Env> {
     return [
       {
         key: "role",
-        text: `You are an autonomous coding agent. Your workspace is ${WORKSPACE_ROOT}, a git checkout of ${spec.repository}, on branch agent/task-${spec.taskId}. The branch tip is the starting point (an empty commit on top of ${spec.baseSha}). Complete the task given in the user message.`,
+        text: spec.continuation
+          ? `You are an autonomous coding agent. Your workspace is ${WORKSPACE_ROOT}, a git checkout of ${spec.repository}, on branch ${spec.branch}. The branch already has the commits of earlier tasks of the same pull request; the branch tip is the starting point. Do not rewrite or drop earlier commits (no rebase, reset, amend of existing commits). Complete the task given in the user message.`
+          : `You are an autonomous coding agent. Your workspace is ${WORKSPACE_ROOT}, a git checkout of ${spec.repository}, on branch ${spec.branch}. The branch tip is the starting point (an empty commit on top of ${spec.baseSha}). Complete the task given in the user message.`,
       },
       { key: "acceptance_criteria", text: list(spec.acceptanceCriteria) },
       { key: "constraints", text: list(spec.constraints) },
@@ -3623,7 +3665,7 @@ export class AgentDO extends DurableObject<Env> {
   private workerReviewHeader(spec: StoredSpec, rv: ReviewSpec): string {
     const goal = maskSecrets(spec.instructions.slice(0, WORKER_REVIEW_INSTRUCTIONS_MAX_CHARS));
     return [
-      `Review the changes that a worker made for the task below (repository ${spec.repository}, work branch agent/task-${spec.taskId}, commit ${rv.headSha}). The diff is against the base commit ${spec.baseSha}.`,
+      `Review the changes that a worker made for the task below (repository ${spec.repository}, work branch ${spec.branch}, commit ${rv.headSha}). The diff is against the base commit ${spec.baseSha}.`,
       `Task goal given by the client (trusted):\n${goal}`,
     ].join("\n\n");
   }
@@ -4322,7 +4364,7 @@ export class AgentDO extends DurableObject<Env> {
       });
 
       // 固定した SHA を checkout した状態で検証する（前後で HEAD と作業ツリーを確かめる）
-      const branch = `agent/task-${spec.taskId}`;
+      const branch = spec.branch;
       const results: VerificationCommandResult[] = [];
       let passed = true;
       let destroyed = false;
@@ -4873,12 +4915,48 @@ export class AgentDO extends DurableObject<Env> {
       this.finishSync({ error: blockedMessage(scan) }, sha);
       return;
     }
+    // 積み足し（同じ PR に積む）: lease の期待値は ls-remote の値ではなく、最後に push できた SHA（無ければ initialSha）。
+    // 人や他が間に push していたら上書きせず失敗させ、initialSha が祖先でない（前のタスクの commit の書き換え）なら push しない
+    const continued = spec.continuation !== undefined;
+    const expected = this.lastPushedSha() ?? spec.initialSha;
     for (let attempt = 1; attempt <= MAX_SYNC_ATTEMPTS; attempt++) {
       if (this.stopIntents().length > 0 || isTerminal(this.store.phase())) return;
       try {
-        const remote = await readRemote();
+        let lease: string;
+        if (continued) {
+          // 0: 祖先、1: 祖先ではない（書き換え。再試行しない）、他: 判定できない（再試行）
+          const anc = await exec(["merge-base", "--is-ancestor", spec.initialSha, sha], 60_000);
+          if (anc.exitCode === 1 && !anc.timedOut) {
+            this.finishSync(
+              {
+                error: `history_rewritten: the commit ${sha} does not contain the starting point ${spec.initialSha} (earlier commits were rewritten or dropped)`,
+              },
+              sha,
+            );
+            return;
+          }
+          if (!ok(anc)) throw new Error(`git merge-base ${why(anc)}`);
+          const remote = await readRemote();
+          if (remote === sha) {
+            // 前の試行の push が通っていた
+            this.finishSync({ pushedSha: sha }, sha);
+            return;
+          }
+          if (remote !== expected) {
+            this.finishSync(
+              {
+                error: `branch_moved_externally: the branch head is ${remote || "(missing)"}, expected ${expected}; not overwriting it`,
+              },
+              sha,
+            );
+            return;
+          }
+          lease = expected;
+        } else {
+          lease = await readRemote();
+        }
         const push = await exec(
-          ["push", `--force-with-lease=${ref}:${remote}`, remoteUrl, `${sha}:${ref}`],
+          ["push", `--force-with-lease=${ref}:${lease}`, remoteUrl, `${sha}:${ref}`],
           120_000,
           { ref, newSha: sha },
         );

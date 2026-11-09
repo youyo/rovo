@@ -173,4 +173,36 @@ describe("完了時の作業ブランチの同期（--force-with-lease の push�
     const failed = events.find((e) => e.type === "push_failed" && e.data.final === true);
     expect(failed?.data.message).toBe("blocked: could not scan the diff for secrets");
   });
+
+  it("積み足し（continuation）でも push の前に検査する。範囲の始まりは initialSha（前のタスクの commit は再検査しない）", async () => {
+    const git = fakeGitRange({ base: INITIAL });
+    const leak = git.commitDirect(file("src/leak.ts", `const t = "${GHP}";`));
+    setAgentTestOverrides("sp-sync-cont", {
+      sandbox: prod(git),
+      pushRetryDelayMs: 0,
+      script: [call("bash", { command: "true" }), report("done")],
+    });
+    const stub = env.AGENT_DO.getByName("sp-sync-cont");
+    const res = await stub.start(
+      makeSpec("sp-sync-cont", {
+        verificationCommands: [],
+        deadlineAt: Date.now() + 3_600_000,
+        baseSha: INITIAL,
+        branch: "agent/task-root01",
+        continuation: { of: "prev01", root: "root01" },
+      }),
+    );
+    expect(res).toMatchObject({ status: "accepted" });
+    expect(await waitForTerminal(asFx(stub))).toBe("completed");
+    expect(git.state.pushes).toHaveLength(0);
+    const scans = git.state.rangeArgs.filter((a) => !a.includes("--numstat"));
+    expect(scans.length).toBeGreaterThan(0);
+    expect(scans.every((a) => notOf(a) === INITIAL)).toBe(true);
+    const events = await allEvents(asFx(stub));
+    const failed = events.find((e) => e.type === "push_failed" && e.data.final === true);
+    expect(failed?.data.message).toBe(
+      `blocked: possible secret (github-token) in src/leak.ts:1 (commit ${leak.slice(0, 7)})`,
+    );
+    expect(JSON.stringify(events)).not.toContain(GHP);
+  });
 });

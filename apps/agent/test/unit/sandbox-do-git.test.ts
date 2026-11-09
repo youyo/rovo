@@ -353,6 +353,165 @@ describe("SandboxDO: prepareWorkspace（作業ブランチの checkout）", () =
     });
   });
 
+  describe("積み足し（continuation）: clone / switch の直後に HEAD が initialSha と一致することを確かめる（門番 3）", () => {
+    const PUSHED = "e".repeat(40);
+    const OTHER = "f".repeat(40);
+    const contSpec = (over: Record<string, unknown> = {}) =>
+      spec({
+        baseSha: INITIAL,
+        initialSha: INITIAL,
+        branch: "agent/task-r1",
+        continuation: { of: "p1", root: "r1" },
+        ...over,
+      });
+    const isHeadRead = (a: string[]) => a.length === 2 && a[0] === "rev-parse" && a[1] === "HEAD";
+    /** 作業ツリーが無い → clone。rev-parse HEAD の応答を台本にする */
+    const freshAt = (head: Reply, over: (a: string[]) => Reply | undefined = () => undefined) =>
+      fresh((argv) => {
+        const a = gitArgs(argv);
+        const o = over(a);
+        if (o) return o;
+        if (isHeadRead(a)) return head;
+        return undefined;
+      });
+
+    it("clone の後の HEAD が initialSha なら通る（rev-parse HEAD で確かめる）", async () => {
+      const c = freshAt({ stdout: `${INITIAL}\n` });
+      await runInDO(sandbox("prep-cont-ok"), async (inst) => {
+        inst.maybeContainer = () => c;
+        await inst.prepareWorkspace(contSpec());
+      });
+      expect(c.calls.map(gitArgs)).toContainEqual(["rev-parse", "HEAD"]);
+    });
+
+    it("clone の後の HEAD が initialSha と違えば（人や他の push でブランチが進んでいた）branch_moved で失敗する。実際の HEAD を載せる", async () => {
+      const c = freshAt({ stdout: `${OTHER}\n` });
+      await runInDO(sandbox("prep-cont-moved"), async (inst) => {
+        inst.maybeContainer = () => c;
+        const err = await inst.prepareWorkspace(contSpec()).catch((e: Error) => e);
+        expect(err).toBeInstanceOf(Error);
+        expect(err.message).toMatch(/^branch_moved/);
+        expect(err.message).toContain(OTHER);
+      });
+    });
+
+    it("rev-parse HEAD が失敗したら（判定できない）失敗側に倒す", async () => {
+      const c = freshAt({ exitCode: 128, stderr: "fatal" });
+      await runInDO(sandbox("prep-cont-revparse-fail"), async (inst) => {
+        inst.maybeContainer = () => c;
+        await expect(inst.prepareWorkspace(contSpec())).rejects.toThrow(/branch_moved|rev-parse/);
+      });
+    });
+
+    it("作業ツリーはあるが作業ブランチが無い（fetch して switch -c）ときも、HEAD が initialSha と違えば失敗する", async () => {
+      const at = (head: string) =>
+        new GitContainer((argv) => {
+          const a = gitArgs(argv);
+          if (a[0] === "rev-parse" && a.includes("--abbrev-ref")) return { stdout: "HEAD\n" };
+          if (a[0] === "rev-parse" && a.includes(`refs/heads/agent/task-r1`))
+            return { exitCode: 1 };
+          if (isHeadRead(a)) return { stdout: `${head}\n` };
+          return {};
+        });
+      const bad = at(OTHER);
+      await runInDO(sandbox("prep-cont-fetch-moved"), async (inst) => {
+        inst.maybeContainer = () => bad;
+        await expect(inst.prepareWorkspace(contSpec())).rejects.toThrow(/branch_moved/);
+      });
+      expect(bad.calls.map(gitArgs)).toContainEqual([
+        "switch",
+        "-q",
+        "-c",
+        "agent/task-r1",
+        "--no-track",
+        "origin/agent/task-r1",
+      ]);
+      const good = at(INITIAL);
+      await runInDO(sandbox("prep-cont-fetch-ok"), async (inst) => {
+        inst.maybeContainer = () => good;
+        await inst.prepareWorkspace(contSpec());
+      });
+    });
+
+    it("ローカルにある作業ブランチへ switch したときも確かめる（initialSha を含まなければ失敗）", async () => {
+      const at = (mergeBase: number) =>
+        new GitContainer((argv) => {
+          const a = gitArgs(argv);
+          if (a[0] === "rev-parse" && a.includes("--abbrev-ref")) return { stdout: "HEAD\n" };
+          if (a[0] === "merge-base") return { exitCode: mergeBase };
+          if (isHeadRead(a)) return { stdout: `${OTHER}\n` };
+          return {};
+        });
+      const bad = at(1);
+      await runInDO(sandbox("prep-cont-switch-bad"), async (inst) => {
+        inst.maybeContainer = () => bad;
+        await expect(inst.prepareWorkspace(contSpec())).rejects.toThrow(/branch_moved/);
+      });
+      expect(bad.calls.map(gitArgs)).toContainEqual(["switch", "-q", "agent/task-r1"]);
+      expect(bad.calls.map(gitArgs)).toContainEqual([
+        "merge-base",
+        "--is-ancestor",
+        INITIAL,
+        "HEAD",
+      ]);
+      const errored = at(128);
+      await runInDO(sandbox("prep-cont-switch-error"), async (inst) => {
+        inst.maybeContainer = () => errored;
+        await expect(inst.prepareWorkspace(contSpec())).rejects.toThrow();
+      });
+      const good = at(0);
+      await runInDO(sandbox("prep-cont-switch-ok"), async (inst) => {
+        inst.maybeContainer = () => good;
+        await inst.prepareWorkspace(contSpec());
+      });
+    });
+
+    it("このタスクの自動の push が通ったあとの作り直し（再 clone）では、最後に push した SHA と一致すれば通る", async () => {
+      const ok = freshAt({ stdout: `${PUSHED}\n` });
+      await runInDO(sandbox("prep-cont-pushed"), async (inst) => {
+        inst.maybeContainer = () => ok;
+        inst.ctx.storage.kv.put("pushed_head", PUSHED);
+        await inst.prepareWorkspace(contSpec());
+      });
+      // 自分の push の後にリモートが別の SHA（initialSha に戻された場合も含む）なら失敗する
+      for (const [i, head] of [OTHER, INITIAL].entries()) {
+        const c = freshAt({ stdout: `${head}\n` });
+        await runInDO(sandbox(`prep-cont-pushed-moved-${i}`), async (inst) => {
+          inst.maybeContainer = () => c;
+          inst.ctx.storage.kv.put("pushed_head", PUSHED);
+          await expect(inst.prepareWorkspace(contSpec())).rejects.toThrow(/branch_moved/);
+        });
+      }
+    });
+
+    it("continuation の無いタスクは今のまま（rev-parse HEAD の一致は見ない）", async () => {
+      const c = freshAt({ stdout: `${OTHER}\n` });
+      await runInDO(sandbox("prep-cont-legacy"), async (inst) => {
+        inst.maybeContainer = () => c;
+        await inst.prepareWorkspace(spec());
+      });
+      expect(c.calls.map(gitArgs).some(isHeadRead)).toBe(false);
+    });
+
+    it("continuation の形が不正（branch が根と違う・root の形・initialSha !== baseSha・task_review との併用）なら ensureReady が拒否する", async () => {
+      const bads = [
+        contSpec({ branch: "agent/task-other" }),
+        contSpec({ branch: "agent/task-a/b", continuation: { of: "p1", root: "a/b" } }),
+        contSpec({ continuation: { of: "p 1", root: "r1" } }),
+        contSpec({ continuation: null }),
+        contSpec({ baseSha: BASE }),
+        contSpec({ checkout: { pullNumber: 1, sha: INITIAL } }),
+      ];
+      for (const [i, bad] of bads.entries()) {
+        await runInDO(sandbox(`prep-cont-invalid-${i}`), async (inst) => {
+          inst.maybeContainer = () => fresh();
+          await expect(inst.ensureReady(bad), JSON.stringify(bad)).rejects.toThrow(/continuation/);
+          expect(inst.ctx.storage.kv.get("spec")).toBeUndefined();
+        });
+      }
+    });
+  });
+
   it("再起動のメッセージは「最後に push したチェックポイントから再 clone した」旨を伝える", async () => {
     await runInDO(sandbox("prep-message"), async (inst) => {
       inst.ensureRunning = async () => true;

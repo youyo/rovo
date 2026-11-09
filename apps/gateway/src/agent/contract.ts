@@ -61,8 +61,13 @@ export interface TaskSpec {
   deadlineAt: number;
   /** 作業ブランチ名（agent/task-<id>）。TaskDO が AgentDO.start より前に作っている */
   branch: string;
-  /** 決定的な初期コミットの SHA（作業ブランチの出発点。空コミット） */
+  /** 決定的な初期コミットの SHA（作業ブランチの出発点。空コミット）。continuation があるときは baseSha と同じ */
   initialSha: string;
+  /**
+   * 同じ PR への積み足し（docs/specs/continue-task.md）。あるときだけ branch は `agent/task-<root>`（根の PR ブランチ）。
+   * of は元のタスクの id、root はチェーンの根の id。省略は今の動き（`agent/task-<taskId>`）。
+   */
+  continuation?: TaskContinuation;
   /** Installation Access Token と期限（epoch ms）。ログに出さない */
   gitCredential: GitCredential;
   /**
@@ -89,6 +94,14 @@ export interface TaskSpec {
    * 結果の review に本文を残す。省略 = client_review（レビューの段は動かない）。
    */
   workerReview?: WorkerReviewSpec;
+}
+
+/** 積み足しの指定（TaskSpec の continuation）。id はどちらも ^[A-Za-z0-9_-]+$ */
+export interface TaskContinuation {
+  /** 元のタスク（continue_task_id）の id */
+  of: string;
+  /** チェーンの根（PR ブランチを作ったタスク）の id */
+  root: string;
 }
 
 /** worker_review の指定（TaskDO が task_start の入力から作る） */

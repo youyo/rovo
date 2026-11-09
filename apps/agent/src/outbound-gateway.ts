@@ -15,13 +15,21 @@ import type { PushPermit } from "./sandbox-port";
 export interface OutboundGatewayProps {
   /** clone / push を許す唯一のリポジトリ。未設定なら github.com へは何も通さない。 */
   repo?: { owner: string; name: string };
-  /** 作業ブランチ名（認証済みの値）。違反の監査には使わない（taskId だけを出す）。 */
+  /**
+   * 作業ブランチ名（認証済みの値）。違反の監査にも、push を許す ref の決定にも使わない（依存関係のキャッシュ側では
+   * 弱い検査の値が入るため。taskId / branchTaskId だけを見る）。
+   */
   task?: string;
   /**
-   * このコンテナのタスク ID（SandboxDO の名前）。トークンの読み出しと、push を許す ref
+   * このコンテナのタスク ID（SandboxDO の名前）。トークンと許可証の読み出しと、branchTaskId が無いときの push を許す ref
    * （`refs/heads/agent/task-<taskId>`）の決定に使う。リクエストの path や本文からは取らない。
    */
   taskId: string;
+  /**
+   * 同じ PR への積み足し（TaskSpec の continuation）のときだけ: チェーンの根の id。あるとき push を許す ref は
+   * `refs/heads/agent/task-<branchTaskId>` の 1 本だけになる（gateway の TaskDO が決めた値を SandboxDO が渡す）。
+   */
+  branchTaskId?: string;
 }
 
 export type { GitCredential, PushPermit };
@@ -190,9 +198,18 @@ function denied(
   return text(status, body);
 }
 
-/** タスクに許す push 先の ref。props の taskId だけから作る。 */
-function allowedRef(taskId: string): string | undefined {
-  return /^[A-Za-z0-9_-]+$/.test(taskId) ? `refs/heads/agent/task-${taskId}` : undefined;
+/** push を許す ref の形（refs/heads/ を含む）。decideOutbound の WORK_BRANCH は refs/heads/ を外した名前を見る */
+const ALLOWED_REF = /^refs\/heads\/agent\/task-[A-Za-z0-9_-]+$/;
+
+/**
+ * タスクに許す push 先の ref（1 本だけ）。props の branchTaskId（積み足しの根）があればそれ、無ければ taskId から作る。
+ * props.task は見ない。形が違えば undefined（push は何も許さない。branchTaskId が不正でも taskId には戻らない）。
+ */
+export function allowedRef(props: OutboundGatewayProps): string | undefined {
+  const id = props.branchTaskId ?? props.taskId;
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]+$/.test(id)) return undefined;
+  const ref = `refs/heads/agent/task-${id}`;
+  return ALLOWED_REF.test(ref) ? ref : undefined;
 }
 
 /** 有効なトークンを Authorization の値にする。無い・期限切れ・読み出し失敗は undefined（= 401）。 */
@@ -320,7 +337,7 @@ export async function handleOutbound(request: Request, deps: OutboundDeps): Prom
   const upgrade =
     request.headers.has("upgrade") ||
     (request.headers.get("connection") ?? "").toLowerCase().includes("upgrade");
-  const workRef = allowedRef(props.taskId);
+  const workRef = allowedRef(props);
   const decision = decideOutbound(
     { method: request.method, url: request.url, upgrade },
     { repo: props.repo, branch: workRef?.slice("refs/heads/".length) },

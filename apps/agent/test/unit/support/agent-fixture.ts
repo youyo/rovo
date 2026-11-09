@@ -116,6 +116,10 @@ export interface Fixture {
   lsRemoteResults: Partial<ExecResult>[];
   /** push の呼び出し（argv） */
   pushCalls: string[][];
+  /** git merge-base の結果を先頭から順に使う。尽きたら成功（exit 0 = 祖先） */
+  mergeBaseResults: Partial<ExecResult>[];
+  /** git merge-base の呼び出し（自動の git の上書きを除いた argv） */
+  mergeBaseCalls: string[][];
   /** worker_review のレビューの段が読む差分（git diff --no-ext-diff の出力）。既定は空 */
   reviewDiff: { value: string };
   /** git diff --no-ext-diff の呼び出し（argv） */
@@ -223,6 +227,8 @@ export function newFixture(
   const pushResults: Partial<ExecResult>[] = [];
   const lsRemoteResults: Partial<ExecResult>[] = [];
   const pushCalls: string[][] = [];
+  const mergeBaseResults: Partial<ExecResult>[] = [];
+  const mergeBaseCalls: string[][] = [];
   const reviewDiff = { value: "" };
   const reviewDiffCalls: string[][] = [];
 
@@ -264,6 +270,10 @@ export function newFixture(
       return r;
     }
     if (a0 === "git" && a1 === "checkout") return {};
+    if (a0 === "git" && a1 === "merge-base") {
+      mergeBaseCalls.push(argv);
+      return mergeBaseResults.shift() ?? {};
+    }
     if (a0 === "git" && a1 === "format-patch") {
       if (patchState.held) {
         patchState.entered = true;
@@ -397,6 +407,8 @@ export function newFixture(
     pushResults,
     lsRemoteResults,
     pushCalls,
+    mergeBaseResults,
+    mergeBaseCalls,
     reviewDiff,
     reviewDiffCalls,
     usageGate: gateOf(usageState),

@@ -1,5 +1,6 @@
 import { EFFORT_LEVELS, SELECTABLE_SANDBOX_INSTANCES } from "@rovo/models";
 import { z } from "zod";
+import { isTaskId } from "./ulid";
 
 export const DEFAULT_WAIT_SECONDS = 30;
 export const MAX_WAIT_SECONDS = 50;
@@ -89,11 +90,25 @@ export const BUDGET_POLICIES = ["ask", "stop"] as const;
 export type BudgetPolicy = (typeof BUDGET_POLICIES)[number];
 export const DEFAULT_BUDGET_POLICY: BudgetPolicy = "ask";
 
-/** task_start の入力（design.md 4.3）。idempotency_key は含めない。 */
+// GitHub の上限: owner は 39 文字、リポジトリ名は 100 文字
+const repositorySchema = z
+  .string()
+  .regex(/^[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name 形式");
+const baseRefSchema = z.string().min(1).max(255);
+
+/**
+ * task_start の入力（design.md 4.3）。idempotency_key は含めない。
+ * repository・base_ref は continue_task_id（同じ PR への積み足し。docs/specs/continue-task.md）があるときだけ省略できる
+ * （省略時は元のタスクから引き継ぐ）。無いときの必須の検査は checkStartTarget（superRefine）で行う。
+ */
 export const taskInputObject = z.object({
-  // GitHub の上限: owner は 39 文字、リポジトリ名は 100 文字
-  repository: z.string().regex(/^[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name 形式"),
-  base_ref: z.string().min(1).max(255),
+  repository: repositorySchema.optional(),
+  base_ref: baseRefSchema.optional(),
+  /** 積み足しの元のタスクの id（ULID の形だけを検査する。所有者・状態は UserDO.authorizeContinue が確かめる） */
+  continue_task_id: z
+    .string()
+    .refine(isTaskId, "continue_task_id must be a task id (ULID)")
+    .optional(),
   // 短縮形は準備の段階（GitHub の commit 取得）で使えず FAILED になるので、入力の段階で 40 桁だけに絞る
   base_sha: z
     .string()
@@ -178,7 +193,30 @@ export function checkReviewFields(
   }
 }
 
-export const taskInputSchema = taskInputObject.superRefine(checkReviewFields);
+/**
+ * repository・base_ref の必須の検査。continue_task_id が無いときは従来どおり必須（taskInputSchema と、idempotency_key を足した
+ * MCP の入力の両方で使う）。
+ */
+export function checkStartTarget(
+  v: Pick<z.infer<typeof taskInputObject>, "repository" | "base_ref" | "continue_task_id">,
+  ctx: z.core.$RefinementCtx,
+): void {
+  if (v.continue_task_id !== undefined) return;
+  for (const k of ["repository", "base_ref"] as const) {
+    if (v[k] === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: [k],
+        message: `${k} is required (it can be omitted only with continue_task_id)`,
+      });
+    }
+  }
+}
+
+export const taskInputSchema = taskInputObject.superRefine((v, ctx) => {
+  checkStartTarget(v, ctx);
+  checkReviewFields(v, ctx);
+});
 
 /** 入力全体（JSON）の上限。項目ごとの上限だけでは合計が大きくなりうるため。 */
 export const MAX_INPUT_BYTES = 256 * 1024;
@@ -187,7 +225,15 @@ export function exceedsInputLimit(input: unknown): boolean {
   return new TextEncoder().encode(JSON.stringify(input)).length > MAX_INPUT_BYTES;
 }
 
+/** task_start の入力（検査済み）。continue_task_id のあるときだけ repository・base_ref が undefined になりうる */
 export type TaskInput = z.infer<typeof taskInputSchema>;
+/** 対象（repository・base_ref）が決まった入力。通常のタスクの作成（TaskDO.ensureCreated）が扱う形 */
+export type TargetedTaskInput = TaskInput & { repository: string; base_ref: string };
+
+/** 対象が決まった入力か（continue_task_id の無い入力は、検査を通っていれば常に true） */
+export function hasTarget(input: TaskInput): input is TargetedTaskInput {
+  return input.repository !== undefined && input.base_ref !== undefined;
+}
 
 /**
  * 入力の fingerprint（SHA-256, hex）。
@@ -204,11 +250,13 @@ export type TaskInput = z.infer<typeof taskInputSchema>;
  * budget_policy は既定（ask）なら含めない（これまでの値と一致させる）。stop のときだけ、上の全体を v6 で包んで足す。
  * effort は未指定なら含めない（これまでの値と一致させる）。指定があれば、上の全体を v7 で包んで末尾に足す（利用者の入力なので、
  * model を rovo が選んだとき（mode: auto）も含める）。
+ * continue_task_id（積み足し）は未指定なら含めない（これまでの値と一致させる）。指定があれば、上の全体を v8 で包んで末尾に足す。
+ * 積み足しでは repository・base_ref を省略できるので、省略は null として入れる（省略と明示は別の入力として扱う）。
  */
 export async function computeFingerprint(input: TaskInput): Promise<string> {
   const fields: unknown[] = [
-    input.repository.toLowerCase(),
-    input.base_ref,
+    input.repository === undefined ? null : input.repository.toLowerCase(),
+    input.base_ref ?? null,
     input.base_sha.toLowerCase(),
     input.title,
     input.instructions,
@@ -253,8 +301,9 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
             ? ["v1", ...fields]
             : ["v2", ...fields, commands];
   const withBudget = input.budget_policy === "stop" ? ["v6", base] : base;
+  const withEffort = input.effort !== undefined ? ["v7", withBudget, input.effort] : withBudget;
   const canonical = JSON.stringify(
-    input.effort !== undefined ? ["v7", withBudget, input.effort] : withBudget,
+    input.continue_task_id !== undefined ? ["v8", withEffort, input.continue_task_id] : withEffort,
   );
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -267,7 +316,7 @@ export async function computeFingerprint(input: TaskInput): Promise<string> {
  */
 export const reviewInputSchema = z
   .object({
-    repository: taskInputObject.shape.repository,
+    repository: repositorySchema,
     pull_number: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
     review_model: z.string().min(1).max(MAX_MODEL_LENGTH),
     review_commands: z.array(verificationCommandSchema).max(MAX_VERIFICATION_COMMANDS).default([]),

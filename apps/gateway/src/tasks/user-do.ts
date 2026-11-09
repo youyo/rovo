@@ -55,6 +55,12 @@ import {
 } from "./budget";
 import { MAX_BUDGET_EXTENSIONS } from "./budget-question";
 import {
+  branchOfRoot,
+  type ContinuationFacts,
+  type InheritedWarning,
+  rootOfBranch,
+} from "./continuation";
+import {
   fetchConsultGatewayCost,
   type GatewayCostResult,
   gatewayCostConfigured,
@@ -62,7 +68,7 @@ import {
 } from "./gateway-cost";
 import { addColumnIfMissing } from "./sql-schema";
 import { parsePrices } from "./summary";
-import type { TaskDO } from "./task-do";
+import type { ContinuationSourceResult, TaskDO } from "./task-do";
 import { isConsultId, isTaskId, ulid, ulidTime } from "./ulid";
 import {
   type ConsultToolName,
@@ -124,6 +130,8 @@ export function parseDailyLimit(raw: string | undefined, fallback: number): numb
 const STALE = Symbol("stale");
 /** 再ログインと重なって確認をやり直す回数の上限。 */
 const MAX_MEMBER_ATTEMPTS = 3;
+/** 完全な commit SHA（SHA-1 の 40 桁 / SHA-256 の 64 桁） */
+const FULL_SHA_RE = /^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$/;
 /** 照合中に予約が入れ替わったときの再判定の上限。 */
 const MAX_RECONCILE_ATTEMPTS = 5;
 
@@ -138,7 +146,25 @@ export const DEFAULT_MONTHLY_BUDGET_USD = 100;
 
 export type ReserveResult =
   | { ok: true; task_id: string; reused: boolean }
-  | { ok: false; code: "conflict" | "concurrency_limit" | "budget_exceeded" };
+  | { ok: false; code: "conflict" | "concurrency_limit" | "budget_exceeded" }
+  /** 同じ PR（ブランチ）に実行中の積み足しがある。task_id はその積み足し（所有者本人の情報） */
+  | { ok: false; code: "branch_busy"; task_id: string }
+  /** 元のタスクがチェーンの最新でない。latest_task_id が今の最新 */
+  | { ok: false; code: "continue_superseded"; latest_task_id: string };
+
+/** 積み足しの予約の鍵（reserve の lock）。branch は agent/task-<根>、continueOf は元のタスクの id */
+export type ReserveLock = { branch: string; continueOf: string };
+
+function isReserveLock(v: unknown): v is ReserveLock {
+  const l = v as ReserveLock | null;
+  return (
+    typeof l === "object" &&
+    l !== null &&
+    typeof l.branch === "string" &&
+    rootOfBranch(l.branch) !== undefined &&
+    isTaskId(l.continueOf)
+  );
+}
 
 /**
  * 裏のモデル呼び出し（AgentDO.consult）を UserDO が待つ上限。超えたら実費不明として予約額で精算し、failed（upstream_unavailable）にする。
@@ -302,6 +328,8 @@ function monthOf(ms: number): string {
 /** 同時実行の枠を持っているタスク。1 タスクにつき 1 行。 */
 type SlotRow = { task_id: string; reserved_at: number };
 type RequestRow = { task_id: string; fingerprint: string };
+/** 実行中の積み足しの鍵 */
+type LockRow = { branch: string; task_id: string; continue_of: string; reserved_at: number };
 
 /**
  * GitHub 連携の失敗。GitHubError の code をそのまま使い、想定外の例外だけ internal にする。
@@ -353,6 +381,33 @@ export type ReviewAuthzResult =
   | { ok: true; repositoryId: number; installationId: number; pull: ReviewPull }
   | AuthzFailure
   | { ok: false; code: "not_found" | "invalid_input"; message: string };
+
+/** authorizeContinue の入力（task_start の入力のうち、積み足しの確認に使うもの。形式は checkStartInput で検査済み） */
+export type ContinueInput = {
+  continue_task_id: string;
+  base_sha: string;
+  repository?: string;
+  base_ref?: string;
+};
+/**
+ * 積み足し（continue_task_id）の権限の結果（docs/specs/continue-task.md「受け付ける条件」）。message は理由のコードで始まる
+ * （invalid_input: continue_review_task / continue_repository_mismatch / continue_base_ref_mismatch、
+ *  conflict: continue_not_finished / continue_superseded / continue_no_pr / continue_pr_closed / continue_pr_merged / continue_pr_mismatch）。
+ * not_found は他人の・存在しないタスクと、本人のトークンで見えない PR（存在を教えない）。branch_moved は base_sha が PR の今の head と違う。
+ */
+export type ContinueAuthzResult =
+  | {
+      ok: true;
+      repositoryId: number;
+      installationId: number;
+      continuation: ContinuationFacts;
+    }
+  | AuthzFailure
+  | {
+      ok: false;
+      code: "not_found" | "invalid_input" | "conflict" | "branch_moved";
+      message: string;
+    };
 
 /** PR の操作の対象。TaskDO の記録から作る（呼び出し元の入力からは取らない）。 */
 export type PrTarget = { repository: string; number: number; branch: string };
@@ -473,6 +528,22 @@ export class UserDO extends DurableObject<Env> {
       reserved_at INTEGER NOT NULL
     )`);
     this.migrateLegacyReservation();
+    // 同じ PR への積み足し（docs/specs/continue-task.md）。reservation_slot と同じ同期区間で扱う。
+    // branch_lock: 実行中の積み足し（鍵 = ブランチ名 agent/task-<根>）。1 つのチェーンに非終端の積み足しは 1 つまで。
+    // 解放は clearSlot と同じ経路（finishTask・予約の回収）だけ。
+    sql.exec(`CREATE TABLE IF NOT EXISTS branch_lock (
+      branch TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      continue_of TEXT NOT NULL,
+      reserved_at INTEGER NOT NULL
+    )`);
+    // branch_chain: チェーンの最新のタスク。積み足しが 1 度も無い PR には行が無く、最新は根（branch の agent/task-<根>）。
+    // 予約で latest_task_id を新しいタスクにし、prev_task_id にそれまでの最新を残す（予約の回収で巻き戻すため）。
+    sql.exec(`CREATE TABLE IF NOT EXISTS branch_chain (
+      branch TEXT PRIMARY KEY,
+      latest_task_id TEXT NOT NULL,
+      prev_task_id TEXT NOT NULL
+    )`);
     // タスクごとの予算。reserved は開始時に予約した額、settled は取り込んだ usage の累計（実費）。
     // closed の後は予約を数えず、実費だけが月の枠を使う。単位はマイクロドル（整数）。
     sql.exec(`CREATE TABLE IF NOT EXISTS task_budget (
@@ -1085,9 +1156,13 @@ export class UserDO extends DurableObject<Env> {
       .one().n;
   }
 
-  /** そのタスクの枠を解放する。枠を持っていたときだけ true。同期区間内で呼ぶこと。 */
+  /**
+   * そのタスクの枠を解放する。枠を持っていたときだけ true。同期区間内で呼ぶこと。
+   * 積み足しの鍵（branch_lock）も同じ経路で解放する。枠の行が先に消えていても鍵だけ残らないよう、早期 return の前に task_id で消す。
+   */
   private clearSlot(taskId: string): boolean {
     const sql = this.ctx.storage.sql;
+    sql.exec("DELETE FROM branch_lock WHERE task_id = ?", taskId);
     const had = sql
       .exec("DELETE FROM reservation_slot WHERE task_id = ? RETURNING task_id", taskId)
       .toArray();
@@ -1135,15 +1210,41 @@ export class UserDO extends DurableObject<Env> {
    * 枠が上限まで埋まっていれば、枠を持つタスクを TaskDO に照合し、回収できるもの（終端でなく一度も作られなかった予約）を
    * 解放して再判定する。照合（await）はトランザクションの外で行い、解放は task_id を指定して行う
    * （入れ替わった別のタスクの枠は消えない）。
+   *
+   * lock は積み足し（continue_task_id）のときだけ渡す（docs/specs/continue-task.md）。branch は agent/task-<根>、continueOf は元のタスク。
+   * 同じブランチに実行中の積み足し（branch_lock）があれば branch_busy、チェーンの最新が continueOf でなければ continue_superseded。
+   * 鍵の持ち主も枠と同じく照合し、回収できる（一度も作られなかった）予約なら解放して再判定する。
    */
-  async reserve(requestKey: string, fingerprint: string): Promise<ReserveResult> {
+  async reserve(
+    requestKey: string,
+    fingerprint: string,
+    lock?: ReserveLock,
+  ): Promise<ReserveResult> {
+    if (lock !== undefined && !isReserveLock(lock)) throw new Error("invalid reserve lock");
+    let last: ReserveResult = { ok: false, code: "concurrency_limit" };
     for (let attempt = 0; attempt < MAX_RECONCILE_ATTEMPTS; attempt++) {
       // 同期区間: 判定と記録を await なしで一度に行う（割り込まれない）。
-      const step = this.ctx.storage.transactionSync(() => this.decide(requestKey, fingerprint));
+      const step = this.ctx.storage.transactionSync(() =>
+        this.decide(requestKey, fingerprint, lock),
+      );
       this.requestConsultAlarm(); // decide が古い consult を閉じたとき、その索引を配送する
       if (step.kind === "done") return step.result;
 
+      if (step.kind === "locked") {
+        // 同じ PR に積み足しの鍵がある。持ち主を TaskDO に照合する（decide は同期なので、照合はここで行う）
+        last = { ok: false, code: "branch_busy", task_id: step.row.task_id };
+        if (await this.shouldRelease(step.row.task_id, step.row.reserved_at)) {
+          this.ctx.storage.transactionSync(() => this.reclaim(step.row.task_id));
+          continue;
+        }
+        // 解放できない。鍵の持ち主が照合の前と同じなら本当に実行中。入れ替わっていれば判定をやり直す
+        const now = this.lockRow(step.row.branch);
+        if (now !== undefined && now.task_id === step.row.task_id) return last;
+        continue;
+      }
+
       // 枠が埋まっている。枠を持つタスクを TaskDO に照合する（ここで他の呼び出しが割り込みうる）。
+      last = { ok: false, code: "concurrency_limit" };
       const verdicts = await Promise.all(
         step.slots.map(async (slot) => ({
           slot,
@@ -1154,7 +1255,7 @@ export class UserDO extends DurableObject<Env> {
       if (releasable.length > 0) {
         // 解放は task_id で行う。照合中に finishTask で先に解放されていれば何も起きない。
         this.ctx.storage.transactionSync(() => {
-          for (const taskId of releasable) this.clearSlot(taskId);
+          for (const taskId of releasable) this.reclaim(taskId);
         });
         continue;
       }
@@ -1164,19 +1265,56 @@ export class UserDO extends DurableObject<Env> {
       const now = this.slotRows()
         .map((r) => r.task_id)
         .join(",");
-      if (before === now) return { ok: false, code: "concurrency_limit" };
+      if (before === now) return last;
     }
-    return { ok: false, code: "concurrency_limit" };
+    return last;
+  }
+
+  /**
+   * 予約の回収（一度も作られなかった予約の解放）。枠と鍵を clearSlot で解放し、チェーンの最新がそのタスクなら prev_task_id に戻す
+   * （finishTask では戻さない: 作られて終端になったタスクは FAILED でもチェーンの最新のまま）。同期区間内で呼ぶこと。
+   */
+  private reclaim(taskId: string): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE branch_chain SET latest_task_id = prev_task_id WHERE latest_task_id = ?",
+      taskId,
+    );
+    this.clearSlot(taskId);
+  }
+
+  private lockRow(branch: string): LockRow | undefined {
+    return this.ctx.storage.sql
+      .exec<LockRow>(
+        "SELECT branch, task_id, continue_of, reserved_at FROM branch_lock WHERE branch = ?",
+        branch,
+      )
+      .toArray()[0];
+  }
+
+  /** チェーンの最新のタスク。行が無ければ根（branch の agent/task-<根>）。同期区間内で呼ぶこと */
+  private chainLatest(branch: string, root: string): string {
+    const row = this.ctx.storage.sql
+      .exec<{ latest_task_id: string }>(
+        "SELECT latest_task_id FROM branch_chain WHERE branch = ?",
+        branch,
+      )
+      .toArray()[0];
+    return row?.latest_task_id ?? root;
   }
 
   /**
    * 同期の判定。同じキーの再試行は既存を返し、予約が空なら新規発行して記録する。
-   * 予約が埋まっていれば照合に必要な情報を返す。
+   * 予約が埋まっていれば照合に必要な情報を返す。積み足し（lock あり）は、①冪等 → ②鍵（branch_busy）→ ③チェーンの最新
+   * （continue_superseded）→ ④枠 → ⑤月額 → ⑥新規発行の順。鍵の持ち主の照合は呼び出し側が行う（ここでは await しない）。
    */
   private decide(
     requestKey: string,
     fingerprint: string,
-  ): { kind: "done"; result: ReserveResult } | { kind: "occupied"; slots: SlotRow[] } {
+    lock?: ReserveLock,
+  ):
+    | { kind: "done"; result: ReserveResult }
+    | { kind: "occupied"; slots: SlotRow[] }
+    | { kind: "locked"; row: LockRow } {
     const sql = this.ctx.storage.sql;
     const at = this.now();
     sql.exec("DELETE FROM requests WHERE created_at < ?", at - REQUEST_RETENTION_MS);
@@ -1192,6 +1330,19 @@ export class UserDO extends DurableObject<Env> {
         return { kind: "done", result: { ok: false, code: "conflict" } };
       }
       return { kind: "done", result: { ok: true, task_id: existing.task_id, reused: true } };
+    }
+
+    let previous: string | undefined;
+    if (lock !== undefined) {
+      const held = this.lockRow(lock.branch);
+      if (held !== undefined) return { kind: "locked", row: held };
+      previous = this.chainLatest(lock.branch, rootOfBranch(lock.branch) as string);
+      if (previous !== lock.continueOf) {
+        return {
+          kind: "done",
+          result: { ok: false, code: "continue_superseded", latest_task_id: previous },
+        };
+      }
     }
 
     if (this.slotCount() >= this.concurrencyLimit()) {
@@ -1222,6 +1373,22 @@ export class UserDO extends DurableObject<Env> {
       at,
     );
     sql.exec("INSERT INTO reservation_slot (task_id, reserved_at) VALUES (?, ?)", taskId, at);
+    if (lock !== undefined && previous !== undefined) {
+      sql.exec(
+        "INSERT INTO branch_lock (branch, task_id, continue_of, reserved_at) VALUES (?, ?, ?, ?)",
+        lock.branch,
+        taskId,
+        lock.continueOf,
+        at,
+      );
+      sql.exec(
+        `INSERT INTO branch_chain (branch, latest_task_id, prev_task_id) VALUES (?, ?, ?)
+         ON CONFLICT (branch) DO UPDATE SET latest_task_id = excluded.latest_task_id, prev_task_id = excluded.prev_task_id`,
+        lock.branch,
+        taskId,
+        previous,
+      );
+    }
     return { kind: "done", result: { ok: true, task_id: taskId, reused: false } };
   }
 
@@ -2468,6 +2635,196 @@ export class UserDO extends DurableObject<Env> {
       }
       return f;
     }
+  }
+
+  /**
+   * 積み足し（task_start の continue_task_id）の権限と、受け付ける条件 1〜8 を順に確かめる（docs/specs/continue-task.md）。
+   * 9（実行中の積み足しが無い・チェーンの最新）は reserve の同期区間で確かめ直す（ここでの確認は早めに断るため）。
+   * 通れば、元のタスクから固定した事実（ContinuationFacts）を返す。呼び出し側の入力は TaskDO に直接渡さない。
+   */
+  async authorizeContinue(
+    githubUserId: number,
+    input: ContinueInput,
+  ): Promise<ContinueAuthzResult> {
+    const notFound = { ok: false as const, code: "not_found" as const, message: "task not found" };
+    const reject = (
+      code: "invalid_input" | "conflict" | "branch_moved",
+      reason: string,
+      message: string,
+    ) => ({ ok: false as const, code, message: `${reason}: ${message}` });
+    const member = await this.ensureMember(githubUserId);
+    if (!member.ok) return member;
+    if (!isTaskId(input.continue_task_id) || !FULL_SHA_RE.test(input.base_sha)) return notFound;
+    const baseSha = input.base_sha.toLowerCase();
+
+    // 1. 呼んだ人自身のタスク（他人のタスク・存在しない id は同じ not_found）
+    let read: ContinuationSourceResult;
+    try {
+      read = await this.env.TASK_DO.getByName(input.continue_task_id).continuationSource(
+        githubUserId,
+      );
+    } catch (e) {
+      return this.toFailure(e);
+    }
+    if (!read.ok) {
+      return read.code === "not_found"
+        ? notFound
+        : {
+            ok: false,
+            code: "upstream_unavailable",
+            message: "the task result could not be read; retry later",
+          };
+    }
+    const src = read.source;
+    // 2. task_start のタスクだけ
+    if (src.review) {
+      return reject(
+        "invalid_input",
+        "continue_review_task",
+        "a task_review task cannot be continued; start a task with task_start instead",
+      );
+    }
+    // 3. 終端・停止確認済み・GitHub の終了処理（finalize_done / body_done）済み
+    if (!src.finished) {
+      return reject(
+        "conflict",
+        "continue_not_finished",
+        `the task ${src.id} has not finished yet (${src.unfinished ?? "not_terminal"}); wait with task_wait until it is terminal, and retry once task_result no longer returns not_ready`,
+      );
+    }
+    // 4. チェーンの最新（行が無ければ根）
+    const branch = src.branch;
+    if (branch === null || branchOfRoot(src.root) !== branch) return notFound;
+    const latest = this.chainLatest(branch, src.root);
+    if (latest !== src.id) {
+      return reject(
+        "conflict",
+        "continue_superseded",
+        `a newer task ${latest} has been stacked on the same pull request; read its task_result and continue from it (continue_task_id: ${latest})`,
+      );
+    }
+    // 5. PR がある・rovo が閉じていない
+    if (src.pr_number === null || src.pr_url === null) {
+      return reject(
+        "conflict",
+        "continue_no_pr",
+        `the task ${src.id} has no pull request (its setup failed); start a new task instead`,
+      );
+    }
+    if (src.closed_empty) {
+      return reject(
+        "conflict",
+        "continue_pr_closed",
+        `rovo closed the empty pull request of the task ${src.id}; start a new task instead`,
+      );
+    }
+    if (src.pr_merged) {
+      return reject(
+        "conflict",
+        "continue_pr_merged",
+        "the pull request is already merged; start a new task instead",
+      );
+    }
+    // 6. repository・base_ref は渡されたら元と同じ
+    if (
+      input.repository !== undefined &&
+      input.repository.toLowerCase() !== src.repository.toLowerCase()
+    ) {
+      return reject(
+        "invalid_input",
+        "continue_repository_mismatch",
+        `repository must be ${src.repository} (the repository of the task ${src.id}) or omitted`,
+      );
+    }
+    if (input.base_ref !== undefined && input.base_ref !== src.base_ref) {
+      return reject(
+        "invalid_input",
+        "continue_base_ref_mismatch",
+        `base_ref must be ${src.base_ref} (the base of the pull request) or omitted`,
+      );
+    }
+    // task_start と同じ権限（App の Installation 経由で push できる）
+    const start = await this.authorizeStart(githubUserId, src.repository);
+    if (!start.ok) return start;
+    // 7. 本人のトークンで PR が見え、open・未マージ・head のブランチと base が記録どおり（fork でない）
+    let pull: UserPull;
+    try {
+      const { client, credentials } = this.github();
+      pull = await credentials.withToken((tok) =>
+        client.getPull(tok, src.repository, src.pr_number as number),
+      );
+    } catch (e) {
+      const f = this.toFailure(e);
+      // 見えない・無い PR（GitHub の 404 は client が forbidden に写す）は、存在を教えない
+      return f.code === "forbidden" ? notFound : f;
+    }
+    const same = (r: string | null) =>
+      r !== null && r.toLowerCase() === src.repository.toLowerCase();
+    if (pull.number !== src.pr_number || !same(pull.baseRepo)) return notFound;
+    if (pull.merged) {
+      return reject(
+        "conflict",
+        "continue_pr_merged",
+        "the pull request is already merged; start a new task instead",
+      );
+    }
+    if (pull.state !== "open") {
+      return reject(
+        "conflict",
+        "continue_pr_closed",
+        "the pull request is closed; start a new task instead",
+      );
+    }
+    if (!same(pull.headRepo) || pull.headRef !== branch || pull.baseRef !== src.base_ref) {
+      return reject(
+        "conflict",
+        "continue_pr_mismatch",
+        "the pull request no longer matches the branch and base recorded by rovo; start a new task instead",
+      );
+    }
+    // 8. base_sha が PR の今の head と一致する
+    const head = pull.headSha.toLowerCase();
+    if (!FULL_SHA_RE.test(head)) {
+      return {
+        ok: false,
+        code: "upstream_unavailable",
+        message: "could not read the head commit",
+      };
+    }
+    if (head !== baseSha) {
+      return reject(
+        "branch_moved",
+        "branch_moved",
+        `base_sha differs from the current head ${head} of the pull request branch ${branch}; check it with task_result (pr.head_sha) or git ls-remote, and retry with the current head`,
+      );
+    }
+    // 先行タスクの警告を引き継ぐ。base_sha が rovo の記録した head（無ければ準備で確かめた initial_sha）でなければ base_not_from_rovo を足す
+    const inherited: InheritedWarning[] = [
+      ...src.inherited_warnings,
+      ...src.warnings.map((warning) => ({ from: src.id, warning })),
+    ];
+    const recorded = (src.head_sha ?? src.initial_sha)?.toLowerCase() ?? null;
+    if (recorded !== baseSha) {
+      inherited.push({
+        from: src.id,
+        warning: `base_not_from_rovo: base_sha ${baseSha} is not the head rovo recorded for the task ${src.id} (${recorded ?? "none"}); commits pushed by someone else may be included without review`,
+      });
+    }
+    return {
+      ok: true,
+      repositoryId: start.repositoryId,
+      installationId: start.installationId,
+      continuation: {
+        of: src.id,
+        root: src.root,
+        branch,
+        repository: src.repository,
+        base_ref: src.base_ref,
+        pr_number: src.pr_number,
+        pr_url: src.pr_url,
+        inherited_warnings: inherited,
+      },
+    };
   }
 
   // ---- PR の Ready 化とマージ（D9）----

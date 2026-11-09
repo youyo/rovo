@@ -54,6 +54,10 @@ export type ToolErrorCode =
   | "merge_blocked"
   | "head_moved"
   | "github_rejected"
+  // 同じ PR への積み足し（continue_task_id。docs/specs/continue-task.md）: base_sha が PR ブランチの今の head と違う /
+  // 同じ PR に積み足しタスクが実行中
+  | "branch_moved"
+  | "branch_busy"
   | "internal";
 
 type ToolError = { code: ToolErrorCode; message: string; retry_after_seconds?: number };
@@ -655,13 +659,22 @@ export function createRovoServer(env: Env): McpServer {
         // 外部（GitHub / DO）を呼ぶ前に入力を検証する（型の不一致も invalid_input）
         const typed = parseToolInput(startSchema, args);
         if (!typed.ok) return typed;
+        // 同じ PR への積み足し（continue_task_id。docs/specs/continue-task.md）は、まだ公開しない（入力スキーマにも出さない）。
+        // 黙って捨てると別の PR ができてしまうので、渡されたら断る
+        if ((typed.value as Record<string, unknown>).continue_task_id !== undefined) {
+          return {
+            ok: false,
+            error: { code: "invalid_input", message: "continue_task_id is not available yet" },
+          };
+        }
         const checked = checkStartInput(typed.value);
         if (!checked.ok) return checked;
+        const { repository } = checked.value.input;
+        if (repository === undefined) {
+          return { ok: false, error: { code: "invalid_input", message: "repository is required" } };
+        }
         // 認可（team 再検証 + Installation / push 権限）を reserve より前に行う
-        const authz = await userDo.authorizeStart(
-          principal.githubUserId,
-          checked.value.input.repository,
-        );
+        const authz = await userDo.authorizeStart(principal.githubUserId, repository);
         if (!authz.ok) {
           await auditAuthzDenied(env, principal, authz);
           return failure(authz);

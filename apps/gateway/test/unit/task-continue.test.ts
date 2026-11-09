@@ -312,12 +312,16 @@ describe("UserDO.authorizeContinue: 断る（条件 1〜8）", () => {
     const o = await newOwner();
     const root = await completedRoot(o.id);
     const inner = app() as unknown as {
-      mustRepo(n: string): { pulls: { number: number; headRepo?: string }[] };
+      mustRepo(n: string): { pulls: { number: number; headRepo?: string; headSha?: string }[] };
     };
     const p = inner.mustRepo(REPO).pulls.find((x) => x.number === root.pr);
-    if (p) p.headRepo = "mallory/widgets";
+    // fork の PR は head のブランチが base のリポジトリに無いので、偽物では head の SHA を固定する
+    if (p) {
+      p.headRepo = "mallory/widgets";
+      p.headSha = root.head;
+    }
     const r = await authorize(o.user, o.id, { continue_task_id: root.id, base_sha: root.head });
-    expectFailure(r, "conflict");
+    expectFailure(r, "conflict", "continue_pr_mismatch");
   });
 
   it("8: base_sha が PR の今の head と違えば branch_moved（今の head が載る）", async () => {

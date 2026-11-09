@@ -582,9 +582,7 @@ describe("continue_task_id（同じ PR への積み足し。docs/specs/continue-
     expect(isTaskId(C)).toBe(true);
     expect(taskInputSchema.safeParse({ ...base, continue_task_id: C }).success).toBe(true);
     for (const bad of ["", "nope", `${C}x`, C.toLowerCase().replace(/[0-9]/g, "!"), 123]) {
-      expect(issues({ ...base, continue_task_id: bad }), String(bad)).toContain(
-        "continue_task_id",
-      );
+      expect(issues({ ...base, continue_task_id: bad }), String(bad)).toContain("continue_task_id");
     }
   });
 

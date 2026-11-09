@@ -57,6 +57,7 @@ import {
 import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { BUDGET_EXTENSION_KIND, MAX_BUDGET_EXTENSIONS } from "./budget-question";
+import { type InheritedWarning, parseInheritedWarnings } from "./continuation";
 import {
   fetchGatewayCost,
   type GatewayCostResult,
@@ -81,6 +82,7 @@ import {
   computeReviewFingerprint,
   DEFAULT_BUDGET_POLICY,
   DEFAULT_REVIEW_POLICY,
+  hasTarget,
   isValidIdempotencyKey,
   MAX_ANSWER_LENGTH,
   MAX_CONCURRENT_WAITERS,
@@ -531,6 +533,43 @@ const FULL_SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 /** PR の本文の保存の上限（agent がモデルに渡すのは先頭 4000 文字。行の大きさを抑える） */
 const MAX_REVIEW_PR_BODY = 8_000;
 
+/**
+ * 積み足し（continue_task_id）の元のタスクとして読んだ値（TaskDO.continuationSource）。読むだけで状態を変えない。
+ * finished は「終端・停止確認済み・GitHub の終了処理（finalize_done。PR があれば body_done も）済み」。満たさないときは unfinished に理由。
+ */
+export type ContinuationSource = {
+  id: string;
+  /** task_review のタスク（元にできない） */
+  review: boolean;
+  status: TaskStatus;
+  finished: boolean;
+  unfinished?: "not_terminal" | "not_stopped" | "finalize_pending" | "body_pending";
+  repository: string;
+  repository_id: number | null;
+  installation_id: number | null;
+  base_ref: string;
+  /** チェーンの根の id（積み足しなら continuation_root、根ならこのタスクの id） */
+  root: string;
+  /** 作業ブランチ（github_link.branch）。GitHub と紐付かないタスクは null */
+  branch: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  closed_empty: boolean;
+  pr_merged: boolean;
+  /** 終端の確定で読んだ PR の head（rovo が push したと分かっている sha）。読めなかったら null */
+  head_sha: string | null;
+  /** 準備で確かめた、作業前の head（根なら初期の空コミット） */
+  initial_sha: string | null;
+  /** このタスクの task_result の warnings（finished で task_review でないときだけ読む。それ以外は []） */
+  warnings: string[];
+  /** このタスクが先行タスクから引き継いでいた警告 */
+  inherited_warnings: InheritedWarning[];
+};
+
+export type ContinuationSourceResult =
+  | { ok: true; source: ContinuationSource }
+  | { ok: false; code: "not_found" | "upstream_unavailable" };
+
 /** task_pr_ready / task_pr_merge の入口で TaskDO が返す、対象と判定の結果。 */
 export type PrContextResult =
   | {
@@ -731,6 +770,10 @@ type TaskRow = {
   sandbox_instance: string | null;
   /** タスクの種類。NULL は通常のタスク、"review" は task_review */
   kind: string | null;
+  /** 積み足し（continue_task_id）の元のタスクの id。NULL は積み足しでない */
+  continuation_of: string | null;
+  /** 積み足しのチェーンの根の id。NULL は積み足しでない（そのタスク自身が根） */
+  continuation_root: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -766,6 +809,8 @@ type GithubRow = {
   closed_empty: number;
   /** D14: TaskSpec.deps の JSON。"null" は lockfile なし（または読めなかった）。NULL は未取得（spec に載せない） */
   deps: string | null;
+  /** 先行タスクから引き継いだ警告（JSON の InheritedWarning[]）。積み足しでないタスクは [] */
+  inherited_warnings: string;
 };
 
 /** 取り込みで見つけた read_issue / read_pr の依頼（検査済み） */
@@ -1062,6 +1107,16 @@ export class TaskDO extends DurableObject<Env> {
     addColumnIfMissing(this.ctx.storage.sql, "task", "sandbox_instance", "TEXT");
     // task_review: タスクの種類（NULL = 通常のタスク）と、対象の PR・差分・投稿の進み具合（1 行。review のタスクだけ）
     addColumnIfMissing(this.ctx.storage.sql, "task", "kind", "TEXT");
+    // 同じ PR への積み足し（docs/specs/continue-task.md）: 元のタスクの id と、チェーンの根の id（NULL = 積み足しでない）、
+    // 先行タスクから引き継いだ警告（JSON の { from, warning } の配列）。既存のタスクは NULL / []
+    addColumnIfMissing(this.ctx.storage.sql, "task", "continuation_of", "TEXT");
+    addColumnIfMissing(this.ctx.storage.sql, "task", "continuation_root", "TEXT");
+    addColumnIfMissing(
+      this.ctx.storage.sql,
+      "github_link",
+      "inherited_warnings",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
     sql.exec(`CREATE TABLE IF NOT EXISTS review_link (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       pull_number INTEGER NOT NULL,
@@ -1549,6 +1604,11 @@ export class TaskDO extends DurableObject<Env> {
       !isNullableId(input.repository_id) ||
       !isNullableId(input.installation_id)
     ) {
+      return { ok: false, code: "invalid_input" };
+    }
+    // 積み足し（continue_task_id）の作成はまだ受け付けない（docs/specs/continue-task.md のタスク B2）。
+    // 対象（repository・base_ref）の決まった通常の入力だけを作る
+    if (parsed.data.continue_task_id !== undefined || !hasTarget(parsed.data)) {
       return { ok: false, code: "invalid_input" };
     }
     const data = parsed.data;
@@ -2498,6 +2558,61 @@ export class TaskDO extends DurableObject<Env> {
       branch: gl.branch,
       review_policy: policy,
       head_sha: gl.head_sha,
+    };
+  }
+
+  /**
+   * 積み足し（continue_task_id）の元のタスクとして読む（UserDO.authorizeContinue が呼ぶ。docs/specs/continue-task.md）。
+   * 所有者でなければ not_found（存在を教えない。authz_denied を監査する）。読むだけで状態を変えない。
+   * warnings は終了処理まで済んだ（finished）タスクだけ読む（AgentDO の結果が要る。読めなければ upstream_unavailable）。
+   */
+  async continuationSource(ownerId: number): Promise<ContinuationSourceResult> {
+    const row = this.getRow();
+    if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
+    const status = this.statusOf(row);
+    const review = this.isReview(row);
+    const gl = this.getGithub();
+    const unfinished: ContinuationSource["unfinished"] = !isTerminal(status)
+      ? "not_terminal"
+      : !this.isStopped()
+        ? "not_stopped"
+        : gl !== undefined && gl.finalize_done !== 1
+          ? "finalize_pending"
+          : gl !== undefined && gl.pr_number !== null && gl.body_done !== 1
+            ? "body_pending"
+            : undefined;
+    let warnings: string[] = [];
+    if (unfinished === undefined && !review) {
+      try {
+        warnings = (await this.composeResult(row, status)).warnings;
+      } catch (e) {
+        console.error("task_do_continuation_error", e instanceof Error ? e.name : typeof e);
+        return { ok: false, code: "upstream_unavailable" };
+      }
+    }
+    return {
+      ok: true,
+      source: {
+        id: row.id,
+        review,
+        status,
+        finished: unfinished === undefined,
+        ...(unfinished !== undefined ? { unfinished } : {}),
+        repository: row.repository,
+        repository_id: row.repository_id,
+        installation_id: row.installation_id,
+        base_ref: row.base_ref,
+        root: row.continuation_root ?? row.id,
+        branch: gl?.branch ?? null,
+        pr_number: gl?.pr_number ?? null,
+        pr_url: gl?.pr_url ?? null,
+        closed_empty: gl?.closed_empty === 1,
+        pr_merged: gl?.pr_merged === 1,
+        head_sha: gl?.head_sha ?? null,
+        initial_sha: gl?.initial_sha ?? null,
+        warnings,
+        inherited_warnings: parseInheritedWarnings(gl?.inherited_warnings),
+      },
     };
   }
 

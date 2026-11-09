@@ -15,6 +15,7 @@ import { autoCandidates, effortRejection, type ModelEnv, resolveModel } from "..
 import type { ProviderKeysDeps } from "../provider-keys";
 import { maxConcurrentTasks } from "./budget";
 import { BUDGET_EXTENSION_KIND } from "./budget-question";
+import type { ContinuationFacts } from "./continuation";
 import {
   nextSteps,
   nextStepsAfterMerge,
@@ -40,14 +41,16 @@ import {
   toTaskListItem,
 } from "./task-list";
 import { isTaskId, ulid } from "./ulid";
-import type { ReviewPull, UserDO } from "./user-do";
+import type { ReserveResult, ReviewPull, UserDO } from "./user-do";
 import {
   type AnswerInput,
   answerInputSchema,
   checkReviewFields,
+  checkStartTarget,
   computeFingerprint,
   computeReviewFingerprint,
   exceedsInputLimit,
+  hasTarget,
   isValidIdempotencyKey,
   type MergeMethod,
   prMergeInputSchema,
@@ -57,6 +60,7 @@ import {
   reviewInputSchema,
   type SteerInput,
   steerInputSchema,
+  type TargetedTaskInput,
   type TaskInput,
   taskInputObject,
 } from "./validation";
@@ -89,6 +93,10 @@ export type ErrorCode =
   | "merge_blocked"
   | "head_moved"
   | "github_rejected"
+  // 同じ PR への積み足し（continue_task_id。docs/specs/continue-task.md）: base_sha が PR ブランチの今の head と違う /
+  // 同じ PR に積み足しタスクが実行中
+  | "branch_moved"
+  | "branch_busy"
   | "internal";
 
 export type ServiceError = { code: ErrorCode; message: string; retry_after_seconds?: number };
@@ -99,7 +107,15 @@ export type TaskServiceDeps = {
   tasks: (taskId: string) => DurableObjectStub<TaskDO>;
 };
 
-export type StartOptions = { repositoryId?: number | null; installationId?: number | null };
+export type StartOptions = {
+  repositoryId?: number | null;
+  installationId?: number | null;
+  /**
+   * 積み足し（continue_task_id）のときだけ: UserDO.authorizeContinue が確かめて固定した事実（task_review の options.pull と同じ形）。
+   * 呼び出し側の入力からは作らない。
+   */
+  continuation?: ContinuationFacts;
+};
 
 /**
  * dashboard_url は、そのタスクの詳細をブラウザで見られる URL（`${PUBLIC_BASE_URL}/dashboard/tasks/<task_id>`。
@@ -391,7 +407,10 @@ const startInputSchema = taskInputObject
   .extend({
     idempotency_key: z.unknown().optional(),
   })
-  .superRefine(checkReviewFields);
+  .superRefine((v, ctx) => {
+    checkStartTarget(v, ctx);
+    checkReviewFields(v, ctx);
+  });
 
 export type CheckedStartInput = { input: TaskInput; idempotency_key: string | undefined };
 
@@ -472,9 +491,34 @@ export function createTaskService(
     return url === undefined ? {} : { dashboard_url: url };
   };
 
+  /** 予約（UserDO.reserve）の失敗を、task_start / task_review の応答にする */
+  const reserveFailure = (r: Exclude<ReserveResult, { ok: true }>): ServiceResult<never> => {
+    switch (r.code) {
+      case "conflict":
+        return fail("conflict", "idempotency_key was already used with different input");
+      case "budget_exceeded":
+        return fail("budget_exceeded", "the monthly budget is insufficient for a new task");
+      case "branch_busy":
+        return fail(
+          "branch_busy",
+          `a stacked task ${r.task_id} is running on the same pull request; wait for it to finish or cancel it with task_cancel, then retry with the same input once task_result no longer returns not_ready (if branch_moved is returned, check the current head)`,
+        );
+      case "continue_superseded":
+        return fail(
+          "conflict",
+          `continue_superseded: a newer task ${r.latest_task_id} has been stacked on the same pull request; read its task_result and continue from it (continue_task_id: ${r.latest_task_id})`,
+        );
+      default:
+        return fail(
+          "concurrency_limit",
+          `the concurrent task limit (${maxConcurrentTasks(env)}) has been reached for this user; wait for a running task to finish or cancel one (budget_status shows concurrency_limit)`,
+        );
+    }
+  };
+
   /** model を省略した task_start のモデルを Clef で選ぶ。例外は投げない（fallback は既定のモデル） */
   const chooseModel = async (
-    input: TaskInput,
+    input: TargetedTaskInput,
     fallback: string,
     userId: number,
   ): Promise<ModelChoice> => {
@@ -582,7 +626,24 @@ export function createTaskService(
     ): Promise<ServiceResult<StartValue>> {
       const checked = checkStartInput(rawInput);
       if (!checked.ok) return checked;
-      const { idempotency_key: key, input } = checked.value;
+      const { idempotency_key: key, input: raw } = checked.value;
+      if (raw.continue_task_id !== undefined) {
+        // 積み足し（docs/specs/continue-task.md）。元のタスクの事実は authorizeContinue が固定したものだけを使う
+        const c = options.continuation;
+        if (
+          c === undefined ||
+          c.of !== raw.continue_task_id ||
+          (raw.repository !== undefined &&
+            raw.repository.toLowerCase() !== c.repository.toLowerCase()) ||
+          (raw.base_ref !== undefined && raw.base_ref !== c.base_ref)
+        ) {
+          return fail("internal", "internal error");
+        }
+        // タスク B1 は予約と認可まで。作成（ensureCreated）・準備は B2 で足す。それまでは予約も TaskDO も作らない
+        return fail("invalid_input", "continue_task_id is not available yet");
+      }
+      if (!hasTarget(raw)) return fail("internal", "internal error");
+      const input = raw;
       // 使えるモデルの外・キーが無いプロバイダーのモデルは、予約より前に拒否する。省略時はここで実際に使うモデルを決める
       // （env の AGENT_MODELS と、AI Gateway に登録されたキー。models_list で一覧を返す）
       const model = await resolveModel(env, input.model, providerKeys);
@@ -611,19 +672,7 @@ export function createTaskService(
 
       const fingerprint = await computeFingerprint(input);
       const reserved = await deps.users(principal.githubUserId).reserve(requestKey, fingerprint);
-      if (!reserved.ok) {
-        switch (reserved.code) {
-          case "conflict":
-            return fail("conflict", "idempotency_key was already used with different input");
-          case "budget_exceeded":
-            return fail("budget_exceeded", "the monthly budget is insufficient for a new task");
-          default:
-            return fail(
-              "concurrency_limit",
-              `the concurrent task limit (${maxConcurrentTasks(env)}) has been reached for this user; wait for a running task to finish or cancel one (budget_status shows concurrency_limit)`,
-            );
-        }
-      }
+      if (!reserved.ok) return reserveFailure(reserved);
 
       const created = await deps.tasks(reserved.task_id).ensureCreated({
         ...input,
@@ -690,19 +739,7 @@ export function createTaskService(
       const fingerprint = await computeReviewFingerprint(input, options.pull.headSha);
       const requestKey = key ?? `review:${fingerprint}`;
       const reserved = await deps.users(principal.githubUserId).reserve(requestKey, fingerprint);
-      if (!reserved.ok) {
-        switch (reserved.code) {
-          case "conflict":
-            return fail("conflict", "idempotency_key was already used with different input");
-          case "budget_exceeded":
-            return fail("budget_exceeded", "the monthly budget is insufficient for a new task");
-          default:
-            return fail(
-              "concurrency_limit",
-              `the concurrent task limit (${maxConcurrentTasks(env)}) has been reached for this user; wait for a running task to finish or cancel one (budget_status shows concurrency_limit)`,
-            );
-        }
-      }
+      if (!reserved.ok) return reserveFailure(reserved);
       const created = await deps.tasks(reserved.task_id).ensureReviewCreated({
         task_id: reserved.task_id,
         owner_id: principal.githubUserId,

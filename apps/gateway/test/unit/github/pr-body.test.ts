@@ -5,7 +5,6 @@ import {
   LEGACY_BEGIN,
   LEGACY_END,
   MANAGED_BEGIN,
-  MANAGED_END,
   MAX_PR_BODY_CHARS,
   type PrReport,
   renderInitialBlock,
@@ -69,9 +68,7 @@ describe("applyManagedBlock", () => {
     );
   });
   it("根のタスクは、目印が何も無ければ末尾に足す", () => {
-    expect(applyManagedBlock("hello", sec("A", "n"), "A", root)).toBe(
-      `hello\n\n${sec("A", "n")}`,
-    );
+    expect(applyManagedBlock("hello", sec("A", "n"), "A", root)).toBe(`hello\n\n${sec("A", "n")}`);
   });
   it("積み足しは、旧形式の 1 組に触らず、その後ろに節を足す", () => {
     const body = `before\n${legacy("old")}\nafter`;
@@ -142,7 +139,7 @@ describe("applyManagedBlock", () => {
   });
   it("それでも収まらなければ、前の節は目印と見出しだけになる", () => {
     let body = "";
-    const many = Array.from({ length: 150 }, (_, i) => `K${i}`);
+    const many = Array.from({ length: 250 }, (_, i) => `K${i}`);
     for (const [i, id] of many.entries()) {
       body = applyManagedBlock(
         body,
@@ -152,8 +149,10 @@ describe("applyManagedBlock", () => {
       );
       expect(body.length).toBeLessThanOrEqual(MAX_PR_BODY_CHARS);
     }
-    expect(body).toContain("<!-- rovo:begin task=K0 -->\n## rovo — task K0\n<!-- rovo:end task=K0 -->");
-    expect(body).toContain("<!-- rovo:end task=K149 -->");
+    expect(body).toContain(
+      "<!-- rovo:begin task=K0 -->\n## rovo — task K0\n<!-- rovo:end task=K0 -->",
+    );
+    expect(body).toContain("<!-- rovo:end task=K249 -->");
     expect(body).toContain("y".repeat(300));
   });
 });
@@ -242,7 +241,10 @@ describe("renderReportBlock", () => {
     expect(b.endsWith("<!-- rovo:end task=T1 -->")).toBe(true);
   });
   it("積み足しの節の見出しと Continues task", () => {
-    const b = renderReportBlock({ ...base, taskId: "T2", continuesTask: "T1" }, { showCost: false });
+    const b = renderReportBlock(
+      { ...base, taskId: "T2", continuesTask: "T1" },
+      { showCost: false },
+    );
     expect(b).toContain("## rovo — task T2\nContinues task T1\n");
   });
   it("SHA の形でない commitSha / headSha（Markdown のリンクなど）は本文に出さない", () => {

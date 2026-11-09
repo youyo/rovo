@@ -505,7 +505,7 @@ describe("SDK の入力検証に届く前の不正（必須欠落・型不一致
     );
     const wait = tools.find((t) => t.name === "task_wait");
     const waitProps = wait?.inputSchema.properties as Record<string, { type?: string }>;
-    expect(waitProps["timeout_seconds"]?.type).toBe("number");
+    expect(waitProps.timeout_seconds?.type).toBe("number");
     await client.close();
   });
 });

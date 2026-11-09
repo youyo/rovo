@@ -3,8 +3,24 @@
  * モデルの要約・検証の出力・警告は信用しないデータなので、コードフェンスで囲み、長さを切る。
  */
 
-export const MANAGED_BEGIN = "<!-- rovo:begin -->";
-export const MANAGED_END = "<!-- rovo:end -->";
+/** 旧形式（タスク別になる前）の 1 組の目印。旧形式の PR では根の節として扱う。 */
+export const LEGACY_BEGIN = "<!-- rovo:begin -->";
+export const LEGACY_END = "<!-- rovo:end -->";
+/** タスク別の目印の共通の前置き。`<!-- rovo:begin task=<id> -->` / `<!-- rovo:end task=<id> -->`。 */
+export const MANAGED_BEGIN = "<!-- rovo:begin";
+export const MANAGED_END = "<!-- rovo:end";
+const TASK_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+function checkId(id: string): string {
+  if (!TASK_ID_RE.test(id)) throw new Error("invalid task id for PR body marker");
+  return id;
+}
+const beginMarker = (id: string) => `${MANAGED_BEGIN} task=${checkId(id)} -->`;
+const endMarker = (id: string) => `${MANAGED_END} task=${checkId(id)} -->`;
+const heading = (id: string, continuesTask?: string) => [
+  `## rovo — task ${id}`,
+  ...(continuesTask ? [`Continues task ${checkId(continuesTask)}`] : []),
+];
 /** GitHub の PR 本文の上限 */
 export const MAX_PR_BODY_CHARS = 65_536;
 
@@ -21,6 +37,8 @@ export interface PrCommandResult {
 
 export interface PrReport {
   taskId: string;
+  /** 積み足しのタスクのとき、元のタスクの id */
+  continuesTask?: string;
   /** TaskDO の状態（COMPLETED など） */
   status: string;
   reason?: string;
@@ -53,32 +71,129 @@ export function fenceUntrusted(text: string, maxChars: number): string {
   return `${fence}\n${body}\n${fence}`;
 }
 
-/** 管理範囲を新しい内容に置き換える。目印が無ければ末尾に足す。全体は MAX_PR_BODY_CHARS に収める。 */
-export function applyManagedBlock(existing: string, block: string): string {
-  const begin = existing.indexOf(MANAGED_BEGIN);
-  const end = begin >= 0 ? existing.indexOf(MANAGED_END, begin + MANAGED_BEGIN.length) : -1;
-  let out: string;
-  if (begin >= 0 && end >= 0) {
-    out = existing.slice(0, begin) + block + existing.slice(end + MANAGED_END.length);
-  } else {
-    out = existing === "" ? block : `${existing}\n\n${block}`;
+const SECTION_RE = /<!-- rovo:begin task=([A-Za-z0-9_-]+) -->[\s\S]*?<!-- rovo:end task=\1 -->/g;
+
+/** 節を短い形（状態・検証・PR の head・summary の先頭 1 行）にする。minimal なら目印と見出しだけ。 */
+function shrinkSection(section: string, id: string, minimal: boolean): string {
+  const continues = section.match(/^Continues task ([A-Za-z0-9_-]+)$/m)?.[1];
+  const lines = [beginMarker(id), ...heading(id, continues)];
+  if (!minimal) {
+    const pick = (re: RegExp) => section.match(re)?.[0];
+    const status = pick(/^Status: .*$/m);
+    const verification = pick(/^Verification: .*$/m);
+    const head = pick(/^PR head: .*$/m);
+    const sm = section.match(/^### Agent summary \(unverified\)\n\n(`{3,})\n(.*)$/m);
+    const first = sm?.[2]?.trim();
+    if (status) lines.push("", status);
+    if (verification) lines.push(verification);
+    if (head) lines.push(head);
+    if (first) {
+      lines.push("", "### Agent summary (unverified)", "", fenceUntrusted(first, 200));
+    }
   }
+  lines.push(endMarker(id));
+  return lines.join("\n");
+}
+
+/**
+ * 自分のタスクの節を新しい内容に置き換える。節の探し方:
+ * 1. 自分の id の節があればその範囲だけ。
+ * 2. 無く、根のタスクなら旧形式の 1 組、それも無ければ末尾。
+ * 3. 無く、積み足しのタスクなら、最後の rovo の目印の直後（旧形式には触らない）。無ければ末尾。
+ * 全体は MAX_PR_BODY_CHARS に収める（前の節を古い順に縮める）。
+ */
+export function applyManagedBlock(
+  existing: string,
+  block: string,
+  taskId: string,
+  opts: { isRoot: boolean },
+): string {
+  const begin = existing.indexOf(beginMarker(taskId));
+  const endM = endMarker(taskId);
+  const end = begin >= 0 ? existing.indexOf(endM, begin) : -1;
+  let before: string;
+  let after: string;
+  if (begin >= 0 && end >= 0) {
+    before = existing.slice(0, begin);
+    after = existing.slice(end + endM.length);
+  } else if (opts.isRoot && existing.includes(LEGACY_BEGIN)) {
+    const lb = existing.indexOf(LEGACY_BEGIN);
+    const le = existing.indexOf(LEGACY_END, lb + LEGACY_BEGIN.length);
+    if (le >= 0) {
+      before = existing.slice(0, lb);
+      after = existing.slice(le + LEGACY_END.length);
+    } else {
+      before = existing === "" ? "" : `${existing}\n\n`;
+      after = "";
+    }
+  } else if (!opts.isRoot) {
+    let last = -1;
+    for (const m of existing.matchAll(/<!-- rovo:end(?: task=[A-Za-z0-9_-]+)? -->/g)) {
+      last = m.index + m[0].length;
+    }
+    if (last >= 0) {
+      before = `${existing.slice(0, last)}\n\n`;
+      after = existing.slice(last);
+    } else {
+      before = existing === "" ? "" : `${existing}\n\n`;
+      after = "";
+    }
+  } else {
+    before = existing === "" ? "" : `${existing}\n\n`;
+    after = "";
+  }
+  let out = before + block + after;
   if (out.length <= MAX_PR_BODY_CHARS) return out;
-  // 外側が大きすぎる: 管理範囲を残し、外側の先頭側を切る
+
+  // 前の節を古い順に縮める（今の節は触らない）。まず短い形、次に目印と見出しだけ。
+  for (const minimal of [false, true]) {
+    const sections: { start: number; end: number; id: string }[] = [];
+    for (const m of out.matchAll(SECTION_RE)) {
+      const id = m[1] as string;
+      if (id === taskId) continue;
+      sections.push({ start: m.index, end: m.index + m[0].length, id });
+    }
+    // 後ろから置換して位置のずれを避けるため、結果を先に求める
+    const replaced = new Map<number, string>();
+    let total = out.length;
+    for (const sec of sections) {
+      if (total <= MAX_PR_BODY_CHARS) break;
+      const text = out.slice(sec.start, sec.end);
+      const short = shrinkSection(text, sec.id, minimal);
+      if (short.length < text.length) {
+        replaced.set(sec.start, short);
+        total -= text.length - short.length;
+      }
+    }
+    if (replaced.size > 0) {
+      let rebuilt = "";
+      let pos = 0;
+      for (const sec of sections) {
+        const r = replaced.get(sec.start);
+        if (r === undefined) continue;
+        rebuilt += out.slice(pos, sec.start) + r;
+        pos = sec.end;
+      }
+      out = rebuilt + out.slice(pos);
+    }
+    if (out.length <= MAX_PR_BODY_CHARS) return out;
+  }
+  // それでも収まらない: 今の節を残し、外側の先頭側を切る
   const room = Math.max(0, MAX_PR_BODY_CHARS - block.length - 2);
-  const outsideBefore = begin >= 0 && end >= 0 ? existing.slice(0, begin) : existing;
+  const cur = out.indexOf(block);
+  const outsideBefore = cur >= 0 ? out.slice(0, cur) : before;
   return `${outsideBefore.slice(0, room)}\n\n${block}`.slice(0, MAX_PR_BODY_CHARS);
 }
 
-export function renderInitialBlock(taskId: string): string {
+export function renderInitialBlock(taskId: string, opts?: { continuesTask?: string }): string {
   return [
-    MANAGED_BEGIN,
-    "## rovo",
+    beginMarker(taskId),
+    ...heading(taskId, opts?.continuesTask),
     "",
     `Status: **RUNNING** (task \`${neutralize(taskId)}\`)`,
     "",
     "This draft pull request is managed by rovo. The agent is working; this section is updated when the task finishes. Do not merge until it does.",
-    MANAGED_END,
+    endMarker(taskId),
   ].join("\n");
 }
 
@@ -102,7 +217,7 @@ function sha(v: string | null | undefined): string | undefined {
 
 function render(r: PrReport, showCost: boolean, scale: number): string {
   const cap = (n: number) => Math.max(200, Math.floor(n * scale));
-  const lines: string[] = [MANAGED_BEGIN, "## rovo", ""];
+  const lines: string[] = [beginMarker(r.taskId), ...heading(r.taskId, r.continuesTask), ""];
   lines.push(`Status: **${r.status}** (task \`${neutralize(r.taskId)}\`)`);
   if (r.reason) lines.push("Reason:", "", fenceUntrusted(r.reason, cap(500)));
   lines.push("");
@@ -157,7 +272,7 @@ function render(r: PrReport, showCost: boolean, scale: number): string {
   if (r.summary.trim() !== "") {
     lines.push("", "### Agent summary (unverified)", "", fenceUntrusted(r.summary, cap(8000)));
   }
-  lines.push(MANAGED_END);
+  lines.push(endMarker(r.taskId));
   return lines.join("\n");
 }
 

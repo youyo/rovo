@@ -3095,3 +3095,38 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
     await client.close();
   });
 });
+
+describe("continue_task_id はまだ公開しない（docs/specs/continue-task.md のタスク B1。公開は B3）", () => {
+  it("tools/list の task_start の入力スキーマに continue_task_id が無い", async () => {
+    const u = await user("alice");
+    const client = await connect(createApiApp(), u.props);
+    const { tools } = await client.listTools();
+    const start = tools.find((t) => t.name === "task_start");
+    const props = start?.inputSchema.properties as Record<string, unknown>;
+    expect(Object.keys(props)).not.toContain("continue_task_id");
+    expect(JSON.stringify(start?.inputSchema)).not.toContain("continue_task_id");
+    expect(start?.inputSchema.required).toEqual(
+      expect.arrayContaining(["repository", "base_ref", "base_sha", "title", "instructions"]),
+    );
+    await client.close();
+  });
+
+  it("task_start に continue_task_id を渡しても積み足しは始まらず invalid_input（予約しない・GitHub は呼ばない）", async () => {
+    const u = await user("alice");
+    const before = u.gh.calls.length;
+    const client = await connect(createApiApp(), u.props);
+    const r = await client.callTool({
+      name: "task_start",
+      arguments: startArgs("t", { continue_task_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" }),
+    });
+    expect(r.isError).toBe(true);
+    expect(body(r).code).toBe("invalid_input");
+    expect(String(body(r).message)).toContain("continue_task_id");
+    expect(u.gh.calls.length).toBe(before);
+    const rows = await runInDurableObject(userStub(u.id), (_i, s) =>
+      s.storage.sql.exec("SELECT * FROM requests").toArray(),
+    );
+    expect(rows).toEqual([]);
+    await client.close();
+  });
+});

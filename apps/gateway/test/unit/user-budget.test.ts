@@ -1,7 +1,7 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { taskBudgetUsd } from "../../src/tasks/budget";
-import { FP, fakeAgent, newUserId, sampleInput, taskStub, userStub } from "./helpers";
+import { FP, fakeAgent, newTaskId, newUserId, sampleInput, taskStub, userStub } from "./helpers";
 
 type UserStub = ReturnType<typeof userStub>;
 
@@ -387,5 +387,298 @@ describe("UserDO: Phase 1 の CREATING(agent_link なし)は照合で回収す�
     expect(await sql(user, "SELECT closed FROM task_budget WHERE task_id = ?", id)).toEqual([
       { closed: 1 },
     ]);
+  });
+});
+
+describe("UserDO: branch_lock と branch_chain（積み足しの同時実行とチェーンの最新。docs/specs/continue-task.md）", () => {
+  const FP2 = "e".repeat(64);
+  const FP3 = "d".repeat(64);
+  const MIN = 60 * 1000;
+  const lockOf = (root: string, continueOf = root) => ({
+    branch: `agent/task-${root}`,
+    continueOf,
+  });
+
+  /** この UserDO インスタンスだけ同時実行の上限を変える（Unit の既定は 1） */
+  async function setLimit(stub: UserStub, value: string) {
+    await runInDurableObject(stub, (i) => {
+      const inst = i as unknown as { env: Record<string, unknown> };
+      inst.env = { ...inst.env, MAX_CONCURRENT_TASKS: value };
+    });
+  }
+
+  async function useClock(stub: UserStub, start = Date.now()) {
+    let t = start;
+    await runInDurableObject(stub, (i) => {
+      (i as unknown as { now: () => number }).now = () => t;
+    });
+    return {
+      advance(ms: number) {
+        t += ms;
+      },
+    };
+  }
+
+  async function reserveLocked(
+    stub: UserStub,
+    key: string,
+    fp: string,
+    lock: { branch: string; continueOf: string },
+  ) {
+    const r = await stub.reserve(key, fp, lock);
+    if (!r.ok) throw new Error(`reserve failed: ${r.code}`);
+    return r.task_id;
+  }
+
+  const locks = (stub: UserStub) =>
+    sql<{ branch: string; task_id: string; continue_of: string }>(
+      stub,
+      "SELECT branch, task_id, continue_of FROM branch_lock ORDER BY branch",
+    );
+  const chain = (stub: UserStub) =>
+    sql<{ branch: string; latest_task_id: string; prev_task_id: string }>(
+      stub,
+      "SELECT branch, latest_task_id, prev_task_id FROM branch_chain ORDER BY branch",
+    );
+
+  it("同じ鍵の 2 回目は branch_busy（実行中の積み足しの id が載る）。枠・予算・request_key を消費しない", async () => {
+    const stub = userStub(newUserId());
+    await setLimit(stub, "4");
+    const root = newTaskId();
+    const a = await reserveLocked(stub, "k1", FP, lockOf(root));
+    expect(await locks(stub)).toEqual([
+      { branch: `agent/task-${root}`, task_id: a, continue_of: root },
+    ]);
+    expect(await stub.reserve("k2", FP2, lockOf(root))).toEqual({
+      ok: false,
+      code: "branch_busy",
+      task_id: a,
+    });
+    expect(await sql(stub, "SELECT task_id FROM requests")).toEqual([{ task_id: a }]);
+    expect(await sql(stub, "SELECT task_id FROM task_budget")).toEqual([{ task_id: a }]);
+    expect(await sql(stub, "SELECT task_id FROM reservation_slot")).toEqual([{ task_id: a }]);
+  });
+
+  it("別の鍵（別の PR）は通る。鍵を取らない通常の予約も鍵に関係なく通る", async () => {
+    const stub = userStub(newUserId());
+    await setLimit(stub, "4");
+    const r1 = newTaskId();
+    const r2 = newTaskId();
+    const a = await reserveLocked(stub, "k1", FP, lockOf(r1));
+    const b = await reserveLocked(stub, "k2", FP2, lockOf(r2));
+    expect(b).not.toBe(a);
+    const c = await stub.reserve("k3", FP3);
+    expect(c.ok).toBe(true);
+    expect((await locks(stub)).map((l) => l.task_id).sort()).toEqual([a, b].sort());
+  });
+
+  it("同じ requestKey の再試行は、鍵があっても同じ task_id（冪等の判定が先）", async () => {
+    const stub = userStub(newUserId());
+    const root = newTaskId();
+    const a = await reserveLocked(stub, "k1", FP, lockOf(root));
+    expect(await stub.reserve("k1", FP, lockOf(root))).toEqual({
+      ok: true,
+      task_id: a,
+      reused: true,
+    });
+    expect(await stub.reserve("k1", FP2, lockOf(root))).toEqual({ ok: false, code: "conflict" });
+    expect(await locks(stub)).toHaveLength(1);
+  });
+
+  it("branch_busy は同時実行の上限（concurrency_limit）より先に判定する", async () => {
+    const stub = userStub(newUserId());
+    const root = newTaskId();
+    const a = await reserveLocked(stub, "k1", FP, lockOf(root));
+    // Unit の上限は 1 なので枠も埋まっているが、同じ PR への積み足しは branch_busy で断る
+    expect(await stub.reserve("k2", FP2, lockOf(root))).toEqual({
+      ok: false,
+      code: "branch_busy",
+      task_id: a,
+    });
+  });
+
+  it("branch_chain: 行が無ければ根が最新。予約で latest を新しいタスク、prev をそれまでの最新にする", async () => {
+    const stub = userStub(newUserId());
+    const root = newTaskId();
+    expect(await chain(stub)).toEqual([]);
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    expect(await chain(stub)).toEqual([
+      { branch: `agent/task-${root}`, latest_task_id: c1, prev_task_id: root },
+    ]);
+    await stub.finishTask(c1, 0, 0);
+    const c2 = await reserveLocked(stub, "k2", FP2, lockOf(root, c1));
+    expect(await chain(stub)).toEqual([
+      { branch: `agent/task-${root}`, latest_task_id: c2, prev_task_id: c1 },
+    ]);
+  });
+
+  it("reserve の同期区間でも、最新でない元からの積み足しは continue_superseded（最新の id が載る）。何も消費しない", async () => {
+    const stub = userStub(newUserId());
+    const root = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    await stub.finishTask(c1, 0, 0);
+    // authorizeContinue の後に別の積み足し（c1）が入った: 根から積み足そうとすると断る
+    expect(await stub.reserve("k2", FP2, lockOf(root))).toEqual({
+      ok: false,
+      code: "continue_superseded",
+      latest_task_id: c1,
+    });
+    expect(await sql(stub, "SELECT request_key FROM requests")).toEqual([{ request_key: "k1" }]);
+    expect(await sql(stub, "SELECT task_id FROM reservation_slot")).toEqual([]);
+    expect(await locks(stub)).toEqual([]);
+  });
+
+  it("完了（finishTask）で鍵が開く。チェーンの最新は戻さない", async () => {
+    const stub = userStub(newUserId());
+    const root = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    expect(await stub.finishTask(c1, 0, 0)).toEqual({ ok: true, released: true });
+    expect(await locks(stub)).toEqual([]);
+    expect(await chain(stub)).toEqual([
+      { branch: `agent/task-${root}`, latest_task_id: c1, prev_task_id: root },
+    ]);
+  });
+
+  it("キャンセル（CANCELLED）で鍵が開く（finishTask と同じ経路）。チェーンの最新は戻さない", async () => {
+    const uid = newUserId();
+    const stub = userStub(uid);
+    const root = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    const created = await taskStub(c1).ensureCreated(sampleInput(c1, uid));
+    expect(created.ok).toBe(true);
+    await taskStub(c1).advance();
+    await taskStub(c1).cancel(uid);
+    for (let i = 0; i < 5 && (await locks(stub)).length > 0; i++) await taskStub(c1).advance();
+    expect(await locks(stub)).toEqual([]);
+    expect(await sql(stub, "SELECT task_id FROM reservation_slot")).toEqual([]);
+    expect((await chain(stub))[0]?.latest_task_id).toBe(c1);
+    await runInDurableObject(taskStub(c1), (_i, s) => s.storage.deleteAlarm());
+  });
+
+  it("失敗（FAILED）で鍵が開く（finishTask と同じ経路）。チェーンの最新は戻さない", async () => {
+    const uid = newUserId();
+    const stub = userStub(uid);
+    const root = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    const created = await taskStub(c1).ensureCreated(sampleInput(c1, uid));
+    expect(created.ok).toBe(true);
+    await taskStub(c1).advance();
+    await fakeAgent(c1).setPhase("failed");
+    for (let i = 0; i < 5 && (await locks(stub)).length > 0; i++) await taskStub(c1).advance();
+    const st = await taskStub(c1).getStatus(uid);
+    expect(st.ok && st.task.status).toBe("FAILED");
+    expect(await locks(stub)).toEqual([]);
+    expect((await chain(stub))[0]?.latest_task_id).toBe(c1);
+    await runInDurableObject(taskStub(c1), (_i, s) => s.storage.deleteAlarm());
+  });
+
+  it("予約の回収（一度も作られなかった予約）: 照合 → 解放 → 再判定で鍵が開き、チェーンの最新が prev_task_id に戻る", async () => {
+    const stub = userStub(newUserId());
+    const clock = await useClock(stub);
+    const root = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    // 10 分未満は回収しない（照合はするが、tombstone は打たない）
+    clock.advance(10 * MIN - 1);
+    expect(await stub.reserve("k2", FP2, lockOf(root))).toEqual({
+      ok: false,
+      code: "branch_busy",
+      task_id: c1,
+    });
+    expect(await taskStub(c1).inspect()).toEqual({ kind: "uncreated" });
+    // 10 分経過: 回収して、根から積み足せる（チェーンは根に戻っている）
+    clock.advance(1);
+    const c2 = await reserveLocked(stub, "k2", FP2, lockOf(root));
+    expect(c2).not.toBe(c1);
+    expect(await taskStub(c1).inspect()).toEqual({ kind: "abandoned" });
+    expect(await locks(stub)).toEqual([
+      { branch: `agent/task-${root}`, task_id: c2, continue_of: root },
+    ]);
+    expect(await chain(stub)).toEqual([
+      { branch: `agent/task-${root}`, latest_task_id: c2, prev_task_id: root },
+    ]);
+    expect(await sql(stub, "SELECT task_id FROM reservation_slot")).toEqual([{ task_id: c2 }]);
+  });
+
+  it("回収で戻すのは、チェーンの最新がその task_id のときだけ", async () => {
+    const stub = userStub(newUserId());
+    await setLimit(stub, "4");
+    const clock = await useClock(stub);
+    const r1 = newTaskId();
+    const r2 = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(r1));
+    clock.advance(10 * MIN);
+    // 別の PR の積み足しは、c1 の回収とは無関係（c1 の鍵が残るあいだも通る）
+    const d1 = await reserveLocked(stub, "k2", FP2, lockOf(r2));
+    clock.advance(10 * MIN);
+    // r1 への積み足しで c1 を回収する。r2 のチェーンは変わらない
+    const c2 = await reserveLocked(stub, "k3", FP3, lockOf(r1));
+    expect(await chain(stub)).toEqual(
+      [
+        { branch: `agent/task-${r1}`, latest_task_id: c2, prev_task_id: r1 },
+        { branch: `agent/task-${r2}`, latest_task_id: d1, prev_task_id: r2 },
+      ].sort((a, b) => a.branch.localeCompare(b.branch)),
+    );
+    expect(c1).not.toBe(c2);
+  });
+
+  it("照合のあいだに鍵の持ち主が終わった（入れ替わった）ら、判定をやり直す（decide は await しない）", async () => {
+    const uid = newUserId();
+    const stub = userStub(uid);
+    const root = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    const created = await taskStub(c1).ensureCreated(sampleInput(c1, uid));
+    expect(created.ok).toBe(true);
+    let hooked = false;
+    await runInDurableObject(stub, (instance) => {
+      const target = instance as unknown as {
+        taskStub: (id: string) => {
+          inspect: () => Promise<unknown>;
+          abandonIfUncreated: () => Promise<unknown>;
+        };
+        finishTask: (id: string, seq: number, micro: number) => Promise<unknown>;
+      };
+      const original = target.taskStub.bind(instance);
+      target.taskStub = (id: string) => {
+        const real = original(id);
+        return {
+          inspect: async () => {
+            const result = await real.inspect();
+            if (!hooked) {
+              hooked = true;
+              await target.finishTask(c1, 0, 0);
+            }
+            return result;
+          },
+          abandonIfUncreated: () => real.abandonIfUncreated(),
+        };
+      };
+    });
+    // c1 は作成済み（回収できない）が、照合中に終わって鍵が開いたので、やり直した判定で通る
+    const c2 = await reserveLocked(stub, "k2", FP2, lockOf(root, c1));
+    expect(hooked).toBe(true);
+    expect(await locks(stub)).toEqual([
+      { branch: `agent/task-${root}`, task_id: c2, continue_of: c1 },
+    ]);
+    await runInDurableObject(taskStub(c1), (_i, s) => s.storage.deleteAlarm());
+  });
+
+  it("clearSlot の早期 return: 枠の行が先に消えていても、task_id の鍵の行は消える（戻り値は今のまま false）", async () => {
+    const stub = userStub(newUserId());
+    const root = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    await sql(stub, "DELETE FROM reservation_slot WHERE task_id = ?", c1);
+    expect(await stub.finishTask(c1, 0, 0)).toEqual({ ok: true, released: false });
+    expect(await locks(stub)).toEqual([]);
+    // 鍵が残って branch_busy が続かない
+    const c2 = await reserveLocked(stub, "k2", FP2, lockOf(root, c1));
+    expect(c2).not.toBe(c1);
+  });
+
+  it("finishTask は他のタスクの鍵を消さない", async () => {
+    const stub = userStub(newUserId());
+    const root = newTaskId();
+    const c1 = await reserveLocked(stub, "k1", FP, lockOf(root));
+    await stub.finishTask(newTaskId(), 0, 0);
+    expect((await locks(stub)).map((l) => l.task_id)).toEqual([c1]);
   });
 });

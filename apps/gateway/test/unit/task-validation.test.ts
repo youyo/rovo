@@ -565,3 +565,77 @@ describe("worker_review（review_fix_rounds: 0 / 1）", () => {
     expect(await fp({ ...worker, verification_commands: [{ argv: ["npm", "test"] }] })).not.toBe(a);
   });
 });
+
+describe("continue_task_id（同じ PR への積み足し。docs/specs/continue-task.md）", () => {
+  const C = ulid();
+  const hash = async (v: unknown) => {
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(v)));
+    return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  };
+  const issues = (input: unknown) => {
+    const r = taskInputSchema.safeParse(input);
+    return r.success ? undefined : r.error.issues.map((i) => i.path.join(".")).join(",");
+  };
+  const { repository: _r, base_ref: _b, ...withoutTarget } = base;
+
+  it("ULID の形だけを受け付ける", () => {
+    expect(isTaskId(C)).toBe(true);
+    expect(taskInputSchema.safeParse({ ...base, continue_task_id: C }).success).toBe(true);
+    for (const bad of ["", "nope", `${C}x`, C.toLowerCase().replace(/[0-9]/g, "!"), 123]) {
+      expect(issues({ ...base, continue_task_id: bad }), String(bad)).toContain(
+        "continue_task_id",
+      );
+    }
+  });
+
+  it("continue_task_id があれば repository・base_ref を省略できる（渡しても形は検査する）", () => {
+    const r = taskInputSchema.safeParse({ ...withoutTarget, continue_task_id: C });
+    expect(r.success).toBe(true);
+    if (r.success) {
+      expect(r.data.repository).toBeUndefined();
+      expect(r.data.base_ref).toBeUndefined();
+      expect(r.data.continue_task_id).toBe(C);
+    }
+    expect(issues({ ...base, repository: "just-name", continue_task_id: C })).toContain(
+      "repository",
+    );
+    expect(issues({ ...base, base_ref: "", continue_task_id: C })).toContain("base_ref");
+  });
+
+  it("continue_task_id が無ければ repository・base_ref は従来どおり必須", () => {
+    expect(issues(withoutTarget)).toContain("repository");
+    expect(issues(withoutTarget)).toContain("base_ref");
+    expect(issues({ ...base, repository: undefined })).toBe("repository");
+    expect(issues({ ...base, base_ref: undefined })).toBe("base_ref");
+  });
+
+  it("base_sha は積み足しでも必須（40 桁）", () => {
+    const { base_sha: _s, ...noSha } = withoutTarget;
+    expect(issues({ ...noSha, continue_task_id: C })).toContain("base_sha");
+    expect(issues({ ...withoutTarget, base_sha: "abc", continue_task_id: C })).toContain(
+      "base_sha",
+    );
+  });
+
+  it("指紋: continue_task_id が無ければ従来と同じ値（v1 のまま）", async () => {
+    const fp = (input: Record<string, unknown>) => computeFingerprint(taskInputSchema.parse(input));
+    expect(await fp(base)).toBe(
+      await hash(["v1", "owner/repo", "main", base.base_sha, "t", "i", ["a"], ["c"]]),
+    );
+  });
+
+  it("指紋: continue_task_id があれば新しい版。元のタスク・repository の省略で別の値になる", async () => {
+    const fp = (input: Record<string, unknown>) => computeFingerprint(taskInputSchema.parse(input));
+    const plain = await fp(base);
+    const cont = await fp({ ...base, continue_task_id: C });
+    expect(cont).not.toBe(plain);
+    expect(await fp({ ...base, continue_task_id: C })).toBe(cont);
+    expect(await fp({ ...base, continue_task_id: ulid() })).not.toBe(cont);
+    const omitted = await fp({ ...withoutTarget, continue_task_id: C });
+    expect(omitted).not.toBe(cont);
+    expect(await fp({ ...withoutTarget, continue_task_id: C })).toBe(omitted);
+    // ほかの入力（title・effort など）も、これまでどおり指紋に効く
+    expect(await fp({ ...withoutTarget, title: "u", continue_task_id: C })).not.toBe(omitted);
+    expect(await fp({ ...withoutTarget, effort: "high", continue_task_id: C })).not.toBe(omitted);
+  });
+});

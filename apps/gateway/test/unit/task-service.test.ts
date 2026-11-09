@@ -47,6 +47,14 @@ describe("task service: start", () => {
     expect(r.value.note).toEqual(expect.any(String));
   });
 
+  it("積み足し（continue_task_id）でない task_start の応答には continuation が付かない", async () => {
+    const svc = createTaskService(env);
+    const r = await svc.start(principal(), { ...startInput });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).not.toHaveProperty("continuation");
+  });
+
   it("同じ idempotency_key での再試行は同じ task_id", async () => {
     const svc = createTaskService(env);
     const p = principal();

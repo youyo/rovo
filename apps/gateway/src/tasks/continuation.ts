@@ -55,3 +55,12 @@ export function parseInheritedWarnings(raw: string | null | undefined): Inherite
     return [];
   }
 }
+
+/**
+ * 同じ PR に積み足しタスクが実行中（branch_lock あり）なので、task_pr_merge を止めるときのメッセージ
+ * （docs/specs/continue-task.md「マージの判定」）。形式は authorizeContinue と同じ `reason: message`。
+ * taskId は実行中の積み足しタスク（所有者本人の情報）。UserDO.prMerge と TaskDO.prContext が使う。
+ */
+export function branchBusyMergeMessage(taskId: string): string {
+  return `branch_busy: a stacked task ${taskId} is running on the same pull request, so the pull request is not merged with any task id; wait for it to finish or cancel it with task_cancel, then retry task_pr_merge with the id of the latest task once its task_result no longer returns not_ready`;
+}

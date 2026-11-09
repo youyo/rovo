@@ -55,6 +55,7 @@ import {
 } from "./budget";
 import { MAX_BUDGET_EXTENSIONS } from "./budget-question";
 import {
+  branchBusyMergeMessage,
   branchOfRoot,
   type ContinuationFacts,
   type InheritedWarning,
@@ -2700,6 +2701,7 @@ export class UserDO extends DurableObject<Env> {
     // reserve の同期区間が decide の順（②鍵 → ③最新）で判定する: 実行中なら branch_busy、
     // 回収できる予約（ensureCreated の失敗など）なら回収して branch_chain を戻してから通す
     const held = this.lockRow(branch);
+    // 鍵は finishTask で開くので、積み足しが終端になってから鍵が開くまでの数秒は branch_busy のまま（reserve が返す）
     const pendingFromSource =
       held !== undefined && held.task_id === latest && held.continue_of === src.id;
     if (latest !== src.id && !pendingFromSource) {
@@ -2833,6 +2835,15 @@ export class UserDO extends DurableObject<Env> {
     };
   }
 
+  /**
+   * 同じ PR（ブランチ）に実行中の積み足し（branch_lock）があれば、その積み足しタスクの id。無ければ null。
+   * TaskDO.prContext(op="merge") が早めに断るために使う（正しさは prMerge が同じ鍵を見て保つ）。
+   */
+  async branchBusy(branch: string): Promise<string | null> {
+    if (typeof branch !== "string") return null;
+    return this.lockRow(branch)?.task_id ?? null;
+  }
+
   // ---- PR の Ready 化とマージ（D9）----
   // 利用者の GitHub のユーザートークンで行う（Installation Token は使わない: 利用者のブランチ保護の扱いと監査の主体を、
   // 利用者本人に合わせるため）。トークンはこの DO の中だけで使い、戻り値には出さない。
@@ -2870,10 +2881,21 @@ export class UserDO extends DurableObject<Env> {
           const pull = await client.getPull(tok, target.repository, target.number);
           const bad = this.pullProblem(pull, target, { allowMerged: true });
           if (bad) return bad;
+          // 同じ PR に積み足しが実行中（branch_lock）なら、どの id でもマージしない（未 push のあいだは PR の head が
+          // 元のタスクの検証済みの sha のままなので、sha の照合だけでは通ってしまう。delete_branch も走らせない）
+          const busy = this.lockRow(target.branch);
+          if (busy !== undefined) {
+            return {
+              ok: false,
+              code: "conflict",
+              reason: "branch_busy",
+              message: branchBusyMergeMessage(busy.task_id),
+            };
+          }
           if (pull.merged) {
             return pull.headSha === opts.expectedSha
               ? { already: true, sha: null }
-              : this.headMoved(pull.headSha);
+              : this.headMoved(pull.headSha, target.branch, true);
           }
           if (pull.draft) {
             return {
@@ -2883,7 +2905,9 @@ export class UserDO extends DurableObject<Env> {
               message: "the pull request is still a draft; call task_pr_ready first",
             };
           }
-          if (pull.headSha !== opts.expectedSha) return this.headMoved(pull.headSha);
+          if (pull.headSha !== opts.expectedSha) {
+            return this.headMoved(pull.headSha, target.branch, false);
+          }
           // head の commit に GitHub の check（check run / commit status）が付いていれば、すべて成功していること。
           // 1 つも無ければ通す（厳しくしたいときは GitHub のブランチ保護を使う）。
           // 読めないとき（権限不足の 403 / 404・5xx・ネットワークの失敗）は止めずに通し、warnings に checks_unreadable を残す
@@ -2954,12 +2978,30 @@ export class UserDO extends DurableObject<Env> {
     };
   }
 
-  private headMoved(actual: string): PrFailure {
+  /**
+   * PR の head がこのタスクの検証した commit と違う。積み足し（continue_task_id）のあとに古い id で呼んだ場合は、
+   * チェーンの最新のタスク（branch_chain）を案内する。マージ済みならそれも伝える。
+   */
+  private headMoved(actual: string, branch: string, merged: boolean): PrFailure {
+    const root = rootOfBranch(branch);
+    const chained =
+      root !== undefined
+        ? this.ctx.storage.sql
+            .exec<{ latest_task_id: string }>(
+              "SELECT latest_task_id FROM branch_chain WHERE branch = ?",
+              branch,
+            )
+            .toArray()[0]?.latest_task_id
+        : undefined;
+    const latest =
+      chained !== undefined
+        ? ` The latest task stacked on this pull request is ${chained}; read its task_result and call task_pr_merge with that id.`
+        : "";
     return {
       ok: false,
       code: "head_moved",
       reason: "head_moved",
-      message: `the pull request head ${actual.slice(0, 12)} differs from the verified commit; review the new changes before merging`,
+      message: `${merged ? "the pull request is already merged, and its" : "the pull request"} head ${actual.slice(0, 12)} differs from the commit this task verified. If a stacked task (continue_task_id) was added on the same pull request, read the task_result of the latest task and call task_pr_merge with its id; otherwise review the new changes before merging.${latest}`,
     };
   }
 

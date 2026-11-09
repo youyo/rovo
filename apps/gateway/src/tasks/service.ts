@@ -124,10 +124,24 @@ export type StartOptions = {
  */
 export type WithDashboardUrl = { dashboard_url?: string };
 
+export type StartContinuation = {
+  /** 元のタスクの id（continue_task_id） */
+  of: string;
+  pr_number: number;
+  pr_url: string;
+  /** PR のブランチ（agent/task-<根の id>） */
+  branch: string;
+};
+
 export type StartValue = {
   task_id: string;
   status: TaskStatus;
   draft_pr_url: string | null;
+  /**
+   * 積み足し（continue_task_id）のときだけ: 元のタスクと、積む先の既存の PR（number・url・branch）。
+   * task_status・task_result の pr（number・url・branch・continuation_of）と同じ値。draft_pr_url もこの PR の URL
+   */
+  continuation?: StartContinuation;
   /** 実際に使うモデル（task_start の model。省略したときは rovo が選んだモデル） */
   model: string;
   /** モデルの選び方（mode: explicit | auto と、理由の固定コード）。記録が無いときは付かない */
@@ -582,6 +596,12 @@ export function createTaskService(
             review_policy: r.result.review_policy,
             verification: r.result.verification,
             pr: r.result.pr,
+            ...(r.result.pr?.continuation_of !== undefined
+              ? { continuation_of: r.result.pr.continuation_of }
+              : {}),
+            ...(r.result.superseded_by !== undefined
+              ? { superseded_by: r.result.superseded_by }
+              : {}),
             ...(r.result.review !== undefined
               ? {
                   review: {
@@ -725,6 +745,16 @@ export function createTaskService(
           task_id: created.task.task_id,
           status,
           draft_pr_url: created.task.draft_pr_url,
+          ...(continuation !== undefined
+            ? {
+                continuation: {
+                  of: continuation.of,
+                  pr_number: continuation.pr_number,
+                  pr_url: continuation.pr_url,
+                  branch: continuation.branch,
+                },
+              }
+            : {}),
           model: created.task.model,
           ...(created.task.model_selection !== undefined
             ? { model_selection: created.task.model_selection }

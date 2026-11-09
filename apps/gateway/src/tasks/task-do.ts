@@ -59,6 +59,7 @@ import { testDraftFallback, withTestScripts } from "../test-routes";
 import { taskBudgetUsd } from "./budget";
 import { BUDGET_EXTENSION_KIND, MAX_BUDGET_EXTENSIONS } from "./budget-question";
 import {
+  branchBusyMergeMessage,
   branchOfRoot,
   type ContinuationFacts,
   type InheritedWarning,
@@ -2685,6 +2686,15 @@ export class TaskDO extends DurableObject<Env> {
       );
     }
     if (op === "merge") {
+      // 同じ PR に積み足しが実行中（UserDO の branch_lock）なら、どの id でもマージしない。ここは早めに断るためで、
+      // 正しさは UserDO.prMerge が同じ鍵を見て保つ（尋ねられなければ通して prMerge に任せる）
+      let busy: string | null = null;
+      try {
+        busy = await this.userStub(row.owner_id).branchBusy(gl.branch);
+      } catch (e) {
+        console.error("task_do_branch_busy_error", e instanceof Error ? e.name : typeof e);
+      }
+      if (busy !== null) return deny("conflict", "branch_busy", branchBusyMergeMessage(busy));
       if (gl.head_matches === null) {
         return deny(
           "not_ready",

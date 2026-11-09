@@ -4,7 +4,6 @@ import {
   fenceUntrusted,
   LEGACY_BEGIN,
   LEGACY_END,
-  MANAGED_BEGIN,
   MAX_PR_BODY_CHARS,
   type PrReport,
   renderInitialBlock,
@@ -43,7 +42,8 @@ describe("fenceUntrusted", () => {
     expect(out).not.toContain(LEGACY_BEGIN);
     expect(out).not.toContain("<!-- rovo:end task=T1 -->");
     expect(out).not.toMatch(/<!--\s*rovo:/i);
-    expect(out).toContain(MANAGED_BEGIN.slice(0, 4));
+    expect(out).toContain("end task=T1 -->");
+    expect(out).toContain("begin task=T1 -->");
   });
 });
 

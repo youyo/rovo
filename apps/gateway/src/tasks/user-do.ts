@@ -2696,7 +2696,13 @@ export class UserDO extends DurableObject<Env> {
     const branch = src.branch;
     if (branch === null || branchOfRoot(src.root) !== branch) return notFound;
     const latest = this.chainLatest(branch, src.root);
-    if (latest !== src.id) {
+    // 最新が、このタスクを元にした鍵の持ち主（実行中か、一度も作られなかった予約）なら、ここでは断らない。
+    // reserve の同期区間が decide の順（②鍵 → ③最新）で判定する: 実行中なら branch_busy、
+    // 回収できる予約（ensureCreated の失敗など）なら回収して branch_chain を戻してから通す
+    const held = this.lockRow(branch);
+    const pendingFromSource =
+      held !== undefined && held.task_id === latest && held.continue_of === src.id;
+    if (latest !== src.id && !pendingFromSource) {
       return reject(
         "conflict",
         "continue_superseded",

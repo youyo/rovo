@@ -688,6 +688,33 @@ describe("B2: 積み足しの終端（warnings の引き継ぎ・superseded_by�
     expect(viaService.ok && viaService.value.superseded_by).toBe(c1.id);
   });
 
+  it("同じ元から実行中の積み足しがあるあいだは、authorizeContinue は通し、reserve が branch_busy で断る（decide の順: 鍵 → 最新）", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const c1 = await startContinuation(o, root.id, root.head);
+    const authz = await authorize(o.user, o.id, { continue_task_id: root.id, base_sha: root.head });
+    expect(authz.ok).toBe(true);
+    if (!authz.ok) return;
+    const svc = createTaskService(env);
+    const r = await svc.start(
+      { githubUserId: o.id, login: "alice" },
+      {
+        continue_task_id: root.id,
+        base_sha: root.head,
+        title: "fix",
+        instructions: "apply the review comments",
+        idempotency_key: "busy-1",
+      },
+      {
+        repositoryId: authz.repositoryId,
+        installationId: authz.installationId,
+        continuation: authz.continuation,
+      },
+    );
+    expect(r).toMatchObject({ ok: false, error: { code: "branch_busy" } });
+    expect(!r.ok && r.error.message).toContain(c1.id);
+  });
+
   it("reserve のあとに ensureCreated が失敗しても、予約が回収されて branch_chain が戻り、次の積み足しが通る", async () => {
     const o = await newOwner();
     const root = await completedRoot(o.id);

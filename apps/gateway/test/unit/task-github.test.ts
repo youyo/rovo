@@ -1736,4 +1736,185 @@ describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作�
       expect((await eventTypes(c.stub)).filter((t) => t === "continued")).toHaveLength(1);
     });
   });
+
+  describe("終端の確定（closeEmptyPull・本文・head_sha / head_matches）", () => {
+    const CLOSE_OR_DELETE =
+      /^(PATCH \/repos\/acme\/widgets\/pulls\/\d+|DELETE \/repos\/acme\/widgets\/git\/refs\/|POST \/repos\/acme\/widgets\/issues\/\d+\/comments)$/;
+    const closeOrDelete = (from: number) =>
+      app()
+        .requests()
+        .slice(from)
+        .filter((r) => CLOSE_OR_DELETE.test(`${r.method} ${r.path}`))
+        .filter((r) => r.method !== "PATCH" || (r.body as { state?: string }).state !== undefined);
+
+    /** 積み足しの準備を済ませ、result で終わらせる */
+    async function finishContinuation(
+      root: Awaited<ReturnType<typeof rootWithPull>>,
+      result: (c: { id: string }) => ResultDto,
+      phase: "completed" | "failed" = "completed",
+    ) {
+      const c = await continued(factsOf(root), root.head);
+      await c.stub.advance();
+      expect((await gl(c.stub)).setup_done).toBe(1);
+      await c.agent.setProgram({ result: result(c) });
+      await c.agent.setPhase(phase);
+      for (let i = 0; i < 4; i++) {
+        await c.stub.advance();
+        if ((await gl(c.stub)).finalize_done === 1) break;
+      }
+      expect((await gl(c.stub)).finalize_done).toBe(1);
+      return c;
+    }
+
+    it("変更なしで COMPLETED（head が initial_sha のまま）でも closeEmptyPull に入らず、PR を閉じない・ブランチを消さない", async () => {
+      const root = await rootWithPull();
+      const before = app().requests().length;
+      const c = await finishContinuation(root, () => completedResult(root.head));
+      expect(closeOrDelete(before)).toEqual([]);
+      expect(pullOf(root.branch)?.state).toBe("open");
+      expect(app().branch(REPO, root.branch)).toBe(root.head);
+      expect((await gl(c.stub)).closed_empty).toBe(0);
+      const r = await c.stub.result(OWNER);
+      if (!r.ok) throw new Error("not ready");
+      expect(r.result.status).toBe("COMPLETED");
+      expect(r.result.pr?.closed_empty).toBeUndefined();
+      expect(r.result.pr).toMatchObject({ number: root.pr, head_sha: root.head });
+    });
+
+    it("準備のあとに push せずに FAILED（pushedSha なし）でも閉じない・消さない", async () => {
+      const root = await rootWithPull();
+      const before = app().requests().length;
+      const c = await finishContinuation(
+        root,
+        () =>
+          ({
+            ...completedResult(root.head, { pushedSha: undefined, reason: "failed" }),
+            status: "failed",
+            verification: { commands: [], results: [], verified: false, attempts: 0 },
+          }) as ResultDto,
+        "failed",
+      );
+      expect((await status(c.stub)).status).toBe("FAILED");
+      expect(closeOrDelete(before)).toEqual([]);
+      expect(pullOf(root.branch)?.state).toBe("open");
+      expect(app().branch(REPO, root.branch)).toBe(root.head);
+      expect((await gl(c.stub)).closed_empty).toBe(0);
+    });
+
+    it("head_sha / head_matches は積み足しの push の結果で更新される。本文には自分の節（Continues task）が足され、根の節は残る", async () => {
+      const root = await rootWithPull();
+      const rootGlBefore = await gl(root.stub);
+      const next = await app().addCommit(REPO, root.head, "continuation commit");
+      const c = await finishContinuation(root, () => {
+        app().setBranch(REPO, root.branch, next);
+        return completedResult(next);
+      });
+      expect(await gl(c.stub)).toMatchObject({ head_sha: next, head_matches: 1, body_done: 1 });
+      const r = await c.stub.result(OWNER);
+      if (!r.ok) throw new Error("not ready");
+      expect(r.result.pr).toMatchObject({
+        number: root.pr,
+        url: root.prUrl,
+        branch: root.branch,
+        continuation_of: root.id,
+        head_sha: next,
+        head_matches_verified: true,
+      });
+      const body = pullOf(root.branch)?.body ?? "";
+      expect(body).toContain(`${MANAGED_BEGIN} task=${root.id} -->`);
+      expect(body).toContain(`${MANAGED_BEGIN} task=${c.id} -->`);
+      expect(body).toContain(`${MANAGED_END} task=${c.id} -->`);
+      expect(body).toContain(`Continues task ${root.id}`);
+      // 自分の節は根の節の後ろ
+      expect(body.indexOf(`task=${c.id}`)).toBeGreaterThan(body.indexOf(`task=${root.id}`));
+      // 元のタスクの記録は変えない
+      expect(await gl(root.stub)).toEqual(rootGlBefore);
+    });
+
+    it("PR の head が push と違えば head_matches = 0", async () => {
+      const root = await rootWithPull();
+      const next = await app().addCommit(REPO, root.head, "continuation commit");
+      const human = await app().addCommit(REPO, next, "human commit");
+      const c = await finishContinuation(root, () => {
+        app().setBranch(REPO, root.branch, human);
+        return completedResult(next);
+      });
+      expect(await gl(c.stub)).toMatchObject({ head_sha: human, head_matches: 0 });
+    });
+
+    it("根のタスクは task_result の pr に branch・continuation_of を足さない", async () => {
+      const t = await createTask();
+      await t.stub.advance();
+      const initial = app().branch(REPO, t.branch) as string;
+      const head = await app().addCommit(REPO, initial, "child");
+      app().setBranch(REPO, t.branch, head);
+      await t.agent.setProgram({ result: completedResult(head) });
+      await t.agent.setPhase("completed");
+      await t.stub.advance();
+      const r = await t.stub.result(OWNER);
+      if (!r.ok) throw new Error("not ready");
+      expect(r.result.pr).not.toHaveProperty("continuation_of");
+      expect(r.result.pr).not.toHaveProperty("branch");
+      expect(r.result).not.toHaveProperty("superseded_by");
+      expect((await status(t.stub)) as Record<string, unknown>).not.toHaveProperty("pr");
+    });
+  });
+
+  describe("task_status と superseded_by", () => {
+    it("task_status の pr は元と同じ PR（number・url・branch）と continuation_of（準備の前から）", async () => {
+      const root = await rootWithPull();
+      const c = await continued(factsOf(root), root.head);
+      const expected = {
+        number: root.pr,
+        url: root.prUrl,
+        branch: root.branch,
+        continuation_of: root.id,
+      };
+      expect((await status(c.stub)).pr).toEqual(expected);
+      await c.stub.advance();
+      expect((await status(c.stub)).pr).toEqual(expected);
+    });
+
+    it("作成に成功すると、元のタスクの TaskDO に superseded_by を書く（C1 → C2 では C1 に）", async () => {
+      const root = await rootWithPull();
+      const c1 = await continued(factsOf(root), root.head);
+      const sup = async (stub: TaskStub) =>
+        (await rows<{ superseded_by: string | null }>(stub, "SELECT superseded_by FROM task"))[0]
+          ?.superseded_by;
+      expect(await sup(root.stub)).toBe(c1.id);
+      const c2 = await continued(factsOf(root, { of: c1.id }), root.head);
+      expect(await sup(c1.stub)).toBe(c2.id);
+      expect(await sup(root.stub)).toBe(c1.id);
+      expect(await sup(c2.stub)).toBeNull();
+    });
+
+    it("superseded_by を書けなくても（RPC が失敗しても）作成は成功する", async () => {
+      const root = await rootWithPull();
+      const id = newTaskId();
+      const stub = taskStub(id);
+      await runInDurableObject(stub, (i) => {
+        const o = i as unknown as { env: Record<string, unknown> };
+        o.env = {
+          ...o.env,
+          TASK_DO: {
+            getByName() {
+              throw new Error("boom");
+            },
+          },
+        };
+      });
+      const {
+        repository: _r,
+        base_ref: _b,
+        ...input
+      } = sampleInput(id, OWNER, { base_sha: root.head, continue_task_id: root.id });
+      const r = await stub.ensureCreated({ ...input, continuation: factsOf(root) } as never);
+      expect(r.ok).toBe(true);
+      const [row] = await rows<{ superseded_by: string | null }>(
+        root.stub,
+        "SELECT superseded_by FROM task",
+      );
+      expect(row?.superseded_by ?? null).toBeNull();
+    });
+  });
 });

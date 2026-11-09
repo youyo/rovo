@@ -282,6 +282,8 @@ export type TaskView = {
   review?: { stage: ReviewStage; model: string; fix_rounds?: number; rounds_used?: number };
   /** task_review のタスクだけ: 対象の PR */
   target_pr?: TargetPr;
+  /** 積み足し（continue_task_id）のタスクだけ: 元と同じ PR と、元のタスクの id（task_status に付く） */
+  pr?: { number: number; url: string; branch: string; continuation_of: string };
   repository: string;
   title: string;
   draft_pr_url: string | null;
@@ -397,7 +399,13 @@ export type ResultView = {
     head_sha: string | null;
     /** head が検証済みの SHA と一致するか。比較できない（未読・検証済みの SHA なし）なら null */
     head_matches_verified: boolean | null;
+    /** 積み足しのタスクだけ: PR のブランチ（agent/task-<根>） */
+    branch?: string;
+    /** 積み足しのタスクだけ: 元のタスクの id（continue_task_id） */
+    continuation_of?: string;
   } | null;
+  /** このタスクを元にした、最新の積み足しタスクの id（あるときだけ。案内のための値） */
+  superseded_by?: string;
   patch?: string;
   diffstat?: string;
   patch_too_large: boolean;
@@ -787,6 +795,11 @@ type TaskRow = {
   continuation_of: string | null;
   /** 積み足しのチェーンの根の id。NULL は積み足しでない（そのタスク自身が根） */
   continuation_root: string | null;
+  /**
+   * このタスクを元にした、最新の積み足しタスクの id（積み足しの作成時に、その TaskDO が書く。fail-soft）。
+   * 案内（task_result の superseded_by）のためだけの値で、正しさの判定には使わない（最新は UserDO.branch_chain が持つ）
+   */
+  superseded_by: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -1184,6 +1197,7 @@ export class TaskDO extends DurableObject<Env> {
     // 先行タスクから引き継いだ警告（JSON の { from, warning } の配列）。既存のタスクは NULL / []
     addColumnIfMissing(this.ctx.storage.sql, "task", "continuation_of", "TEXT");
     addColumnIfMissing(this.ctx.storage.sql, "task", "continuation_root", "TEXT");
+    addColumnIfMissing(this.ctx.storage.sql, "task", "superseded_by", "TEXT");
     addColumnIfMissing(
       this.ctx.storage.sql,
       "github_link",
@@ -1882,7 +1896,31 @@ export class TaskDO extends DurableObject<Env> {
     });
     if (result.ok && result.created) this.notifyWaiters();
     if (result.ok) await this.ensureAlarm();
+    // 積み足し: 元のタスクに superseded_by を書く（1 本の RPC）。案内のためだけの値なので、書けなくても作成は止めない
+    if (result.ok && continuation !== undefined) {
+      try {
+        await this.env.TASK_DO.getByName(continuation.facts.of).markSuperseded(
+          input.owner_id,
+          input.task_id,
+        );
+      } catch (e) {
+        console.error("task_do_mark_superseded_error", e instanceof Error ? e.name : typeof e);
+      }
+    }
     return result;
+  }
+
+  /**
+   * 積み足しの元のタスクとして、このタスクを元にした積み足しタスクの id（superseded_by）を記録する（積み足しの TaskDO が呼ぶ）。
+   * 所有者でない・形の違う id・自分自身は何もしない。task_result の superseded_by の案内のためだけの値（正しさには使わない）。
+   */
+  async markSuperseded(ownerId: number, byTaskId: string): Promise<boolean> {
+    const row = this.getRow();
+    if (!row || this.notOwner(row, ownerId)) return false;
+    if (!isTaskId(byTaskId) || byTaskId === row.id) return false;
+    if (row.superseded_by === byTaskId) return true;
+    this.ctx.storage.sql.exec("UPDATE task SET superseded_by = ? WHERE singleton = 1", byTaskId);
+    return true;
   }
 
   /**
@@ -2049,7 +2087,22 @@ export class TaskDO extends DurableObject<Env> {
   async getStatus(ownerId: number): Promise<GetStatusResult> {
     const row = this.getRow();
     if (!row || this.notOwner(row, ownerId)) return { ok: false, code: "not_found" };
-    return { ok: true, task: this.view(row) };
+    return { ok: true, task: { ...this.view(row), ...this.continuationPr(row) } };
+  }
+
+  /** 積み足しのタスクだけ: 元と同じ PR（number・url・branch）と、元のタスク（continuation_of）。task_status に足す */
+  private continuationPr(row: TaskRow): Pick<TaskView, "pr"> {
+    if (row.continuation_of === null) return {};
+    const gl = this.getGithub();
+    if (!gl || gl.pr_number === null || gl.pr_url === null) return {};
+    return {
+      pr: {
+        number: gl.pr_number,
+        url: gl.pr_url,
+        branch: gl.branch,
+        continuation_of: row.continuation_of,
+      },
+    };
   }
 
   /**
@@ -2700,7 +2753,8 @@ export class TaskDO extends DurableObject<Env> {
     let warnings: string[] = [];
     if (unfinished === undefined && !review) {
       try {
-        warnings = (await this.composeResult(row, status)).warnings;
+        // 元のタスク自身の分だけ（引き継いだ分は inherited_warnings で別に渡す。足すと二重に数え、接頭辞も入れ子になる）
+        warnings = (await this.composeResult(row, status, { inherited: false })).warnings;
       } catch (e) {
         console.error("task_do_continuation_error", e instanceof Error ? e.name : typeof e);
         return { ok: false, code: "upstream_unavailable" };
@@ -2762,11 +2816,27 @@ export class TaskDO extends DurableObject<Env> {
   }
 
   /** task_result と R2 の result.json が共有する結果の組み立て。AgentDO の getResult が失敗・タイムアウトしたら throw する。 */
-  private async composeResult(row: TaskRow, status: TaskStatus): Promise<ResultView> {
+  private async composeResult(
+    row: TaskRow,
+    status: TaskStatus,
+    opts: { inherited?: boolean } = {},
+  ): Promise<ResultView> {
     const dto = await this.withTimeout(this.agentStub().getResult(), this.resultTimeoutMs);
     const view =
       dto.status === "not_ready" ? this.synthesizeResult(row, status) : shapeResult(status, dto);
-    const withGh = this.withGithub(view);
+    const own = this.withGithub(view);
+    // 積み足し: 先行タスクの警告を `inherited from <id>: <warning>` で足す（opts.inherited が false なら自分の分だけ）
+    const inherited =
+      opts.inherited === false
+        ? []
+        : parseInheritedWarnings(this.getGithub()?.inherited_warnings)
+            .map((w) => `inherited from ${w.from}: ${w.warning}`)
+            .filter((w, i, all) => all.indexOf(w) === i && !own.warnings.includes(w));
+    const withGh: ResultView = {
+      ...own,
+      ...(inherited.length > 0 ? { warnings: [...own.warnings, ...inherited] } : {}),
+      ...(row.superseded_by !== null ? { superseded_by: row.superseded_by } : {}),
+    };
     if (this.isReview(row)) {
       return this.withReview(row, withGh, dto.status === "not_ready" ? undefined : dto.review);
     }
@@ -2890,6 +2960,10 @@ export class TaskDO extends DurableObject<Env> {
               ...(gl.closed_empty === 1 ? { closed_empty: true as const } : {}),
               head_sha: gl.head_sha,
               head_matches_verified: gl.head_matches === null ? null : gl.head_matches === 1,
+              // 積み足しのタスクだけ: 元と同じ PR のブランチと、元のタスクの id
+              ...(row?.continuation_of != null
+                ? { branch: gl.branch, continuation_of: row.continuation_of }
+                : {}),
             }
           : null,
     };
@@ -4648,6 +4722,7 @@ export class TaskDO extends DurableObject<Env> {
     const block = renderReportBlock(
       {
         taskId: row.id,
+        ...(row.continuation_of !== null ? { continuesTask: row.continuation_of } : {}),
         status,
         ...(reason !== undefined ? { reason } : {}),
         summary: view.summary,
@@ -4668,7 +4743,9 @@ export class TaskDO extends DurableObject<Env> {
       },
       { showCost: this.env.PR_SHOW_COST === "true" },
     );
-    const body = applyManagedBlock(pull.body, block, row.id, { isRoot: true });
+    const body = applyManagedBlock(pull.body, block, row.id, {
+      isRoot: row.continuation_of === null,
+    });
     if (body !== pull.body) await api.updatePullBody(number, body);
     this.ctx.storage.sql.exec(
       "UPDATE github_link SET head_sha = ?, head_matches = ?, warnings = ?, body_done = 1, finalize_attempts = 0, finalize_retry_at = 0",
@@ -4742,6 +4819,8 @@ export class TaskDO extends DurableObject<Env> {
     api: GitHubRepoApi,
     pull: { number: number; draft: boolean; state: string; headSha: string },
   ): Promise<void> {
+    // 積み足しは元の PR とブランチを使う。変更なしで終わっても閉じない・消さない（前のタスクの成果が載っている）
+    if (row.continuation_of !== null) return;
     if (gl.closed_empty === 1 || gl.pr_merged === 1) return;
     if (gl.initial_sha === null || pull.headSha !== gl.initial_sha) return;
     if (!pull.draft || pull.state !== "open") return;

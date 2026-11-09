@@ -568,3 +568,200 @@ describe("task service: start と continue_task_id", () => {
     expect(!r.ok && r.error.message).toContain("repository");
   });
 });
+
+describe("B2: 積み足しの終端（warnings の引き継ぎ・superseded_by・予約の回収）", () => {
+  type Owner = Awaited<ReturnType<typeof newOwner>>;
+  let keySeq = 0;
+
+  /** COMPLETED まで進めた根（ワーカーの warnings 付き） */
+  async function rootWithWarnings(o: Owner, warnings: string[]) {
+    const t = await createTask({}, o.id);
+    await t.stub.advance();
+    const head = await pushChildCommit(t.branch);
+    await t.agent.setProgram({ result: completedResult(head, { warnings }) });
+    await t.agent.setPhase("completed");
+    for (let i = 0; i < 5; i++) {
+      await t.stub.advance();
+      if ((await t.stub.result(o.id)).ok) break;
+    }
+    expect((await t.stub.result(o.id)).ok).toBe(true);
+    return { ...t, head };
+  }
+
+  /** authorizeContinue → service.start（reserve → ensureCreated）で積み足しを作る */
+  async function startContinuation(o: Owner, of: string, baseSha: string) {
+    const authz = await authorize(o.user, o.id, { continue_task_id: of, base_sha: baseSha });
+    if (!authz.ok) throw new Error(`authorizeContinue failed: ${authz.code} ${authz.message}`);
+    const svc = createTaskService(env);
+    const r = await svc.start(
+      { githubUserId: o.id, login: "alice" },
+      {
+        continue_task_id: of,
+        base_sha: baseSha,
+        title: "fix",
+        instructions: "apply the review comments",
+        idempotency_key: `cont-${++keySeq}`,
+      },
+      {
+        repositoryId: authz.repositoryId,
+        installationId: authz.installationId,
+        continuation: authz.continuation,
+      },
+    );
+    if (!r.ok) throw new Error(`start failed: ${r.error.code}`);
+    const stub = taskStub(r.value.task_id);
+    extraStubs.push(stub);
+    return { id: r.value.task_id, stub };
+  }
+
+  /** 積み足しを COMPLETED まで進める（PR のブランチに 1 つ commit を積む） */
+  async function completeContinuation(
+    o: Owner,
+    c: { id: string; stub: TaskStub },
+    branch: string,
+    warnings: string[],
+  ) {
+    await c.stub.advance();
+    const head = await pushChildCommit(branch);
+    await fakeAgent(c.id).setProgram({ result: completedResult(head, { warnings }) });
+    await fakeAgent(c.id).setPhase("completed");
+    for (let i = 0; i < 5; i++) {
+      await c.stub.advance();
+      if ((await c.stub.result(o.id)).ok) break;
+    }
+    const r = await c.stub.result(o.id);
+    if (!r.ok) throw new Error(`result failed: ${r.code}`);
+    return { head, result: r.result };
+  }
+
+  it("根 R → C1（警告あり）→ C2: C2 の warnings に R と C1 の警告が 1 回ずつ、入れ子の接頭辞なしで出る", async () => {
+    const o = await newOwner();
+    const wR = "tests_modified: root changed a test";
+    const wC1 = "ci_config_changed: c1 changed the CI";
+    const root = await rootWithWarnings(o, [wR]);
+    const c1 = await startContinuation(o, root.id, root.head);
+    const d1 = await completeContinuation(o, c1, root.branch, [wC1]);
+    // C1 自身の warnings: 自分の分と、R から引き継いだ分
+    expect(d1.result.warnings).toContain(wC1);
+    expect(d1.result.warnings.filter((w) => w === `inherited from ${root.id}: ${wR}`)).toHaveLength(
+      1,
+    );
+    // C1 を元にしたときの continuationSource の warnings は C1 自身の分だけ
+    const src = await c1.stub.continuationSource(o.id);
+    expect(src.ok && src.source.warnings).toEqual([wC1]);
+
+    const c2 = await startContinuation(o, c1.id, d1.head);
+    const d2 = await completeContinuation(o, c2, root.branch, []);
+    const inherited = d2.result.warnings.filter((w) => w.startsWith("inherited from"));
+    expect(inherited.sort()).toEqual(
+      [`inherited from ${root.id}: ${wR}`, `inherited from ${c1.id}: ${wC1}`].sort(),
+    );
+    expect(d2.result.warnings.some((w) => w.includes("inherited from", 15))).toBe(false);
+    // 引き継いだ警告があるので task_pr_merge は warnings_present で止まる
+    const ctx = await c2.stub.prContext(o.id, "merge");
+    expect(ctx).toMatchObject({ ok: false, code: "conflict" });
+  });
+
+  it("task_result に superseded_by（最新の積み足しの id）と pr.continuation_of が出る。根の結果は他を変えない", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const before = await root.stub.result(o.id);
+    if (!before.ok) throw new Error("not ready");
+    expect(before.result).not.toHaveProperty("superseded_by");
+    const c1 = await startContinuation(o, root.id, root.head);
+    const after = await root.stub.result(o.id);
+    if (!after.ok) throw new Error("not ready");
+    expect(after.result.superseded_by).toBe(c1.id);
+    const { superseded_by: _s, ...rest } = after.result;
+    expect(rest).toEqual(before.result);
+    const d1 = await completeContinuation(o, c1, root.branch, []);
+    expect(d1.result.pr).toMatchObject({
+      number: root.pr,
+      url: root.prUrl,
+      branch: root.branch,
+      continuation_of: root.id,
+    });
+    // service の task_result にも出る
+    const svc = createTaskService(env);
+    const p: Principal = { githubUserId: o.id, login: "alice" };
+    const viaService = await svc.result(p, root.id);
+    expect(viaService.ok && viaService.value.superseded_by).toBe(c1.id);
+  });
+
+  it("同じ元から実行中の積み足しがあるあいだは、authorizeContinue は通し、reserve が branch_busy で断る（decide の順: 鍵 → 最新）", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const c1 = await startContinuation(o, root.id, root.head);
+    const authz = await authorize(o.user, o.id, { continue_task_id: root.id, base_sha: root.head });
+    expect(authz.ok).toBe(true);
+    if (!authz.ok) return;
+    const svc = createTaskService(env);
+    const r = await svc.start(
+      { githubUserId: o.id, login: "alice" },
+      {
+        continue_task_id: root.id,
+        base_sha: root.head,
+        title: "fix",
+        instructions: "apply the review comments",
+        idempotency_key: "busy-1",
+      },
+      {
+        repositoryId: authz.repositoryId,
+        installationId: authz.installationId,
+        continuation: authz.continuation,
+      },
+    );
+    expect(r).toMatchObject({ ok: false, error: { code: "branch_busy" } });
+    expect(!r.ok && r.error.message).toContain(c1.id);
+  });
+
+  it("reserve のあとに ensureCreated が失敗しても、予約が回収されて branch_chain が戻り、次の積み足しが通る", async () => {
+    const o = await newOwner();
+    const root = await completedRoot(o.id);
+    const authz = await authorize(o.user, o.id, { continue_task_id: root.id, base_sha: root.head });
+    if (!authz.ok) throw new Error("authorizeContinue failed");
+    const svc = createTaskService(env);
+    const p: Principal = { githubUserId: o.id, login: "alice" };
+    // TaskDO だけが断る事実（PR の URL の形が違う）: reserve は通り、ensureCreated が invalid_input
+    const bad = await svc.start(
+      p,
+      {
+        continue_task_id: root.id,
+        base_sha: root.head,
+        title: "fix",
+        instructions: "apply the review comments",
+        idempotency_key: "bad-1",
+      },
+      {
+        repositoryId: authz.repositoryId,
+        installationId: authz.installationId,
+        continuation: { ...authz.continuation, pr_url: "ftp://example.invalid/pull/1" },
+      },
+    );
+    expect(bad).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+    const state = () =>
+      runInDurableObject(o.user, (_i, s) => ({
+        lock: s.storage.sql.exec("SELECT task_id FROM branch_lock").toArray(),
+        chain: s.storage.sql
+          .exec("SELECT latest_task_id, prev_task_id FROM branch_chain")
+          .toArray() as { latest_task_id: string; prev_task_id: string }[],
+      }));
+    const held = await state();
+    expect(held.lock).toHaveLength(1);
+    const phantom = held.chain[0]?.latest_task_id as string;
+    expect(phantom).not.toBe(root.id);
+    extraStubs.push(taskStub(phantom));
+    // 回収の待ち（RESERVATION_RECLAIM_AFTER_MS）を過ぎる
+    await runInDurableObject(o.user, (i) => {
+      const u = i as unknown as { now: () => number };
+      const base = u.now.bind(u);
+      u.now = () => base() + 11 * 60 * 1000;
+    });
+    const next = await startContinuation(o, root.id, root.head);
+    expect(next.id).not.toBe(phantom);
+    expect(await state()).toEqual({
+      lock: [{ task_id: next.id }],
+      chain: [{ latest_task_id: next.id, prev_task_id: root.id }],
+    });
+  });
+});

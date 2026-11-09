@@ -5,6 +5,7 @@ import { readWorkerAudit } from "./audit-sink";
 import { resetCloudflareSummaryCache } from "./dashboard/cloudflare";
 import { DIRECTORY_NAME } from "./directory/types";
 import { resetProviderKeysCache } from "./provider-keys";
+import { sweepBranchCleanup } from "./tasks/branch-cleanup";
 
 /**
  * 通しの E2E 専用の仕組み（ENVIRONMENT=test のときだけ有効。それ以外は 404 / 何もしない）。
@@ -200,6 +201,12 @@ export function registerTestRoutes(app: Hono<{ Bindings: Env }>) {
     const id = await taskIdOf(c.req);
     if (!id) return c.json({ error: "task_id is required" }, 400);
     return c.json(await c.env.TASK_DO.getByName(id).testDeliveryStates());
+  });
+
+  // 作業ブランチの掃除の 1 回分（Cron の scheduled と同じ sweep）。E2E は Cron を起動できないので、これで代わりに呼ぶ
+  app.post("/__test/branch-cleanup/sweep", async (c) => {
+    if (c.env.ENVIRONMENT !== "test") return c.notFound();
+    return c.json(await sweepBranchCleanup(c.env, Date.now()));
   });
 
   // 索引（DirectoryDO）の 1 タスクの行。無ければ row: null

@@ -30,6 +30,8 @@
     { "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] },
     { "tag": "v2", "new_sqlite_classes": ["DirectoryDO"] }
   ],
+  // 作業ブランチの掃除（毎時 17 分。tasks/branch-cleanup.ts。docs/deploy.md）。1 回 20 件まで・Installation Token だけを使う
+  "triggers": { "crons": ["17 * * * *"] },
   "services": [
     // apps/web（Web Research Service）の WebResearch エントリポイント。呼び出し元の種別は props で固定する
     // （web は RPC の引数ではなく ctx.props から caller を取る）。デプロイは web → agent → gateway の順。

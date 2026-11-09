@@ -45,6 +45,8 @@
     { "tag": "v1", "new_sqlite_classes": ["TaskDO", "UserDO"] },
     { "tag": "v2", "new_sqlite_classes": ["DirectoryDO"] }
   ],
+  // 作業ブランチの掃除（毎時 17 分。docs/deploy.md）。apps/gateway/wrangler.jsonc と同じ値
+  "triggers": { "crons": ["17 * * * *"] },
   "services": [
     {
       "binding": "WEB",

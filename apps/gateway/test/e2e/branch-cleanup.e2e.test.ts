@@ -60,7 +60,8 @@ async function completedTask() {
   for (;;) {
     const row = await directoryRow(taskId);
     if (row && row.ended_at !== null && row.pr_number !== null) break;
-    if (Date.now() > indexDeadline) throw new Error(`索引に載りませんでした: ${JSON.stringify(row)}`);
+    if (Date.now() > indexDeadline)
+      throw new Error(`索引に載りませんでした: ${JSON.stringify(row)}`);
     await new Promise((r) => setTimeout(r, 300));
   }
   const pull = await pullOf(branch);

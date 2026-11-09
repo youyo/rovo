@@ -1,5 +1,5 @@
 import { runInDurableObject } from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import { env as cfEnv } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DIRECTORY_NAME, type TaskIndexSnapshot } from "../../src/directory/types";
 import worker from "../../src/index";
@@ -15,6 +15,9 @@ afterEach(clearTaskAlarms);
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+/** Worker の Env（secret は vitest.config.ts の bindings で入っている） */
+const env = cfEnv as unknown as Env;
 
 const NOW = Date.UTC(2026, 10, 1, 0, 17, 0);
 
@@ -154,11 +157,9 @@ describe("sweepBranchCleanup", () => {
 
   it("DIRECTORY_DO が無い環境では何もしない", async () => {
     const t = fakeTasks({});
-    const r = await sweepBranchCleanup(
-      { ...env, DIRECTORY_DO: undefined } as unknown as Env,
-      NOW,
-      { task: t.task },
-    );
+    const r = await sweepBranchCleanup({ ...env, DIRECTORY_DO: undefined } as unknown as Env, NOW, {
+      task: t.task,
+    });
     expect(t.order).toEqual([]);
     expect(r).toMatchObject({ claimed: 0, checked: 0, deleted: 0, done: 0 });
   });

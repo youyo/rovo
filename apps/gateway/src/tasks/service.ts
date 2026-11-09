@@ -300,7 +300,7 @@ export type PrMergeValue = {
   already_merged: boolean;
   merge_method: MergeMethod;
   merge_sha: string | null;
-  /** delete_branch を求めなかったときは null。消せなかったときは false（マージは成功。warnings に理由） */
+  /** delete_branch: false のときは null。消せなかったときは false（マージは成功。warnings に理由） */
   branch_deleted: boolean | null;
   warnings: string[];
   review_policy: ReviewPolicy;

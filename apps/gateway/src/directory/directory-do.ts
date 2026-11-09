@@ -87,6 +87,13 @@ const ADDED_COLUMNS = [
   ["work_stage", "TEXT"],
 ] as const;
 
+/** 作業ブランチの掃除: 1 回に選ぶ上限 */
+const BRANCH_CLEANUP_MAX = 20;
+/** 作業ブランチの掃除: 同じタスクを確かめ直すまでの間隔（50 分） */
+const BRANCH_CLEANUP_INTERVAL_MS = 50 * 60_000;
+/** 作業ブランチの掃除: 対象は終わってから 30 日以内のタスク */
+const BRANCH_CLEANUP_WINDOW_MS = 30 * 24 * 60 * 60_000;
+
 /**
  * ダッシュボードの索引（シングルトン。docs/specs/dashboard.md D10）。
  * TaskDO が outbox で送ってくる snapshot を task_index に持ち、一覧・集計・タイムラインの読み取りに答える。
@@ -165,6 +172,64 @@ export class DirectoryDO extends DurableObject<Env> {
       revision INTEGER NOT NULL
     )`);
     sql.exec("CREATE INDEX IF NOT EXISTS consult_index_at ON consult_index (at DESC, consult_id)");
+    // 作業ブランチの掃除の進み具合（issue #185）。task_index とは別に持つ（索引の更新・置き換えで消えない）
+    sql.exec(`CREATE TABLE IF NOT EXISTS branch_cleanup (
+      task_id TEXT PRIMARY KEY,
+      ended_at INTEGER NOT NULL,
+      last_checked_at INTEGER,
+      done INTEGER NOT NULL DEFAULT 0
+    )`);
+  }
+
+  /**
+   * 作業ブランチの掃除（Cron の 1 回分）の候補を選ぶ。
+   * 1. task_index から、終わっていて（ended_at が now - 30 日以降）PR があり、review でないタスクを branch_cleanup に写す
+   *    （INSERT OR IGNORE。既にある行の進み具合は変えない。デプロイ前に終わったタスクもここで拾う）。
+   * 2. 終わってから 30 日を過ぎた行は消す（表が増え続けないように）。
+   * 3. done でなく、最後の確認から 50 分以上たった行を、確認が古い順（まだ確認していない行が先）に最大 limit 件（上限 20）選び、
+   *    last_checked_at = now にして返す。選ぶのと印を付けるのを同じ同期区間で行う（同じ回に 2 度選ばれない）。
+   */
+  claimBranchCleanup(now: number, limit = BRANCH_CLEANUP_MAX): string[] {
+    if (!Number.isSafeInteger(now) || !Number.isSafeInteger(limit) || limit < 1) return [];
+    const n = Math.min(limit, BRANCH_CLEANUP_MAX);
+    const since = now - BRANCH_CLEANUP_WINDOW_MS;
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      sql.exec(
+        `INSERT OR IGNORE INTO branch_cleanup (task_id, ended_at)
+         SELECT task_id, ended_at FROM task_index
+         WHERE ended_at IS NOT NULL AND ended_at >= ? AND pr_number IS NOT NULL
+           AND (kind IS NULL OR kind != 'review')`,
+        since,
+      );
+      sql.exec("DELETE FROM branch_cleanup WHERE ended_at < ?", since);
+      const ids = sql
+        .exec<{ task_id: string }>(
+          `SELECT task_id FROM branch_cleanup
+           WHERE done = 0 AND ended_at >= ? AND (last_checked_at IS NULL OR last_checked_at <= ?)
+           ORDER BY last_checked_at IS NOT NULL, last_checked_at, ended_at, task_id
+           LIMIT ?`,
+          since,
+          now - BRANCH_CLEANUP_INTERVAL_MS,
+          n,
+        )
+        .toArray()
+        .map((r) => r.task_id);
+      if (ids.length > 0) {
+        sql.exec(
+          "UPDATE branch_cleanup SET last_checked_at = ? WHERE task_id IN (SELECT value FROM json_each(?))",
+          now,
+          JSON.stringify(ids),
+        );
+      }
+      return ids;
+    });
+  }
+
+  /** 作業ブランチの掃除を終えた（もう試さない）。以後 claimBranchCleanup は選ばない */
+  finishBranchCleanup(taskId: string): void {
+    if (typeof taskId !== "string") return;
+    this.ctx.storage.sql.exec("UPDATE branch_cleanup SET done = 1 WHERE task_id = ?", taskId);
   }
 
   /**

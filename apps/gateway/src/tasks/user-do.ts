@@ -437,7 +437,7 @@ export type PrMergeResult =
       ok: true;
       already_merged: boolean;
       merge_sha: string | null;
-      /** delete_branch を求めなかったときは null */
+      /** delete_branch: false のときは null */
       branch_deleted: boolean | null;
       warnings: string[];
     }

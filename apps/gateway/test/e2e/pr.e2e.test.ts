@@ -730,7 +730,15 @@ describe("continue_task_id（同じ PR への積み足しの通し）", () => {
           code: "branch_busy",
           message: expect.stringContaining(c1),
         });
-        // task_pr_merge も、どの id でも branch_busy（conflict + 接頭辞）で止まり、マージしない
+        // task_pr_merge も、どの id でも branch_busy（conflict + 接頭辞）で止まり、マージしない。
+        // GitHub への書き込み（PUT / DELETE。認証の種類は問わない。トークンの失効 DELETE /installation/token だけ除く）も無い
+        const writes = async () =>
+          (await admin.app<{ method: string; path: string }[]>("requests")).filter(
+            (r) =>
+              (r.method === "PUT" || r.method === "DELETE") &&
+              !(r.method === "DELETE" && r.path === "/installation/token"),
+          ).length;
+        const writesBefore = await writes();
         for (const id of [t.taskId, c1]) {
           const m = await t.client.callTool({ name: "task_pr_merge", arguments: { task_id: id } });
           expect(m.isError).toBe(true);
@@ -738,6 +746,7 @@ describe("continue_task_id（同じ PR への積み足しの通し）", () => {
           if (id === t.taskId) expect(String(bodyOf(m).message)).toMatch(/^branch_busy:/);
         }
         expect((await pullOf(t.branch))?.merged).toBe(false);
+        expect(await writes()).toBe(writesBefore);
 
         // 積み足しタスクが同じブランチに commit を積んで COMPLETED
         const head2 = await admin.app<string>("addCommit", "acme/widgets", t.head, "c1 commit");

@@ -484,6 +484,7 @@ Terraform の State には Logpush の宛先の資格情報（R2 の S3 互換�
   - `TOKEN_ENC_KEY`（agent）を変えると、実行中のタスクは次のトークン更新まで push / clone が 401 になる。実行中のタスクが無いときに変える。
   - GitHub App の Client secret / 秘密鍵は、GitHub で新しいものを発行して `wrangler secret put` で差し替える。
 - Installation Token は、タスクの終端で失効する。失効に失敗した場合は、期限（最長 1 時間）まで有効。
+- 作業ブランチの掃除: gateway の Cron Trigger（`triggers.crons: ["17 * * * *"]`、毎時 17 分。`deploy.example/gateway.wrangler.jsonc` に入っている）が、rovo の外でマージ・クローズされた PR の作業ブランチを消す。1 回 20 件まで、同じタスクは 50 分空ける、対象は終わってから 30 日以内、GitHub のレート制限でその回の残りを止める。認証は Installation Token だけ（App の Contents: write と Pull requests の権限の範囲。新しい secret・権限は要らない）。消すのは、PR が merged か closed、ブランチの先頭が rovo の記録した head のまま、そのブランチを base にした open な PR が無い、`delete_branch: false` を明示していない、積み足しの後続が走っていないときだけ。理由は監査ログの `branch_cleanup`（`reason`: `deleted` / `already_gone` / `pr_open` / `base_of_open_pr` / `head_changed` / `head_not_verified` / `pr_mismatch` / `app_unavailable` / `kept_by_request` / `continuation_active` / `not_chain_tail` など）に出る。Workers の Cron Trigger の実行はダッシュボードの Worker > Settings > Triggers とログ（`branch_cleanup_sweep`。件数と理由コードだけ）で確かめる。
 - 障害時の見方: 監査ログ（10）、R2 の `summary.json`（9）、`task_status` / `task_result`。Sandbox の復旧の回数は要約の `restarts` / `bootRetries` に出る。
 - R2 の中身は非信頼データとして扱う（9）。
 

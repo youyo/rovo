@@ -98,6 +98,11 @@ describe("回帰: 本番相当の入力から手書き相当の設定が出る",
     assert.equal(parseJsonc(out.agent).assets, undefined);
     assert.equal(parseJsonc(out.web).assets, undefined);
   });
+  it("gateway だけに Cron Trigger（作業ブランチの掃除。毎時 17 分）が出る。agent / web には出ない", () => {
+    assert.deepEqual(parseJsonc(out.gateway).triggers, { crons: ["17 * * * *"] });
+    assert.equal(parseJsonc(out.agent).triggers, undefined);
+    assert.equal(parseJsonc(out.web).triggers, undefined);
+  });
   it("gateway に ai バインディングと、モデルの自動選択の var が出る（新しい secret は要らない）", () => {
     const g = parseJsonc(out.gateway);
     assert.deepEqual(g.ai, { binding: "AI" });

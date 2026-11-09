@@ -3141,6 +3141,7 @@ describe("continue_task_id の公開（docs/specs/continue-task.md のタスク 
   it("task_start に continue_task_id を渡すと積み足しの確認（authorizeContinue）に進む: 存在しないタスクは not_found（予約しない）", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
+    const before = u.gh.calls.length;
     const { repository: _r, base_ref: _b, ...rest } = startArgs("t");
     const r = await client.callTool({
       name: "task_start",
@@ -3148,6 +3149,8 @@ describe("continue_task_id の公開（docs/specs/continue-task.md のタスク 
     });
     expect(r.isError).toBe(true);
     expect(body(r).code).toBe("not_found");
+    // 利用者の認可（/user・チームの所属）は呼ぶが、リポジトリには触れない
+    expect(u.gh.calls.slice(before).filter((c) => c.path.startsWith("/repos/"))).toEqual([]);
     expect(String(body(r).message)).not.toContain("not available");
     const rows = await runInDurableObject(userStub(u.id), (_i, s) =>
       s.storage.sql.exec("SELECT * FROM requests").toArray(),

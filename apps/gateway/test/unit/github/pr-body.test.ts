@@ -42,6 +42,7 @@ describe("fenceUntrusted", () => {
     expect(out).not.toContain(LEGACY_BEGIN);
     expect(out).not.toContain("<!-- rovo:end task=T1 -->");
     expect(out).not.toMatch(/<!--\s*rovo:/i);
+    // 目印は無害化されるが、目印の後ろの元の本文（task=T1 -->）は残ることを確かめる
     expect(out).toContain("end task=T1 -->");
     expect(out).toContain("begin task=T1 -->");
   });

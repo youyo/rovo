@@ -6,6 +6,7 @@ import { checkUrl, MAX_URL_LENGTH } from "../../../web/src/url-policy";
 import { auditFromWorker } from "../audit-sink";
 import { isAuthProps } from "../auth/props";
 import { createConsultService } from "../consult";
+import { errorMessageForLog } from "../log-error";
 import { listModels } from "../models";
 import { defaultSandboxInstanceOf, maxSandboxInstanceOf } from "../sandbox-instance";
 import {
@@ -302,12 +303,17 @@ function principalFromContext(): Principal | null {
 }
 
 /**
- * 想定外の例外を写す。メッセージ・スタックは出さない（ログにはエラー名だけ）。
+ * 想定外の例外を写す。応答にメッセージ・スタックは出さない（ログにはエラー名と、マスクして切ったメッセージ）。
  * DO の一時的な障害（retryable / overloaded）は再試行できるので upstream_unavailable、それ以外は internal。
  */
 function mapException(tool: string, e: unknown): ToolError {
   const flags = (e ?? {}) as { retryable?: unknown; overloaded?: unknown };
-  console.error("mcp_tool_error", tool, e instanceof Error ? e.name : typeof e);
+  console.error(
+    "mcp_tool_error",
+    tool,
+    e instanceof Error ? e.name : typeof e,
+    errorMessageForLog(e),
+  );
   if (flags.retryable === true || flags.overloaded === true) {
     return {
       code: "upstream_unavailable",

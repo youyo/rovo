@@ -627,8 +627,11 @@ export function createTaskService(
       const checked = checkStartInput(rawInput);
       if (!checked.ok) return checked;
       const { idempotency_key: key, input: raw } = checked.value;
+      // 積み足し（continue_task_id。docs/specs/continue-task.md）。元のタスクの事実は authorizeContinue が固定したもの
+      // （options.continuation）だけを使い、repository・base_ref は元のタスクの値にする
+      let continuation: ContinuationFacts | undefined;
+      let input: TargetedTaskInput;
       if (raw.continue_task_id !== undefined) {
-        // 積み足し（docs/specs/continue-task.md）。元のタスクの事実は authorizeContinue が固定したものだけを使う
         const c = options.continuation;
         if (
           c === undefined ||
@@ -639,11 +642,14 @@ export function createTaskService(
         ) {
           return fail("internal", "internal error");
         }
-        // タスク B1 は予約と認可まで。作成（ensureCreated）・準備は B2 で足す。それまでは予約も TaskDO も作らない
-        return fail("invalid_input", "continue_task_id is not available yet");
+        continuation = c;
+        input = { ...raw, repository: c.repository, base_ref: c.base_ref };
+      } else {
+        if (options.continuation !== undefined || !hasTarget(raw)) {
+          return fail("internal", "internal error");
+        }
+        input = raw;
       }
-      if (!hasTarget(raw)) return fail("internal", "internal error");
-      const input = raw;
       // 使えるモデルの外・キーが無いプロバイダーのモデルは、予約より前に拒否する。省略時はここで実際に使うモデルを決める
       // （env の AGENT_MODELS と、AI Gateway に登録されたキー。models_list で一覧を返す）
       const model = await resolveModel(env, input.model, providerKeys);
@@ -670,12 +676,22 @@ export function createTaskService(
       // 省略時はサーバーで生成する（再試行の重複排除は保証しない）。':' を含むので利用者のキーと衝突しない。
       const requestKey = key ?? `auto:${ulid()}`;
 
-      const fingerprint = await computeFingerprint(input);
-      const reserved = await deps.users(principal.githubUserId).reserve(requestKey, fingerprint);
+      // 指紋は利用者が入力した形（積み足しで省略した repository・base_ref は省略のまま）で作る
+      const fingerprint = await computeFingerprint(raw);
+      // 積み足しは、同じ PR（ブランチ）の鍵とチェーンの最新を予約と同じ同期区間で確かめる（branch_busy / continue_superseded）
+      const reserved = await deps
+        .users(principal.githubUserId)
+        .reserve(
+          requestKey,
+          fingerprint,
+          ...(continuation !== undefined
+            ? [{ branch: continuation.branch, continueOf: continuation.of }]
+            : []),
+        );
       if (!reserved.ok) return reserveFailure(reserved);
 
       const created = await deps.tasks(reserved.task_id).ensureCreated({
-        ...input,
+        ...(continuation !== undefined ? { ...raw, continuation } : input),
         model: choice.model,
         model_selection: choice.selection,
         task_id: reserved.task_id,

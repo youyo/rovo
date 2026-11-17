@@ -24,8 +24,8 @@ infra/crash.log
 test-results/
 playwright-report/
 
-# Claude Code の mod（plugins/rovo）の型。エンジンが自動生成する
-plugins/*/.claude-plugin/types/
+# Claude Code の mod（plugins/rovo-console）の型。エンジンが自動生成する
+plugins/rovo-console/.claude-plugin/types/
 
 # 環境ごとの値・秘密（秘密が入るファイルだけを除外する。rovo.config.json と deploy/ は秘密を含まず、下流がコミットするので除外しない）
 .dev.vars.*

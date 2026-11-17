@@ -182,8 +182,9 @@ describe("planTests: scripts・plugin・infra・docs", () => {
   it("docs-check は lint の中で流れるので lint だけ", () => {
     assert.deepEqual(tasks(["scripts/docs-check-lib.mjs"]), ["lint"]);
   });
-  it("plugins/rovo は test:plugin", () => {
-    assert.deepEqual(tasks(["plugins/rovo/hooks/x.ts"]), ["lint", "test:plugin"]);
+  it("plugins/rovo・plugins/rovo-console は test:plugin", () => {
+    assert.deepEqual(tasks(["plugins/rovo/skills/x/SKILL.md"]), ["lint", "test:plugin"]);
+    assert.deepEqual(tasks(["plugins/rovo-console/hooks/x.ts"]), ["lint", "test:plugin"]);
   });
   it("infra は test:infra", () => {
     assert.deepEqual(tasks(["infra/main.tf"]), ["lint", "test:infra"]);

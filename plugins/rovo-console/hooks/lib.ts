@@ -101,34 +101,6 @@ const asObject = (text: string): Record<string, unknown> | null => {
 const plain = (value: unknown): string | null =>
   typeof value === "string" ? stripFence(value) : null;
 
-/** `mcp__<server>__<prefix>task_start` を見分ける。prefix は空か `my-rovo_` のようなもの。 */
-export const matchTaskStart = (tool: string): { server: string; prefix: string } | null => {
-  if (!tool.startsWith("mcp__")) return null;
-  const parts = tool.split("__");
-  if (parts.length < 3) return null;
-  const name = parts[parts.length - 1] ?? "";
-  const hit = /^((?:[A-Za-z0-9-]+_)*)task_start$/.exec(name);
-  const server = parts.slice(1, -1).join("__");
-  if (hit === null || server === "") return null;
-  return { server, prefix: hit[1] ?? "" };
-};
-
-export const parseStartResult = (
-  text: string,
-): { taskId: string; status?: string; dashboardUrl?: string; model?: string } | null => {
-  const body = asObject(text);
-  if (body === null || typeof body.task_id !== "string" || body.task_id === "") return null;
-  const dashboardUrl = httpsOnly(body.dashboard_url);
-  const status = plain(body.status) ?? undefined;
-  const model = shortText(body.model, MAX_MODEL);
-  return {
-    taskId: stripFence(body.task_id),
-    ...(model !== undefined ? { model } : {}),
-    ...(status !== undefined && status !== "" ? { status } : {}),
-    ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
-  };
-};
-
 /** task_console の `pr`。{ number: 数値, url: https } だけを通す。 */
 const parsePr = (value: unknown): PrLink | undefined => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
@@ -578,7 +550,7 @@ export const cleanTitle = (title: unknown, fallback: string): string => {
   return (text === "" ? fallback : text).slice(0, MAX_TITLE);
 };
 
-/** 終端から 1 時間たったものを消す。task_start で拾ったものは新しい方から 10 件、task_list から入ったものは 50 件に絞る。 */
+/** 終端から 1 時間たったものを消す。task_list 以外から入ったもの（前の版で保存したもの）は新しい方から 10 件、task_list から入ったものは 50 件に絞る。 */
 export const pruneTasks = (list: RovoTask[], now: number): RovoTask[] => {
   const live = list.filter(
     (t) => t.terminalAt === undefined || now - t.terminalAt < KEEP_AFTER_TERMINAL_MS,
@@ -947,7 +919,7 @@ export const parseTaskList = (text: string): { tasks: ListedTask[]; truncated: b
 
 /**
  * task_list の結果を追跡リストに混ぜる。新しいものは足し、知っているものは状態を更新する
- * （startedAt と task_start で付けた印は保つ）。すでに終わっていたものは通知済みにして、トーストを出さない。
+ * （startedAt と、保存していた印は保つ）。すでに終わっていたものは通知済みにして、トーストを出さない。
  * 終端に変わったことを知らせる（トースト・notified）のは呼ぶ側。開始時刻の古い順に並べる。
  */
 export const mergeListed = (
@@ -1033,6 +1005,40 @@ export const matchRovoTool = (tool: string): { server: string; prefix: string } 
   const server = parts.slice(1, -1).join("__");
   if (hit === null || server === "") return null;
   return { server, prefix: hit[1] ?? "" };
+};
+
+/** 接続先（rovo の MCP サーバーと、ツール名の接頭辞）。 */
+export type Endpoint = { server: string; prefix: string };
+
+/** 接続先と見なすのに要るツール（同じ server と prefix の下に 3 つ揃うこと）。 */
+const ENDPOINT_TOOLS = ["task_start", "task_list", "task_console"] as const;
+
+/**
+ * `$.tool.list()` の名前から rovo の接続先を探す（MCP のツールだけを見る。呼び出しはしない）。
+ * endpoints: task_start・task_list・task_console が同じ server と prefix に揃うもの（最初に出た順）。
+ * noList: task_start と task_console はあるが task_list が無いもの（古い rovo。追跡できない）。
+ */
+export const findEndpoints = (
+  tools: readonly { name: string; mcp: boolean }[],
+): { endpoints: Endpoint[]; noList: Endpoint[] } => {
+  const groups = new Map<string, { ep: Endpoint; names: Set<string> }>();
+  for (const t of tools) {
+    if (t.mcp !== true) continue;
+    const hit = matchRovoTool(t.name);
+    if (hit === null) continue;
+    const key = `${hit.server}/${hit.prefix}`;
+    const name = (t.name.split("__").at(-1) ?? "").slice(hit.prefix.length);
+    const group = groups.get(key) ?? { ep: hit, names: new Set<string>() };
+    group.names.add(name);
+    groups.set(key, group);
+  }
+  const endpoints: Endpoint[] = [];
+  const noList: Endpoint[] = [];
+  for (const { ep, names } of groups.values()) {
+    if (ENDPOINT_TOOLS.every((n) => names.has(n))) endpoints.push(ep);
+    else if (names.has("task_start") && names.has("task_console")) noList.push(ep);
+  }
+  return { endpoints, noList };
 };
 
 // --- ペインの情報設計（0.6.0） -------------------------------------------------------

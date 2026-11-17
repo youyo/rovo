@@ -78,18 +78,23 @@ claude mcp add --transport http rovo https://<your-host>/mcp
 
 On first use you see Rovo's consent screen and sign in with GitHub. In claude.ai and other clients that take a connector URL, enter `https://<your-host>/mcp` as the remote MCP server URL.
 
-### 5. Install the mod (optional, recommended)
+### 5. Install the Claude Code plugins (optional, recommended)
 
-The bundled mod shows task progress in a pane beside Claude Code, and adds `/rovo:create-task` and `/rovo:consult`. In Claude Code:
+Two plugins are bundled in the same marketplace. `rovo` is the skills only: `/rovo:create-task` and `/rovo:consult`. `rovo-console` is the mod that shows task progress in a pane beside Claude Code. They are separate so you can take the skills without the JS mod. Neither has a `tool.call` hook, so both work with Claude Code's Code Mode. In Claude Code:
 
 ```
 /plugin marketplace add youyo/rovo
 /plugin install rovo@rovo
+/plugin install rovo-console@rovo
 ```
+
+Skip the last line if you do not want the pane (the dashboard shows the same progress). Restart Claude Code afterwards.
+
+**Upgrading from 0.6.x**: before 0.7.0 the pane was part of `rovo`, so updating `rovo` removes the pane. Update the marketplace, update `rovo`, add `rovo-console` if you want the pane, then restart Claude Code (`claude plugin marketplace update rovo`, `claude plugin update rovo@rovo`, `claude plugin install rovo-console@rovo`). The saved task list and log are kept per plugin name, so they are not carried over to `rovo-console`; they are fetched again.
 
 ### 6. Try it
 
-- In Claude Code, run `/rovo:create-task Fix the flaky pagination test in the widgets API` (the repository, branch and SHA come from the git repository you are in). The pane beside the chat shows the stages and the live log, and a Draft PR appears on GitHub.
+- In Claude Code, run `/rovo:create-task Fix the flaky pagination test in the widgets API` (the repository, branch and SHA come from the git repository you are in). With `rovo-console` installed, the pane beside the chat shows the stages and the live log. A Draft PR appears on GitHub.
 - Open the dashboard at `https://<your-host>/dashboard` and sign in with GitHub.
 - Ask another model for a second opinion with `/rovo:consult Is this migration plan safe?`
 
@@ -204,7 +209,7 @@ The gateway serves a read-only dashboard (`/dashboard`) where you can see the st
 
 ## Claude Code mod
 
-A read-only mod that shows the progress of tasks in a pane beside Claude Code is bundled ([plugins/rovo/README.md](plugins/rovo/README.md)). It also adds `/rovo:create-task`, `/rovo:consult`, `/rovo-console`. To install it, see step 5 of the [Quick start](#quick-start) (`/plugin marketplace add youyo/rovo` and `/plugin install rovo@rovo`). From a shell: `claude plugin install rovo --marketplace youyo/rovo`.
+Two plugins are bundled. `rovo` ([plugins/rovo/README.md](plugins/rovo/README.md)) is the skills only: `/rovo:create-task` and `/rovo:consult`. `rovo-console` ([plugins/rovo-console/README.md](plugins/rovo-console/README.md)) is a read-only mod that shows the progress of tasks in a pane beside Claude Code, and adds `/rovo-console`. To install them, see step 5 of the [Quick start](#quick-start) (`/plugin install rovo@rovo` and `/plugin install rovo-console@rovo`). From a shell: `claude plugin install rovo@rovo` and `claude plugin install rovo-console@rovo`.
 
 ## Components
 

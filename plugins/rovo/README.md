@@ -1,82 +1,51 @@
-# rovo (Claude Code の mod)
+# rovo (Claude Code のスキル)
 
-rovo のタスクを、Claude Code の会話の横のペインに出す mod。**読み取り専用**で、タスクの状態を見るだけ。タスクの取り消し・Ready 化・マージなどはしない。
-
-## 何をするか
-
-会話の横のペインに、rovo のワーカーの進み具合を「パイプラインの列」として出す。上の段がワーカーの一覧（1 行目が列見出し）、下の段が選んだワーカーのコンソール。
-
-```
-rovo  作業中 2 · 質問待ち 1 · 完了 3
-  タイトル                         準備 実行 検証 PR モデル     経過
-▎ task_console: 作業の記録を差…    ●━━━━◐┈━▶┈○┈┈┈┈○  sonnet-5.5   3分51秒
-▎   rovo  $ git status --short | head; pnpm --filter ./apps/gateway exe…
-  gateway: 自分のタスクを数える…   ●━━━━●━━━━?┈┈┈┈○  opus-5.5    12分4秒
-    rovo  ? 質問に答えてください（会話で task_answer）
-    task_list: 途中で止まったワ…     ✓ PR #83          sonnet-5.5   3分前
-    docs: README を英語にする        ✕ 失敗            haiku-5.5    8分前
-  他 2 件（完了。終わって 1 時間で消えます）
-─ task_console: 作業の記録を差分で返す log_after…          PR #84 · ダッシュボード
-┌ コンソール（残りの行いっぱい。末尾に追従）┐
-```
-
-- 見出しは `作業中 n · 質問待ち n · 完了 n`（費用は出さない）。2 行目の列見出しに、駅の名前を 1 回だけ出す（task は 準備・実行・検証・PR）。review のワーカーがいるときだけ、review をまとめた直前に `レビュー … 取出 調査 投稿` の見出しを足す
-- 並びは 質問待ち → 作業中（開始が新しい順）→ 終端（終了が新しい順）。状態が変わったときだけ動く
-- 作業中・質問待ちのワーカーは 2 行。1 行目は選択の帯（`▎`）・タイトル・線路・モデル（`anthropic/claude-sonnet-5-5` は `sonnet-5.5`）・経過時間。タイトルは、ペインの幅から他の列を引いた残りを使う。線路は、済んだ駅が緑の `●━━`、いまの駅がスピナー、次の駅への線路に光（`▶`）が流れる。駅に着いた直後は `◉` が白く光る。質問待ち（INPUT_REQUIRED）は流れを止めて `?` を点滅する。2 行目は字下げの後に、リポジトリ名（`owner/` を落とした名前だけ）といまの動き（`$ コマンド`。検証中は `[2/4]` が前に付く。質問待ちは warning 色で `? 質問に答えてください（会話で task_answer）`）
-- 終端のワーカーは 1 行で薄い色: タイトル・結果（線路の位置に `✓ PR #n` / `✓ 完了` / `✕ 失敗` / `✕ 予算超過` / `– 取り消し`。状態色）・モデル・終わってからの時間（`3分前`）。タイトルの前に記号は付けない。結果以外は薄くし、失敗の行は薄くしない。終端の行は最大 5 行で、それ以上は `他 n 件（完了。終わって 1 時間で消えます）`
-- 作業中の行は最大 4 件。出しているワーカーは必ず入れる。行が足りないときは、終端の行 → 作業中の行の順に減らし、出力の窓に 6 行は残す
-- 出しているワーカー（`▎` の付いた行）のタイトルを全文で `─ タイトル` の行に出し、右端に `PR #n · ダッシュボード` のリンクを寄せる（タイトルはリンクを優先して切る）
-- リポジトリとモデルは、`task_list` か `task_start` で分かっていれば常に出す
-- どのワーカーを出すかは、描くたびには選び直さない。動くのは、クリックしたときと、次のイベントのときだけ: 新しい作業中のタスクを拾った、またはあるワーカーが質問待ちに入った。そのとき、いま出しているワーカーが終端か、一覧から消えているときだけ、質問待ち > 最新の実行中 > 最新の順で移る（作業中や質問待ちのワーカーを見ているときは奪わない。出しているワーカーが完了しても動かさないので、最後の出力と PR を読める）。起動直後は同じ優先で自動で決める
-- 行を選ぶと（どの行を押してもよい）、下の段のコンソール（出力の窓、スクロール）がそのワーカーに替わる。枠はペインの下まで伸びる（行が足りないときは最小の高さ）
-- コンソールは、選んだワーカーのログが**積み上がる**。`task_console` に `log_after`（カーソル。最初は `"0"`）を付けて呼び、返った `log.entries` を、ワーカーごとに最大 500 行まで足していく（古い行から捨てる）。行は `$ pnpm test` とその出力の末尾、`✎ edit apps/x.ts (+12 -4)`、`⎇ commit …`、`🔍 search …`、薄い色の状態の変化。末尾に追従し、上へスクロールすると止まる（末尾まで戻すと再開）。実行中のコマンドの出力は、ログの末尾に「いま流れている出力」として続け、終わるとログの側に入る
-- `log` を返さないサーバー（`log_after` を知らない `task_console`）では、これまでどおり最新のコマンド 1 本だけを、`$ コマンド` を枠の先頭に固定して出す。`log_after` を受け付けないサーバーは、付けずに呼び直し、1 分間は付けない
-- ログの最後の 100 行とカーソルは `$.store` に残し、再起動後は続きから積む
-- 予算の延長の承認待ち（`task_console` の `awaiting` が `budget_extension`）のワーカーは「予算の承認待ち」と出し、入った時に 1 回トーストで知らせる。答えるのは利用者に確認してから（mod 自身は答えない）
-- 流れは約 0.7 秒ごとに描き直す。動いているワーカーがいなければ止まる
-
-並べるのは「呼んだ人の全タスク」。`task_list` がある rovo では、別のセッションや Cowork から始めたワーカーも数秒ごとに取って並べる（`scope: "recent"`、終わってから 1 時間で隠す）。`task_list` が無いサーバーでは、このセッションで `task_start` を拾ったタスクだけに戻る（1 分に 1 回 `task_list` を試し直す）。`task_list` を呼ぶ先は、rovo のツール（`task_*`）を呼んだ MCP サーバーから覚える。
-
-いまの動きは、出しているワーカーと実行中のワーカーについて `task_console` から取る（約 4 秒ごと。一度に取るのは最大 6 件で、選んだものを先に回す）。終わったワーカーは開いたときに 1 回だけ取る。
-
-### コマンド
+rovo のタスクを Claude Code から頼む・別のモデルに相談するためのスキル。hooks や mod は持たない（スキルだけ）。
 
 | コマンド | 内容 |
 |---|---|
 | `/rovo:create-task <依頼>` | 依頼を rovo のタスクにする（`task_start`）。リポジトリ・ブランチ・SHA は作業ディレクトリの git から求める |
 | `/rovo:consult <相談>` | 別のモデルに意見を聞く（`consult`）。Claude が会話の文脈と質問をまとめて 1 回相談し、答えを確かめてから伝える。答えが 50 秒以内に出なければ `pending` が返り、`consult_result` で受け取る（待つ間は会話を止めない） |
-| `/rovo-console` | ペインを開く・閉じる（打つたびに切り替え。他のタブの裏で見えていないときは前に出す）。mod 自身のコマンドで、作業中に打っても処理を止めずその場で動く |
 
-### ペインの開き方
-
-Claude が `task_start` で新しいタスクを始めても、ペインは自動では開かない。代わりにトーストで「`/rovo-console` で開けます」と案内する（ペインがすでに開いて見えているときは出さない）。開くのは `/rovo-console` を打ったときだけ。`/rovo:create-task` は利用者の操作がきっかけなので、「タスクを作成中…」の表示のためにペインを開く。端末が狭いなどで描かれないときは、Claude Code の決まりで表示されない。
+タスクの進み具合を会話の横のペインに出す mod は、別のプラグイン `rovo-console`（[plugins/rovo-console/README.md](../rovo-console/README.md)）。0.7.0 でスキルから分けた。ペインが無くても、ダッシュボードで進み具合を見られる。
 
 ## 前提
 
-rovo の MCP サーバーが Claude Code に接続されていること（ツール `task_start`・`task_status`・`task_console`、あれば `task_list` を読む）。接続されていないと、ペインは何も出さない。
+rovo の MCP サーバーが Claude Code に接続されていること（ツール `task_start`・`consult` など）。
 
 ## インストール
 
 ターミナルのプロンプトで:
 
 ```
-/plugin install rovo --marketplace youyo/rovo
+/plugin marketplace add youyo/rovo
+/plugin install rovo@rovo
 ```
 
 シェルから:
 
 ```sh
-claude plugin install rovo --marketplace youyo/rovo
+claude plugin marketplace add youyo/rovo
+claude plugin install rovo@rovo
 ```
 
-デスクトップアプリでは、プロンプト横の + → Plugins → Add marketplace に `youyo/rovo` を入れて Add plugin する。
+デスクトップアプリでは、プロンプト横の + → Plugins → Add marketplace に `youyo/rovo` を入れて Add plugin する。ペインも要るなら `rovo-console` を追加で入れる（`/plugin install rovo-console@rovo`）。入れたあとは Claude Code を再起動する。
+
+### 0.6.x から移る
+
+0.7.0 で、`rovo` はスキルだけになり、ペインの mod は `rovo-console` に分かれた。更新するとペインが消える。要る人は `rovo-console` を追加で入れる:
+
+1. marketplace を更新する: `claude plugin marketplace update rovo`
+2. `rovo` を更新する: `claude plugin update rovo@rovo`
+3. ペインが要るなら入れる: `claude plugin install rovo-console@rovo`
+4. Claude Code を再起動する
+
+`rovo-console` は保存済みのタスク一覧・ログを引き継がない（取り直せる）。
 
 ## 開発
 
 ```sh
-claude --plugin-dir plugins/rovo     # 手元の mod を読み込んで起動
-claude plugin test plugins/rovo      # テスト
-claude plugin validate plugins/rovo  # 検査
+claude plugin validate plugins/rovo  # 検査（スキルだけなので plugin test は無い）
 ```
 
-リポジトリのルートからは `mise run test:plugin`。型（`.claude-plugin/types/`）は Claude Code が自動で作るので、コミットしない。
+リポジトリのルートからは `mise run test:plugin`。

@@ -3,6 +3,7 @@ import type { RovoTask } from "../types";
 import {
   coerceTasks,
   displayWidth,
+  findEndpoints,
   headingText,
   isWaiting,
   labelRow,
@@ -403,4 +404,70 @@ test("matchRovoTool recognizes every rovo tool name in both shapes and reads ser
   }
   expect(matchRovoTool("mcp__s__other_tool")).toBeNull();
   expect(matchRovoTool("Bash")).toBeNull();
+});
+
+// --- 接続先の発見（$.tool.list の名前から） ---------------------------------------
+
+const mcpTool = (name: string, mcp = true) => ({ name, description: "", mcp });
+const rovoTools = (base: string, names: readonly string[]) =>
+  names.map((n) => mcpTool(`${base}${n}`));
+const TRIO = ["task_start", "task_list", "task_console"] as const;
+
+test("findEndpoints reads the real names: rovo-direct (no prefix) and the Portal (team-rovo_)", () => {
+  const tools = [
+    mcpTool("Bash", false),
+    ...rovoTools("mcp__rovo-direct__", [...TRIO, "task_status", "task_wait"]),
+    ...rovoTools("mcp__claude_ai_mcp_hubs_run__team-rovo_", [...TRIO, "task_result"]),
+    mcpTool("mcp__claude_ai_mcp_hubs_run__other-mcp_run_script"),
+  ];
+  // 実物の名前そのもの（司令塔が実機で確かめたもの）
+  expect(tools.map((t) => t.name)).toContain("mcp__rovo-direct__task_list");
+  expect(tools.map((t) => t.name)).toContain("mcp__claude_ai_mcp_hubs_run__team-rovo_task_list");
+  expect(findEndpoints(tools)).toEqual({
+    endpoints: [
+      { server: "rovo-direct", prefix: "" },
+      { server: "claude_ai_mcp_hubs_run", prefix: "team-rovo_" },
+    ],
+    noList: [],
+  });
+});
+
+test("findEndpoints needs task_start, task_list and task_console under the same server and prefix", () => {
+  // 2 つだけ・別の prefix に分かれている・別のサーバーに分かれているものは選ばない
+  const tools = [
+    ...rovoTools("mcp__a__", ["task_start", "task_list"]),
+    ...rovoTools("mcp__b__x_", ["task_start", "task_console"]),
+    ...rovoTools("mcp__b__y_", ["task_list"]),
+    ...rovoTools("mcp__c__", ["task_start"]),
+    ...rovoTools("mcp__d__", ["task_list", "task_console"]),
+  ];
+  expect(findEndpoints(tools).endpoints).toEqual([]);
+});
+
+test("findEndpoints only looks at MCP tools (mcp: true)", () => {
+  const tools = TRIO.map((n) => mcpTool(`mcp__fake__${n}`, false));
+  expect(findEndpoints(tools)).toEqual({ endpoints: [], noList: [] });
+});
+
+test("findEndpoints keeps every candidate in order of first appearance", () => {
+  const tools = ["s1", "s2", "s3", "s4", "s5"].flatMap((s) => rovoTools(`mcp__${s}__`, TRIO));
+  expect(findEndpoints(tools).endpoints.map((e) => e.server)).toEqual([
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "s5",
+  ]);
+});
+
+test("findEndpoints reports servers with task_start and task_console but no task_list as noList", () => {
+  const tools = [
+    ...rovoTools("mcp__old-rovo__", ["task_start", "task_console", "task_status"]),
+    ...rovoTools("mcp__claude_ai_mcp_hubs_run__team-rovo_", TRIO),
+    ...rovoTools("mcp__half__", ["task_start"]),
+  ];
+  expect(findEndpoints(tools)).toEqual({
+    endpoints: [{ server: "claude_ai_mcp_hubs_run", prefix: "team-rovo_" }],
+    noList: [{ server: "old-rovo", prefix: "" }],
+  });
 });

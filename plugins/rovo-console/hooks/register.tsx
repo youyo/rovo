@@ -1,9 +1,10 @@
-import type { EngineInterface, McpToolResult, Register, Timer } from "claude-code";
+import type { EngineInterface, McpToolResult, Register, Timer, ToolInfo } from "claude-code";
 import { atom, read, update } from "claude-code";
 
 import type { RovoConsole, RovoTask } from "../types";
 import type {
   Awaiting,
+  Endpoint,
   LaneState,
   LogLine,
   ParsedConsole,
@@ -17,13 +18,13 @@ import {
   bestWorker,
   budgetToastText,
   CONSOLE_RETRY_MS,
-  cleanTitle,
   coerceLogs,
   coerceTasks,
   columnHeader,
   detailText,
   displayWidth,
   expandTabs,
+  findEndpoints,
   formatElapsed,
   frameTop,
   glyph,
@@ -34,15 +35,12 @@ import {
   laneCells,
   logStyle,
   MAX_LOG_PAGES,
-  matchRovoTool,
-  matchTaskStart,
   mergeListed,
   moveTarget,
   orderTasks,
   padWidth,
   paneColumns,
   parseConsole,
-  parseStartResult,
   parseStatus,
   parseTaskList,
   planWorkers,
@@ -52,7 +50,6 @@ import {
   STATIONS,
   STORED_LOG_LINES,
   shortModel,
-  shortText,
   slideShift,
   spacerRows,
   stageIndex,
@@ -72,7 +69,7 @@ const POLL_MS = 4000;
 const STORE_KEY = "tasks";
 const LOGS_KEY = "logs";
 
-// 読み取り専用: 呼ぶ MCP ツールはこの 3 つだけ（task_start は model が呼んだ結果を見るだけ）。
+// 読み取り専用: 呼ぶ MCP ツールはこの 3 つだけ。新しいタスクは task_list で拾う（task_start は呼ばない・見ない）。
 const TOOL_CONSOLE = "task_console";
 const TOOL_STATUS = "task_status";
 const TOOL_LIST = "task_list";
@@ -86,23 +83,41 @@ const ARRIVE_FRAMES = 3;
 const LIST_IDLE_MS = 20_000;
 // 1 回の tick で task_console を取るワーカーの上限（選んでいるものを先頭に、残りは順番に回す）。
 const MAX_CONSOLE_POLLS = 6;
+// task_list がまだ 1 回も読めていない（接続先が無い・繋がる前で失敗した）ときの発見の間隔。
+// 発見は $.tool.list() の名前を見るだけで、MCP は呼ばない（名前に出てきた接続先だけ task_list を読み直す）。
+// MCP の接続は起動から数十秒〜数分遅れることがある。繋がった直後に気づけるよう最初の 1 分は 5 秒ごと、
+// 5 分までは 15 秒ごと、10 分までは 1 分ごとに見る（5 分を過ぎても粘る）。rovo を繋いでいない環境で
+// 見続けないよう 10 分で止め、/rovo-console・/rovo:create-task・次の起動のときにやり直す。
+const DISCOVER_STEPS: readonly { until: number; every: number }[] = [
+  { until: 60_000, every: 5_000 },
+  { until: 5 * 60_000, every: 15_000 },
+  { until: 10 * 60_000, every: 60_000 },
+];
+const NEW_TASK_TOAST = "rovo のタスクが始まりました。/rovo-console で開けます";
 
-const tasksAtom = atom({ plugin: "rovo", key: "tasks" } as const, []);
-const consolesAtom = atom({ plugin: "rovo", key: "consoles" } as const, {});
-const frameAtom = atom({ plugin: "rovo", key: "frame" } as const, 0);
-const arrivalsAtom = atom({ plugin: "rovo", key: "arrivals" } as const, {});
-const listsAtom = atom({ plugin: "rovo", key: "lists" } as const, {});
-const endpointsAtom = atom({ plugin: "rovo", key: "endpoints" } as const, []);
+const tasksAtom = atom({ plugin: "rovo-console", key: "tasks" } as const, []);
+const consolesAtom = atom({ plugin: "rovo-console", key: "consoles" } as const, {});
+const frameAtom = atom({ plugin: "rovo-console", key: "frame" } as const, 0);
+const arrivalsAtom = atom({ plugin: "rovo-console", key: "arrivals" } as const, {});
+const listsAtom = atom({ plugin: "rovo-console", key: "lists" } as const, {});
+const endpointsAtom = atom({ plugin: "rovo-console", key: "endpoints" } as const, []);
+// task_start と task_console はあるが task_list が無いサーバー（$.tool.list() で見つけたもの）。追跡できないと知らせる。
+const noListAtom = atom({ plugin: "rovo-console", key: "noList" } as const, []);
+// このセッションで task_list の同期が 1 回済んだ接続先。最初の同期で見えたタスクには開始のトーストを出さない。
+const syncedAtom = atom({ plugin: "rovo-console", key: "synced" } as const, {});
 // 積み上がるログ（ワーカーごと）と、log_after を受け付けなかった接続先。
-const logsAtom = atom({ plugin: "rovo", key: "logs" } as const, {});
-const logOffAtom = atom({ plugin: "rovo", key: "logOff" } as const, {});
+const logsAtom = atom({ plugin: "rovo-console", key: "logs" } as const, {});
+const logOffAtom = atom({ plugin: "rovo-console", key: "logOff" } as const, {});
 // 出力の窓。follow が true の間は末尾に追従する。offset は追従を止めたときの先頭行（出力の中の行番号）。
-const scrollAtom = atom({ plugin: "rovo", key: "scroll" } as const, { follow: true, offset: 0 });
+const scrollAtom = atom({ plugin: "rovo-console", key: "scroll" } as const, {
+  follow: true,
+  offset: 0,
+});
 // いま出しているワーカー（taskKey）。描画のたびに選び直さない。動くのは、クリックと、
 // イベント（新しい作業中のタスクを拾った・質問待ちに入った）で出しているものが終端か消えているときだけ。変わったら追従に戻す。
-const shownAtom = atom({ plugin: "rovo", key: "shown" } as const, null);
+const shownAtom = atom({ plugin: "rovo-console", key: "shown" } as const, null);
 // /rovo:create-task が実行された時刻。タスクを拾うまで「タスクを作成中…」を出す。
-const creatingAtom = atom({ plugin: "rovo", key: "creating" } as const, null);
+const creatingAtom = atom({ plugin: "rovo-console", key: "creating" } as const, null);
 const CREATING_MS = 10 * 60 * 1000;
 const CREATE_COMMAND = "create-task";
 const CONSOLE_COMMAND = "rovo-console";
@@ -123,6 +138,8 @@ const textOf = (result: McpToolResult): string =>
 
 let timer: Timer | null = null;
 let animTimer: Timer | null = null;
+let discoverTimer: Timer | null = null;
+let discoverStartedAt = 0;
 let isPolling = false;
 let pollCursor = 0;
 
@@ -195,14 +212,19 @@ const mutate = async ($: Dollar, change: (list: RovoTask[]) => RovoTask[]): Prom
   return after;
 };
 
-/** task_list を取り直す必要があるか: 取れている接続先が 1 つでもある。 */
-const hasListSupport = async ($: Dollar): Promise<boolean> =>
-  Object.values(await read($, listsAtom)).some((l) => l.supported);
+/** task_list を取り直す必要があるか: 取れている接続先か、まだ 1 回も試していない接続先がある。 */
+const wantsList = async ($: Dollar): Promise<boolean> => {
+  const lists = await read($, listsAtom);
+  return (await read($, endpointsAtom)).some((ep) => {
+    const state = lists[endpointKey(ep)];
+    return state === undefined || state.supported;
+  });
+};
 
 const stopIfIdle = async ($: Dollar): Promise<void> => {
   const list = await read($, tasksAtom);
   const active = list.some((t) => !isTerminal(t.status));
-  if (timer !== null && !active && !(await hasListSupport($))) {
+  if (timer !== null && !active && !(await wantsList($))) {
     timer.cancel();
     timer = null;
   }
@@ -424,13 +446,48 @@ const pollOne = async ($: Dollar, t: RovoTask): Promise<void> => {
   if (shouldToastBudget) $.ui.toast(budgetToastText(t.title));
 };
 
+/** タスクを作成中（/rovo:create-task から 10 分以内）か。 */
+const isCreating = async ($: Dollar, now: number): Promise<boolean> => {
+  const creatingAt = await read($, creatingAtom);
+  return creatingAt !== null && now - creatingAt < CREATING_MS;
+};
+
+/** ペインが開いていて見えているか。分からなければ見えていない側に倒す。 */
+const isPaneShown = async ($: Dollar): Promise<boolean> => {
+  try {
+    return (await $.ui.panes()).some((p) => p.id === PANE_ID && p.isShown);
+  } catch {
+    return false;
+  }
+};
+
 /**
- * 呼んだ人の全タスク（task_list）を取って追跡リストに混ぜる。task_list が無いサーバー
- * （エラー・形が違う）は 1 分間あきらめ、その間は task_start で拾ったものだけで動く。
+ * task_list で新しく見えた作業中のタスクの扱い。最初の同期（このセッションでその接続先を初めて
+ * 読んだとき）で見えたものは、前からあったもの（他のセッションの分も含む）なので知らせない。
+ * 「タスクを作成中…」は、最初の同期より後に見えた新しいタスクか、作成を始めた後に作られたタスクで消す。
+ * 開始を知らせるべきなら true（トーストは呼ぶ側が 1 回の同期につき 1 回だけ出す）。
+ */
+const onFreshTasks = async (
+  $: Dollar,
+  fresh: readonly RovoTask[],
+  isFirst: boolean,
+): Promise<boolean> => {
+  if (fresh.length === 0) return false;
+  const creatingAt = await read($, creatingAtom);
+  if (creatingAt !== null && fresh.some((t) => !isFirst || t.startedAt >= creatingAt)) {
+    await update($, creatingAtom, () => null);
+  }
+  return !isFirst;
+};
+
+/**
+ * 呼んだ人の全タスク（task_list）を取って追跡リストに混ぜる。失敗した接続先は 1 分間あきらめる。
+ * task_list が無い（unknown tool・形が違う）ときは missing を付け、ペインで追跡できないと知らせる。
  * 呼び出し側が isPolling を握っていること。
  */
 const syncLists = async ($: Dollar): Promise<void> => {
   const endpoints = await read($, endpointsAtom);
+  let shouldAnnounce = false;
   for (const ep of endpoints) {
     const key = endpointKey(ep);
     const now = await $.clock.now();
@@ -438,23 +495,37 @@ const syncLists = async ($: Dollar): Promise<void> => {
     if (state !== undefined) {
       if (!state.supported && now < state.retryAt) continue;
       const active = (await read($, tasksAtom)).some((t) => !isTerminal(t.status));
-      if (state.supported && now - state.lastAt < (active ? POLL_MS - 500 : LIST_IDLE_MS)) continue;
+      // 作業中のワーカーがいるか作成中の間は毎周期、それ以外はゆっくり。
+      const gap = active || (await isCreating($, now)) ? POLL_MS - 500 : LIST_IDLE_MS;
+      if (state.supported && now - state.lastAt < gap) continue;
     }
     let parsed: ReturnType<typeof parseTaskList> = null;
+    let isMissing = false;
     try {
       const res = await $.mcp.call(ep.server, ep.prefix + TOOL_LIST, {
         scope: "recent",
         limit: 50,
       });
-      parsed = res.isError ? null : parseTaskList(textOf(res));
+      if (res.isError) {
+        isMissing = UNKNOWN_TOOL.test(textOf(res));
+      } else {
+        parsed = parseTaskList(textOf(res));
+        isMissing = parsed === null;
+      }
     } catch {
+      // 繋がっていない・一時的な失敗。追跡できないとは言わない。
       parsed = null;
     }
     const at = await $.clock.now();
     if (parsed === null) {
       await update($, listsAtom, (m) => ({
         ...m,
-        [key]: { supported: false, retryAt: at + CONSOLE_RETRY_MS, lastAt: at },
+        [key]: {
+          supported: false,
+          retryAt: at + CONSOLE_RETRY_MS,
+          lastAt: at,
+          ...(isMissing ? { missing: true } : {}),
+        },
       }));
       continue;
     }
@@ -462,9 +533,20 @@ const syncLists = async ($: Dollar): Promise<void> => {
       ...m,
       [key]: { supported: true, retryAt: 0, lastAt: at },
     }));
+    const isFirst = (await read($, syncedAtom))[key] !== true;
+    await update($, syncedAtom, (m) => (m[key] === true ? m : { ...m, [key]: true as const }));
+    const known = new Set((await read($, tasksAtom)).map(taskKey));
     const listed = parsed.tasks;
     const merged = await mutate($, (list) => mergeListed(list, listed, ep, at));
     await ensureTimer($);
+    const fresh = await onFreshTasks(
+      $,
+      merged.filter(
+        (t) => t.server === ep.server && !known.has(taskKey(t)) && !isTerminal(t.status),
+      ),
+      isFirst,
+    );
+    shouldAnnounce = shouldAnnounce || fresh;
     // 終端に変わったワーカーを知らせる（初めから終わっていたものは notified 済みで、ここに来ない）。
     const toAnnounce = merged.filter((t) => isTerminal(t.status) && t.notified !== true);
     if (toAnnounce.length > 0) {
@@ -475,6 +557,10 @@ const syncLists = async ($: Dollar): Promise<void> => {
       for (const t of toAnnounce) $.ui.toast(toastText(t.title, t.status));
     }
   }
+  // ペインは自動では開かない（利用者が /rovo-console で開く）。見えていなければトーストで案内する。
+  // 他のセッションのタスクのこともあるので「始めました」ではなく「始まりました」と言う。接続先が
+  // 複数あっても 1 回の同期につき 1 回だけ（同じタスクが直結と Portal の両方に見えることがある）。
+  if (shouldAnnounce && !(await isPaneShown($))) $.ui.toast(NEW_TASK_TOAST);
 };
 
 /** 今回 task_console を取るワーカー: 選んでいるものを先頭に、残りは順番に回して上限まで。並びは一覧のまま。 */
@@ -530,7 +616,7 @@ const fetchMissingNow = async ($: Dollar, only?: string, listedOnly = false): Pr
     const key = taskKey(t);
     if (only !== undefined && key !== only) continue;
     if (only === undefined && t.listed === true && key !== pickedKey) continue;
-    // タイマーの周期では、task_start で拾った終端のタスクは取り直さない（開いたときだけ）。
+    // タイマーの周期では、task_list 以外から入った（保存していた）終端のタスクは取り直さない（開いたときだけ）。
     if (listedOnly && t.listed !== true) continue;
     // 実行中のタスクはタイマーが取る。
     if (!isTerminal(t.status)) continue;
@@ -625,7 +711,7 @@ const advanceFrame = async ($: Dollar): Promise<void> => {
 const ensureTimer = async ($: Dollar): Promise<void> => {
   const list = await read($, tasksAtom);
   const active = list.some((t) => !isTerminal(t.status));
-  if (timer === null && (active || (await hasListSupport($)))) {
+  if (timer === null && (active || (await wantsList($)))) {
     timer = $.clock.every(POLL_MS, () => {
       void tick($);
     });
@@ -651,57 +737,126 @@ const coerceEndpoints = (value: unknown): { server: string; prefix: string }[] =
   return out.slice(0, MAX_ENDPOINTS);
 };
 
-/** rovo のツールを呼んだ接続先を覚える（task_list を呼ぶ先）。新しい接続先なら true。 */
-const rememberEndpoint = async (
-  $: Dollar,
-  ep: { server: string; prefix: string },
-): Promise<boolean> => {
+/**
+ * 見つけた接続先を覚える（task_list を呼ぶ先。$.store にも残す）。いま見つかったものを先に、
+ * 前に覚えていて今回見えなかったもの（まだ繋がっていないだけかもしれない）を後に、MAX_ENDPOINTS まで。
+ */
+const rememberEndpoints = async ($: Dollar, found: readonly Endpoint[]): Promise<void> => {
   const known = await read($, endpointsAtom);
-  if (known.some((k) => endpointKey(k) === endpointKey(ep))) return false;
-  const next = [...known, ep].slice(-MAX_ENDPOINTS);
+  const keys = new Set(found.map(endpointKey));
+  const next = [...found, ...known.filter((k) => !keys.has(endpointKey(k)))].slice(
+    0,
+    MAX_ENDPOINTS,
+  );
+  if (JSON.stringify(next) === JSON.stringify(known)) return;
   await update($, endpointsAtom, () => next);
   await $.store.set(ENDPOINTS_KEY, next);
-  return true;
 };
 
-const track = async (
-  $: Dollar,
-  hit: { server: string; prefix: string },
-  started: { taskId: string; status?: string; dashboardUrl?: string; model?: string },
-  title: unknown,
-  input: { repository?: unknown; model?: unknown } = {},
-): Promise<void> => {
-  const now = await $.clock.now();
-  const status = started.status ?? "RUNNING";
-  // task_list が答える前でも、1 行目にリポジトリとモデルを出せるよう、task_start の入力と応答から取る。
-  const repository = shortText(input.repository, 100);
-  const model = started.model ?? shortText(input.model, 60);
-  const added: RovoTask = {
-    taskId: started.taskId,
-    title: cleanTitle(title, started.taskId),
-    server: hit.server,
-    prefix: hit.prefix,
-    startedAt: now,
-    status,
-    ...(started.dashboardUrl !== undefined ? { dashboardUrl: started.dashboardUrl } : {}),
-    ...(repository !== undefined ? { repository } : {}),
-    ...(model !== undefined ? { model } : {}),
-    ...(isTerminal(status) ? { terminalAt: now, notified: true as const } : {}),
-  };
-  const isNew = !(await read($, tasksAtom)).some((x) => taskKey(x) === taskKey(added));
-  await mutate($, (list) => [...list.filter((x) => taskKey(x) !== taskKey(added)), added]);
-  await update($, creatingAtom, () => null);
-  if (isNew) {
-    // ペインは自動では開かない（利用者が /rovo-console で開く）。代わりに、見えていなければトーストで案内する。
-    let isShown = false;
-    try {
-      isShown = (await $.ui.panes()).some((p) => p.id === PANE_ID && p.isShown);
-    } catch {
-      // 分からなければ案内を出す側に倒す。
-    }
-    if (!isShown) $.ui.toast("rovo のタスクを始めました。/rovo-console で開けます");
+/**
+ * $.tool.list() の名前から接続先を探す（MCP のツールの名前を見るだけで、何も呼ばない）。
+ * task_list が無い rovo は noList に入れてペインで知らせる。found は今回 $.tool.list() に出ていた接続先、
+ * added は新しく覚えた接続先の数。読めなければ null。
+ */
+const discover = async ($: Dollar): Promise<{ found: Endpoint[]; added: number } | null> => {
+  let tools: ToolInfo[];
+  try {
+    tools = await $.tool.list();
+  } catch {
+    return null;
   }
+  const found = findEndpoints(tools);
+  const before = new Set((await read($, endpointsAtom)).map(endpointKey));
+  await rememberEndpoints($, found.endpoints);
+  const known = (await read($, endpointsAtom)).map(endpointKey);
+  const noList = found.noList.filter((n) => !known.includes(endpointKey(n)));
+  await update($, noListAtom, (old) =>
+    JSON.stringify(old) === JSON.stringify(noList) ? old : noList,
+  );
+  return { found: found.endpoints, added: known.filter((k) => !before.has(k)).length };
 };
+
+/** このセッションで、どれかの接続先の task_list が 1 回でも読めたか。読めるまで発見を続ける。 */
+const hasSynced = async ($: Dollar): Promise<boolean> =>
+  Object.keys(await read($, syncedAtom)).length > 0;
+
+/**
+ * $.tool.list() に出ているのに、一時的な失敗（繋がる前など。unknown tool ではない）で止まっている
+ * 接続先を、1 分待たずに読み直せるようにする。読み直す接続先があれば true。
+ */
+const retryNow = async ($: Dollar, found: readonly Endpoint[]): Promise<boolean> => {
+  const keys = new Set(found.map(endpointKey));
+  let changed = false;
+  await update($, listsAtom, (m) => {
+    const next = { ...m };
+    for (const [k, v] of Object.entries(m)) {
+      if (!keys.has(k) || v.supported || v.missing === true || v.retryAt === 0) continue;
+      next[k] = { ...v, retryAt: 0 };
+      changed = true;
+    }
+    return changed ? next : m;
+  });
+  return changed;
+};
+
+const stopDiscovery = (): void => {
+  discoverTimer?.cancel();
+  discoverTimer = null;
+};
+
+const scheduleDiscovery = ($: Dollar, ms: number): void => {
+  discoverTimer = $.clock.after(ms, () => {
+    discoverTimer = null;
+    void discoverTick($).catch(() => undefined);
+  });
+};
+
+/**
+ * 発見の再試行の 1 回。新しい接続先が見つかったか、$.tool.list() に出てきた接続先が一時的な失敗で
+ * 止まっていれば、task_list を読み直して既存のポーリングに乗せる。task_list が 1 回読めたら止める。
+ * まだなら DISCOVER_STEPS の間隔で続ける。
+ */
+const discoverTick = async ($: Dollar): Promise<void> => {
+  const seen = await discover($);
+  if (seen !== null && (seen.added > 0 || (await retryNow($, seen.found)))) {
+    await ensureTimer($);
+    await refresh($);
+  }
+  if (await hasSynced($)) return;
+  const elapsed = (await $.clock.now()) - discoverStartedAt;
+  const step = DISCOVER_STEPS.find((s) => elapsed < s.until);
+  if (step !== undefined && discoverTimer === null) scheduleDiscovery($, step.every);
+};
+
+/**
+ * いま接続先を探し直す（起動・/rovo-console・/rovo:create-task のとき）。接続先があればタイマーを立てて
+ * task_list を取り直す（中身の無い終端のワーカーも 1 回取る）。それでも task_list がまだ 1 回も
+ * 読めていなければ（接続先が無い・繋がる前で失敗した）、発見の再試行を最初から始める。
+ */
+const discoverNow = async ($: Dollar): Promise<void> => {
+  const seen = await discover($);
+  if (seen !== null) await retryNow($, seen.found);
+  if ((await read($, endpointsAtom)).length > 0) await ensureTimer($);
+  await refresh($);
+  if (await hasSynced($)) {
+    stopDiscovery();
+    return;
+  }
+  discoverStartedAt = await $.clock.now();
+  if (discoverTimer === null) scheduleDiscovery($, DISCOVER_STEPS[0]?.every ?? 5_000);
+};
+
+/** task_list が無く追跡できない接続先（$.tool.list() で見たものと、呼んで unknown tool だったもの）。 */
+const missingEndpoints = async ($: Dollar): Promise<Endpoint[]> => {
+  const lists = await read($, listsAtom);
+  const called = (await read($, endpointsAtom)).filter(
+    (ep) => lists[endpointKey(ep)]?.missing === true,
+  );
+  return [...(await read($, noListAtom)), ...called];
+};
+
+const endpointLabel = (ep: Endpoint): string =>
+  ep.prefix === "" ? ep.server : `${ep.server} の ${ep.prefix.slice(0, -1)}`;
 
 /** ヘッダー・出力の窓の寸法。描画と ui.scroll の両方が同じ計算を使う。 */
 type PaneModel = {
@@ -866,10 +1021,11 @@ export const register: Register = (on) => {
       await update($, endpointsAtom, () => endpoints);
       await ensureTimer($);
     } catch {
-      // 接続先が読めなければ task_start で拾ったものだけで動く。
+      // 接続先が読めなければ $.tool.list() から探す。
     }
-    // 起動を待たせない。task_list を取り、終端だけのときはタイマーが動かないので中身も 1 回取る。
-    void refresh($).catch(() => undefined);
+    // 起動を待たせない。接続先を $.tool.list() から探し（無ければ再試行を始める）、task_list を取る。
+    // 終端だけのときはタイマーが動かないので中身も 1 回取る。
+    void discoverNow($).catch(() => undefined);
 
     return next(e);
   });
@@ -898,6 +1054,7 @@ export const register: Register = (on) => {
         } catch {
           // 作成中の表示が消せなくても続ける。
         }
+        void discoverNow($).catch(() => undefined);
 
         return { text: "コンソールのペインを閉じました。" };
       }
@@ -913,7 +1070,7 @@ export const register: Register = (on) => {
       } catch {
         // ペインは開いた。
       }
-      void refresh($).catch(() => undefined);
+      void discoverNow($).catch(() => undefined);
 
       return { text: "コンソールのペインを開きました（読み取り専用）。" };
     }
@@ -925,38 +1082,12 @@ export const register: Register = (on) => {
       } catch {
         // 表示に失敗しても本来の処理は続ける。
       }
+      // 作成中は task_list を毎周期読む。接続先が無ければ探し直す。
+      void discoverNow($).catch(() => undefined);
     }
 
     return next(e);
   });
-
-  // 呼び出しは変えない・止めない: next の結果をそのまま返す。
-  on("tool.call", async ($, e, next) => {
-    const ran = await next(e);
-    try {
-      const outcome = ran as { deny?: string; isError?: boolean; text?: string };
-      const hit = matchTaskStart(String(e.tool));
-      if (hit !== null && outcome.deny === undefined && outcome.isError !== true) {
-        const started = parseStartResult(outcome.text ?? "");
-        if (started !== null) {
-          const input = e as Record<string, unknown>;
-          await track($, hit, started, input.title, {
-            repository: input.repository,
-            model: input.model,
-          });
-        }
-      }
-      const rovoTool = outcome.deny === undefined ? matchRovoTool(String(e.tool)) : null;
-      if (rovoTool !== null && (await rememberEndpoint($, rovoTool))) {
-        void refresh($).catch(() => undefined);
-      }
-      await ensureTimer($);
-    } catch {
-      // 追跡に失敗しても tool の結果には触れない。
-    }
-
-    return ran;
-  }).catch(($, e, next) => next(e));
 
   on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e) => {
     const { Box, Text, Button, Link } = $.ui.resolve(e);
@@ -978,9 +1109,15 @@ export const register: Register = (on) => {
       );
     }
     if (m.tasks.length === 0) {
+      const missing = await missingEndpoints($);
       return (
         <Box flexDirection="column">
           <Text dimColor>追跡中のタスクはありません。</Text>
+          {missing.map((ep) => (
+            <Text key={`missing:${endpointKey(ep)}`} color="warning" wrap="truncate-end">
+              {`${endpointLabel(ep)} には task_list が無く、タスクを追跡できません（rovo のサーバーの更新が要ります）。`}
+            </Text>
+          ))}
         </Box>
       );
     }

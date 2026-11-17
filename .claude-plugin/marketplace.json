@@ -1,6 +1,17 @@
 {
   "name": "rovo",
-  "description": "rovo のタスクを Claude Code の横のペインに出す mod",
+  "description": "rovo の Claude Code プラグイン。rovo はスキル（/rovo:create-task・/rovo:consult）、rovo-console は rovo のタスクを会話の横のペインに出す mod。0.7.0 でペインは rovo から rovo-console に分かれた。ペインが要るなら rovo-console を追加で入れる（保存済みのタスク一覧・ログは引き継がれないが、取り直せる）",
   "owner": { "name": "youyo" },
-  "plugins": [{ "name": "rovo", "source": "./plugins/rovo" }]
+  "plugins": [
+    {
+      "name": "rovo",
+      "source": "./plugins/rovo",
+      "description": "rovo のスキル（/rovo:create-task・/rovo:consult）。0.7.0 からペインは rovo-console に分かれた"
+    },
+    {
+      "name": "rovo-console",
+      "source": "./plugins/rovo-console",
+      "description": "rovo のタスクの進み具合とコンソールを会話の横のペインに出す mod（読み取り専用）。0.7.0 で rovo から分かれた。rovo の 0.6.x から更新するとペインが消えるので、要るなら入れる。保存済みのタスク一覧・ログは引き継がれない（取り直せる）"
+    }
+  ]
 }

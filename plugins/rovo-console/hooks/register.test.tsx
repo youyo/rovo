@@ -6,7 +6,6 @@ import type { RovoTask } from "../types";
 import { displayWidth, MIN_WINDOW } from "./lib";
 
 const START = "mcp__rovo-direct__task_start";
-const START_HUB = "mcp__claude_ai_mcp_hubs_run__my-rovo_task_start";
 const WRITE_TOOLS = /cancel|answer|steer|pr_ready|pr_merge|start/;
 
 const WRAP_OPEN = "<<<UNTRUSTED_CHILD_QUESTION id=x1>>>";
@@ -72,7 +71,22 @@ type Rig = {
   setListHandler: (h: McpHandler) => void;
   stored: () => RovoTask[];
   storeGet: (key: string) => unknown;
+  /** $.tool.list() の答え（MCP が後から繋がる様子は、ここに足して表す）。 */
+  tools: { name: string; description: string; mcp: boolean }[];
+  /** $.tool.list() が呼ばれた回数。 */
+  toolLists: { count: number };
+  /** サーバー側のタスク（server ごと）。既定の task_list はこれを返す。無いサーバーは unknown tool。 */
+  served: Map<string, Record<string, unknown>[]>;
 };
+
+/** 1 つの接続先のツール（実物と同じ名前の形）。 */
+const toolsOf = (base: string, names: readonly string[] = ROVO_TOOLS) =>
+  names.map((n) => ({ name: `${base}${n}`, description: "", mcp: true }));
+const ROVO_TOOLS = ["task_start", "task_list", "task_console", "task_status", "task_wait"] as const;
+const DIRECT = "mcp__rovo-direct__";
+const HUB = "mcp__claude_ai_mcp_hubs_run__my-rovo_";
+/** Portal の実物の名前（司令塔が実機で確かめたもの）。 */
+const PORTAL = "mcp__claude_ai_mcp_hubs_run__team-rovo_";
 
 const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } = {}): Rig => {
   const clock = mock.clock(on, { now: options.now ?? 1_000_000 });
@@ -99,8 +113,20 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
   const seen: unknown[] = [];
   const answers = new Map<string, unknown>();
   let handler: McpHandler = (call) => ok(consoleBody(String(call.args.task_id)));
-  // 既定は task_list の無いサーバー（今の本番）。
-  let listHandler: McpHandler = () => err("unknown tool: task_list");
+  const tools: Rig["tools"] = [];
+  const toolLists = { count: 0 };
+  const served = new Map<string, Record<string, unknown>[]>();
+  // 既定: served にあるサーバーはそのタスクを返す。無いサーバーは task_list の無いサーバー。
+  let listHandler: McpHandler = (call) => {
+    const items = served.get(call.server);
+    return items === undefined
+      ? err("unknown tool: task_list")
+      : ok({ tasks: items, truncated: false });
+  };
+  on("tool.list", () => {
+    toolLists.count += 1;
+    return { value: tools.map((t) => ({ ...t })) };
+  });
 
   on("session.start", (_, e) => ({ cwd: e.cwd }));
   on("ui.open", (_, e) => {
@@ -177,6 +203,9 @@ const rig = (on: On, options: { store?: Record<string, unknown>; now?: number } 
     },
     stored: () => (store.get("tasks") ?? []) as RovoTask[],
     storeGet: (key) => store.get(key),
+    tools,
+    toolLists,
+    served,
   };
 };
 
@@ -184,7 +213,7 @@ const startSession = ($: Engine) =>
   $.session.start({ cwd: "/", surface: "terminal", isInteractive: true });
 
 const PANE = {
-  plugin: "rovo",
+  plugin: "rovo-console",
   component: "Pane",
   requestId: "rovo",
   props: {
@@ -209,16 +238,77 @@ const task = (n: number, over: Partial<RovoTask> = {}): RovoTask => ({
   ...over,
 });
 
+/** server の名前（ツール名の mcp__<server>__ の部分）。 */
+const serverOf = (base: string) => base.split("__")[1] ?? "";
+
+/** rovo の MCP が繋がった（$.tool.list に出る・task_list が答える）ことにする。 */
+const connect = (r: Rig, base: string = DIRECT) => {
+  if (!r.tools.some((t) => t.name.startsWith(base))) r.tools.push(...toolsOf(base));
+  const server = serverOf(base);
+  if (!r.served.has(server)) r.served.set(server, []);
+};
+
+/** サーバー側でタスクが始まった（task_list に出る）。 */
+const serveTask = async (
+  r: Rig,
+  id: string,
+  title: string,
+  over: Record<string, unknown> = {},
+  base: string = DIRECT,
+) => {
+  await r.clock.settle(); // 起動の発見と最初の同期を先に済ませる
+  connect(r, base);
+  const now = await r.clock.now();
+  const items = r.served.get(serverOf(base)) ?? [];
+  const at = items.findIndex((x) => x.task_id === id);
+  const row = {
+    task_id: id,
+    kind: "task",
+    title,
+    repository: "o/r",
+    status: "RUNNING",
+    waiting_for_answer: false,
+    created_at: new Date(now).toISOString(),
+    dashboard_url: `https://dash.example/tasks/${id}`,
+    ...over,
+  };
+  if (at >= 0) items[at] = row;
+  else items.push(row);
+  r.served.set(serverOf(base), items);
+};
+
+/** task_list で拾われるまで 1 秒ずつ進める（30 秒まで）。 */
+const pickUp = async (r: Rig, id: string, base: string = DIRECT) => {
+  const server = serverOf(base);
+  for (let i = 0; i < 30; i++) {
+    if (r.stored().some((t) => t.taskId === id && t.server === server)) return;
+    await r.clock.advance(1_000);
+  }
+  throw new Error(`not picked up: ${id}`);
+};
+
+/** サーバー側でタスクを始め、mod が task_list で拾うまで待つ。 */
+const begin = async (
+  r: Rig,
+  id: string,
+  title: string,
+  over: Record<string, unknown> = {},
+  base: string = DIRECT,
+) => {
+  await serveTask(r, id, title, over, base);
+  await pickUp(r, id, base);
+};
+
 // --- picking tasks up ------------------------------------------------------
 
-test("task_start results are picked up in both name shapes", async ($, on) => {
+test("new tasks are picked up from task_list in both name shapes", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
-  r.answers.set(START_HUB, startAnswer("t2"));
+  connect(r);
+  connect(r, HUB);
   await startSession($);
 
-  await $.tool.call({ tool: START, title: "Direct task", repository: "o/r" });
-  await $.tool.call({ tool: START_HUB, title: "Hub task", repository: "o/r" });
+  await begin(r, "t1", "Direct task");
+  await begin(r, "t2", "Hub task", {}, HUB);
 
   const tasks = r.stored();
   expect(tasks.map((t) => [t.taskId, t.title, t.server, t.prefix])).toEqual([
@@ -230,6 +320,7 @@ test("task_start results are picked up in both name shapes", async ($, on) => {
 
 test("an errored task_start is not picked up, and nothing opens", async ($, on) => {
   const r = rig(on);
+  connect(r);
   r.answers.set(START, {
     result: {},
     text: JSON.stringify({ error: "invalid_input" }),
@@ -244,20 +335,6 @@ test("an errored task_start is not picked up, and nothing opens", async ($, on) 
   expect(r.opened).toEqual([]);
   await r.clock.advance(20_000);
   expect(r.calls).toEqual([]);
-});
-
-test("the hook returns next's result unchanged and passes the call through", async ($, on) => {
-  const r = rig(on);
-  const answer = startAnswer("t1");
-  r.answers.set(START, answer);
-  await startSession($);
-
-  const input = { tool: START, title: "Same", repository: "o/r", instructions: "do it" } as const;
-  const ran = await $.tool.call(input);
-
-  expect(ran).toMatchObject(answer);
-  expect(r.seen).toHaveLength(1);
-  expect(r.seen[0]).toMatchObject({ title: "Same", repository: "o/r", instructions: "do it" });
 });
 
 test("rovo-console is registered as an immediate command at session start; open/close-console are not", async ($, on) => {
@@ -296,19 +373,18 @@ test("/rovo-console opens a closed pane, closes a shown one, and brings a hidden
   expect(f.text).toContain("開き");
 });
 
-const START_TOAST = "rovo のタスクを始めました。/rovo-console で開けます";
+const START_TOAST = "rovo のタスクが始まりました。/rovo-console で開けます";
 
-test("a new task from task_start never opens the pane; only /rovo-console does", async ($, on) => {
+test("a new task from task_list never opens the pane; only /rovo-console does", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   on("command.run", () => ({ text: "engine" }));
+  connect(r);
   await startSession($);
   expect(r.opened).toEqual([]);
 
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
-  await $.tool.call({ tool: START, title: "A again", repository: "o/r" });
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "B", repository: "o/r" });
+  await begin(r, "t1", "A");
+  await begin(r, "t1", "A again");
+  await begin(r, "t2", "B");
   expect(r.opened).toEqual([]);
 
   const out = await $.command.run({ command: "rovo-console", args: "" } as never);
@@ -318,10 +394,10 @@ test("a new task from task_start never opens the pane; only /rovo-console does",
 
 test("a new task after /rovo-console closes the pane still does not open it again", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   on("command.run", () => ({ text: "engine" }));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
 
   await $.command.run({ command: "rovo-console", args: "" } as never); // opens
   const out = await $.command.run({ command: "rovo-console", args: "" } as never); // closes
@@ -329,35 +405,33 @@ test("a new task after /rovo-console closes the pane still does not open it agai
   expect(r.opened).toEqual(["rovo"]);
   expect(out.text).toContain("閉じ");
 
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "B", repository: "o/r" });
+  await begin(r, "t2", "B");
   expect(r.opened).toEqual(["rovo"]);
 });
 
 test("a new task toasts how to open the pane, once per task, when the pane is not shown", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
+  connect(r);
   await startSession($);
 
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
-  await $.tool.call({ tool: START, title: "A again", repository: "o/r" });
+  await begin(r, "t1", "A");
+  await begin(r, "t1", "A again");
   expect(r.toasts).toEqual([START_TOAST]);
 
   r.pane.open = true;
   r.pane.behind = true; // 他のタブの裏で見えていない
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "B", repository: "o/r" });
+  await begin(r, "t2", "B");
   expect(r.toasts).toEqual([START_TOAST, START_TOAST]);
   expect(r.opened).toEqual([]);
 });
 
 test("a new task gives no start toast while the pane is open and shown", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
+  connect(r);
   await startSession($);
   r.pane.open = true;
   r.pane.behind = false;
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   expect(r.toasts).toEqual([]);
   expect(r.opened).toEqual([]);
 });
@@ -483,9 +557,9 @@ test('"creating" expires after 10 minutes', async ($, on) => {
 });
 
 const seedOld = async ($: Engine, r: Rig) => {
-  r.answers.set(START, startAnswer("t1"));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Old task", repository: "o/r" });
+  await begin(r, "t1", "Old task");
   await r.clock.advance(20_000); // 出力を取りに行く
 };
 
@@ -533,8 +607,7 @@ test("a new task picked up while creating switches to the normal view with that 
   on("command.run", () => ({ text: "engine" }));
   await seedOld($, r);
   await $.command.run({ command: "rovo:create-task", args: "x" } as never);
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "New task", repository: "o/r" });
+  await begin(r, "t2", "New task");
   await r.clock.advance(20_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   const text = await allText(ui);
@@ -579,23 +652,23 @@ test("after 10 minutes of creating, the previous task is shown again", async ($,
 test("polls task_console every 4 seconds with the right server and prefix", async ($, on) => {
   const r = rig(on);
   r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
-  r.answers.set(START, startAnswer("t1"));
-  r.answers.set(START_HUB, startAnswer("t2"));
+  connect(r);
+  connect(r, HUB);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
 
-  await r.clock.advance(3_999);
-  expect(r.calls).toEqual([]);
-  await r.clock.advance(1);
+  // the tick that picked it up from task_list also asked task_console;
   // the shown worker also asks for its log (log_after), from the start
   expect(r.calls).toEqual([
     { server: "rovo-direct", tool: "task_console", args: { task_id: "t1", log_after: "0" } },
   ]);
-  await r.clock.advance(4_000);
+  await r.clock.advance(3_999);
+  expect(r.calls).toHaveLength(1);
+  await r.clock.advance(1);
   expect(r.calls).toHaveLength(2);
   expect(r.toasts).toEqual([]); // still running: nothing to announce
 
-  await $.tool.call({ tool: START_HUB, title: "B", repository: "o/r" });
+  await begin(r, "t2", "B", {}, HUB);
   r.calls.length = 0;
   await r.clock.advance(4_000);
   expect(r.calls).toContainEqual({
@@ -607,33 +680,31 @@ test("polls task_console every 4 seconds with the right server and prefix", asyn
 
 test("never two calls at once: a slow call blocks the next tick", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler(async (call) => {
     await r.clock.sleep(10_000);
     return ok(consoleBody(String(call.args.task_id)));
   });
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A"); // the pick-up tick asks task_console, which takes 10 seconds
 
-  await r.clock.advance(4_000);
   expect(r.calls).toHaveLength(1);
-  await r.clock.advance(4_000);
+  await r.clock.advance(4_000); // +4s: skipped
   expect(r.calls).toHaveLength(1);
-  await r.clock.advance(2_000); // 10s: the first call settles at 14s
+  await r.clock.advance(4_000); // +8s: skipped
   expect(r.calls).toHaveLength(1);
-  await r.clock.advance(4_000); // 14s: settled; the 12s tick was skipped
+  await r.clock.advance(2_000); // +10s: the first call settles
   expect(r.calls).toHaveLength(1);
-  await r.clock.advance(2_000); // 16s: the next tick goes out
+  await r.clock.advance(2_000); // +12s: the next tick goes out
   expect(r.calls).toHaveLength(2);
 });
 
 test("several tasks are fetched one after another, not together", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "B", repository: "o/r" });
+  await begin(r, "t1", "A");
+  await begin(r, "t2", "B");
 
   let running = 0;
   let peak = 0;
@@ -644,6 +715,7 @@ test("several tasks are fetched one after another, not together", async ($, on) 
     running -= 1;
     return ok(consoleBody(String(call.args.task_id)));
   });
+  r.calls.length = 0;
 
   await r.clock.advance(4_000);
   await r.clock.advance(2_000);
@@ -651,15 +723,13 @@ test("several tasks are fetched one after another, not together", async ($, on) 
   expect(peak).toBe(1);
 });
 
-test("the timer stops when every task is terminal, and restarts for a new one", async ($, on) => {
-  const r = rig(on);
+test("the timer stops when every task is terminal (no task_list), and restarts for a new one", async ($, on) => {
+  const r = rig(on, { store: { tasks: [task(1, { title: "A" })] } });
   r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(consoleBody(String(call.args.task_id), { status: "COMPLETED", phase: "done" })),
   );
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
 
   await r.clock.advance(4_000);
   expect(r.calls).toHaveLength(1);
@@ -672,11 +742,36 @@ test("the timer stops when every task is terminal, and restarts for a new one", 
   expect(r.calls).toHaveLength(1);
   expect(r.statuses.length).toBe(writes);
 
-  r.answers.set(START, startAnswer("t2"));
   r.setHandler((call) => ok(consoleBody(String(call.args.task_id))));
-  await $.tool.call({ tool: START, title: "B", repository: "o/r" });
+  await begin(r, "t2", "B"); // the MCP joins: found by the search, then task_list
   await r.clock.advance(4_000);
   expect(r.calls.map((c) => c.args.task_id)).toEqual(["t1", "t2"]);
+});
+
+test("with task_list, task_console stops when every worker has ended; only task_list goes on, every 20 seconds", async ($, on) => {
+  const r = rig(on);
+  r.pane.open = true;
+  connect(r);
+  await startSession($);
+  await begin(r, "t1", "A");
+  await serveTask(r, "t1", "A", { status: "COMPLETED", stage: "done" });
+  r.setHandler((call) =>
+    ok(consoleBody(String(call.args.task_id), { status: "COMPLETED", phase: "done" })),
+  );
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual(["A が完了"]);
+  await r.clock.advance(4_000);
+  const consoles = r.calls.length;
+  const lists = r.listCalls.length;
+  await r.clock.advance(60_000);
+  expect(r.calls).toHaveLength(consoles);
+  expect(r.listCalls.length - lists).toBe(3);
+
+  r.setHandler((call) => ok(consoleBody(String(call.args.task_id))));
+  await begin(r, "t2", "B");
+  await r.clock.advance(4_000);
+  expect(r.calls.slice(consoles).every((c) => c.args.task_id === "t2")).toBe(true);
+  expect(r.calls.length).toBeGreaterThan(consoles);
 });
 
 test("a stored running task resumes polling at session start", async ($, on) => {
@@ -690,16 +785,15 @@ test("a stored running task resumes polling at session start", async ($, on) => 
 
 test("without task_console it falls back to task_status and says output is unsupported", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     call.tool === "task_console"
       ? err("Unknown tool: task_console")
       : ok({ task_id: "t1", status: "RUNNING" }),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A"); // the pick-up tick tries task_console, then task_status
 
-  await r.clock.advance(4_000);
   expect(r.calls.map((c) => c.tool)).toEqual(["task_console", "task_status"]);
   await r.clock.advance(4_000);
   expect(r.calls.map((c) => c.tool)).toEqual(["task_console", "task_status", "task_status"]);
@@ -716,16 +810,17 @@ test("without task_console it falls back to task_status and says output is unsup
 test("task_status carries the terminal state when the console is missing", async ($, on) => {
   const r = rig(on);
   r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     call.tool === "task_console" ? err("unknown tool") : ok({ task_id: "t1", status: "FAILED" }),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Broken", repository: "o/r" });
+  await begin(r, "t1", "Broken"); // the pick-up tick falls back to task_status, which says FAILED
+  await serveTask(r, "t1", "Broken", { status: "FAILED" }); // task_list says so too from now on
 
-  await r.clock.advance(4_000);
   expect(r.toasts).toEqual(["Broken が失敗"]);
   await r.clock.advance(30_000);
+  expect(r.toasts).toEqual(["Broken が失敗"]);
   expect(r.calls.filter((c) => c.tool === "task_status")).toHaveLength(1);
 });
 
@@ -733,12 +828,11 @@ test("task_status carries the terminal state when the console is missing", async
 
 test("the status line counts running tasks and clears when none are left", async ($, on) => {
   const r = rig(on);
+  connect(r);
   await startSession($);
-  r.answers.set(START, startAnswer("t1"));
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   expect(r.statuses.at(-1)).toBe("1 件実行中");
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "B", repository: "o/r" });
+  await begin(r, "t2", "B");
   expect(r.statuses.at(-1)).toBe("2 件実行中");
 
   r.setHandler((call) =>
@@ -759,6 +853,7 @@ test("the status line counts running tasks and clears when none are left", async
 test("a terminal task toasts exactly once, with words per state", async ($, on) => {
   const r = rig(on);
   r.pane.open = true; // ペインは開いて見えている（開始の案内トーストを出さない）
+  connect(r);
   await startSession($);
   const states: Record<string, string> = {
     t1: "COMPLETED",
@@ -767,8 +862,7 @@ test("a terminal task toasts exactly once, with words per state", async ($, on) 
     t4: "CANCELLED",
   };
   for (const id of Object.keys(states)) {
-    r.answers.set(START, startAnswer(id));
-    await $.tool.call({ tool: START, title: `T-${id}`, repository: "o/r" });
+    await begin(r, id, `T-${id}`);
   }
   r.setHandler((call) =>
     ok(consoleBody(String(call.args.task_id), { status: states[String(call.args.task_id)] })),
@@ -801,10 +895,14 @@ test("a terminal task already announced does not toast again after a restart", a
 const BUDGET_TOAST = "B が予算の承認待ち（利用者に確認してから task_answer で答える）";
 
 const startOne = async ($: Parameters<typeof startSession>[0], r: Rig, title = "B") => {
-  r.answers.set(START, startAnswer("t1"));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title, repository: "o/r" });
+  await begin(r, "t1", title);
 };
+
+/** task_list も同じ状態を言う（質問待ちなら INPUT_REQUIRED と waiting_for_answer）。 */
+const serveAsking = (r: Rig, asking: boolean) =>
+  serveTask(r, "t1", "B", asking ? { status: "INPUT_REQUIRED", waiting_for_answer: true } : {});
 
 test("awaiting budget_extension toasts once, and again after it cleared and came back", async ($, on) => {
   const r = rig(on);
@@ -816,16 +914,19 @@ test("awaiting budget_extension toasts once, and again after it cleared and came
     );
 
   r.setHandler(() => awaiting("budget_extension"));
+  await serveAsking(r, true);
   await r.clock.advance(4_000);
   await r.clock.advance(4_000);
   await r.clock.advance(4_000);
   expect(r.toasts).toEqual([BUDGET_TOAST]);
 
   r.setHandler(() => ok(consoleBody("t1"))); // answered, running again
+  await serveAsking(r, false);
   await r.clock.advance(4_000);
   expect(r.toasts).toEqual([BUDGET_TOAST]);
 
   r.setHandler(() => awaiting("budget_extension"));
+  await serveAsking(r, true);
   await r.clock.advance(4_000);
   expect(r.toasts).toEqual([BUDGET_TOAST, BUDGET_TOAST]);
 });
@@ -842,6 +943,7 @@ test("the pane says 予算の承認待ち for awaiting, the question note otherw
   r.setHandler(() =>
     ok(consoleBody("t1", { status: "INPUT_REQUIRED", awaiting: "budget_extension" })),
   );
+  await serveAsking(r, true);
   await r.clock.advance(4_000);
   expect(await textsOf()).toContain("予算の承認待ち");
 
@@ -863,17 +965,37 @@ test("the pane says 予算の承認待ち for awaiting, the question note otherw
 
 // --- limits ----------------------------------------------------------------
 
-test("keeps at most 10 tasks, the newest", async ($, on) => {
-  const r = rig(on);
+test("keeps at most 10 tasks not from task_list (stored from before), the newest", async ($, on) => {
+  const r = rig(on, {
+    store: { tasks: Array.from({ length: 12 }, (_, i) => task(i + 1, { startedAt: i })) },
+  });
   await startSession($);
-  for (let i = 1; i <= 12; i++) {
-    r.answers.set(START, startAnswer(`t${i}`));
-    await $.tool.call({ tool: START, title: `n${i}`, repository: "o/r" });
-  }
+  await r.clock.settle();
   const tasks = r.stored();
   expect(tasks).toHaveLength(10);
   expect(tasks[0]?.taskId).toBe("t3");
   expect(tasks.at(-1)?.taskId).toBe("t12");
+});
+
+test("keeps at most 50 tasks from task_list, the newest", async ($, on) => {
+  const r = rig(on);
+  connect(r);
+  r.served.set(
+    "rovo-direct",
+    Array.from({ length: 52 }, (_, i) => ({
+      task_id: `L${i + 1}`,
+      kind: "task",
+      title: `n${i + 1}`,
+      status: "RUNNING",
+      created_at: new Date(1_000 + i).toISOString(),
+    })),
+  );
+  await startSession($);
+  await r.clock.settle();
+  const tasks = r.stored();
+  expect(tasks).toHaveLength(50);
+  expect(tasks[0]?.taskId).toBe("L3");
+  expect(tasks.at(-1)?.taskId).toBe("L52");
 });
 
 test("drops a terminal task one hour after it ended", async ($, on) => {
@@ -887,12 +1009,12 @@ test("drops a terminal task one hour after it ended", async ($, on) => {
       ],
     },
   });
+  connect(r);
   await startSession($);
   expect(r.stored().map((t) => t.taskId)).toEqual(["t2"]);
 
   await r.clock.advance(hour);
-  r.answers.set(START, startAnswer("t9"));
-  await $.tool.call({ tool: START, title: "later", repository: "o/r" });
+  await begin(r, "t9", "later");
   expect(r.stored().map((t) => t.taskId)).toEqual(["t9"]);
 });
 
@@ -901,7 +1023,6 @@ test("drops a terminal task one hour after it ended", async ($, on) => {
 test("only task_console and task_status are ever called; the model is never fed", async ($, on) => {
   const r = rig(on);
   const session = mock.session(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) => {
     if (call.tool === "task_console") {
       return ok(
@@ -912,8 +1033,9 @@ test("only task_console and task_status are ever called; the model is never fed"
     }
     return ok({ task_id: "t1", status: "RUNNING" });
   });
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   await r.clock.advance(4_000);
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface });
@@ -938,7 +1060,6 @@ const allText = async (ui: { findAll: (q: { type: string }) => Promise<{ text?: 
 
 test("the pane shows the list, the selected task, phases, command and tail on every surface", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) => {
     const id = String(call.args.task_id);
     return ok(
@@ -955,10 +1076,10 @@ test("the pane shows the list, the selected task, phases, command and tail on ev
       }),
     );
   });
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "First", repository: "o/r" });
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "Second", repository: "o/r" });
+  await begin(r, "t1", "First");
+  await begin(r, "t2", "Second");
   await r.clock.advance(4_000);
   await r.clock.advance(10_000);
 
@@ -998,7 +1119,6 @@ test("the pane shows the list, the selected task, phases, command and tail on ev
 
 test("child strings are plain text: no Markdown, no links, no code elements", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1", { dashboard_url: "http://insecure.example/t1" }));
   r.setHandler(() =>
     ok(
       consoleBody("t1", {
@@ -1013,8 +1133,11 @@ test("child strings are plain text: no Markdown, no links, no code elements", as
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A [link](https://evil.example)", repository: "o/r" });
+  await begin(r, "t1", "A [link](https://evil.example)", {
+    dashboard_url: "http://insecure.example/t1",
+  });
   await r.clock.advance(4_000);
 
   for (const surface of SURFACES) {
@@ -1032,9 +1155,9 @@ test("child strings are plain text: no Markdown, no links, no code elements", as
 
 test("the dashboard URL is a link only when it starts with https://", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   await r.clock.advance(4_000);
 
   for (const surface of SURFACES) {
@@ -1047,7 +1170,6 @@ test("the dashboard URL is a link only when it starts with https://", async ($, 
 
 test("the tail is cut to the last 30 lines", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   const lines = Array.from({ length: 100 }, (_, i) => `row${i}`).join("\n");
   r.setHandler(() =>
     ok(
@@ -1056,8 +1178,9 @@ test("the tail is cut to the last 30 lines", async ($, on) => {
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   await r.clock.advance(4_000);
 
   // The header takes rows now, so the window needs room for all 30 lines.
@@ -1084,12 +1207,16 @@ test("an empty pane says there is nothing to follow", async ($, on) => {
 test("the pane hides a terminal task one hour after it ended, even with no event since", async ($, on) => {
   const hour = 3_600_000;
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(consoleBody(String(call.args.task_id), { status: "COMPLETED", phase: "done" })),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Old one", repository: "o/r" });
+  await begin(r, "t1", "Old one"); // task_console says COMPLETED at the pick-up tick
+  await serveTask(r, "t1", "Old one", {
+    status: "COMPLETED",
+    ended_at: new Date(await r.clock.now()).toISOString(),
+  });
   await r.clock.advance(4_000);
 
   let ui = await $.ui.mount({ ...PANE, surface: "terminal" });
@@ -1104,12 +1231,12 @@ test("the pane hides a terminal task one hour after it ended, even with no event
 
 test("an unknown phase draws no current station; stopped_phase marks the station it stopped at with ✕", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler(() =>
     ok(consoleBody("t1", { phase: "running", stopped_phase: "verify", status: "FAILED" })),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   await r.clock.advance(4_000);
 
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
@@ -1122,19 +1249,18 @@ test("an unknown phase draws no current station; stopped_phase marks the station
 
 test("after falling back it retries task_console once a minute, not more often", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     call.tool === "task_console" ? err("unknown tool") : ok({ task_id: "t1", status: "RUNNING" }),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A"); // t=0: the pick-up tick's first try fails
   const consoles = () => r.calls.filter((c) => c.tool === "task_console").length;
 
-  await r.clock.advance(4_000); // t=4s: first try fails
   expect(consoles()).toBe(1);
-  await r.clock.advance(56_000); // t=60s
+  await r.clock.advance(56_000); // t=56s
   expect(consoles()).toBe(1);
-  await r.clock.advance(4_000); // t=64s: a minute after the failure
+  await r.clock.advance(4_000); // t=60s: a minute after the failure
   expect(consoles()).toBe(2);
   await r.clock.advance(56_000);
   expect(consoles()).toBe(2);
@@ -1144,7 +1270,6 @@ test("after falling back it retries task_console once a minute, not more often",
 
 test("when task_console starts working it comes back with output", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   let isDeployed = false;
   r.setHandler((call) =>
     call.tool === "task_console" && !isDeployed
@@ -1153,8 +1278,9 @@ test("when task_console starts working it comes back with output", async ($, on)
         ? ok(consoleBody("t1"))
         : ok({ task_id: "t1", status: "RUNNING" }),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   await r.clock.advance(4_000);
   let ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   expect(
@@ -1204,11 +1330,11 @@ const scrollBy = ($: Engine, by: number, bodyRows = 12) =>
 
 const startScrollRig = async ($: Engine, on: On, tail: string) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler(() => withTail(tail));
   on("ui.scroll", () => ({}));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Header task", repository: "o/r" });
+  await begin(r, "t1", "Header task");
   await r.clock.advance(4_000);
   return r;
 };
@@ -1307,10 +1433,10 @@ test("many tasks keep the header short: the list is capped", async ($, on) => {
       }),
     ),
   );
+  connect(r);
   await startSession($);
   for (let n = 1; n <= 8; n++) {
-    r.answers.set(START, startAnswer(`t${n}`));
-    await $.tool.call({ tool: START, title: `Task ${n}`, repository: "o/r" });
+    await begin(r, `t${n}`, `Task ${n}`);
   }
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...small(14), surface: "terminal" });
@@ -1350,7 +1476,6 @@ test("the output is framed; the command sits inside the frame; the whole tree fi
 
 test("with no command the frame costs only its two border rows", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler(() =>
     ok(
       consoleBody("t1", {
@@ -1358,8 +1483,9 @@ test("with no command the frame costs only its two border rows", async ($, on) =
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...small(14), surface: "terminal" });
   // heading + column header + 2 worker rows = 4; frame 2; 14 - 6 = 8 left, 2 of them blank rows; window = 6
@@ -1410,15 +1536,15 @@ test("no PR link when pr is missing, null, malformed or not https", async ($, on
 
 test("the task_status fallback takes the PR from draft_pr_url", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   let body: Record<string, unknown> = {
     task_id: "t1",
     status: "RUNNING",
     draft_pr_url: "https://github.com/o/r/pull/7",
   };
   r.setHandler((call) => (call.tool === "task_console" ? err("unknown tool") : ok(body)));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   await r.clock.advance(4_000);
 
   let ui = await $.ui.mount({ ...PANE, surface: "terminal" });
@@ -1446,7 +1572,6 @@ test("a switch of the shown worker (to the new task, when the old one has ended)
   const r = rig(on);
   on("ui.scroll", () => ({}));
   const ended = { value: false };
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(
       consoleBody(String(call.args.task_id), {
@@ -1460,10 +1585,15 @@ test("a switch of the shown worker (to the new task, when the old one has ended)
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Old", repository: "o/r" });
+  await begin(r, "t1", "Old");
   await r.clock.advance(4_000);
   ended.value = true;
+  await serveTask(r, "t1", "Old", {
+    status: "COMPLETED",
+    ended_at: new Date(await r.clock.now()).toISOString(),
+  });
   await r.clock.advance(4_000); // Old ends; the pane stays on it
   await scrollBy($, -8);
   let ui = await $.ui.mount({ ...small(12), surface: "terminal" });
@@ -1471,8 +1601,7 @@ test("a switch of the shown worker (to the new task, when the old one has ended)
   await ui.unmount();
 
   // a new running task arrives; the shown one has ended, so the pane moves to it and follows again
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "New", repository: "o/r" });
+  await begin(r, "t2", "New");
   await r.clock.advance(4_000);
   ui = await $.ui.mount({ ...small(12), surface: "terminal" });
   expect(await allText(ui)).toMatch(/^row99$/m);
@@ -1483,7 +1612,6 @@ test("when the selected task disappears the window follows again", async ($, on)
   const hour = 3_600_000;
   const r = rig(on);
   on("ui.scroll", () => ({}));
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(
       consoleBody(String(call.args.task_id), {
@@ -1497,10 +1625,13 @@ test("when the selected task disappears the window follows again", async ($, on)
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "First", repository: "o/r" });
-  r.answers.set(START, startAnswer("t2"));
-  await $.tool.call({ tool: START, title: "Second", repository: "o/r" });
+  await begin(r, "t1", "First", {
+    status: "COMPLETED",
+    ended_at: new Date(await r.clock.now()).toISOString(),
+  });
+  await begin(r, "t2", "Second");
   await r.clock.advance(4_000);
 
   // pick the first (finished) task, scroll up in it
@@ -1537,10 +1668,10 @@ test("the glyph of each state has its own theme color", async ($, on) => {
     const n = Number(String(call.args.task_id).slice(1));
     return ok(consoleBody(`t${n}`, { status: states[n] ?? "RUNNING" }));
   });
+  connect(r);
   await startSession($);
   for (let n = 0; n < states.length; n++) {
-    r.answers.set(START, startAnswer(`t${n}`));
-    await $.tool.call({ tool: START, title: `T${n}`, repository: "o/r" });
+    await begin(r, `t${n}`, `T${n}`);
   }
   await r.clock.advance(4_000);
   await r.clock.advance(10_000);
@@ -1559,9 +1690,9 @@ test("the glyph of each state has its own theme color", async ($, on) => {
 
 test("a running worker's spinner is colored suggestion", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Run", repository: "o/r" });
+  await begin(r, "t1", "Run");
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   const pairs = (await ui.findAll({ type: "Text" })).map(
@@ -1573,7 +1704,6 @@ test("a running worker's spinner is colored suggestion", async ($, on) => {
 
 test("the selected row mark, lane marks, links and frame are colored; body text is not", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(
       consoleBody(String(call.args.task_id), {
@@ -1582,8 +1712,9 @@ test("the selected row mark, lane marks, links and frame are colored; body text 
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "First", repository: "o/r" });
+  await begin(r, "t1", "First");
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
 
@@ -1603,10 +1734,10 @@ test("the selected row mark, lane marks, links and frame are colored; body text 
 
 test("the frame turns to the state color when the task ends", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) => ok(consoleBody(String(call.args.task_id), { status: "FAILED" })));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "First", repository: "o/r" });
+  await begin(r, "t1", "First");
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   expect(await colorOf(ui, /^╭─ $/)).toBe("error");
@@ -1616,9 +1747,9 @@ test("the frame turns to the state color when the task ends", async ($, on) => {
 
 test("the status line stays plain text", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  await begin(r, "t1", "A");
   // eslint-disable-next-line no-control-regex
   expect(r.statuses.filter(Boolean).every((t) => !/\u001b/.test(String(t)))).toBe(true);
 });
@@ -1815,11 +1946,11 @@ test("with task_list, workers from other sessions are listed: 2 rows working, 1 
   await ui.unmount();
 });
 
-test("the task_list endpoint is remembered from any rovo tool call and stored", async ($, on) => {
+test("the endpoint found in $.tool.list is stored, so task_list can be read there again after a restart", async ($, on) => {
   const r = rig(on, { now: T0 });
-  r.setListHandler(() => listOf(item(1)));
+  r.tools.push(...toolsOf(HUB));
+  r.served.set("claude_ai_mcp_hubs_run", [item(1)]);
   await startSession($);
-  await $.tool.call({ tool: "mcp__claude_ai_mcp_hubs_run__my-rovo_task_wait", task_id: "x" });
   await r.clock.settle();
   expect(r.listCalls[0]?.server).toBe("claude_ai_mcp_hubs_run");
   expect(r.listCalls[0]?.tool).toBe("my-rovo_task_list");
@@ -1832,17 +1963,16 @@ test("the task_list endpoint is remembered from any rovo tool call and stored", 
   ]);
 });
 
-test("without task_list (today's server) it falls back: only tasks picked up from task_start, and task_list is retried once a minute", async ($, on) => {
-  const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
+test("a server whose task_list fails is tried again once a minute while a worker is running; only task_console is polled", async ($, on) => {
+  const r = rig(on, { store: { tasks: [task(1, { title: "Mine", repository: "o/r" })] } });
+  r.tools.push(...toolsOf(DIRECT)); // the names are there, but task_list answers unknown tool
   await startSession($);
-  await $.tool.call({ tool: START, title: "Mine", repository: "o/r" });
   await r.clock.settle();
   expect(r.listCalls).toHaveLength(1);
 
   for (let i = 0; i < 14; i++) await r.clock.advance(4_000); // 56 秒
   expect(r.listCalls).toHaveLength(1);
-  await r.clock.advance(12_000); // 68 秒
+  await r.clock.advance(4_000); // 60 秒
   expect(r.listCalls).toHaveLength(2);
 
   const ui = await mountPane($);
@@ -2095,12 +2225,12 @@ test("task_list is read-only and bounded: scope recent, limit 50, no write tools
 
 test("without task_list a worker waiting for an answer (INPUT_REQUIRED) also stops the flow and blinks ?", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(consoleBody(String(call.args.task_id), { status: "INPUT_REQUIRED", phase: "run" })),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Asks", repository: "o/r" });
+  await begin(r, "t1", "Asks");
   await r.clock.advance(4_000);
   const lanes: string[] = [];
   const notes: string[] = [];
@@ -2120,6 +2250,7 @@ test("without task_list a worker waiting for an answer (INPUT_REQUIRED) also sto
 test("listed workers survive a restart through $.store", async ($, on) => {
   const r = rig(on, { now: T0, store: ENDPOINT });
   r.setListHandler(() => listOf(item(1)));
+  connect(r);
   await startSession($);
   await r.clock.settle();
   expect(r.stored().map((t) => t.taskId)).toContain("L1");
@@ -2173,11 +2304,10 @@ const startLogRig = async (
   over?: (id: string) => Record<string, unknown>,
 ) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler(logServer(events, over));
   on("ui.scroll", () => ({}));
   await startSession($);
-  await $.tool.call({ tool: START, title: "Log task", repository: "o/r" });
+  await begin(r, "t1", "Log task");
   await r.clock.advance(4_000);
   return r;
 };
@@ -2281,10 +2411,10 @@ test("a truncated page is followed with next_cursor in the same poll, and the ne
 
 test("a server without log keeps today's behavior: only the latest command, pinned in the frame", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) => ok(consoleBody(String(call.args.task_id)))); // ignores log_after, no log
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Old server", repository: "o/r" });
+  await begin(r, "t1", "Old server");
   await r.clock.advance(4_000);
   await r.clock.advance(4_000);
   const ui = await mountPane($);
@@ -2314,15 +2444,14 @@ test("a server that stops returning log goes back to the latest command only", a
 
 test("a server that rejects log_after still shows the console: retried without it, then left alone for a minute", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     call.args.log_after !== undefined
       ? err("invalid_input: unexpected argument log_after")
       : ok(consoleBody(String(call.args.task_id))),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Strict", repository: "o/r" });
-  await r.clock.advance(4_000);
+  await begin(r, "t1", "Strict"); // the pick-up tick asks for the log, then without it
   expect(r.calls.map((c) => [c.tool, c.args.log_after])).toEqual([
     ["task_console", "0"],
     ["task_console", undefined],
@@ -2477,11 +2606,14 @@ test("the title takes the width the other columns leave, and model and repo are 
   await narrow.unmount();
 });
 
-test("model (first row) and repo (second row) show as soon as task_start gave them, before task_list answers", async ($, on) => {
+test("model (first row) and repo (second row) show from task_list as soon as the task is picked up", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1", { model: "anthropic/claude-haiku-5-5" }));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Just started", repository: "youyo/rovo" });
+  await begin(r, "t1", "Just started", {
+    repository: "youyo/rovo",
+    model: "anthropic/claude-haiku-5-5",
+  });
   const ui = await mountPane($);
   const [row, row2] = await rowsOf(ui, "t1");
   expect(row).toContain("haiku-5.5");
@@ -2866,7 +2998,6 @@ test("blank rows come only from rows the output window keeps above MIN_WINDOW: 2
 
 test("the top edge carries the title (bold) and the links; wide titles are cut so the edge never passes the width", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(
       consoleBody(String(call.args.task_id), {
@@ -2874,12 +3005,13 @@ test("the top edge carries the title (bold) and the links; wide titles are cut s
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({
-    tool: START,
-    title: "とても長い全角のタイトルがここに入りますとても長い全角のタイトルがここに入ります",
-    repository: "o/r",
-  });
+  await begin(
+    r,
+    "t1",
+    "とても長い全角のタイトルがここに入りますとても長い全角のタイトルがここに入ります",
+  );
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   expect(await ui.find({ type: "Box", key: "titlebar" })).toBeUndefined();
@@ -2900,7 +3032,6 @@ test("the top edge carries the title (bold) and the links; wide titles are cut s
 
 const edgeRig = async ($: Engine, on: Parameters<typeof rig>[0], columns: number) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) =>
     ok(
       consoleBody(String(call.args.task_id), {
@@ -2908,12 +3039,13 @@ const edgeRig = async ($: Engine, on: Parameters<typeof rig>[0], columns: number
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({
-    tool: START,
-    title: "ダッシュボードの文言と表示の直し（タブ名・実行中の表示・リンクの並びをそろえる）",
-    repository: "o/r",
-  });
+  await begin(
+    r,
+    "t1",
+    "ダッシュボードの文言と表示の直し（タブ名・実行中の表示・リンクの並びをそろえる）",
+  );
   await r.clock.advance(4_000);
   return $.ui.mount({
     ...PANE,
@@ -2983,10 +3115,10 @@ test("the frame is indented 2 columns, under the ▎ column", async ($, on) => {
 
 test("a completed worker's frame takes the success color; a working one stays subtle", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler((call) => ok(consoleBody(String(call.args.task_id), { status: "COMPLETED" })));
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Done", repository: "o/r" });
+  await begin(r, "t1", "Done");
   await r.clock.advance(4_000);
   const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
   expect(await colorOf(ui, /^╭─ $/)).toBe("success");
@@ -2995,7 +3127,6 @@ test("a completed worker's frame takes the success color; a working one stays su
 
 test("tabs in the output and the command are drawn as spaces, so the right edge stays put", async ($, on) => {
   const r = rig(on);
-  r.answers.set(START, startAnswer("t1"));
   r.setHandler(() =>
     ok(
       consoleBody("t1", {
@@ -3008,8 +3139,9 @@ test("tabs in the output and the command are drawn as spaces, so the right edge 
       }),
     ),
   );
+  connect(r);
   await startSession($);
-  await $.tool.call({ tool: START, title: "Tabs", repository: "o/r" });
+  await begin(r, "t1", "Tabs");
   await r.clock.advance(4_000);
   const ui = await mountPane($, 20);
   const text = await allText(ui);
@@ -3018,4 +3150,354 @@ test("tabs in the output and the command are drawn as spaces, so the right edge 
   expect(text).toMatch(/^ {4}indented$/m);
   expect(text).toMatch(/^\$ echo {2}a$/m);
   await ui.unmount();
+});
+
+// --- 接続先の発見（$.tool.list）と、tool.call を使わない追跡 -----------------------
+
+const THREE = ["task_start", "task_list", "task_console"] as const;
+
+test("the mod adds no tool.call hook: task_start goes straight to the engine, and the task shows up through task_list", async ($, on) => {
+  const r = rig(on);
+  connect(r);
+  r.answers.set(START, startAnswer("t1"));
+  await startSession($);
+  await r.clock.settle();
+  const ran = await $.tool.call({ tool: START, title: "A", repository: "o/r" });
+  expect(ran).toMatchObject(startAnswer("t1"));
+  expect(r.seen).toHaveLength(1);
+  expect(r.seen[0]).toMatchObject({ title: "A", repository: "o/r" });
+  expect(r.stored()).toEqual([]); // the call itself is not watched
+  await serveTask(r, "t1", "A");
+  await pickUp(r, "t1");
+  expect(r.stored().map((t) => [t.taskId, t.title, t.server, t.prefix])).toEqual([
+    ["t1", "A", "rovo-direct", ""],
+  ]);
+});
+
+test("at session start the endpoint comes from $.tool.list (the Portal's real name) and task_list is read there, with nothing typed", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  r.tools.push(...toolsOf(PORTAL, THREE));
+  r.served.set("claude_ai_mcp_hubs_run", [item(1)]);
+  await startSession($);
+  await r.clock.settle();
+  expect(r.listCalls[0]).toEqual({
+    server: "claude_ai_mcp_hubs_run",
+    tool: "team-rovo_task_list",
+    args: { scope: "recent", limit: 50 },
+  });
+  expect(r.storeGet("endpoints")).toEqual([
+    { server: "claude_ai_mcp_hubs_run", prefix: "team-rovo_" },
+  ]);
+  const ui = await mountPane($);
+  expect(await ui.find({ type: "Button", text: /Listed 1/ })).toBeDefined();
+  await ui.unmount();
+});
+
+test("the direct server's real name (mcp__rovo-direct__task_list) is found the same way", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  r.tools.push(...toolsOf(DIRECT, THREE));
+  r.served.set("rovo-direct", [item(1)]);
+  await startSession($);
+  await r.clock.settle();
+  expect(r.tools.map((t) => t.name)).toContain("mcp__rovo-direct__task_list");
+  expect(r.listCalls[0]).toEqual({
+    server: "rovo-direct",
+    tool: "task_list",
+    args: { scope: "recent", limit: 50 },
+  });
+});
+
+test("with no rovo tools at start (the MCP connects late), it keeps looking and follows the server once it shows up, with nothing typed", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  await startSession($);
+  await r.clock.settle();
+  expect(r.listCalls).toEqual([]);
+  await r.clock.advance(45_000);
+  expect(r.toolLists.count).toBeGreaterThan(3);
+  expect(r.listCalls).toEqual([]);
+
+  r.tools.push(...toolsOf(DIRECT));
+  r.served.set("rovo-direct", [item(1)]);
+  await r.clock.advance(15_000);
+  expect(r.listCalls.length).toBeGreaterThan(0);
+  const ui = await mountPane($);
+  expect(await ui.find({ type: "Button", text: /Listed 1/ })).toBeDefined();
+  await ui.unmount();
+});
+
+test("the search goes on for at least 5 minutes, slows down, stops after 10 minutes, and /rovo-console starts it again", async ($, on) => {
+  const r = rig(on);
+  on("command.run", () => ({ text: "engine" }));
+  await startSession($);
+  await r.clock.settle();
+  await r.clock.advance(60_000);
+  const firstMinute = r.toolLists.count;
+  expect(firstMinute).toBeGreaterThanOrEqual(10); // every few seconds at first
+  await r.clock.advance(60_000);
+  const secondMinute = r.toolLists.count - firstMinute;
+  expect(secondMinute).toBeGreaterThan(0);
+  expect(secondMinute).toBeLessThan(firstMinute); // then slower
+  await r.clock.advance(170_000); // 4 分 50 秒
+  const nearFive = r.toolLists.count;
+  await r.clock.advance(30_000); // 5 分 20 秒
+  expect(r.toolLists.count).toBeGreaterThan(nearFive); // still looking past 5 minutes
+
+  await r.clock.advance(10 * 60_000);
+  const stopped = r.toolLists.count;
+  await r.clock.advance(30 * 60_000);
+  expect(r.toolLists.count).toBe(stopped); // given up
+
+  await $.command.run({ command: "rovo-console", args: "" } as never);
+  await r.clock.settle();
+  expect(r.toolLists.count).toBeGreaterThan(stopped);
+  const again = r.toolLists.count;
+  await r.clock.advance(10_000);
+  expect(r.toolLists.count).toBeGreaterThan(again); // the search runs again
+});
+
+test("only a full set of task_start, task_list and task_console under one server and prefix is an endpoint; nothing unknown is called", async ($, on) => {
+  const r = rig(on);
+  r.tools.push(
+    ...toolsOf("mcp__a__", ["task_start", "task_list"]),
+    ...toolsOf("mcp__b__x_", ["task_start", "task_console"]),
+    ...toolsOf("mcp__b__y_", ["task_list"]),
+    ...THREE.map((n) => ({ name: `mcp__fake__${n}`, description: "", mcp: false })),
+  );
+  await startSession($);
+  await r.clock.advance(120_000);
+  expect(r.listCalls).toEqual([]);
+  expect(r.calls).toEqual([]);
+  expect(r.storeGet("endpoints") ?? []).toEqual([]);
+});
+
+test("every candidate is followed (up to 4), and the same task id on two servers is two workers", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  for (const s of ["s1", "s2", "s3", "s4", "s5"]) {
+    r.tools.push(...toolsOf(`mcp__${s}__`, THREE));
+    r.served.set(s, [item(1)]);
+  }
+  await startSession($);
+  await r.clock.settle();
+  const servers = new Set(r.listCalls.map((c) => c.server));
+  expect(servers.size).toBe(4);
+  expect(r.stored().map((t) => `${t.server}/${t.taskId}`)).toHaveLength(4);
+  expect(new Set(r.stored().map((t) => t.server)).size).toBe(4);
+});
+
+test("/rovo-console and /rovo:create-task look at $.tool.list again, and pick up a server that joined later", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  on("command.run", () => ({ text: "engine" }));
+  connect(r);
+  await startSession($);
+  await r.clock.settle();
+  const c0 = r.toolLists.count;
+  await $.command.run({ command: "rovo-console", args: "" } as never);
+  await r.clock.settle();
+  expect(r.toolLists.count).toBeGreaterThan(c0);
+  const c1 = r.toolLists.count;
+  r.tools.push(...toolsOf(HUB));
+  r.served.set("claude_ai_mcp_hubs_run", [item(2)]);
+  await $.command.run({ command: "rovo:create-task", args: "x" } as never);
+  await r.clock.settle();
+  expect(r.toolLists.count).toBeGreaterThan(c1);
+  expect(r.listCalls.some((c) => c.tool === "my-rovo_task_list")).toBe(true);
+});
+
+test("while creating, task_list is read every 4 seconds (not every 20); a new task from it clears creating and is shown", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  on("command.run", () => ({ text: "engine" }));
+  connect(r);
+  await startSession($);
+  await r.clock.settle();
+  const idle0 = r.listCalls.length;
+  await r.clock.advance(8_000);
+  expect(r.listCalls.length).toBe(idle0); // idle: every 20 seconds
+
+  await $.command.run({ command: "rovo:create-task", args: "x" } as never);
+  await r.clock.settle();
+  const c0 = r.listCalls.length;
+  await r.clock.advance(4_000);
+  expect(r.listCalls.length).toBe(c0 + 1);
+  await r.clock.advance(4_000);
+  expect(r.listCalls.length).toBe(c0 + 2);
+  let ui = await mountPane($);
+  expect(await allText(ui)).toContain("タスクを作成中…");
+  await ui.unmount();
+
+  await serveTask(r, "n1", "New task");
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).not.toContain("タスクを作成中…");
+  expect(text).toContain("New task");
+  await ui.unmount();
+});
+
+test("tasks that were already there at the first sync do not clear creating; a task created after the command does", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  on("command.run", () => ({ text: "engine" }));
+  await startSession($);
+  await r.clock.settle();
+  await $.command.run({ command: "rovo:create-task", args: "x" } as never);
+  // the MCP joins late; an older task from another session is running there
+  r.tools.push(...toolsOf(DIRECT));
+  r.served.set("rovo-direct", [item(1)]);
+  await r.clock.advance(10_000);
+  expect(r.listCalls.length).toBeGreaterThan(0);
+  let ui = await mountPane($);
+  expect(await allText(ui)).toContain("タスクを作成中…");
+  await ui.unmount();
+
+  await serveTask(r, "n1", "Mine");
+  await r.clock.advance(4_000);
+  ui = await mountPane($);
+  expect(await allText(ui)).not.toContain("タスクを作成中…");
+  expect(await allText(ui)).toContain("Mine");
+  await ui.unmount();
+});
+
+test("a task created after the command and first seen at the first sync (late MCP) clears creating too", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  on("command.run", () => ({ text: "engine" }));
+  await startSession($);
+  await r.clock.settle();
+  await $.command.run({ command: "rovo:create-task", args: "x" } as never);
+  await r.clock.advance(3_000);
+  await serveTask(r, "n1", "Mine"); // created 3 seconds after the command
+  await r.clock.advance(10_000);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).not.toContain("タスクを作成中…");
+  expect(text).toContain("Mine");
+  await ui.unmount();
+});
+
+test("no start toast at the first sync; a running task that shows up later toasts once, only while the pane is not shown; one already ended does not", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  connect(r);
+  r.served.set("rovo-direct", [item(1), item(2)]);
+  await startSession($);
+  await r.clock.settle();
+  expect(r.toasts).toEqual([]);
+
+  await serveTask(r, "n1", "New");
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual([START_TOAST]);
+  await r.clock.advance(8_000);
+  expect(r.toasts).toEqual([START_TOAST]); // once
+
+  r.pane.open = true;
+  r.pane.behind = false;
+  await serveTask(r, "n2", "Seen");
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual([START_TOAST]); // the pane is shown
+
+  r.pane.behind = true; // behind another tab
+  await serveTask(r, "n3", "Behind");
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual([START_TOAST, START_TOAST]);
+
+  await serveTask(r, "n4", "Ended", {
+    status: "COMPLETED",
+    stage: "done",
+    ended_at: new Date((await r.clock.now()) - 1_000).toISOString(),
+  });
+  await r.clock.advance(4_000);
+  expect(r.toasts).toEqual([START_TOAST, START_TOAST]);
+  expect(r.opened).toEqual([]); // the pane never opens by itself
+});
+
+test("a second endpoint found later has its own first sync: its running tasks do not toast", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  on("command.run", () => ({ text: "engine" }));
+  r.placed.value = false; // the pane is not drawn (so it is never shown)
+  connect(r);
+  await startSession($);
+  await r.clock.settle();
+  r.tools.push(...toolsOf(HUB));
+  r.served.set("claude_ai_mcp_hubs_run", [item(1), item(2)]);
+  await $.command.run({ command: "rovo:create-task", args: "x" } as never);
+  await r.clock.settle();
+  expect(r.listCalls.some((c) => c.tool === "my-rovo_task_list")).toBe(true);
+  expect(r.toasts).toEqual([]);
+});
+
+test("a server with task_start and task_console but no task_list: the pane says it cannot follow tasks there, and nothing is called", async ($, on) => {
+  const r = rig(on);
+  r.tools.push(...toolsOf("mcp__old-rovo__", ["task_start", "task_console", "task_status"]));
+  await startSession($);
+  await r.clock.advance(60_000);
+  expect(r.listCalls).toEqual([]);
+  expect(r.calls).toEqual([]);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).toContain("old-rovo");
+  expect(text).toContain("task_list");
+  expect(text).toContain("追跡できません");
+  await ui.unmount();
+});
+
+test("a server whose task_list answers unknown tool is shown as not followable", async ($, on) => {
+  const r = rig(on);
+  r.tools.push(...toolsOf(DIRECT)); // served has no rovo-direct: unknown tool
+  await startSession($);
+  await r.clock.settle();
+  expect(r.listCalls).toHaveLength(1);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).toContain("rovo-direct");
+  expect(text).toContain("追跡できません");
+  await ui.unmount();
+});
+
+test("a passing task_list failure (not unknown tool) does not say the server cannot be followed", async ($, on) => {
+  const r = rig(on);
+  r.tools.push(...toolsOf(DIRECT));
+  r.setListHandler(() => err("upstream timeout"));
+  await startSession($);
+  await r.clock.settle();
+  expect(r.listCalls).toHaveLength(1);
+  const ui = await mountPane($);
+  const text = await allText(ui);
+  expect(text).not.toContain("追跡できません");
+  expect(text).toContain("追跡中のタスクはありません");
+  await ui.unmount();
+});
+
+for (const failure of ["isError", "throw"] as const) {
+  test(`a stored endpoint whose MCP connects late (task_list ${failure} at first) is followed once it shows up, with nothing typed`, async ($, on) => {
+    const r = rig(on, { now: T0, store: ENDPOINT });
+    let isConnected = false;
+    r.setListHandler(() => {
+      if (isConnected) return listOf(item(1));
+      if (failure === "throw") throw new Error("not connected");
+      return err("MCP server rovo-direct is not connected");
+    });
+    await startSession($);
+    await r.clock.settle();
+    expect(r.listCalls).toHaveLength(1);
+    await r.clock.advance(30_000);
+    expect(r.listCalls).toHaveLength(1); // not in $.tool.list yet: nothing is called
+
+    isConnected = true;
+    r.tools.push(...toolsOf(DIRECT));
+    await r.clock.advance(15_000);
+    const ui = await mountPane($);
+    expect(await ui.find({ type: "Button", text: /Listed 1/ })).toBeDefined();
+    expect(await allText(ui)).not.toContain("追跡できません");
+    await ui.unmount();
+  });
+}
+
+test("new tasks on two endpoints in the same round give one start toast, not one per endpoint", async ($, on) => {
+  const r = rig(on, { now: T0 });
+  connect(r);
+  connect(r, HUB);
+  await startSession($);
+  await r.clock.settle();
+  await serveTask(r, "n1", "Direct");
+  await serveTask(r, "n1", "Hub", {}, HUB);
+  await r.clock.advance(20_000);
+  expect(r.stored()).toHaveLength(2);
+  expect(r.toasts).toEqual([START_TOAST]);
 });

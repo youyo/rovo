@@ -1,0 +1,6 @@
+{
+  "name": "rovo-console",
+  "version": "0.7.0",
+  "description": "rovo のタスクの進み具合とコンソールを会話の横のペインに出す mod（読み取り専用。0.7.0 でスキルの rovo から分かれた）",
+  "types": "./types/index.d.ts"
+}

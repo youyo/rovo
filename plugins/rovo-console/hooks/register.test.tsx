@@ -184,7 +184,7 @@ const startSession = ($: Engine) =>
   $.session.start({ cwd: "/", surface: "terminal", isInteractive: true });
 
 const PANE = {
-  plugin: "rovo",
+  plugin: "rovo-console",
   component: "Pane",
   requestId: "rovo",
   props: {

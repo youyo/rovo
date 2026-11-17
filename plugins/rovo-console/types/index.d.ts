@@ -68,7 +68,7 @@ export type RovoLogLine = {
 
 declare module "claude-code" {
   interface PluginState {
-    rovo: {
+    "rovo-console": {
       tasks: RovoTask[];
       /** キーは taskKey(task) = `${server}/${taskId}`。 */
       consoles: Record<string, RovoConsole>;

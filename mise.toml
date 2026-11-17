@@ -207,8 +207,13 @@ description = "Unit + infra + 偽 GitHub + E2E（Docker 必須。実ネットワ
 depends = ["test:unit", "test:infra", "test:fake-github", "test:e2e"]
 
 [tasks."test:plugin"]
-description = "Claude Code の mod（plugins/rovo）のテストと検査。claude の CLI が要る（CI には無いことがある）ので test の依存には入れない。手元で mod を変えたときに実行する"
-run = ["claude plugin test plugins/rovo", "claude plugin validate plugins/rovo"]
+description = "Claude Code のプラグイン（スキルの plugins/rovo・ペインの mod の plugins/rovo-console）のテストと検査。claude の CLI が要る（CI には無いことがある）ので test の依存には入れない。手元でプラグインを変えたときに実行する。plugins/rovo はスキルだけで hooks が無く plugin test は通らないので、validate だけ流す"
+run = [
+  "claude plugin test plugins/rovo-console",
+  "claude plugin validate plugins/rovo",
+  "claude plugin validate plugins/rovo-console",
+  "claude plugin validate .",
+]
 
 [tasks."typecheck:audit"]
 description = "packages/audit の型検査"

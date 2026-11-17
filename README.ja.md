@@ -78,18 +78,23 @@ claude mcp add --transport http rovo https://<your-host>/mcp
 
 初回は Rovo の同意画面が出るので、GitHub でログインする。claude.ai などコネクタの URL を入れるクライアントでは、リモート MCP サーバーの URL に `https://<your-host>/mcp` を入れる。
 
-### 5. mod を入れる（任意・おすすめ）
+### 5. Claude Code のプラグインを入れる（任意・おすすめ）
 
-同梱の mod は、タスクの進み具合を Claude Code の横のペインに出し、`/rovo:create-task` と `/rovo:consult` を追加する。Claude Code で:
+同じ marketplace に 2 つのプラグインを同梱している。`rovo` はスキルだけで、`/rovo:create-task` と `/rovo:consult` を追加する。`rovo-console` は、タスクの進み具合を Claude Code の横のペインに出す mod。分けているのは、`tool.call` の JS hook を持つプラグインがあると Claude Code の Code Mode が無効になるため（スキルだけを入れたい人は `rovo` だけ入れればよい）。Claude Code で:
 
 ```
 /plugin marketplace add youyo/rovo
 /plugin install rovo@rovo
+/plugin install rovo-console@rovo
 ```
+
+ペインが要らなければ最後の 1 行は不要（ダッシュボードで同じ進み具合を見られる）。入れたあとは Claude Code を再起動する。
+
+**0.6.x から移る人へ**: 0.7.0 より前はペインが `rovo` に入っていたので、`rovo` を更新するとペインが消える。marketplace を更新 → `rovo` を更新 → ペインが要るなら `rovo-console` を入れる → Claude Code を再起動する（`claude plugin marketplace update rovo`・`claude plugin update rovo@rovo`・`claude plugin install rovo-console@rovo`）。保存済みのタスク一覧・ログはプラグイン名ごとなので `rovo-console` には引き継がれない（取り直される）。
 
 ### 6. 試す
 
-- Claude Code で `/rovo:create-task widgets API の不安定なページネーションのテストを直して` を実行する（リポジトリ・ブランチ・SHA は、いる git リポジトリから求める）。会話の横のペインに段階とログが流れ、GitHub に Draft PR ができる。
+- Claude Code で `/rovo:create-task widgets API の不安定なページネーションのテストを直して` を実行する（リポジトリ・ブランチ・SHA は、いる git リポジトリから求める）。`rovo-console` を入れていれば、会話の横のペインに段階とログが流れる。GitHub に Draft PR ができる。
 - ダッシュボード `https://<your-host>/dashboard` を開き、GitHub でログインする。
 - `/rovo:consult この移行の手順は安全？` で、別のモデルに意見を聞く。
 
@@ -204,7 +209,7 @@ gateway は、タスクの状況をブラウザで見られる読み取り専用
 
 ## Claude Code の mod
 
-タスクの進み具合を Claude Code の横のペインに出す読み取り専用の mod を同梱している（[plugins/rovo/README.md](plugins/rovo/README.md)）。`/rovo:create-task`・`/rovo:consult`・`/rovo-console` も追加される。導入は[クイックスタート](#クイックスタート)の 5（`/plugin marketplace add youyo/rovo` と `/plugin install rovo@rovo`）。シェルからは `claude plugin install rovo --marketplace youyo/rovo`。
+2 つのプラグインを同梱している。`rovo`（[plugins/rovo/README.md](plugins/rovo/README.md)）はスキルだけで、`/rovo:create-task` と `/rovo:consult` を追加する。`rovo-console`（[plugins/rovo-console/README.md](plugins/rovo-console/README.md)）は、タスクの進み具合を Claude Code の横のペインに出す読み取り専用の mod で、`/rovo-console` を追加する。導入は[クイックスタート](#クイックスタート)の 5（`/plugin install rovo@rovo` と `/plugin install rovo-console@rovo`）。シェルからは `claude plugin install rovo@rovo` と `claude plugin install rovo-console@rovo`。
 
 ## 構成
 

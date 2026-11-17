@@ -9,7 +9,7 @@
   "linter": { "enabled": true },
   "overrides": [
     {
-      "includes": ["plugins/rovo/**"],
+      "includes": ["plugins/rovo/**", "plugins/rovo-console/**"],
       "linter": {
         "rules": {
           "style": { "useTemplate": "off" },

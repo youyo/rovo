@@ -87,22 +87,25 @@ const LIST_IDLE_MS = 20_000;
 // 1 回の tick で task_console を取るワーカーの上限（選んでいるものを先頭に、残りは順番に回す）。
 const MAX_CONSOLE_POLLS = 6;
 
-const tasksAtom = atom({ plugin: "rovo", key: "tasks" } as const, []);
-const consolesAtom = atom({ plugin: "rovo", key: "consoles" } as const, {});
-const frameAtom = atom({ plugin: "rovo", key: "frame" } as const, 0);
-const arrivalsAtom = atom({ plugin: "rovo", key: "arrivals" } as const, {});
-const listsAtom = atom({ plugin: "rovo", key: "lists" } as const, {});
-const endpointsAtom = atom({ plugin: "rovo", key: "endpoints" } as const, []);
+const tasksAtom = atom({ plugin: "rovo-console", key: "tasks" } as const, []);
+const consolesAtom = atom({ plugin: "rovo-console", key: "consoles" } as const, {});
+const frameAtom = atom({ plugin: "rovo-console", key: "frame" } as const, 0);
+const arrivalsAtom = atom({ plugin: "rovo-console", key: "arrivals" } as const, {});
+const listsAtom = atom({ plugin: "rovo-console", key: "lists" } as const, {});
+const endpointsAtom = atom({ plugin: "rovo-console", key: "endpoints" } as const, []);
 // 積み上がるログ（ワーカーごと）と、log_after を受け付けなかった接続先。
-const logsAtom = atom({ plugin: "rovo", key: "logs" } as const, {});
-const logOffAtom = atom({ plugin: "rovo", key: "logOff" } as const, {});
+const logsAtom = atom({ plugin: "rovo-console", key: "logs" } as const, {});
+const logOffAtom = atom({ plugin: "rovo-console", key: "logOff" } as const, {});
 // 出力の窓。follow が true の間は末尾に追従する。offset は追従を止めたときの先頭行（出力の中の行番号）。
-const scrollAtom = atom({ plugin: "rovo", key: "scroll" } as const, { follow: true, offset: 0 });
+const scrollAtom = atom({ plugin: "rovo-console", key: "scroll" } as const, {
+  follow: true,
+  offset: 0,
+});
 // いま出しているワーカー（taskKey）。描画のたびに選び直さない。動くのは、クリックと、
 // イベント（新しい作業中のタスクを拾った・質問待ちに入った）で出しているものが終端か消えているときだけ。変わったら追従に戻す。
-const shownAtom = atom({ plugin: "rovo", key: "shown" } as const, null);
+const shownAtom = atom({ plugin: "rovo-console", key: "shown" } as const, null);
 // /rovo:create-task が実行された時刻。タスクを拾うまで「タスクを作成中…」を出す。
-const creatingAtom = atom({ plugin: "rovo", key: "creating" } as const, null);
+const creatingAtom = atom({ plugin: "rovo-console", key: "creating" } as const, null);
 const CREATING_MS = 10 * 60 * 1000;
 const CREATE_COMMAND = "create-task";
 const CONSOLE_COMMAND = "rovo-console";

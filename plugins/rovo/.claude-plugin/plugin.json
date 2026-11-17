@@ -1,6 +1,5 @@
 {
   "name": "rovo",
-  "version": "0.6.9",
-  "description": "rovo のタスクの進み具合とコンソールを会話の横に出す（読み取り専用）",
-  "types": "./types/index.d.ts"
+  "version": "0.7.0",
+  "description": "rovo のスキル: /rovo:create-task（依頼をタスクにする）と /rovo:consult（別のモデルに意見を聞く）。ペインは 0.7.0 から rovo-console に分かれた"
 }

@@ -80,6 +80,7 @@ const DASHBOARD_SPEC = /^apps\/dashboard\/e2e\/[^/]+\.spec\.ts$/;
 const RULES = [
   // ---- mod（claude の CLI でしか流せない。test には含まれない） ----
   ["plugins/rovo/**", ["test:plugin"]],
+  ["plugins/rovo-console/**", ["test:plugin"]],
   [".claude-plugin/**", ["test:plugin"]],
 
   // ---- dashboard ----

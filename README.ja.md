@@ -80,7 +80,7 @@ claude mcp add --transport http rovo https://<your-host>/mcp
 
 ### 5. Claude Code のプラグインを入れる（任意・おすすめ）
 
-同じ marketplace に 2 つのプラグインを同梱している。`rovo` はスキルだけで、`/rovo:create-task` と `/rovo:consult` を追加する。`rovo-console` は、タスクの進み具合を Claude Code の横のペインに出す mod。分けているのは、`tool.call` の JS hook を持つプラグインがあると Claude Code の Code Mode が無効になるため（スキルだけを入れたい人は `rovo` だけ入れればよい）。Claude Code で:
+同じ marketplace に 2 つのプラグインを同梱している。`rovo` はスキルだけで、`/rovo:create-task` と `/rovo:consult` を追加する。`rovo-console` は、タスクの進み具合を Claude Code の横のペインに出す mod。分けているのは、JS の mod を入れずにスキルだけを使えるようにするため（スキルだけを入れたい人は `rovo` だけ入れればよい）。どちらも `tool.call` の hook を持たないので、Claude Code の Code Mode と一緒に使える。Claude Code で:
 
 ```
 /plugin marketplace add youyo/rovo

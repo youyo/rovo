@@ -19,13 +19,11 @@ import {
   isTerminal,
   MAX_LOG_LINES,
   MIN_WINDOW,
-  matchTaskStart,
   moveTarget,
   orderTasks,
   paneColumns,
   parseConsole,
   parseLog,
-  parseStartResult,
   parseStatus,
   planWorkers,
   pruneTasks,
@@ -52,39 +50,6 @@ const task = (n: number, over: Partial<RovoTask> = {}): RovoTask => ({
   startedAt: 0,
   status: "RUNNING",
   ...over,
-});
-
-test("matchTaskStart reads server and prefix from both name shapes", () => {
-  expect(matchTaskStart("mcp__rovo-direct__task_start")).toEqual({
-    server: "rovo-direct",
-    prefix: "",
-  });
-  expect(matchTaskStart("mcp__claude_ai_mcp_hubs_run__my-rovo_task_start")).toEqual({
-    server: "claude_ai_mcp_hubs_run",
-    prefix: "my-rovo_",
-  });
-  expect(matchTaskStart("mcp__rovo-direct__task_status")).toBeNull();
-  expect(matchTaskStart("mcp__rovo-direct__task_start_extra")).toBeNull();
-  expect(matchTaskStart("Bash")).toBeNull();
-  expect(matchTaskStart("mcp__x__notask_start")).toBeNull();
-});
-
-test("parseStartResult takes task_id, status and an https dashboard_url only", () => {
-  expect(
-    parseStartResult(
-      JSON.stringify({
-        task_id: "abc",
-        status: "RUNNING",
-        dashboard_url: "https://d.example/t/abc",
-      }),
-    ),
-  ).toEqual({ taskId: "abc", status: "RUNNING", dashboardUrl: "https://d.example/t/abc" });
-  expect(
-    parseStartResult(JSON.stringify({ task_id: "abc", dashboard_url: "javascript:alert(1)" }))
-      ?.dashboardUrl,
-  ).toBeUndefined();
-  expect(parseStartResult("not json")).toBeNull();
-  expect(parseStartResult(JSON.stringify({ nope: 1 }))).toBeNull();
 });
 
 test("stripFence removes the untrusted-child wrapper lines and control characters", () => {

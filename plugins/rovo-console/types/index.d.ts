@@ -2,7 +2,7 @@
 export type RovoTask = {
   taskId: string;
   title: string;
-  /** task_start を呼んだ MCP サーバー名（ツール名の `mcp__<server>__` の部分）。 */
+  /** タスクを拾った接続先の MCP サーバー名（ツール名の `mcp__<server>__` の部分）。 */
   server: string;
   /** ツール名の接頭辞。空か `my-rovo_` のようなもの。 */
   prefix: string;
@@ -32,7 +32,7 @@ export type RovoTask = {
   verifyMax?: number;
   /** 質問への答え待ち（waiting_for_answer）。 */
   waiting?: boolean;
-  /** task_list から入ったタスク。一覧の上限が task_start で拾ったものと別（50 件）。 */
+  /** task_list から入ったタスク。一覧の上限が、それ以外（前の版で保存したもの）と別（50 件）。 */
   listed?: boolean;
   /** task_list の pr（https のみ）。task_console の pr があればそちらを優先する。 */
   pr?: { number: number | null; url: string };
@@ -76,16 +76,29 @@ declare module "claude-code" {
       scroll: { follow: boolean; offset: number };
       /** いまペインに出しているワーカーの taskKey。描くたびには選び直さず、クリックとイベント（新しい作業中のタスク・質問待ち）のときだけ替わる。替わったら窓を追従に戻す。 */
       shown: string | null;
-      /** /rovo-create-task が実行された時刻（ms）。タスクを拾うと null に戻る。10 分たつと表示しない。 */
+      /** /rovo:create-task が実行された時刻（ms）。task_list で新しいタスクを拾うと null に戻る。10 分たつと表示しない。 */
       creating: number | null;
       /** 描き直しの番号。0.7 秒ごとに 1 つ進み、スピナー・▶・点滅の位置を決める。 */
       frame: number;
       /** 各ワーカーが今いる駅と、その駅に着いたフレーム（着いた直後の ◉ のため）。キーは taskKey。 */
       arrivals: Record<string, { at: number; since: number }>;
-      /** rovo のツールを呼んだ接続先（server と prefix）。task_list を呼ぶ先。$.store にも残す。 */
+      /**
+       * $.tool.list() の名前から見つけた接続先（server と prefix。task_start・task_list・task_console が揃うもの）。
+       * task_list を呼ぶ先。$.store にも残す。
+       */
       endpoints: { server: string; prefix: string }[];
-      /** task_list の接続先（server と prefix の組）ごとの状態。キーは `${server}/${prefix}`。 */
-      lists: Record<string, { supported: boolean; retryAt: number; lastAt: number }>;
+      /** task_start と task_console はあるが task_list が無い接続先（$.tool.list() で見たもの）。追跡できないと知らせる。 */
+      noList: { server: string; prefix: string }[];
+      /** このセッションで task_list の同期が 1 回済んだ接続先（キーは `${server}/${prefix}`）。開始のトーストの基準。 */
+      synced: Record<string, true>;
+      /**
+       * task_list の接続先（server と prefix の組）ごとの状態。キーは `${server}/${prefix}`。
+       * missing は、呼んで unknown tool か形の違う答えが返った（task_list が無い）印。
+       */
+      lists: Record<
+        string,
+        { supported: boolean; retryAt: number; lastAt: number; missing?: boolean }
+      >;
       /**
        * 積み上がるログ。キーは taskKey。supported は task_console が log を返したワーカー
        * （false なら最新のコマンドだけの表示）。cursor は次に渡す log_after、lines は最大 500 行。

@@ -80,7 +80,7 @@ On first use you see Rovo's consent screen and sign in with GitHub. In claude.ai
 
 ### 5. Install the Claude Code plugins (optional, recommended)
 
-Two plugins are bundled in the same marketplace. `rovo` is the skills only: `/rovo:create-task` and `/rovo:consult`. `rovo-console` is the mod that shows task progress in a pane beside Claude Code. They are separate on purpose: Claude Code turns Code Mode off while a plugin with a `tool.call` JS hook is installed, so you can take the skills without the pane. In Claude Code:
+Two plugins are bundled in the same marketplace. `rovo` is the skills only: `/rovo:create-task` and `/rovo:consult`. `rovo-console` is the mod that shows task progress in a pane beside Claude Code. They are separate so you can take the skills without the JS mod. Neither has a `tool.call` hook, so both work with Claude Code's Code Mode. In Claude Code:
 
 ```
 /plugin marketplace add youyo/rovo

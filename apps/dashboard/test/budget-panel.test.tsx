@@ -1,5 +1,5 @@
 import type { OverviewDto } from "@rovo/dashboard-contract";
-import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
+import { overviewFixture, overviewIndexFixture } from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
@@ -59,6 +59,24 @@ describe("予算の欄（自分の予算と全員の実績を 1 つの欄にま�
     expect(value(c, "remaining")).toBe("$38.50");
     expect(value(c, "limit")).toBe("$49.90");
     expect(value(c, "all")).toBe("$43.90");
+  });
+
+  it("全員の実績の出典: index のときだけ「（概算）」の印と data 属性。ledger・source 無しでは付けない", () => {
+    const idx = mount(overviewIndexFixture);
+    expect(value(idx, "all")).toBe("$41.90（概算）");
+    expect(row(idx, "all")?.getAttribute("data-budget-source")).toBe("index");
+    // ほかの行には付かない
+    expect(value(idx, "spent")).toBe("$11.40");
+    const ledger = mount(overviewFixture);
+    expect(value(ledger, "all")).toBe("$43.90");
+    expect(row(ledger, "all")?.hasAttribute("data-budget-source")).toBe(false);
+    const { source: _omit, ...legacyActual } = overviewFixture.month.budget_actual;
+    const legacy = mount({
+      ...overviewFixture,
+      month: { ...overviewFixture.month, budget_actual: legacyActual },
+    });
+    expect(value(legacy, "all")).toBe("$43.90");
+    expect(row(legacy, "all")?.hasAttribute("data-budget-source")).toBe(false);
   });
 
   it("行は dl の中の項目（dt と dd）。読み上げで名前と値が対応する", () => {

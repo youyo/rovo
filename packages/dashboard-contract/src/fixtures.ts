@@ -175,7 +175,7 @@ export const overviewFixture: OverviewDto = {
   month: {
     period: { start: "2026-10-01T00:00:00.000Z", end: "2026-11-01T00:00:00.000Z" },
     task_cost_usd: 41.2,
-    budget_actual: { spent_usd: 43.9, estimated_usd: 0.4 },
+    budget_actual: { spent_usd: 43.9, estimated_usd: 0.4, source: "ledger" },
     hidden_tasks: { count: 1, cost_usd: 2.9 },
   },
   models: [
@@ -190,6 +190,15 @@ export const overviewMeFixture: OverviewDto = {
   scope: "me",
   tasks: tasks.filter((t) => t.owner_login === ALICE),
   consults: overviewFixture.consults.filter((c) => c.owner_login === ALICE),
+};
+
+/** 台帳を集められず、索引の費用に戻ったときの応答（`budget_actual.source` が `index`） */
+export const overviewIndexFixture: OverviewDto = {
+  ...overviewFixture,
+  month: {
+    ...overviewFixture.month,
+    budget_actual: { spent_usd: 41.9, estimated_usd: 0.4, source: "index" },
+  },
 };
 
 const runningTask = tasks[3] as VisibleTaskDto;

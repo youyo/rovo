@@ -474,8 +474,10 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
   };
   const byOwner = await monthByOwner(directory, repoIds, monthStart, monthEnd, at);
   const flow = await flowSummary(directory, repoIds, at);
-  const actual =
-    (await sumLedgers(env, session.uid, budgetRaw, owners, at, monthStart)) ?? indexActual;
+  const ledgerActual = await sumLedgers(env, session.uid, budgetRaw, owners, at, monthStart);
+  // 出典: 台帳を集められたら ledger（精算済みの実額）、戻したら index（索引からの概算）
+  const actual = ledgerActual ?? indexActual;
+  const actualSource: "ledger" | "index" = ledgerActual ? "ledger" : "index";
 
   const dto: OverviewDto = {
     generated_at: iso(at),
@@ -499,6 +501,7 @@ async function handleOverview(request: Request, env: Env, now: () => number): Pr
       budget_actual: {
         spent_usd: usd(actual.spent_micro),
         estimated_usd: usd(actual.estimated_micro),
+        source: actualSource,
       },
       hidden_tasks: { count: summary.hidden.count, cost_usd: usd(summary.hidden.cost_micro) },
       ...(byOwner

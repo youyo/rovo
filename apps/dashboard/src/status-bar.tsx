@@ -60,10 +60,17 @@ function cloudflareBar(
   };
 }
 
-function Sb(props: { alt?: boolean; strong?: boolean; children: React.ReactNode; k: string }) {
+function Sb(props: {
+  alt?: boolean;
+  strong?: boolean;
+  children: React.ReactNode;
+  k: string;
+  /** 出典が索引（概算）のとき "index"。色でなく data 属性でも区別できるようにする */
+  source?: "index";
+}) {
   const cls = `sb${props.alt ? " sb--alt" : ""}${props.strong ? " sb--strong" : ""}`;
   return (
-    <span className={cls} data-sb={props.k}>
+    <span className={cls} data-sb={props.k} data-budget-source={props.source}>
       {props.children}
     </span>
   );
@@ -198,8 +205,13 @@ export function StatusBar(props: {
         <Sb k="budget-left" alt>
           {leftText(data.budget, t)}
         </Sb>
-        <Sb k="budget-all">
-          {t("bar.all", { amount: formatUsd(data.month.budget_actual.spent_usd, t) })}
+        <Sb
+          k="budget-all"
+          source={data.month.budget_actual.source === "index" ? "index" : undefined}
+        >
+          {t(data.month.budget_actual.source === "index" ? "bar.allApprox" : "bar.all", {
+            amount: formatUsd(data.month.budget_actual.spent_usd, t),
+          })}
         </Sb>
         <Sb k="models" alt>
           <ModelLine models={data.models} />

@@ -3,6 +3,7 @@ import { isPlainLeftClick } from "./click";
 import { formatCount, formatDuration, formatShortDate, formatUsd, singleLine } from "./format";
 import type { T } from "./i18n";
 import { useT } from "./lang";
+import { monthPace } from "./pace";
 import { taskPath } from "./route";
 import { markKindOf, markLabel } from "./status";
 import { MarkSymbol, ShapeSymbol } from "./status-mark";
@@ -234,6 +235,61 @@ function MonthRow(props: { row: MonthCostRow }) {
   );
 }
 
+/**
+ * チームの費用（今月・UTC）。合計は month.budget_actual.spent_usd（台帳の合計。台帳を集められなければ索引の費用）。
+ * 出典（source）が index のときは概算と分かる文を出す。見込みは既存の monthPace（上限なし）で、月の初日は出さない。
+ */
+function CostSection(props: { data: OverviewDto; at: number }) {
+  const t = useT();
+  const { data, at } = props;
+  const actual = data.month.budget_actual;
+  const pace = monthPace({
+    spentUsd: actual.spent_usd,
+    limitUsd: null,
+    periodStart: data.month.period.start,
+    periodEnd: data.month.period.end,
+    nowMs: at,
+  });
+  return (
+    <section
+      className="tb-section tb-costbox"
+      aria-labelledby="tb-cost-h"
+      data-team-cost=""
+      data-source={actual.source}
+    >
+      <h2 id="tb-cost-h">{t("board.titleCost")}</h2>
+      <div className="tb-cost-body">
+        <dl className="tb-cost-tiles">
+          <div className="tb-cost-tile tb-cost-tile--total" data-team-cost-tile="total">
+            <dt>{t("board.costTotal")}</dt>
+            <dd className="tb-cost-big">{formatUsd(actual.spent_usd, t)}</dd>
+          </div>
+          {pace.kind === "ok" ? (
+            <div className="tb-cost-tile" data-team-cost-tile="pace">
+              <dt>{t("board.costPace")}</dt>
+              <dd className="tb-cost-num">{formatUsd(pace.projected, t)}</dd>
+            </div>
+          ) : null}
+          <div className="tb-cost-tile" data-team-cost-tile="mine">
+            <dt>{t("board.costMine")}</dt>
+            <dd className="tb-cost-num">{formatUsd(data.budget.spent_usd, t)}</dd>
+          </div>
+        </dl>
+        {actual.source === undefined ? null : (
+          <p className="soft tb-cost-note" data-team-cost-source={actual.source}>
+            {actual.source === "ledger" ? t("board.costSourceLedger") : t("board.costSourceIndex")}
+          </p>
+        )}
+        {actual.estimated_usd > 0 ? (
+          <p className="soft tb-cost-note" data-team-cost-estimated="">
+            {t("board.costEstimated", { amount: formatUsd(actual.estimated_usd, t) })}
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function MonthSection(props: { month: MonthCosts }) {
   const t = useT();
   const { rows, hidden } = props.month;
@@ -442,6 +498,7 @@ export function TeamBoard(props: {
   const at = Number.isFinite(generated) ? generated : Date.now();
   return (
     <section className="console teamboard" aria-label={t("board.label")} data-teamboard="">
+      <CostSection data={props.data} at={at} />
       <section className="tb-section" aria-labelledby="tb-people-h">
         <h2 id="tb-people-h">{props.isToday ? t("board.titleNow") : t("board.titleDay")}</h2>
         <ul className="tb-people">

@@ -269,6 +269,60 @@ async function pinGeneratedAt(
   });
 }
 
+test("(TB13) チームの費用: 一番上の欄に今月の合計とあなたの分、出典の文（精算済みの実額 か 概算）が出る。360px でもはみ出さない", async ({
+  page,
+}) => {
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  const cost = page.locator("[data-team-cost]");
+  await expect(cost).toBeVisible();
+  await expect(cost.locator("#tb-cost-h")).toHaveText("チームの費用（今月・UTC）");
+  // ボードの最初の区画
+  await expect(page.locator("[data-teamboard] > section").first()).toHaveAttribute(
+    "data-team-cost",
+    "",
+  );
+  const total = cost.locator('[data-team-cost-tile="total"]');
+  await expect(total.locator("dt")).toHaveText("チームの合計");
+  await expect(total.locator("dd")).toHaveText(/^\$\d/);
+  await expect(cost.locator('[data-team-cost-tile="mine"] dd')).toHaveText(/^\$\d/);
+  // 出典の文: 台帳が集められたか、索引に戻ったかのどちらかが、文字で出る
+  const source = cost.locator("[data-team-cost-source]");
+  await expect(source).toHaveText(
+    /^(精算済みの実額|概算: 台帳を集められなかったため、タスクの記録から計算)$/,
+  );
+  await expect(cost).toHaveAttribute("data-source", /^(ledger|index)$/);
+  await page.setViewportSize({ width: 360, height: 800 });
+  await expect(cost).toBeVisible();
+  await expectNoHorizontalScroll(page);
+});
+
+test("(TB13b) チームの費用: 出典が index（概算）のとき、360px でも「概算」の文が見え、横にはみ出さない", async ({
+  page,
+}) => {
+  await pinGeneratedAt(page, {
+    mutate: (body) => {
+      body.month.budget_actual.source = "index";
+    },
+  });
+  await page.setViewportSize({ width: 360, height: 800 });
+  await loginAs(page, s.users.alice);
+  await openTeam(page);
+  const cost = page.locator("[data-team-cost]");
+  await expect(cost).toHaveAttribute("data-source", "index");
+  const note = cost.locator('[data-team-cost-source="index"]');
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("概算");
+  await expectNoHorizontalScroll(page);
+  // 文の要素の右端が画面内（nowrap で 1 行に伸びていない）
+  const m = await note.evaluate((el) => ({
+    right: el.getBoundingClientRect().right,
+    ws: getComputedStyle(el.closest("[data-team-cost]") as Element).whiteSpace,
+  }));
+  expect(m.right).toBeLessThanOrEqual(360);
+  expect(m.ws).not.toBe("nowrap");
+});
+
 test("(TB9) 今月の費用: 見出しに今月、閲覧者が先頭で人ごとに 1 行、割合とペースが文字でも分かる", async ({
   page,
 }) => {

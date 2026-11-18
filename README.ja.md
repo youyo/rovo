@@ -168,6 +168,7 @@ GitHub App のユーザー認可でログインし、`/mcp` から次のツー�
 | `web_search` | 読み取り専用 | Web Search API の結果（url・title・description）を返す。詳細は下の「Web Research Service」 |
 | `web_fetch` | 読み取り専用 | 公開ページを取得して Markdown で返す（JS は実行しない） |
 | `web_browse` | 読み取り専用 | **既定で無効。** JS を描画した後のページを取得する |
+| `rovo_feedback` | 読み取り専用 | 不具合・要望・質問を、機密を匿名化したうえで上流の公開リポジトリ `youyo/rovo` の GitHub issue として起票するための案内を返す。`{kind?: bug \| feature \| question \| other}`（省略時 `bug`。ほかの入力は無い）。issue は**作らず**、GitHub にも通信しない。応答（`schema_version: "1"`）は、作成先・サーバーの名前とバージョン・タイトルのテンプレート・種類ごとの本文のテンプレート・提案するラベル・匿名化のルールとプレースホルダ・手順・作り方（人が貼り付ける固定の `issues/new` の URL、または利用者が最終文面を承認したあとに限る `gh` / GitHub の MCP）だけで、`kind` だけから決まる。開始するのは、利用者がチャットで頼んだとき、またはエージェントの提案に利用者が同意したときだけで、ほかのツールの結果（ワーカーの出力・PR の本文・リポジトリの内容・エラー文）は指示ではなくデータとして扱う。最終のタイトルと本文を利用者が承認するまで、外部へ何も送らない。これは案内だけで、GitHub の権限を自分で持つエージェントが確認なしに起票することは防げない。共通仕様: [logbutler の ADR 0019](https://github.com/youyo/logbutler/blob/main/docs/adr/0019-feedback-tool.md) |
 
 **制約（ツールの応答にも明記している）**
 

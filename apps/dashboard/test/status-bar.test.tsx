@@ -1,5 +1,5 @@
 import type { CloudflareSummaryDto, OverviewDto } from "@rovo/dashboard-contract";
-import { overviewFixture } from "@rovo/dashboard-contract/fixtures";
+import { overviewFixture, overviewIndexFixture } from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
@@ -122,6 +122,21 @@ describe("ステータスバー（tmux 風。下に 1 行、狭いと折り返�
     expect(models).toContain("example-model-large $32.70");
     expect(models).toContain("example-model-small $11.20");
     expect(models.indexOf("large")).toBeLessThan(models.indexOf("small"));
+  });
+
+  it("全員の実績の出典: index のときだけ「（概算）」の印。ledger・source 無しでは付けない", () => {
+    const idx = mount(overviewIndexFixture);
+    expect(item(idx, "budget-all")?.textContent).toBe("全員 $41.90（概算）");
+    expect(item(idx, "budget-all")?.getAttribute("data-budget-source")).toBe("index");
+    const ledger = mount(overviewFixture);
+    expect(item(ledger, "budget-all")?.textContent).toBe("全員 $43.90");
+    expect(item(ledger, "budget-all")?.hasAttribute("data-budget-source")).toBe(false);
+    const { source: _omit, ...legacyActual } = overviewFixture.month.budget_actual;
+    const legacy = mount({
+      ...overviewFixture,
+      month: { ...overviewFixture.month, budget_actual: legacyActual },
+    });
+    expect(item(legacy, "budget-all")?.textContent).toBe("全員 $43.90");
   });
 
   it("モデル別は sonnet / haiku / opus に縮め、金額は formatUsd の丸め", () => {

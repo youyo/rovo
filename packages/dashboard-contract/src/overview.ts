@@ -148,6 +148,11 @@ export type BudgetMeDto = z.infer<typeof BudgetMeDtoSchema>;
 export const BudgetActualDtoSchema = z.strictObject({
   spent_usd: usdSchema,
   estimated_usd: usdSchema,
+  /**
+   * 合計の出典。`ledger` = 各利用者の台帳（精算済みの実額）、`index` = 台帳を集められず、
+   * 索引（タスクと consult の記録）から計算した概算。古い gateway の応答には無い（任意）。
+   */
+  source: z.enum(["ledger", "index"]).optional(),
 });
 export type BudgetActualDto = z.infer<typeof BudgetActualDtoSchema>;
 

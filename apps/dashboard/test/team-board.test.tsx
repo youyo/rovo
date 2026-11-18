@@ -1,5 +1,9 @@
 import type { OverviewDto, VisibleTaskDto, WaitingDto } from "@rovo/dashboard-contract";
-import { overviewFixture, waitingFixture } from "@rovo/dashboard-contract/fixtures";
+import {
+  overviewFixture,
+  overviewIndexFixture,
+  waitingFixture,
+} from "@rovo/dashboard-contract/fixtures";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -208,6 +212,121 @@ describe("チームボード: 英語・漏れ", () => {
   });
 });
 
+describe("チームボード: チームの費用（今月・UTC。合計と出典）", () => {
+  const MID_MONTH = "2026-10-16T00:00:00.000Z";
+  const withActual = (
+    base: OverviewDto,
+    actual: Partial<OverviewDto["month"]["budget_actual"]> & { source?: undefined },
+    generated_at = MID_MONTH,
+  ): OverviewDto => ({
+    ...base,
+    generated_at,
+    month: { ...base.month, budget_actual: { ...base.month.budget_actual, ...actual } },
+  });
+  const noSource = (d: OverviewDto): OverviewDto => {
+    const { source: _omit, ...rest } = d.month.budget_actual;
+    return { ...d, month: { ...d.month, budget_actual: rest } };
+  };
+  const cost = (c: HTMLElement) => c.querySelector("[data-team-cost]") as HTMLElement;
+  const tile = (c: HTMLElement, k: string) =>
+    cost(c).querySelector(`[data-team-cost-tile="${k}"]`) as HTMLElement | null;
+
+  it("チームボードの一番上。見出しは「チームの費用（今月・UTC）」で、section は見出しに結びつく", () => {
+    const c = mount({ data: withActual(overviewFixture, {}) });
+    const first = c.querySelector("section.teamboard > section") as HTMLElement;
+    expect(first).toBe(cost(c));
+    expect(first.getAttribute("aria-labelledby")).toBe("tb-cost-h");
+    expect(text(c.querySelector("#tb-cost-h"))).toBe("チームの費用（今月・UTC）");
+    const en = mount({ data: withActual(overviewFixture, {}) }, inEn);
+    expect(text(en.querySelector("#tb-cost-h"))).toBe("Team cost (this month, UTC)");
+  });
+
+  it("区画のクラスは、行ごとの費用の span 用の .tb-cost（mono・nowrap）と衝突しない", () => {
+    const c = mount({ data: withActual(overviewFixture, {}) });
+    expect(cost(c).classList.contains("tb-cost")).toBe(false);
+    expect(cost(c).classList.contains("tb-section")).toBe(true);
+    // 既存の .tb-cost は人ごとの行の費用の span だけ
+    for (const e of c.querySelectorAll(".tb-cost")) expect(e.tagName).toBe("SPAN");
+  });
+
+  it("合計は dl の項目（dt と dd）。budget_actual.spent_usd を大きな数字で、あなたの分は budget.spent_usd", () => {
+    const c = mount({ data: withActual(overviewFixture, {}) });
+    const dl = cost(c).querySelector("dl") as HTMLElement;
+    expect(dl).not.toBeNull();
+    const total = tile(c, "total") as HTMLElement;
+    expect(text(total.querySelector("dt"))).toBe("チームの合計");
+    expect(text(total.querySelector("dd"))).toBe("$43.90");
+    expect(total.querySelector("dd")?.classList.contains("tb-cost-big")).toBe(true);
+    const mine = tile(c, "mine") as HTMLElement;
+    expect(text(mine.querySelector("dt"))).toBe("あなたの分");
+    expect(text(mine.querySelector("dd"))).toBe("$11.40");
+    const en = mount({ data: withActual(overviewFixture, {}) }, inEn);
+    expect(text(tile(en, "total")?.querySelector("dt"))).toBe("Team total");
+    expect(text(tile(en, "mine")?.querySelector("dt"))).toBe("Your share");
+  });
+
+  it("source が ledger: 「精算済みの実額」。data 属性は ledger", () => {
+    const c = mount({ data: withActual(overviewFixture, {}) });
+    expect(cost(c).getAttribute("data-source")).toBe("ledger");
+    const note = cost(c).querySelector("[data-team-cost-source]") as HTMLElement;
+    expect(note.getAttribute("data-team-cost-source")).toBe("ledger");
+    expect(text(note)).toBe("精算済みの実額");
+    expect(note.classList.contains("soft")).toBe(true);
+    const en = mount({ data: withActual(overviewFixture, {}) }, inEn);
+    expect(text(en.querySelector("[data-team-cost-source]"))).toBe("Settled actual amount");
+  });
+
+  it("source が index: 台帳を集められず記録から計算した概算と分かる文。data 属性で区別できる", () => {
+    const c = mount({ data: withActual(overviewIndexFixture, {}) });
+    expect(cost(c).getAttribute("data-source")).toBe("index");
+    const note = cost(c).querySelector("[data-team-cost-source]") as HTMLElement;
+    expect(note.getAttribute("data-team-cost-source")).toBe("index");
+    expect(text(note)).toBe("概算: 台帳を集められなかったため、タスクの記録から計算");
+    expect(text(tile(c, "total")?.querySelector("dd"))).toBe("$41.90");
+    const en = mount({ data: withActual(overviewIndexFixture, {}) }, inEn);
+    expect(text(en.querySelector("[data-team-cost-source]"))).toMatch(/^Estimate: /);
+  });
+
+  it("source が無い古い応答: 出典の文も data 属性も出さない（合計は出す）", () => {
+    const c = mount({ data: noSource(withActual(overviewFixture, {})) });
+    expect(cost(c).querySelector("[data-team-cost-source]")).toBeNull();
+    expect(cost(c).hasAttribute("data-source")).toBe(false);
+    expect(text(tile(c, "total")?.querySelector("dd"))).toBe("$43.90");
+  });
+
+  it("推定が 0 より大きければ「うち推定 $x」。0 なら出さない", () => {
+    const c = mount({ data: withActual(overviewFixture, {}) });
+    expect(text(cost(c).querySelector("[data-team-cost-estimated]"))).toBe("うち推定 $0.40");
+    const en = mount({ data: withActual(overviewFixture, {}) }, inEn);
+    expect(text(en.querySelector("[data-team-cost-estimated]"))).toBe("Includes $0.40 estimated");
+    const zero = mount({ data: withActual(overviewFixture, { estimated_usd: 0 }) });
+    expect(cost(zero).querySelector("[data-team-cost-estimated]")).toBeNull();
+  });
+
+  it("月末の見込み: チームの合計を経過日数で延ばす（上限なし。「超過」の文は出さない）", () => {
+    // 15 日経過 / 31 日: 43.90 * 31 / 15 = 90.7267
+    const c = mount({ data: withActual(overviewFixture, {}) });
+    const pace = tile(c, "pace") as HTMLElement;
+    expect(text(pace.querySelector("dt"))).toBe("月末の見込み");
+    expect(text(pace.querySelector("dd"))).toBe("$90.73");
+    expect(text(cost(c))).not.toContain("超える");
+    const en = mount({ data: withActual(overviewFixture, {}) }, inEn);
+    expect(text(tile(en, "pace")?.querySelector("dt"))).toBe("Projected by month end");
+  });
+
+  it("月の初日は見込みを出さない（既存のペースと同じ）。合計とあなたの分は出る", () => {
+    const c = mount({ data: withActual(overviewFixture, {}, "2026-10-01T12:00:00.000Z") });
+    expect(tile(c, "pace")).toBeNull();
+    expect(tile(c, "total")).not.toBeNull();
+    expect(tile(c, "mine")).not.toBeNull();
+  });
+
+  it("過去の日を見ていても出る（月の値）", () => {
+    const c = mount({ data: withActual(overviewFixture, {}), isToday: false });
+    expect(text(tile(c, "total")?.querySelector("dd"))).toBe("$43.90");
+  });
+});
+
 describe("チームボード: 今月の費用（UTC・人ごと）", () => {
   const data: OverviewDto = {
     ...overviewFixture,
@@ -226,7 +345,7 @@ describe("チームボード: 今月の費用（UTC・人ごと）", () => {
   it("リポジトリ別の下に出る。1 行 1 人・バー・額 / 上限・割合・ペース（文字と記号）", () => {
     const c = mount({ data }, inEn);
     const sections = [...c.querySelectorAll("section.tb-section h2")].map((h) => text(h));
-    expect(sections[2]).toContain("This month (UTC)");
+    expect(sections[3]).toContain("This month (UTC)");
     const bob = c.querySelector('li.tb-month-row[data-login="bob-example"]') as HTMLElement;
     expect(bob.querySelector(".tb-month-bar")).not.toBeNull();
     expect(text(bob)).toContain("$60.00");
@@ -282,10 +401,10 @@ describe("チームボード: 成果の推移（直近 14 日）", () => {
     },
   });
 
-  it("4 つ目の区画。並びは いま → リポジトリ別 → 今月 → 成果の推移", () => {
+  it("5 つ目の区画。並びは チームの費用 → いま → リポジトリ別 → 今月 → 成果の推移", () => {
     const c = mount({ data: withFlow() });
     const ids = [...c.querySelectorAll("section.tb-section h2")].map((h) => h.id);
-    expect(ids).toEqual(["tb-people-h", "tb-repos-h", "tb-month-h", "tb-flow-h"]);
+    expect(ids).toEqual(["tb-cost-h", "tb-people-h", "tb-repos-h", "tb-month-h", "tb-flow-h"]);
     expect(text(c.querySelector("#tb-flow-h"))).toContain("14");
   });
 

@@ -20,7 +20,7 @@ import {
 } from "../../src/dashboard/api";
 import { handleDashboard } from "../../src/dashboard/serve";
 import { SESSION_COOKIE, sealSession } from "../../src/dashboard/session";
-import { DIRECTORY_NAME, type TaskIndexSnapshot } from "../../src/directory/types";
+import { DIRECTORY_NAME, MAX_OWNER_IDS, type TaskIndexSnapshot } from "../../src/directory/types";
 import { ulid } from "../../src/tasks/ulid";
 import { clearTaskAlarms, createTask, runToCompleted } from "./pr-helpers";
 
@@ -510,6 +510,8 @@ describe("overview の consult（D9。M3b の索引）", () => {
     // 閲覧者の台帳 12.5 + 7 + 3。estimated は 0.5 + 2 + 0
     expect(dto.month.budget_actual.spent_usd).toBeCloseTo(22.5);
     expect(dto.month.budget_actual.estimated_usd).toBeCloseTo(2.5);
+    // 台帳を集められたので、出典は ledger
+    expect(dto.month.budget_actual.source).toBe("ledger");
     // 利用者が 1 人なら、全員の実績 = あなたの使った額
     const solo = newViewer([newRepoId()]);
     const soloDto = OverviewDtoSchema.parse((await api(solo, overviewPath())).json());
@@ -596,6 +598,24 @@ describe("overview の consult（D9。M3b の索引）", () => {
     const r = await api(v, overviewPath());
     expect(r.status).toBe(200);
     const dto = OverviewDtoSchema.parse(r.json());
+    expect(dto.month.budget_actual.spent_usd).toBeCloseTo(
+      dto.month.task_cost_usd + dto.models.reduce((a, m) => a + m.consult_cost_usd, 0),
+    );
+    // 索引に戻ったので、出典は index
+    expect(dto.month.budget_actual.source).toBe("index");
+  });
+
+  it("利用者が多すぎて（truncated）台帳を集められないときも、索引の費用に戻り、出典は index", async () => {
+    const v = newViewer([newRepoId()]);
+    for (let i = 0; i <= MAX_OWNER_IDS; i++)
+      await seedConsult({ owner_id: v.uid + 9000 + i, cost_micro: 1_000_000 });
+    v.ledgers[v.uid + 9000] = { spent_usd: 100, estimated_usd: 0 };
+    const r = await api(v, overviewPath());
+    expect(r.status).toBe(200);
+    const dto = OverviewDtoSchema.parse(r.json());
+    // 台帳は 1 つも読まない（諦める）。索引の費用 = タスク + consult の合計
+    expect(v.ledgerCalls).toHaveLength(0);
+    expect(dto.month.budget_actual.source).toBe("index");
     expect(dto.month.budget_actual.spent_usd).toBeCloseTo(
       dto.month.task_cost_usd + dto.models.reduce((a, m) => a + m.consult_cost_usd, 0),
     );

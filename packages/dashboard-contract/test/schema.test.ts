@@ -8,6 +8,7 @@ import {
   cloudflareSummaryFixture,
   cloudflareSummaryWithEstimateFixture,
   overviewFixture,
+  overviewIndexFixture,
   taskDetailRunningFixture,
   taskEventsFixture,
 } from "../src/fixtures";
@@ -39,6 +40,28 @@ describe("budget の monthly_budget_usd（月の上限）", () => {
     const legacy = clone(overviewFixture);
     delete legacy.budget.monthly_budget_usd;
     expect(ok(OverviewDtoSchema, legacy)).toBe(true);
+  });
+});
+
+describe("budget_actual.source（全員の実績の出典）", () => {
+  it("fixtures は ledger と index の両方の例を持ち、どちらもスキーマを通る", () => {
+    expect(overviewFixture.month.budget_actual.source).toBe("ledger");
+    expect(overviewIndexFixture.month.budget_actual.source).toBe("index");
+    expect(ok(OverviewDtoSchema, overviewFixture)).toBe(true);
+    expect(ok(OverviewDtoSchema, overviewIndexFixture)).toBe(true);
+  });
+  it("source が無い古い応答も通る", () => {
+    const legacy = clone(overviewFixture);
+    delete legacy.month.budget_actual.source;
+    expect("source" in legacy.month.budget_actual).toBe(false);
+    expect(ok(OverviewDtoSchema, legacy)).toBe(true);
+  });
+  it("ledger / index 以外の値は弾く", () => {
+    for (const bad of ["estimate", "", "LEDGER", null, 1]) {
+      const dto = clone(overviewFixture) as unknown as { month: { budget_actual: object } };
+      dto.month.budget_actual = { ...dto.month.budget_actual, source: bad };
+      expect(ok(OverviewDtoSchema, dto), String(bad)).toBe(false);
+    }
   });
 });
 

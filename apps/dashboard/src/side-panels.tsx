@@ -31,6 +31,8 @@ export function BudgetPanel(props: { data: OverviewDto }) {
     periodEnd: month.period.end,
     nowMs: Date.parse(props.data.generated_at),
   });
+  // 全員の実績は、台帳を集められず索引から計算したとき（source が index）だけ概算の印を付ける
+  const approx = month.budget_actual.source === "index";
   const rows = [
     { key: "spent", name: t("budget.spent"), value: formatUsd(budget.spent_usd, t) },
     { key: "remaining", name: t("budget.remaining"), value: formatUsd(budget.remaining_usd, t) },
@@ -39,7 +41,13 @@ export function BudgetPanel(props: { data: OverviewDto }) {
       name: t("budget.limit"),
       value: limit === null ? t("common.unknown") : formatUsd(limit, t),
     },
-    { key: "all", name: t("budget.all"), value: formatUsd(month.budget_actual.spent_usd, t) },
+    {
+      key: "all",
+      name: t("budget.all"),
+      value: approx
+        ? t("budget.allApprox", { amount: formatUsd(month.budget_actual.spent_usd, t) })
+        : formatUsd(month.budget_actual.spent_usd, t),
+    },
   ];
   return (
     <section className="panel" data-budget="month" aria-labelledby="budget-month-h">
@@ -51,6 +59,7 @@ export function BudgetPanel(props: { data: OverviewDto }) {
             key={r.key}
             className={r.key === "all" ? "budget-row budget-row--all" : "budget-row"}
             data-budget-row={r.key}
+            data-budget-source={r.key === "all" && approx ? "index" : undefined}
           >
             <dt>{r.name}</dt>
             <dd className="budget-value">{r.value}</dd>

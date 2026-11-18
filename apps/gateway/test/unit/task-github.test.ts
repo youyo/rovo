@@ -1715,11 +1715,21 @@ describe("積み足し（continue_task_id。docs/specs/continue-task.md）: 作�
       const root = await rootWithPull();
       const c = await continued(factsOf(root), root.head);
       const copy = await gl(c.stub);
-      app().setFault({ pattern: "^GET /repos/acme/widgets/git/ref/heads/", status: 503, count: 1 });
+      // 障害は、このテストのブランチと PR だけに当てる。前のテストのタスク（終了処理の再試行が残るもの）は、
+      // 実時間の alarm で GET /pulls/<自分の PR> を呼ぶので、どの PR にも合う形だと 1 回分の障害を横取りされる
+      app().setFault({
+        pattern: `^GET /repos/acme/widgets/git/ref/heads/${root.branch}$`,
+        status: 503,
+        count: 1,
+      });
       await c.stub.advance();
       expect((await status(c.stub)).status).toBe("CREATING");
       expect((await gl(c.stub)).setup_retry_at as number).toBeGreaterThan(0);
-      app().setFault({ pattern: "^GET /repos/acme/widgets/pulls/\\d+$", status: 502, count: 1 });
+      app().setFault({
+        pattern: `^GET /repos/acme/widgets/pulls/${root.pr}$`,
+        status: 502,
+        count: 1,
+      });
       await warp(c.stub, 120_000);
       await runDurableObjectAlarm(c.stub);
       expect((await status(c.stub)).status).toBe("CREATING");

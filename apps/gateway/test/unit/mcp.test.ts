@@ -71,7 +71,7 @@ async function user(login: string) {
 }
 
 describe("/mcp ツール一覧", () => {
-  it("19 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
+  it("20 のツールだけを公開し、Phase 2 の挙動を説明に書く", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
@@ -80,6 +80,7 @@ describe("/mcp ツール一覧", () => {
       "consult",
       "consult_result",
       "models_list",
+      "rovo_feedback",
       "sandbox_instances_list",
       "task_answer",
       "task_cancel",
@@ -3118,9 +3119,11 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
     consult: WRITE(false, false, true),
     // 仕様（consult-pending.md）の分類: 読み取り専用。答えを読むだけで、状態を変えない
     consult_result: READ(false),
+    // 利用者の決定: 起票の案内を返すだけ（issue は作らず、外部へ通信しない）。読み取り専用・冪等・外部なし
+    rovo_feedback: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   };
 
-  it("20 ツール（web_browse 有効）すべてに title と annotations があり、分類が決定どおり", async () => {
+  it("21 ツール（web_browse 有効）すべてに title と annotations があり、分類が決定どおり", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props, withBrowse(fakeWeb().port));
     const { tools } = await client.listTools();
@@ -3140,11 +3143,11 @@ describe("tools/list の annotations（読み取り専用 / 書き込みの分�
     await client.close();
   });
 
-  it("web_browse が無効（既定）なら 19 ツールで、それぞれに annotations がある", async () => {
+  it("web_browse が無効（既定）なら 20 ツールで、それぞれに annotations がある", async () => {
     const u = await user("alice");
     const client = await connect(createApiApp(), u.props);
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(19);
+    expect(tools).toHaveLength(20);
     for (const t of tools) {
       expect(t.annotations, t.name).toMatchObject(EXPECTED[t.name] as Hints);
     }

@@ -1,14 +1,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { buildFeedback } from "../../src/feedback/guide";
 import {
   addMember,
   admin,
   baseUrl,
   bodyOf,
   emitAgentEvent,
+  githubUrl,
   installApp,
   login,
   newUser,
+  ORG,
   startArgs,
+  TEAM,
   waitForResult,
 } from "./helpers";
 
@@ -655,6 +659,94 @@ describe("tools/list の task_start（同じ PR への積み足し。docs/specs/
       expect(start?.inputSchema.required).not.toContain("repository");
       expect(start?.inputSchema.required).not.toContain("base_ref");
       expect(start?.description).toContain("continue_task_id");
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("rovo_feedback（GitHub issue の起票案内。実 Worker・MCP 経由）", () => {
+  const kinds = ["bug", "feature", "question", "other"] as const;
+
+  it("tools/list に出て、入力スキーマは kind だけ。annotations は readOnly・idempotent・openWorld なし", async () => {
+    const { client } = await memberClient("fb-list");
+    try {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "rovo_feedback");
+      expect(t).toBeDefined();
+      expect(t?.annotations).toEqual({
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      });
+      const props = t?.inputSchema.properties as Record<string, unknown>;
+      expect(Object.keys(props)).toEqual(["kind"]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("4 種類と省略で呼ぶと、応答が buildFeedback(kind) と完全に一致する。issue は作られない", async () => {
+    const { client } = await memberClient("fb-call");
+    try {
+      const omitted = await client.callTool({ name: "rovo_feedback", arguments: {} });
+      expect(omitted.isError).toBeFalsy();
+      expect(bodyOf(omitted)).toEqual(buildFeedback("bug"));
+      for (const kind of kinds) {
+        const r = await client.callTool({ name: "rovo_feedback", arguments: { kind } });
+        expect(r.isError, kind).toBeFalsy();
+        expect(bodyOf(r), kind).toEqual(buildFeedback(kind));
+      }
+      const bad = await client.callTool({ name: "rovo_feedback", arguments: { kind: "nope" } });
+      expect(bad.isError).toBe(true);
+      expect(bodyOf(bad).code).toBe("invalid_input");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("別々の 2 人の利用者（片方だけがタスクを持つ）で応答が完全に一致する", async () => {
+    const alice = newUser("fb-alice");
+    const bob = newUser("fb-bob");
+    await addMember(alice);
+    await addMember(bob);
+    await installApp();
+    const ca = await login(alice);
+    const cb = await login(bob);
+    try {
+      // alice は自分のタスクを持つ（応答が利用者の状態に依存しないことを確かめる）
+      await ca.callTool({ name: "task_start", arguments: startArgs("fb-state") });
+      for (const kind of kinds) {
+        const ra = await ca.callTool({ name: "rovo_feedback", arguments: { kind } });
+        const rb = await cb.callTool({ name: "rovo_feedback", arguments: { kind } });
+        expect(JSON.stringify(bodyOf(ra)), kind).toBe(JSON.stringify(bodyOf(rb)));
+        expect(bodyOf(ra), kind).toEqual(buildFeedback(kind));
+      }
+    } finally {
+      await Promise.all([ca.close(), cb.close()]);
+    }
+  });
+
+  it("E2E の env にある値（Worker・偽 GitHub のホスト・org・team・利用者のログイン）が応答に現れない", async () => {
+    const { user, client } = await memberClient("fb-sentinel");
+    try {
+      const sentinels = [
+        new URL(baseUrl).host,
+        new URL(githubUrl).host,
+        baseUrl,
+        githubUrl,
+        ORG,
+        `${ORG}/${TEAM}`,
+        user.login,
+        String(user.id),
+        "acme/widgets",
+      ];
+      for (const kind of kinds) {
+        const text = JSON.stringify(
+          bodyOf(await client.callTool({ name: "rovo_feedback", arguments: { kind } })),
+        );
+        for (const s of sentinels) expect(text, `${kind}: ${s}`).not.toContain(s);
+      }
     } finally {
       await client.close();
     }

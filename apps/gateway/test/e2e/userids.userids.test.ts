@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { buildFeedback } from "../../src/feedback/guide";
 import {
   admin,
   auditRecords,
@@ -79,5 +80,21 @@ describe("ALLOWED_USER_IDS だけの構成", () => {
     const reqs = await admin.requests();
     expect(reqs.some((r) => r.path.includes("/memberships/"))).toBe(false);
     expect(JSON.stringify(await auditRecords())).not.toContain(outsider.login);
+  });
+});
+
+describe("rovo_feedback（env の異なる 2 構成で、応答が同じ純関数の結果と一致する）", () => {
+  it("4 種類の応答が buildFeedback(kind) と完全に一致する（通常の構成の E2E と同じ値）", async () => {
+    await admin.addUser(allowed);
+    const client = await login(allowed);
+    try {
+      for (const kind of ["bug", "feature", "question", "other"] as const) {
+        const r = await client.callTool({ name: "rovo_feedback", arguments: { kind } });
+        expect(r.isError, kind).toBeFalsy();
+        expect(bodyOf(r), kind).toEqual(buildFeedback(kind));
+      }
+    } finally {
+      await client.close();
+    }
   });
 });

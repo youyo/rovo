@@ -7,9 +7,14 @@ import type { ToolAnnotations } from "@modelcontextprotocol/server";
  */
 type Entry = { title: string; annotations: ToolAnnotations };
 
-const read = (title: string, openWorldHint: boolean): Entry => ({
+// idempotentHint は、明示したツールだけに付く（既存の読み取り専用ツールの値は変えない）
+const read = (title: string, openWorldHint: boolean, idempotentHint?: boolean): Entry => ({
   title,
-  annotations: { readOnlyHint: true, openWorldHint },
+  annotations: {
+    readOnlyHint: true,
+    openWorldHint,
+    ...(idempotentHint === undefined ? {} : { idempotentHint }),
+  },
 });
 
 const write = (
@@ -32,6 +37,8 @@ export const TOOL_ANNOTATIONS = {
   web_search: read("Web search", true),
   web_fetch: read("Fetch web page", true),
   web_browse: read("Browse web page", true),
+  // 上流の公開リポジトリへ issue を起票するための案内を返すだけ（issue は作らず、外部へ通信もしない。kind だけで決まる固定の応答）
+  rovo_feedback: read("フィードバック（GitHub issue の起票案内）", false, true),
   // 書き込み
   task_start: write("Start task", {
     destructiveHint: false,

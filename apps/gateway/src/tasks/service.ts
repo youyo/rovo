@@ -83,6 +83,9 @@ export type ErrorCode =
   | "upstream_unavailable"
   // consult でモデルがリクエストの中身を拒否した（4xx）。待っても再試行しても直らない
   | "model_rejected"
+  // consult でモデルのプロバイダーの残高が切れた（OpenAI の insufficient_quota / credit_balance_exhausted）。
+  // プロバイダーのアカウントに入金されるまで直らない。web の日次上限（quota_exceeded）・rovo の月の枠（budget_exceeded）とは別
+  | "provider_quota_exhausted"
   // 指定したモデルのプロバイダーのキーが AI Gateway に登録されていない（D10b）。models_list の available を見て選び直す
   | "model_unavailable"
   | "invalid_cursor"

@@ -374,6 +374,70 @@ describe("AgentDO.consult", () => {
     });
   });
 
+  describe("プロバイダーの残高切れ（provider_quota_exhausted）", () => {
+    // 台本の api: "openai-responses" は、createAI の経路で OpenAI の response.failed から作られるメッセージと同じ形
+    // （形そのものは provider-quota.test.ts が実際の SSE で確かめる）
+    const quotaStep = (code: string, usage?: { input?: number; output?: number }) => ({
+      error: `${code}: You exceeded your current quota, please check your plan and billing details.`,
+      api: "openai-responses",
+      ...(usage ? { usage } : {}),
+    });
+
+    it("insufficient_quota / credit_balance_exhausted は provider_quota_exhausted。モデルは 1 回しか呼ばない。usage が 0 なら費用 0（見積もりの印なし）", async () => {
+      for (const code of ["insufficient_quota", "credit_balance_exhausted"]) {
+        const t = setup({ model: "openai/gpt-6-sol", budgetUsd: 0.5 });
+        await t.stub.setScript(t.request.messages[0]?.content ?? "", [quotaStep(code)]);
+        const r = await t.stub.consult(t.request);
+        expect(r, code).toMatchObject({
+          ok: false,
+          code: "provider_quota_exhausted",
+          costUsd: 0,
+        });
+        expect(r, code).not.toHaveProperty("costEstimated");
+        expect(t.seen.userTexts, code).toHaveLength(1);
+        // message は固定文と provider 名だけ（プロバイダーの生の文面は入れない）
+        if (r.ok) throw new Error("unexpected ok");
+        expect(r.message).toContain("openai");
+        expect(r.message).not.toContain("billing");
+        expect(r.message).not.toContain(code);
+      }
+    });
+
+    it("usage が報告されていれば、計算した額で精算する（見積もりの印なし）", async () => {
+      const t = setup({ model: "openai/gpt-6-sol" });
+      await t.stub.setScript(t.request.messages[0]?.content ?? "", [
+        quotaStep("insufficient_quota", { input: 1000, output: 0 }),
+      ]);
+      const r = await t.stub.consult(t.request);
+      expect(r).toMatchObject({ ok: false, code: "provider_quota_exhausted" });
+      expect(r.costUsd).toBeCloseTo(0.001, 9);
+      expect(r).not.toHaveProperty("costEstimated");
+    });
+
+    it("api が openai-responses でない・status がある・コードが違うときは今までどおり（model_error / model_rejected）", async () => {
+      const cases = [
+        { step: { error: "insufficient_quota: quota" }, code: "model_error" },
+        {
+          step: { error: "insufficient_quota: quota", api: "openai-responses", status: 429 },
+          code: "model_error",
+        },
+        {
+          step: { error: "credit balance is too low", api: "anthropic-messages", status: 400 },
+          code: "model_rejected",
+        },
+        { step: { error: "server_error: boom", api: "openai-responses" }, code: "model_error" },
+      ];
+      for (const c of cases) {
+        const t = setup({ model: "openai/gpt-6-sol" });
+        await t.stub.setScript(t.request.messages[0]?.content ?? "", [c.step]);
+        expect(await t.stub.consult(t.request), JSON.stringify(c.step)).toMatchObject({
+          ok: false,
+          code: c.code,
+        });
+      }
+    });
+  });
+
   describe("モデルの 4xx と 5xx の区別", () => {
     it("リクエストの中身の問題（400 など）は model_rejected（再試行しても直らない）。費用は実費", async () => {
       for (const status of [400, 401, 403, 404, 422]) {

@@ -28,6 +28,11 @@ export interface ScriptStep {
   status?: number;
   /** モデルの呼び出しの失敗を再現する（stopReason: error。usage があればそれまでの消費として報告する） */
   error?: string;
+  /**
+   * error と一緒に使う。失敗のメッセージの api（既定は scripted）。"openai-responses" と「<code>: <message>」の error で、
+   * OpenAI の response.failed（createAI の経路で作られる形。プロバイダーの残高切れの判定に使う）を再現する
+   */
+  api?: string;
   /** 署名つきの thinking のブロック（content の先頭に置く。thinking を持ち回れるかの確認用） */
   thinking?: { text: string; signature?: string; redacted?: boolean };
   /** 出力の上限で切れた応答を再現する（stopReason: length。道具の呼び出しがあっても length にする） */
@@ -232,6 +237,7 @@ export function createScriptedProvider(
         const failed: AssistantMessage = {
           ...message,
           content: [],
+          ...(step.api !== undefined ? { api: step.api } : {}),
           stopReason: "error",
           errorMessage: step.error,
           ...(step.status !== undefined

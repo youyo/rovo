@@ -140,11 +140,15 @@ export type ReviewMessage =
 
 /**
  * モデル 1 回の結果。truncated は出力の上限で切れた（JSON が閉じていない）こと。toolCalls はモデルが呼んだ道具。
- * 失敗: model_error（5xx など。再試行してよい）/ model_rejected（4xx。直らない）/ timeout / budget（予算に収まらない）
+ * 失敗: model_error（5xx など。再試行してよい）/ model_rejected（4xx。直らない）/
+ * provider_quota_exhausted（プロバイダーの残高切れ。入金されるまで直らない）/ timeout / budget（予算に収まらない）
  */
 export type ModelCallResult =
   | { ok: true; text: string; truncated: boolean; toolCalls?: ReviewToolCall[] }
-  | { ok: false; code: "model_error" | "model_rejected" | "timeout" | "budget" };
+  | {
+      ok: false;
+      code: "model_error" | "model_rejected" | "provider_quota_exhausted" | "timeout" | "budget";
+    };
 
 /**
  * レビューのモデルを呼ぶ口（AgentDO が AI Gateway と予算につなぐ。費用の計上もそちら。呼ぶ前に、それまでに使った額と残りを確かめる）。
@@ -162,6 +166,7 @@ export type ReviewFailureCode =
   | "diff_unavailable"
   | "model_error"
   | "model_rejected"
+  | "provider_quota_exhausted"
   | "timeout"
   | "budget"
   | "invalid_response"
@@ -235,7 +240,8 @@ function withoutToolBlocks(messages: ReviewMessage[]): ReviewMessage[] {
  * 上限 REVIEW_MAX_TOOL_ROUNDS 回、または道具の結果の累計が上限を超えたら、道具を外して 1 回だけ「JSON だけ」と求め、
  * それでも JSON にならなければ tool_rounds_exceeded）。
  * 1 回の呼び出しの失敗（model_error / timeout）は同じ依頼をもう 1 回、形の違う答えは「JSON だけを返す」と 1 回だけ再要求する
- * （再要求では道具を使わせない）。4xx（model_rejected）と予算不足（budget）は再試行しない。
+ * （再要求では道具を使わせない）。4xx（model_rejected）・プロバイダーの残高切れ（provider_quota_exhausted）・予算不足（budget）は
+ * 再試行しない。
  * 予算は呼び出し側（ModelCaller）が各呼び出しの前に確かめ、足りなければ budget を返す。
  */
 export async function runReviewModel(
@@ -267,7 +273,14 @@ export async function runReviewModel(
   /** 失敗（model_error / timeout）なら同じ依頼をもう 1 回 */
   const callWithRetry = async (req: Parameters<ModelCaller["call"]>[0]) => {
     const a = await caller.call(req);
-    if (a.ok || a.code === "model_rejected" || a.code === "budget") return a;
+    if (
+      a.ok ||
+      a.code === "model_rejected" ||
+      a.code === "provider_quota_exhausted" ||
+      a.code === "budget"
+    ) {
+      return a;
+    }
     return caller.call(req);
   };
 

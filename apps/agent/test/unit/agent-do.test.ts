@@ -262,6 +262,87 @@ describe("モデルの 4xx と 5xx の区別（タスク）", () => {
     expect(done(await fx.stub.getResult()).reason).toMatch(/^model_rejected/);
   });
 
+  it("プロバイダーの残高切れ（OpenAI の response.failed の insufficient_quota / credit_balance_exhausted）は、終端の reason が provider_quota_exhausted。この 2 つの文面では pi-durable の Harness の再試行に当たらず、モデルは 1 回だけ呼ぶ", async () => {
+    // 注: Harness の再試行は pi-ai の isRetryableAssistantError（errorMessage の正規表現）で決まる。insufficient_quota は
+    // 再試行しない側の一覧にあるが、credit_balance_exhausted は無く、message の本文が再試行を誘う文（"try your request again" など）
+    // なら Harness が最大 3 回（2・4・8 秒後）再試行する（このテストはその場合を扱わない）
+    const cases = [
+      "insufficient_quota: You exceeded your current quota, please check your plan and billing details.",
+      "credit_balance_exhausted: Your credit balance is exhausted.",
+    ];
+    for (const [i, error] of cases.entries()) {
+      const fx = newFixture(`quota-${i}`, [
+        { error, api: "openai-responses" },
+        { error, api: "openai-responses" },
+        { error, api: "openai-responses" },
+        { error, api: "openai-responses" },
+      ]);
+      await fx.stub.start(makeSpec(`quota-${i}`));
+      expect(await waitForTerminal(fx), error).toBe("failed");
+      const reason = done(await fx.stub.getResult()).reason ?? "";
+      expect(reason, error).toMatch(/^provider_quota_exhausted: /);
+      // プロバイダーの生の文面は reason に入れない
+      expect(reason, error).not.toContain("quota,");
+      expect(reason, error).not.toContain("credit balance");
+      expect(fx.modelCalls.count, error).toBe(1);
+    }
+  });
+
+  it("残高切れの本文が再試行を誘う文面（pi-ai の正規表現に当たる）でも、Harness は再試行しない。上流は 1 回だけで、終端の reason は provider_quota_exhausted", async () => {
+    const error =
+      "credit_balance_exhausted: Your credit balance is exhausted. Please try your request again later.";
+    const fx = newFixture(
+      "quota-retry-text",
+      Array.from({ length: 6 }, () => ({ error, api: "openai-responses" })),
+    );
+    await fx.stub.start(makeSpec("quota-retry-text"));
+    // 再試行されると、再試行を使い切ってから終端になる（呼び出しは 4 回）。終端の時点の回数で見る
+    expect(await waitForTerminal(fx, 30_000)).toBe("failed");
+    expect(done(await fx.stub.getResult()).reason).toMatch(/^provider_quota_exhausted: /);
+    expect(fx.modelCalls.count).toBe(1);
+  }, 40_000);
+
+  it("残高切れでない一時的な失敗（再試行を誘う文面の model_error）は、今までどおり Harness が再試行する", async () => {
+    const error = "upstream service unavailable (503)";
+    const fx = newFixture(
+      "retry-not-quota",
+      Array.from({ length: 6 }, () => ({ error })),
+    );
+    await fx.stub.start(makeSpec("retry-not-quota"));
+    // 再試行の回数で見る（待ちの上限は打ち切りのためだけ）
+    await waitUntil(() => fx.modelCalls.count >= 2, 30_000);
+    expect(fx.modelCalls.count).toBeGreaterThanOrEqual(2);
+  }, 40_000);
+
+  it("残高切れの印（last_model_quota_exhausted）は、モデルを呼ぶ前のガード（preModelCall）で毎回消える。block・例外で終わる呼び出しのあとに古い印が残らない", async () => {
+    const fx = newFixture("quota-mark-reset", [report()]);
+    await fx.stub.start(makeSpec("quota-mark-reset"));
+    expect(await waitForTerminal(fx)).toBe("completed");
+    const after = await runInDO(fx.stub, async (inst) => {
+      const i = inst as unknown as {
+        store: { setMeta(k: string, v: unknown): void; meta<T>(k: string): T | undefined };
+        preModelCall(context: unknown): Promise<unknown>;
+      };
+      i.store.setMeta("last_model_quota_exhausted", true);
+      // 終端のタスクでは block を返す（onResult は呼ばれない経路）
+      expect(await i.preModelCall({ messages: [] })).toMatchObject({ block: expect.any(String) });
+      return i.store.meta<boolean>("last_model_quota_exhausted");
+    });
+    expect(after).toBe(false);
+  });
+
+  it("api が openai-responses でない（台本の既定）・status があるときは、同じ文でも今までどおり model_error", async () => {
+    for (const [i, step] of [
+      { error: "insufficient_quota: quota" },
+      { error: "insufficient_quota: quota", api: "openai-responses", status: 503 },
+    ].entries()) {
+      const fx = newFixture(`quota-not-${i}`, [step]);
+      await fx.stub.start(makeSpec(`quota-not-${i}`));
+      expect(await waitForTerminal(fx)).toBe("failed");
+      expect(done(await fx.stub.getResult()).reason).toMatch(/^model_error/);
+    }
+  });
+
   it("5xx・status なしは今までどおり model_error", async () => {
     for (const [i, status] of [503, undefined].entries()) {
       const fx = newFixture(`rej-5xx-${i}`, [

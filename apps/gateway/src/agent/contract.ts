@@ -169,7 +169,7 @@ export interface ReviewResultDto {
   suggestionCount: number;
   commands: ReviewCommandResultDto[];
   commandsUnavailable: boolean;
-  /** 飛ばした理由の固定コード（model_error / model_rejected / timeout / budget / invalid_response / tool_rounds_exceeded） */
+  /** 飛ばした理由の固定コード（model_error / model_rejected / provider_quota_exhausted / timeout / budget / invalid_response / tool_rounds_exceeded） */
   failure?: string;
   usage: ReviewUsageDto;
   /** worker_review の修正の回に入った（must_fix をワーカーに渡した）。直したかどうかは fixApplied */
@@ -488,7 +488,9 @@ export type ConsultErrorCode =
   | "invalid_request"
   | "model_error"
   /** モデルがリクエストの中身を拒否した（4xx。待っても再試行しても直らない）。model_error は再試行してよい失敗 */
-  | "model_rejected";
+  | "model_rejected"
+  /** モデルのプロバイダーの残高切れ（OpenAI の insufficient_quota / credit_balance_exhausted）。入金されるまで直らない */
+  | "provider_quota_exhausted";
 
 export type ConsultResult =
   | {

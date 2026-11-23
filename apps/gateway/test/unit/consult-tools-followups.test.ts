@@ -193,3 +193,38 @@ describe("途中の会話の件数（CONSULT_MAX_TRANSCRIPT）", () => {
     expect(CONSULT_MAX_TRANSCRIPT).toBe(64);
   });
 });
+
+describe("プロバイダーの残高切れ（provider_quota_exhausted）", () => {
+  it("途中の歩で残高切れなら、次の歩を頼まずに失敗を返す。モデルを呼んだ歩として数える（費用の確定で待つ件数）", async () => {
+    const seen: ConsultRequest[] = [];
+    const steps: ConsultResult[] = [
+      toolStep(1),
+      {
+        ok: false,
+        code: "provider_quota_exhausted",
+        message: "the model provider (openai) has no credit or quota left",
+        costUsd: 0,
+      },
+      okResult({ text: "should not be reached" }),
+    ];
+    const request: ConsultRequest = {
+      consultId: "consult-01HXXXXXXXXXXXXXXXXXXXXXXX",
+      userId: "1",
+      model: "openai/gpt-6-sol",
+      system: "s",
+      messages: [{ role: "user", content: "q" }],
+      budgetUsd: 1,
+    };
+    const out = await runConsultTools(
+      request,
+      ["web_search"],
+      deps(async (req) => {
+        seen.push(structuredClone(req));
+        return steps.shift() ?? okResult({ text: "exhausted" });
+      }),
+    );
+    expect(seen).toHaveLength(2);
+    expect(out.result).toMatchObject({ ok: false, code: "provider_quota_exhausted" });
+    expect(out.modelCalls).toBe(2);
+  });
+});

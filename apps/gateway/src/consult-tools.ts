@@ -35,7 +35,7 @@ import { callWebWithQuota } from "./web/tools";
  * - 上限・予算不足・日ごとの上限（渡した道具がすべて使えない）のどれかに当たったら、会話の道具のブロックを文字にたたみ、
  *   「道具を閉じた」旨の固定文を添えて最後の 1 歩を頼む（道具の定義の無い依頼に道具のブロックを残すと拒否するプロバイダーがある）
  * - web のエラー・日ごとの上限・知らない道具・引数の誤りは、エラーの結果としてモデルに返して続ける
- * - モデルの 5xx・時間切れは consult 全体の失敗、4xx は model_rejected
+ * - モデルの 5xx・時間切れは consult 全体の失敗、4xx は model_rejected、プロバイダーの残高切れは provider_quota_exhausted
  * - 費用は「各歩のモデルの実費 + web の回数 × 単価」。予約額を上限にする
  * 道具の結果の整形はワーカーと同じ（@rovo/web-format の formatWeb* と wrapUntrusted）。
  */
@@ -575,7 +575,13 @@ export async function runConsultTools(
     }
     if (!isConsultResult(r)) return outcome(r);
     if (!r.ok) {
-      if (r.code === "model_error" || r.code === "model_rejected") modelCalls++;
+      if (
+        r.code === "model_error" ||
+        r.code === "model_rejected" ||
+        r.code === "provider_quota_exhausted"
+      ) {
+        modelCalls++;
+      }
       // 道具を開いた途中の歩で入力が残りの予算に収まらない: 道具を閉じて最後の歩を頼む
       if (r.code === "input_too_large" && open && transcript.length > 0) {
         closed = "budget";

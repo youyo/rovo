@@ -78,7 +78,10 @@ import { type AgentPiHooks, createAgentExtension } from "./pi/extension";
 import {
   type CallVerdict,
   guardProvider,
+  isProviderQuotaExhausted,
   isRequestRejection,
+  providerOf,
+  providerQuotaMessage,
   upstreamStatus,
 } from "./pi/guard-provider";
 import {
@@ -725,9 +728,23 @@ export class AgentDO extends DurableObject<Env> {
         }),
       ) as ToolRegistration[];
       registry.install(createAgentExtension(sandboxTools, this.piHooks()));
+      const agent = this;
       return Harness.open(
         storage,
-        { models, registry, settings: { toolExecution: "sequential" } },
+        {
+          models,
+          registry,
+          settings: {
+            toolExecution: "sequential",
+            // Harness は再試行するかを決めるたびに settings.retry を読む（getter でよい）。直前のモデル呼び出しの結果が
+            // プロバイダーの残高切れ（noteModelResult が isProviderQuotaExhausted で付けた印）のときだけ、その失敗の
+            // 再試行を止める（入金されるまで直らない）。印は呼ぶ前（preModelCall）に毎回消え、結果で付け直すので、効くのは直前の
+            // 失敗の再試行の判断だけ。それ以外は既定の再試行のまま
+            get retry() {
+              return agent.lastModelQuotaExhausted() ? { enabled: false } : {};
+            },
+          },
+        },
         context,
       );
     },
@@ -794,13 +811,10 @@ export class AgentDO extends DurableObject<Env> {
 
   /**
    * 失敗したモデル呼び出しの上流のステータスを覚える（4xx = リクエストの中身の問題かどうかを、終端の reason に反映する）。
-   * 成功した呼び出しで消す。
+   * プロバイダーの残高切れ（isProviderQuotaExhausted）かどうかも、ステータスとは別の印（last_model_quota_exhausted）で覚える
+   * （response.failed はストリームの中の失敗で、ステータスが無い）。どちらも成功した呼び出しで消す。
    */
-  private noteModelResult(
-    message: { stopReason: string; usage?: AssistantMessage["usage"] } & Parameters<
-      typeof upstreamStatus
-    >[0],
-  ) {
+  private noteModelResult(message: AssistantMessage) {
     this.noteMissingUsage(message);
     this.noteCallBasis(message);
     try {
@@ -808,8 +822,18 @@ export class AgentDO extends DurableObject<Env> {
         "last_model_status",
         message.stopReason === "error" ? (upstreamStatus(message) ?? null) : null,
       );
+      this.store.setMeta("last_model_quota_exhausted", isProviderQuotaExhausted(message));
     } catch {
       // 記録の失敗でモデル呼び出しの結果を失わない
+    }
+  }
+
+  /** 直前のモデル呼び出しの結果がプロバイダーの残高切れだったか（noteModelResult の印。読めなければ偽） */
+  private lastModelQuotaExhausted(): boolean {
+    try {
+      return this.store.meta<boolean>("last_model_quota_exhausted") === true;
+    } catch {
+      return false;
     }
   }
 
@@ -1589,6 +1613,18 @@ export class AgentDO extends DurableObject<Env> {
     const { usage, costUsd } = step;
     if (step.kind === "error") {
       console.error("consult_model_error", step.stopReason);
+      // プロバイダーの残高切れ（入金されるまで直らない）。再試行を促さない別のコードで返す。message は固定文と provider 名だけ
+      // （プロバイダーの生の文面は入れない）。usage が 0 なら 0 で確定し（見積もりの印は付けない）、報告されていれば計算した額
+      if (step.quotaExhausted) {
+        const provider = providerOf(req.model);
+        console.error("consult_provider_quota_exhausted", provider);
+        return {
+          ok: false,
+          code: "provider_quota_exhausted",
+          message: providerQuotaMessage(provider),
+          costUsd: step.reported ? costUsd : 0,
+        };
+      }
       // 4xx（リクエストの中身の問題。待っても直らない）は別のコードで返す。HTTP の 4xx は生成の前に拒否された応答なので課金されない
       // （usage が無くても予約額では精算しない）。5xx・429・408・ステータスなし（ストリームの途中の失敗など）は従来どおり
       if (step.rejected) {
@@ -2275,14 +2311,17 @@ export class AgentDO extends DurableObject<Env> {
       // 停止の意図があれば、確定のトランザクションがそれを優先する
       if (this.stopIntents().length === 0 && status === "unanswered") {
         this.emit("error", { message: `model run ended: ${reason ?? "unknown"}` });
-        // 最後のモデル呼び出しが 4xx（リクエストの中身の問題）なら、待っても直らないので別の reason にする
+        // 最後のモデル呼び出しがプロバイダーの残高切れ・4xx（リクエストの中身の問題）なら、待っても直らないので別の reason にする
+        const quotaExhausted = this.lastModelQuotaExhausted();
         const rejected = isRequestRejection(
           this.store.meta<number | null>("last_model_status") ?? undefined,
         );
-        await this.finalize({
-          phase: "failed",
-          reason: `${rejected ? "model_rejected" : "model_error"}: ${reason ?? "unknown"}`,
-        });
+        const code = quotaExhausted
+          ? "provider_quota_exhausted"
+          : rejected
+            ? "model_rejected"
+            : "model_error";
+        await this.finalize({ phase: "failed", reason: `${code}: ${reason ?? "unknown"}` });
       } else {
         await this.finalize({ phase: "failed", reason: "no_completion_report" });
       }
@@ -3031,6 +3070,13 @@ export class AgentDO extends DurableObject<Env> {
 
   /** モデル呼び出しの直前。期限と予算を確かめ、払えなければ呼ばせない。 */
   private async preModelCall(context: unknown): Promise<CallVerdict> {
+    // 残高切れの印は「直前の呼び出しの結果」だけを表す。呼ぶ前に毎回消し、結果が出たら noteModelResult が付け直す
+    // （block・例外で終わる呼び出しは onResult を通らないので、消しておかないと古い印が次の再試行の判断に残る）
+    try {
+      this.store.setMeta("last_model_quota_exhausted", false);
+    } catch {
+      // 記録の失敗でモデル呼び出しを止めない
+    }
     const spec = this.spec();
     const maxTokens = this.overrides().maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     if (!spec) return { maxTokens, metadata: {} }; // タスクとして開始する前（M1 スパイク）
@@ -3896,6 +3942,12 @@ export class AgentDO extends DurableObject<Env> {
         }
         const { usage, costUsd, reported } = step;
         if (step.kind === "error") {
+          // プロバイダーの残高切れ: 再試行しない。usage が 0 なら 0 で数え（見積もりにしない）、報告されていれば計算した額
+          if (step.quotaExhausted) {
+            this.addReviewUsage({ ...usage, costUsd: reported ? costUsd : 0 }, false);
+            await this.refreshUsage().catch(() => undefined);
+            return { ok: false, code: "provider_quota_exhausted" };
+          }
           // 4xx は生成の前に拒否された応答なので課金されない（usage が無くても見積額では数えない）
           if (step.rejected) {
             this.addReviewUsage({ costUsd, ...usage }, false);

@@ -176,6 +176,35 @@ describe("D10: consult のモデルの 4xx", () => {
   });
 });
 
+describe("consult のプロバイダーの残高切れ", () => {
+  it("AgentDO が provider_quota_exhausted を返したら、MCP の consult も provider_quota_exhausted（retry_after_seconds なし。message は固定文と provider 名だけ）。予約は閉じる", async () => {
+    const { user, client } = await memberClient("quota");
+    try {
+      const q = `consult e2e quota ${user.id}`;
+      await setConsultScript(q, { fail: { code: "provider_quota_exhausted" } });
+      const r = await client.callTool({
+        name: "consult",
+        arguments: { messages: [{ role: "user", content: q }] },
+      });
+      expect(r.isError).toBe(true);
+      const body = bodyOf(r);
+      expect(body).toMatchObject({ code: "provider_quota_exhausted" });
+      expect(body.retry_after_seconds).toBeUndefined();
+      expect(String(body.message)).toMatch(
+        /^the model provider \([a-z0-9-]+\) has no credit or quota left/,
+      );
+      // AgentDO の message（プロバイダーの生の文面が入りうる）は返さない
+      expect(String(body.message)).not.toContain("fake consult failure");
+
+      const after = bodyOf(await client.callTool({ name: "budget_status", arguments: {} }));
+      expect(after.reserved_usd).toBe(0);
+      expect(after.estimated_usd).toBe(0);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe("D10: budget_status と consult の予約・精算", () => {
   it("consult を 2 回呼ぶと、usage（cache_write → cache_read）と費用が返り、月の枠から実費で精算される。タスクの実行中でも使える", async () => {
     const { user, client } = await memberClient("consult");

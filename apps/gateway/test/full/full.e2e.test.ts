@@ -1439,6 +1439,30 @@ describe("Gateway → Web Research Service（Phase 5: クライアントの MCP 
     await client.close();
   });
 
+  it("p3. consult でモデルのプロバイダーの残高が切れた（OpenAI の response.failed の insufficient_quota）なら、本物の AgentDO から provider_quota_exhausted が返る（retry_after_seconds なし。生の文面なし。予約は閉じ、見積もりにしない）", async () => {
+    const client = await newClient("quinn");
+    const q = `full consult quota ${Date.now()}`;
+    // 台本の api: openai-responses と「<code>: <message>」は、createAI の経路で response.failed から作られる形と同じ
+    const quota = {
+      error:
+        "insufficient_quota: You exceeded your current quota, please check your plan and billing details.",
+      api: "openai-responses",
+    };
+    await testPost("/__test/agent/set-script", { key: q, script: [quota, quota, quota] });
+    const r = await call(client, "consult", { messages: [{ role: "user", content: q }] });
+    expect(r.isError, JSON.stringify(r.body)).toBe(true);
+    expect(r.body.code).toBe("provider_quota_exhausted");
+    expect(r.body.retry_after_seconds).toBeUndefined();
+    expect(String(r.body.message)).toMatch(
+      /^the model provider \([a-z0-9-]+\) has no credit or quota left/,
+    );
+    // プロバイダーの生の文面は返さない
+    expect(JSON.stringify(r.body)).not.toContain("billing details");
+    const budget = await call(client, "budget_status", {});
+    expect(budget.body).toMatchObject({ reserved_usd: 0, estimated_usd: 0 });
+    await client.close();
+  });
+
   it("p2. 不正な URL・private な URL は invalid_input（web が拒否する）", async () => {
     const client = await newClient("pia");
     for (const url of [

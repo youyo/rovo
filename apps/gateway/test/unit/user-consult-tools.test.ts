@@ -435,6 +435,21 @@ describe("UserDO: 道具つきの consult の往復（#135）", () => {
     });
   });
 
+  it("途中の歩のプロバイダーの残高切れは provider_quota_exhausted（retry_after_seconds なし）。次の歩は頼まない", async () => {
+    const f = await fixture([
+      toolStep([{ name: "web_search", args: { query: "q" } }]),
+      { ok: false, code: "provider_quota_exhausted", message: "m", costUsd: 0 },
+    ]);
+    const { done } = await f.run();
+    expect(done).toMatchObject({
+      status: "failed",
+      error: { code: "provider_quota_exhausted" },
+    });
+    if (!(done.ok && done.status === "failed")) throw new Error("not failed");
+    expect(done.error.retry_after_seconds).toBeUndefined();
+    expect(f.agent.calls).toHaveLength(2);
+  });
+
   it("1 歩の上限を過ぎたら consult 全体の失敗。実費が分からない歩は予約の残りで数える（合計は予約額）", async () => {
     const f = await fixture([toolStep([{ name: "web_search", args: { query: "q" } }]), "hang"], {
       stepTimeoutMs: 50,

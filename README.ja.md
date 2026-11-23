@@ -427,7 +427,7 @@ mise run dev
 ## エラー
 
 ツールのエラーは `isError: true` で、本文は `{"code", "message", "retry_after_seconds"?}` の JSON。`code` は
-`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded`（月額の枠が足りず `task_start` を拒否。待っても空かない）/ `quota_exceeded`（web の1日の上限）/ `not_ready`（`task_result` の対象がまだ終端でない）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。`consult` では、モデルがリクエストの中身を拒否した（4xx）ときの `model_rejected`（待っても直らない。`retry_after_seconds` なし）も返る。`task_pr_ready` / `task_pr_merge` では、GitHub の拒否を表す `merge_blocked`（ブランチ保護など。メッセージに GitHub の理由）/ `head_moved`（検証後にブランチが動いた）/ `github_rejected` も返る。
+`not_found` / `conflict` / `expired` / `concurrency_limit` / `budget_exceeded`（月額の枠が足りず `task_start` を拒否。待っても空かない）/ `quota_exceeded`（web の1日の上限）/ `not_ready`（`task_result` の対象がまだ終端でない）/ `invalid_cursor` / `forbidden` / `reauth_required` / `upstream_unavailable` / `invalid_input` / `internal`。`consult` では、モデルがリクエストの中身を拒否した（4xx）ときの `model_rejected`（待っても直らない。`retry_after_seconds` なし）と、モデルのプロバイダーのアカウントの残高が切れたときの `provider_quota_exhausted`（OpenAI の `insufficient_quota` / `credit_balance_exhausted`。プロバイダーのアカウントに入金されるまで再試行しても直らないので `retry_after_seconds` なし。別のプロバイダーのモデルを選ぶ）も返る。`quota_exceeded`（rovo の web の1日の上限）・`budget_exceeded`（rovo の月額の枠）は rovo の上限で、`provider_quota_exhausted` はプロバイダーのアカウントの残高という違いがある。`task_pr_ready` / `task_pr_merge` では、GitHub の拒否を表す `merge_blocked`（ブランチ保護など。メッセージに GitHub の理由）/ `head_moved`（検証後にブランチが動いた）/ `github_rejected` も返る。
 `reauth_required` は GitHub 資格を回復できないとき（MCP のトークンが有効でも）で、再ログインが必要。`internal` は想定外の失敗で、詳細は応答に含めない。
 
 ## セキュリティ

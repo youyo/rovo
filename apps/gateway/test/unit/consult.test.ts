@@ -533,6 +533,33 @@ describe("consult: 50 秒を超える（pending）", () => {
     });
   });
 
+  it("AgentDO がプロバイダーの残高切れを返したら provider_quota_exhausted（retry_after_seconds なし。message は固定文と provider 名だけ）。費用は返った額で精算する", async () => {
+    const fx = fakeAgent([
+      {
+        ok: false,
+        code: "provider_quota_exhausted",
+        message: "raw provider text: You exceeded your current quota, check billing",
+        costUsd: 0,
+      },
+    ]);
+    const svc = consultServiceWith(env, fx.agent);
+    const p = principal();
+    const r = await svc.consult(p, input({ model: "openai/gpt-6-sol" }));
+    expect(r).toMatchObject({ ok: false, error: { code: "provider_quota_exhausted" } });
+    if (r.ok) throw new Error("expected failure");
+    expect(r.error.retry_after_seconds).toBeUndefined();
+    expect(r.error.message).toContain("openai");
+    expect(r.error.message).not.toMatch(/retry later/);
+    // AgentDO の message（プロバイダーの生の文面が入りうる）は使わない
+    expect(r.error.message).not.toContain("raw provider text");
+    expect(r.error.message).not.toContain("billing");
+    expect(await userStub(p.githubUserId).budgetStatus()).toMatchObject({
+      spent_usd: 0,
+      reserved_usd: 0,
+      estimated_usd: 0,
+    });
+  });
+
   it("遅い失敗は consult_result が failed（error は 50 秒以内の失敗と同じ形）で返す", async () => {
     const agent = controllableAgent();
     const svc = consultServiceWith(env, agent.factory, { waitMs: 20 });

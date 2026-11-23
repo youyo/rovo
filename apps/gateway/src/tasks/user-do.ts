@@ -1918,7 +1918,7 @@ export class UserDO extends DurableObject<Env> {
       ...(toolsOutcome?.toolsUsed ? { toolsUsed: toolsOutcome.toolsUsed } : {}),
       ...(toolsOutcome?.toolsClosed ? { toolsClosed: toolsOutcome.toolsClosed } : {}),
     };
-    let outcome = interpretConsult(result, request.effort, extras);
+    let outcome = interpretConsult(result, request.effort, extras, request.model);
     // 費用の確定（AI Gateway のログ）: 道具つきは往復の歩の数と web の費用を渡す。往復の結果が無い（上限切れ・例外）ときは
     // 歩の数も web の費用も分からないので確定しない（予約額のまま）
     const settleDetail = withTools

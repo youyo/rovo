@@ -85,6 +85,17 @@ export type ConsultOutcome =
       estimated: boolean;
     };
 
+/** rovo のモデル id（`<provider>/<id>`）のプロバイダー名。分からなければ unknown */
+function providerOf(model: string | undefined): string {
+  const head = model?.split("/")[0];
+  return head !== undefined && head !== "" && head !== model ? head : "unknown";
+}
+
+/** provider_quota_exhausted の固定の message（provider 名だけを差し込む） */
+export function providerQuotaMessage(model: string | undefined): string {
+  return `the model provider (${providerOf(model)}) has no credit or quota left; retrying will not help until the provider account is topped up. Choose a model of another provider (models_list)`;
+}
+
 const UNAVAILABLE: ConsultFailure = {
   code: "upstream_unavailable",
   message: "the consult is temporarily unavailable; retry later",
@@ -103,6 +114,8 @@ export function interpretConsult(
   requestedEffort?: Effort,
   /** 道具つきの consult（#135）の往復の結果 */
   extras: ConsultToolsExtras = {},
+  /** 依頼のモデルの id（`<provider>/<id>`）。provider_quota_exhausted の message に provider 名だけを入れる */
+  model?: string,
 ): ConsultOutcome {
   if (result === undefined) {
     return { status: "failed", error: unavailableFailure(), settleUsd: null, estimated: true };
@@ -148,6 +161,14 @@ export function interpretConsult(
         code: "model_rejected",
         message:
           "the model rejected the request (a 4xx response, e.g. invalid_request_error); retrying the same request will not help. Change the input or the model",
+      };
+    }
+    // プロバイダーの残高切れ。入金されるまで直らないので retry_after_seconds は付けない。message は固定文と provider 名だけ
+    // （AgentDO の message は使わない。プロバイダーの生の文面を返さない）
+    if (result.code === "provider_quota_exhausted") {
+      return {
+        code: "provider_quota_exhausted",
+        message: providerQuotaMessage(model),
       };
     }
     if (result.code === "model_error") {

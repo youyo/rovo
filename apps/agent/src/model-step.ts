@@ -10,7 +10,12 @@ import {
   type TSchema,
 } from "@earendil-works/pi-ai";
 import { computeCostUsd, type ModelPrice } from "@rovo/models";
-import { guardProvider, isRequestRejection, upstreamStatus } from "./pi/guard-provider";
+import {
+  guardProvider,
+  isProviderQuotaExhausted,
+  isRequestRejection,
+  upstreamStatus,
+} from "./pi/guard-provider";
 
 /**
  * Pi のセッションを使わない「モデルを 1 回呼ぶ」歩（レビューのモデルと consult が共有する）。
@@ -87,6 +92,8 @@ export type ModelStepOutcome =
       kind: "error";
       /** 4xx（リクエストの中身の問題。生成の前に拒否されたので課金されない） */
       rejected: boolean;
+      /** プロバイダーの残高切れ（isProviderQuotaExhausted。入金されるまで直らないので再試行しない） */
+      quotaExhausted: boolean;
       stopReason: "error" | "aborted";
       /** 上流の HTTP ステータス（分かるときだけ。記録用） */
       status?: number;
@@ -246,6 +253,7 @@ export async function runModelStep(req: ModelStepRequest): Promise<ModelStepOutc
     return {
       kind: "error",
       rejected: isRequestRejection(status),
+      quotaExhausted: isProviderQuotaExhausted(message),
       stopReason: message.stopReason,
       ...(status !== undefined ? { status } : {}),
       usage,

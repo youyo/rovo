@@ -222,8 +222,8 @@ describe("runReviewModel", () => {
     expect(c2.calls).toHaveLength(2);
   });
 
-  it("モデルがリクエストを拒否した（4xx）・予算が足りないときは再試行しない", async () => {
-    for (const code of ["model_rejected", "budget"] as const) {
+  it("モデルがリクエストを拒否した（4xx）・プロバイダーの残高切れ・予算が足りないときは再試行しない", async () => {
+    for (const code of ["model_rejected", "provider_quota_exhausted", "budget"] as const) {
       const c = caller([
         { ok: false, code },
         { ok: true, text: valid, truncated: false },

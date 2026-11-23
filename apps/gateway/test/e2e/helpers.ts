@@ -187,8 +187,8 @@ export async function emitAgentEvent(
 export type ConsultScriptStep = {
   text?: string;
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
-  /** 失敗を返す（model_rejected = モデルの 4xx、model_error = 5xx など）。費用は 0 */
-  fail?: { code: "model_rejected" | "model_error" };
+  /** 失敗を返す（model_rejected = モデルの 4xx、model_error = 5xx など、provider_quota_exhausted = プロバイダーの残高切れ）。費用は 0 */
+  fail?: { code: "model_rejected" | "model_error" | "provider_quota_exhausted" };
   /** 応答するまでの遅れ（ms）。遅いモデル（consult の pending）の再現に使う */
   delayMs?: number;
   /** 道具つきの consult（#135）: この手でモデルが呼ぶ道具 */

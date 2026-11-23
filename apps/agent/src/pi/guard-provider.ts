@@ -41,6 +41,43 @@ export function isRequestRejection(status: number | undefined): boolean {
   );
 }
 
+/** プロバイダーの残高切れを表す OpenAI の response.failed の error.code（完全一致だけ） */
+const PROVIDER_QUOTA_CODES: ReadonlySet<string> = new Set([
+  "insufficient_quota",
+  "credit_balance_exhausted",
+]);
+
+/**
+ * プロバイダーの残高切れか（待っても再試行しても、プロバイダーのアカウントに入金されるまで直らない）。
+ * OpenAI Responses のストリームの response.failed は、pi-ai が「<error.code>: <error.message>」の文にして errorMessage に入れる
+ * （HTTP 200 のストリームの中なので status は無い）。次のすべてを満たすときだけ真にする:
+ * stopReason が error / 上流の HTTP ステータスが無い / api が openai-responses /
+ * errorMessage（前置きの「rovo: 」は外す）の最初の「: 」より前がコードの一覧と完全一致。
+ * message の部分は見ない（部分一致・正規表現は使わない）。HTTP 429 の insufficient_quota と Anthropic の 400 は対象外。
+ */
+export function isProviderQuotaExhausted(message: AssistantMessage): boolean {
+  if (message.stopReason !== "error") return false;
+  if (upstreamStatus(message) !== undefined) return false;
+  if (message.api !== "openai-responses") return false;
+  const raw = message.errorMessage;
+  if (typeof raw !== "string") return false;
+  const text = raw.startsWith("rovo: ") ? raw.slice("rovo: ".length) : raw;
+  const end = text.indexOf(": ");
+  if (end < 0) return false;
+  return PROVIDER_QUOTA_CODES.has(text.slice(0, end));
+}
+
+/** rovo のモデル id（`<provider>/<id>`）のプロバイダー名。無ければ unknown */
+export function providerOf(rovoModelId: string): string {
+  const head = rovoModelId.split("/")[0];
+  return head !== undefined && head !== "" && head !== rovoModelId ? head : "unknown";
+}
+
+/** provider_quota_exhausted の固定の message（provider 名だけを差し込む。プロバイダーの生の文面は入れない） */
+export function providerQuotaMessage(provider: string): string {
+  return `the model provider (${provider}) has no credit or quota left; retrying will not help until the provider account is topped up`;
+}
+
 /** モデル呼び出しの直前に呼ばれる。block を返すと、モデルを呼ばずにエラー応答にする。 */
 export type CallGuard = (
   model: Model<Api>,

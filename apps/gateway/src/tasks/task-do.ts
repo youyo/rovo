@@ -234,7 +234,7 @@ export type ReviewResultView = {
   fix_commit_sha: string | null;
   commands: ReviewCommandView[];
   commands_unavailable: boolean;
-  /** 飛ばした理由の固定コード（model_error / model_rejected / timeout / budget / invalid_response / tool_rounds_exceeded） */
+  /** 飛ばした理由の固定コード（model_error / model_rejected / provider_quota_exhausted / timeout / budget / invalid_response / tool_rounds_exceeded） */
   failure?: string;
   /** 修正のあとの再実行の結果（修正しなかった・task_review は null）。commands の output は、service が非信頼の囲みで包む */
   final: {

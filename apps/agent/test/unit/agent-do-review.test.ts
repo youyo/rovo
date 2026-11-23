@@ -182,6 +182,21 @@ describe("task_review（kind: review）のレビューの段", () => {
     expect(result.usage.costUsd).toBeGreaterThan(0);
   });
 
+  it("プロバイダーの残高切れは再試行せず FAILED（review_failed: provider_quota_exhausted）。usage が 0 なら費用 0 で見積もりにしない", async () => {
+    const quota: ScriptStep = {
+      error: "insufficient_quota: You exceeded your current quota.",
+      api: "openai-responses",
+    };
+    const fx = newFixture("rv-quota", [quota, quota]);
+    await fx.stub.start(reviewSpec("rv-quota"));
+    expect(await waitForTerminal(fx)).toBe("failed");
+    expect(fx.modelCalls.count).toBe(1);
+    const { result, review: rv } = await review(fx);
+    expect(result.reason).toBe("review_failed: provider_quota_exhausted");
+    expect(rv).toMatchObject({ stage: "skipped", failure: "provider_quota_exhausted" });
+    expect(rv.usage).toMatchObject({ costUsd: 0, estimated: false });
+  });
+
   it("予算が足りず budget_policy が stop なら、モデルを呼ばずに BUDGET_EXCEEDED（review_skipped_budget）", async () => {
     const fx = newFixture("rv-budget-stop", [{ text: VALID }]);
     await fx.stub.start(reviewSpec("rv-budget-stop", { budgetUsd: 0.001, budgetPolicy: "stop" }));
